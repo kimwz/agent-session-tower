@@ -22,3 +22,17 @@ export function graphSessionGroups(sessions: Session[], limit: number, selectedI
   }
   return [...groups.entries()].sort(([a, aSessions], [b, bSessions]) => sortSessions(aSessions[0], bSessions[0]) || a.localeCompare(b));
 }
+
+export const HOST_HEIGHT = 145;
+/** Reserve room for account usage without rewriting saved folder or card positions. */
+export function clearHostPosition(host: { x: number; y: number }, projects: Array<{ position: { x: number; y: number }; width: number; height: number }>) {
+  let y = host.y;
+  const gap = 16;
+  for (let pass = 0; pass <= projects.length; pass++) {
+    const collisions = projects.filter(project => host.x < project.position.x + project.width + gap && host.x + 256 + gap > project.position.x
+      && y < project.position.y + project.height + gap && y + HOST_HEIGHT + gap > project.position.y);
+    if (!collisions.length) break;
+    y = Math.min(...collisions.map(project => project.position.y - HOST_HEIGHT - gap));
+  }
+  return { x: host.x, y };
+}

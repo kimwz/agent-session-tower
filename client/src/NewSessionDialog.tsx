@@ -1,3 +1,4 @@
+import { translate as t, translateMessage, useI18n } from './i18n';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { ArrowUpRight, Folder, LoaderCircle, X } from 'lucide-react';
@@ -17,6 +18,7 @@ interface NewSessionDialogProps {
 }
 
 export function NewSessionDialog({ providers, projects, initialCwd, token, connected, onClose, onCreated }: NewSessionDialogProps) {
+  useI18n();
   const id = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
@@ -49,7 +51,7 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
     event.preventDefault();
     if (inFlight.current || unavailable || !prompt.trim() || !cwd.trim()) return;
     if (!cwd.trim().startsWith('/')) {
-      setFolderError('/로 시작하는 전체 폴더 경로를 입력해 주세요.');
+      setFolderError(t("/로 시작하는 전체 폴더 경로를 입력해 주세요."));
       folderInput.current?.focus();
       return;
     }
@@ -67,16 +69,16 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
       onCreated(result.session, result.run);
       onClose();
     } catch (cause) {
-      setError(cause instanceof Error && !(cause instanceof TypeError) ? cause.message : '연결을 확인하지 못했습니다. 그래프에서 새 세션이 시작되었는지 확인해 주세요.');
+      setError(cause instanceof Error && !(cause instanceof TypeError) ? cause.message : t("연결을 확인하지 못했습니다. 그래프에서 새 세션이 시작되었는지 확인해 주세요."));
     } finally {
       inFlight.current = false;
       setSubmitting(false);
     }
   }
 
-  const connectionMessage = !connected ? '다시 연결되면 세션을 시작할 수 있습니다.'
-    : !token ? '연결을 확인하고 있습니다.'
-      : !providerAvailable ? `${providerLabels[provider]}를 현재 사용할 수 없습니다.` : '';
+  const connectionMessage = !connected ? t("다시 연결되면 세션을 시작할 수 있습니다.")
+    : !token ? t("연결을 확인하고 있습니다.")
+      : !providerAvailable ? t("{0}를 현재 사용할 수 없습니다.", { 0: providerLabels[provider] }) : '';
 
   return createPortal(<dialog
     ref={dialog}
@@ -102,20 +104,20 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
     }} aria-busy={submitting}>
       <header className="new-session-heading">
         <div>
-          <h2 id={`${id}-heading`}>새 세션</h2>
-          <p id={`${id}-description`}>폴더와 첫 요청을 정하면 바로 작업을 시작합니다.</p>
+          <h2 id={`${id}-heading`}>{t("새 세션")}</h2>
+          <p id={`${id}-description`}>{t("폴더와 첫 요청을 정하면 바로 작업을 시작합니다.")}</p>
         </div>
-        <button type="button" className="icon-button" aria-label="새 세션 창 닫기" disabled={submitting} onClick={onClose}><X size={19} /></button>
+        <button type="button" className="icon-button" aria-label={t("새 세션 창 닫기")} disabled={submitting} onClick={onClose}><X size={19} /></button>
       </header>
 
       <fieldset className="new-session-provider-field" disabled={submitting}>
-        <legend>도구</legend>
+        <legend>{t("도구")}</legend>
         <div className="new-session-providers">
           {(['claude', 'codex'] as const).map(value => {
             const available = providers.some(item => item.provider === value && item.available);
             return <label key={value} className={`new-session-provider ${provider === value ? 'selected' : ''} ${!available ? 'unavailable' : ''}`}>
               <ProviderIcon provider={value} size={21} />
-              <span><strong>{providerLabels[value]}</strong><small>{available ? '사용 가능' : '사용할 수 없음'}</small></span>
+              <span><strong>{providerLabels[value]}</strong><small>{available ? t("사용 가능") : t("사용할 수 없음")}</small></span>
               <input type="radio" name={`${id}-provider`} value={value} checked={provider === value} disabled={!available} onChange={() => setProvider(value)} />
             </label>;
           })}
@@ -123,32 +125,32 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
       </fieldset>
 
       <div className="new-session-field">
-        <label htmlFor={`${id}-folder`}>작업 폴더</label>
+        <label htmlFor={`${id}-folder`}>{t("작업 폴더")}</label>
         <div className="new-session-folder-input">
           <Folder size={16} aria-hidden="true" />
-          <input ref={folderInput} id={`${id}-folder`} list={`${id}-projects`} value={cwd} placeholder="/Users/…/프로젝트" required disabled={submitting} autoComplete="off" spellCheck={false} aria-describedby={`${id}-folder-help${folderError ? ` ${id}-folder-error` : ''}`} aria-invalid={!!folderError} onChange={event => { setCwd(event.target.value); setFolderError(''); }} />
+          <input ref={folderInput} id={`${id}-folder`} list={`${id}-projects`} value={cwd} placeholder={t("/Users/…/프로젝트")} required disabled={submitting} autoComplete="off" spellCheck={false} aria-describedby={`${id}-folder-help${folderError ? ` ${id}-folder-error` : ''}`} aria-invalid={!!folderError} onChange={event => { setCwd(event.target.value); setFolderError(''); }} />
         </div>
         <datalist id={`${id}-projects`}>{uniqueProjects.map(([path, label]) => <option key={path} value={path}>{label}</option>)}</datalist>
-        <p id={`${id}-folder-help`} className="new-session-help">이 Mac의 기존 폴더 경로</p>
-        {folderError && <p id={`${id}-folder-error`} className="new-session-error" role="alert">{folderError}</p>}
+        <p id={`${id}-folder-help`} className="new-session-help">{t("이 Mac의 기존 폴더 경로")}</p>
+        {folderError && <p id={`${id}-folder-error`} className="new-session-error" role="alert">{translateMessage(folderError)}</p>}
       </div>
 
       <div className="new-session-field">
-        <label htmlFor={`${id}-title`}>세션 이름 <span>선택</span></label>
-        <input id={`${id}-title`} value={title} maxLength={120} placeholder="비워두면 첫 요청으로 정해집니다" disabled={submitting} autoComplete="off" onChange={event => setTitle(event.target.value)} />
+        <label htmlFor={`${id}-title`}>{t("세션 이름")}{' '}<span>{t("선택")}</span></label>
+        <input id={`${id}-title`} value={title} maxLength={120} placeholder={t("비워두면 첫 요청으로 정해집니다")} disabled={submitting} autoComplete="off" onChange={event => setTitle(event.target.value)} />
       </div>
 
       <div className="new-session-field new-session-prompt-field">
-        <label htmlFor={`${id}-prompt`}>첫 요청</label>
-        <textarea ref={promptInput} id={`${id}-prompt`} value={prompt} maxLength={32000} rows={5} placeholder="어떤 작업을 시작할까요?" required disabled={submitting} onChange={event => setPrompt(event.target.value)} />
+        <label htmlFor={`${id}-prompt`}>{t("첫 요청")}</label>
+        <textarea ref={promptInput} id={`${id}-prompt`} value={prompt} maxLength={32000} rows={5} placeholder={t("어떤 작업을 시작할까요?")} required disabled={submitting} onChange={event => setPrompt(event.target.value)} />
       </div>
 
-      {error && <p className="new-session-error new-session-request-error" role="alert">{error}</p>}
+      {error && <p className="new-session-error new-session-request-error" role="alert">{translateMessage(error)}</p>}
       <footer className="new-session-footer">
-        <p role="status">{submitting ? '새 세션을 시작하고 있습니다.' : connectionMessage}</p>
+        <p role="status">{submitting ? t("새 세션을 시작하고 있습니다.") : connectionMessage}</p>
         <button type="submit" className="new-session-submit" disabled={submitting || unavailable || !cwd.trim() || !prompt.trim()}>
           {submitting ? <LoaderCircle size={16} className="spin" /> : <ArrowUpRight size={16} />}
-          {submitting ? '시작 중…' : '세션 시작'}
+          {submitting ? t("시작 중…") : t("세션 시작")}
         </button>
       </footer>
     </form>

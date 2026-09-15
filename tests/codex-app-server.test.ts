@@ -98,11 +98,11 @@ class Fake {
   }
 }
 
-async function open(fake: Fake, runId = 'monitor-run', imagePaths?: string[]) {
+async function open(fake: Fake, runId = 'monitor-run', imagePaths?: string[], model?: string) {
   const started: string[] = [];
   const output: string[] = [];
   const finished: Parameters<CodexBridgeOptions['onFinished']>[0][] = [];
-  const bridge = await openCodexBridgeRun({ codexHome: fake.codexHome, threadId: 'thread', runId, prompt: 'Exact prompt: $(never execute)\n새 요청', imagePaths, onStarted: id => { started.push(id); }, onOutput: text => { output.push(text); }, onFinished: result => { finished.push(result); } });
+  const bridge = await openCodexBridgeRun({ codexHome: fake.codexHome, threadId: 'thread', runId, prompt: 'Exact prompt: $(never execute)\n새 요청', imagePaths, model, onStarted: id => { started.push(id); }, onOutput: text => { output.push(text); }, onFinished: result => { finished.push(result); } });
   assert.ok(bridge);
   return { bridge, started, output, finished };
 }
@@ -111,6 +111,37 @@ async function until(check: () => boolean) {
   const deadline = Date.now() + 4000;
   while (!check()) { if (Date.now() > deadline) assert.fail('Timed out waiting for bridge state'); await delay(10); }
 }
+
+test('explicit model is acknowledged before queue admission and omission preserves native settings', async t => {
+  const fake = await fixture(t, (request, fake) => {
+    if (request.method === 'thread/settings/update') { fake.reply(request, {}); return true; }
+  });
+  const run = await open(fake, 'model-override', undefined, 'native-model');
+  t.after(() => run.bridge.close());
+  await run.bridge.start();
+  const methods = fake.requests.map(request => request.method);
+  assert.ok(methods.indexOf('thread/settings/update') < methods.indexOf('thread/queue/add'));
+  assert.deepEqual(fake.requests.find(request => request.method === 'thread/settings/update')?.params, { threadId: 'thread', model: 'native-model' });
+  fake.complete(fake.turns[0], 'used explicit model'); await run.bridge.done;
+});
+
+test('model update rejection or connection loss never admits the prompt', async t => {
+  for (const lost of [false, true]) {
+    await t.test(lost ? 'lost acknowledgement' : 'provider rejected model', async t => {
+      const fake = await fixture(t, (request, fake) => {
+        if (request.method !== 'thread/settings/update') return;
+        if (lost) fake.socket.terminate(); else fake.error(request, 'private raw model error');
+        return true;
+      });
+      const run = await open(fake, 'model-failure', undefined, 'native-model');
+      await run.bridge.start().catch(() => {}); await run.bridge.done;
+      assert.equal(run.finished[0].status, 'error');
+      assert.equal(fake.requests.some(request => request.method === 'thread/queue/add'), false);
+      assert.equal(fake.turns.length, 0);
+      assert.doesNotMatch(run.finished[0].error || '', /private/);
+    });
+  }
+});
 
 test('native queue input preserves image paths as localImage blocks in the same thread', async t => {
   const fake = await fixture(t);
@@ -142,6 +173,7 @@ test('existing writer receives the exact queued prompt and output/completion cor
   assert.deepEqual(fake.requests.find(request => request.method === 'thread/resume')?.params, { threadId: 'thread', excludeTurns: true });
   assert.deepEqual(fake.requests.find(request => request.method === 'thread/queue/add')?.params.input, [{ type: 'text', text: 'Exact prompt: $(never execute)\n새 요청', text_elements: [] }]);
   assert.equal(fake.requests.some(request => ['thread/start', 'thread/fork', 'turn/start', 'turn/steer', 'command/exec'].includes(request.method)), false);
+  assert.equal(fake.requests.some(request => request.method === 'thread/settings/update'), false);
   fake.notice('item/agentMessage/delta', { threadId: 'another-thread', turnId: 'turn-monitor-run', itemId: 'wrong', delta: 'SECRET OTHER THREAD' });
   fake.notice('turn/completed', { threadId: 'thread', turn: { id: 'other-turn', status: 'completed', items: [] } });
   fake.complete(fake.turns[0], 'Answer from the existing writer');

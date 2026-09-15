@@ -1,3 +1,4 @@
+import { translate as t, translateMessage, useI18n } from './i18n';
 import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Folder, Grip, LoaderCircle, Pencil, Pin, Plus, X } from 'lucide-react';
@@ -20,6 +21,7 @@ export type ProjectGroupHeaderData = {
 };
 
 function GroupTitleDialog({ data, onClose }: { data: ProjectGroupHeaderData; onClose: () => void }) {
+  useI18n();
   const id = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const input = useRef<HTMLInputElement>(null);
@@ -54,30 +56,31 @@ function GroupTitleDialog({ data, onClose }: { data: ProjectGroupHeaderData; onC
       try { if (await data.onUpdate({ cwd: data.path, title: draft.trim() })) onClose(); }
       finally { inFlight.current = false; }
     }} aria-busy={data.saving}>
-      <header><h2 id={`${id}-heading`}>그룹 제목</h2><button type="button" className="icon-button" aria-label="그룹 제목 편집 닫기" disabled={data.saving} onClick={onClose}><X size={18} /></button></header>
+      <header><h2 id={`${id}-heading`}>{t("그룹 제목")}</h2><button type="button" className="icon-button" aria-label={t("그룹 제목 편집 닫기")} disabled={data.saving} onClick={onClose}><X size={18} /></button></header>
       <p className="group-title-path">{data.path}</p>
-      <label htmlFor={`${id}-title`}>표시할 이름</label>
-      <input ref={input} id={`${id}-title`} value={draft} onChange={event => setDraft(event.target.value)} placeholder="비워두면 폴더 이름을 표시합니다" maxLength={120} disabled={data.saving} autoComplete="off" />
-      <p className="group-title-help">폴더 경로는 그대로 유지됩니다.</p>
-      {data.error && <p className="group-title-error" role="alert">{data.error}</p>}
-      <footer><button type="button" className="secondary-button" disabled={data.saving} onClick={onClose}>취소</button><button type="submit" className="group-title-save" disabled={data.disabled || data.saving}>{data.saving && <LoaderCircle size={14} className="spin" />}{data.saving ? '저장 중…' : '저장'}</button></footer>
+      <label htmlFor={`${id}-title`}>{t("표시할 이름")}</label>
+      <input ref={input} id={`${id}-title`} value={draft} onChange={event => setDraft(event.target.value)} placeholder={t("비워두면 폴더 이름을 표시합니다")} maxLength={120} disabled={data.saving} autoComplete="off" />
+      <p className="group-title-help">{t("폴더 경로는 그대로 유지됩니다.")}</p>
+      {data.error && <p className="group-title-error" role="alert">{translateMessage(data.error)}</p>}
+      <footer><button type="button" className="secondary-button" disabled={data.saving} onClick={onClose}>{t("취소")}</button><button type="submit" className="group-title-save" disabled={data.disabled || data.saving}>{data.saving && <LoaderCircle size={14} className="spin" />}{data.saving ? t("저장 중…") : t("저장")}</button></footer>
     </form>
   </dialog>, document.body);
 }
 
 export function ProjectGroupHeader({ data }: { data: ProjectGroupHeaderData }) {
+  useI18n();
   const [editing, setEditing] = useState(false);
   const actionable = data.path.startsWith('/');
   const disabled = data.disabled || data.saving || !actionable;
   return <>
     <div className="project-group-heading">
-      <div className="project-group-title"><Folder size={16} aria-hidden="true" /><strong className={data.title ? undefined : 'folder-tail'} title={data.name}>{data.title ? data.name : <bdi dir="ltr">{data.name}</bdi>}</strong><button className="project-group-action nodrag nopan" aria-label={`${data.name} 그룹 제목 편집`} title="그룹 제목 편집" disabled={disabled} onClick={() => setEditing(true)}><Pencil size={13} /></button></div>
+      <div className="project-group-title"><Folder size={16} aria-hidden="true" /><strong className={data.title ? undefined : 'folder-tail'} title={data.name}>{data.title ? data.name : <bdi dir="ltr">{data.name}</bdi>}</strong><button className="project-group-action nodrag nopan" aria-label={t("{0} 그룹 제목 편집", { 0: data.name })} title={t("그룹 제목 편집")} disabled={disabled} onClick={() => setEditing(true)}><Pencil size={13} /></button></div>
       <div className="project-group-path folder-tail" title={data.path}><bdi dir="ltr">{data.path}</bdi></div>
-      <div className="project-group-bottom"><span>{data.count}개 세션{data.active > 0 && ` · ${data.active}개 작업 중`}</span><div className="project-group-actions nodrag nopan">
-        <button className={`project-group-action ${data.pinned ? 'pinned' : ''}`} aria-label={`${data.name} 그룹 ${data.pinned ? '고정 해제' : '고정'}`} aria-pressed={data.pinned} title={data.pinned ? '그룹 고정 해제' : '세션이 없어도 그룹 유지'} disabled={disabled} onClick={() => { void data.onUpdate({ cwd: data.path, pinned: !data.pinned }); }}>{data.saving && !editing ? <LoaderCircle size={14} className="spin" /> : <Pin size={14} />}</button>
-        <button className="project-group-action" aria-label={`${data.name} 폴더에 새 세션`} title="이 폴더에 새 세션" disabled={data.disabled || !actionable} onClick={() => data.onCreate(data.path)}><Plus size={17} /></button>
+      <div className="project-group-bottom"><span>{data.count}{t("개 세션")}{data.active > 0 && t(" · {0}개 작업 중", { 0: data.active })}</span><div className="project-group-actions nodrag nopan">
+        <button className={`project-group-action ${data.pinned ? 'pinned' : ''}`} aria-label={t("{0} 그룹 {1}", { 0: data.name, 1: data.pinned ? t("고정 해제") : t("고정") })} aria-pressed={data.pinned} title={data.pinned ? t("그룹 고정 해제") : t("세션이 없어도 그룹 유지")} disabled={disabled} onClick={() => { void data.onUpdate({ cwd: data.path, pinned: !data.pinned }); }}>{data.saving && !editing ? <LoaderCircle size={14} className="spin" /> : <Pin size={14} />}</button>
+        <button className="project-group-action" aria-label={t("{0} 폴더에 새 세션", { 0: data.name })} title={t("이 폴더에 새 세션")} disabled={data.disabled || !actionable} onClick={() => data.onCreate(data.path)}><Plus size={17} /></button>
       </div>{data.manual && <Grip size={12} className="project-drag-grip" aria-hidden="true" />}</div>
-      {data.error && !editing && <p className="project-group-error nodrag nopan" role="alert">{data.error}</p>}
+      {data.error && !editing && <p className="project-group-error nodrag nopan" role="alert">{translateMessage(data.error)}</p>}
     </div>
     {editing && <GroupTitleDialog data={data} onClose={() => setEditing(false)} />}
   </>;

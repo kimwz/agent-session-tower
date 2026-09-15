@@ -1,3 +1,4 @@
+import { translate as t, translateMessage, useI18n } from './i18n';
 import { useEffect, useRef, useState } from 'react';
 import { Check, LoaderCircle, Pencil, X } from 'lucide-react';
 import type { Session } from '../../shared/types';
@@ -9,6 +10,7 @@ export function SessionTitleEditor({ session, token, connected, onSaved }: {
   connected: boolean;
   onSaved: (session: Session) => void;
 }) {
+  useI18n();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState('');
   const [saving, setSaving] = useState(false);
@@ -38,14 +40,14 @@ export function SessionTitleEditor({ session, token, connected, onSaved }: {
       onSaved(result.session);
       finish();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : '제목을 저장하지 못했습니다.');
+      setError(cause instanceof Error ? cause.message : t("제목을 저장하지 못했습니다."));
       requestAnimationFrame(() => input.current?.focus());
     } finally { inFlight.current = false; setSaving(false); }
   }
 
   if (!editing) return <div className="session-title-row">
     <h2 title={sessionTitle(session)}>{sessionTitle(session)}</h2>
-    <button ref={editButton} className="icon-button title-edit-button" aria-label="세션 제목 수정" title="세션 제목 수정" disabled={unavailable} onClick={() => {
+    <button ref={editButton} className="icon-button title-edit-button" aria-label={t("세션 제목 수정")} title={t("세션 제목 수정")} disabled={unavailable} onClick={() => {
       setDraft(sessionTitle(session)); setError(''); setEditing(true);
     }}><Pencil size={14} /></button>
   </div>;
@@ -57,13 +59,13 @@ export function SessionTitleEditor({ session, token, connected, onSaved }: {
     }
     if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
   }}>
-    <label htmlFor="session-title-input">세션 제목</label>
+    <label htmlFor="session-title-input">{t("세션 제목")}</label>
     <div className="session-title-input-row">
-      <input id="session-title-input" ref={input} value={draft} maxLength={120} disabled={saving} placeholder="비워두면 자동 제목 사용" autoComplete="off" aria-describedby={error ? 'session-title-error' : undefined} aria-invalid={!!error} onChange={event => setDraft(event.target.value)} />
-      <button className="icon-button title-save-button" type="submit" aria-label={saving ? '제목 저장 중' : '제목 저장'} title="제목 저장 (Enter)" disabled={saving || unavailable}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={16} />}</button>
-      <button className="icon-button" type="button" aria-label="제목 수정 취소" title="취소 (Esc)" disabled={saving} onClick={finish}><X size={16} /></button>
+      <input id="session-title-input" ref={input} value={draft} maxLength={120} disabled={saving} placeholder={t("비워두면 자동 제목 사용")} autoComplete="off" aria-describedby={error ? 'session-title-error' : undefined} aria-invalid={!!error} onChange={event => setDraft(event.target.value)} />
+      <button className="icon-button title-save-button" type="submit" aria-label={saving ? t("제목 저장 중") : t("제목 저장")} title={t("제목 저장 (Enter)")} disabled={saving || unavailable}>{saving ? <LoaderCircle size={15} className="spin" /> : <Check size={16} />}</button>
+      <button className="icon-button" type="button" aria-label={t("제목 수정 취소")} title={t("취소 (Esc)")} disabled={saving} onClick={finish}><X size={16} /></button>
     </div>
-    <div className="session-title-editor-footer">{session.customTitle && <button type="button" disabled={saving || unavailable} onClick={() => { void save(''); }}>자동 제목으로 되돌리기</button>}<span>{draft.length} / 120</span></div>
-    {error && <p id="session-title-error" className="session-title-error" role="alert">{error}</p>}
+    <div className="session-title-editor-footer">{session.customTitle && <button type="button" disabled={saving || unavailable} onClick={() => { void save(''); }}>{t("자동 제목으로 되돌리기")}</button>}<span>{draft.length} / 120</span></div>
+    {error && <p id="session-title-error" className="session-title-error" role="alert">{translateMessage(error)}</p>}
   </form>;
 }

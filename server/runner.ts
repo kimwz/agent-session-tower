@@ -10,6 +10,7 @@ import { isImageAttachment } from '../shared/attachments.js';
 import { attachmentMetadata, attachmentPrompt, AttachmentStore } from './attachments.js';
 import { normalizeSessionTitle } from './session-titles.js';
 import type { CodexBridgeRun, CodexBridgeOptions } from './codex-app-server.js';
+import { requestedModel, validModelId } from './models.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -75,21 +76,23 @@ export async function getProviderHealth(counts: Partial<Record<Provider, number>
   }));
 }
 
-export function buildResumeArgs(session: Session): string[] {
+export function buildResumeArgs(session: Session, model?: string): string[] {
+  const override = requestedModel(model);
   if (session.provider === 'claude') return [
     '-p', '--resume', session.nativeId, '--output-format', 'stream-json', '--verbose',
-    '--include-partial-messages', '--permission-mode', 'acceptEdits', '--permission-prompts', 'none',
+    '--include-partial-messages', '--permission-mode', 'acceptEdits', '--permission-prompts', 'none', ...(override ? ['--model', override] : []),
   ];
   return ['exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="never"',
-    'resume', session.nativeId, '-', '--json', '--skip-git-repo-check'];
+    'resume', session.nativeId, '-', '--json', '--skip-git-repo-check', ...(override ? ['--model', override] : [])];
 }
 
-export function buildCreateArgs(session: Session): string[] {
+export function buildCreateArgs(session: Session, model?: string): string[] {
+  const override = requestedModel(model);
   if (session.provider === 'claude') return [
     '-p', '--session-id', session.nativeId, '--output-format', 'stream-json', '--verbose',
-    '--include-partial-messages', '--permission-mode', 'acceptEdits', '--permission-prompts', 'none',
+    '--include-partial-messages', '--permission-mode', 'acceptEdits', '--permission-prompts', 'none', ...(override ? ['--model', override] : []),
   ];
-  return ['exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="never"', '-', '--json', '--skip-git-repo-check'];
+  return ['exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="never"', '-', '--json', '--skip-git-repo-check', ...(override ? ['--model', override] : [])];
 }
 
 /** Owns only processes launched by this monitor; never signals an external agent. */
@@ -215,6 +218,7 @@ export class RunManager extends EventEmitter {
   async create(input: CreateSessionRequest): Promise<{ session: Session; run: Run }> {
     this.validateAdmission(input.prompt);
     if (!PROVIDERS.includes(input.provider)) throw new RunError('Claude 또는 Codex를 선택하세요.');
+    const model = requestedModel(input.model);
     if (typeof input.cwd !== 'string' || !isAbsolute(input.cwd) || input.cwd.includes('\0') || input.cwd.length > 4096) throw new RunError('기존 작업 폴더의 절대 경로를 입력하세요.');
     try { if (!(await stat(input.cwd)).isDirectory()) throw new Error(); }
     catch { throw new RunError('작업 폴더를 찾을 수 없습니다. 기존 폴더의 절대 경로를 입력하세요.'); }
@@ -230,7 +234,7 @@ export class RunManager extends EventEmitter {
       status: 'idle', statusReason: '새 세션을 생성하고 있습니다.', createdAt, updatedAt: createdAt,
       lastRequestAt: createdAt, lastMessage: input.prompt.trim().slice(0, 512), messageCount: 0, isSubagent: false, resumable: false, creationPending: true,
     };
-    const run: Run = { id: randomUUID(), sessionId: id, prompt: input.prompt.trim(), status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.' };
+    const run: Run = { id: randomUUID(), sessionId: id, prompt: input.prompt.trim(), status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}) };
     this.createdSessions.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}) });
     this.runs.set(run.id, run);
     this.admissions.add(run.id);
@@ -261,12 +265,14 @@ export class RunManager extends EventEmitter {
     this.validateAdmission(prompt, hasAttachments);
     const session = this.getSession(sessionId);
     this.validateSession(session);
+    const model = requestedModel(request.model);
     if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 503);
     const prepared = await this.attachments.prepare(sessionId, request);
     // File writes yield; recheck admission immediately before inserting the run.
     try { this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); }
     catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
     const run: Run = { id: randomUUID(), sessionId, prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
+      ...(model ? { model } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
     this.admissions.add(run.id);
     this.runs.set(run.id, run);
@@ -400,6 +406,7 @@ export class RunManager extends EventEmitter {
     let started = false;
     const bridge = await this.options.openCodexBridge({
       threadId: session.nativeId, runId: run.id, prompt: attachmentPrompt(run.prompt, attachments),
+      ...(run.model ? { model: run.model } : {}),
       ...(attachments.length ? { imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) } : {}),
       onStarted: () => {
         if (FINISHED.has(run.status)) return;
@@ -447,7 +454,7 @@ export class RunManager extends EventEmitter {
     if (!(await stat(session.cwd)).isDirectory()) throw new Error('The session working directory no longer exists.');
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     const images = attachments.filter(item => isImageAttachment(item.metadata.mimeType));
-    const args = creating ? buildCreateArgs(session) : buildResumeArgs(session);
+    const args = creating ? buildCreateArgs(session, run.model) : buildResumeArgs(session, run.model);
     if (session.provider === 'claude') {
       if (images.length) args.push('--input-format', 'stream-json');
       for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
@@ -662,6 +669,7 @@ function isSavedRun(value: unknown): value is Run {
   const run = value as Partial<Run>;
   return typeof run.id === 'string' && typeof run.sessionId === 'string' && typeof run.prompt === 'string'
     && typeof run.createdAt === 'string' && typeof run.output === 'string'
+    && (run.model === undefined || validModelId(run.model))
     && (run.attachments === undefined || (Array.isArray(run.attachments) && run.attachments.length <= 10 && run.attachments.every(item => attachmentMetadata(item))))
     && ['queued', 'running', 'completed', 'error', 'cancelled'].includes(run.status ?? '');
 }

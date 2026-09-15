@@ -46,6 +46,27 @@ export interface ProviderHealth {
   executable?: string;
   sessionCount: number;
   error?: string;
+  usage?: ProviderUsage;
+  models?: ModelOption[];
+  defaultModel?: string;
+}
+export interface UsageWindow {
+  id: string;
+  usedPercent: number;
+  windowMinutes?: number;
+  resetsAt?: string;
+}
+export interface ProviderUsage {
+  status: 'loading' | 'available' | 'unavailable' | 'error';
+  windows: UsageWindow[];
+  updatedAt?: string;
+  reason?: string;
+  stale?: boolean;
+}
+export interface ModelOption {
+  id: string;
+  label: string;
+  description?: string;
 }
 export interface Run {
   id: string;
@@ -58,6 +79,7 @@ export interface Run {
   output: string;
   error?: string;
   attachments?: Attachment[];
+  model?: string;
 }
 export interface Attachment {
   id: string;
@@ -73,12 +95,14 @@ export interface AttachmentInput {
 export interface MessageAttachments {
   attachments?: AttachmentInput[];
   attachmentIds?: string[];
+  model?: string;
 }
 export interface CreateSessionRequest {
   provider: Provider;
   cwd: string;
   prompt: string;
   title?: string;
+  model?: string;
 }
 export interface ProjectGroup {
   cwd: string;

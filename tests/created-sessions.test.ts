@@ -65,6 +65,20 @@ function finished(manager: RunManager, id: string): Promise<Run> {
   return until(() => manager.list().find(run => run.id === id && ['completed', 'error', 'cancelled'].includes(run.status)));
 }
 
+test('new-session model is persisted and passed as a native CLI override', async t => {
+  const f = await fixture(t);
+  for (const provider of ['claude', 'codex'] as const) {
+    const accepted = await f.manager.create({ provider, cwd: f.directory, prompt: 'Create with selected model', model: 'native-model' });
+    assert.equal(accepted.run.model, 'native-model');
+    assert.equal((await finished(f.manager, accepted.run.id)).status, 'completed');
+    const args = f.launches.at(-1)!;
+    assert.equal(args[args.indexOf('--model') + 1], 'native-model');
+  }
+  const count = f.manager.list().length;
+  await assert.rejects(f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Invalid override', model: '--settings' }), /Invalid model/);
+  assert.equal(f.manager.list().length, count);
+});
+
 for (const provider of ['claude', 'codex'] as Provider[]) {
   test(`creates a real ${provider} CLI invocation, confirms identity, then resumes that exact conversation`, async t => {
     const f = await fixture(t);

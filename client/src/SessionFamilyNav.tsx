@@ -1,3 +1,4 @@
+import { translate as t, useI18n } from './i18n';
 import { memo, useEffect, useMemo, useRef } from 'react';
 import { GitBranch } from 'lucide-react';
 import type { Session } from '../../shared/types';
@@ -11,6 +12,7 @@ export const SessionFamilyNav = memo(function SessionFamilyNav({ sessions, selec
   selectedId: string;
   onNavigate: (id: string) => void;
 }) {
+  useI18n();
   const family = useMemo(() => getSessionFamily(sessions, selectedId), [sessions, selectedId]);
   const selection = useRef<HTMLSelectElement>(null);
   useEffect(() => {
@@ -20,10 +22,10 @@ export const SessionFamilyNav = memo(function SessionFamilyNav({ sessions, selec
     }
   }, [selectedId]);
   if (!family.root || family.members.length < 2) return null;
-  return <nav className="session-family-nav" aria-label="서브에이전트 탐색">
-    <GitBranch size={12} /><span>서브 {family.members.length - 1}</span>
-    <select ref={selection} aria-label="에이전트 대화 선택" value={selectedId} onChange={event => { pendingNavigationFocus = event.target.value; onNavigate(event.target.value); }}>
-      {family.members.map((member, index) => <option key={member.id} value={member.id}>{index === 0 ? '부모 대화' : sessionTitle(member)}{member.status === 'working' ? ` · ${statusLabels[member.status]}` : ''}</option>)}
+  return <nav className="session-family-nav" aria-label={t("서브에이전트 탐색")}>
+    <GitBranch size={12} /><span>{t("서브")}{' '}{family.members.length - 1}</span>
+    <select ref={selection} aria-label={t("에이전트 대화 선택")} value={selectedId} onChange={event => { pendingNavigationFocus = event.target.value; onNavigate(event.target.value); }}>
+      {family.members.map((member, index) => <option key={member.id} value={member.id}>{index === 0 ? t("부모 대화") : sessionTitle(member)}{member.status === 'working' ? ` · ${statusLabels[member.status]}` : ''}</option>)}
     </select>
   </nav>;
 });

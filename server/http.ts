@@ -5,6 +5,7 @@ import { normalizeSessionTitle } from './session-titles.js';
 import { normalizeProjectGroupPatch } from './project-groups.js';
 import type { Attachment, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run } from '../shared/types.js';
 import { isImageAttachment, MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../shared/attachments.js';
+import { requestedModel } from './models.js';
 
 export interface Backend {
   snapshot(): Snapshot;
@@ -154,7 +155,8 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
         if (typeof body.prompt !== 'string' || !body.prompt.trim() || body.prompt.length > 32_000) return json(res, 400, { error: '메시지는 1자 이상, 32,000자 이하여야 합니다.' });
         const title = body.title === undefined ? undefined : normalizeSessionTitle(body.title);
         if (!backend.createSession) return json(res, 503, { error: '새 세션을 생성할 수 없습니다.' });
-        const result = await backend.createSession({ provider: body.provider, cwd: body.cwd, prompt: body.prompt.trim(), ...(title ? { title } : {}) });
+        const model = requestedModel(body.model);
+        const result = await backend.createSession({ provider: body.provider, cwd: body.cwd, prompt: body.prompt.trim(), ...(title ? { title } : {}), ...(model ? { model } : {}) });
         return json(res, 202, { ...result, session: publicSession(result.session) });
       }
       const detailMatch = path.match(/^\/api\/sessions\/([^/]+)$/);
@@ -194,7 +196,8 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
         const count = (attachments?.length || 0) + (attachmentIds?.length || 0);
         if (count > MAX_ATTACHMENTS) return json(res, 413, { error: `첨부 파일은 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.` });
         if (typeof body.prompt !== 'string' || (!body.prompt.trim() && !count) || body.prompt.length > 32_000) return json(res, 400, { error: '메시지나 첨부 파일을 추가하세요. 메시지는 32,000자 이하여야 합니다.' });
-        const run = await backend.enqueue(messageMatch[1], body.prompt.trim(), { attachments, attachmentIds });
+        const model = requestedModel(body.model);
+        const run = await backend.enqueue(messageMatch[1], body.prompt.trim(), { attachments, attachmentIds, ...(model ? { model } : {}) });
         return json(res, 202, { run });
       }
       const cancelMatch = path.match(/^\/api\/runs\/([^/]+)\/cancel$/);

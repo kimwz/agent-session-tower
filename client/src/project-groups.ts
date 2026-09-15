@@ -1,7 +1,8 @@
+import { translate as t } from './i18n';
 import type { ProjectGroup, Session } from '../../shared/types';
 
 export function projectGroupLabel(cwd: string, title?: string, fallback?: string): string {
-  return title?.trim() || fallback || cwd.split('/').filter(Boolean).at(-1) || '프로젝트 없음';
+  return title?.trim() || fallback || cwd.split('/').filter(Boolean).at(-1) || t("프로젝트 없음");
 }
 
 export function projectGroupChoices(sessions: Session[], groups: ProjectGroup[]): [string, string][] {

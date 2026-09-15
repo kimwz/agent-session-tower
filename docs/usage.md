@@ -35,6 +35,8 @@ agent-session-tower --help
 
 Projects group sessions by their working folder. Open a session node to read its conversation. Subagents are grouped with their parent; independently forked sessions remain separate.
 
+Choose **한국어 / English** in the top bar to switch the interface language. The first visit follows your browser language, and your choice is remembered in that browser. Conversation text, session titles, and folder paths stay as written.
+
 Use **새 세션** (New session) to choose a provider, existing absolute folder path, optional title, and first request. A project's **+** button preselects its folder. Rename or pin a project from its header, and select manual layout to drag projects and session cards. Layout preferences are stored in that browser; custom names, project pins, and hidden sessions are stored on the server.
 
 Search and provider, time, and status filters narrow the graph. Blue **새 활동** (New activity) indicators mark unread conversation updates. **세션 종료** hides a session and its children; it does not stop their work or delete native history. Hidden sessions can be reopened from **종료한 세션**.
@@ -47,7 +49,7 @@ Tower reads native history directly from:
 - `~/.codex/sessions/**/*.jsonl`
 - `~/.codex/archived_sessions/**/*.jsonl`
 
-Custom `CLAUDE_CONFIG_DIR` and `CODEX_HOME` locations are supported. Tower does not import or copy CLI authentication files.
+Custom `CLAUDE_CONFIG_DIR` and `CODEX_HOME` locations are supported. CLI credentials stay on the host machine. Account usage uses native Codex account APIs and the existing Claude Code OAuth credential; credentials are not sent to the browser or copied into Tower's state directory.
 
 Status combines native lifecycle events, live process signals, and recent log activity. Some CLI versions provide fewer signals, so a status may be inferred; the UI's status explanation distinguishes this. macOS is the verified platform. Linux has not been verified. Windows is not currently supported.
 
@@ -56,6 +58,18 @@ Sending a request continues the same native session. Claude sessions resume thro
 Subagent records without an independently resumable session ID are viewable through their parent. Existing terminals or desktop apps may need a refresh or resume to show changes made from the web. Required approvals for work sent through the Codex app remain in that app. Tower does not automatically bypass provider permissions. CLI-resumed Codex work uses `workspace-write`; Claude work uses `acceptEdits`. Usage is billed through the existing provider account.
 
 You can upload up to 10 attachments per request: 10 MB per file, 5 MB per image, and 20 MB total. PNG, JPEG, GIF, and WebP images use native image input; other files are provided as local copies. Uploaded files remain on the host so the conversation can keep referencing them.
+
+## Account usage
+
+The machine node shows separate usage indicators for the Claude Code and Codex accounts connected on that machine. Percentages represent **used capacity**, not remaining capacity. These are account-wide limits, so activity on other devices can count toward them.
+
+Hover, focus, or select an indicator to see the available usage windows, such as five hours and one week, and their reset times. Not every provider, plan, or authentication method supplies the same windows. Missing data is shown as unavailable, and older data is marked stale instead of being displayed as a fresh zero.
+
+## Model selection
+
+The chat composer lets you choose a model for the next request. **Agent default** sends no model override and follows the native agent or session configuration. An explicit selection is saved with the request, so queued requests and retries keep their chosen model.
+
+Codex models come from the native model catalog. Claude Code supports its native model aliases. Existing session models can also appear in the selector. Changing the selection does not interrupt the current turn; it applies when the next request runs. In an open Codex app session, an explicit choice updates that session's native model setting before the request is queued. Another client changing the same session's model settings can affect queued turns.
 
 ## Remote access
 

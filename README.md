@@ -27,14 +27,16 @@ Your browser opens at **http://localhost:8000** with a canvas like this:
 
 ![Claude Code and Codex sessions grouped by project on the Agent Session Tower graph canvas](docs/images/session-graph.png)
 
-Requires **Node.js 22.13+**, **npm**, and **Git**. Use your existing Claude Code or Codex installation and sign-in. The first run downloads and builds the app; later runs reuse npm's cache. Tested on macOS. The current web UI is in Korean.
+Requires **Node.js 22.13+**, **npm**, and **Git**. Use your existing Claude Code or Codex installation and sign-in. The first run downloads and builds the app; later runs reuse npm's cache. Tested on macOS. The web UI supports **English and Korean**.
 
 ## What you can do
 
 - **See existing sessions immediately.** Automatically discovers local Claude Code and Codex histories, including sessions started outside Tower.
 - **Follow work on a live graph.** View projects, sessions, and subagents together, with working, waiting, completed, and error states.
+- **Check account usage.** See Claude Code and Codex usage as small donuts under the machine node. Hover or focus for usage windows and reset times.
 - **Create new sessions.** Choose Claude Code or Codex, pick an existing project folder, and send the first request from the web.
 - **Continue a conversation.** Read the original history and send the next instruction to the same native session. Attach files or paste images.
+- **Choose a model in chat.** Keep the agent's default or select a model for your next request.
 - **Organize your workspace.** Rename sessions and project groups, pin projects, drag nodes, search, filter, and hide or reopen sessions.
 - **Catch new activity.** Unread indicators help you find replies and results you have not opened yet.
 - **Access it remotely.** Open the web UI from another device on your LAN or VPN, with password-protected access to the machine running your agents.

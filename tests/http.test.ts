@@ -19,11 +19,13 @@ test('local HTTP service protects session data and task mutations, and streams r
   const dir = await mkdtemp(join(tmpdir(), 'monitor-http-'));
   await writeFile(join(dir, 'index.html'), '<!doctype html><title>Agent Session Tower</title>');
   let enqueued = 0;
+  let created = 0;
   const snapshot: Snapshot = { sessions: [session], providers: [], runs: [], scanning: false, updatedAt: new Date().toISOString(), hostname: 'test', version: '0.1.0' };
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, backend: {
     snapshot: () => snapshot,
     detail: async id => id === session.id ? { session, messages: [], hasMore: false } : undefined,
-    enqueue: async (_id, prompt) => { enqueued++; return { ...run, prompt }; },
+    enqueue: async (_id, prompt, request) => { enqueued++; return { ...run, prompt, ...(request?.model ? { model: request.model } : {}) }; },
+    createSession: async input => { created++; return { session, run: { ...run, prompt: input.prompt, ...(input.model ? { model: input.model } : {}) } }; },
     cancel: async () => {}, subscribe: () => () => {},
   } });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -70,6 +72,23 @@ test('local HTTP service protects session data and task mutations, and streams r
     assert.equal((await fetch(`${base}/api/sessions/${session.id}?limit=10000`)).status, 400);
     assert.equal((await fetch(`${base}/api/sessions/missing`)).status, 404);
     assert.equal((await fetch(`${base}/api/missing`)).status, 404);
+  });
+  await t.test('model overrides are passed through and invalid values fail before backend admission', async () => {
+    const { token } = await (await fetch(`${base}/api/bootstrap`)).json();
+    const headers = { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+    const path = `${base}/api/sessions/${encodeURIComponent(session.id)}/messages`;
+    const before = enqueued;
+    for (const model of ['', '--config', 'with space', 42, null]) {
+      assert.equal((await fetch(path, { method: 'POST', headers, body: JSON.stringify({ prompt: 'test', model }) })).status, 400);
+    }
+    assert.equal(enqueued, before);
+    const response = await fetch(path, { method: 'POST', headers, body: JSON.stringify({ prompt: 'test', model: 'provider/model-v2' }) });
+    assert.equal(response.status, 202); assert.equal((await response.json()).run.model, 'provider/model-v2');
+    const body = { provider: 'claude', cwd: '/tmp/project', prompt: 'new session' };
+    assert.equal((await fetch(`${base}/api/sessions`, { method: 'POST', headers, body: JSON.stringify({ ...body, model: '--config' }) })).status, 400);
+    assert.equal(created, 0);
+    const create = await fetch(`${base}/api/sessions`, { method: 'POST', headers, body: JSON.stringify({ ...body, model: 'sonnet' }) });
+    assert.equal(create.status, 202); assert.equal((await create.json()).run.model, 'sonnet'); assert.equal(created, 1);
   });
   await t.test('SSE connects with an immediate sanitized snapshot', async () => {
     const controller = new AbortController();

@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { test } from 'node:test';
-import { buildResumeArgs, findExecutable, RunManager } from '../server/runner.js';
+import { buildCreateArgs, buildResumeArgs, findExecutable, RunManager } from '../server/runner.js';
 import type { Run, Session } from '../shared/types.js';
 
 const ID = '10000000-0000-4000-8000-000000000001';
@@ -92,6 +92,63 @@ process.stdin.on('end', () => {
 const finished = (manager: RunManager, id: string) => until(() => {
   const run = manager.list().find((entry) => entry.id === id);
   return run && ['completed', 'error', 'cancelled'].includes(run.status) ? run : undefined;
+});
+
+test('new and resumed CLI commands override models only when explicitly requested', () => {
+  for (const provider of ['claude', 'codex'] as const) {
+    const session = makeSession('/tmp', { provider, model: 'native-existing' });
+    for (const build of [buildCreateArgs, buildResumeArgs]) {
+      assert.equal(build(session).includes('--model'), false);
+      const args = build(session, 'provider/model-v2[1m]');
+      assert.equal(args[args.indexOf('--model') + 1], 'provider/model-v2[1m]');
+      assert.throws(() => build(session, '--config'), /Invalid model/);
+    }
+  }
+});
+
+test('model request is snapshotted, persisted and passed to native CLI', async t => {
+  const f = await fixture({ busy: true }); t.after(f.cleanup);
+  const request = { model: 'native-chosen' };
+  const accepted = await f.manager.enqueue(f.session.id, 'Use the chosen model', request);
+  request.model = 'changed-later';
+  assert.equal(accepted.model, 'native-chosen');
+  assert.equal(JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'))[0].model, 'native-chosen');
+  f.sessions.set(f.session.id, { ...f.session, status: 'completed' });
+  assert.equal((await finished(f.manager, accepted.id)).status, 'completed');
+  const args = f.launches[0].args;
+  assert.equal(args[args.indexOf('--model') + 1], 'native-chosen');
+});
+
+test('invalid model is rejected before attachment preparation and queue admission', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  for (const model of ['', '--model', 'has space', 'x'.repeat(161), 42, null]) {
+    await assert.rejects(f.manager.enqueue(f.session.id, 'test', { model: model as string, attachments: [{ name: 'invalid', mimeType: 'bad', data: 'bad' }] }), /Invalid model/);
+  }
+  assert.equal(f.manager.list().length, 0); assert.equal(f.launches.length, 0);
+});
+
+test('two queued model choices for one native session are bridged in order and never overlap', async t => {
+  const starts: CodexBridgeOptions[] = [];
+  const release = new Map<string, () => void>();
+  const f = await fixture({ openCodexBridge: async options => {
+    let resolve!: () => void;
+    const done = new Promise<void>(accept => { resolve = accept; });
+    const finish = () => { options.onFinished({ status: 'completed' }); resolve(); };
+    release.set(options.runId, finish);
+    return { start: async () => { starts.push(options); options.onStarted(`turn-${options.runId}`); },
+      cancel: async () => { finish(); }, close: () => { finish(); }, done };
+  } });
+  t.after(f.cleanup);
+  const first = await f.manager.enqueue(f.session.id, 'First instruction', { model: 'model-a' });
+  const second = await f.manager.enqueue(f.session.id, 'Second instruction', { model: 'model-b' });
+  await until(() => starts.length === 1 ? true : undefined);
+  assert.equal(starts[0].model, 'model-a');
+  assert.equal(f.manager.list().find(run => run.id === second.id)?.status, 'queued');
+  release.get(first.id)!();
+  await until(() => starts.length === 2 ? true : undefined);
+  assert.deepEqual(starts.map(start => [start.prompt, start.model]), [['First instruction', 'model-a'], ['Second instruction', 'model-b']]);
+  release.get(second.id)!(); await finished(f.manager, second.id);
+  assert.equal(f.launches.length, 0);
 });
 
 test('resume commands keep prompts off argv and enable ordinary sandbox permissions', () => {

@@ -16,6 +16,7 @@ import { accessPasswordPath, loadAccessPassword, networkAccess } from './remote-
 import { readWebAsset } from './web-assets.js';
 import { projectSessionStates } from './snapshot.js';
 import { openCodexBridgeRun } from './codex-app-server.js';
+import { ProviderCapabilities } from './provider-capabilities.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 
 const HELP = `Agent Session Tower 0.1.0
@@ -57,7 +58,7 @@ async function main() {
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be between 1 and 65535.');
   const access = networkAccess(host, port);
-  let providers: ProviderHealth[] = await getProviderHealth();
+  const providers: ProviderHealth[] = await getProviderHealth();
   if (command === 'doctor') {
     for (const provider of providers) console.log(`${provider.available ? '✓' : '✗'} ${provider.provider}: ${provider.executable || provider.error || 'CLI not found'}`);
     console.log(`Session roots: ${process.env.CODEX_HOME || join(homedir(), '.codex')}, ${process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')}`);
@@ -96,6 +97,7 @@ async function main() {
   let scanning = true;
   const listeners = new Set<() => void>();
   const changed = () => { for (const listener of listeners) listener(); };
+  const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed });
   sessions.on('change', changed);
   runs.on('change', changed);
   const snapshot = (): Snapshot => {
@@ -104,7 +106,7 @@ async function main() {
     return {
       sessions: projectSessionStates(all, managed, runs.settledRunIds()).map(session => closedSessions.apply(titles.apply(session))),
       groups: groups.list(),
-      providers: providers.map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider).length })),
+      providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider).length })),
       runs: dismissedRuns.visible(managed), scanning, hostname: hostname(), version: '0.1.0', updatedAt: new Date().toISOString(),
     };
   };
@@ -154,19 +156,16 @@ async function main() {
   console.log('  Reading local Claude Code and Codex sessions…\n  Press Ctrl+C to stop.\n');
   if (open) openBrowser(access.browserUrl);
   let closing = false;
-  const healthTimer = setInterval(async () => {
-    try { providers = await getProviderHealth(); changed(); } catch { /* Keep last known CLI health. */ }
-  }, 60_000);
-  healthTimer.unref();
+  capabilities.start();
   const shutdown = async () => {
     if (closing) return;
     closing = true;
-    clearInterval(healthTimer);
+    const stoppingCapabilities = capabilities.stop();
     sessions.stop();
     dispose();
     server.closeAllConnections();
     server.close();
-    try { await titles.flush(); await dismissedRuns.flush(); await closedSessions.flush(); await groups.flush(); await runs.close(); } finally { await releaseLock(); }
+    try { await stoppingCapabilities; await titles.flush(); await dismissedRuns.flush(); await closedSessions.flush(); await groups.flush(); await runs.close(); } finally { await releaseLock(); }
   };
   const onSignal = () => { void shutdown().catch(error => { console.error(`Agent Session Tower shutdown: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }); };
   process.once('SIGINT', onSignal);

@@ -1,0 +1,32 @@
+.host-with-usage { width: 256px; height: 145px; position: relative; overflow: visible; }
+.host-with-usage .host-node { height: 74px; }
+.host-node .host-icon { flex-shrink: 0; }
+.host-node > div { min-width: 0; }
+.provider-usage { height: 67px; margin-top: 4px; }
+.provider-usage-rings { display: flex; gap: 6px; }
+.provider-usage-meter { position: relative; width: 125px; }
+.usage-trigger { display: flex; align-items: center; gap: 6px; width: 100%; height: 47px; padding: 4px; border: 1px solid #273c50; border-radius: 8px; background: #101d2c; color: #d3e1f1; text-align: left; }
+.usage-trigger:hover, .usage-trigger:focus-visible { background: #1a2c40; border-color: #7b98ba; outline: 2px solid #97bff9; outline-offset: 2px; }
+.usage-donut { width: 32px; height: 32px; flex-shrink: 0; display: grid; place-items: center; position: relative; color: #b9cbe2; }
+.usage-donut > svg:first-child { position: absolute; inset: 0; width: 32px; height: 32px; transform: rotate(-90deg); fill: none; stroke-width: 3; }
+.usage-track { stroke: #344356; }
+.usage-fill { stroke: #d8a379; stroke-linecap: round; }
+.codex .usage-fill { stroke: #76c5b5; }
+.usage-summary { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.usage-summary strong { font-size: 13px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.usage-summary strong i { font-style: normal; color: #e9ba78; }
+.usage-summary small { font-size: 8px; color: #93a9c2; white-space: nowrap; }
+.provider-usage-scope { display: block; text-align: center; color: #869ab5; font-size: 9px; margin-top: 5px; }
+.usage-tooltip { position: absolute; top: calc(100% + 8px); left: 0; z-index: 100; width: 280px; border: 1px solid #4b6687; border-radius: 10px; padding: 14px; background: #152335; color: #d8e5f5; box-shadow: 0 12px 40px #0009; font-size: 11px; cursor: default; }
+.usage-tooltip::before { content: ''; position: absolute; top: -9px; left: 0; right: 0; height: 9px; }
+.codex .usage-tooltip { left: auto; right: 0; }
+.usage-tooltip > strong { display: block; font-size: 12px; }
+.usage-tooltip p { margin: 7px 0; color: #a2b5cd; line-height: 1.5; }
+.usage-tooltip dl { margin: 10px 0; }
+.usage-tooltip dl > div { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid #30465f; padding: 8px 0; }
+.usage-tooltip dt { color: #b7cbe5; }
+.usage-tooltip dd { margin: 0; text-align: right; }
+.usage-tooltip dd b { font-weight: 500; }
+.usage-tooltip dd span { display: block; color: #90a8c3; margin-top: 4px; font-size: 10px; }
+.usage-tooltip > small { color: #8ba0bb; }
+.usage-tooltip .usage-stale { color: #e1b776; }
