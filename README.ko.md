@@ -2,13 +2,26 @@
 
 [English](README.md)
 
-**Claude Code와 Codex를 그대로 쓰면서, 웹에서 세션을 정리하고 관제하세요.**
+**Claude Code와 Codex의 harness를 그대로 쓰면서, 웹 UI에서 여러 세션과 에이전트를 한눈에 관제하고 관리하세요.**
+
+여러 세션에서 여러 에이전트를 동시에 돌리거나 리모트로 관리할 때 특히 유용합니다.
 
 명령어 하나로 기존 로컬 세션을 프로젝트별 그래프에 모아 볼 수 있습니다.
 
 ```sh
 npx --yes github:kimwz/agent-session-tower
 ```
+
+리포지토리를 직접 clone해서 실행할 수도 있습니다.
+
+```sh
+git clone https://github.com/kimwz/agent-session-tower.git
+cd agent-session-tower
+npm ci
+npm start
+```
+
+`npm ci`가 의존성 설치와 앱 빌드를 자동으로 처리합니다.
 
 브라우저에서 **http://localhost:8000**이 열리고, 아래와 같은 노드형 캔버스로 바로 관제할 수 있습니다.
 

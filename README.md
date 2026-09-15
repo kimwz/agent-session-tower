@@ -2,13 +2,26 @@
 
 [한국어](README.ko.md)
 
-**Keep using Claude Code and Codex as usual. Monitor and manage your sessions through the web.**
+**Keep using your Claude Code and Codex harnesses. Monitor and manage your agents at a glance in a web UI.**
+
+Especially useful when running multiple agents across sessions or managing them remotely.
 
 Run one command to see your existing local sessions organized by project on a live node graph:
 
 ```sh
 npx --yes github:kimwz/agent-session-tower
 ```
+
+Or clone the repository and run it locally:
+
+```sh
+git clone https://github.com/kimwz/agent-session-tower.git
+cd agent-session-tower
+npm ci
+npm start
+```
+
+`npm ci` installs dependencies and builds the app automatically.
 
 Your browser opens at **http://localhost:8000** with a canvas like this:
 
