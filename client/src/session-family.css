@@ -1,0 +1,28 @@
+.session-family-nav {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 57%;
+  flex-shrink: 0;
+  color: #869fbe;
+  font-size: 10px;
+}
+.session-family-nav > span { white-space: nowrap; }
+.session-family-nav select {
+  min-width: 0;
+  width: 116px;
+  max-width: 100%;
+  padding: 5px 6px;
+  border: 1px solid #30445f;
+  border-radius: 5px;
+  background: #152235;
+  color: #c3d2e7;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  appearance: auto;
+}
+.session-family-nav select:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+@media (max-width: 680px) {
+  .session-family-nav select { width: 110px; }
+}

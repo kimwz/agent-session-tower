@@ -1,0 +1,87 @@
+.session-title-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  margin-top: 12px;
+}
+.session-title-row > h2 {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}
+.title-edit-button {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  color: #8ca5c5;
+}
+.session-title-editor {
+  margin-top: 13px;
+}
+.session-title-editor > label {
+  display: block;
+  font-size: 10px;
+  color: #95afce;
+  margin-bottom: 7px;
+}
+.session-title-input-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.session-title-input-row input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid #57779f;
+  border-radius: 5px;
+  background: #18283c;
+  color: #d3e0f2;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.session-title-input-row input:focus {
+  outline: 2px solid #8eadcf;
+  outline-offset: 1px;
+}
+.session-title-input-row .icon-button {
+  flex-shrink: 0;
+  width: 29px;
+  height: 33px;
+}
+.title-save-button {
+  color: #a1d1be;
+}
+.session-title-editor-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 7px;
+  min-height: 18px;
+  font-size: 9px;
+  color: #7e98ba;
+}
+.session-title-editor-footer > button {
+  padding: 0;
+  color: #9ebcde;
+  font-size: 10px;
+}
+.session-title-editor-footer > button:hover:enabled {
+  color: #d3e0f2;
+  text-decoration: underline;
+}
+.session-title-editor-footer > span {
+  margin-left: auto;
+}
+.session-title-error {
+  color: #e1b2a6;
+  font-size: 11px;
+  line-height: 1.6;
+  margin-top: 7px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 680px) {
+  .chat-header .session-title-row > h2 { margin-top: 0; }
+  .session-title-input-row input { font-size: 16px; }
+}

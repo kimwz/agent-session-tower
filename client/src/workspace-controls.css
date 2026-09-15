@@ -1,0 +1,77 @@
+/* The graph owns the workspace; filters sit over it without taking a row. */
+.app-header { height: 56px; min-height: 56px; }
+.canvas-toolbar {
+  position: absolute;
+  top: 14px;
+  left: 16px;
+  right: 16px;
+  z-index: 5;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  pointer-events: none;
+}
+.canvas-toolbar > * { pointer-events: auto; }
+.canvas-toolbar .stat-filters {
+  gap: 2px;
+  flex-wrap: nowrap;
+  padding: 3px;
+  border: 1px solid #2b394d;
+  border-radius: 8px;
+  background: #111d2bee;
+  box-shadow: 0 3px 12px #0002;
+  backdrop-filter: blur(12px);
+}
+.canvas-toolbar .stat-filters button { padding: 6px 8px; font-size: 10px; border-color: transparent; }
+.canvas-toolbar .stat-filters button b { font-size: 10px; }
+.canvas-toolbar .stat-filters button.selected { border-color: #3c526f; }
+.canvas-toolbar .period-select { margin-left: auto; background: #111d2b; border-radius: 6px; }
+.canvas-toolbar .period-select select { padding-block: 10px; }
+.canvas-caption { display: none; }
+.canvas-status { position: absolute; top: 59px; right: 17px; z-index: 3; display: flex; align-items: center; gap: 6px; color: #6c819e; font-size: 9px; pointer-events: none; }
+.canvas-status .status-pip { position: static; }
+.canvas-error { position: absolute; top: 85px; left: 16px; right: 16px; z-index: 8; }
+.canvas-empty { position: absolute; inset: 105px 0 125px; z-index: 2; background: #0b121cee; pointer-events: none; }
+.canvas-empty > button { pointer-events: auto; }
+.new-session-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid #3c526e; background: #1d2f46; color: #d2e2f6; padding: 7px 10px; border-radius: 6px; font-size: 11px; white-space: nowrap; }
+.new-session-button:hover { border-color: #7c9abe; background: #293f5b; }
+.closed-sessions-toggle { display: flex; align-items: center; gap: 7px; width: 100%; color: #8295af; padding: 9px 6px 6px; font-size: 10px; }
+.closed-sessions-toggle > b { margin-left: auto; font-weight: 400; color: #637b99; }
+.closed-sessions-toggle:hover, .closed-sessions-toggle.selected { color: #c9dbf5; }
+.unread-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #94baff; margin-right: 6px; vertical-align: 2px; box-shadow: 0 0 0 3px #8db5ff10; flex-shrink: 0; }
+.session-row.unread .session-row-main > strong { color: #dfebfc; }
+.chat-header { padding: 12px 18px 10px; flex-shrink: 0; }
+.chat-heading-line { padding-right: 33px; min-height: 29px; }
+.chat-panel .close-chat { position: absolute; top: 11px; right: 12px; display: inline-flex; margin: 0; }
+.chat-heading-line .session-close-button { margin-left: auto; }
+.chat-header h2 { margin-top: 7px; }
+.chat-context-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 7px; min-height: 26px; }
+.chat-context-row .chat-project { margin: 0; min-width: 0; flex: 1; }
+.chat-context-row .chat-project > span:first-of-type { max-width: 100%; }
+.chat-context-row .chat-project > svg { flex-shrink: 0; }
+@media (max-width: 900px) {
+  .canvas-toolbar { left: 12px; right: 12px; }
+  .canvas-toolbar .stat-filters button { padding-inline: 6px; }
+  .canvas-status { display: none; }
+}
+@media (max-width: 680px) {
+  .app-header { height: 56px; min-height: 56px; padding-inline: 10px; }
+  .header-actions { gap: 6px; }
+  .header-actions .connection-state { display: none; }
+  .brand-local { display: none; }
+  .new-session-button { font-size: 10px; padding: 6px 8px; }
+  .sidebar-scrim, .has-chat .sidebar-scrim { inset-block-start: 56px; }
+  .chat-header { padding: 10px 15px 8px; }
+  .chat-panel .close-chat { right: 10px; top: 10px; }
+  .chat-heading-line { padding-right: 28px; gap: 6px; }
+  .chat-heading-line > .status-badge { margin-left: 0; }
+  .chat-heading-line > .mobile-back { display: none; }
+  .chat-header h2 { margin-top: 6px; }
+  .canvas-toolbar { top: 12px; gap: 6px; }
+  .canvas-toolbar .stat-filters button { padding: 6px; font-size: 9px; }
+  .canvas-toolbar .stat-filters button b { margin-left: 0; }
+  .canvas-toolbar .stat-filters button > svg { display: none; }
+  .canvas-toolbar .period-select select { font-size: 9px; padding: 9px 24px 9px 8px; }
+}

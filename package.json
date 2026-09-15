@@ -1,0 +1,70 @@
+{
+  "name": "agent-session-tower",
+  "version": "0.1.0",
+  "description": "Keep using Claude Code and Codex as usual. Monitor and manage your local sessions in a live web graph.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kimwz/agent-session-tower.git"
+  },
+  "homepage": "https://github.com/kimwz/agent-session-tower#readme",
+  "bugs": {
+    "url": "https://github.com/kimwz/agent-session-tower/issues"
+  },
+  "keywords": [
+    "claude-code",
+    "codex",
+    "ai-agents",
+    "session-monitor",
+    "dashboard",
+    "graph"
+  ],
+  "bin": {
+    "agent-session-tower": "bin/agent-session-tower.mjs"
+  },
+  "files": [
+    "bin",
+    "dist/server",
+    "dist/shared",
+    "dist/client",
+    "README.md",
+    "README.ko.md",
+    "docs",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "node --import tsx server/index.ts run --no-open",
+    "build": "tsc -p tsconfig.server.json && vite build",
+    "build:executable": "npm run build && node scripts/build-executable.mjs",
+    "start": "node bin/agent-session-tower.mjs run",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:executable": "node scripts/test-executable.mjs",
+    "check": "npm run typecheck && npm test && npm run build",
+    "prepare": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/ws": "^8.18.1",
+    "@vitejs/plugin-react": "^5.1.0",
+    "@xyflow/react": "^12.10.0",
+    "esbuild": "^0.28.2",
+    "lucide-react": "^0.577.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.0"
+  },
+  "dependencies": {
+    "ws": "^8.21.3"
+  }
+}

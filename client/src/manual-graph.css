@@ -1,0 +1,78 @@
+.agent-unread {
+  position:absolute;
+  top:10px;
+  right:10px;
+  display:flex;
+  align-items:center;
+  gap:4px;
+  color:#9fc9ff;
+  font-size:9px;
+  line-height:14px;
+  pointer-events:none;
+}
+.agent-unread i {
+  width:5px;
+  height:5px;
+  border-radius:50%;
+  background:#76b6ff;
+  box-shadow:0 0 0 3px #76b6ff16;
+}
+.agent-card.has-unread:not(.selected) { border-color:#37618e; }
+.manual-layout .agent-card { cursor:grab; height:202px; min-height:202px; }
+.manual-layout .react-flow__node.dragging .agent-card,
+.manual-layout .react-flow__node.dragging .project-drag-handle { cursor:grabbing; }
+.manual-project-lane {
+  width:100%;
+  height:100%;
+  border:1px solid #314661aa;
+  border-radius:20px;
+  background:linear-gradient(180deg,#16223444,#12203422);
+  pointer-events:none;
+}
+.project-drag-handle {
+  position:relative;
+  width:240px;
+  height:78px;
+  margin:18px 20px 0;
+  padding:0;
+  border-radius:10px;
+  color:#a9bdd7;
+  cursor:grab;
+  pointer-events:auto;
+  user-select:none;
+}
+.project-drag-handle:hover { background:#1c2c42; }
+.auto-layout .project-drag-handle { cursor:default; }
+.auto-layout .project-drag-handle:hover { background:none; }
+.project-drag-grip { flex-shrink:0; color:#6983a2; }
+.graph-layout-switch {
+  position:absolute;
+  z-index:4;
+  left:22px;
+  bottom:108px;
+  display:flex;
+  align-items:center;
+  gap:3px;
+  padding:4px;
+  border:1px solid #31415a;
+  border-radius:8px;
+  background:#142030ed;
+}
+.graph-layout-switch button {
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:5px;
+  min-height:28px;
+  padding:5px 8px;
+  border-radius:4px;
+  color:#7f96b3;
+  font-size:10px;
+}
+.graph-layout-switch button[aria-pressed="true"] { background:#2a3e59; color:#d2e1f4; }
+.graph-layout-switch button:hover { color:#e0edff; }
+.graph-layout-switch>span { margin:0 7px; color:#8198b5; font-size:9px; white-space:nowrap; }
+@media (max-width:1100px) { .graph-layout-switch>span { display:none; } }
+@media (max-width:760px) {
+  .graph-layout-switch { left:17px; bottom:151px; }
+}

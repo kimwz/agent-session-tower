@@ -1,0 +1,47 @@
+# Agent Session Tower
+
+[한국어](README.ko.md)
+
+**Keep using Claude Code and Codex as usual. Monitor and manage your sessions through the web.**
+
+Run one command to see your existing local sessions organized by project on a live node graph:
+
+```sh
+npx --yes github:kimwz/agent-session-tower
+```
+
+Your browser opens at **http://localhost:8000** with a canvas like this:
+
+![Claude Code and Codex sessions grouped by project on the Agent Session Tower graph canvas](docs/images/session-graph.png)
+
+Requires **Node.js 22.13+**, **npm**, and **Git**. Use your existing Claude Code or Codex installation and sign-in. The first run downloads and builds the app; later runs reuse npm's cache. Tested on macOS. The current web UI is in Korean.
+
+## What you can do
+
+- **See existing sessions immediately.** Automatically discovers local Claude Code and Codex histories, including sessions started outside Tower.
+- **Follow work on a live graph.** View projects, sessions, and subagents together, with working, waiting, completed, and error states.
+- **Create new sessions.** Choose Claude Code or Codex, pick an existing project folder, and send the first request from the web.
+- **Continue a conversation.** Read the original history and send the next instruction to the same native session. Attach files or paste images.
+- **Organize your workspace.** Rename sessions and project groups, pin projects, drag nodes, search, filter, and hide or reopen sessions.
+- **Catch new activity.** Unread indicators help you find replies and results you have not opened yet.
+- **Access it remotely.** Open the web UI from another device on your LAN or VPN, with password-protected access to the machine running your agents.
+
+No separate Tower account, API key, database, or CLI hooks. Your agents keep using their existing CLI accounts and model settings.
+
+## Remote access
+
+Stop the running Tower with `Ctrl+C`, then start it with:
+
+```sh
+npx --yes github:kimwz/agent-session-tower --host 0.0.0.0 --port 8000
+```
+
+Open the network address printed in the terminal from your other device. Sign in as `monitor` with the password stored at the printed password-file path. Keep the host machine and Tower running.
+
+Direct access uses HTTP, so use a trusted LAN or VPN. See [remote access details](docs/usage.md#remote-access).
+
+## More
+
+- [Usage, CLI options, and how sessions work](docs/usage.md)
+- [Run from source and contribute](docs/development.md)
+- [MIT license](LICENSE)

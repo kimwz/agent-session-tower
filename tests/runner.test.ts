@@ -1,0 +1,561 @@
+import assert from 'node:assert/strict';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
+import { delimiter, isAbsolute, join } from 'node:path';
+import { test } from 'node:test';
+import { buildResumeArgs, findExecutable, RunManager } from '../server/runner.js';
+import type { Run, Session } from '../shared/types.js';
+
+const ID = '10000000-0000-4000-8000-000000000001';
+const ID2 = '10000000-0000-4000-8000-000000000002';
+type OpenCodexBridge = NonNullable<ConstructorParameters<typeof RunManager>[0]['openCodexBridge']>;
+type CodexBridgeOptions = Parameters<OpenCodexBridge>[0];
+
+function makeSession(cwd: string, overrides: Partial<Session> = {}): Session {
+  return { id: `codex:${ID}`, nativeId: ID, provider: 'codex', title: 'Runner fixture', cwd,
+    project: 'fixture', status: 'completed', statusReason: 'Finished', createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true, ...overrides };
+}
+
+async function until<T>(read: () => T | undefined, timeout = 5000): Promise<T> {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const value = read();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error('Timed out waiting for the run state.');
+}
+
+async function fixture(options: { mode?: string; provider?: 'codex' | 'claude'; busy?: boolean; maxConcurrent?: number; refreshError?: boolean; path?: string; shebang?: boolean; openCodexBridge?: OpenCodexBridge } = {}) {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-monitor-runner-'));
+  const script = join(directory, 'provider.mjs');
+  await writeFile(script, `#!/usr/bin/env node
+import { writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+let prompt = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (chunk) => prompt += chunk);
+process.stdin.on('end', () => {
+  const args = process.argv.slice(2);
+  const id = args.find(value => /^10000000-/.test(value));
+  const provider = args.includes('--resume') ? 'claude' : 'codex';
+  const send = event => process.stdout.write(JSON.stringify(event) + '\\n');
+  writeFileSync(process.env.RECEIVED_PATH, JSON.stringify({prompt,args,cwd:process.cwd(),nested:process.env.CLAUDECODE}));
+  const mode = process.env.FIXTURE_MODE;
+  if (mode === 'invalid-event') { process.stdout.write('null\\n'); return; }
+  if (mode === 'orphan') { spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:['ignore',process.stdout,process.stderr]}); process.exit(0); }
+  if (mode === 'empty') return;
+  if (mode === 'fail') { process.stderr.write('authentication expired'); process.exitCode = 2; return; }
+  if (mode === 'hold') { setTimeout(() => send({type:'item.completed',item:{type:'agent_message',text:'too late'}}), 20000); return; }
+  if (provider === 'claude') {
+    send({type:'system',subtype:'init',session_id: mode === 'mismatch' ? '${ID2}' : id});
+    send({type:'stream_event',event:{type:'message_start'}});
+    send({type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text:'Hello '}}});
+    send({type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text:'Claude'}}});
+    send({type:'stream_event',event:{type:'message_stop'}});
+    send({type:'assistant',message:{content:[{type:'text',text:'Hello Claude'}]}});
+    send({type:'result',is_error:mode==='stream-error',errors:mode==='stream-error'?['provider declined']:undefined,result:'Hello Claude'});
+  } else {
+    send({type:'thread.started',thread_id:mode === 'mismatch'?'${ID2}':id});
+    if (mode === 'stream-error') send({type:'turn.failed',error:{message:'provider declined'}});
+    setTimeout(() => {
+      send({type:'item.completed',item:{type:'agent_message',text:mode === 'large'?'a'.repeat(100000):'Hello Codex'}});
+      send({type:'turn.completed'});
+    }, mode === 'slow' ? 150 : 5);
+  }
+});
+`);
+  await chmod(script, 0o700);
+  let session = makeSession(directory, { provider: options.provider ?? 'codex', status: options.busy ? 'working' : 'completed' });
+  const sessions = new Map([[session.id, session]]);
+  const launches: Array<{ file: string; args: string[]; path?: string }> = [];
+  const children: ChildProcessWithoutNullStreams[] = [];
+  let refreshes = 0;
+  const stateDir = join(directory, 'state');
+  const manager = new RunManager({
+    getSession: (id) => sessions.get(id), refreshSessions: async () => { refreshes++; if(options.refreshError) throw new Error('activity unavailable'); }, stateDir,
+    pollMs: 25, maxConcurrent: options.maxConcurrent, findExecutable: async (provider) => `/fixture/${provider}`,
+    openCodexBridge: options.openCodexBridge,
+    env: { FIXTURE_MODE: options.mode ?? '', RECEIVED_PATH: join(directory, 'received.json'), CLAUDECODE: '1', ...(options.path !== undefined ? { PATH: options.path } : {}) },
+    spawnProcess: (file, args, spawnOptions) => {
+      launches.push({file,args,path:spawnOptions.env?.PATH});
+      const child=options.shebang ? spawn(script, args, spawnOptions) : spawn(process.execPath, [script, ...args], spawnOptions); children.push(child); return child;
+    },
+  });
+  await manager.start();
+  return { manager, sessions, session, launches, children, directory, stateDir, refreshes: () => refreshes,
+    cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
+}
+
+const finished = (manager: RunManager, id: string) => until(() => {
+  const run = manager.list().find((entry) => entry.id === id);
+  return run && ['completed', 'error', 'cancelled'].includes(run.status) ? run : undefined;
+});
+
+test('resume commands keep prompts off argv and enable ordinary sandbox permissions', () => {
+  const codex = buildResumeArgs(makeSession('/tmp'));
+  assert.deepEqual(codex.slice(0, 5), ['exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="never"']);
+  assert.deepEqual(codex.slice(5), ['resume', ID, '-', '--json', '--skip-git-repo-check']);
+  const claude = buildResumeArgs(makeSession('/tmp', {provider:'claude'}));
+  assert.ok(claude.includes('--resume') && claude.includes(ID));
+  assert.ok(claude.includes('acceptEdits'));
+  assert.ok(![...codex, ...claude].some((value) => value.includes('bypass') || value.includes('dangerously')));
+});
+
+test('resumes exact Codex session, streams output, and treats shell syntax as literal stdin', async () => {
+  const f = await fixture();
+  try {
+    const prompt = 'Do not execute: $(touch INJECTION) `touch INJECTION2`\nhello';
+    const run = await f.manager.enqueue(f.session.id, prompt);
+    const result = await finished(f.manager, run.id);
+    assert.equal(result.status, 'completed');
+    assert.match(result.output, /Hello Codex/);
+    const received = JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8'));
+    assert.equal(received.prompt, prompt);
+    assert.equal(received.cwd, await realpath(f.directory));
+    assert.equal(received.nested, undefined);
+    assert.ok(!received.args.includes(prompt));
+    assert.ok(f.refreshes() > 0);
+    await assert.rejects(stat(join(f.directory, 'INJECTION')), {code:'ENOENT'});
+    await until(() => f.manager.list().find((entry) => entry.status === 'completed'));
+  } finally { await f.cleanup(); }
+});
+
+test('Claude partial text is streamed without duplicating the final assistant message', async () => {
+  const f = await fixture({ provider: 'claude' });
+  try {
+    const result = await finished(f.manager, (await f.manager.enqueue(f.session.id, 'hello')).id);
+    assert.equal(result.status, 'completed');
+    assert.equal(result.output.trim(), 'Hello Claude');
+  } finally { await f.cleanup(); }
+});
+
+const ATTACHED_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2S8AAAAASUVORK5CYII=';
+for (const provider of ['claude', 'codex'] as const) test(`${provider} receives native image input and readable general files in the exact resumed conversation`, async () => {
+  const f = await fixture({ provider });
+  try {
+    const run = await f.manager.enqueue(f.session.id, '', { attachments: [
+      { name: 'picture.png', mimeType: 'image/png', data: ATTACHED_PNG },
+      { name: 'notes $(touch INJECTION).txt', mimeType: 'text/plain', data: Buffer.from('private attachment contents').toString('base64') },
+    ] });
+    assert.equal((await finished(f.manager, run.id)).status, 'completed');
+    const received = JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8'));
+    assert.ok(received.args.includes(ID));
+    let prompt = received.prompt;
+    if (provider === 'claude') {
+      assert.equal(received.args[received.args.indexOf('--input-format') + 1], 'stream-json');
+      const message = JSON.parse(received.prompt);
+      assert.equal(message.session_id, ID);
+      assert.deepEqual(message.message.content[1], { type: 'image', source: { type: 'base64', media_type: 'image/png', data: ATTACHED_PNG } });
+      assert.equal(message.message.role, 'user');
+      prompt = message.message.content[0].text;
+      assert.ok(received.args.includes('--add-dir'));
+    } else {
+      const imagePath = received.args[received.args.indexOf('--image') + 1];
+      assert.equal((await readFile(imagePath)).toString('base64'), ATTACHED_PNG);
+    }
+    assert.match(prompt, /첨부한 파일을 확인/);
+    assert.match(prompt, /notes \$\(touch INJECTION\)\.txt/);
+    assert.doesNotMatch(JSON.stringify(f.manager.list()), /private attachment contents|base64|\/attachments\//);
+    assert.equal(f.manager.list()[0].prompt, '');
+    assert.deepEqual(Object.keys(run.attachments![0]).sort(), ['id', 'mimeType', 'name', 'size']);
+    assert.equal((await f.manager.attachment(run.attachments![1].id)).content.toString(), 'private attachment contents');
+    await assert.rejects(stat(join(f.directory, 'INJECTION')), { code: 'ENOENT' });
+  } finally { await f.cleanup(); }
+});
+
+test('native app bridge receives stored image paths without launching a second writer', async () => {
+  let received: CodexBridgeOptions | undefined;
+  const f = await fixture({ openCodexBridge: async options => {
+    received = options;
+    return { start: async () => { options.onStarted('owned'); options.onFinished({ status: 'completed' }); }, cancel: async () => {}, close: () => {}, done: Promise.resolve() };
+  } });
+  try {
+    f.sessions.set(f.session.id, { ...f.session, activeProcess: true });
+    const run = await f.manager.enqueue(f.session.id, 'explain picture', { attachments: [{ name: 'picture.png', mimeType: 'image/png', data: ATTACHED_PNG }] });
+    assert.equal((await finished(f.manager, run.id)).status, 'completed');
+    assert.equal(f.launches.length, 0);
+    assert.equal(received?.threadId, ID);
+    assert.match(received!.prompt, /^explain picture/);
+    assert.equal((await readFile(received!.imagePaths![0])).toString('base64'), ATTACHED_PNG);
+  } finally { await f.cleanup(); }
+});
+
+test('retries retain attachments after restart, enforce session ownership, and never auto-submit old runs', async () => {
+  const f = await fixture({ busy: true });
+  let reopened: RunManager | undefined;
+  try {
+    const run = await f.manager.enqueue(f.session.id, '', { attachments: [{ name: 'notes.txt', mimeType: 'text/plain', data: 'aGVsbG8=' }] });
+    await f.manager.close();
+    reopened = new RunManager({ getSession: id => f.sessions.get(id), refreshSessions: async () => {}, stateDir: f.stateDir, findExecutable: async () => '/fixture/codex' });
+    await reopened.start();
+    assert.equal(reopened.list()[0].status, 'cancelled');
+    assert.deepEqual(reopened.list()[0].attachments, run.attachments);
+    const retry = await reopened.enqueue(f.session.id, '', { attachmentIds: [run.attachments![0].id] });
+    assert.deepEqual(retry.attachments, run.attachments);
+    const other = makeSession(f.directory, { id: `codex:${ID2}`, nativeId: ID2 });
+    f.sessions.set(other.id, other);
+    await assert.rejects(reopened.enqueue(other.id, 'other session', { attachmentIds: [run.attachments![0].id] }), { statusCode: 404 });
+    assert.equal(f.launches.length, 0);
+  } finally { await reopened?.close(); await f.cleanup(); }
+});
+
+test('failed admission and full queues roll back only newly saved attachment files', async () => {
+  const f = await fixture({ busy: true });
+  try {
+    const input = { name: 'notes.txt', mimeType: 'text/plain', data: 'aGVsbG8=' };
+    const first = await f.manager.enqueue(f.session.id, 'first', { attachments: [input] });
+    await rm(join(f.stateDir, 'runs.json'));
+    await mkdir(join(f.stateDir, 'runs.json'));
+    await assert.rejects(f.manager.enqueue(f.session.id, 'rejected', { attachmentIds: [first.attachments![0].id], attachments: [input] }), /Cannot save/);
+    assert.deepEqual(await readdir(join(f.stateDir, 'attachments')), [first.attachments![0].id]);
+    await rm(join(f.stateDir, 'runs.json'), { recursive: true });
+    const results = await Promise.allSettled(Array.from({ length: 40 }, (_, i) => f.manager.enqueue(f.session.id, `queued ${i}`, { attachments: [input] })));
+    assert.equal(results.filter(result => result.status === 'fulfilled').length, 31);
+    assert.equal((await readdir(join(f.stateDir, 'attachments'))).length, 32);
+    assert.equal(f.launches.length, 0);
+  } finally { await rm(join(f.stateDir, 'runs.json'), { recursive: true, force: true }); await f.cleanup(); }
+});
+
+test('shutdown during attachment preparation rejects admission and cleans fresh files before any provider launch', async () => {
+  const f = await fixture();
+  const store = (f.manager as any).attachments;
+  const prepare = store.prepare.bind(store);
+  let prepared!: () => void;
+  const preparedSignal = new Promise<void>(resolve => { prepared = resolve; });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  store.prepare = async (...args: unknown[]) => { const result = await prepare(...args); prepared(); await gate; return result; };
+  try {
+    const pending = f.manager.enqueue(f.session.id, '', { attachments: [{ name: 'notes.txt', mimeType: 'text/plain', data: 'aGVsbG8=' }] });
+    const rejected = assert.rejects(pending, /not accepting/);
+    await preparedSignal;
+    await f.manager.close();
+    release(); await rejected;
+    assert.equal(f.manager.list().length, 0);
+    assert.equal(f.launches.length, 0);
+    assert.deepEqual(await readdir(join(f.stateDir, 'attachments')), []);
+  } finally { release(); await f.cleanup(); }
+});
+
+test('Finder-style PATH can run a Node CLI wrapper without searching its monitored working directory', async () => {
+  const f = await fixture({ path: '/usr/bin:/bin:.:relative::', shebang: true });
+  try {
+    // An unsafe inherited PATH would choose this workspace executable before ~/.local/bin/node.
+    await writeFile(join(f.directory, 'node'), '#!/bin/sh\nexit 88\n', { mode: 0o700 });
+    const result = await finished(f.manager, (await f.manager.enqueue(f.session.id, 'continue from Finder')).id);
+    assert.equal(result.status, 'completed', result.error);
+    assert.match(result.output, /Hello Codex/);
+    const directories = f.launches[0].path!.split(delimiter);
+    assert.ok(directories.every(directory => directory && isAbsolute(directory)));
+    assert.deepEqual(directories.slice(0, 2), ['/usr/bin', '/bin']);
+    assert.ok(directories.includes(join(homedir(), '.local', 'bin')));
+    assert.ok(directories.includes('/opt/homebrew/bin'));
+  } finally { await f.cleanup(); }
+});
+
+test('busy native conversations wait and resume automatically after their writer exits', async () => {
+  const f = await fixture({busy:true});
+  try {
+    const run = await f.manager.enqueue(f.session.id, 'next turn');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal(f.launches.length, 0);
+    assert.match(f.manager.list()[0].output, /current turn/);
+    f.sessions.set(f.session.id, {...f.session, status:'idle', activeProcess:false});
+    assert.equal((await finished(f.manager, run.id)).status, 'completed');
+    assert.equal(f.launches.length, 1);
+  } finally { await f.cleanup(); }
+});
+
+test('an idle Codex conversation with an active native writer cannot start a second writer', async () => {
+  const f = await fixture();
+  try {
+    f.sessions.set(f.session.id, {...f.session, status:'idle', activeProcess:true});
+    const run = await f.manager.enqueue(f.session.id, 'continue the desktop conversation');
+    await until(() => f.launches.length > 0 || f.refreshes() >= 3 ? true : undefined);
+    assert.equal(f.launches.length, 0, 'the idle desktop writer still owns the Codex conversation');
+    assert.equal(f.manager.list().find(entry => entry.id === run.id)?.status, 'queued');
+    f.sessions.set(f.session.id, {...f.session, status:'idle', activeProcess:false});
+    assert.equal((await finished(f.manager, run.id)).status, 'completed');
+    assert.equal(f.launches.length, 1, 'resume starts only after the native writer exits');
+  } finally { await f.cleanup(); }
+});
+
+test('an idle Claude conversation with an active process retains its existing resume behavior', async () => {
+  const f = await fixture({provider:'claude'});
+  try {
+    f.sessions.set(f.session.id, {...f.session, status:'idle', activeProcess:true});
+    const run = await f.manager.enqueue(f.session.id, 'continue the idle Claude conversation');
+    const result = await finished(f.manager, run.id);
+    assert.equal(result.status, 'completed');
+    assert.equal(result.output.trim(), 'Hello Claude');
+    assert.equal(f.launches.length, 1);
+    assert.ok(f.launches[0].args.includes('--resume'));
+  } finally { await f.cleanup(); }
+});
+
+test('an idle Codex desktop writer receives the exact instruction through its bridge without a new CLI', async () => {
+  let bridgeOptions: CodexBridgeOptions | undefined;
+  let starts = 0;
+  let resolveDone!: () => void;
+  const done = new Promise<void>(resolve => { resolveDone = resolve; });
+  const f = await fixture({openCodexBridge: async options => {
+    bridgeOptions = options;
+    return {
+      done,
+      start: async () => { starts++; },
+      cancel: async () => { options.onFinished({status:'cancelled'}); resolveDone(); },
+      close: () => resolveDone(),
+    };
+  }});
+  try {
+    f.sessions.set(f.session.id, {...f.session, status:'idle', activeProcess:true});
+    const prompt = 'Continue this exact desktop thread.\nKeep $(commands) as literal text.';
+    const run = await f.manager.enqueue(f.session.id, prompt);
+    await until(() => starts === 1 ? true : undefined);
+    assert.ok(bridgeOptions);
+    assert.equal(bridgeOptions.threadId, f.session.nativeId);
+    assert.equal(bridgeOptions.runId, run.id);
+    assert.equal(bridgeOptions.prompt, prompt);
+    assert.equal(f.manager.list().find(entry => entry.id === run.id)?.status, 'queued', 'opening the bridge does not claim the turn started');
+    assert.equal(f.launches.length, 0);
+    bridgeOptions.onStarted();
+    const running = f.manager.list().find(entry => entry.id === run.id)!;
+    assert.equal(running.status, 'running');
+    assert.ok(running.startedAt);
+    bridgeOptions.onOutput('Hello ');
+    bridgeOptions.onOutput('desktop Codex');
+    assert.equal(f.manager.list().find(entry => entry.id === run.id)?.output, 'Hello desktop Codex');
+    bridgeOptions.onFinished({status:'completed'});
+    resolveDone();
+    const result = await finished(f.manager, run.id);
+    assert.equal(result.status, 'completed');
+    assert.equal(result.output, 'Hello desktop Codex');
+    assert.ok(result.finishedAt);
+    assert.equal(f.manager.settledRunIds().has(run.id), true);
+    assert.equal(starts, 1);
+    assert.equal(f.launches.length, 0);
+    assert.equal(f.children.length, 0);
+  } finally { await f.cleanup(); }
+});
+
+test('cancel during bridge startup interrupts only the bridged turn and ignores later output', async () => {
+  let bridgeOptions: CodexBridgeOptions | undefined;
+  let cancels = 0;
+  let releaseStart!: () => void;
+  const starting = new Promise<void>(resolve => { releaseStart = resolve; });
+  let resolveDone!: () => void;
+  const done = new Promise<void>(resolve => { resolveDone = resolve; });
+  const f = await fixture({openCodexBridge: async options => {
+    bridgeOptions = options;
+    return {
+      done,
+      start: async () => { options.onStarted(); await starting; },
+      cancel: async () => { cancels++; options.onFinished({status:'cancelled'}); resolveDone(); releaseStart(); },
+      close: () => { resolveDone(); releaseStart(); },
+    };
+  }});
+  try {
+    f.sessions.set(f.session.id, {...f.session, status:'idle', activeProcess:true});
+    const run = await f.manager.enqueue(f.session.id, 'cancel only this desktop turn');
+    await until(() => f.manager.list().find(entry => entry.id === run.id && entry.status === 'running'));
+    await f.manager.cancel(run.id);
+    assert.equal(cancels, 1, 'the bridge must be registered before start() finishes');
+    assert.equal((await finished(f.manager, run.id)).status, 'cancelled');
+    bridgeOptions!.onStarted();
+    bridgeOptions!.onOutput('late output after cancellation');
+    const result = f.manager.list().find(entry => entry.id === run.id)!;
+    assert.equal(result.status, 'cancelled');
+    assert.doesNotMatch(result.output, /late output/);
+    assert.equal(f.launches.length, 0);
+    assert.equal(f.children.length, 0, 'there is no owned CLI process to signal');
+  } finally { releaseStart(); await f.cleanup(); }
+});
+
+test('a bridge submission error after possible delivery never falls back to a second CLI writer', async () => {
+  let starts = 0;
+  let closes = 0;
+  let resolveDone!: () => void;
+  const done = new Promise<void>(resolve => { resolveDone = resolve; });
+  const f = await fixture({openCodexBridge: async options => ({
+    done,
+    start: async () => { starts++; options.onStarted(); throw new Error('Desktop acknowledgement lost after possible delivery'); },
+    cancel: async () => { options.onFinished({status:'cancelled'}); resolveDone(); },
+    close: () => { closes++; resolveDone(); },
+  })});
+  try {
+    f.sessions.set(f.session.id, {...f.session, status:'idle', activeProcess:true});
+    const run = await f.manager.enqueue(f.session.id, 'submit exactly once');
+    const result = await finished(f.manager, run.id);
+    assert.equal(result.status, 'error');
+    assert.match(result.error || '', /acknowledgement lost after possible delivery/);
+    assert.equal(starts, 1);
+    assert.equal(closes, 1);
+    f.sessions.set(f.session.id, {...f.session, status:'idle', activeProcess:false});
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(f.launches.length, 0, 'even when the writer disappears, an uncertain delivery must never replay');
+    assert.equal(f.children.length, 0);
+    assert.equal(starts, 1);
+  } finally { await f.cleanup(); }
+});
+
+test('serializes a conversation while allowing independent sessions up to concurrency limit', async () => {
+  const f = await fixture({mode:'slow', maxConcurrent:2});
+  try {
+    const secondSession = makeSession(f.directory, {id:`codex:${ID2}`,nativeId:ID2});
+    f.sessions.set(secondSession.id, secondSession);
+    const one = await f.manager.enqueue(f.session.id, 'one');
+    const two = await f.manager.enqueue(f.session.id, 'two');
+    const three = await f.manager.enqueue(secondSession.id, 'three');
+    await until(() => f.launches.length === 2 ? true : undefined);
+    assert.equal(f.manager.list().find((run) => run.id === two.id)?.status, 'queued');
+    assert.equal(f.manager.list().filter((run) => run.status === 'running').length, 2);
+    await Promise.all([one,two,three].map((run) => finished(f.manager, run.id)));
+    assert.equal(f.launches.length, 3);
+    assert.ok(f.manager.list().every((run) => run.status === 'completed'));
+  } finally { await f.cleanup(); }
+});
+
+for (const mode of ['fail', 'stream-error', 'mismatch', 'empty', 'invalid-event']) test(`provider ${mode} is an error, never false success`, async () => {
+  const f = await fixture({mode});
+  try {
+    const result = await finished(f.manager, (await f.manager.enqueue(f.session.id, 'hello')).id);
+    assert.equal(result.status, 'error');
+    assert.match(result.error ?? '', mode === 'fail' ? /authentication expired/ : mode === 'mismatch' ? /different conversation/ : mode === 'empty' ? /without confirming completion/ : mode === 'invalid-event' ? /invalid output event/ : /provider declined/);
+  } finally { await f.cleanup(); }
+});
+
+test('rejected persistence never launches an instruction later from the polling queue',async()=>{
+  const f=await fixture();
+  try{
+    await rm(f.stateDir,{recursive:true,force:true});
+    await assert.rejects(f.manager.enqueue(f.session.id,'must not run'),/Cannot save/);
+    await new Promise(resolve=>setTimeout(resolve,100));
+    assert.equal(f.launches.length,0);
+    assert.equal(f.manager.list().length,0);
+  }finally{await mkdir(f.stateDir,{recursive:true});await f.cleanup();}
+});
+
+test('an executable lookup finishing after shutdown cannot admit or launch work',async()=>{
+  const directory=await mkdtemp(join(tmpdir(),'agent-monitor-admission-'));
+  let release!:(path:string)=>void;
+  const lookup=new Promise<string>(resolve=>{release=resolve;});
+  const session=makeSession(directory);
+  const manager=new RunManager({getSession:()=>session,refreshSessions:async()=>{},stateDir:directory,findExecutable:()=>lookup});
+  try{
+    await manager.start();
+    const admission=manager.enqueue(session.id,'too late');
+    const rejected=assert.rejects(admission,/not accepting/);
+    await manager.close();
+    release('/fixture/codex');
+    await rejected;
+    assert.equal(manager.list().length,0);
+  }finally{await rm(directory,{recursive:true,force:true});}
+});
+
+test('simultaneous admission cannot exceed the waiting queue capacity',async()=>{
+  const f=await fixture({busy:true});
+  try{
+    const attempts=await Promise.allSettled(Array.from({length:40},(_,i)=>f.manager.enqueue(f.session.id,`task ${i}`)));
+    assert.equal(attempts.filter(result=>result.status==='fulfilled').length,32);
+    assert.equal(f.manager.list().length,32);
+    assert.equal(f.launches.length,0);
+  }finally{await f.cleanup();}
+});
+
+test('cancellation signals owned descendants even after the CLI leader exits',async()=>{
+  const f=await fixture({mode:'orphan'});
+  try{
+    const run=await f.manager.enqueue(f.session.id,'orphan');
+    await until(()=>f.children[0]?.exitCode===0?true:undefined);
+    assert.equal(f.manager.settledRunIds().has(run.id),false,'the descendant still holds the owned pipe open');
+    await f.manager.cancel(run.id);
+    await until(()=>f.manager.settledRunIds().has(run.id)?true:undefined);
+    assert.equal(f.manager.list()[0].status,'cancelled');
+  }finally{await f.cleanup();}
+});
+
+test('after an owned child closes, stale native working state cannot block the next instruction',async()=>{
+  const f=await fixture({mode:'hold'});
+  try{
+    const first=await f.manager.enqueue(f.session.id,'first');
+    await until(()=>f.children.length===1?true:undefined);
+    f.sessions.set(f.session.id,{...f.session,status:'working'});
+    await f.manager.cancel(first.id);
+    await until(()=>f.manager.settledRunIds().has(first.id)?true:undefined);
+    const second=await f.manager.enqueue(f.session.id,'next');
+    await until(()=>f.children.length===2?true:undefined);
+    await f.manager.cancel(second.id);
+    await until(()=>f.manager.settledRunIds().has(second.id)?true:undefined);
+    f.sessions.set(f.session.id,{...f.session,status:'working',updatedAt:new Date(Date.now()+1000).toISOString()});
+    const third=await f.manager.enqueue(f.session.id,'external task wins');
+    await new Promise(resolve=>setTimeout(resolve,100));
+    assert.equal(f.children.length,2,'newer external turn still blocks another writer');
+    await f.manager.cancel(third.id);
+  }finally{await f.cleanup();}
+});
+
+test('failed activity refresh keeps instructions queued until explicitly cancelled', async () => {
+  const f = await fixture({refreshError:true});
+  try {
+    const run = await f.manager.enqueue(f.session.id, 'hello');
+    await until(() => f.manager.list()[0].output.includes('activity unavailable') ? true : undefined);
+    assert.equal(f.launches.length, 0);
+    assert.equal(f.manager.list()[0].status, 'queued');
+    await f.manager.cancel(run.id);
+    await new Promise(resolve=>setTimeout(resolve,75));
+    assert.equal(f.launches.length, 0);
+  } finally { await f.cleanup(); }
+});
+
+test('cancels only its owned process and persists private terminal run state', async () => {
+  const f = await fixture({mode:'hold'});
+  try {
+    const run = await f.manager.enqueue(f.session.id, 'hold');
+    await until(() => f.manager.list().find((entry) => entry.status === 'running'));
+    await f.manager.cancel(run.id);
+    assert.equal((await finished(f.manager, run.id)).status, 'cancelled');
+    await assert.rejects(f.manager.cancel('unknown'), /Task not found/);
+    const persisted: Run[] = JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'));
+    assert.equal(persisted.find((entry) => entry.id === run.id)?.status, 'cancelled');
+    assert.equal((await stat(join(f.stateDir, 'runs.json'))).mode & 0o777, 0o600);
+  } finally { await f.cleanup(); }
+});
+
+test('bounds streamed history and rejects invalid or unavailable native sessions', async () => {
+  const f = await fixture({mode:'large'});
+  try {
+    await assert.rejects(f.manager.enqueue('missing', 'hello'), /no longer exists/);
+    await assert.rejects(f.manager.enqueue(f.session.id, '  '), /Enter an instruction/);
+    await assert.rejects(f.manager.enqueue(f.session.id, 'x'.repeat(32001)), /at most/);
+    const result = await finished(f.manager, (await f.manager.enqueue(f.session.id, 'hello')).id);
+    assert.equal(result.status, 'completed');
+    assert.equal(result.output.length, 64000);
+    f.sessions.set(f.session.id, {...f.session, nativeId:'--malicious'});
+    await assert.rejects(f.manager.enqueue(f.session.id, 'hello'), /ID is invalid/);
+  } finally { await f.cleanup(); }
+});
+
+test('restart preserves finished history and never replays interrupted or queued tasks', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent-monitor-recovery-'));
+  const records: Run[] = ['running','queued','completed'].map((status, index) => ({id:String(index),sessionId:`codex:${ID}`,prompt:'must not replay',status:status as Run['status'],createdAt:new Date().toISOString(),output:'history'}));
+  await writeFile(join(directory, 'runs.json'), JSON.stringify(records));
+  const manager = new RunManager({getSession:()=>undefined,refreshSessions:async()=>{},stateDir:directory});
+  try {
+    await manager.start();
+    assert.deepEqual(manager.list().map((run)=>run.status), ['error','cancelled','completed']);
+    assert.match(manager.list()[0].error ?? '', /not restarted/);
+    assert.equal(manager.list()[2].output, 'history');
+  } finally { await manager.close(); await rm(directory,{recursive:true,force:true}); }
+});
+
+test('executable discovery supports paths containing spaces without shell evaluation', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'agent monitor path '));
+  try {
+    await writeFile(join(directory, 'claude'), '#!/bin/sh\nexit 0\n');
+    await chmod(join(directory, 'claude'), 0o755);
+    assert.equal(await findExecutable('claude', {PATH:directory}), join(directory,'claude'));
+  } finally { await rm(directory,{recursive:true,force:true}); }
+});
