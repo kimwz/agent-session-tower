@@ -892,6 +892,28 @@ kbd {
   background:#19293d;
   box-shadow:0 0 0 3px #658eb71b
 }
+.agent-card.claude { --activity-color:#e6b586; }
+.agent-card.codex { --activity-color:#7bcebd; }
+.agent-activity-border {
+  position:absolute;
+  inset:-1px;
+  width:calc(100% + 2px);
+  height:calc(100% + 2px);
+  overflow:visible;
+  fill:none;
+  color:var(--activity-color);
+  pointer-events:none
+}
+.agent-activity-border rect {
+  width:calc(100% - 2px);
+  height:calc(100% - 2px);
+  stroke:currentColor;
+  stroke-width:2;
+  stroke-linecap:round;
+  stroke-dasharray:12 88;
+  filter:drop-shadow(0 0 3px currentColor);
+  animation:agent-card-orbit 3s linear infinite
+}
 .agent-card-top {
   position:relative;
   display:flex;
@@ -907,8 +929,6 @@ kbd {
   width:59px;
   height:59px
 }
-.agent-orb-wrap.claude { --ring:#e6b586; }
-.agent-orb-wrap.codex { --ring:#7bcebd; }
 .session-context-ring {
   position:absolute;
   top:-3px;
@@ -953,18 +973,6 @@ kbd {
 .agent-orb.codex {
   background:linear-gradient(145deg,#89cabc,#4e9c97 55%,#37718a);
   color:#d4fff5
-}
-.agent-card.working .agent-orb-wrap:before {
-  content:'';
-  position:absolute;
-  inset:-8px;
-  border-radius:50%;
-  padding:2px;
-  background:conic-gradient(transparent 0%,transparent 35%,var(--ring) 62%,#ffffffcc 77%,var(--ring) 86%,transparent 95%);
-  mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
-  mask-composite:exclude;
-  animation:orbit 3s linear infinite;
-  filter:drop-shadow(0 0 2px var(--ring))
 }
 .agent-card.completed .agent-orb {
   opacity:.82
@@ -2521,8 +2529,13 @@ kbd {
 .spin {
   animation:orbit 1s linear infinite
 }
-.motion-off .react-flow__edge.animated path,.motion-off .agent-card.working .agent-orb-wrap:before {
+.motion-off .react-flow__edge.animated path,.motion-off .agent-activity-border rect {
   animation:none!important
+}
+.motion-off .agent-activity-border rect {
+  stroke-dasharray:none;
+  opacity:.55;
+  filter:none
 }
 .sidebar-scrim {
   display:none
@@ -2533,6 +2546,9 @@ kbd {
   transform:rotate(360deg)
 }
 
+}
+@keyframes agent-card-orbit {
+  to { stroke-dashoffset:-100; }
 }
 @keyframes blink {
   0%,80%,100% {
@@ -2946,8 +2962,13 @@ kbd {
   transition-duration:.01ms!important;
   scroll-behavior:auto!important
 }
-.react-flow__edge.animated path,.agent-card.working .agent-orb-wrap:before {
+.react-flow__edge.animated path,.agent-activity-border rect {
   animation:none!important
+}
+.agent-activity-border rect {
+  stroke-dasharray:none;
+  opacity:.55;
+  filter:none
 }
 
 }
