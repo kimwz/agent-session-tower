@@ -296,6 +296,182 @@ test('new projects use the actual visible right edge and new cards stay near shi
   tightBounds(addedCard, projectId);
 });
 
+test('new cards follow the visible folder after card and folder drags without following filtered history', () => {
+  const recent = session('recent');
+  const history = session('history');
+  const next = session('new');
+  const projectId = graphProjectId('/work');
+  let layout = reconcileManualGraph(defaultGraphPreferences().layout, [recent, history]);
+  layout = moveManualGraphNodes(layout, [
+    { id: recent.id, position: { x: 1400, y: 1600 } },
+    { id: history.id, position: { x: -5000, y: -3000 } },
+  ]);
+  const visibleIds = new Set([recent.id]);
+  layout = moveManualGraphNodes(layout, [{ id: projectId, position: { x: 1880, y: 1744 } }], visibleIds);
+  const before = absolute(layout, recent.id);
+  const historicalPosition = absolute(layout, history.id);
+  const added = reconcileManualGraph(layout, [recent, history, next], true, [recent, next]);
+  assert.deepEqual(absolute(added, next.id), { x: before.x, y: before.y + 228 });
+  assert.equal(added.agents[recent.id], layout.agents[recent.id]);
+  assert.equal(added.agents[history.id], layout.agents[history.id]);
+  assert.deepEqual(absolute(added, recent.id), before);
+  assert.deepEqual(absolute(added, history.id), historicalPosition);
+  assert.deepEqual(added.projects[projectId].position, layout.projects[projectId].position);
+  assert.equal(reconcileManualGraph(added, [history, next, recent], true, [next, recent]), added);
+});
+
+test('multiple new cards share a row below visible contents while distant saved rows retain their positions', () => {
+  const a = session('a'); const b = session('b'); const history = session('history');
+  const additions = [session('new-a'), session('new-b'), session('new-c')];
+  let layout = reconcileManualGraph(defaultGraphPreferences().layout, [a, b, history]);
+  layout = moveManualGraphNodes(layout, [
+    { id: a.id, position: { x: 900, y: -400 } },
+    { id: b.id, position: { x: 1168, y: -400 } },
+    { id: history.id, position: { x: 20000, y: 30000 } },
+  ]);
+  const added = reconcileManualGraph(layout, [a, b, history, ...additions], true, [a, b, ...additions]);
+  const positions = additions.map(item => absolute(added, item.id)).sort((left, right) => left.y - right.y || left.x - right.x);
+  assert.deepEqual(positions, [{ x: 900, y: -172 }, { x: 1168, y: -172 }, { x: 900, y: 56 }]);
+  for (const item of [a, b, history]) assert.deepEqual(absolute(added, item.id), absolute(layout, item.id));
+});
+
+test('new cards align with the visible bottom row even when direct creation reveals distant upper history', () => {
+  const history = session('visible-history'); const current = session('current');
+  const initial = moveManualGraphNodes(reconcileManualGraph(defaultGraphPreferences().layout, [history, current]), [
+    { id: history.id, position: { x: -4513, y: -2863 } },
+    { id: current.id, position: { x: 20, y: 1391 } },
+  ]);
+  const fresh = session('fresh');
+  const added = reconcileManualGraph(initial, [history, current, fresh]);
+  assert.deepEqual(absolute(added, fresh.id), { x: 20, y: 1619 });
+  assert.deepEqual(absolute(added, history.id), absolute(initial, history.id));
+  assert.deepEqual(absolute(added, current.id), absolute(initial, current.id));
+
+  const sibling = session('bottom-sibling');
+  const row = moveManualGraphNodes(reconcileManualGraph(initial, [history, current, sibling]), [{ id: sibling.id, position: { x: 288, y: 1398 } }]);
+  const additions = [session('next-a'), session('next-b')];
+  const batch = reconcileManualGraph(row, [history, current, sibling, ...additions]);
+  assert.deepEqual(additions.map(item => absolute(batch, item.id)).sort((a, b) => a.x - b.x), [{ x: 20, y: 1626 }, { x: 288, y: 1626 }]);
+  assert.deepEqual(absolute(batch, sibling.id), absolute(row, sibling.id));
+});
+
+test('a nearby vacant cell avoids hidden cards and another folder without following a long blocked column', () => {
+  const recent = session('recent');
+  const hidden = Array.from({ length: 30 }, (_, index) => session(`hidden-${index}`));
+  const other = session('other', { cwd: '/other' });
+  let layout = reconcileManualGraph(defaultGraphPreferences().layout, [recent, ...hidden, other]);
+  layout = moveManualGraphNodes(layout, [
+    { id: recent.id, position: { x: 1000, y: 1000 } },
+    ...hidden.map((item, index) => ({ id: item.id, position: { x: 1000, y: 1228 + index * 228 } })),
+    { id: other.id, position: { x: 1268, y: 1228 } },
+  ]);
+  const next = session('new');
+  const added = reconcileManualGraph(layout, [recent, ...hidden, other, next], true, [recent, next]);
+  const position = absolute(added, next.id);
+  assert.deepEqual(position, { x: 732, y: 1228 });
+  for (const item of [recent, ...hidden, other]) {
+    const saved = absolute(layout, item.id);
+    assert.deepEqual(absolute(added, item.id), saved);
+    assert.ok(position.x + AGENT_WIDTH <= saved.x || saved.x + AGENT_WIDTH <= position.x || position.y + AGENT_HEIGHT <= saved.y || saved.y + AGENT_HEIGHT <= position.y);
+  }
+});
+
+test('new folders use visible bounds and title widths at their current height instead of hidden distant frames', () => {
+  const recent = session('recent'); const history = session('history');
+  const distant = session('distant', { cwd: '/hidden' });
+  const fresh = session('fresh', { cwd: '/new-folder' });
+  const hiddenPin: ProjectGroup = { cwd: '/hidden-empty', title: '', pinned: false, hidden: true };
+  const projectId = graphProjectId('/work');
+  let layout = reconcileManualGraph(defaultGraphPreferences().layout, [recent, history, distant], true, [recent, history, distant], [hiddenPin]);
+  layout = moveManualGraphNodes(layout, [
+    { id: recent.id, position: { x: -2000, y: 1600 } },
+    { id: history.id, position: { x: 40000, y: 50000 } },
+    { id: distant.id, position: { x: 90000, y: 90000 } },
+    { id: graphProjectId(hiddenPin.cwd), position: { x: 100000, y: 100000 } },
+  ]);
+  const minimumProjectWidths = new Map([[projectId, 700]]);
+  const visibleProjectIds = new Set([projectId, graphProjectId(fresh.cwd)]);
+  const before = manualProjectBounds(layout, projectId, new Set([recent.id]), minimumProjectWidths)!;
+  const added = reconcileManualGraph(layout, [recent, history, distant, fresh], true, [recent, fresh], [hiddenPin], { visibleProjectIds, minimumProjectWidths });
+  const frame = manualProjectBounds(added, graphProjectId(fresh.cwd))!;
+  assert.deepEqual(frame.position, { x: before.position.x + before.width + 36, y: before.position.y });
+  for (const item of [recent, history, distant]) assert.deepEqual(absolute(added, item.id), absolute(layout, item.id));
+  assert.deepEqual(manualProjectBounds(added, graphProjectId(hiddenPin.cwd)), manualProjectBounds(layout, graphProjectId(hiddenPin.cwd)));
+  assert.deepEqual(added.projects[projectId].position, layout.projects[projectId].position);
+});
+
+test('visible empty frames anchor new folders and title width changes never move saved cards or origins', () => {
+  const pin: ProjectGroup = { cwd: '/empty', title: 'A wider visible folder title', pinned: true };
+  const projectId = graphProjectId(pin.cwd);
+  let layout = reconcileManualGraph(defaultGraphPreferences().layout, [], true, [], [pin]);
+  layout = moveManualGraphNodes(layout, [{ id: projectId, position: { x: 800, y: -1200 } }], new Set());
+  const widths = new Map([[projectId, 750]]);
+  const wider = manualProjectBounds(layout, projectId, new Set(), widths)!;
+  assert.deepEqual(wider, { position: { x: 800, y: -1200 }, width: 750, height: 328 });
+  const fresh = session('fresh', { cwd: '/new-folder' });
+  const added = reconcileManualGraph(layout, [fresh], true, [fresh], [pin], {
+    visibleProjectIds: new Set([projectId, graphProjectId(fresh.cwd)]), minimumProjectWidths: widths,
+  });
+  assert.deepEqual(manualProjectBounds(added, graphProjectId(fresh.cwd))!.position, { x: 1586, y: -1200 });
+  assert.deepEqual(added.projects[projectId].position, layout.projects[projectId].position);
+  const applied = reconcileManualGraph(layout, [], true, [], [pin], { minimumProjectWidths: widths });
+  assert.equal(reconcileManualGraph(applied, [], true, [], [pin], { minimumProjectWidths: widths }), applied);
+  const populated = reconcileManualGraph(layout, [session('a', { cwd: pin.cwd })], true, [session('a', { cwd: pin.cwd })], [pin]);
+  const ordinary = manualProjectBounds(populated, projectId)!;
+  const expanded = manualProjectBounds(populated, projectId, undefined, widths)!;
+  assert.deepEqual(expanded.position, ordinary.position);
+  assert.equal(expanded.height, ordinary.height);
+  assert.equal(expanded.width, 750);
+  assert.deepEqual(absolute(populated, 'a'), { x: 820, y: -1094 });
+});
+
+test('unseen hidden frames wait for reveal and then get distinct positions while saved hidden frames stay retained', () => {
+  const groups: ProjectGroup[] = ['/one', '/two', '/three'].map(cwd => ({ cwd, title: '', pinned: false, hidden: true }));
+  const hidden = reconcileManualGraph(defaultGraphPreferences().layout, [], true, [], groups, { visibleProjectIds: new Set() });
+  assert.deepEqual(hidden.projects, {});
+  const visibleProjectIds = new Set(groups.map(group => graphProjectId(group.cwd)));
+  const revealed = reconcileManualGraph(hidden, [], true, [], groups, { visibleProjectIds });
+  const frames = [...visibleProjectIds].map(id => manualProjectBounds(revealed, id)!);
+  assert.equal(new Set(frames.map(frame => `${frame.position.x},${frame.position.y}`)).size, groups.length);
+  for (let i = 0; i < frames.length; i++) for (let j = i + 1; j < frames.length; j++) {
+    assert.ok(frames[i].position.x + frames[i].width + 36 <= frames[j].position.x || frames[j].position.x + frames[j].width + 36 <= frames[i].position.x);
+  }
+  const moved = moveManualGraphNodes(revealed, [{ id: graphProjectId('/one'), position: { x: -650, y: 1700 } }], new Set());
+  assert.equal(reconcileManualGraph(moved, [], true, [], groups, { visibleProjectIds: new Set() }), moved);
+  assert.equal(reconcileManualGraph(moved, [], true, [], groups, { visibleProjectIds }), moved);
+});
+
+test('a new visible folder stays near the origin without overlapping a saved hidden empty frame', () => {
+  const hidden: ProjectGroup = { cwd: '/hidden-empty', title: 'Saved hidden folder', pinned: false, hidden: true };
+  const hiddenId = graphProjectId(hidden.cwd);
+  const layout = reconcileManualGraph(defaultGraphPreferences().layout, [], true, [], [hidden], { visibleProjectIds: new Set([hiddenId]) });
+  const before = manualProjectBounds(layout, hiddenId)!;
+  const fresh = session('fresh', { cwd: '/fresh' });
+  const freshId = graphProjectId(fresh.cwd);
+  const added = reconcileManualGraph(layout, [fresh], true, [fresh], [hidden], { visibleProjectIds: new Set([freshId]) });
+  const frame = manualProjectBounds(added, freshId)!;
+  assert.deepEqual(frame.position, { x: before.position.x, y: before.position.y + before.height + 36 });
+  assert.deepEqual(manualProjectBounds(added, hiddenId), before);
+  assert.equal(reconcileManualGraph(added, [fresh], true, [fresh], [hidden], { visibleProjectIds: new Set([freshId, hiddenId]) }), added);
+});
+
+test('a new cwd membership is allocated near visible contents without moving siblings or stale history', () => {
+  const moving = session('moving', { cwd: '/old-folder' });
+  const current = session('current'); const hidden = session('hidden');
+  let layout = reconcileManualGraph(defaultGraphPreferences().layout, [moving, current, hidden]);
+  layout = moveManualGraphNodes(layout, [
+    { id: moving.id, position: { x: 50000, y: 50000 } },
+    { id: current.id, position: { x: 900, y: 700 } },
+    { id: hidden.id, position: { x: -20000, y: -30000 } },
+  ]);
+  const changed = { ...moving, cwd: current.cwd };
+  const added = reconcileManualGraph(layout, [changed, current, hidden], true, [changed, current]);
+  assert.deepEqual(absolute(added, changed.id), { x: 900, y: 928 });
+  assert.deepEqual(absolute(added, current.id), absolute(layout, current.id));
+  assert.deepEqual(absolute(added, hidden.id), absolute(layout, hidden.id));
+  assert.equal(Object.hasOwn(added.projects, graphProjectId('/old-folder')), false);
+});
+
 test('batch card targets use world coordinates after folder translation regardless of change ordering', () => {
   const initial = reconcileManualGraph(defaultGraphPreferences().layout, [session('a'), session('b')]);
   const projectId = graphProjectId('/work');
@@ -382,4 +558,205 @@ test('pins outside the current search retain placement, and unpinning an empty g
   assert.deepEqual(Object.keys(unpinned.projects), [graphProjectId('/other')]);
   assert.deepEqual(manualProjectBounds(unpinned, graphProjectId('/other'))!.position, { x: 945, y: -238 });
   assert.deepEqual(reconcileManualGraph(unpinned, [], true, [], []).projects, {});
+});
+
+function titleFixture(xs = [0, 318, 636]) {
+  const items = xs.map((_, index) => session(`title-${index}`, { cwd: `/title-${index}` }));
+  const ids = items.map(item => graphProjectId(item.cwd));
+  const layout = moveManualGraphNodes(reconcileManualGraph(defaultGraphPreferences().layout, items),
+    ids.map((id, index) => ({ id, position: { x: xs[index], y: 145 } })));
+  return { items, ids, layout };
+}
+
+function titleOptions(items: Session[], widths: number[]) {
+  return { visibleProjectIds: new Set(items.map(item => graphProjectId(item.cwd))),
+    minimumProjectWidths: new Map(items.map((item, index) => [graphProjectId(item.cwd), widths[index]])) };
+}
+
+test('legacy title expansion moves only newly intersected right neighbors and cascades without changing relative card positions', () => {
+  const { items, ids, layout } = titleFixture();
+  const options = titleOptions(items, [584, 458, 282]);
+  const repaired = reconcileManualGraph(layout, items, true, items, [], options);
+  assert.deepEqual(ids.map(id => manualProjectBounds(repaired, id)!.position), [{ x: 0, y: 145 }, { x: 620, y: 145 }, { x: 1114, y: 145 }]);
+  assert.equal(repaired.agents, layout.agents);
+  assert.deepEqual(repaired.projects[ids[0]].position, layout.projects[ids[0]].position);
+  assert.deepEqual(ids.map(id => repaired.projects[id].appliedHeaderWidth), [584, 458, 282]);
+  assert.equal(reconcileManualGraph(repaired, items, true, items, [], options), repaired);
+});
+
+test('title repair requires a new rectangle intersection and preserves intentionally overlapping or vertically separate frames', () => {
+  for (const [x, width, expected] of [[292, 300, 336], [292, 288, 292], [260, 584, 260]]) {
+    const { items, ids, layout } = titleFixture([0, x]);
+    const repaired = reconcileManualGraph(layout, items, true, items, [], titleOptions(items, [width, 282]));
+    assert.equal(manualProjectBounds(repaired, ids[1])!.position.x, expected);
+  }
+  const { items, ids, layout } = titleFixture([-2000, -1682]);
+  const shifted = moveManualGraphNodes(layout, [{ id: ids[1], position: { x: -1682, y: 2000 } }]);
+  const repaired = reconcileManualGraph(shifted, items, true, items, [], titleOptions(items, [584, 282]));
+  assert.deepEqual(repaired.projects[ids[0]].position, shifted.projects[ids[0]].position);
+  assert.deepEqual(repaired.projects[ids[1]].position, shifted.projects[ids[1]].position);
+  const adjacent = reconcileManualGraph(layout, items, true, items, [], titleOptions(items, [584, 282]));
+  assert.equal(manualProjectBounds(adjacent, ids[1])!.position.x, -1380);
+});
+
+test('persisted title repair is idempotent after reload and does not override later drags or new-card insertion', () => {
+  const { items, ids, layout } = titleFixture([0, 318]);
+  const options = titleOptions(items, [584, 458]);
+  const repaired = reconcileManualGraph(layout, items, true, items, [], options);
+  const restored = parseGraphPreferences(JSON.stringify({ version: 1, mode: 'manual', layout: repaired })).layout;
+  assert.deepEqual(restored, repaired);
+  assert.equal(reconcileManualGraph(restored, items, true, items, [], options), restored);
+  const dragged = moveManualGraphNodes(restored, [{ id: ids[1], position: { x: 318, y: 145 } }]);
+  assert.equal(reconcileManualGraph(dragged, items, true, items, [], options), dragged);
+  const fresh = session('new-card', { cwd: items[0].cwd });
+  const added = reconcileManualGraph(dragged, [...items, fresh], true, [...items, fresh], [], options);
+  for (const item of items) assert.deepEqual(absolute(added, item.id), absolute(dragged, item.id));
+  assert.deepEqual(absolute(added, fresh.id), { x: 20, y: 479 });
+  assert.equal(reconcileManualGraph(added, [...items, fresh], true, [...items, fresh], [], options), added);
+});
+
+test('automatic viewing leaves legacy title repair pending while new projects initialize their current header width', () => {
+  const { items, ids, layout } = titleFixture([0, 318]);
+  const options = titleOptions(items, [584, 458]);
+  assert.equal(reconcileManualGraph(layout, items, true, items, [], { ...options, repairHeaderWidths: false }), layout);
+  const manual = reconcileManualGraph(layout, items, true, items, [], options);
+  assert.equal(manualProjectBounds(manual, ids[1])!.position.x, 620);
+  const initial = reconcileManualGraph(defaultGraphPreferences().layout, items, true, items, [], options);
+  assert.deepEqual(ids.map(id => initial.projects[id].appliedHeaderWidth), [584, 458]);
+  assert.equal(reconcileManualGraph(initial, items, true, items, [], options), initial);
+});
+
+test('title growth while a neighbor is hidden is repaired once on reveal across repeated growth and reload', () => {
+  const { items, ids, layout } = titleFixture([0, 318]);
+  const baseline = reconcileManualGraph(layout, items, true, items, [], titleOptions(items, [282, 282]));
+  const hidden = reconcileManualGraph(baseline, items, true, [items[0]], [], titleOptions([items[0]], [584]));
+  assert.deepEqual(hidden.projects[ids[1]].position, baseline.projects[ids[1]].position);
+  const wider = reconcileManualGraph(hidden, items, true, [items[0]], [], titleOptions([items[0]], [700]));
+  assert.deepEqual(wider.projects[ids[1]].pendingHeaderRepairs, { [ids[0]]: { width: 282, shiftX: 0 } });
+  const restored = parseGraphPreferences(JSON.stringify({ ...defaultGraphPreferences(), layout: wider })).layout;
+  const revealed = reconcileManualGraph(restored, items, true, items, [], titleOptions(items, [700, 282]));
+  assert.equal(manualProjectBounds(revealed, ids[1])!.position.x, 736);
+  assert.equal(revealed.projects[ids[1]].pendingHeaderRepairs, undefined);
+  assert.equal(reconcileManualGraph(revealed, items, true, items, [], titleOptions(items, [700, 282])), revealed);
+  const smaller = reconcileManualGraph(hidden, items, true, [items[0]], [], titleOptions([items[0]], [282]));
+  const harmless = reconcileManualGraph(smaller, items, true, items, [], titleOptions(items, [282, 282]));
+  assert.equal(manualProjectBounds(harmless, ids[1])!.position.x, 318);
+  assert.equal(harmless.projects[ids[1]].pendingHeaderRepairs, undefined);
+});
+
+test('deferred cascades preserve prior left-to-right order even when the shifted source passes a hidden neighbor', () => {
+  for (const [width, sourceX, targetX] of [[584, 620, 938], [964, 1000, 1318]]) {
+    const { items, ids, layout } = titleFixture([0, 318, 900]);
+    const baseline = reconcileManualGraph(layout, items, true, items, [], titleOptions(items, [282, 282, 282]));
+    const hidden = reconcileManualGraph(baseline, items, true, items.slice(0, 2), [], titleOptions(items.slice(0, 2), [width, 282]));
+    assert.equal(manualProjectBounds(hidden, ids[1])!.position.x, sourceX);
+    assert.equal(manualProjectBounds(hidden, ids[2])!.position.x, 900);
+    assert.deepEqual(hidden.projects[ids[2]].pendingHeaderRepairs?.[ids[1]], { width: 282, shiftX: sourceX - 318 });
+    const restored = parseGraphPreferences(JSON.stringify({ ...defaultGraphPreferences(), layout: hidden })).layout;
+    const revealed = reconcileManualGraph(restored, items, true, items, [], titleOptions(items, [width, 282, 282]));
+    assert.equal(manualProjectBounds(revealed, ids[1])!.position.x, sourceX);
+    assert.equal(manualProjectBounds(revealed, ids[2])!.position.x, targetX);
+    assert.equal(revealed.agents, restored.agents);
+    assert.equal(revealed.projects[ids[2]].pendingHeaderRepairs, undefined);
+    assert.equal(reconcileManualGraph(revealed, items, true, items, [], titleOptions(items, [width, 282, 282])), revealed);
+  }
+});
+
+test('deferred repair accumulates title-only cascade shifts while preserving a hidden folder historical geometry', () => {
+  const { items, ids, layout } = titleFixture([0, 318, 900]);
+  const baseline = reconcileManualGraph(layout, items, true, items, [], titleOptions(items, [282, 282, 282]));
+  const first = reconcileManualGraph(baseline, items, true, items.slice(0, 2), [], titleOptions(items.slice(0, 2), [584, 282]));
+  const second = reconcileManualGraph(first, items, true, items.slice(0, 2), [], titleOptions(items.slice(0, 2), [700, 282]));
+  assert.deepEqual(second.projects[ids[2]].pendingHeaderRepairs?.[ids[1]], { width: 282, shiftX: 418 });
+  const revealed = reconcileManualGraph(second, items, true, items, [], titleOptions(items, [700, 282, 282]));
+  assert.equal(manualProjectBounds(revealed, ids[2])!.position.x, 1054);
+
+  const pair = titleFixture([0, 318]);
+  const history = session('history', { cwd: pair.items[1].cwd });
+  const all = [...pair.items, history];
+  const visited = moveManualGraphNodes(reconcileManualGraph(pair.layout, all), [{ id: history.id, position: { x: -50000, y: -60000 } }]);
+  const measured = reconcileManualGraph(visited, all, true, pair.items, [], titleOptions(pair.items, [282, 282]));
+  const hidden = reconcileManualGraph(measured, all, true, [pair.items[0]], [], titleOptions([pair.items[0]], [584]));
+  assert.deepEqual(absolute(hidden, history.id), absolute(measured, history.id));
+  const visible = reconcileManualGraph(hidden, all, true, pair.items, [], titleOptions(pair.items, [584, 282]));
+  assert.equal(manualProjectBounds(visible, pair.ids[1], new Set(pair.items.map(item => item.id)))!.position.x, 620);
+  assert.equal(visible.agents, hidden.agents);
+  assert.deepEqual(absolute(visible, history.id), { x: absolute(hidden, history.id).x + 302, y: absolute(hidden, history.id).y });
+});
+
+test('a deferred baseline affects only its target and never reverses an unrelated actual left neighbor', () => {
+  const { items, ids, layout } = titleFixture([1000, 700, 1800]);
+  const baseline = reconcileManualGraph(layout, items, true, items, [], titleOptions(items, [282, 282, 282]));
+  const stored = structuredClone(baseline);
+  stored.projects[ids[2]].pendingHeaderRepairs = { [ids[0]]: { width: 282, shiftX: 682 } };
+  const restored = parseGraphPreferences(JSON.stringify({ ...defaultGraphPreferences(), layout: stored })).layout;
+  const repaired = reconcileManualGraph(restored, items, true, items, [], titleOptions(items, [584, 584, 282]));
+  assert.equal(manualProjectBounds(repaired, ids[1])!.position.x, 700, 'the actual left frame stays anchored');
+  assert.equal(manualProjectBounds(repaired, ids[0])!.position.x, 1320);
+  assert.equal(manualProjectBounds(repaired, ids[2])!.position.x, 1940);
+  assert.equal(repaired.agents, restored.agents);
+  assert.equal(reconcileManualGraph(repaired, items, true, items, [], titleOptions(items, [584, 584, 282])), repaired);
+});
+
+test('a broad first view does not consume title expansion before filtering makes the title determine the frame width', () => {
+  const { items, ids, layout } = titleFixture([0, 318]);
+  const history = session('far-history', { cwd: items[0].cwd });
+  const all = [...items, history];
+  const wide = moveManualGraphNodes(reconcileManualGraph(layout, all), [{ id: history.id, position: { x: -4980, y: 251 } }]);
+  const options = titleOptions(items, [585, 459]);
+  const broad = reconcileManualGraph(wide, all, true, all, [], options);
+  assert.equal(broad.projects[ids[0]].appliedHeaderWidth, undefined);
+  assert.equal(reconcileManualGraph(broad, all, true, all, [], options), broad);
+  const filtered = reconcileManualGraph(broad, all, true, items, [], options);
+  assert.equal(manualProjectBounds(filtered, ids[0], new Set(items.map(item => item.id)))!.position.x, 0);
+  assert.equal(manualProjectBounds(filtered, ids[1])!.position.x, 621);
+  assert.equal(filtered.projects[ids[0]].appliedHeaderWidth, 585);
+  assert.equal(reconcileManualGraph(filtered, all, true, items, [], options), filtered);
+
+  const dragged = moveManualGraphNodes(broad, [{ id: history.id, position: { x: 20, y: 251 } }], new Set(all.map(item => item.id)), options.minimumProjectWidths);
+  assert.equal(dragged.projects[ids[0]].appliedHeaderWidth, 585);
+  assert.equal(reconcileManualGraph(dragged, all, true, all, [], options), dragged, 'ordinary card drag cannot trigger the filter repair');
+  assert.equal(manualProjectBounds(dragged, ids[1])!.position.x, 318);
+  const movedWide = moveManualGraphNodes(broad, [{ id: ids[0], position: { x: -4800, y: 145 } }], new Set(all.map(item => item.id)), options.minimumProjectWidths);
+  assert.equal(movedWide.projects[ids[0]].appliedHeaderWidth, undefined, 'a drag that leaves cards wider than the title does not consume the baseline');
+});
+
+test('fresh multi-column folders leave smaller headers eligible for later filtered-width repair', () => {
+  const items = [session('a'), session('b'), session('c')];
+  const id = graphProjectId('/work');
+  const options = titleOptions([items[0]], [458]);
+  const layout = reconcileManualGraph(defaultGraphPreferences().layout, items, true, items, [], options);
+  assert.equal(manualProjectBounds(layout, id)!.width, 550);
+  assert.equal(layout.projects[id].appliedHeaderWidth, undefined);
+  const filtered = reconcileManualGraph(layout, items, true, [items[0]], [], options);
+  assert.equal(filtered.projects[id].appliedHeaderWidth, 458);
+  assert.equal(filtered.agents, layout.agents);
+});
+
+test('invalid optional title metadata is ignored without discarding valid projects and removed sources cannot leave deferred repairs', () => {
+  const { items, ids, layout } = titleFixture([0, 318]);
+  for (const invalid of [null, -1, 0, '584', {}, Infinity]) {
+    const stored = structuredClone(layout);
+    Object.assign(stored.projects[ids[0]], { appliedHeaderWidth: invalid });
+    Object.assign(stored.projects[ids[1]], { appliedHeaderWidth: 282, pendingHeaderRepairs: {
+      [ids[0]]: { width: 282, shiftX: 302 }, [ids[1]]: { width: 282, shiftX: 0 }, 'project:missing': { width: 282, shiftX: 0 },
+    } });
+    const parsed = parseGraphPreferences(JSON.stringify({ version: 1, mode: 'manual', layout: stored })).layout;
+    assert.deepEqual(Object.keys(parsed.projects), ids);
+    assert.deepEqual(parsed.projects[ids[0]].position, layout.projects[ids[0]].position);
+    assert.equal(parsed.projects[ids[0]].appliedHeaderWidth, undefined);
+    assert.deepEqual(parsed.projects[ids[1]].pendingHeaderRepairs, { [ids[0]]: { width: 282, shiftX: 302 } });
+  }
+  for (const invalid of [null, 282, [], { width: -1, shiftX: 0 }, { width: 282, shiftX: -1 }, { width: '282', shiftX: 0 }, { width: 282, shiftX: Infinity }]) {
+    const stored = structuredClone(layout);
+    Object.assign(stored.projects[ids[1]], { pendingHeaderRepairs: { [ids[0]]: invalid } });
+    const parsed = parseGraphPreferences(JSON.stringify({ ...defaultGraphPreferences(), layout: stored })).layout;
+    assert.equal(parsed.projects[ids[1]].pendingHeaderRepairs, undefined);
+    assert.deepEqual(parsed.projects[ids[1]].position, layout.projects[ids[1]].position);
+  }
+  const hidden = reconcileManualGraph(layout, items, true, [items[0]], [], titleOptions([items[0]], [584]));
+  assert.ok(hidden.projects[ids[1]].pendingHeaderRepairs);
+  const removed = reconcileManualGraph(hidden, [items[1]], true, [items[1]], [], { ...titleOptions([items[1]], [282]), repairHeaderWidths: false });
+  assert.equal(removed.projects[ids[1]].pendingHeaderRepairs, undefined);
+  assert.deepEqual(removed.projects[ids[1]].position, hidden.projects[ids[1]].position);
 });

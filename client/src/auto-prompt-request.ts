@@ -19,6 +19,7 @@ export type AutoPromptOutcome = { job: AutoPromptJob } | { error: unknown; uncer
 export interface AutoPromptAttempt {
   id: string;
   send: (token: string) => Promise<AutoPromptOutcome>;
+  takeCompletedSession: (job: AutoPromptJob) => string | undefined;
 }
 
 /** One immutable request survives dialog close, response loss, and explicit retries. */
@@ -26,6 +27,7 @@ export function createAutoPromptAttempt(request: AutoPromptRequest, requestApi: 
   const id = request.requestId;
   const body = JSON.stringify(request);
   let inFlight: Promise<AutoPromptOutcome> | undefined;
+  let completionTaken = false;
   async function submit(token: string): Promise<AutoPromptOutcome> {
     try {
       return await requestApi<{ job: AutoPromptJob }>('/api/auto-prompts', {
@@ -42,7 +44,11 @@ export function createAutoPromptAttempt(request: AutoPromptRequest, requestApi: 
       }
     }
   }
-  return { id, send(token) {
+  return { id, takeCompletedSession(job) {
+    if (completionTaken || job.id !== id || job.status !== 'completed' || !job.sessionId) return undefined;
+    completionTaken = true;
+    return job.sessionId;
+  }, send(token) {
     if (!inFlight) inFlight = submit(token).finally(() => { inFlight = undefined; });
     return inFlight;
   } };

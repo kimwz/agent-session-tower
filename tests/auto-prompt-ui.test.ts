@@ -90,3 +90,46 @@ test('out-of-order snapshots never regress routing or unlock a dispatched reques
   assert.equal(newerAutoPromptJob(dispatching, completed), completed);
   assert.equal(newerAutoPromptJob(completed, dispatching), completed);
 });
+
+test('only a completed local attempt with a target can be consumed for automatic navigation', () => {
+  const attempt = createAutoPromptAttempt(request());
+  assert.equal(attempt.takeCompletedSession(job({ id: 'unrelated-history', status: 'completed', sessionId: 'claude:other' })), undefined);
+  for (const status of ['queued', 'routing', 'dispatching', 'error', 'cancelled'] as const) {
+    assert.equal(attempt.takeCompletedSession(job({ status, sessionId: 'claude:chosen' })), undefined, status);
+  }
+  assert.equal(attempt.takeCompletedSession(job({ status: 'completed' })), undefined);
+  assert.equal(attempt.takeCompletedSession(job({ status: 'completed', sessionId: '' })), undefined);
+  assert.equal(attempt.takeCompletedSession(job({ status: 'completed', sessionId: 'claude:chosen' })), 'claude:chosen');
+});
+
+test('SSE completion while POST is pending navigates once across recovery, polling, and reopening', async () => {
+  let resolve!: (value: { job: AutoPromptJob }) => void;
+  const post = new Promise<{ job: AutoPromptJob }>(done => { resolve = done; });
+  const requestApi: typeof api = async <T>() => await post as T;
+  const attempt = createAutoPromptAttempt(request(), requestApi);
+  const sending = attempt.send('token');
+  const completed = job({ status: 'completed', sessionId: 'claude:chosen', runId: 'run-1' });
+  assert.equal(attempt.takeCompletedSession(completed), 'claude:chosen', 'no dialog visibility or session metadata is needed');
+  resolve({ job: completed });
+  const response = await sending;
+  assert.ok('job' in response);
+  assert.equal(attempt.takeCompletedSession(response.job), undefined);
+  assert.equal(attempt.takeCompletedSession({ ...completed }), undefined, 'polling or reopening cannot consume the same attempt twice');
+  const fresh = createAutoPromptAttempt({ ...request(), requestId: 'request-2' });
+  assert.equal(fresh.takeCompletedSession(completed), undefined);
+  assert.equal(fresh.takeCompletedSession({ ...completed, id: 'request-2', sessionId: 'codex:fresh' }), 'codex:fresh');
+});
+
+test('navigation consumption happens before a callback can reenter with duplicate completion', () => {
+  const attempt = createAutoPromptAttempt(request());
+  const completed = job({ status: 'completed', sessionId: 'claude:chosen' });
+  const navigations: string[] = [];
+  function receive() {
+    const sessionId = attempt.takeCompletedSession(completed);
+    if (!sessionId) return;
+    navigations.push(sessionId);
+    receive();
+  }
+  receive();
+  assert.deepEqual(navigations, ['claude:chosen']);
+});

@@ -3,6 +3,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Eye, EyeOff, Folder, Grip, LoaderCircle, Pencil, Pin, Plus, X } from 'lucide-react';
 import type { ProjectGroupPatch } from '../../shared/types';
+import { projectGroupDisplayTitle } from './project-group-title';
 import './project-groups.css';
 
 export type ProjectGroupHeaderData = {
@@ -75,7 +76,7 @@ export function ProjectGroupHeader({ data }: { data: ProjectGroupHeaderData }) {
   const disabled = data.disabled || data.saving || !actionable;
   return <>
     <div className="project-group-heading">
-      <div className="project-group-title"><Folder size={16} aria-hidden="true" /><strong className={data.title ? undefined : 'folder-tail'} title={data.name}>{data.title ? data.name : <bdi dir="ltr">{data.name}</bdi>}</strong><button className="project-group-action nodrag nopan" aria-label={t("{0} 그룹 제목 편집", { 0: data.name })} title={t("그룹 제목 편집")} disabled={disabled} onClick={() => setEditing(true)}><Pencil size={13} /></button></div>
+      <div className="project-group-title"><Folder size={16} aria-hidden="true" /><strong title={data.name}><bdi dir="ltr">{projectGroupDisplayTitle(data.name)}</bdi></strong><button className="project-group-action nodrag nopan" aria-label={t("{0} 그룹 제목 편집", { 0: data.name })} title={t("그룹 제목 편집")} disabled={disabled} onClick={() => setEditing(true)}><Pencil size={13} /></button></div>
       <div className="project-group-path folder-tail" title={data.path}><bdi dir="ltr">{data.path}</bdi></div>
       <div className="project-group-bottom"><span>{data.count}{t("개 세션")}{data.active > 0 && t(" · {0}개 작업 중", { 0: data.active })}</span><div className="project-group-actions nodrag nopan">
         <button className={`project-group-action ${data.pinned ? 'pinned' : ''}`} aria-label={t("{0} 그룹 {1}", { 0: data.name, 1: data.pinned ? t("고정 해제") : t("고정") })} aria-pressed={data.pinned} title={data.pinned ? t("그룹 고정 해제") : t("세션이 없어도 그룹 유지")} disabled={disabled} onClick={() => { void data.onUpdate({ cwd: data.path, pinned: !data.pinned }); }}>{data.saving && !editing ? <LoaderCircle size={14} className="spin" /> : <Pin size={14} />}</button>

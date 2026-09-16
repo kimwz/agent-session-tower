@@ -1,7 +1,7 @@
 .project-group-heading { width:100%; min-width:0; }
 .project-group-title { display:flex; align-items:center; gap:7px; min-width:0; height:26px; }
 .project-group-title>svg { flex-shrink:0; color:#8eabc9; }
-.project-group-title>strong { flex:1; min-width:0; margin:0; font-size:18px; line-height:25px; font-weight:620; color:#d4e1f2; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.project-group-title>strong { flex:1; min-width:0; margin:0; font-size:18px; line-height:25px; font-weight:620; color:#d4e1f2; white-space:nowrap; }
 .project-group-path { margin:3px 0 0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:10px; line-height:14px; color:#7f95b2; }
 .project-group-bottom { display:flex; align-items:center; gap:5px; height:28px; }
 .project-group-bottom>span { flex:1; min-width:0; font-size:9px; line-height:14px; margin:0; color:#8ba0bc; white-space:nowrap; }

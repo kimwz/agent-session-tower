@@ -29,17 +29,20 @@
 .host-node.has-auto-prompt .live-pip { flex-shrink:0; }
 .host-node .auto-prompt-trigger { top:8px; right:8px; }
 .auto-prompt-dialog {
+  position:fixed;
+  inset:auto 0 24px;
+  margin:0 auto;
   width:min(680px,calc(100vw - 32px));
-  max-height:calc(100dvh - 40px);
+  max-height:calc(100dvh - 48px);
   padding:26px;
   color:var(--text);
   border:1px solid #405674;
   border-radius:16px;
   background:#111c2b;
-  box-shadow:0 28px 100px #000a;
+  box-shadow:0 16px 48px #0006;
   overflow:auto;
 }
-.auto-prompt-dialog::backdrop { background:#050b14b8; backdrop-filter:blur(5px); }
+.auto-prompt-dialog::backdrop { background:#050b143d; }
 .auto-prompt-dialog:focus { outline:none; }
 .auto-prompt-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin-bottom:24px; }
 .auto-prompt-heading h2 { display:flex; align-items:center; gap:10px; color:#e0ecff; font-size:22px; font-weight:600; letter-spacing:-.5px; }
@@ -91,14 +94,12 @@
 .auto-prompt-result-path>bdi { overflow-wrap:anywhere; }
 .auto-prompt-result-session { display:block; margin-top:8px; color:#d5e7e6; font-size:14px; line-height:1.6; overflow-wrap:anywhere; }
 .auto-prompt-result-reason { margin-top:9px; color:#a3bbb9; font-size:12px; line-height:1.75; overflow-wrap:anywhere; }
-.auto-prompt-open { display:flex; align-items:center; justify-content:center; gap:8px; min-height:36px; padding:0 13px; margin-top:16px; border:1px solid #669b8e; border-radius:6px; color:#d8fff3; background:#2a544a; font-size:12px; }
-.auto-prompt-open:hover:enabled { background:#356c5e; }
 .auto-prompt-footer { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:15px; }
 .auto-prompt-footer:has(p:empty):not(:has(button)) { display:none; }
 .auto-prompt-footer>p { color:#97a9c2; font-size:11px; line-height:1.6; }
 .auto-prompt-footer>.secondary-button { margin-left:auto; }
 @media (max-width:520px) {
-  .auto-prompt-dialog { width:calc(100vw - 24px); max-height:calc(100dvh - 24px); padding:19px; }
+  .auto-prompt-dialog { bottom:12px; width:calc(100vw - 24px); max-height:calc(100dvh - 24px); padding:19px; }
   .auto-prompt-heading { margin-bottom:20px; }
   .auto-prompt-heading h2 { font-size:21px; }
   .auto-prompt-selectors { gap:9px; }

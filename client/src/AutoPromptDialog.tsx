@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowUpRight, Check, ChevronDown, Folder, LoaderCircle, Paperclip, Send, Sparkles, Square, TriangleAlert, X } from 'lucide-react';
+import { Check, ChevronDown, Folder, LoaderCircle, Paperclip, Send, Sparkles, Square, TriangleAlert, X } from 'lucide-react';
 import type { AutoPromptJob, Provider, ProviderHealth, Session } from '../../shared/types';
 import { MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments';
 import { DraftAttachments } from './ChatAttachments';
@@ -81,7 +81,6 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
     seenTerminalId.current = '';
     setAttemptId(''); setJob(undefined); setError(''); setUncertain(false);
     if (clearPrompt) { setPrompt(''); setAttachments([]); }
-    requestAnimationFrame(() => composer.current?.focus());
   }
 
   // Defaults are applied only when opening a fresh dialog, never to an unresolved request.
@@ -103,8 +102,7 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
       setProvider(opening.current.providers.find(item => item.available)?.provider || 'claude');
     }
     element.showModal();
-    if (!attempt.current) composer.current?.focus();
-    else element.focus();
+    if (attempt.current) element.focus();
     return () => {
       element.close();
       setDragging(false);
@@ -112,7 +110,23 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
     };
   }, [visible]);
 
-  // A result that arrived while hidden must be shown once before a trigger starts a new request.
+  // Focus follows the committed unlocked state, including reopening after a
+  // handled result. A frame scheduled while clearing state can still run early.
+  useEffect(() => {
+    if (visible && !locked && dialog.current?.open) composer.current?.focus({ preventScroll: true });
+  }, [visible, locked]);
+
+  // Errors/cancellations stay available until seen. Successful dispatches are
+  // consumed once even while hidden, independently of lagging session metadata.
+  useEffect(() => {
+    if (!job) return;
+    const sessionId = attempt.current?.takeCompletedSession(job);
+    if (!sessionId) return;
+    seenTerminalId.current = job.id;
+    onClose();
+    onNavigate(sessionId);
+  }, [job, onClose, onNavigate]);
+
   useEffect(() => {
     if (visible && job && !autoPromptPending(job) && currentJob.current?.id === job.id) seenTerminalId.current = job.id;
   }, [visible, job]);
@@ -244,7 +258,7 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
     {statusLabel && <div className="auto-prompt-progress" role="status"><LoaderCircle size={18} className="spin" aria-hidden="true" /><div><strong>{statusLabel}</strong>{job?.status === 'routing' && <small title={job.routerModel}>{t('{0}가 요청을 살펴보고 있습니다.', { 0: job.provider === 'claude' ? 'Opus' : 'GPT-5.6 Sol' })}</small>}<small>{t('창을 닫아도 요청은 계속됩니다.')}</small></div>{job && ['queued', 'routing'].includes(job.status) && <button type="button" className="auto-prompt-cancel" disabled={cancelling || !connected || !token} onClick={() => { void cancel(); }}>{cancelling ? <LoaderCircle size={12} className="spin" /> : <Square size={11} />}{t('취소')}</button>}</div>}
     {requestError && <div className="auto-prompt-error" role="alert"><TriangleAlert size={16} aria-hidden="true" /><p>{translateMessage(requestError)}</p>{uncertain && <button type="button" disabled={submitting || unavailable} onClick={() => { void submit(); }}>{t('같은 요청 다시 확인')}</button>}</div>}
     {job?.status === 'cancelled' && <p className="auto-prompt-cancelled" role="status">{t('요청을 취소했습니다. 세션에 보내지 않았습니다.')}</p>}
-    {job?.status === 'completed' && <section className="auto-prompt-result" aria-label={t('요청을 보낸 세션')}><div className="auto-prompt-result-heading"><Check size={19} aria-hidden="true" /><h3>{job.decision?.action === 'create' ? t('새 세션에 요청을 보냈습니다') : t('기존 세션에 요청을 보냈습니다')}</h3></div><p className="auto-prompt-result-path"><Folder size={14} aria-hidden="true" /><bdi dir="ltr">{job.decision?.cwd || target?.cwd || cwd}</bdi></p><strong className="auto-prompt-result-session">{target ? sessionTitle(target) : job.sessionId}</strong>{job.decision?.reason && <p className="auto-prompt-result-reason">{job.decision.reason}</p>}<button type="button" className="auto-prompt-open" disabled={!job.sessionId} onClick={() => { if (job.sessionId) { onNavigate(job.sessionId); onClose(); } }}>{t('대화 열기')}<ArrowUpRight size={15} /></button></section>}
+    {job?.status === 'completed' && <section className="auto-prompt-result" aria-label={t('요청을 보낸 세션')}><div className="auto-prompt-result-heading"><Check size={19} aria-hidden="true" /><h3>{job.decision?.action === 'create' ? t('새 세션에 요청을 보냈습니다') : t('기존 세션에 요청을 보냈습니다')}</h3></div><p className="auto-prompt-result-path"><Folder size={14} aria-hidden="true" /><bdi dir="ltr">{job.decision?.cwd || target?.cwd || cwd}</bdi></p><strong className="auto-prompt-result-session">{target ? sessionTitle(target) : job.sessionId}</strong>{job.decision?.reason && <p className="auto-prompt-result-reason">{job.decision.reason}</p>}</section>}
     <footer className="auto-prompt-footer"><p>{!locked && connectionMessage}</p>{job && !pending && <button type="button" className="secondary-button" disabled={submitting || cancelling} onClick={() => resetRequest(job.status === 'completed')}>{job.status === 'completed' ? t('새 요청') : t('요청 다시 작성')}</button>}</footer>
   </dialog>, document.body);
 }

@@ -5,7 +5,7 @@ import { ArrowUpRight, Check, GitBranch, Maximize, Minus, Monitor, Plus, Radio, 
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../shared/types';
 import { SessionContextIcon } from './SessionContextIcon';
 import { cleanPreview, providerLabels, relativeTime, sessionActivityAt, sessionTitle, statusLabels } from './lib';
-import { graphProjectId, graphSessionGroups, clearHostPosition, HOST_HEIGHT } from './graph-layout';
+import { graphProjectId, graphProjectKey, graphSessionGroups, clearHostPosition, HOST_HEIGHT } from './graph-layout';
 import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualProjectBounds, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, reconcileManualGraph, setGraphLayoutMode, type GraphLayoutMode, type GraphPreferences } from './graph-layout-preferences';
 import { includePinnedProjectGroups, projectGroupLabel } from './project-groups';
 import { ProjectGroupHeader, type ProjectGroupHeaderData } from './ProjectGroupHeader';
@@ -13,6 +13,7 @@ import './manual-graph.css';
 import './auto-prompt.css';
 import { ProviderUsage } from './ProviderUsage';
 import { CanvasSettings } from './CanvasSettings';
+import { projectGroupMinimumWidth, projectGroupTitleMeasurer } from './project-group-title';
 
 type AgentData = { session: Session; selected: boolean; unread: boolean; onSelect: (id: string) => void };
 type ProjectData = ProjectGroupHeaderData & { onAutoPrompt: (cwd?: string) => void };
@@ -71,14 +72,30 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
   const groupMetadata = useMemo(() => new Map(groups.map(group => [group.cwd, group])), [groups]);
   const visibleAgentIds = useMemo(() => new Set(sessions.map(session => session.id)), [sessions]);
   const seedSessions = useMemo(() => manual ? sessions : graphSessionGroups(sessions, graphLimit, selectedId).flatMap(([, members]) => members), [manual, sessions, graphLimit, selectedId]);
-  const manualLayout = useMemo(() => reconcileManualGraph(preferences.layout, allSessions, sessionsReady, seedSessions, retainedGroups), [preferences.layout, allSessions, sessionsReady, seedSessions, retainedGroups]);
+  const minimumProjectWidths = useMemo(() => {
+    const measure = projectGroupTitleMeasurer();
+    const widths = new Map<string, number>();
+    for (const session of seedSessions) {
+      const path = graphProjectKey(session);
+      const projectId = graphProjectId(path);
+      const width = projectGroupMinimumWidth(projectGroupLabel(path, groupMetadata.get(path)?.title, session.project), measure);
+      widths.set(projectId, Math.max(widths.get(projectId) || 0, width));
+    }
+    for (const group of visiblePins) {
+      const projectId = graphProjectId(group.cwd);
+      if (!widths.has(projectId)) widths.set(projectId, projectGroupMinimumWidth(projectGroupLabel(group.cwd, group.title), measure));
+    }
+    return widths;
+  }, [seedSessions, groupMetadata, visiblePins, language]);
+  const manualOptions = useMemo(() => ({ minimumProjectWidths, visibleProjectIds: new Set(minimumProjectWidths.keys()), repairHeaderWidths: manual }), [minimumProjectWidths, manual]);
+  const manualLayout = useMemo(() => reconcileManualGraph(preferences.layout, allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions), [preferences.layout, allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions]);
 
   useEffect(() => {
     setPreferences(current => {
-      const layout = reconcileManualGraph(current.layout, allSessions, sessionsReady, seedSessions, retainedGroups);
+      const layout = reconcileManualGraph(current.layout, allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions);
       return layout === current.layout ? current : { ...current, layout };
     });
-  }, [allSessions, sessionsReady, seedSessions, retainedGroups]);
+  }, [allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions]);
 
   useEffect(() => {
     try { window.localStorage.setItem(GRAPH_PREFERENCES_KEY, JSON.stringify(preferences)); }
@@ -92,19 +109,19 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
     let x = 0;
     grouped.forEach(([path, members]) => {
       const columns = grouped.length === 1 && members.length > 6 ? 4 : members.length > 2 ? 2 : 1;
-      const width = columns * 268 + 14;
       const projectId = graphProjectId(path);
+      const width = Math.max(columns * 268 + 14, minimumProjectWidths.get(projectId) || 0);
       const rows = Math.max(1, Math.ceil(members.length / columns));
       const metadata = groupMetadata.get(path);
       const projectData: ProjectData = { name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, hidden: metadata?.hidden || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, manual, disabled: groupActionsDisabled, saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate, onAutoPrompt };
       const savedProject = manualLayout.projects[projectId];
       if (manual && savedProject) {
-        const bounds = manualProjectBounds(manualLayout, projectId, visibleAgentIds)!;
+        const bounds = manualProjectBounds(manualLayout, projectId, visibleAgentIds, minimumProjectWidths)!;
         ns.push({ id: projectId, type: 'projectGroup', zIndex: 1, position: bounds.position, data: projectData, style: { width: bounds.width, height: bounds.height }, dragHandle: '.project-drag-handle', selectable: false, draggable: true, focusable: false });
       } else {
         ns.push({ id: projectId, type: 'projectGroup', zIndex: 1, position: { x, y: 185 }, data: projectData, style: { width, height: rows * 215 + 121 }, draggable: false, selectable: false, focusable: false });
       }
-      es.push({ id: `host-${projectId}`, source: 'host', target: projectId, type: 'smoothstep', zIndex: 0, animated: motion && members.some(s => s.status === 'working'), style: { stroke: '#3b4d63', strokeWidth: 1.2 }, pathOptions: { borderRadius: 14 } } as Edge);
+      es.push({ id: `host-${projectId}`, source: 'host', target: projectId, type: 'smoothstep', zIndex: 0, animated: motion && members.some(s => s.status === 'working'), style: { stroke: '#2e3e52', strokeWidth: 1.2 }, pathOptions: { borderRadius: 14 } } as Edge);
       members.forEach((session, index) => {
         const savedAgent = manualLayout.agents[session.id];
         const placedManually = manual && savedProject && savedAgent;
@@ -117,7 +134,7 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
     const hostPosition = manual ? clearHostPosition(manualLayout.host, ns.filter(node => node.type === 'projectGroup').map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }))) : { x: Math.max(0, (x - 36) / 2 - 128), y: 0 };
     ns.push({ id: 'host', type: 'host', position: hostPosition, data: { name: hostname, active: sessions.filter(s => s.status === 'working').length, providers, disabled: groupActionsDisabled, onAutoPrompt }, style: { width: 256, height: HOST_HEIGHT, pointerEvents: 'all' }, zIndex: 20, draggable: manual, dragHandle: '.host-node', selectable: false, focusable: false });
     return { modelNodes: ns, edges: es, shown: grouped.reduce((total, [, members]) => total + members.length, 0) };
-  }, [sessions, selectedId, onSelect, hostname, providers, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt]);
+  }, [sessions, selectedId, onSelect, hostname, providers, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt]);
 
   const [nodes, setNodes] = useState(modelNodes);
   const visibleProjectKey = modelNodes.filter(node => node.type === 'projectGroup').map(node => node.id).join('|');
@@ -134,11 +151,11 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
     const moves = changes.flatMap(change => change.type === 'position' && change.position ? [{ id: change.id, position: change.position }] : []);
     if (!moves.length) return;
     setPreferences(current => {
-      const reconciled = reconcileManualGraph(current.layout, allSessions, sessionsReady, seedSessions, retainedGroups);
-      const layout = moveManualGraphNodes(reconciled, moves, visibleAgentIds);
+      const reconciled = reconcileManualGraph(current.layout, allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions);
+      const layout = moveManualGraphNodes(reconciled, moves, visibleAgentIds, minimumProjectWidths);
       return layout === current.layout ? current : { ...current, layout };
     });
-  }, [manual, allSessions, sessionsReady, seedSessions, visibleAgentIds, retainedGroups]);
+  }, [manual, allSessions, sessionsReady, seedSessions, visibleAgentIds, retainedGroups, manualOptions, minimumProjectWidths]);
 
   const changeMode = (mode: GraphLayoutMode) => {
     if (mode === preferences.mode) return;
