@@ -59,13 +59,27 @@ Subagent records without an independently resumable session ID are viewable thro
 
 ### Tool approvals
 
-Tower leaves the native permission and sandbox configuration in effect. For example, a Claude Code `auto` default stays `auto`. Tower does not force `acceptEdits`, disable approval prompts, or set Codex approvals to `never`.
+For task execution, Tower leaves the native permission and sandbox configuration in effect. For example, a Claude Code `auto` default stays `auto`. Tower does not force `acceptEdits`, disable approval prompts, or set Codex approvals to `never` for the session receiving your work. The separate Auto Prompt router runs with execution tools disabled so it can only select a destination.
 
 When a Tower-launched session needs permission, the chat shows the requested tool and its input with **Allow once** and **Deny** buttons. Codex can also request additional filesystem or network access for the current turn; those requests show **Allow for this turn** and the requested access. Neither decision saves a permission rule or changes your global settings. The execution stays open while waiting. Canceling the run or stopping Tower clears its pending approvals, and an expired request cannot be approved later.
 
 For work sent to an already open Codex desktop session, its original app continues to handle approvals. Check that app when it is waiting for permission. Explicit provider deny rules still apply.
 
 You can upload up to 10 attachments per request: 10 MB per file, 5 MB per image, and 20 MB total. PNG, JPEG, GIF, and WebP images use native image input; other files are provided as local copies. Uploaded files remain on the host so the conversation can keep referencing them.
+
+## Auto Prompt
+
+Use the sparkle button in the upper-right corner of a machine or project box to open **Auto Prompt**. The machine button selects **Auto**; a project button selects that folder. Choose a folder on the left and **Claude Code** or **Codex** on the right, then enter a request. File attachments, image paste, drag and drop, and **Ctrl/Cmd+Enter** work as in chat. Plain Enter inserts a newline.
+
+With **Auto**, a separate routing agent first chooses from Tower's known project folders, then considers sessions in that folder. Selecting a folder skips the first step. The router uses **Claude Opus** or **GPT-5.6-Sol** through your existing native sign-in. Routing consumes provider usage in addition to the eventual task. It does not change the model of the session receiving your request.
+
+The router considers session titles, recent conversation, pending requests, and available context usage. It prefers the same session for a continuation. A new subject normally starts a new session; an idle session with useful project context can also be reused when its known context usage is **30% or less**. This percentage is context used, not account quota. When a native record does not supply the context window size, Tower does not assume that it is below 30%. Hidden sessions and subagents are excluded, and the chosen provider and folder are enforced.
+
+The dialog shows the routing stage, chosen folder and session, and the reason. **Open conversation** takes you to the actual task. Existing busy sessions receive continuations through the normal queue. You can cancel while the router is deciding; once the request has been sent, use the conversation's normal stop control. Closing the dialog does not cancel the request.
+
+Tower validates the selection again before sending the original prompt and attachments. If the destination changed, the model returned an invalid choice, or a folder could not be determined, it reports the problem without submitting elsewhere. Retrying an uncertain connection uses the same request ID. Interrupted routing requests are not automatically replayed after a server restart.
+
+See [Auto Prompt architecture and API](auto-prompt.md) for integration details.
 
 ## Account usage
 

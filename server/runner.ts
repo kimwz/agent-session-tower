@@ -40,6 +40,11 @@ interface CreatedSession {
   seenNative?: boolean;
   title?: string;
 }
+/** Internal admission data is never accepted from the public message endpoint. */
+export interface RunAdmission {
+  autoPromptId?: string;
+  validate?: () => void;
+}
 
 const MAX_OUTPUT = 64_000;
 const MAX_PROMPT = 32_000;
@@ -222,8 +227,9 @@ export class RunManager extends EventEmitter {
       ? { ...session, parentId: aliases.get(session.parentId) } : session);
   }
 
-  async create(input: CreateSessionRequest): Promise<{ session: Session; run: Run }> {
-    this.validateAdmission(input.prompt);
+  async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
+    this.validateCorrelation(internal.autoPromptId);
+    this.validateAdmission(input.prompt, Boolean(input.attachments?.length));
     if (!PROVIDERS.includes(input.provider)) throw new RunError('Claude 또는 Codex를 선택하세요.');
     const model = requestedModel(input.model);
     if (typeof input.cwd !== 'string' || !isAbsolute(input.cwd) || input.cwd.includes('\0') || input.cwd.length > 4096) throw new RunError('기존 작업 폴더의 절대 경로를 입력하세요.');
@@ -231,17 +237,23 @@ export class RunManager extends EventEmitter {
     catch { throw new RunError('작업 폴더를 찾을 수 없습니다. 기존 폴더의 절대 경로를 입력하세요.'); }
     const title = input.title === undefined ? '' : normalizeSessionTitle(input.title);
     if (!(await this.executable(input.provider))) throw new RunError(`Install the ${input.provider} CLI and ensure it is in PATH before creating a session.`, 503);
-    this.validateAdmission(input.prompt);
     const uuid = randomUUID();
     const id = `${input.provider}:${input.provider === 'codex' ? 'monitor-' : ''}${uuid}`;
+    const prepared = await this.attachments.prepare(id, { attachments: input.attachments });
+    try {
+      this.validateAdmission(input.prompt, prepared.attachments.length > 0);
+      this.validateCorrelation(internal.autoPromptId);
+      internal.validate?.();
+    } catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
     const createdAt = new Date().toISOString();
     const session: Session = {
       id, nativeId: input.provider === 'claude' ? uuid : '', provider: input.provider,
-      title: input.prompt.trim().replace(/\s+/g, ' ').slice(0, 120), ...(title ? { customTitle: title } : {}), cwd: input.cwd, project: basename(input.cwd) || input.cwd,
+      title: input.prompt.trim().replace(/\s+/g, ' ').slice(0, 120) || '첨부 파일 확인', ...(title ? { customTitle: title } : {}), cwd: input.cwd, project: basename(input.cwd) || input.cwd,
       status: 'idle', statusReason: '새 세션을 생성하고 있습니다.', createdAt, updatedAt: createdAt,
       lastRequestAt: createdAt, lastMessage: input.prompt.trim().slice(0, 512), messageCount: 0, isSubagent: false, resumable: false, creationPending: true,
     };
-    const run: Run = { id: randomUUID(), sessionId: id, prompt: input.prompt.trim(), status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}) };
+    const run: Run = { id: randomUUID(), sessionId: id, prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}),
+      ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
     this.createdSessions.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}) });
     this.runs.set(run.id, run);
     this.admissions.add(run.id);
@@ -253,6 +265,7 @@ export class RunManager extends EventEmitter {
       // leave an unacknowledged request queued for a later polling cycle.
       this.fail(run, error);
       await this.flush().catch(() => {});
+      await this.attachments.rollback(prepared.createdIds);
       throw error;
     } finally { this.admissions.delete(run.id); }
     void this.pump();
@@ -266,7 +279,14 @@ export class RunManager extends EventEmitter {
     if ([...this.runs.values()].filter((run) => run.status === 'queued').length >= MAX_QUEUED) throw new RunError('The task queue is full. Wait for a task to finish.', 429);
   }
 
-  async enqueue(sessionId: string, prompt: string, request: MessageAttachments = {}): Promise<Run> {
+  private validateCorrelation(id: string | undefined): void {
+    if (id === undefined) return;
+    if (!UUID.test(id)) throw new RunError('Invalid Auto Prompt request ID.');
+    if ([...this.runs.values()].some(run => run.autoPromptId === id)) throw new RunError('This Auto Prompt already has an execution task.', 409);
+  }
+
+  async enqueue(sessionId: string, prompt: string, request: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
+    this.validateCorrelation(internal.autoPromptId);
     sessionId = this.monitorSessionId(sessionId);
     const hasAttachments = Boolean(request.attachments?.length || request.attachmentIds?.length);
     this.validateAdmission(prompt, hasAttachments);
@@ -276,10 +296,11 @@ export class RunManager extends EventEmitter {
     if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 503);
     const prepared = await this.attachments.prepare(sessionId, request);
     // File writes yield; recheck admission immediately before inserting the run.
-    try { this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); }
+    try { this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
     catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
     const run: Run = { id: randomUUID(), sessionId, prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
       ...(model ? { model } : {}),
+      ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
     this.admissions.add(run.id);
     this.runs.set(run.id, run);
@@ -770,6 +791,7 @@ function isSavedRun(value: unknown): value is Run {
   return typeof run.id === 'string' && typeof run.sessionId === 'string' && typeof run.prompt === 'string'
     && typeof run.createdAt === 'string' && typeof run.output === 'string'
     && (run.model === undefined || validModelId(run.model))
+    && (run.autoPromptId === undefined || UUID.test(run.autoPromptId))
     && (run.attachments === undefined || (Array.isArray(run.attachments) && run.attachments.length <= 10 && run.attachments.every(item => attachmentMetadata(item))))
     && ['queued', 'running', 'completed', 'error', 'cancelled'].includes(run.status ?? '');
 }

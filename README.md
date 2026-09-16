@@ -35,6 +35,7 @@ Requires **Node.js 22.13+**, **npm**, and **Git**. Use your existing Claude Code
 - **Follow work on a live graph.** View projects, sessions, and subagents together, with working, waiting, completed, and error states.
 - **Check account usage.** See Claude Code and Codex usage as small donuts inside the machine node. Hover or focus for usage windows and reset times.
 - **Create new sessions.** Choose Claude Code or Codex, pick an existing project folder, and send the first request from the web.
+- **Route a prompt automatically.** Open **Auto Prompt** from the sparkle button on a machine or folder. A separate Opus or GPT Sol agent chooses a suitable existing session or starts a new one, and shows its reason.
 - **Continue a conversation.** Read the original history and send the next instruction to the same native session. Attach files or paste images.
 - **Choose a model in chat.** Keep the agent's default or select a model for your next request.
 - **Approve tools in chat.** Tower-launched sessions keep native permission settings and show the requested action or access for approval or denial. Existing Codex desktop sessions handle approvals in their original app.

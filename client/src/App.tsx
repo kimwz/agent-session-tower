@@ -8,6 +8,7 @@ import { api, cleanPreview, providerLabels, relativeTime, sessionActivityAt, ses
 import { getMainSessionId, getMainSessions } from './session-family';
 import { acknowledgeSession, conversationRevision, parseReadState, pruneReadState, readStateKey } from './session-read-state';
 import { NewSessionDialog } from './NewSessionDialog';
+import { AutoPromptDialog } from './AutoPromptDialog';
 import { projectGroupChoices, visiblePinnedProjectGroups } from './project-groups';
 
 type StatusFilter = 'all' | SessionStatus;
@@ -56,6 +57,8 @@ export function App() {
   });
   const [showHelp, setShowHelp] = useState(false);
   const [showNewSession, setShowNewSession] = useState(false);
+  const [showAutoPrompt, setShowAutoPrompt] = useState(false);
+  const [autoPromptCwd, setAutoPromptCwd] = useState<string>();
   const [newSessionCwd, setNewSessionCwd] = useState<string>();
   const [groupSaving, setGroupSaving] = useState<ReadonlySet<string>>(() => new Set());
   const [groupErrors, setGroupErrors] = useState<Record<string, string>>({});
@@ -128,6 +131,13 @@ export function App() {
   }, []);
   const openNewSession = useCallback((cwd?: string) => { setNewSessionCwd(cwd); setShowNewSession(true); }, []);
   const closeNewSession = useCallback(() => { setShowNewSession(false); setNewSessionCwd(undefined); }, []);
+  const openAutoPrompt = useCallback((cwd?: string) => { setAutoPromptCwd(cwd); setShowAutoPrompt(true); }, []);
+  const closeAutoPrompt = useCallback(() => setShowAutoPrompt(false), []);
+  const openAutoPromptSession = useCallback((id: string) => {
+    setShowClosed(false); setProvider('all'); setStatus('all'); setProject('all'); setQuery(''); setPeriod('all');
+    selectSession(id);
+    refresh();
+  }, [refresh, selectSession]);
   const updateGroup = useCallback(async (patch: ProjectGroupPatch): Promise<boolean> => {
     if (groupInFlight.current.has(patch.cwd) || !token || connection !== 'connected') return false;
     groupInFlight.current.add(patch.cwd);
@@ -212,13 +222,14 @@ export function App() {
         </div>
         {loadError && <div className="main-error canvas-error" role="alert"><TriangleAlert size={15} /><span>{translateMessage(loadError)}</span><button onClick={refresh}>{t("다시 시도")}</button></div>}
         {!snapshot || (snapshot.scanning && sessions.length === 0 && !visiblePins.length) ? <div className="graph-loading"><div className="loading-constellation"><span /><span /><span /><Monitor size={25} /></div><h3>{t("이 Mac의 에이전트를 찾고 있습니다")}</h3><p>{t("Claude Code와 Codex의 실제 세션 기록을 연결합니다.")}</p></div> : <>
-          <Graph providers={snapshot.providers} sessions={filtered} allSessions={mainSessions} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} filterKey={filterKey} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} />
+          <Graph providers={snapshot.providers} sessions={filtered} allSessions={mainSessions} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} filterKey={filterKey} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} onAutoPrompt={openAutoPrompt} />
           {!filtered.length && !visiblePins.length && <div className="graph-empty canvas-empty"><h3>{mainSessions.length ? t("표시할 세션이 없습니다") : t("새 세션을 시작해 보세요")}</h3><p>{mainSessions.length ? t("검색어나 필터를 바꾸면 다른 세션을 볼 수 있습니다.") : t("Claude Code 또는 Codex를 선택해 이곳에서 작업을 시작할 수 있습니다.")}</p>{mainSessions.length ? <button className="secondary-button" onClick={clearFilters}><RefreshCw size={13} />{t("전체 기록 보기")}</button> : <button className="secondary-button" onClick={() => openNewSession()} disabled={!token || connection !== 'connected'}><Plus size={13} />{t("새 세션")}</button>}</div>}
         </>}
         <div className="canvas-status"><span className={`status-pip ${visibleWorking ? 'working' : 'completed'}`} /><span>{filtered.length.toLocaleString()}{t("개 세션")}{visibleWorking > 0 && t(" · {0}개 작업 중", { 0: visibleWorking })}</span>{snapshot?.scanning && <LoaderCircle size={11} className="spin" />}</div>
       </main>
-      {selectedId && <Suspense fallback={<aside className="chat-panel"><div className="chat-loading"><LoaderCircle className="spin" size={20} /><span>{t("대화를 여는 중")}</span></div></aside>}><ChatPanel key={selectedId} sessionId={selectedId} session={selectedSession} allSessions={sessions} provider={snapshot?.providers.find(item => item.provider === (selectedSession?.provider || (selectedId.startsWith('claude') ? 'claude' : 'codex')))} runs={currentRuns} token={token} connected={connection === 'connected'} onClose={closeChat} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate} onSessionClose={changeSessionClosed} sessionClosed={!!selectedMainSession?.closed} changingClosed={changingClosed} readRevision={showNewSession || (sidebarIsDrawer && sidebarOpen) ? '' : revisions.get(selectedId)} onRead={onRead} /></Suspense>}
+      {selectedId && <Suspense fallback={<aside className="chat-panel"><div className="chat-loading"><LoaderCircle className="spin" size={20} /><span>{t("대화를 여는 중")}</span></div></aside>}><ChatPanel key={selectedId} sessionId={selectedId} session={selectedSession} allSessions={sessions} provider={snapshot?.providers.find(item => item.provider === (selectedSession?.provider || (selectedId.startsWith('claude') ? 'claude' : 'codex')))} runs={currentRuns} token={token} connected={connection === 'connected'} onClose={closeChat} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate} onSessionClose={changeSessionClosed} sessionClosed={!!selectedMainSession?.closed} changingClosed={changingClosed} readRevision={showNewSession || showAutoPrompt || (sidebarIsDrawer && sidebarOpen) ? '' : revisions.get(selectedId)} onRead={onRead} /></Suspense>}
     </div>
+    <AutoPromptDialog visible={showAutoPrompt} initialCwd={autoPromptCwd} providers={snapshot?.providers || []} projects={projects} sessions={sessions} jobs={snapshot?.autoPrompts || []} token={token} connected={connection === 'connected'} onClose={closeAutoPrompt} onNavigate={openAutoPromptSession} onRefresh={refresh} />
     {showNewSession && <NewSessionDialog providers={snapshot?.providers || []} projects={projects} initialCwd={newSessionCwd || selectedSession?.cwd || (project !== 'all' ? project : undefined)} token={token} connected={connection === 'connected'} onClose={closeNewSession} onCreated={sessionCreated} />}
   </div>;
 }

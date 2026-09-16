@@ -1,7 +1,7 @@
 import { translate as t, useI18n } from './i18n';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { applyNodeChanges, Background, BackgroundVariant, Handle, Position, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type FitViewOptions, type Node, type NodeChange, type NodeProps } from '@xyflow/react';
-import { ArrowUpRight, Check, ChevronRight, GitBranch, Maximize, Minus, Monitor, Move, Plus, Radio, Scan, Waypoints } from 'lucide-react';
+import { ArrowUpRight, Check, ChevronRight, GitBranch, Maximize, Minus, Monitor, Move, Plus, Radio, Scan, Sparkles, Waypoints } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../shared/types';
 import { ProviderIcon } from './Icons';
 import { cleanPreview, providerLabels, relativeTime, sessionActivityAt, sessionTitle, statusLabels } from './lib';
@@ -10,11 +10,12 @@ import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualProjectBounds, ma
 import { includePinnedProjectGroups, projectGroupLabel } from './project-groups';
 import { ProjectGroupHeader, type ProjectGroupHeaderData } from './ProjectGroupHeader';
 import './manual-graph.css';
+import './auto-prompt.css';
 import { ProviderUsage } from './ProviderUsage';
 
 type AgentData = { session: Session; selected: boolean; unread: boolean; onSelect: (id: string) => void };
-type ProjectData = ProjectGroupHeaderData;
-type HostData = { name: string; active: number; providers: ProviderHealth[] };
+type ProjectData = ProjectGroupHeaderData & { onAutoPrompt: (cwd?: string) => void };
+type HostData = { name: string; active: number; providers: ProviderHealth[]; disabled: boolean; onAutoPrompt: (cwd?: string) => void };
 
 const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentData>>) {
   useI18n();
@@ -35,22 +36,22 @@ const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentData>>) 
 
 const ProjectGroupNode = memo(function ProjectGroupNode({ data }: NodeProps<Node<ProjectData>>) {
   useI18n();
-  return <div className="manual-project-lane"><div className="project-drag-handle"><Handle type="target" position={Position.Top} /><ProjectGroupHeader data={data} /><Handle type="source" position={Position.Bottom} /></div>{!data.count && <p className="project-group-empty">{t("표시된 세션이 없습니다")}<span>{t("+ 버튼으로 이 폴더에서 시작하세요")}</span></p>}</div>;
+  return <div className="manual-project-lane"><div className="project-drag-handle"><Handle type="target" position={Position.Top} /><ProjectGroupHeader data={data} /><Handle type="source" position={Position.Bottom} /></div><button type="button" className="auto-prompt-trigger nodrag nopan" aria-label={t("{0} 폴더에서 Auto Prompt 열기", { 0: data.name })} title="Auto Prompt" disabled={data.disabled || !data.path.startsWith('/')} onClick={() => data.onAutoPrompt(data.path)}><Sparkles size={32} aria-hidden="true" /></button>{!data.count && <p className="project-group-empty">{t("표시된 세션이 없습니다")}<span>{t("+ 버튼으로 이 폴더에서 시작하세요")}</span></p>}</div>;
 });
 const HostNode = memo(function HostNode({ data }: NodeProps<Node<HostData>>) {
   useI18n();
-  return <div className="host-with-usage"><div className="host-node"><span className="host-icon"><Monitor size={20} /></span><div><strong>{data.name || t("이 Mac")}</strong><span><i className={data.active ? 'live-pip' : ''} />{data.active ? t("{0}개 에이전트 작업 중", { 0: data.active }) : t("다음 작업을 기다리는 중")}</span></div></div><ProviderUsage providers={data.providers} /><Handle type="source" position={Position.Bottom} /></div>;
+  return <div className="host-with-usage"><div className="host-node has-auto-prompt"><span className="host-icon"><Monitor size={20} /></span><div className="host-copy"><strong title={data.name}>{data.name || t("이 Mac")}</strong><span><i className={data.active ? 'live-pip' : ''} /><span>{data.active ? t("{0}개 에이전트 작업 중", { 0: data.active }) : t("다음 작업을 기다리는 중")}</span></span></div><button type="button" className="auto-prompt-trigger nodrag nopan" aria-label={t("이 기기에서 Auto Prompt 열기")} title="Auto Prompt" disabled={data.disabled} onClick={() => data.onAutoPrompt()}><Sparkles size={32} aria-hidden="true" /></button></div><ProviderUsage providers={data.providers} /><Handle type="source" position={Position.Bottom} /></div>;
 });
 const nodeTypes = { agent: AgentNode, projectGroup: ProjectGroupNode, host: HostNode };
 
-type GraphProps = { providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void };
+type GraphProps = { providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void };
 
 function readPreferences(): GraphPreferences {
   try { return parseGraphPreferences(window.localStorage.getItem(GRAPH_PREFERENCES_KEY)); }
   catch { return defaultGraphPreferences(); }
 }
 
-function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate }: GraphProps) {
+function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt }: GraphProps) {
   const { language } = useI18n();
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
@@ -95,7 +96,7 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
       const projectId = graphProjectId(path);
       const rows = Math.max(1, Math.ceil(members.length / columns));
       const metadata = groupMetadata.get(path);
-      const projectData: ProjectData = { name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, manual, disabled: groupActionsDisabled, saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate };
+      const projectData: ProjectData = { name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, manual, disabled: groupActionsDisabled, saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate, onAutoPrompt };
       const savedProject = manualLayout.projects[projectId];
       if (manual && savedProject) {
         const bounds = manualProjectBounds(manualLayout, projectId, visibleAgentIds)!;
@@ -115,9 +116,9 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
       x += width + 36;
     });
     const hostPosition = manual ? clearHostPosition(manualLayout.host, ns.filter(node => node.type === 'projectGroup').map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }))) : { x: Math.max(0, (x - 36) / 2 - 128), y: 0 };
-    ns.push({ id: 'host', type: 'host', position: hostPosition, data: { name: hostname, active: sessions.filter(s => s.status === 'working').length, providers }, style: { width: 256, height: HOST_HEIGHT, pointerEvents: 'all' }, zIndex: 20, draggable: manual, dragHandle: '.host-node', selectable: false, focusable: false });
+    ns.push({ id: 'host', type: 'host', position: hostPosition, data: { name: hostname, active: sessions.filter(s => s.status === 'working').length, providers, disabled: groupActionsDisabled, onAutoPrompt }, style: { width: 256, height: HOST_HEIGHT, pointerEvents: 'all' }, zIndex: 20, draggable: manual, dragHandle: '.host-node', selectable: false, focusable: false });
     return { modelNodes: ns, edges: es, shown: grouped.reduce((total, [, members]) => total + members.length, 0) };
-  }, [sessions, selectedId, onSelect, hostname, providers, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate]);
+  }, [sessions, selectedId, onSelect, hostname, providers, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt]);
 
   const [nodes, setNodes] = useState(modelNodes);
   const visibleProjectKey = modelNodes.filter(node => node.type === 'projectGroup').map(node => node.id).join('|');

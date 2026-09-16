@@ -9,6 +9,7 @@ import { DismissedRunStore } from './dismissed-runs.js';
 import { ClosedSessionStore } from './closed-sessions.js';
 import { ProjectGroupStore } from './project-groups.js';
 import { RunManager, getProviderHealth } from './runner.js';
+import { AutoPromptManager } from './auto-prompts.js';
 import { createMonitorServer } from './http.js';
 import { acquireStateLock, MonitorAlreadyRunning } from './state-lock.js';
 import { existingServerUrl } from './existing-server.js';
@@ -100,6 +101,7 @@ async function main() {
   const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed });
   sessions.on('change', changed);
   runs.on('change', changed);
+  let autoPrompts: AutoPromptManager | undefined;
   const snapshot = (): Snapshot => {
     const all = runs.sessionList(sessions.list());
     const managed = runs.list();
@@ -107,17 +109,22 @@ async function main() {
       sessions: projectSessionStates(all, managed, runs.settledRunIds()).map(session => closedSessions.apply(titles.apply(session))),
       groups: groups.list(),
       providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider).length })),
-      runs: dismissedRuns.visible(managed), scanning, hostname: hostname(), version: '0.1.0', updatedAt: new Date().toISOString(),
+      runs: dismissedRuns.visible(managed), autoPrompts: autoPrompts?.list() || [], scanning, hostname: hostname(), version: '0.1.0', updatedAt: new Date().toISOString(),
     };
   };
+  const detail = async (id: string, before?: number, limit?: number) => {
+    const session = runs.getSession(id);
+    if (!session) return undefined;
+    const history = await sessions.detail(runs.nativeSessionId(id), before, limit);
+    return { ...(history || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
+  };
+  autoPrompts = new AutoPromptManager({ stateDir, snapshot, detail, refresh: () => sessions.refresh(true), runs });
+  autoPrompts.on('change', changed);
+  try { await autoPrompts.start(); }
+  catch (error) { try { await runs.close(); } finally { await releaseLock(); } throw error; }
   const { server, dispose } = createMonitorServer({ port, clientDir,
     remote: password ? { password, origins: access.origins } : undefined, backend: {
-    snapshot, detail: async (id, before, limit) => {
-      const session = runs.getSession(id);
-      if (!session) return undefined;
-      const detail = await sessions.detail(runs.nativeSessionId(id), before, limit);
-      return { ...(detail || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
-    },
+    snapshot, detail,
     setTitle: async (id, title) => {
       const session = runs.getSession(id);
       if (!session) return undefined;
@@ -133,6 +140,9 @@ async function main() {
       return titles.apply(updated);
     },
     createSession: input => runs.create(input),
+    startAutoPrompt: input => autoPrompts!.submit(input),
+    getAutoPrompt: id => autoPrompts!.get(id),
+    cancelAutoPrompt: id => autoPrompts!.cancel(id),
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
     enqueue: (id, prompt, attachments) => runs.enqueue(id, prompt, attachments),
     attachment: id => runs.attachment(id), cancel: id => runs.cancel(id),
@@ -148,7 +158,7 @@ async function main() {
     server.listen(port, host, () => { server.removeListener('error', reject); accept(); });
   }).catch(async error => {
     dispose();
-    try { await titles.flush(); await dismissedRuns.flush(); await closedSessions.flush(); await groups.flush(); await runs.close(); } finally { await releaseLock(); }
+    try { await finishCleanup([autoPrompts!.close(), titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), runs.close()]); } finally { await releaseLock(); }
     if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') throw new Error(`Port ${port} is already in use. Open http://localhost:${port} if Agent Session Tower is already running, or choose --port 8001.`);
     throw error;
   });
@@ -161,12 +171,13 @@ async function main() {
   const shutdown = async () => {
     if (closing) return;
     closing = true;
+    const stoppingAutoPrompts = autoPrompts!.close();
     const stoppingCapabilities = capabilities.stop();
     sessions.stop();
     dispose();
     server.closeAllConnections();
     server.close();
-    try { await stoppingCapabilities; await titles.flush(); await dismissedRuns.flush(); await closedSessions.flush(); await groups.flush(); await runs.close(); } finally { await releaseLock(); }
+    try { await finishCleanup([stoppingAutoPrompts, stoppingCapabilities, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), runs.close()]); } finally { await releaseLock(); }
   };
   const onSignal = () => { void shutdown().catch(error => { console.error(`Agent Session Tower shutdown: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }); };
   process.once('SIGINT', onSignal);
@@ -178,6 +189,12 @@ async function main() {
     changed();
     console.log(`  Ready: ${sessions.list().length} sessions discovered.\n`);
   } catch (error) { await shutdown(); throw error; }
+}
+
+async function finishCleanup(operations: Promise<unknown>[]): Promise<void> {
+  const results = await Promise.allSettled(operations);
+  const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
+  if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('; '));
 }
 
 function printRemoteAccess(host: string, port: number, stateDir: string) {

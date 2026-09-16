@@ -3,7 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from './session-titles.js';
 import { normalizeProjectGroupPatch } from './project-groups.js';
-import type { Attachment, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run } from '../shared/types.js';
+import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run } from '../shared/types.js';
 import { isImageAttachment, MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../shared/attachments.js';
 import { requestedModel } from './models.js';
 
@@ -14,6 +14,9 @@ export interface Backend {
   setClosed?(id: string, closed: boolean): Promise<Session | undefined>;
   setGroup?(patch: ProjectGroupPatch): Promise<ProjectGroup>;
   createSession?(input: CreateSessionRequest): Promise<{ session: Session; run: Run }>;
+  startAutoPrompt?(input: AutoPromptRequest): Promise<AutoPromptJob>;
+  getAutoPrompt?(id: string): AutoPromptJob | undefined;
+  cancelAutoPrompt?(id: string): Promise<AutoPromptJob>;
   enqueue(id: string, prompt: string, attachments?: MessageAttachments): Promise<Run>;
   attachment?(id: string): Promise<{ metadata: Attachment; content: Buffer }>;
   cancel(id: string): Promise<void>;
@@ -123,6 +126,42 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
       }
       if (req.method === 'GET' && path === '/api/bootstrap') return json(res, 200, { token });
       if (req.method === 'GET' && path === '/api/snapshot') return json(res, 200, snapshot());
+      if (req.method === 'POST' && path === '/api/auto-prompts') {
+        const body = await readJson(req, Math.ceil(MAX_TOTAL_ATTACHMENT_BYTES / 3) * 4 + 256 * 1024);
+        if (Object.keys(body).some(key => !['requestId', 'provider', 'cwd', 'prompt', 'attachments'].includes(key))) {
+          return json(res, 400, { error: 'Auto Prompt 요청에는 폴더, 도구, 프롬프트와 첨부 파일만 지정할 수 있습니다.' });
+        }
+        if (typeof body.requestId !== 'string' || !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(body.requestId)) {
+          return json(res, 400, { error: 'Auto Prompt 요청 ID가 올바르지 않습니다.' });
+        }
+        if (body.provider !== 'claude' && body.provider !== 'codex') return json(res, 400, { error: 'Claude 또는 Codex를 선택하세요.' });
+        if (body.cwd !== undefined && (typeof body.cwd !== 'string' || !body.cwd.startsWith('/') || body.cwd.length > 4096 || body.cwd.includes('\0'))) {
+          return json(res, 400, { error: '목록에서 작업 폴더를 선택하거나 Auto를 선택하세요.' });
+        }
+        if (body.attachments !== undefined && !Array.isArray(body.attachments)) return json(res, 400, { error: '첨부 파일 목록 형식이 올바르지 않습니다.' });
+        const attachments = body.attachments as AutoPromptRequest['attachments'];
+        if ((attachments?.length || 0) > MAX_ATTACHMENTS) return json(res, 413, { error: `첨부 파일은 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.` });
+        if (typeof body.prompt !== 'string' || (!body.prompt.trim() && !attachments?.length) || body.prompt.length > 32_000) {
+          return json(res, 400, { error: '메시지나 첨부 파일을 추가하세요. 메시지는 32,000자 이하여야 합니다.' });
+        }
+        if (!backend.startAutoPrompt) return json(res, 503, { error: 'Auto Prompt를 현재 사용할 수 없습니다.' });
+        const job = await backend.startAutoPrompt({ requestId: body.requestId, provider: body.provider, prompt: body.prompt,
+          ...(body.cwd !== undefined ? { cwd: body.cwd as string } : {}), ...(attachments ? { attachments } : {}) });
+        return json(res, 202, { job });
+      }
+      const autoPromptMatch = url.pathname.match(/^\/api\/auto-prompts\/([a-f\d-]+)(\/cancel)?$/i);
+      if (autoPromptMatch && /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(autoPromptMatch[1])) {
+        const id = autoPromptMatch[1];
+        if (req.method === 'GET' && !autoPromptMatch[2]) {
+          const job = backend.getAutoPrompt?.(id);
+          return job ? json(res, 200, { job }) : json(res, 404, { error: 'Auto Prompt 요청을 찾을 수 없습니다.' });
+        }
+        if (req.method === 'POST' && autoPromptMatch[2]) {
+          if (Object.keys(await readJson(req)).length) return json(res, 400, { error: '취소 요청 본문은 비워 두세요.' });
+          if (!backend.cancelAutoPrompt) return json(res, 503, { error: 'Auto Prompt를 현재 사용할 수 없습니다.' });
+          return json(res, 200, { job: await backend.cancelAutoPrompt(id) });
+        }
+      }
       if (req.method === 'POST' && path === '/api/groups') {
         const patch = normalizeProjectGroupPatch(await readJson(req));
         if (!backend.setGroup) return json(res, 503, { error: '폴더 그룹을 저장할 수 없습니다.' });

@@ -131,3 +131,54 @@ test('approval localization does not match partial errors or alter native transc
     assert.ok(transcript.includes(denied), 'even a known error stays verbatim inside a native message');
   }
 });
+
+test('Auto Prompt admission, validation and native failures translate in both directions', () => {
+  const cases = [
+    ['선택한 Codex 계정에서 라우팅 모델 GPT Sol을 사용할 수 없습니다.', 'The routing model GPT Sol is unavailable for the selected Codex account.'],
+    ['Auto Prompt 요청 ID가 올바르지 않습니다.', 'Invalid Auto Prompt request ID.'],
+    ['취소 요청 본문은 비워 두세요.', 'Leave the cancellation request body empty.'],
+    ['이미 실행 대상으로 전달된 요청입니다. 세션의 작업 중지 기능을 사용하세요.', 'This request has already been handed off for execution. Use the session controls to stop the task.'],
+    ['선택한 세션은 인접 작업에 재사용할 수 없습니다. 컨텍스트 사용률이 확인된 30% 이하의 대기 세션이 필요합니다.', 'The selected session cannot be reused for an adjacent task. Choose an idle session with confirmed context usage of 30% or less.'],
+    ['Auto Prompt: 라우팅 시간이 초과되었습니다. 작업을 보내지 않았습니다.', 'Auto Prompt: native routing timed out. No task was dispatched.'],
+    ['Auto Prompt: Codex가 올바르지 않은 형식의 선택 결과를 반환했습니다.', 'Auto Prompt: Codex returned malformed structured output.'],
+    ['Auto Prompt: Claude Code가 올바른 선택 결과를 반환하지 않았습니다. 해당 CLI의 로그인과 모델 접근 권한을 확인하세요.', 'Auto Prompt: Claude Code did not return a successful structured decision. Check native sign-in and model access.'],
+  ];
+  for (const [ko, en] of cases) {
+    setLanguage('en'); assert.equal(translateMessage(ko), en);
+    setLanguage('ko'); assert.equal(translateMessage(en), ko);
+  }
+});
+
+test('Auto Prompt provider error templates preserve native provider names in either language', () => {
+  for (const provider of ['Claude Code', 'Codex']) {
+    const ko = `${provider}를 사용할 수 없습니다. 설치와 로그인을 확인하세요.`;
+    const en = `${provider} is unavailable. Check its installation and sign-in.`;
+    setLanguage('en'); assert.equal(translateMessage(ko), en);
+    setLanguage('ko'); assert.equal(translateMessage(en), ko);
+    const missing = `Auto Prompt: ${provider} CLI was not found. Install and sign in to the native CLI first.`;
+    const localized = `Auto Prompt: ${provider} CLI를 찾을 수 없습니다. 먼저 해당 CLI를 설치하고 로그인하세요.`;
+    assert.equal(translateMessage(missing), localized);
+    setLanguage('en'); assert.equal(translateMessage(localized), missing);
+  }
+  for (const provider of ['claude', 'codex']) {
+    const en = `Auto Prompt: native ${provider} routing exited unsuccessfully. Check native sign-in, model access, and CLI compatibility.`;
+    const ko = `Auto Prompt: ${provider} 라우팅이 정상적으로 종료되지 않았습니다. 해당 CLI의 로그인, 모델 접근 권한과 호환성을 확인하세요.`;
+    setLanguage('ko'); assert.equal(translateMessage(en), ko);
+    setLanguage('en'); assert.equal(translateMessage(ko), en);
+  }
+});
+
+test('Auto Prompt localization leaves model reasons, partial errors and unknown native text untouched', () => {
+  const nativeReason = 'Auto Prompt: Codex 세션에서 src/편집기.ts 작업을 이어갑니다. Model: gpt-5.6-sol.';
+  const unknown = [
+    nativeReason,
+    'Auto Prompt: Unknown native diagnostic: {"model":"gpt-5.6-sol"}',
+    'The model said: Auto Prompt: native routing timed out. No task was dispatched.',
+    'Auto Prompt: Codex CLI was not found. Install and sign in to the native CLI first. Native follow-up text.',
+    'Auto Prompt: native codex routing exited unsuccessfully.',
+  ];
+  for (const language of ['ko', 'en'] as const) {
+    setLanguage(language);
+    for (const message of unknown) assert.equal(translateMessage(message), message);
+  }
+});

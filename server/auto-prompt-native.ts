@@ -1,0 +1,246 @@
+import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
+import { constants } from 'node:fs';
+import { lstat, mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { delimiter, isAbsolute, join } from 'node:path';
+import type { Provider } from '../shared/types.js';
+import { MAX_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../shared/attachments.js';
+import { findExecutable } from './runner.js';
+
+export interface AutoPromptModelRequest {
+  provider: Provider;
+  model: string;
+  systemPrompt: string;
+  prompt: string;
+  schema: Record<string, unknown>;
+  imagePaths?: readonly string[];
+  signal: AbortSignal;
+}
+
+export interface AutoPromptNativeDependencies {
+  stateDir?: string;
+  env?: NodeJS.ProcessEnv;
+  findExecutable?: typeof findExecutable;
+  spawnProcess?: (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
+  timeoutMs?: number;
+  killGraceMs?: number;
+}
+
+const MAX_OUTPUT = 1_000_000;
+const MAX_ERROR_OUTPUT = 64_000;
+const MAX_PROMPT = 512_000;
+const CODE_MODE_DISABLED_WARNING = 'Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.';
+const record = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
+const failure = (message: string) => new Error(`Auto Prompt: ${message}`);
+const cancelled = () => Object.assign(failure('routing was cancelled.'), { name: 'AbortError' });
+
+// Installed Codex 0.153.4 exposes these config controls. Its own temporary
+// structured-thread path disables the same execution and utility features.
+// Unknown/unsupported settings must fail; never retry with weaker isolation.
+const CODEX_DISABLED_FEATURES = [
+  'shell_tool', 'unified_exec', 'shell_snapshot', 'hooks', 'plugins', 'apps',
+  'browser_use', 'browser_use_external', 'browser_use_full_cdp_access', 'computer_use',
+  'in_app_browser', 'image_generation', 'view_image', 'sleep_tool', 'multi_agent',
+  'multi_agent_v2', 'memories', 'goals', 'code_mode', 'code_mode_host', 'code_mode_only',
+  'context_management', 'current_time_reminder', 'deferred_executor',
+  'request_permissions_tool', 'standalone_web_search', 'token_budget', 'tool_suggest',
+  'skill_search', 'skill_mcp_dependency_install', 'workspace_dependencies', 'remote_plugin',
+] as const;
+
+function codexArgs(options: AutoPromptModelRequest, directory: string, images: string[]): string[] {
+  const settings: Record<string, unknown> = {
+    approval_policy: 'never', web_search: 'disabled', project_doc_max_bytes: 0,
+    suppress_unstable_features_warning: true,
+    model_instructions_file: join(directory, 'instructions.txt'),
+    developer_instructions: '', notify: [], allow_login_shell: false,
+    'shell_environment_policy.inherit': 'none',
+    'orchestrator.mcp.enabled': false, 'orchestrator.skills.enabled': false,
+    'skills.include_instructions': false,
+    'tools.update_plan.enabled': false, 'tools.experimental_request_user_input.enabled': false,
+    'include_environment_context': false, 'include_apps_instructions': false,
+    'include_collaboration_mode_instructions': false,
+    ...Object.fromEntries(CODEX_DISABLED_FEATURES.map(feature => [`features.${feature}`, false])),
+    'features.skip_host_skill_discovery': true,
+  };
+  return ['exec', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--strict-config',
+    '--skip-git-repo-check', '-C', directory, '--sandbox', 'read-only', '--model', options.model,
+    '--output-schema', join(directory, 'schema.json'), '--json', '--color', 'never',
+    ...Object.entries(settings).flatMap(([key, value]) => ['-c', `${key}=${JSON.stringify(value)}`]),
+    ...images.flatMap(path => ['--image', path]), '-'];
+}
+
+function imageMime(content: Buffer): string | undefined {
+  if (content.length >= 24 && content.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) && content.toString('ascii', 12, 16) === 'IHDR') return 'image/png';
+  if (content.length >= 4 && content[0] === 0xff && content[1] === 0xd8 && content[2] === 0xff) return 'image/jpeg';
+  if (content.length >= 13 && ['GIF87a', 'GIF89a'].includes(content.toString('ascii', 0, 6))) return 'image/gif';
+  if (content.length >= 20 && content.toString('ascii', 0, 4) === 'RIFF' && content.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+  return undefined;
+}
+
+async function imagesForRequest(paths: readonly string[], directory: string): Promise<{ paths: string[]; blocks: object[] }> {
+  if (paths.length > MAX_ATTACHMENTS) throw failure('too many routing images.');
+  const result: { paths: string[]; blocks: object[] } = { paths: [], blocks: [] };
+  let total = 0;
+  for (const path of paths) {
+    if (!isAbsolute(path)) throw failure('routing image is invalid.');
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => { throw failure('routing image could not be read.'); });
+    let content: Buffer;
+    try {
+      const info = await file.stat();
+      if (!info.isFile() || info.nlink !== 1 || info.size > MAX_IMAGE_ATTACHMENT_BYTES) throw failure('routing image is invalid or too large.');
+      content = await file.readFile();
+      total += content.length;
+      if (content.length > MAX_IMAGE_ATTACHMENT_BYTES || total > MAX_TOTAL_ATTACHMENT_BYTES) throw failure('routing images are too large.');
+    } finally { await file.close(); }
+    const mime = imageMime(content);
+    if (!mime) throw failure('routing image format is unsupported.');
+    const copied = join(directory, `image-${result.paths.length}.${mime.split('/')[1]}`);
+    await writeFile(copied, content, { mode: 0o600, flag: 'wx' });
+    result.paths.push(copied);
+    result.blocks.push({ type: 'image', source: { type: 'base64', media_type: mime, data: content.toString('base64') } });
+  }
+  return result;
+}
+
+/** Reasoning only. The caller validates the returned decision before dispatch. */
+export async function runAutoPromptModel(options: AutoPromptModelRequest, dependencies: AutoPromptNativeDependencies = {}): Promise<unknown> {
+  if (options.signal.aborted) throw cancelled();
+  if (!['claude', 'codex'].includes(options.provider) || options.model !== (options.provider === 'claude' ? 'opus' : 'gpt-5.6-sol')) throw failure('routing model is unsupported.');
+  const schema = JSON.stringify(options.schema);
+  if (!record(options.schema) || typeof options.prompt !== 'string' || typeof options.systemPrompt !== 'string'
+    || Buffer.byteLength(options.prompt) > MAX_PROMPT || Buffer.byteLength(options.systemPrompt) > 64_000 || Buffer.byteLength(schema) > 64_000) throw failure('routing input is invalid or too large.');
+  const env = { ...process.env, ...dependencies.env };
+  env.PATH = [...new Set([...(env.PATH ?? '').split(delimiter), join(homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'])]
+    .filter(directory => directory && isAbsolute(directory)).join(delimiter);
+  delete env.CLAUDECODE;
+  delete env.CLAUDE_CODE_SESSION_ID;
+  const executable = await (dependencies.findExecutable ?? findExecutable)(options.provider, env);
+  if (!executable) throw failure(`${options.provider === 'claude' ? 'Claude Code' : 'Codex'} CLI was not found. Install and sign in to the native CLI first.`);
+  const tempRoot = join(dependencies.stateDir ?? join(homedir(), '.agent-monitor'), 'tmp');
+  await mkdir(tempRoot, { recursive: true, mode: 0o700 });
+  const root = await lstat(tempRoot);
+  if (!root.isDirectory() || root.isSymbolicLink()) throw failure('private routing directory is invalid.');
+  const directory = await mkdtemp(join(tempRoot, 'auto-prompt-'));
+  try {
+    await writeFile(join(directory, 'schema.json'), schema, { mode: 0o600, flag: 'wx' });
+    await writeFile(join(directory, 'instructions.txt'), options.systemPrompt, { mode: 0o600, flag: 'wx' });
+    const images = await imagesForRequest(options.imagePaths ?? [], directory);
+    if (options.signal.aborted) throw cancelled();
+    const args = options.provider === 'codex' ? codexArgs(options, directory, images.paths) : [
+      '-p', '--safe-mode', '--tools', '', '--disable-slash-commands', '--strict-mcp-config',
+      '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence', '--no-chrome',
+      '--permission-prompts', 'none', '--system-prompt', options.systemPrompt,
+      '--model', options.model, '--json-schema', schema, '--output-format', 'stream-json', '--verbose', '--input-format', 'stream-json',
+    ];
+    const stdin = options.provider === 'codex' ? options.prompt : JSON.stringify({
+      type: 'user', message: { role: 'user', content: [{ type: 'text', text: options.prompt }, ...images.blocks] },
+    }) + '\n';
+    return await collect(options, dependencies, executable, args, directory, env, stdin);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+}
+
+function collect(options: AutoPromptModelRequest, dependencies: AutoPromptNativeDependencies, executable: string, args: string[], cwd: string, env: NodeJS.ProcessEnv, stdin: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    let child: ChildProcessWithoutNullStreams;
+    try { child = (dependencies.spawnProcess ?? spawn)(executable, args, { cwd, env, shell: false, detached: true, stdio: 'pipe' }); }
+    catch { reject(failure('native CLI could not be started.')); return; }
+    let error: Error | undefined;
+    let stdout = '';
+    let bytes = 0;
+    let stderrBytes = 0;
+    let finalText: string | undefined;
+    let structuredOutput: Record<string, unknown> | undefined;
+    let completed = false;
+    let closed = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
+    const signalGroup = (signal: NodeJS.Signals) => {
+      try { if (child.pid && process.platform !== 'win32') process.kill(-child.pid, signal); else child.kill(signal); } catch { /* Already exited. */ }
+    };
+    const stop = (reason: Error) => {
+      if (error) return;
+      error = reason;
+      if (closed) return;
+      signalGroup('SIGTERM');
+      killTimer = setTimeout(() => signalGroup('SIGKILL'), dependencies.killGraceMs ?? 500);
+    };
+    const abort = () => stop(cancelled());
+    const timeout = setTimeout(() => stop(failure('native routing timed out. No task was dispatched.')), dependencies.timeoutMs ?? 180_000);
+    options.signal.addEventListener('abort', abort, { once: true });
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', (chunk: string) => {
+      stderrBytes += Buffer.byteLength(chunk);
+      if (stderrBytes > MAX_ERROR_OUTPUT) stop(failure('native CLI emitted excessive diagnostic output.'));
+    });
+    const readLine = (line: string) => {
+      if (!line.trim() || error) return;
+      let frame: any;
+      try { frame = JSON.parse(line); } catch { stop(failure('native CLI returned malformed protocol output.')); return; }
+      if (!record(frame) || typeof frame.type !== 'string') { stop(failure('native CLI returned an invalid protocol event.')); return; }
+      if (options.provider === 'claude') {
+        if (frame.type === 'result') {
+          if (completed || frame.subtype !== 'success' || frame.is_error !== false
+            || (Array.isArray(frame.permission_denials) && frame.permission_denials.length > 0) || !record(frame.structured_output)) {
+            stop(failure('Claude Code did not return a successful structured decision. Check native sign-in and model access.')); return;
+          }
+          structuredOutput = frame.structured_output; completed = true;
+        } else if (frame.type === 'system' && frame.subtype === 'init') {
+          // StructuredOutput is the schema-response mechanism, not an execution tool.
+          if (!Array.isArray(frame.tools) || frame.tools.some((tool: unknown) => tool !== 'StructuredOutput')
+            || (Array.isArray(frame.mcp_servers) && frame.mcp_servers.length)) stop(failure('Claude Code exposed tools during routing.'));
+        } else if (frame.type === 'assistant') {
+          if (!record(frame.message) || !Array.isArray(frame.message.content)
+            || frame.message.content.some((block: any) => !record(block) || !['text', 'thinking', 'redacted_thinking'].includes(block.type)
+              && !(block.type === 'tool_use' && block.name === 'StructuredOutput'))) stop(failure('Claude Code attempted a tool operation during routing.'));
+        } else if (!['user', 'rate_limit_event'].includes(frame.type)) stop(failure('Claude Code returned an unsupported routing event.'));
+        return;
+      }
+      if (['item.started', 'item.updated', 'item.completed'].includes(frame.type)) {
+        // Codex 0.153.4 represents this expected fail-closed startup warning as
+        // an error item. All other native errors still stop routing.
+        if (frame.type === 'item.completed' && record(frame.item) && frame.item.type === 'error') {
+          if (frame.item.message !== CODE_MODE_DISABLED_WARNING) stop(failure('Codex reported an unsupported routing configuration. Check CLI compatibility.'));
+          return;
+        }
+        if (!record(frame.item) || !['reasoning', 'agent_message'].includes(frame.item.type)) { stop(failure('Codex attempted a tool operation during routing.')); return; }
+        if (frame.type === 'item.completed' && frame.item.type === 'agent_message' && typeof frame.item.text === 'string') finalText = frame.item.text;
+      } else if (frame.type === 'turn.completed') completed = true;
+      else if (!['thread.started', 'turn.started'].includes(frame.type)) stop(failure('Codex routing failed or returned an unsupported event. Check native sign-in and CLI compatibility.'));
+    };
+    child.stdout.on('data', (chunk: string) => {
+      bytes += Buffer.byteLength(chunk);
+      if (bytes > MAX_OUTPUT) { stop(failure('native routing output exceeded its limit.')); return; }
+      stdout += chunk;
+      let newline: number;
+      while ((newline = stdout.indexOf('\n')) >= 0) { readLine(stdout.slice(0, newline)); stdout = stdout.slice(newline + 1); }
+    });
+    child.stdin.on('error', () => stop(failure('native CLI stopped accepting routing input.')));
+    child.on('error', () => stop(failure('native CLI could not be started.')));
+    child.on('exit', () => {
+      // A descendant retaining stdout must not keep the router or its temp files alive.
+      exitTimer = setTimeout(() => stop(failure('native CLI left an unfinished routing process.')), 100);
+    });
+    child.on('close', code => {
+      closed = true;
+      clearTimeout(timeout); clearTimeout(killTimer); clearTimeout(exitTimer);
+      options.signal.removeEventListener('abort', abort);
+      // Reap any surviving descendants of this dedicated process, even on success.
+      signalGroup('SIGKILL');
+      if (error) { reject(error); return; }
+      if (code !== 0) { reject(failure(`native ${options.provider} routing exited unsuccessfully. Check native sign-in, model access, and CLI compatibility.`)); return; }
+      readLine(stdout);
+      if (error) { reject(error); return; }
+      if (options.provider === 'claude') {
+        if (!completed || !structuredOutput) reject(failure('Claude Code did not complete a structured decision.'));
+        else resolve(structuredOutput);
+        return;
+      }
+      if (!completed || !finalText) { reject(failure('Codex did not complete a structured decision.')); return; }
+      try { const value: unknown = JSON.parse(finalText); if (!record(value)) throw new Error(); resolve(value); }
+      catch { reject(failure('Codex returned malformed structured output.')); }
+    });
+    if (options.signal.aborted) abort();
+    if (!error) child.stdin.end(stdin);
+  });
+}

@@ -1,0 +1,106 @@
+.auto-prompt-trigger {
+  position:absolute;
+  top:12px;
+  right:12px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:44px;
+  height:44px;
+  padding:0;
+  border:1px solid #58789d;
+  border-radius:11px;
+  background:#243b56;
+  color:#c0dbff;
+  pointer-events:auto;
+  cursor:pointer;
+}
+.auto-prompt-trigger:hover:enabled { color:#eef6ff; border-color:#99bce9; background:#365473; }
+.auto-prompt-trigger:focus-visible { outline:2px solid #aacfff; outline-offset:3px; }
+.auto-prompt-trigger:disabled { opacity:.4; cursor:default; }
+.manual-project-lane { position:relative; }
+.manual-project-lane .project-group-title { padding-right:44px; }
+.manual-project-lane .project-group-path { margin-right:44px; }
+.host-node.has-auto-prompt { gap:10px; padding:16px 60px 16px 14px; }
+.host-node.has-auto-prompt .host-icon { flex-shrink:0; }
+.host-node.has-auto-prompt .host-copy { flex:1; min-width:0; }
+.host-node.has-auto-prompt .host-copy>span { overflow:hidden; }
+.host-node.has-auto-prompt .host-copy>span>span { overflow:hidden; text-overflow:ellipsis; }
+.host-node.has-auto-prompt .live-pip { flex-shrink:0; }
+.host-node .auto-prompt-trigger { top:8px; right:8px; }
+.auto-prompt-dialog {
+  width:min(680px,calc(100vw - 32px));
+  max-height:calc(100dvh - 40px);
+  padding:26px;
+  color:var(--text);
+  border:1px solid #405674;
+  border-radius:16px;
+  background:#111c2b;
+  box-shadow:0 28px 100px #000a;
+  overflow:auto;
+}
+.auto-prompt-dialog::backdrop { background:#050b14b8; backdrop-filter:blur(5px); }
+.auto-prompt-dialog:focus { outline:none; }
+.auto-prompt-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; margin-bottom:24px; }
+.auto-prompt-heading h2 { display:flex; align-items:center; gap:10px; color:#e0ecff; font-size:22px; font-weight:600; letter-spacing:-.5px; }
+.auto-prompt-heading h2>svg { color:#a9cfff; }
+.auto-prompt-heading p { margin-top:9px; color:#95a9c3; font-size:12px; line-height:1.65; }
+.auto-prompt-heading>.icon-button { flex-shrink:0; margin:-5px -7px 0 0; }
+.auto-prompt-selectors { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:14px; }
+.auto-prompt-selectors label { position:relative; display:flex; align-items:center; gap:9px; height:39px; min-width:0; padding:0 11px; border:1px solid #3b506d; border-radius:7px; background:#17263a; color:#b5c9e6; }
+.auto-prompt-directory { flex:1; max-width:420px; }
+.auto-prompt-provider { flex:0 0 126px; }
+.auto-prompt-selectors select { flex:1; min-width:0; width:100%; height:100%; padding:0 19px 0 0; border:0; border-radius:0; color:#d4e2f6; background:transparent; font-size:12px; text-overflow:ellipsis; cursor:pointer; appearance:none; }
+.auto-prompt-selectors label>svg { flex-shrink:0; }
+.auto-prompt-selectors label>svg:last-child { position:absolute; right:10px; pointer-events:none; }
+.auto-prompt-selectors select:focus-visible { outline:0; }
+.auto-prompt-selectors label:has(select:focus-visible) { outline:2px solid #97bded; outline-offset:3px; }
+.auto-prompt-selectors label:has(select:disabled) { opacity:.65; }
+.auto-prompt-selectors select:disabled { cursor:default; }
+.auto-prompt-selectors option { color:#d4e2f6; background:#17263a; }
+.auto-prompt-composer textarea { min-height:230px; max-height:45dvh; padding:17px 16px 12px; font-size:14px; line-height:1.8; }
+.auto-prompt-composer .composer-bottom { gap:10px; padding:8px 12px 12px; }
+.auto-prompt-composer .composer-hint { font-size:10px; }
+.auto-prompt-composer .send-button { min-height:35px; padding:0 14px; font-size:12px; }
+.auto-prompt-composer .draft-attachments { padding:13px 13px 0; }
+.auto-prompt-progress { display:flex; align-items:flex-start; gap:11px; padding:16px 2px 0; color:#aecff7; }
+.auto-prompt-progress>svg { flex-shrink:0; margin-top:2px; }
+.auto-prompt-progress>div { flex:1; min-width:0; }
+.auto-prompt-progress strong { display:block; font-size:12px; font-weight:500; line-height:1.65; }
+.auto-prompt-progress small { display:block; margin-top:4px; color:#8499b6; font-size:10px; line-height:1.6; overflow-wrap:anywhere; }
+.auto-prompt-cancel { display:flex; align-items:center; gap:5px; flex-shrink:0; min-height:30px; padding:5px 9px; border:1px solid #49617f; border-radius:5px; color:#b8cce6; font-size:11px; }
+.auto-prompt-cancel:hover:enabled { background:#22354e; }
+.auto-prompt-error { display:flex; align-items:flex-start; flex-wrap:wrap; gap:9px; padding:12px; margin-top:16px; border:1px solid #785258; border-radius:7px; color:#efb7b7; background:#34222b; font-size:12px; line-height:1.7; }
+.auto-prompt-error>svg { flex-shrink:0; margin-top:3px; }
+.auto-prompt-error>p { flex:1; min-width:0; overflow-wrap:anywhere; }
+.auto-prompt-error>button { width:100%; min-height:32px; border:1px solid #9a6f76; border-radius:5px; background:#482f39; color:#ffe0e0; font-size:11px; }
+.auto-prompt-error>button:hover:enabled { background:#5c3c48; }
+.auto-prompt-cancelled { margin-top:17px; color:#a5b8d0; font-size:12px; line-height:1.7; }
+.auto-prompt-result { padding:19px; margin-top:18px; border:1px solid #3d695f; border-radius:10px; background:#172e30; }
+.auto-prompt-result-heading { display:flex; align-items:center; gap:9px; color:#a8e3ce; }
+.auto-prompt-result-heading>svg { flex-shrink:0; }
+.auto-prompt-result h3 { color:#d7f0e9; font-size:14px; font-weight:550; }
+.auto-prompt-result-path { display:flex; align-items:flex-start; gap:7px; margin-top:14px; color:#94b8b7; font-size:11px; line-height:1.6; }
+.auto-prompt-result-path>svg { flex-shrink:0; margin-top:2px; }
+.auto-prompt-result-path>bdi { overflow-wrap:anywhere; }
+.auto-prompt-result-session { display:block; margin-top:8px; color:#d5e7e6; font-size:14px; line-height:1.6; overflow-wrap:anywhere; }
+.auto-prompt-result-reason { margin-top:9px; color:#a3bbb9; font-size:12px; line-height:1.75; overflow-wrap:anywhere; }
+.auto-prompt-open { display:flex; align-items:center; justify-content:center; gap:8px; min-height:36px; padding:0 13px; margin-top:16px; border:1px solid #669b8e; border-radius:6px; color:#d8fff3; background:#2a544a; font-size:12px; }
+.auto-prompt-open:hover:enabled { background:#356c5e; }
+.auto-prompt-footer { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:15px; }
+.auto-prompt-footer:has(p:empty):not(:has(button)) { display:none; }
+.auto-prompt-footer>p { color:#97a9c2; font-size:11px; line-height:1.6; }
+.auto-prompt-footer>.secondary-button { margin-left:auto; }
+@media (max-width:520px) {
+  .auto-prompt-dialog { width:calc(100vw - 24px); max-height:calc(100dvh - 24px); padding:19px; }
+  .auto-prompt-heading { margin-bottom:20px; }
+  .auto-prompt-heading h2 { font-size:21px; }
+  .auto-prompt-selectors { gap:9px; }
+  .auto-prompt-selectors label { gap:6px; padding-left:8px; }
+  .auto-prompt-provider { flex-basis:128px; }
+  .auto-prompt-selectors select { font-size:16px; }
+  .auto-prompt-composer textarea { min-height:200px; max-height:36dvh; font-size:16px; }
+  .auto-prompt-composer .composer-bottom { gap:6px; padding:7px 9px 10px; }
+  .auto-prompt-composer .composer-hint>span { display:none; }
+  .auto-prompt-result { padding:15px; }
+}

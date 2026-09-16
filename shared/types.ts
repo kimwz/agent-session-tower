@@ -13,6 +13,7 @@ export interface Session {
   parentId?: string;
   agentName?: string;
   model?: string;
+  contextUsage?: SessionContextUsage;
   status: SessionStatus;
   statusReason: string;
   createdAt: string;
@@ -25,6 +26,12 @@ export interface Session {
   resumable: boolean;
   activeProcess?: boolean;
   filePath?: string;
+}
+export interface SessionContextUsage {
+  usedTokens: number;
+  contextWindow?: number;
+  usedPercent?: number;
+  updatedAt?: string;
 }
 export interface ChatMessage {
   id: string;
@@ -80,6 +87,7 @@ export interface Run {
   error?: string;
   attachments?: Attachment[];
   model?: string;
+  autoPromptId?: string;
   approvals?: RunApproval[];
 }
 export interface RunApproval {
@@ -111,6 +119,36 @@ export interface CreateSessionRequest {
   prompt: string;
   title?: string;
   model?: string;
+  attachments?: AttachmentInput[];
+}
+export interface AutoPromptRequest {
+  requestId: string;
+  provider: Provider;
+  cwd?: string;
+  prompt: string;
+  attachments?: AttachmentInput[];
+}
+export interface AutoPromptDecision {
+  action: 'resume' | 'create';
+  cwd: string;
+  sessionId?: string;
+  reason: string;
+}
+export interface AutoPromptJob {
+  id: string;
+  provider: Provider;
+  cwd?: string;
+  prompt: string;
+  routerModel: string;
+  status: 'queued' | 'routing' | 'dispatching' | 'completed' | 'error' | 'cancelled';
+  stage?: 'directory' | 'session';
+  createdAt: string;
+  updatedAt: string;
+  attachments?: Array<Pick<Attachment, 'name' | 'mimeType' | 'size'>>;
+  decision?: AutoPromptDecision;
+  sessionId?: string;
+  runId?: string;
+  error?: string;
 }
 export interface ProjectGroup {
   cwd: string;
@@ -131,4 +169,5 @@ export interface Snapshot {
   hostname: string;
   version: string;
   groups?: ProjectGroup[];
+  autoPrompts?: AutoPromptJob[];
 }
