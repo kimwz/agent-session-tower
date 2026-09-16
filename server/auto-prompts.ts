@@ -56,7 +56,7 @@ function directories(snapshot: Snapshot): Directory[] {
     return value;
   };
   for (const session of snapshot.sessions) if (!session.isSubagent && session.cwd) add(session.cwd)?.sessions.push(session);
-  for (const group of snapshot.groups || []) if (group.pinned) add(group.cwd);
+  for (const group of snapshot.groups || []) if (group.pinned || group.hidden) add(group.cwd);
   return [...values.values()].sort((a, b) => a.cwd.localeCompare(b.cwd)).map((value, index) => ({ ...value, id: `d${index + 1}` }));
 }
 function eligible(session: Session, job: AutoPromptJob, cwd: string): boolean {

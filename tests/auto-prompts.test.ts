@@ -111,6 +111,35 @@ test('Auto selects among every directory including closed sessions and empty pin
   assert.equal((f.dispatches[0].input as CreateSessionRequest).provider, 'claude');
 });
 
+test('hidden-only folders without sessions remain available to Auto and explicit folder routing without being pinned', async t => {
+  for (const mode of ['auto', 'explicit'] as const) await t.test(mode, async t => {
+    const f = await fixture(t);
+    f.current.sessions = [];
+    const hidden = { cwd: f.other, title: '', pinned: false, hidden: true };
+    f.current.groups = [hidden];
+    f.respond(async input => {
+      const value = JSON.parse(input.prompt);
+      if (value.directories) {
+        assert.deepEqual(value.directories.map((directory: { cwd: string; sessionCount: number }) => [directory.cwd, directory.sessionCount]), [[f.other, 0]]);
+        return { directoryId: value.directories[0].id, reason: 'Use the hidden folder.' };
+      }
+      assert.equal(value.cwd, f.other); assert.deepEqual(value.candidates, []);
+      return create();
+    });
+    const accepted = await f.manager.submit(request(mode === 'explicit' ? f.other : undefined));
+    assert.equal((await f.finished(accepted.id)).status, 'completed');
+    assert.equal(f.calls.length, mode === 'explicit' ? 1 : 2);
+    assert.equal(f.dispatches[0].action, 'create');
+    assert.equal((f.dispatches[0].input as CreateSessionRequest).cwd, f.other);
+    assert.deepEqual(f.current.groups, [hidden]);
+  });
+  const f = await fixture(t);
+  const missing = join(f.directory, 'missing');
+  f.current.groups = [{ cwd: missing, title: '', pinned: false, hidden: true }];
+  await assert.rejects(f.manager.submit(request(missing)), /더 이상 존재하지 않습니다/);
+  assert.equal(f.calls.length, 0); assert.equal(f.dispatches.length, 0);
+});
+
 test('adjacent reuse accepts exactly 30% but rejects estimates, higher, unknown, busy, or already queued context', async t => {
   for (const mode of ['boundary', 'estimated', 'higher', 'unknown', 'busy', 'queued'] as const) await t.test(mode, async t => {
     const f = await fixture(t);

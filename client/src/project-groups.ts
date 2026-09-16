@@ -12,17 +12,27 @@ export function projectGroupChoices(sessions: Session[], groups: ProjectGroup[])
     if (session.cwd) choices.set(session.cwd, projectGroupLabel(session.cwd, titles.get(session.cwd), session.project));
   }
   for (const group of groups) {
-    if (group.pinned && !choices.has(group.cwd)) choices.set(group.cwd, projectGroupLabel(group.cwd, group.title));
+    if ((group.pinned || group.hidden) && !choices.has(group.cwd)) choices.set(group.cwd, projectGroupLabel(group.cwd, group.title));
   }
   return [...choices].sort(([aPath, aTitle], [bPath, bTitle]) => aTitle.localeCompare(bTitle) || aPath.localeCompare(bPath));
 }
 
-/** Pins bypass card filters, but still respect an explicit folder or group search. */
-export function visiblePinnedProjectGroups(groups: ProjectGroup[], sessions: Session[], project: string, query: string): ProjectGroup[] {
+/** Persisted frames respect folder/search filters. Revealed hidden frames remain restorable beyond the card limit. */
+export function visiblePinnedProjectGroups(groups: ProjectGroup[], sessions: Session[], project: string, query: string, showHidden = false, matchingSessions: Session[] = []): ProjectGroup[] {
   const term = query.trim().toLocaleLowerCase();
   const labels = new Map(sessions.filter(session => session.cwd).map(session => [session.cwd, session.project]));
-  return groups.filter(group => group.pinned && (project === 'all' || group.cwd === project)
-    && (!term || `${group.title} ${group.cwd} ${labels.get(group.cwd) || ''}`.toLocaleLowerCase().includes(term)));
+  const matchingFolders = new Set(matchingSessions.map(session => session.cwd));
+  return groups.filter(group => (group.pinned || (showHidden && group.hidden)) && (showHidden || !group.hidden)
+    && (project === 'all' || group.cwd === project)
+    && (!term || `${group.title} ${group.cwd} ${labels.get(group.cwd) || ''}`.toLocaleLowerCase().includes(term)
+      || (showHidden && group.hidden && matchingFolders.has(group.cwd))));
+}
+
+/** Hiding changes only the canvas projection, never session membership or the existing filters. */
+export function canvasVisibleSessions(sessions: Session[], groups: ProjectGroup[], showHidden: boolean): Session[] {
+  if (showHidden) return sessions;
+  const hidden = new Set(groups.filter(group => group.hidden).map(group => group.cwd));
+  return sessions.filter(session => !hidden.has(session.cwd));
 }
 
 /** Keep the card ordering intact; empty pins follow in a stable, readable order. */

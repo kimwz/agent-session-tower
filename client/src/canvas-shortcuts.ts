@@ -5,3 +5,8 @@ export function isAutoPromptShortcut(event: ShortcutKey): boolean {
   return event.code === 'KeyP' && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
     && !event.repeat && !event.defaultPrevented;
 }
+
+export function isShowAllShortcut(event: ShortcutKey): boolean {
+  return event.code === 'KeyA' && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
+    && !event.repeat && !event.defaultPrevented;
+}

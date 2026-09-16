@@ -15,12 +15,15 @@ export function normalizeProjectGroupPatch(value: unknown): ProjectGroupPatch {
   }
   const hasTitle = Object.hasOwn(patch, 'title');
   const hasPinned = Object.hasOwn(patch, 'pinned');
-  if (!hasTitle && !hasPinned) throw invalid('제목 또는 고정 상태를 지정하세요.');
+  const hasHidden = Object.hasOwn(patch, 'hidden');
+  if (!hasTitle && !hasPinned && !hasHidden) throw invalid('제목, 고정 상태 또는 숨김 상태를 지정하세요.');
   if (hasPinned && typeof patch.pinned !== 'boolean') throw invalid('폴더 그룹의 고정 상태는 boolean이어야 합니다.');
+  if (hasHidden && typeof patch.hidden !== 'boolean') throw invalid('폴더 그룹의 숨김 상태는 boolean이어야 합니다.');
   return {
     cwd: patch.cwd,
     ...(hasTitle ? { title: normalizeSessionTitle(patch.title) } : {}),
     ...(hasPinned ? { pinned: patch.pinned as boolean } : {}),
+    ...(hasHidden ? { hidden: patch.hidden as boolean } : {}),
   };
 }
 
@@ -46,7 +49,9 @@ export class ProjectGroupStore {
       for (const value of saved) {
         const patch = normalizeProjectGroupPatch(value);
         if (patch.title === undefined || patch.pinned === undefined || groups.has(patch.cwd)) throw new Error('Saved project groups are invalid.');
-        if (patch.title || patch.pinned) groups.set(patch.cwd, { cwd: patch.cwd, title: patch.title, pinned: patch.pinned });
+        if (patch.title || patch.pinned || patch.hidden) groups.set(patch.cwd, {
+          cwd: patch.cwd, title: patch.title, pinned: patch.pinned, ...(patch.hidden ? { hidden: true } : {}),
+        });
       }
       await file.chmod(0o600);
       this.groups = groups;
@@ -58,12 +63,13 @@ export class ProjectGroupStore {
   set(value: ProjectGroupPatch): Promise<ProjectGroup> {
     const patch = normalizeProjectGroupPatch(value);
     const write = this.writes.then(async () => {
-      // Merge against the last committed document, so concurrent title/pin edits retain both.
+      // Merge against the last committed document, so concurrent partial edits retain each field.
       const prior = this.groups.get(patch.cwd) || { cwd: patch.cwd, title: '', pinned: false };
-      const group = { ...prior, ...patch };
-      if (group.title === prior.title && group.pinned === prior.pinned) return { ...group };
+      const group: ProjectGroup = { ...prior, ...patch };
+      if (!group.hidden) delete group.hidden;
+      if (group.title === prior.title && group.pinned === prior.pinned && group.hidden === prior.hidden) return { ...group };
       const next = new Map(this.groups);
-      if (group.title || group.pinned) next.set(group.cwd, group);
+      if (group.title || group.pinned || group.hidden) next.set(group.cwd, group);
       else next.delete(group.cwd);
       const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
       try {

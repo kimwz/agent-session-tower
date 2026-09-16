@@ -1,7 +1,7 @@
 import { translate as t, useI18n } from './i18n';
-import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { applyNodeChanges, Background, BackgroundVariant, Handle, Position, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type FitViewOptions, type Node, type NodeChange, type NodeProps } from '@xyflow/react';
-import { ArrowUpRight, Check, ChevronRight, GitBranch, Maximize, Minus, Monitor, Move, Plus, Radio, Scan, Sparkles, Waypoints } from 'lucide-react';
+import { ArrowUpRight, Check, GitBranch, Maximize, Minus, Monitor, Move, Plus, Radio, Scan, Sparkles, Waypoints } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../shared/types';
 import { SessionContextIcon } from './SessionContextIcon';
 import { cleanPreview, providerLabels, relativeTime, sessionActivityAt, sessionTitle, statusLabels } from './lib';
@@ -23,7 +23,6 @@ const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentData>>) 
   const session = data.session;
   const activityAt = sessionActivityAt(session);
   return <>
-    <Handle type="target" position={Position.Top} />
     <button className={`agent-card ${session.provider} ${session.status} ${data.selected ? 'selected' : ''} ${data.unread ? 'has-unread' : ''}`} onClick={() => data.onSelect(session.id)} aria-describedby={contextDescriptionId} aria-label={t("{0}: {1}, {2}{3}. 대화 열기", { 0: providerLabels[session.provider], 1: sessionTitle(session), 2: statusLabels[session.status], 3: data.unread ? t(", 새 활동") : t(", 확인함") })}>
       {data.unread && <span className="agent-unread"><i />{t("새 활동")}</span>}
       <div className="agent-card-top"><SessionContextIcon provider={session.provider} usage={session.contextUsage} descriptionId={contextDescriptionId} />{session.isSubagent && <span className="subagent-mark" title={t("하위 에이전트")}><GitBranch size={12} /></span>}</div>
@@ -31,13 +30,12 @@ const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentData>>) 
       <div className="agent-card-bottom"><span className="agent-provider">{providerLabels[session.provider]}</span><span className={`agent-state ${session.status}`}>{session.status === 'completed' ? <Check size={11} /> : session.status === 'working' ? <Radio size={11} /> : <i />}{statusLabels[session.status]}</span></div>
       <p className="agent-card-preview">{cleanPreview(session.lastMessage) || t("대화 기록을 확인하세요")}</p><time className="agent-updated" dateTime={activityAt}>{relativeTime(activityAt)}<ArrowUpRight size={11} /></time>
     </button>
-    <Handle type="source" position={Position.Bottom} />
   </>;
 });
 
 const ProjectGroupNode = memo(function ProjectGroupNode({ data }: NodeProps<Node<ProjectData>>) {
   useI18n();
-  return <div className="manual-project-lane"><div className="project-drag-handle"><Handle type="target" position={Position.Top} /><ProjectGroupHeader data={data} /><Handle type="source" position={Position.Bottom} /></div><button type="button" className="auto-prompt-trigger nodrag nopan" aria-label={t("{0} 폴더에서 Auto Prompt 열기", { 0: data.name })} title="Auto Prompt" disabled={data.disabled || !data.path.startsWith('/')} onClick={() => data.onAutoPrompt(data.path)}><Sparkles size={32} aria-hidden="true" /></button>{!data.count && <p className="project-group-empty">{t("표시된 세션이 없습니다")}<span>{t("+ 버튼으로 이 폴더에서 시작하세요")}</span></p>}</div>;
+  return <div className={`manual-project-lane ${data.hidden ? 'is-hidden' : ''}`}><div className="project-drag-handle"><Handle type="target" position={Position.Top} /><ProjectGroupHeader data={data} /></div><button type="button" className="auto-prompt-trigger nodrag nopan" aria-label={t("{0} 폴더에서 Auto Prompt 열기", { 0: data.name })} title="Auto Prompt" disabled={data.disabled || !data.path.startsWith('/')} onClick={() => data.onAutoPrompt(data.path)}><Sparkles size={32} aria-hidden="true" /></button>{!data.count && <p className="project-group-empty">{t("표시된 세션이 없습니다")}<span>{t("+ 버튼으로 이 폴더에서 시작하세요")}</span></p>}</div>;
 });
 const HostNode = memo(function HostNode({ data }: NodeProps<Node<HostData>>) {
   useI18n();
@@ -45,14 +43,14 @@ const HostNode = memo(function HostNode({ data }: NodeProps<Node<HostData>>) {
 });
 const nodeTypes = { agent: AgentNode, projectGroup: ProjectGroupNode, host: HostNode };
 
-type GraphProps = { providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void };
+type GraphProps = { providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void; filterControls: ReactNode; emptyState?: ReactNode };
 
 function readPreferences(): GraphPreferences {
   try { return parseGraphPreferences(window.localStorage.getItem(GRAPH_PREFERENCES_KEY)); }
   catch { return defaultGraphPreferences(); }
 }
 
-function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt }: GraphProps) {
+function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, filterControls, emptyState }: GraphProps) {
   const { language } = useI18n();
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
@@ -68,18 +66,18 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
   const [preferences, setPreferences] = useState(readPreferences);
   const [manualFitRequest, setManualFitRequest] = useState(0);
   const manual = preferences.mode === 'manual';
-  const pinnedGroups = useMemo(() => groups.filter(group => group.pinned), [groups]);
+  const retainedGroups = useMemo(() => groups.filter(group => group.pinned || group.hidden), [groups]);
   const groupMetadata = useMemo(() => new Map(groups.map(group => [group.cwd, group])), [groups]);
   const visibleAgentIds = useMemo(() => new Set(sessions.map(session => session.id)), [sessions]);
   const seedSessions = useMemo(() => manual ? sessions : graphSessionGroups(sessions, graphLimit, selectedId).flatMap(([, members]) => members), [manual, sessions, graphLimit, selectedId]);
-  const manualLayout = useMemo(() => reconcileManualGraph(preferences.layout, allSessions, sessionsReady, seedSessions, pinnedGroups), [preferences.layout, allSessions, sessionsReady, seedSessions, pinnedGroups]);
+  const manualLayout = useMemo(() => reconcileManualGraph(preferences.layout, allSessions, sessionsReady, seedSessions, retainedGroups), [preferences.layout, allSessions, sessionsReady, seedSessions, retainedGroups]);
 
   useEffect(() => {
     setPreferences(current => {
-      const layout = reconcileManualGraph(current.layout, allSessions, sessionsReady, seedSessions, pinnedGroups);
+      const layout = reconcileManualGraph(current.layout, allSessions, sessionsReady, seedSessions, retainedGroups);
       return layout === current.layout ? current : { ...current, layout };
     });
-  }, [allSessions, sessionsReady, seedSessions, pinnedGroups]);
+  }, [allSessions, sessionsReady, seedSessions, retainedGroups]);
 
   useEffect(() => {
     try { window.localStorage.setItem(GRAPH_PREFERENCES_KEY, JSON.stringify(preferences)); }
@@ -97,7 +95,7 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
       const projectId = graphProjectId(path);
       const rows = Math.max(1, Math.ceil(members.length / columns));
       const metadata = groupMetadata.get(path);
-      const projectData: ProjectData = { name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, manual, disabled: groupActionsDisabled, saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate, onAutoPrompt };
+      const projectData: ProjectData = { name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, hidden: metadata?.hidden || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, manual, disabled: groupActionsDisabled, saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate, onAutoPrompt };
       const savedProject = manualLayout.projects[projectId];
       if (manual && savedProject) {
         const bounds = manualProjectBounds(manualLayout, projectId, visibleAgentIds)!;
@@ -112,7 +110,6 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
         // Flat world positions keep pointer and drag-stop coordinates independent
         // from the enclosing rectangle as its origin follows moving cards.
         ns.push({ id: session.id, type: 'agent', position: placedManually ? { x: savedProject.position.x + savedAgent.position.x, y: savedProject.position.y + savedAgent.position.y } : { x: x + 20 + (index % columns) * 268, y: 291 + Math.floor(index / columns) * 215 }, zIndex: 3, ...(placedManually ? { dragHandle: '.agent-card' } : {}), data: { session, selected: session.id === selectedId, unread: unreadIds?.has(session.id) || false, onSelect }, style: { pointerEvents: 'all' }, draggable: !!placedManually, selectable: false, focusable: false });
-        es.push({ id: `edge-${session.id}`, source: projectId, target: session.id, type: 'smoothstep', animated: motion && session.status === 'working', zIndex: 2, style: { stroke: session.status === 'working' ? (session.provider === 'claude' ? '#ba9060' : '#4b998b') : '#2b3b4e', strokeWidth: 1.1, opacity: session.status === 'completed' ? 0.55 : 0.95 }, pathOptions: { borderRadius: 10 } } as Edge);
       });
       x += width + 36;
     });
@@ -136,11 +133,11 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
     const moves = changes.flatMap(change => change.type === 'position' && change.position ? [{ id: change.id, position: change.position }] : []);
     if (!moves.length) return;
     setPreferences(current => {
-      const reconciled = reconcileManualGraph(current.layout, allSessions, sessionsReady, seedSessions, pinnedGroups);
+      const reconciled = reconcileManualGraph(current.layout, allSessions, sessionsReady, seedSessions, retainedGroups);
       const layout = moveManualGraphNodes(reconciled, moves, visibleAgentIds);
       return layout === current.layout ? current : { ...current, layout };
     });
-  }, [manual, allSessions, sessionsReady, seedSessions, visibleAgentIds, pinnedGroups]);
+  }, [manual, allSessions, sessionsReady, seedSessions, visibleAgentIds, retainedGroups]);
 
   const changeMode = (mode: GraphLayoutMode) => {
     if (mode === preferences.mode) return;
@@ -162,15 +159,22 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
     return () => window.clearTimeout(timeout);
   }, [manualFitRequest, manual, fitVisibleGraph]);
 
-  return <div ref={canvas} className={`graph-canvas ${manual ? 'manual-layout' : 'auto-layout'} ${motion ? '' : 'motion-off'}`}>
-    <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.1, minZoom: 0.15, maxZoom: 0.95, duration: 0 }} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(_, viewport) => setZoom(Math.round(viewport.zoom * 100))} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
-      <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#283343" />
-    </ReactFlow>
-    <div className="canvas-caption"><span className="canvas-caption-symbol"><Waypoints size={14} /></span><span>{t("이 Mac")}<ChevronRight size={12} />{t("프로젝트")}<ChevronRight size={12} />{t("세션")}</span></div>
-    <div className="graph-layout-switch" role="group" aria-label={t("그래프 정렬 방식")}><button aria-pressed={!manual} onClick={() => changeMode('auto')} title={t("최근 활동 순서로 자동 정렬")}><Waypoints size={12} />{t("자동 정렬")}</button><button aria-pressed={manual} onClick={() => changeMode('manual')} title={t("폴더와 세션을 드래그해 위치 지정")}><Move size={12} />{t("수동 배치")}</button>{manual && <span>{t("폴더·카드를 드래그해 이동")}</span>}</div>
-    <div className="graph-controls" aria-label={t("그래프 보기 조절")}><button onClick={() => { void zoomOut({ duration: 0 }); }} aria-label={t("그래프 축소")} title={t("축소")}><Minus size={16} /></button><span>{zoom}%</span><button onClick={() => { void zoomIn({ duration: 0 }); }} aria-label={t("그래프 확대")} title={t("확대")}><Plus size={16} /></button><i /><button onClick={() => fitVisibleGraph({ padding: 0.13, maxZoom: 0.95 })} aria-label={t("전체 그래프 맞춤")} title={t("전체 맞춤")}><Maximize size={16} /></button>{selectedId && nodes.some(n => n.id === selectedId) && <button onClick={() => fitVisibleGraph({ nodes: [{ id: selectedId }], maxZoom: 1.1, padding: 0.7 })} aria-label={t("선택한 세션 위치로 이동")} title={t("선택한 세션 찾기")}><Scan size={16} /></button>}</div>
-    <div className="graph-footer"><div className="graph-legend"><span><i className="legend-dot working" />{t("작업 중")}</span><span><i className="legend-dot idle" />{t("대기 중")}</span><span><i className="legend-dot completed" />{t("완료")}</span></div><label className="motion-toggle"><input type="checkbox" checked={motion} onChange={event => setMotion(event.target.checked)} />{t("흐름 표시")}</label></div>
-    {manual ? <div className="graph-limit manual-session-count">{shown.toLocaleString()}{t("개 세션 · 위치 자동 저장")}</div> : (shown < sessions.length || graphLimit > 8) && <div className="graph-limit"><span>{t("최근 활동")}{' '}{shown}{t("개 표시 · 전체")}{' '}{sessions.length.toLocaleString()}{t("개")}</span>{shown < sessions.length && graphLimit < 72 && <button onClick={() => setGraphLimit(value => Math.min(72, value + 8))}><Plus size={10} />{t("더 표시")}</button>}{graphLimit > 8 && <button onClick={() => setGraphLimit(8)}>{t("접기")}</button>}</div>}
+  return <div className="graph-view">
+    <div className="canvas-toolbar" aria-label={t("캔버스 보기 도구")}>
+      <div className="canvas-filter-row" aria-label={t("캔버스 필터")}>{filterControls}</div>
+      <div className="canvas-tool-row">
+        <div className="graph-layout-switch" role="group" aria-label={t("그래프 정렬 방식")}><button aria-pressed={!manual} onClick={() => changeMode('auto')} title={t("최근 활동 순서로 자동 정렬")}><Waypoints size={12} />{t("자동 정렬")}</button><button aria-pressed={manual} onClick={() => changeMode('manual')} title={t("폴더와 세션을 드래그해 위치 지정")}><Move size={12} />{t("수동 배치")}</button></div>
+        <div className="graph-controls" role="group" aria-label={t("그래프 보기 조절")}><button onClick={() => { void zoomOut({ duration: 0 }); }} aria-label={t("그래프 축소")} title={t("축소")}><Minus size={16} /></button><span>{zoom}%</span><button onClick={() => { void zoomIn({ duration: 0 }); }} aria-label={t("그래프 확대")} title={t("확대")}><Plus size={16} /></button><i /><button onClick={() => fitVisibleGraph({ padding: 0.13, maxZoom: 0.95 })} aria-label={t("전체 그래프 맞춤")} title={t("전체 맞춤")}><Maximize size={16} /></button>{selectedId && nodes.some(n => n.id === selectedId) && <button onClick={() => fitVisibleGraph({ nodes: [{ id: selectedId }], maxZoom: 1.1, padding: 0.7 })} aria-label={t("선택한 세션 위치로 이동")} title={t("선택한 세션 찾기")}><Scan size={16} /></button>}</div>
+        <label className="motion-toggle"><input type="checkbox" checked={motion} onChange={event => setMotion(event.target.checked)} />{t("흐름 표시")}</label>
+        {manual ? <div className="graph-limit manual-session-count">{shown.toLocaleString()}{t("개 세션 · 위치 자동 저장")}</div> : <div className="graph-limit"><span>{t("최근 활동")}{' '}{shown}{t("개 표시 · 전체")}{' '}{sessions.length.toLocaleString()}{t("개")}</span>{shown < sessions.length && graphLimit < 72 && <button onClick={() => setGraphLimit(value => Math.min(72, value + 8))}><Plus size={10} />{t("더 표시")}</button>}{graphLimit > 8 && <button onClick={() => setGraphLimit(8)}>{t("접기")}</button>}</div>}
+      </div>
+    </div>
+    <div ref={canvas} className={`graph-canvas ${manual ? 'manual-layout' : 'auto-layout'} ${motion ? '' : 'motion-off'}`}>
+      <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.1, minZoom: 0.15, maxZoom: 0.95, duration: 0 }} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(_, viewport) => setZoom(Math.round(viewport.zoom * 100))} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
+        <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#283343" />
+      </ReactFlow>
+      {emptyState}
+    </div>
   </div>;
 }
 

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isAutoPromptShortcut } from '../client/src/canvas-shortcuts.js';
+import { isAutoPromptShortcut, isShowAllShortcut } from '../client/src/canvas-shortcuts.js';
 
 const event = () => ({ code: 'KeyP', key: 'P', shiftKey: true, ctrlKey: false, metaKey: false, altKey: false, repeat: false, defaultPrevented: false, isComposing: false });
 
@@ -15,5 +15,17 @@ test('the shortcut does not intercept modifier combinations, held keys, or handl
   assert.equal(isAutoPromptShortcut({ ...event(), shiftKey: false }), false);
   for (const modifier of ['ctrlKey', 'metaKey', 'altKey', 'repeat', 'defaultPrevented'] as const) {
     assert.equal(isAutoPromptShortcut({ ...event(), [modifier]: true }), false, modifier);
+  }
+});
+
+test('Show all uses Shift+A under either keyboard layout and keeps other shortcuts untouched', () => {
+  const showAll = { ...event(), code: 'KeyA', key: 'A' };
+  assert.equal(isShowAllShortcut(showAll), true);
+  assert.equal(isShowAllShortcut({ ...showAll, key: 'ㅁ', isComposing: true }), true);
+  assert.equal(isShowAllShortcut(event()), false);
+  assert.equal(isAutoPromptShortcut(showAll), false);
+  assert.equal(isShowAllShortcut({ ...showAll, shiftKey: false }), false);
+  for (const guard of ['ctrlKey', 'metaKey', 'altKey', 'repeat', 'defaultPrevented'] as const) {
+    assert.equal(isShowAllShortcut({ ...showAll, [guard]: true }), false, guard);
   }
 });

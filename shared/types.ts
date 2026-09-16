@@ -156,11 +156,13 @@ export interface ProjectGroup {
   cwd: string;
   title: string;
   pinned: boolean;
+  hidden?: boolean;
 }
 export interface ProjectGroupPatch {
   cwd: string;
   title?: string;
   pinned?: boolean;
+  hidden?: boolean;
 }
 export interface Snapshot {
   sessions: Session[];

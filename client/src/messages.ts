@@ -1,5 +1,16 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  '전체보기': 'Show all',
+  '숨긴 폴더 표시 전환': 'Toggle hidden folders',
+  '숨긴 폴더 포함 (Shift+A)': 'Include hidden folders (Shift+A)',
+  '{0} 폴더 숨기기': 'Hide folder {0}',
+  '{0} 폴더 숨김 해제': 'Unhide folder {0}',
+  '폴더 숨김 해제': 'Unhide folder',
+  '폴더와 세션을 캔버스에서 숨기기': 'Hide this folder and its sessions from the canvas',
+  '폴더가 숨겨져 있습니다': 'Folders are hidden',
+  '전체보기를 켜면 현재 필터에 맞는 숨긴 폴더와 세션을 볼 수 있습니다.': 'Turn on Show all to reveal hidden folders and sessions that match the current filters.',
+  '전체보기 켜기': 'Turn on Show all',
+  '캔버스 보기 도구': 'Canvas view tools',
   '컨텍스트 사용량: {0}%': 'Context used: {0}%',
   '컨텍스트 사용량: 약 {0}%': 'Context used: about {0}%',
   '컨텍스트 사용량: 알 수 없음': 'Context usage unavailable',

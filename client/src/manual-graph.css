@@ -31,7 +31,7 @@
 }
 .project-drag-handle {
   position:relative;
-  width:240px;
+  width:calc(100% - 40px);
   height:78px;
   margin:18px 20px 0;
   padding:0;
@@ -46,10 +46,6 @@
 .auto-layout .project-drag-handle:hover { background:none; }
 .project-drag-grip { flex-shrink:0; color:#6983a2; }
 .graph-layout-switch {
-  position:absolute;
-  z-index:4;
-  left:22px;
-  bottom:108px;
   display:flex;
   align-items:center;
   gap:3px;
@@ -71,8 +67,3 @@
 }
 .graph-layout-switch button[aria-pressed="true"] { background:#2a3e59; color:#d2e1f4; }
 .graph-layout-switch button:hover { color:#e0edff; }
-.graph-layout-switch>span { margin:0 7px; color:#8198b5; font-size:9px; white-space:nowrap; }
-@media (max-width:1100px) { .graph-layout-switch>span { display:none; } }
-@media (max-width:760px) {
-  .graph-layout-switch { left:17px; bottom:151px; }
-}

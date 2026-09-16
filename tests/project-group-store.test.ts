@@ -56,6 +56,46 @@ test('concurrent partial patches merge title and pin fields against committed me
   assert.deepEqual(await readdir(dir), ['project-groups.json']);
 });
 
+test('hidden folders merge partial edits, survive restart alone and disappear after unhiding', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'monitor-groups-hidden-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new ProjectGroupStore(dir); await store.start();
+  const cwd = '/hidden-folder-without-sessions';
+  await Promise.all([
+    store.set({ cwd, title: 'Keep this title' }),
+    store.set({ cwd, hidden: true }),
+    store.set({ cwd, pinned: true }),
+  ]);
+  const group = { cwd, title: 'Keep this title', pinned: true, hidden: true };
+  assert.deepEqual(store.list(), [group]);
+  const restarted = new ProjectGroupStore(dir); await restarted.start();
+  assert.deepEqual(restarted.list(), [group]);
+  assert.deepEqual(await restarted.set({ cwd, hidden: false }), { cwd, title: group.title, pinned: true });
+  await restarted.set({ cwd, hidden: true });
+  await Promise.all([restarted.set({ cwd, title: '' }), restarted.set({ cwd, pinned: false })]);
+  const hiddenOnly = { cwd, title: '', pinned: false, hidden: true };
+  assert.deepEqual(restarted.list(), [hiddenOnly]);
+  const hiddenRestarted = new ProjectGroupStore(dir); await hiddenRestarted.start();
+  assert.deepEqual(hiddenRestarted.list(), [hiddenOnly]);
+  assert.deepEqual(await hiddenRestarted.set({ cwd, hidden: false }), { cwd, title: '', pinned: false });
+  assert.deepEqual(hiddenRestarted.list(), []);
+  assert.deepEqual(JSON.parse(await readFile(join(dir, 'project-groups.json'), 'utf8')), []);
+});
+
+test('saved groups without hidden metadata remain visible and retain their titles and pins', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'monitor-groups-legacy-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const legacy = { cwd: '/legacy', title: 'Existing folder', pinned: true };
+  const visible = { cwd: '/visible', title: 'Visible folder', pinned: false };
+  await writeFile(join(dir, 'project-groups.json'), JSON.stringify([legacy, { ...visible, hidden: false }]));
+  const store = new ProjectGroupStore(dir); await store.start();
+  assert.deepEqual(store.list(), [legacy, visible]);
+  assert.deepEqual(await store.set({ cwd: legacy.cwd, hidden: false }), legacy);
+  assert.deepEqual(await store.set({ cwd: legacy.cwd, hidden: true }), { ...legacy, hidden: true });
+  const restarted = new ProjectGroupStore(dir); await restarted.start();
+  assert.deepEqual(restarted.list(), [{ ...legacy, hidden: true }, visible]);
+});
+
 test('a failed group save preserves memory and disk and does not poison later patches or flush', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'monitor-groups-failure-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -77,9 +117,12 @@ test('group patches validate exact booleans and title limits while preserving ab
   assert.deepEqual(normalizeProjectGroupPatch({ cwd: '/path/../alias/ ', title: ` ${'x'.repeat(120)} ` }), { cwd: '/path/../alias/ ', title: 'x'.repeat(120) });
   assert.equal(normalizeProjectGroupPatch({ cwd: '/path', title: '😀'.repeat(60) }).title, '😀'.repeat(60));
   assert.deepEqual(normalizeProjectGroupPatch({ cwd: '/missing', pinned: false }), { cwd: '/missing', pinned: false });
+  assert.deepEqual(normalizeProjectGroupPatch({ cwd: '/hidden', hidden: true }), { cwd: '/hidden', hidden: true });
+  assert.deepEqual(normalizeProjectGroupPatch({ cwd: '/visible', hidden: false }), { cwd: '/visible', hidden: false });
   for (const invalid of [null, [], {}, { cwd: '/valid' },
     ...['relative', '', '/bad\0path', '/'.repeat(4097), 42].map(cwd => ({ cwd, pinned: true })),
     ...[undefined, null, 0, 1, 'true', [], {}].map(pinned => ({ cwd: '/valid', pinned })),
+    ...[undefined, null, 0, 1, 'true', [], {}].map(hidden => ({ cwd: '/valid', hidden })),
     ...[undefined, null, 42, [], {}, 'x'.repeat(121), '😀'.repeat(61)].map(title => ({ cwd: '/valid', title })),
   ]) assert.throws(() => normalizeProjectGroupPatch(invalid), { statusCode: 400 });
 });
@@ -88,7 +131,7 @@ test('group startup rejects symlink metadata and invalid saved documents', async
   const dir = await mkdtemp(join(tmpdir(), 'monitor-groups-invalid-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, 'project-groups.json');
-  for (const saved of [{}, [{ cwd: '/valid', pinned: true }], [{ cwd: '../bad', title: '', pinned: true }], [{ cwd: '/valid', title: '', pinned: 'true' }]]) {
+  for (const saved of [{}, [{ cwd: '/valid', pinned: true }], [{ cwd: '../bad', title: '', pinned: true }], [{ cwd: '/valid', title: '', pinned: 'true' }], [{ cwd: '/valid', title: '', pinned: false, hidden: 'true' }]]) {
     await writeFile(path, JSON.stringify(saved));
     await assert.rejects(new ProjectGroupStore(dir).start());
   }
@@ -123,13 +166,13 @@ test('group HTTP validates authentication, commits before SSE and allows groups 
   const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { authorization } })).json();
   const headers = { authorization, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
   const send = (body: unknown, extra: Record<string, string> = {}) => fetch(`${base}/api/groups`, { method: 'POST', headers: { ...headers, ...extra }, body: JSON.stringify(body) });
-  const patch = { cwd: '/no-session-and-no-directory', title: '  Pinned project  ', pinned: true };
+  const patch = { cwd: '/no-session-and-no-directory', title: '  Pinned project  ', pinned: true, hidden: true };
   assert.equal((await send(patch, { authorization: '' })).status, 401);
   assert.equal((await send(patch, { 'X-Agent-Monitor-Token': '' })).status, 403);
   assert.equal((await send(patch, { Origin: 'https://attacker.example' })).status, 403);
   assert.equal((await send(patch, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
   assert.equal((await send(patch, { 'Content-Type': 'text/plain' })).status, 415);
-  for (const invalid of [{}, { cwd: '/valid' }, { cwd: 'relative', pinned: true }, { cwd: '/valid', pinned: 'true' }, { cwd: '/valid', title: 'x'.repeat(121) }, null, []]) assert.equal((await send(invalid)).status, 400);
+  for (const invalid of [{}, { cwd: '/valid' }, { cwd: 'relative', pinned: true }, { cwd: '/valid', pinned: 'true' }, { cwd: '/valid', hidden: 'true' }, { cwd: '/valid', hidden: null }, { cwd: '/valid', title: 'x'.repeat(121) }, null, []]) assert.equal((await send(invalid)).status, 400);
   assert.equal((await fetch(`${base}/api/groups`, { method: 'POST', headers, body: '{bad' })).status, 400);
   assert.equal(saves, 0);
   const controller = new AbortController();
@@ -140,7 +183,7 @@ test('group HTTP validates authentication, commits before SSE and allows groups 
     const accepted = await send(patch);
     assert.equal(accepted.status, 200);
     const group = (await accepted.json()).group;
-    assert.deepEqual(group, { cwd: patch.cwd, title: 'Pinned project', pinned: true });
+    assert.deepEqual(group, { cwd: patch.cwd, title: 'Pinned project', pinned: true, hidden: true });
     assert.deepEqual(JSON.parse(await readFile(join(stateDir, 'project-groups.json'), 'utf8')), [group]);
     let stream = '';
     while (!stream.includes('Pinned project')) { const next = await reader.read(); if (next.done) break; stream += new TextDecoder().decode(next.value); }
@@ -154,6 +197,10 @@ test('group HTTP validates authentication, commits before SSE and allows groups 
     assert.equal((await send({ cwd: patch.cwd, title: '' })).status, 200);
     assert.deepEqual(store.list(), [{ ...group, title: '' }]);
     assert.equal((await send({ cwd: patch.cwd, pinned: false })).status, 200);
+    assert.deepEqual(store.list(), [{ ...group, title: '', pinned: false }]);
+    const unhidden = await send({ cwd: patch.cwd, hidden: false });
+    assert.equal(unhidden.status, 200);
+    assert.deepEqual((await unhidden.json()).group, { cwd: patch.cwd, title: '', pinned: false });
     assert.deepEqual(store.list(), []);
     assert.deepEqual(native, original);
   } finally { controller.abort(); }

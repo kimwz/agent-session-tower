@@ -1,7 +1,7 @@
 import { translate as t, translateMessage, useI18n } from './i18n';
 import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Folder, Grip, LoaderCircle, Pencil, Pin, Plus, X } from 'lucide-react';
+import { Eye, EyeOff, Folder, Grip, LoaderCircle, Pencil, Pin, Plus, X } from 'lucide-react';
 import type { ProjectGroupPatch } from '../../shared/types';
 import './project-groups.css';
 
@@ -12,6 +12,7 @@ export type ProjectGroupHeaderData = {
   count: number;
   active: number;
   pinned: boolean;
+  hidden: boolean;
   manual: boolean;
   disabled: boolean;
   saving: boolean;
@@ -78,6 +79,7 @@ export function ProjectGroupHeader({ data }: { data: ProjectGroupHeaderData }) {
       <div className="project-group-path folder-tail" title={data.path}><bdi dir="ltr">{data.path}</bdi></div>
       <div className="project-group-bottom"><span>{data.count}{t("개 세션")}{data.active > 0 && t(" · {0}개 작업 중", { 0: data.active })}</span><div className="project-group-actions nodrag nopan">
         <button className={`project-group-action ${data.pinned ? 'pinned' : ''}`} aria-label={t("{0} 그룹 {1}", { 0: data.name, 1: data.pinned ? t("고정 해제") : t("고정") })} aria-pressed={data.pinned} title={data.pinned ? t("그룹 고정 해제") : t("세션이 없어도 그룹 유지")} disabled={disabled} onClick={() => { void data.onUpdate({ cwd: data.path, pinned: !data.pinned }); }}>{data.saving && !editing ? <LoaderCircle size={14} className="spin" /> : <Pin size={14} />}</button>
+        <button className={`project-group-action ${data.hidden ? 'is-hidden' : ''}`} aria-label={data.hidden ? t("{0} 폴더 숨김 해제", { 0: data.name }) : t("{0} 폴더 숨기기", { 0: data.name })} aria-pressed={data.hidden} title={data.hidden ? t("폴더 숨김 해제") : t("폴더와 세션을 캔버스에서 숨기기")} disabled={disabled} onClick={() => { void data.onUpdate({ cwd: data.path, hidden: !data.hidden }); }}>{data.hidden ? <EyeOff size={15} /> : <Eye size={15} />}</button>
         <button className="project-group-action" aria-label={t("{0} 폴더에 새 세션", { 0: data.name })} title={t("이 폴더에 새 세션")} disabled={data.disabled || !actionable} onClick={() => data.onCreate(data.path)}><Plus size={17} /></button>
       </div>{data.manual && <Grip size={12} className="project-drag-grip" aria-hidden="true" />}</div>
       {data.error && !editing && <p className="project-group-error nodrag nopan" role="alert">{translateMessage(data.error)}</p>}
