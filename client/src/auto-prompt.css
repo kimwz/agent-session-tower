@@ -8,15 +8,15 @@
   width:44px;
   height:44px;
   padding:0;
-  border:1px solid #58789d;
+  border:0;
   border-radius:11px;
-  background:#243b56;
-  color:#c0dbff;
+  background:none;
+  color:#91a9c9;
   pointer-events:auto;
   cursor:pointer;
 }
-.auto-prompt-trigger:hover:enabled { color:#eef6ff; border-color:#99bce9; background:#365473; }
-.auto-prompt-trigger:focus-visible { outline:2px solid #aacfff; outline-offset:3px; }
+.auto-prompt-trigger:hover:enabled { color:#e0edff; background:#304967; }
+.auto-prompt-trigger:focus-visible { outline:2px solid #97c4ff; outline-offset:3px; }
 .auto-prompt-trigger:disabled { opacity:.4; cursor:default; }
 .manual-project-lane { position:relative; }
 .manual-project-lane .project-group-title { padding-right:44px; }
