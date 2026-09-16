@@ -10,8 +10,13 @@ import { runAutoPromptModel, type AutoPromptModelRequest, type AutoPromptNativeD
 const DECISION = { action: 'existing', sessionId: 'fixture-A' };
 const SCHEMA = { type: 'object', properties: { action: { const: 'existing' }, sessionId: { const: 'fixture-A' } }, required: ['action', 'sessionId'], additionalProperties: false };
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1sAAAAASUVORK5CYII=', 'base64');
+const CLAUDE_PROGRESS = [
+  { type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 10, retry_delay_ms: 500, error_status: null, error: 'unknown' },
+  { type: 'system', subtype: 'thinking_tokens', estimated_tokens: 12, estimated_tokens_delta: 4, user_message_uuid: 'fixture-message' },
+  { type: 'system', subtype: 'thinking', content: 'Synthetic reasoning progress.' },
+].map(frame => ({ ...frame, uuid: '11111111-1111-4111-8111-111111111111', session_id: 'fixture-session' }));
 
-async function fixture(t: TestContext, provider: 'claude' | 'codex' = 'codex', mode = 'success') {
+async function fixture(t: TestContext, provider: 'claude' | 'codex' = 'codex', mode = 'success', progress: object[] = []) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-native-router-'));
   const reportFile = join(directory, 'report.json');
   const script = join(directory, 'provider.mjs');
@@ -37,8 +42,12 @@ else if (mode === 'stderr') process.stderr.write('private'.repeat(10000));
 else if (mode === 'malformed') process.stdout.write('not JSON');
 else if (provider === 'claude') {
   send({type:'system', subtype:'init', tools: mode === 'tools' ? ['Bash'] : ['StructuredOutput'], mcp_servers:[]});
+  for (const frame of JSON.parse(process.env.ROUTER_PROGRESS)) send(frame);
+  if (mode === 'unknown-system') send({type:'system',subtype:'fixture_unknown',content:'private response content'});
+  if (mode === 'unsafe-event-name') send({type:'private event content',subtype:'x'.repeat(65),content:'private response content'});
   if (mode === 'tool-call') send({type:'assistant',message:{content:[{type:'tool_use',name:'Bash',input:{command:'exit'}}]}});
   send({type:'assistant',message:{content:[{type:'tool_use',name:'StructuredOutput',input:decision}]}});
+  for (const frame of JSON.parse(process.env.ROUTER_PROGRESS)) send(frame);
   const result = {type:'result',subtype:'success',is_error:false,structured_output:decision};
   if (mode === 'missing-structured') { delete result.structured_output; result.result = JSON.stringify(decision); }
   if (mode === 'error-result') { result.is_error=true; result.subtype='error_during_execution'; }
@@ -60,7 +69,7 @@ else {
     stateDir: join(directory, 'state'), timeoutMs: 3000, killGraceMs: 30,
     findExecutable: async () => '/fixture/native-cli',
     spawnProcess: (file, args, options) => {
-      const child = spawn(process.execPath, [script], { ...options, env: { ...options.env, ROUTER_ARGS: JSON.stringify(args), ROUTER_REPORT: reportFile, ROUTER_ORPHAN: join(directory, 'orphan.pid'), ROUTER_MODE: mode, ROUTER_PROVIDER: provider } });
+      const child = spawn(process.execPath, [script], { ...options, env: { ...options.env, ROUTER_ARGS: JSON.stringify(args), ROUTER_REPORT: reportFile, ROUTER_ORPHAN: join(directory, 'orphan.pid'), ROUTER_MODE: mode, ROUTER_PROVIDER: provider, ROUTER_PROGRESS: JSON.stringify(progress) } });
       launched = { file, args, options, pid: child.pid };
       return child;
     },
@@ -147,6 +156,49 @@ for (const mode of ['missing-structured', 'error-result', 'tool-call']) {
     await assert.rejects(runAutoPromptModel(f.request, f.dependencies));
   });
 }
+test('Claude reports only bounded event names for unsupported protocol frames', async t => {
+  const knownName = await fixture(t, 'claude', 'unknown-system');
+  await assert.rejects(runAutoPromptModel(knownName.request, knownName.dependencies), {
+    message: 'Auto Prompt: Claude Code returned an unsupported routing event (system/fixture_unknown).',
+  });
+  const unsafeName = await fixture(t, 'claude', 'unsafe-event-name');
+  await assert.rejects(runAutoPromptModel(unsafeName.request, unsafeName.dependencies), {
+    message: 'Auto Prompt: Claude Code returned an unsupported routing event (unknown/unknown).',
+  });
+});
+test('Claude accepts documented retry and thinking progress before and between response frames', async t => {
+  const f = await fixture(t, 'claude', 'success', [
+    ...CLAUDE_PROGRESS,
+    { ...CLAUDE_PROGRESS[0], error_status: 429, error: 'rate_limit', no_response: { waited_ms: 10000, retry_wait_ms: 20000 } },
+  ]);
+  assert.deepEqual(await runAutoPromptModel(f.request, f.dependencies), DECISION);
+});
+for (const mode of ['incomplete', 'error-result', 'tool-call', 'unknown-system']) {
+  test(`Claude progress cannot hide ${mode}`, async t => {
+    const f = await fixture(t, 'claude', mode, CLAUDE_PROGRESS);
+    await assert.rejects(runAutoPromptModel(f.request, f.dependencies));
+    assert.deepEqual(await readdir(join(f.directory, 'state', 'tmp')), []);
+  });
+}
+test('Claude rejects malformed progress and execution events', async t => {
+  const invalid = [
+    { ...CLAUDE_PROGRESS[0], attempt: '1' },
+    { ...CLAUDE_PROGRESS[0], error_status: '429' },
+    { ...CLAUDE_PROGRESS[0], error: 'private diagnostic text' },
+    { ...CLAUDE_PROGRESS[0], no_response: { waited_ms: 1 } },
+    { ...CLAUDE_PROGRESS[1], estimated_tokens_delta: 0.5 },
+    { ...CLAUDE_PROGRESS[1], user_message_uuid: {} },
+    { ...CLAUDE_PROGRESS[2], content: {} },
+    { ...CLAUDE_PROGRESS[2], uuid: undefined },
+    { ...CLAUDE_PROGRESS[0], subtype: 'api_error' },
+    { ...CLAUDE_PROGRESS[2], subtype: 'hook_started', hook_name: 'fixture' },
+    { ...CLAUDE_PROGRESS[2], type: 'tool_progress', tool_name: 'Bash' },
+  ];
+  for (const frame of invalid) {
+    const f = await fixture(t, 'claude', 'success', [frame]);
+    await assert.rejects(runAutoPromptModel(f.request, f.dependencies), /unsupported routing event/);
+  }
+});
 test('Codex never extracts a JSON substring from a malformed decision', async t => {
   const f = await fixture(t, 'codex', 'bad-decision');
   await assert.rejects(runAutoPromptModel(f.request, f.dependencies), /malformed structured/);

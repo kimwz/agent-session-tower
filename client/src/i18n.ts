@@ -55,6 +55,7 @@ const errorTemplates = [
   'Codex가 요청한 상호작용({0})은 이 앱에서 지원하지 않습니다. 이 상호작용은 원래 Codex 앱에서 계속하세요.',
   '{0}를 사용할 수 없습니다. 설치와 로그인을 확인하세요.',
   'Auto Prompt: {0} CLI를 찾을 수 없습니다. 먼저 해당 CLI를 설치하고 로그인하세요.',
+  'Auto Prompt: Claude Code가 지원하지 않는 라우팅 이벤트를 반환했습니다 ({0}).',
   'Auto Prompt: {0} 라우팅이 정상적으로 종료되지 않았습니다. 해당 CLI의 로그인, 모델 접근 권한과 호환성을 확인하세요.',
 ].flatMap(key => [key, english[key]].map(template => {
   const names: string[] = [];

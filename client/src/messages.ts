@@ -83,6 +83,7 @@ export const english: Record<string, string> = {
   'Auto Prompt: Claude Code가 라우팅 중 실행 도구를 제공했습니다.': 'Auto Prompt: Claude Code exposed tools during routing.',
   'Auto Prompt: Claude Code가 라우팅 중 도구 실행을 시도했습니다.': 'Auto Prompt: Claude Code attempted a tool operation during routing.',
   'Auto Prompt: Claude Code가 지원하지 않는 라우팅 이벤트를 반환했습니다.': 'Auto Prompt: Claude Code returned an unsupported routing event.',
+  'Auto Prompt: Claude Code가 지원하지 않는 라우팅 이벤트를 반환했습니다 ({0}).': 'Auto Prompt: Claude Code returned an unsupported routing event ({0}).',
   'Auto Prompt: Codex가 지원하지 않는 라우팅 설정을 보고했습니다. CLI 호환성을 확인하세요.': 'Auto Prompt: Codex reported an unsupported routing configuration. Check CLI compatibility.',
   'Auto Prompt: Codex가 라우팅 중 도구 실행을 시도했습니다.': 'Auto Prompt: Codex attempted a tool operation during routing.',
   'Auto Prompt: Codex 라우팅이 실패했거나 지원하지 않는 이벤트를 반환했습니다. 해당 CLI의 로그인과 호환성을 확인하세요.': 'Auto Prompt: Codex routing failed or returned an unsupported event. Check native sign-in and CLI compatibility.',

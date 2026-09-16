@@ -33,6 +33,28 @@ const CODE_MODE_DISABLED_WARNING = 'Code Mode is unavailable because code-mode h
 const record = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
 const failure = (message: string) => new Error(`Auto Prompt: ${message}`);
 const cancelled = () => Object.assign(failure('routing was cancelled.'), { name: 'AbortError' });
+const eventName = (value: unknown): string => typeof value === 'string' && /^[a-zA-Z0-9_.-]{1,64}$/.test(value) ? value : 'unknown';
+const CLAUDE_RETRY_ERRORS = new Set([
+  'authentication_failed', 'oauth_org_not_allowed', 'account_on_hold', 'billing_error',
+  'rate_limit', 'overloaded', 'invalid_request', 'model_not_found', 'server_error', 'unknown', 'max_output_tokens',
+]);
+
+// Claude Code 2.1.263's SDK schema identifies these as reasoning/retry progress.
+// They neither run tools nor complete a decision; the final result is still required.
+function isClaudeRoutingProgress(frame: Record<string, any>): boolean {
+  if (frame.type !== 'system' || typeof frame.uuid !== 'string' || typeof frame.session_id !== 'string') return false;
+  if (frame.subtype === 'thinking') return typeof frame.content === 'string';
+  if (frame.subtype === 'thinking_tokens') return Number.isSafeInteger(frame.estimated_tokens)
+    && Number.isSafeInteger(frame.estimated_tokens_delta)
+    && (frame.user_message_uuid === undefined || typeof frame.user_message_uuid === 'string');
+  if (frame.subtype === 'api_retry') return Number.isSafeInteger(frame.attempt)
+    && Number.isSafeInteger(frame.max_retries) && Number.isSafeInteger(frame.retry_delay_ms)
+    && (frame.error_status === null || Number.isSafeInteger(frame.error_status))
+    && CLAUDE_RETRY_ERRORS.has(frame.error)
+    && (frame.no_response === undefined || record(frame.no_response)
+      && Number.isSafeInteger(frame.no_response.waited_ms) && Number.isSafeInteger(frame.no_response.retry_wait_ms));
+  return false;
+}
 
 // Installed Codex 0.153.4 exposes these config controls. Its own temporary
 // structured-thread path disables the same execution and utility features.
@@ -193,7 +215,10 @@ function collect(options: AutoPromptModelRequest, dependencies: AutoPromptNative
           if (!record(frame.message) || !Array.isArray(frame.message.content)
             || frame.message.content.some((block: any) => !record(block) || !['text', 'thinking', 'redacted_thinking'].includes(block.type)
               && !(block.type === 'tool_use' && block.name === 'StructuredOutput'))) stop(failure('Claude Code attempted a tool operation during routing.'));
-        } else if (!['user', 'rate_limit_event'].includes(frame.type)) stop(failure('Claude Code returned an unsupported routing event.'));
+        } else if (!['user', 'rate_limit_event'].includes(frame.type) && !isClaudeRoutingProgress(frame)) {
+          const name = eventName(frame.type) + (frame.subtype === undefined ? '' : `/${eventName(frame.subtype)}`);
+          stop(failure(`Claude Code returned an unsupported routing event (${name}).`));
+        }
         return;
       }
       if (['item.started', 'item.updated', 'item.completed'].includes(frame.type)) {

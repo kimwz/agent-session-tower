@@ -168,6 +168,26 @@ test('Auto Prompt provider error templates preserve native provider names in eit
   }
 });
 
+test('Claude routing diagnostics preserve event identifiers and legacy errors in both languages', () => {
+  for (const identifier of ['system/thinking_tokens', 'system/future_event.v2', 'unknown']) {
+    const en = `Auto Prompt: Claude Code returned an unsupported routing event (${identifier}).`;
+    const ko = `Auto Prompt: Claude Code가 지원하지 않는 라우팅 이벤트를 반환했습니다 (${identifier}).`;
+    setLanguage('ko'); assert.equal(translateMessage(en), ko);
+    setLanguage('en'); assert.equal(translateMessage(ko), en);
+    for (const language of ['ko', 'en'] as const) {
+      setLanguage(language);
+      for (const partial of [`The model said: ${en}`, `${en} Native follow-up text.`]) assert.equal(translateMessage(partial), partial);
+      const messages = [{ id: 'native', role: 'assistant' as const, timestamp: '2026-09-16T00:00:00Z', text: en }];
+      const transcript = renderToStaticMarkup(createElement(ChatTranscript, { messages }));
+      assert.ok(transcript.includes(en), 'a native conversation retains the exact diagnostic text');
+    }
+  }
+  const legacyEn = 'Auto Prompt: Claude Code returned an unsupported routing event.';
+  const legacyKo = 'Auto Prompt: Claude Code가 지원하지 않는 라우팅 이벤트를 반환했습니다.';
+  setLanguage('ko'); assert.equal(translateMessage(legacyEn), legacyKo);
+  setLanguage('en'); assert.equal(translateMessage(legacyKo), legacyEn);
+});
+
 test('Auto Prompt localization leaves model reasons, partial errors and unknown native text untouched', () => {
   const nativeReason = 'Auto Prompt: Codex 세션에서 src/편집기.ts 작업을 이어갑니다. Model: gpt-5.6-sol.';
   const unknown = [
