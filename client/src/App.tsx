@@ -155,7 +155,6 @@ export function App() {
   }, [openAutoPrompt, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar]);
   const closeAutoPrompt = useCallback(() => setShowAutoPrompt(false), []);
   const openAutoPromptSession = useCallback((id: string) => {
-    setShowClosed(false); setProvider('all'); setStatus('all'); setProject('all'); setQuery(''); setPeriod('all');
     selectSession(id);
     refresh();
   }, [refresh, selectSession]);
