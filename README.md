@@ -33,7 +33,7 @@ Requires **Node.js 22.13+**, **npm**, and **Git**. Use your existing Claude Code
 
 - **See existing sessions immediately.** Automatically discovers local Claude Code and Codex histories, including sessions started outside Tower.
 - **Follow work on a live graph.** View projects, sessions, and subagents together, with working, waiting, completed, and error states.
-- **Check account usage.** See Claude Code and Codex usage as small donuts under the machine node. Hover or focus for usage windows and reset times.
+- **Check account usage.** See Claude Code and Codex usage as small donuts inside the machine node. Hover or focus for usage windows and reset times.
 - **Create new sessions.** Choose Claude Code or Codex, pick an existing project folder, and send the first request from the web.
 - **Continue a conversation.** Read the original history and send the next instruction to the same native session. Attach files or paste images.
 - **Choose a model in chat.** Keep the agent's default or select a model for your next request.

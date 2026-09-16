@@ -29,7 +29,7 @@ export function ProviderUsageMeter({ provider, health }: { provider: Provider; h
         <svg viewBox="0 0 36 36"><circle className="usage-track" cx="18" cy="18" r="15" />{primary && <circle className="usage-fill" cx="18" cy="18" r="15" pathLength="100" strokeDasharray={`${Math.min(100, primary.usedPercent)} 100`} />}</svg>
         <ProviderIcon provider={provider} size={14} />
       </span>
-      <span className="usage-summary"><strong>{percent}{stale && <i aria-hidden="true">*</i>}</strong><small>{provider === 'claude' ? 'Claude' : 'Codex'} · {label}</small></span>
+      <span className="usage-summary"><strong>{percent}{stale && <i aria-hidden="true">*</i>}</strong><small>{provider === 'claude' ? 'Claude' : 'Codex'} · {primary ? usageWindowLabel(primary) : label}</small></span>
     </button>
     {open && <div className="usage-tooltip" id={id} role="tooltip">
       <strong>{t('{0} 계정 사용량', { 0: providerLabels[provider] })}</strong>

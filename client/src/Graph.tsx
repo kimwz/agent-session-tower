@@ -99,18 +99,18 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
       const savedProject = manualLayout.projects[projectId];
       if (manual && savedProject) {
         const bounds = manualProjectBounds(manualLayout, projectId, visibleAgentIds)!;
-        ns.push({ id: projectId, type: 'projectGroup', position: bounds.position, data: projectData, style: { width: bounds.width, height: bounds.height }, dragHandle: '.project-drag-handle', selectable: false, draggable: true, focusable: false });
+        ns.push({ id: projectId, type: 'projectGroup', zIndex: 1, position: bounds.position, data: projectData, style: { width: bounds.width, height: bounds.height }, dragHandle: '.project-drag-handle', selectable: false, draggable: true, focusable: false });
       } else {
-        ns.push({ id: projectId, type: 'projectGroup', position: { x, y: 185 }, data: projectData, style: { width, height: rows * 215 + 121 }, draggable: false, selectable: false, focusable: false });
+        ns.push({ id: projectId, type: 'projectGroup', zIndex: 1, position: { x, y: 185 }, data: projectData, style: { width, height: rows * 215 + 121 }, draggable: false, selectable: false, focusable: false });
       }
-      es.push({ id: `host-${projectId}`, source: 'host', target: projectId, type: 'smoothstep', animated: motion && members.some(s => s.status === 'working'), style: { stroke: '#3b4d63', strokeWidth: 1.2 }, pathOptions: { borderRadius: 14 } } as Edge);
+      es.push({ id: `host-${projectId}`, source: 'host', target: projectId, type: 'smoothstep', zIndex: 0, animated: motion && members.some(s => s.status === 'working'), style: { stroke: '#3b4d63', strokeWidth: 1.2 }, pathOptions: { borderRadius: 14 } } as Edge);
       members.forEach((session, index) => {
         const savedAgent = manualLayout.agents[session.id];
         const placedManually = manual && savedProject && savedAgent;
         // Flat world positions keep pointer and drag-stop coordinates independent
         // from the enclosing rectangle as its origin follows moving cards.
-        ns.push({ id: session.id, type: 'agent', position: placedManually ? { x: savedProject.position.x + savedAgent.position.x, y: savedProject.position.y + savedAgent.position.y } : { x: x + 20 + (index % columns) * 268, y: 291 + Math.floor(index / columns) * 215 }, zIndex: 1, ...(placedManually ? { dragHandle: '.agent-card' } : {}), data: { session, selected: session.id === selectedId, unread: unreadIds?.has(session.id) || false, onSelect }, style: { pointerEvents: 'all' }, draggable: !!placedManually, selectable: false, focusable: false });
-        es.push({ id: `edge-${session.id}`, source: projectId, target: session.id, type: 'smoothstep', animated: motion && session.status === 'working', zIndex: 0, style: { stroke: session.status === 'working' ? (session.provider === 'claude' ? '#ba9060' : '#4b998b') : '#2b3b4e', strokeWidth: 1.1, opacity: session.status === 'completed' ? 0.55 : 0.95 }, pathOptions: { borderRadius: 10 } } as Edge);
+        ns.push({ id: session.id, type: 'agent', position: placedManually ? { x: savedProject.position.x + savedAgent.position.x, y: savedProject.position.y + savedAgent.position.y } : { x: x + 20 + (index % columns) * 268, y: 291 + Math.floor(index / columns) * 215 }, zIndex: 3, ...(placedManually ? { dragHandle: '.agent-card' } : {}), data: { session, selected: session.id === selectedId, unread: unreadIds?.has(session.id) || false, onSelect }, style: { pointerEvents: 'all' }, draggable: !!placedManually, selectable: false, focusable: false });
+        es.push({ id: `edge-${session.id}`, source: projectId, target: session.id, type: 'smoothstep', animated: motion && session.status === 'working', zIndex: 2, style: { stroke: session.status === 'working' ? (session.provider === 'claude' ? '#ba9060' : '#4b998b') : '#2b3b4e', strokeWidth: 1.1, opacity: session.status === 'completed' ? 0.55 : 0.95 }, pathOptions: { borderRadius: 10 } } as Edge);
       });
       x += width + 36;
     });

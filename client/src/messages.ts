@@ -253,6 +253,7 @@ export const english: Record<string, string> = {
   '제목 없는 세션': 'Untitled session',
   '요청을 처리하지 못했습니다 ({0})': 'Could not process the request ({0})',
   '언어': 'Language',
+  '에이전트 기본값': 'Agent default',
   '에이전트 기본값 (변경 없음)': 'Agent default (no override)',
   '다음 요청에 적용': 'Applies to the next request',
   '기존 모델 유지: {0}': 'Keep existing model: {0}',
