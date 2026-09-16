@@ -15,6 +15,50 @@ const session: Session = {
 };
 const run: Run = { id: 'run-1', sessionId: session.id, prompt: 'Continue', status: 'queued', createdAt: new Date().toISOString(), output: '' };
 
+test('tool approvals require authentication, reject modified inputs, and preserve backend stale-request errors', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-http-approvals-'));
+  const decisions: Array<{ runId: string; approvalId: string; decision: string }> = [];
+  const pending = new Set(['allow-request', 'deny-request', 'permission/1']);
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir,
+    remote: { password: 'approval-fixture', origins: new Set() }, backend: {
+      snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: new Date().toISOString() }),
+      detail: async () => undefined, enqueue: async () => run, cancel: async () => {}, subscribe: () => () => {},
+      respondToApproval: async (runId, approvalId, decision) => {
+        if (runId !== run.id || !pending.delete(approvalId)) throw Object.assign(new Error('Approval is no longer pending.'), { statusCode: 409 });
+        decisions.push({ runId, approvalId, decision });
+        return { ...run, status: 'running' };
+      },
+    },
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
+  const authorization = `Basic ${Buffer.from('monitor:approval-fixture').toString('base64')}`;
+  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { authorization } })).json();
+  const headers = { authorization, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+  const endpoint = `${base}/api/runs/${run.id}/approvals/allow-request`;
+  const send = (body: unknown, suppliedHeaders = headers, url = endpoint) => fetch(url, { method: 'POST', headers: suppliedHeaders, body: JSON.stringify(body) });
+  assert.equal((await send({ decision: 'allow' }, { ...headers, authorization: '' })).status, 401);
+  assert.equal((await send({ decision: 'allow' }, { ...headers, 'X-Agent-Monitor-Token': '' })).status, 403);
+  assert.equal((await send({ decision: 'allow' }, { ...headers, Origin: 'https://attacker.example' } as typeof headers)).status, 403);
+  assert.equal((await send({ decision: 'allow' }, { ...headers, 'Sec-Fetch-Site': 'cross-site' } as typeof headers)).status, 403);
+  for (const body of [{}, { decision: 'always' }, { decision: true }, { decision: 'allow', input: { command: 'changed' } }, { decision: 'allow', updatedPermissions: [] }]) {
+    assert.equal((await send(body)).status, 400);
+  }
+  assert.deepEqual(decisions, []);
+  const allowed = await send({ decision: 'allow' });
+  assert.equal(allowed.status, 200); assert.equal((await allowed.json()).run.status, 'running');
+  assert.equal((await send({ decision: 'allow' })).status, 409);
+  assert.equal((await send({ decision: 'deny' }, headers, `${base}/api/runs/${run.id}/approvals/deny-request`)).status, 200);
+  assert.equal((await send({ decision: 'allow' }, headers, `${base}/api/runs/${run.id}/approvals/${encodeURIComponent('permission/1')}`)).status, 200);
+  assert.equal((await send({ decision: 'allow' }, headers, `${base}/api/runs/another-run/approvals/unknown`)).status, 409);
+  assert.deepEqual(decisions, [
+    { runId: run.id, approvalId: 'allow-request', decision: 'allow' },
+    { runId: run.id, approvalId: 'deny-request', decision: 'deny' },
+    { runId: run.id, approvalId: 'permission/1', decision: 'allow' },
+  ]);
+});
+
 test('local HTTP service protects session data and task mutations, and streams real snapshots', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'monitor-http-'));
   await writeFile(join(dir, 'index.html'), '<!doctype html><title>Agent Session Tower</title>');

@@ -11,6 +11,8 @@ import { attachmentMetadata, attachmentPrompt, AttachmentStore } from './attachm
 import { normalizeSessionTitle } from './session-titles.js';
 import type { CodexBridgeRun, CodexBridgeOptions } from './codex-app-server.js';
 import { requestedModel, validModelId } from './models.js';
+import { ClaudeControl } from './claude-control.js';
+import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -23,11 +25,13 @@ interface RunnerOptions {
   maxConcurrent?: number;
   pollMs?: number;
   openCodexBridge?: (options: Omit<CodexBridgeOptions, 'codexHome'>) => Promise<CodexBridgeRun | undefined>;
+  openCodexStdio?: (options: CodexStdioOptions) => Promise<CodexStdioRun>;
 }
 interface OwnedProcess {
   child: ChildProcessWithoutNullStreams;
   done: Promise<void>;
   killTimer?: ReturnType<typeof setTimeout>;
+  claude?: ClaudeControl;
 }
 interface CreatedSession {
   session: Session;
@@ -80,19 +84,18 @@ export function buildResumeArgs(session: Session, model?: string): string[] {
   const override = requestedModel(model);
   if (session.provider === 'claude') return [
     '-p', '--resume', session.nativeId, '--output-format', 'stream-json', '--verbose',
-    '--include-partial-messages', '--permission-mode', 'acceptEdits', '--permission-prompts', 'none', ...(override ? ['--model', override] : []),
+    '--include-partial-messages', '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--permission-prompts', 'host', ...(override ? ['--model', override] : []),
   ];
-  return ['exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="never"',
-    'resume', session.nativeId, '-', '--json', '--skip-git-repo-check', ...(override ? ['--model', override] : [])];
+  return ['app-server', '--stdio'];
 }
 
 export function buildCreateArgs(session: Session, model?: string): string[] {
   const override = requestedModel(model);
   if (session.provider === 'claude') return [
     '-p', '--session-id', session.nativeId, '--output-format', 'stream-json', '--verbose',
-    '--include-partial-messages', '--permission-mode', 'acceptEdits', '--permission-prompts', 'none', ...(override ? ['--model', override] : []),
+    '--include-partial-messages', '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--permission-prompts', 'host', ...(override ? ['--model', override] : []),
   ];
-  return ['exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="never"', '-', '--json', '--skip-git-repo-check', ...(override ? ['--model', override] : [])];
+  return ['app-server', '--stdio'];
 }
 
 /** Owns only processes launched by this monitor; never signals an external agent. */
@@ -105,6 +108,7 @@ export class RunManager extends EventEmitter {
   private readonly runs = new Map<string, Run>();
   private readonly owned = new Map<string, OwnedProcess>();
   private readonly bridged = new Map<string, CodexBridgeRun>();
+  private readonly stdio = new Map<string, CodexStdioRun>();
   private readonly reservedSessions = new Set<string>();
   private readonly admissions = new Set<string>();
   private readonly locallySettled = new Map<string, number>();
@@ -142,6 +146,8 @@ export class RunManager extends EventEmitter {
         if (!isSavedRun(value)) continue;
         const run: Run = { ...value, prompt: value.prompt.slice(0, MAX_PROMPT), output: value.output.slice(-MAX_OUTPUT),
           ...(value.attachments ? { attachments: value.attachments.map(item => attachmentMetadata(item)!) } : {}) };
+        // A permission request belongs to a live process, never a restored run.
+        delete run.approvals;
         if (run.status === 'running' || run.status === 'queued') {
           run.status = run.status === 'running' ? 'error' : 'cancelled';
           run.error = 'Agent Session Tower stopped before this task finished. It was not restarted; send the instruction again to continue.';
@@ -159,7 +165,8 @@ export class RunManager extends EventEmitter {
     this.pollTimer.unref();
   }
 
-  list(): Run[] { return [...this.runs.values()].map((run) => ({ ...run, ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}) })); }
+  list(): Run[] { return [...this.runs.values()].map((run) => ({ ...run, ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
+    ...(run.approvals ? { approvals: structuredClone(run.approvals) } : {}) })); }
   async attachment(id: string) {
     const { metadata, content } = await this.attachments.read(id);
     return { metadata, content };
@@ -296,12 +303,32 @@ export class RunManager extends EventEmitter {
       await this.flush();
       return;
     }
+    const stdio = this.stdio.get(runId);
+    if (stdio) {
+      await stdio.cancel();
+      await this.flush();
+      return;
+    }
     run.status = 'cancelled';
     run.finishedAt = new Date().toISOString();
     const owned = this.owned.get(runId);
+    owned?.claude?.close();
     if (owned) this.stopOwned(runId, owned);
     this.changed();
     await this.flush();
+  }
+
+  async respondToApproval(runId: string, approvalId: string, decision: 'allow' | 'deny'): Promise<Run> {
+    const run = this.runs.get(runId);
+    if (!run) throw new RunError('Task not found.', 404);
+    const owned = this.owned.get(runId);
+    const stdio = this.stdio.get(runId);
+    if (this.stopping || run.status !== 'running' || (!owned?.claude && !stdio) || !run.approvals?.some(approval => approval.id === approvalId)) {
+      throw new RunError('This permission request is no longer pending. Refresh the conversation.', 409);
+    }
+    if (stdio) await stdio.respondToApproval(approvalId, decision);
+    else await owned!.claude!.respond(approvalId, decision);
+    return this.list().find(item => item.id === runId)!;
   }
 
   async close(): Promise<void> {
@@ -310,7 +337,7 @@ export class RunManager extends EventEmitter {
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.notifyTimer) { clearTimeout(this.notifyTimer); this.notifyTimer = undefined; }
     for (const run of this.runs.values()) {
-      if ((run.status === 'queued' || run.status === 'running') && !this.bridged.has(run.id)) {
+      if ((run.status === 'queued' || run.status === 'running') && !this.bridged.has(run.id) && !this.stdio.has(run.id)) {
         run.status = 'cancelled';
         run.finishedAt = new Date().toISOString();
         run.error = 'Stopped when Agent Session Tower shut down. This task will not restart automatically.';
@@ -318,9 +345,11 @@ export class RunManager extends EventEmitter {
     }
     const processes = [...this.owned.entries()];
     const bridges = [...this.bridged.entries()];
+    const stdio = [...this.stdio.values()];
     for (const [id, owned] of processes) this.stopOwned(id, owned);
     await Promise.all([
       ...processes.map(([, owned]) => owned.done),
+      ...stdio.map(async owned => { try { await owned.cancel(); } catch { /* The adapter records unconfirmed cancellation as an error. */ } finally { owned.close(); await owned.done; } }),
       ...bridges.map(async ([id, bridge]) => {
         try { await bridge.cancel(); }
         catch {
@@ -365,7 +394,7 @@ export class RunManager extends EventEmitter {
       await this.options.refreshSessions();
       for (const run of this.runs.values()) {
         if (this.stopping) break;
-        if (this.owned.size + this.bridged.size >= (this.options.maxConcurrent ?? 2)) break;
+        if (this.owned.size + this.bridged.size + this.stdio.size >= (this.options.maxConcurrent ?? 2)) break;
         if (run.status !== 'queued' || this.admissions.has(run.id)) continue;
         const session = this.getSession(run.sessionId);
         const creating = this.createdSessions.get(run.sessionId)?.runId === run.id;
@@ -448,25 +477,97 @@ export class RunManager extends EventEmitter {
     return true;
   }
 
+  private async launchCodex(run: Run, session: Session, creating: boolean): Promise<void> {
+    const executable = await this.executable('codex');
+    if (!executable) throw new Error('Codex CLI is no longer available in PATH.');
+    if (!(await stat(session.cwd)).isDirectory()) throw new Error('The session working directory no longer exists.');
+    const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
+    const latest = this.getSession(session.id);
+    if (run.status !== 'queued' || this.stopping || (latest && (this.isWorking(latest) || latest.activeProcess))) {
+      this.reservedSessions.delete(session.id);
+      return;
+    }
+    if (!creating) this.validateSession(latest);
+    else if (!latest) throw new RunError('Session no longer exists.', 404);
+    const env = { ...process.env, ...this.options.env };
+    env.PATH = providerDirectories(env).join(delimiter);
+    delete env.CLAUDECODE;
+    delete env.CLAUDE_CODE_SESSION_ID;
+    let started = false;
+    let registered = false;
+    const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
+      executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
+      ...(!creating ? { threadId: session.nativeId } : {}), ...(run.model ? { model: run.model } : {}),
+      prompt: attachmentPrompt(run.prompt, attachments),
+      imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path),
+      onSession: async id => {
+        if (!UUID.test(id) || (!creating && id !== session.nativeId)) throw new Error('Codex returned a different or invalid conversation ID. No message was submitted.');
+        if (run.status !== 'running' || this.stopping) throw new Error('The task stopped before a message was submitted.');
+        if (creating) {
+          const created = this.createdSessions.get(session.id);
+          if (!created || (created.confirmed && created.session.nativeId !== id)) throw new Error('The new conversation identity changed. No message was submitted.');
+          created.confirmed = true; created.session.nativeId = id; created.session.creationPending = false; session.nativeId = id;
+          this.changed();
+          try { await this.flush(); }
+          catch (error) { throw new Error(`Cannot save the new conversation identity: ${errorMessage(error)}`); }
+        }
+      },
+      onStarted: (_turnId, startedAt) => {
+        if (FINISHED.has(run.status)) return;
+        started = true; run.startedAt = startedAt ?? new Date().toISOString(); this.changed();
+      },
+      onOutput: text => { if (!FINISHED.has(run.status)) this.append(run, text); },
+      onApproval: approval => { if (run.status === 'running') { run.approvals = [...(run.approvals || []), approval]; this.changed(); } },
+      onApprovalCancelled: id => {
+        if (!run.approvals?.some(approval => approval.id === id)) return;
+        run.approvals = run.approvals.filter(approval => approval.id !== id);
+        if (!run.approvals.length) delete run.approvals;
+        this.changed();
+      },
+      // The adapter reports completion only after its native child has closed.
+      onFinished: result => {
+        if (!registered) return;
+        this.stdio.delete(run.id); this.reservedSessions.delete(session.id); delete run.approvals;
+        if (started) {
+          this.settledRuns.add(run.id); this.locallySettled.delete(session.id); this.locallySettled.set(session.id, Date.now());
+          if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
+        }
+        if (!FINISHED.has(run.status)) {
+          run.status = result.status; run.error = result.error; run.finishedAt = result.finishedAt ?? new Date().toISOString();
+        }
+        this.changed();
+        if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
+      },
+    });
+    // Opening an adapter does not spawn. Admission can be cancelled during discovery.
+    const current = this.getSession(session.id);
+    if (run.status !== 'queued' || this.stopping || (current && (this.isWorking(current) || current.activeProcess))) {
+      owned.close(); this.reservedSessions.delete(session.id); return;
+    }
+    registered = true;
+    this.stdio.set(run.id, owned);
+    run.status = 'running'; run.output = ''; this.changed();
+    // Initialization is independently cancellable and does not block unrelated sessions.
+    void owned.start().catch(() => { owned.close(); });
+  }
+
   private async launch(run: Run, session: Session, creating = false): Promise<void> {
+    if (session.provider === 'codex') return this.launchCodex(run, session, creating);
     const executable = await this.executable(session.provider);
     if (!executable) throw new Error(`${session.provider} CLI is no longer available in PATH.`);
     if (!(await stat(session.cwd)).isDirectory()) throw new Error('The session working directory no longer exists.');
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     const images = attachments.filter(item => isImageAttachment(item.metadata.mimeType));
     const args = creating ? buildCreateArgs(session, run.model) : buildResumeArgs(session, run.model);
-    if (session.provider === 'claude') {
-      if (images.length) args.push('--input-format', 'stream-json');
-      for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
-    } else for (const image of images) args.push('--image', image.path);
+    for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
     const prompt = attachmentPrompt(run.prompt, attachments);
-    const input = session.provider === 'claude' && images.length ? JSON.stringify({
+    const input = {
       type: 'user', session_id: session.nativeId, parent_tool_use_id: null,
       message: { role: 'user', content: [
         { type: 'text', text: prompt },
         ...images.map(item => ({ type: 'image', source: { type: 'base64', media_type: item.metadata.mimeType, data: item.content.toString('base64') } })),
       ] },
-    }) + '\n' : prompt;
+    };
     // Recheck after asynchronous filesystem discovery, immediately before creating the writer.
     const latest = this.getSession(session.id);
     if (run.status !== 'queued' || this.stopping || (latest && (this.isWorking(latest) || (latest.provider === 'codex' && latest.activeProcess)))) {
@@ -492,22 +593,35 @@ export class RunManager extends EventEmitter {
     let buffer = '';
     let stderr = '';
     let streamError: string | undefined;
-    let providerError: string | undefined;
     let sawCompletion = false;
     let sawSessionId = false;
     let sawPartial = false;
     let messageHasPartial = false;
     let identitySaved: Promise<void> = Promise.resolve();
+    owned.claude = new ClaudeControl({
+      write: message => new Promise<void>((resolve, reject) => {
+        if (run.status !== 'running' || child.exitCode !== null || child.stdin.destroyed || child.stdin.writableEnded) { reject(new Error('Provider input is closed.')); return; }
+        child.stdin.write(JSON.stringify(message) + '\n', error => error ? reject(error) : resolve());
+      }),
+      onApproval: approval => { if (run.status === 'running') { run.approvals = [...(run.approvals || []), approval]; this.changed(); } },
+      onCancelled: id => {
+        if (!run.approvals?.some(approval => approval.id === id)) return;
+        run.approvals = run.approvals.filter(approval => approval.id !== id);
+        if (!run.approvals.length) delete run.approvals;
+        this.changed();
+      },
+      onError: error => { streamError = error.message; this.stopOwned(run.id, owned); },
+    });
     const parseEventLine = (line: string): void => {
       if (!line.trim()) return;
       let event: Record<string, any>;
       try { event = JSON.parse(line); } catch { this.append(run, line + '\n'); return; }
       if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error('Expected a provider event object.');
-      const actualId = session.provider === 'codex' && event.type === 'thread.started' ? event.thread_id
-        : session.provider === 'claude' && event.type === 'system' && event.subtype === 'init' ? event.session_id : undefined;
+      if (owned.claude?.handle(event)) return;
+      const actualId = event.type === 'system' && event.subtype === 'init' ? event.session_id : undefined;
       const created = creating ? this.createdSessions.get(session.id) : undefined;
       if (actualId && created && !created.confirmed && typeof actualId === 'string' && UUID.test(actualId)
-        && (session.provider === 'codex' || actualId === session.nativeId)) {
+        && actualId === session.nativeId) {
         created.confirmed = true;
         created.session.nativeId = actualId;
         created.session.creationPending = false;
@@ -524,42 +638,30 @@ export class RunManager extends EventEmitter {
         this.stopOwned(run.id, owned);
         return;
       }
-      if (session.provider === 'codex') {
-        if (event.type === 'item.completed') {
-          if (event.item?.type === 'agent_message') this.append(run, String(event.item.text ?? '') + '\n\n');
-          else if (event.item?.type === 'command_execution') this.append(run, `$ ${String(event.item.command ?? '')}\n${String(event.item.aggregated_output ?? '').slice(-4000)}\n`);
-          else if (event.item?.type === 'file_change') this.append(run, `Updated ${event.item.changes?.map((change: any) => change.path).join(', ') ?? 'workspace files'}\n`);
-        } else if (event.type === 'turn.completed') {
-          sawCompletion = true;
-        } else if (event.type === 'error' || event.type === 'turn.failed') {
-          providerError = String(event.message ?? event.error?.message ?? 'Codex could not complete this turn.');
-          if (event.type === 'turn.failed') streamError = providerError;
-          this.append(run, providerError + '\n');
+      if (event.type === 'stream_event') {
+        if (event.event?.type === 'message_start') messageHasPartial = false;
+        const delta = event.event?.delta;
+        if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
+          this.append(run, delta.text); sawPartial = true; messageHasPartial = true;
         }
-      } else {
-        if (event.type === 'stream_event') {
-          if (event.event?.type === 'message_start') messageHasPartial = false;
-          const delta = event.event?.delta;
-          if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
-            this.append(run, delta.text); sawPartial = true; messageHasPartial = true;
-          }
-          if (event.event?.type === 'message_stop' && messageHasPartial) this.append(run, '\n\n');
-        } else if (event.type === 'assistant') {
-          for (const block of event.message?.content ?? []) {
-            if (block.type === 'text' && !messageHasPartial) this.append(run, String(block.text) + '\n\n');
-            if (block.type === 'tool_use') this.append(run, `[${block.name}]\n`);
-          }
-          messageHasPartial = false;
-        } else if (event.type === 'result') {
-          sawCompletion = true;
-          if (event.is_error) streamError = (event.errors ?? [event.result ?? 'Claude Code could not complete this turn.']).join('\n');
-          if (event.permission_denials?.length) {
-            const denied = [...new Set(event.permission_denials.map((denial: any) => denial.tool_name ?? 'tool'))].join(', ');
-            streamError = `Permission required for: ${denied}. Review permissions in the original CLI and send the instruction again.`;
-            this.append(run, `\n${streamError}\n`);
-          }
-          if (!sawPartial && !run.output && event.result) this.append(run, String(event.result));
+        if (event.event?.type === 'message_stop' && messageHasPartial) this.append(run, '\n\n');
+      } else if (event.type === 'assistant') {
+        for (const block of event.message?.content ?? []) {
+          if (block.type === 'text' && !messageHasPartial) this.append(run, String(block.text) + '\n\n');
+          if (block.type === 'tool_use') this.append(run, `[${block.name}]\n`);
         }
+        messageHasPartial = false;
+      } else if (event.type === 'result') {
+        sawCompletion = true;
+        owned.claude?.close();
+        child.stdin.end();
+        if (event.is_error) streamError = (event.errors ?? [event.result ?? 'Claude Code could not complete this turn.']).join('\n');
+        if (event.permission_denials?.length) {
+          const denied = [...new Set(event.permission_denials.map((denial: any) => denial.tool_name ?? 'tool'))].join(', ');
+          streamError = `Permission was denied for: ${denied}. The instruction could not complete with the current permissions.`;
+          this.append(run, `\n${streamError}\n`);
+        }
+        if (!sawPartial && !run.output && event.result) this.append(run, String(event.result));
       }
     };
     const parseLine = (line: string): void => {
@@ -582,32 +684,30 @@ export class RunManager extends EventEmitter {
     child.on('error', (error: Error) => { streamError = errorMessage(error); });
     child.on('close', async (code: number | null, signal: NodeJS.Signals | null) => {
       if (buffer) parseLine(buffer);
+      owned.claude?.close();
       // A newly bound UUID must be durable before this turn reports success.
       await identitySaved;
       if (owned.killTimer) clearTimeout(owned.killTimer);
       this.owned.delete(run.id);
       this.reservedSessions.delete(session.id);
-      const writerConflict = session.provider === 'codex' && !sawSessionId && /already has an active writer|thread-store conflict/i.test(`${stderr}\n${providerError ?? ''}\n${streamError ?? ''}`);
-      if (!writerConflict) {
-        this.settledRuns.add(run.id);
-        this.locallySettled.delete(session.id);
-        this.locallySettled.set(session.id, Date.now());
-        if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
-      }
+      this.settledRuns.add(run.id);
+      this.locallySettled.delete(session.id);
+      this.locallySettled.set(session.id, Date.now());
+      if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
       if (run.status !== 'cancelled') {
-        if (writerConflict) streamError = '다른 Codex 프로세스가 이 세션의 쓰기 권한을 보유하고 있습니다. 기존 앱 서버와 연결할 수 없었습니다. 원래 앱에서 이 요청이 실행되지 않았는지 확인한 뒤 다시 보내 주세요.';
-        if (!streamError && code === 0 && (!sawCompletion || !sawSessionId)) streamError = providerError ?? 'The provider exited without confirming completion in the requested conversation.';
+        if (!streamError && code === 0 && (!sawCompletion || !sawSessionId)) streamError = 'The provider exited without confirming completion in the requested conversation.';
         if (streamError || code !== 0) this.fail(run, streamError ?? (stderr.trim() || `The provider exited ${signal ? `with signal ${signal}` : `with code ${code ?? 'unknown'}`}.`));
         else { run.status = 'completed'; run.finishedAt = new Date().toISOString(); this.changed(); }
       } else this.changed();
       finish();
       if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
     });
-    child.stdin.end(input);
+    owned.claude.start(input);
     this.changed();
   }
 
   private stopOwned(id: string, owned: OwnedProcess): void {
+    owned.claude?.close();
     const signal = (name: NodeJS.Signals): void => {
       if (this.owned.get(id) !== owned) return;
       try {
@@ -645,7 +745,7 @@ export class RunManager extends EventEmitter {
   }
 
   private persist(): void {
-    const data = JSON.stringify(this.list());
+    const data = JSON.stringify(this.list().map(({ approvals: _liveApprovals, ...run }) => run));
     const created = JSON.stringify([...this.createdSessions.values()]);
     this.writes = this.writes.then(async () => {
       // Write identities first. A crash between commits may leave an orphaned

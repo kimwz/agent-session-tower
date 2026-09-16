@@ -80,6 +80,14 @@ export interface Run {
   error?: string;
   attachments?: Attachment[];
   model?: string;
+  approvals?: RunApproval[];
+}
+export interface RunApproval {
+  id: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  description?: string;
+  scope?: 'turn';
 }
 export interface Attachment {
   id: string;

@@ -17,6 +17,7 @@ export interface Backend {
   enqueue(id: string, prompt: string, attachments?: MessageAttachments): Promise<Run>;
   attachment?(id: string): Promise<{ metadata: Attachment; content: Buffer }>;
   cancel(id: string): Promise<void>;
+  respondToApproval?(runId: string, approvalId: string, decision: 'allow' | 'deny'): Promise<Run>;
   dismiss?(id: string): Promise<void>;
   subscribe(listener: () => void): () => void;
 }
@@ -199,6 +200,17 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
         const model = requestedModel(body.model);
         const run = await backend.enqueue(messageMatch[1], body.prompt.trim(), { attachments, attachmentIds, ...(model ? { model } : {}) });
         return json(res, 202, { run });
+      }
+      // Provider request IDs are opaque and may contain an encoded slash.
+      const approvalMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/approvals\/([^/]+)$/);
+      if (req.method === 'POST' && approvalMatch) {
+        const body = await readJson(req);
+        if ((body.decision !== 'allow' && body.decision !== 'deny') || Object.keys(body).length !== 1) {
+          return json(res, 400, { error: '승인 또는 거절을 선택하세요. 실행 내용은 변경할 수 없습니다.' });
+        }
+        if (!backend.respondToApproval) return json(res, 503, { error: '이 실행기의 승인 요청을 처리할 수 없습니다.' });
+        const run = await backend.respondToApproval(decodeURIComponent(approvalMatch[1]), decodeURIComponent(approvalMatch[2]), body.decision);
+        return json(res, 200, { run });
       }
       const cancelMatch = path.match(/^\/api\/runs\/([^/]+)\/cancel$/);
       if (req.method === 'POST' && cancelMatch) {

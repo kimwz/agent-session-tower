@@ -78,3 +78,56 @@ test('known runtime error templates translate in either direction without changi
   assert.equal(translateMessage('Invalid model. Choose a valid provider model.'), '모델이 올바르지 않습니다. 유효한 도구 모델을 선택하세요.');
   assert.equal(translateMessage('Codex could not apply the selected model. No message was submitted.'), 'Codex가 선택한 모델을 적용하지 못했습니다. 메시지를 보내지 않았습니다.');
 });
+
+test('approval denial, initialization and cancellation errors explain the same outcome in both languages', () => {
+  const cases = [
+    ['This permission request is no longer pending. Refresh the conversation.', '이 권한 요청은 더 이상 대기 중이 아닙니다. 대화를 새로고침하세요.'],
+    ['This approval is no longer pending. Refresh the conversation.', '이 승인 요청은 더 이상 대기 중이 아닙니다. 대화를 새로고침하세요.'],
+    ['Claude Code did not initialize its permission connection. No instruction was submitted.', 'Claude Code의 권한 연결 초기화가 완료되지 않았습니다. 요청을 보내지 않았습니다.'],
+    ['Could not confirm Codex cancellation. The owned process was stopped; check the native conversation before retrying.', 'Codex 취소를 확인하지 못했습니다. 이 앱에서 시작한 프로세스는 중지했습니다. 다시 시도하기 전에 원래 대화를 확인하세요.'],
+    ['Permission was denied for: Bash, mcp__github__pull_request. The instruction could not complete with the current permissions.', 'Bash, mcp__github__pull_request 권한이 거절되었습니다. 현재 권한으로 요청을 완료할 수 없습니다.'],
+    ['Codex did not acknowledge turn/start within 15 seconds.', 'Codex가 15초 안에 turn/start 요청을 확인하지 않았습니다.'],
+    ['EPIPE /사용자/경로\n{"method":"turn/start"} Codex may have received the request. It was not resent automatically; check the native conversation before retrying.', 'EPIPE /사용자/경로\n{"method":"turn/start"} Codex가 요청을 받았을 수 있습니다. 자동으로 다시 보내지 않았습니다. 다시 시도하기 전에 원래 대화를 확인하세요.'],
+  ];
+  for (const [en, ko] of cases) {
+    setLanguage('ko'); assert.equal(translateMessage(en), ko);
+    setLanguage('en'); assert.equal(translateMessage(ko), en);
+  }
+});
+
+test('known unsupported interactions localize the complete explanation while keeping the native method exact', () => {
+  const reasons = [
+    'The request does not belong to this monitored turn.',
+    'This request does not offer both a one-time approval and a supported denial. Use the native app to review it.',
+    'Codex did not provide the exact command or terminal input for review. Continue in the native app.',
+    'Codex did not provide the file changes for review. Continue in the native app.',
+    'Codex requested an unsupported permission profile.',
+    'Continue in the native Codex app for this interaction.',
+  ];
+  const method = 'item/permissions/requestApproval';
+  for (const reason of reasons) {
+    const en = `Codex requested an unsupported interaction (${method}). ${reason}`;
+    setLanguage('ko');
+    const ko = translateMessage(en);
+    assert.ok(ko.startsWith(`Codex가 요청한 상호작용(${method})은 이 앱에서 지원하지 않습니다.`));
+    assert.equal(ko.includes(reason), false, 'the application explanation must also be translated');
+    setLanguage('en'); assert.equal(translateMessage(ko), en);
+  }
+});
+
+test('approval localization does not match partial errors or alter native transcript content', () => {
+  const denied = 'Permission was denied for: Bash. The instruction could not complete with the current permissions.';
+  const unknown = [
+    `The model said: ${denied}`,
+    `${denied} Native follow-up text.`,
+    'Codex requested an unsupported interaction (custom/native). Unknown native explanation.',
+    'Native permission_denials: [{"tool_name":"Bash","input":{"command":"gh pr view 1"}}]',
+  ];
+  for (const language of ['ko', 'en'] as const) {
+    setLanguage(language);
+    for (const text of unknown) assert.equal(translateMessage(text), text);
+    const messages = [{ id: 'native', role: 'assistant' as const, timestamp: '2026-09-15T00:00:00Z', text: denied }];
+    const transcript = renderToStaticMarkup(createElement(ChatTranscript, { messages }));
+    assert.ok(transcript.includes(denied), 'even a known error stays verbatim inside a native message');
+  }
+});

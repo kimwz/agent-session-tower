@@ -2,7 +2,7 @@ import { translate as t, translateMessage, useI18n } from './i18n';
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentPropsWithoutRef, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, Copy, Folder, GitBranch, LoaderCircle, MessageSquare, Paperclip, RefreshCw, Send, Square, Terminal, Trash2, TriangleAlert, X } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, Copy, Folder, GitBranch, LoaderCircle, MessageSquare, Paperclip, RefreshCw, Send, ShieldQuestion, Square, Terminal, Trash2, TriangleAlert, X } from 'lucide-react';
 import type { ChatMessage, ProviderHealth, Run, Session, SessionDetail } from '../../shared/types';
 import { ProviderIcon } from './Icons';
 import { SessionTitleEditor } from './SessionTitleEditor';
@@ -16,6 +16,7 @@ import { MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attach
 import { draftFromRun, finishComposerSend, getComposerState, markComposerSending, setComposerDraft, setComposerError, startComposerSend, subscribeComposer, type ChatDraft } from './chat-drafts';
 import { matchChatRuns, type ChatRunMatch } from './chat-runs';
 import { ModelPicker } from './ModelPicker';
+import { RunApprovalCard } from './RunApprovalCard';
 
 const emptyMessages: readonly ChatMessage[] = [];
 
@@ -60,15 +61,16 @@ export const ChatTranscript = memo(function ChatTranscript({ messages, runMatche
   return <>{entries.map(entry => entry.kind === 'tools' ? <ToolMessageGroup key={`tools:${entry.id}`} group={entry} /> : <Message key={`message:${entry.message.id}`} message={entry.message} runMatch={runMatches?.get(entry.message.id)} />)}</>;
 });
 
-export const RunControl = memo(function RunControl({ run, onCancel, onRetry, cancelling, onDismiss, dismissing = false, disabled = false, retryDisabled = false, showPrompt = true }: { run: Run; onCancel: (id: string) => void; onRetry: (run: Run) => void; cancelling: boolean; onDismiss?: (id: string) => void; dismissing?: boolean; disabled?: boolean; retryDisabled?: boolean; showPrompt?: boolean }) {
+export const RunControl = memo(function RunControl({ run, onCancel, onRetry, cancelling, onDismiss, dismissing = false, disabled = false, retryDisabled = false, showPrompt = true, token = '', onSnapshotRefresh }: { run: Run; onCancel: (id: string) => void; onRetry: (run: Run) => void; cancelling: boolean; onDismiss?: (id: string) => void; dismissing?: boolean; disabled?: boolean; retryDisabled?: boolean; showPrompt?: boolean; token?: string; onSnapshotRefresh?: () => void }) {
   useI18n();
   if (run.status === 'completed' || run.status === 'cancelled') return null;
   const active = run.status === 'running' || run.status === 'queued';
+  const approvals = active ? run.approvals || [] : [];
   const preview = run.prompt || (run.attachments?.length ? run.attachments.map(file => file.name).join(', ') : t("보낸 요청"));
-  return <div data-run-id={run.id} className={`run-control ${run.status}`}>
+  return <div data-run-id={run.id} className={`run-control ${run.status}${approvals.length ? ' awaiting-approval' : ''}`}>
     <div className="run-control-line">
-      {active ? <LoaderCircle className="spin" size={12} aria-hidden="true" /> : <TriangleAlert size={12} aria-hidden="true" />}
-      <strong>{run.status === 'queued' ? t("전송 대기 중") : run.status === 'running' ? t("작업 중") : t("요청 실패")}</strong>
+      {approvals.length ? <ShieldQuestion size={12} aria-hidden="true" /> : active ? <LoaderCircle className="spin" size={12} aria-hidden="true" /> : <TriangleAlert size={12} aria-hidden="true" />}
+      <strong>{approvals.length ? t('작업 승인 대기') : run.status === 'queued' ? t("전송 대기 중") : run.status === 'running' ? t("작업 중") : t("요청 실패")}</strong>
       {showPrompt && <span className="run-control-preview" title={preview}>{cleanPreview(preview, 140)}</span>}
       <div className="run-control-actions">
         {active && <button type="button" disabled={disabled || cancelling} onClick={() => onCancel(run.id)}><Square size={10} aria-hidden="true" />{cancelling ? t("취소 중…") : run.status === 'queued' ? t("대기 취소") : t("중지")}</button>}
@@ -76,6 +78,7 @@ export const RunControl = memo(function RunControl({ run, onCancel, onRetry, can
       </div>
     </div>
     {run.status === 'error' && run.error && <p className="run-control-error">{translateMessage(run.error)}</p>}
+    {approvals.map(approval => <RunApprovalCard key={approval.id} runId={run.id} approval={approval} token={token} disabled={disabled || cancelling || !onSnapshotRefresh} onSnapshotRefresh={onSnapshotRefresh || (() => {})} />)}
   </div>;
 });
 
@@ -100,6 +103,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
   const [showMetadata, setShowMetadata] = useState(false);
   const [pageVisible, setPageVisible] = useState(() => document.visibilityState === 'visible');
   const scroller = useRef<HTMLDivElement>(null);
+  const runControls = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const mounted = useRef(true);
@@ -155,7 +159,9 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
 
   const current = session || detail?.session;
   const currentRuns = useMemo(() => runs.filter(run => run.sessionId === sessionId), [runs, sessionId]);
-  const controlRuns = useMemo(() => currentRuns.filter(run => run.status === 'running' || run.status === 'queued' || run.status === 'error'), [currentRuns]);
+  const controlRuns = useMemo(() => currentRuns.filter(run => run.status === 'running' || run.status === 'queued' || run.status === 'error').sort((a, b) => Number(!!b.approvals?.length) - Number(!!a.approvals?.length)), [currentRuns]);
+  const approvalKey = controlRuns.flatMap(run => run.status === 'error' ? [] : run.approvals?.map(approval => `${run.id}:${approval.id}`) || []).join('|');
+  useLayoutEffect(() => { if (approvalKey && runControls.current) runControls.current.scrollTop = 0; }, [approvalKey]);
   const runProjection = useMemo(() => matchChatRuns(detail?.messages || emptyMessages, currentRuns, sessionId), [detail?.messages, currentRuns, sessionId]);
   const scrollToBottom = useCallback(() => { followRef.current = true; setFollowing(true); scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' }); }, []);
 
@@ -254,7 +260,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
     <div className="composer-section">
       {current?.resumable === false && current.parentId && <button className="parent-session-link" onClick={() => onNavigate(current.parentId!)}><GitBranch size={14} /><span>{t("부모 세션에서 이어가기")}</span><ArrowUp size={13} /></button>}
       {sendError && <div className="inline-error" role="alert"><TriangleAlert size={15} /><span>{translateMessage(sendError)}</span><button aria-label={t("오류 메시지 닫기")} onClick={() => setSendError('')}><X size={13} /></button></div>}
-      {controlRuns.length > 0 && <div className="run-controls" aria-label={t("진행 중이거나 실패한 요청")}>{controlRuns.map(run => <RunControl key={run.id} run={run} onCancel={cancelRun} onRetry={retryPrompt} onDismiss={dismissRun} cancelling={cancelling === run.id} dismissing={dismissing === run.id} disabled={!connected || !token || !!cancelling || !!dismissing} retryDisabled={disabled || sending} showPrompt={!runProjection.matchedRunIds.has(run.id)} />)}</div>}
+      {controlRuns.length > 0 && <div ref={runControls} className={`run-controls${approvalKey ? ' has-approvals' : ''}`} aria-label={t("진행 중이거나 실패한 요청")}>{controlRuns.map(run => <RunControl key={run.id} run={run} onCancel={cancelRun} onRetry={retryPrompt} onDismiss={dismissRun} cancelling={cancelling === run.id} dismissing={dismissing === run.id} disabled={!connected || !token || !!cancelling || !!dismissing} retryDisabled={disabled || sending} showPrompt={!runProjection.matchedRunIds.has(run.id)} token={token} onSnapshotRefresh={onSnapshotRefresh} />)}</div>}
       <form className={`composer ${disabled ? 'disabled' : ''} ${dragging ? 'composer-dragging' : ''}`} onSubmit={event => { event.preventDefault(); void sendPrompt(); }}
         onDragOver={event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = disabled || sending ? 'none' : 'copy'; if (!disabled && !sending) setDragging(true); } }}
         onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}

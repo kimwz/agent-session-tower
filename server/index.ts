@@ -136,6 +136,7 @@ async function main() {
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
     enqueue: (id, prompt, attachments) => runs.enqueue(id, prompt, attachments),
     attachment: id => runs.attachment(id), cancel: id => runs.cancel(id),
+    respondToApproval: (runId, approvalId, decision) => runs.respondToApproval(runId, approvalId, decision),
     dismiss: async id => {
       await dismissedRuns.dismiss(id, runs.list().find(run => run.id === id));
       changed();

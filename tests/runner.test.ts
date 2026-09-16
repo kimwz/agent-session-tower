@@ -34,10 +34,18 @@ async function fixture(options: { mode?: string; provider?: 'codex' | 'claude'; 
   await writeFile(script, `#!/usr/bin/env node
 import { writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import { startCodexFixture } from ${JSON.stringify(new URL('./fixtures/provider-stdio.mjs', import.meta.url).href)};
 let prompt = '';
 process.stdin.setEncoding('utf8');
-process.stdin.on('data', (chunk) => prompt += chunk);
-process.stdin.on('end', () => {
+const claudeInput = process.argv.includes('-p');
+if (claudeInput) createInterface({input:process.stdin}).on('line', line => {
+  const message = JSON.parse(line);
+  if (message.type === 'control_request' && message.request.subtype === 'initialize') process.stdout.write(JSON.stringify({type:'control_response',response:{subtype:'success',request_id:message.request_id,response:{}}})+'\\n');
+  else if (message.type === 'user') { prompt = line; processPrompt(); }
+});
+else startCodexFixture({defaultId:'${ID}',otherId:'${ID2}'});
+function processPrompt() {
   const args = process.argv.slice(2);
   const id = args.find(value => /^10000000-/.test(value));
   const provider = args.includes('--resume') ? 'claude' : 'codex';
@@ -46,8 +54,8 @@ process.stdin.on('end', () => {
   const mode = process.env.FIXTURE_MODE;
   if (mode === 'invalid-event') { process.stdout.write('null\\n'); return; }
   if (mode === 'orphan') { spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:['ignore',process.stdout,process.stderr]}); process.exit(0); }
-  if (mode === 'empty') return;
-  if (mode === 'fail') { process.stderr.write('authentication expired'); process.exitCode = 2; return; }
+  if (mode === 'empty') { process.exit(0); return; }
+  if (mode === 'fail') { process.stderr.write('authentication expired'); process.exit(2); return; }
   if (mode === 'hold') { setTimeout(() => send({type:'item.completed',item:{type:'agent_message',text:'too late'}}), 20000); return; }
   if (provider === 'claude') {
     send({type:'system',subtype:'init',session_id: mode === 'mismatch' ? '${ID2}' : id});
@@ -57,15 +65,8 @@ process.stdin.on('end', () => {
     send({type:'stream_event',event:{type:'message_stop'}});
     send({type:'assistant',message:{content:[{type:'text',text:'Hello Claude'}]}});
     send({type:'result',is_error:mode==='stream-error',errors:mode==='stream-error'?['provider declined']:undefined,result:'Hello Claude'});
-  } else {
-    send({type:'thread.started',thread_id:mode === 'mismatch'?'${ID2}':id});
-    if (mode === 'stream-error') send({type:'turn.failed',error:{message:'provider declined'}});
-    setTimeout(() => {
-      send({type:'item.completed',item:{type:'agent_message',text:mode === 'large'?'a'.repeat(100000):'Hello Codex'}});
-      send({type:'turn.completed'});
-    }, mode === 'slow' ? 150 : 5);
   }
-});
+}
 `);
   await chmod(script, 0o700);
   let session = makeSession(directory, { provider: options.provider ?? 'codex', status: options.busy ? 'working' : 'completed' });
@@ -94,19 +95,20 @@ const finished = (manager: RunManager, id: string) => until(() => {
   return run && ['completed', 'error', 'cancelled'].includes(run.status) ? run : undefined;
 });
 
-test('new and resumed CLI commands override models only when explicitly requested', () => {
+test('Claude CLI model overrides are explicit; Codex uses its app-server protocol', () => {
   for (const provider of ['claude', 'codex'] as const) {
     const session = makeSession('/tmp', { provider, model: 'native-existing' });
     for (const build of [buildCreateArgs, buildResumeArgs]) {
       assert.equal(build(session).includes('--model'), false);
       const args = build(session, 'provider/model-v2[1m]');
-      assert.equal(args[args.indexOf('--model') + 1], 'provider/model-v2[1m]');
+      if (provider === 'claude') assert.equal(args[args.indexOf('--model') + 1], 'provider/model-v2[1m]');
+      else assert.deepEqual(args, ['app-server', '--stdio']);
       assert.throws(() => build(session, '--config'), /Invalid model/);
     }
   }
 });
 
-test('model request is snapshotted, persisted and passed to native CLI', async t => {
+test('model request is snapshotted, persisted and passed to the native thread', async t => {
   const f = await fixture({ busy: true }); t.after(f.cleanup);
   const request = { model: 'native-chosen' };
   const accepted = await f.manager.enqueue(f.session.id, 'Use the chosen model', request);
@@ -115,8 +117,8 @@ test('model request is snapshotted, persisted and passed to native CLI', async t
   assert.equal(JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'))[0].model, 'native-chosen');
   f.sessions.set(f.session.id, { ...f.session, status: 'completed' });
   assert.equal((await finished(f.manager, accepted.id)).status, 'completed');
-  const args = f.launches[0].args;
-  assert.equal(args[args.indexOf('--model') + 1], 'native-chosen');
+  const received = JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8'));
+  assert.equal(received.threadParams.model, 'native-chosen');
 });
 
 test('invalid model is rejected before attachment preparation and queue admission', async t => {
@@ -153,11 +155,12 @@ test('two queued model choices for one native session are bridged in order and n
 
 test('resume commands keep prompts off argv and enable ordinary sandbox permissions', () => {
   const codex = buildResumeArgs(makeSession('/tmp'));
-  assert.deepEqual(codex.slice(0, 5), ['exec', '--sandbox', 'workspace-write', '-c', 'approval_policy="never"']);
-  assert.deepEqual(codex.slice(5), ['resume', ID, '-', '--json', '--skip-git-repo-check']);
+  assert.deepEqual(codex, ['app-server', '--stdio']);
   const claude = buildResumeArgs(makeSession('/tmp', {provider:'claude'}));
   assert.ok(claude.includes('--resume') && claude.includes(ID));
-  assert.ok(claude.includes('acceptEdits'));
+  assert.equal(claude.includes('--permission-mode'), false);
+  assert.equal(claude[claude.indexOf('--permission-prompt-tool') + 1], 'stdio');
+  assert.equal(claude[claude.indexOf('--permission-prompts') + 1], 'host');
   assert.ok(![...codex, ...claude].some((value) => value.includes('bypass') || value.includes('dangerously')));
 });
 
@@ -189,6 +192,26 @@ test('Claude partial text is streamed without duplicating the final assistant me
   } finally { await f.cleanup(); }
 });
 
+for (const decision of ['allow', 'deny'] as const) test(`owned Codex exposes a live approval and sends exactly the selected ${decision}`, async t => {
+  const f = await fixture({ mode: 'approval' }); t.after(f.cleanup);
+  const accepted = await f.manager.enqueue(f.session.id, 'Run the approved command');
+  const pending = await until(() => f.manager.list().find(run => run.id === accepted.id && run.approvals?.length));
+  const approval = pending.approvals![0];
+  assert.equal(pending.status, 'running');
+  assert.equal(approval.input.command, 'gh pr view 1');
+  assert.equal(JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8')).approvalResponse, undefined);
+  approval.input.command = 'browser cannot change the requested command';
+  assert.equal(f.manager.list().find(run => run.id === accepted.id)?.approvals?.[0].input.command, 'gh pr view 1');
+  await (f.manager as unknown as { flush(): Promise<void> }).flush();
+  assert.equal(JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'))[0].approvals, undefined);
+  await f.manager.respondToApproval(accepted.id, approval.id, decision);
+  await assert.rejects(f.manager.respondToApproval(accepted.id, approval.id, decision), { statusCode: 409 });
+  const result = await finished(f.manager, accepted.id);
+  assert.equal(result.status, 'completed', result.error);
+  assert.equal(result.approvals, undefined);
+  assert.deepEqual(JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8')).approvalResponse, { decision: decision === 'allow' ? 'accept' : 'decline' });
+});
+
 const ATTACHED_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2S8AAAAASUVORK5CYII=';
 for (const provider of ['claude', 'codex'] as const) test(`${provider} receives native image input and readable general files in the exact resumed conversation`, async () => {
   const f = await fixture({ provider });
@@ -199,9 +222,9 @@ for (const provider of ['claude', 'codex'] as const) test(`${provider} receives 
     ] });
     assert.equal((await finished(f.manager, run.id)).status, 'completed');
     const received = JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8'));
-    assert.ok(received.args.includes(ID));
     let prompt = received.prompt;
     if (provider === 'claude') {
+      assert.ok(received.args.includes(ID));
       assert.equal(received.args[received.args.indexOf('--input-format') + 1], 'stream-json');
       const message = JSON.parse(received.prompt);
       assert.equal(message.session_id, ID);
@@ -210,7 +233,8 @@ for (const provider of ['claude', 'codex'] as const) test(`${provider} receives 
       prompt = message.message.content[0].text;
       assert.ok(received.args.includes('--add-dir'));
     } else {
-      const imagePath = received.args[received.args.indexOf('--image') + 1];
+      assert.equal(received.threadParams.threadId, ID);
+      const imagePath = received.input.find((item: { type: string }) => item.type === 'localImage').path;
       assert.equal((await readFile(imagePath)).toString('base64'), ATTACHED_PNG);
     }
     assert.match(prompt, /첨부한 파일을 확인/);
@@ -480,7 +504,7 @@ for (const mode of ['fail', 'stream-error', 'mismatch', 'empty', 'invalid-event'
   try {
     const result = await finished(f.manager, (await f.manager.enqueue(f.session.id, 'hello')).id);
     assert.equal(result.status, 'error');
-    assert.match(result.error ?? '', mode === 'fail' ? /authentication expired/ : mode === 'mismatch' ? /different conversation/ : mode === 'empty' ? /without confirming completion/ : mode === 'invalid-event' ? /invalid output event/ : /provider declined/);
+    assert.match(result.error ?? '', mode === 'fail' ? /authentication expired/ : mode === 'mismatch' ? /different or invalid conversation/ : mode === 'empty' ? /exited/ : mode === 'invalid-event' ? /Invalid protocol frame/ : /provider declined/);
   } finally { await f.cleanup(); }
 });
 
@@ -522,15 +546,16 @@ test('simultaneous admission cannot exceed the waiting queue capacity',async()=>
   }finally{await f.cleanup();}
 });
 
-test('cancellation signals owned descendants even after the CLI leader exits',async()=>{
+test('cancellation cleans owned descendants after leader exit and reports unconfirmed native completion',async()=>{
   const f=await fixture({mode:'orphan'});
   try{
     const run=await f.manager.enqueue(f.session.id,'orphan');
     await until(()=>f.children[0]?.exitCode===0?true:undefined);
     assert.equal(f.manager.settledRunIds().has(run.id),false,'the descendant still holds the owned pipe open');
-    await f.manager.cancel(run.id);
+    await assert.rejects(f.manager.cancel(run.id), /exited|connection|closed/);
     await until(()=>f.manager.settledRunIds().has(run.id)?true:undefined);
-    assert.equal(f.manager.list()[0].status,'cancelled');
+    assert.equal(f.manager.list()[0].status,'error');
+    assert.match(f.manager.list()[0].error || '', /not resent automatically/);
   }finally{await f.cleanup();}
 });
 
@@ -538,12 +563,12 @@ test('after an owned child closes, stale native working state cannot block the n
   const f=await fixture({mode:'hold'});
   try{
     const first=await f.manager.enqueue(f.session.id,'first');
-    await until(()=>f.children.length===1?true:undefined);
+    await until(()=>f.manager.list().find(run => run.id === first.id)?.startedAt ? true : undefined);
     f.sessions.set(f.session.id,{...f.session,status:'working'});
     await f.manager.cancel(first.id);
     await until(()=>f.manager.settledRunIds().has(first.id)?true:undefined);
     const second=await f.manager.enqueue(f.session.id,'next');
-    await until(()=>f.children.length===2?true:undefined);
+    await until(()=>f.manager.list().find(run => run.id === second.id)?.startedAt ? true : undefined);
     await f.manager.cancel(second.id);
     await until(()=>f.manager.settledRunIds().has(second.id)?true:undefined);
     f.sessions.set(f.session.id,{...f.session,status:'working',updatedAt:new Date(Date.now()+1000).toISOString()});

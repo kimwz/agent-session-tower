@@ -29,10 +29,17 @@ async function fixture(t: test.TestContext, mode = '', maxConcurrent = 2) {
   const launches: string[][] = [];
   await writeFile(script, `
 import {mkdirSync,rmSync,writeFileSync} from 'node:fs';
+import {createInterface} from 'node:readline';
+import { startCodexFixture } from ${JSON.stringify(new URL('./fixtures/provider-stdio.mjs', import.meta.url).href)};
 let prompt = '';
 process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => prompt += chunk);
-process.stdin.on('end', () => {
+if (process.argv.includes('-p')) createInterface({input:process.stdin}).on('line', line => {
+  const message=JSON.parse(line);
+  if(message.type==='control_request'&&message.request.subtype==='initialize') process.stdout.write(JSON.stringify({type:'control_response',response:{subtype:'success',request_id:message.request_id,response:{}}})+'\\n');
+  else if(message.type==='user'){prompt=message.message.content[0].text;processPrompt();}
+});
+else startCodexFixture({defaultId:'${CODEX_ID}',otherId:'${OTHER_ID}',created:true});
+function processPrompt() {
   const args = process.argv.slice(2);
   writeFileSync(process.env.RECEIVED_PATH, JSON.stringify({args,prompt,cwd:process.cwd()}));
   const send = event => process.stdout.write(JSON.stringify(event) + '\\n');
@@ -41,7 +48,7 @@ process.stdin.on('end', () => {
   const id = claude ? args[args.indexOf(resume ? '--resume' : '--session-id') + 1] : '${CODEX_ID}';
   const mode = process.env.FIXTURE_MODE;
   if (mode === 'break-registry') { rmSync(process.env.CREATED_PATH,{force:true}); mkdirSync(process.env.CREATED_PATH); }
-  if (mode === 'fail') { process.stderr.write('authentication expired'); process.exitCode = 2; return; }
+  if (mode === 'fail') { process.stderr.write('authentication expired'); process.exit(2); return; }
   if (mode === 'hold-before-id') { setInterval(() => {}, 1000); return; }
   const actual = mode === 'invalid-id' ? 'bad-id' : mode === 'mismatch' ? '${OTHER_ID}' : id;
   send(claude ? {type:'system',subtype:'init',session_id:actual} : {type:'thread.started',thread_id:actual});
@@ -49,7 +56,7 @@ process.stdin.on('end', () => {
   if (mode === 'hold') { setInterval(() => {}, 1000); return; }
   if (claude) send({type:'result',is_error:false,result:'Created Claude'});
   else { send({type:'item.completed',item:{type:'agent_message',text:'Created Codex'}}); send({type:'turn.completed'}); }
-});
+}
 `);
   const manager = new RunManager({ stateDir, getSession: id => native.get(id), refreshSessions: async () => {}, pollMs: 25,
     maxConcurrent, findExecutable: async provider => `/fixture/${provider}`,
@@ -65,14 +72,15 @@ function finished(manager: RunManager, id: string): Promise<Run> {
   return until(() => manager.list().find(run => run.id === id && ['completed', 'error', 'cancelled'].includes(run.status)));
 }
 
-test('new-session model is persisted and passed as a native CLI override', async t => {
+test('new-session model is persisted and passed as a native override', async t => {
   const f = await fixture(t);
   for (const provider of ['claude', 'codex'] as const) {
     const accepted = await f.manager.create({ provider, cwd: f.directory, prompt: 'Create with selected model', model: 'native-model' });
     assert.equal(accepted.run.model, 'native-model');
     assert.equal((await finished(f.manager, accepted.run.id)).status, 'completed');
     const args = f.launches.at(-1)!;
-    assert.equal(args[args.indexOf('--model') + 1], 'native-model');
+    if (provider === 'claude') assert.equal(args[args.indexOf('--model') + 1], 'native-model');
+    else assert.equal(JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8')).threadParams.model, 'native-model');
   }
   const count = f.manager.list().length;
   await assert.rejects(f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Invalid override', model: '--settings' }), /Invalid model/);
@@ -104,8 +112,14 @@ for (const provider of ['claude', 'codex'] as Provider[]) {
     await assert.rejects(stat(join(f.directory, 'SECOND')), { code: 'ENOENT' });
     const second = await f.manager.enqueue(confirmed.id, 'continue exactly here');
     assert.equal((await finished(f.manager, second.id)).status, 'completed');
-    assert.ok(f.launches[1]!.includes(confirmed.nativeId));
-    assert.ok(f.launches[1]!.includes(provider === 'codex' ? 'resume' : '--resume'));
+    if (provider === 'claude') {
+      assert.ok(f.launches[1]!.includes(confirmed.nativeId));
+      assert.ok(f.launches[1]!.includes('--resume'));
+    } else {
+      const resumed = JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8'));
+      assert.equal(resumed.threadMethod, 'thread/resume');
+      assert.equal(resumed.threadParams.threadId, confirmed.nativeId);
+    }
     assert.equal((await stat(join(f.stateDir, 'created-sessions.json'))).mode & 0o777, 0o600);
   });
 }
@@ -191,13 +205,13 @@ test('failure to persist the provider-confirmed UUID cannot report successful cr
   await f.manager.close();
 });
 
-for (const [provider, mode] of [['codex', 'invalid-id'], ['codex', 'double-id'], ['claude', 'mismatch']] as const) {
+for (const [provider, mode] of [['codex', 'invalid-id'], ['codex', 'unconfirmed-turn'], ['claude', 'mismatch']] as const) {
   test(`creation stops on ${provider} ${mode} identity events`, async t => {
     const f = await fixture(t, mode);
     const accepted = await f.manager.create({ provider, cwd: f.directory, prompt: 'create once' });
     assert.equal((await finished(f.manager, accepted.run.id)).status, 'error');
     assert.equal(f.launches.length, 1);
-    if (mode !== 'double-id') assert.equal(f.manager.getSession(accepted.session.id)?.resumable, false);
+    if (mode !== 'unconfirmed-turn') assert.equal(f.manager.getSession(accepted.session.id)?.resumable, false);
   });
 }
 

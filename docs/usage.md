@@ -53,9 +53,17 @@ Custom `CLAUDE_CONFIG_DIR` and `CODEX_HOME` locations are supported. CLI credent
 
 Status combines native lifecycle events, live process signals, and recent log activity. Some CLI versions provide fewer signals, so a status may be inferred; the UI's status explanation distinguishes this. macOS is the verified platform. Linux has not been verified. Windows is not currently supported.
 
-Sending a request continues the same native session. Claude sessions resume through the CLI. Codex sessions use the existing local app server when available, or resume through the CLI when the session is no longer owned by another writer. Busy sessions queue requests; unavailable app-server connections may leave them waiting until the original session is released. Tower runs up to two requests at once, with one active request per session.
+Sending a request continues the same native session. Claude sessions resume through the CLI. Codex sessions use the existing local app server when available, or an app-server process started by Tower when the session is no longer owned by another writer. Busy sessions queue requests; unavailable app-server connections may leave them waiting until the original session is released. Tower runs up to two requests at once, with one active request per session.
 
-Subagent records without an independently resumable session ID are viewable through their parent. Existing terminals or desktop apps may need a refresh or resume to show changes made from the web. Required approvals for work sent through the Codex app remain in that app. Tower does not automatically bypass provider permissions. CLI-resumed Codex work uses `workspace-write`; Claude work uses `acceptEdits`. Usage is billed through the existing provider account.
+Subagent records without an independently resumable session ID are viewable through their parent. Existing terminals or desktop apps may need a refresh or resume to show changes made from the web. Usage is billed through the existing provider account.
+
+### Tool approvals
+
+Tower leaves the native permission and sandbox configuration in effect. For example, a Claude Code `auto` default stays `auto`. Tower does not force `acceptEdits`, disable approval prompts, or set Codex approvals to `never`.
+
+When a Tower-launched session needs permission, the chat shows the requested tool and its input with **Allow once** and **Deny** buttons. Codex can also request additional filesystem or network access for the current turn; those requests show **Allow for this turn** and the requested access. Neither decision saves a permission rule or changes your global settings. The execution stays open while waiting. Canceling the run or stopping Tower clears its pending approvals, and an expired request cannot be approved later.
+
+For work sent to an already open Codex desktop session, its original app continues to handle approvals. Check that app when it is waiting for permission. Explicit provider deny rules still apply.
 
 You can upload up to 10 attachments per request: 10 MB per file, 5 MB per image, and 20 MB total. PNG, JPEG, GIF, and WebP images use native image input; other files are provided as local copies. Uploaded files remain on the host so the conversation can keep referencing them.
 
