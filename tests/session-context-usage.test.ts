@@ -43,6 +43,33 @@ test('context tooltips localize percentages and available token counts without i
   assert.equal(contextUsageLabel({ usedTokens: NaN, contextWindow: 100_000 }), 'Context usage unavailable · Context window: 100,000 tokens');
 });
 
+test('model-default capacities clearly mark estimates in both languages while native capacities stay exact', () => {
+  const usage: SessionContextUsage = { usedTokens: 30_000, contextWindow: 1_000_000, usedPercent: 3, capacitySource: 'model-default' };
+  setLanguage('ko');
+  assert.equal(contextUsageLabel(usage), '컨텍스트 사용량: 약 3% · 30,000 / 1,000,000 토큰 · Claude CLI 모델의 기본 한도 기준이며, 실제 한도는 설정에 따라 다를 수 있습니다.');
+  assert.equal(contextUsageLabel({ ...usage, capacitySource: undefined }), '컨텍스트 사용량: 3% · 30,000 / 1,000,000 토큰');
+  setLanguage('en');
+  assert.equal(contextUsageLabel(usage), "Context used: about 3% · 30,000 / 1,000,000 tokens · Based on the Claude CLI model's default capacity; actual capacity may vary with settings.");
+  assert.equal(contextUsageLabel({ ...usage, capacitySource: undefined }), 'Context used: 3% · 30,000 / 1,000,000 tokens');
+  assert.match(contextUsageLabel({ ...usage, usedTokens: 0, usedPercent: 0 }), /^Context used: about 0% · 0 \/ 1,000,000 tokens/);
+  const unknown = contextUsageLabel({ ...usage, usedPercent: undefined });
+  assert.match(unknown, /^Context usage unavailable · 30,000 \/ 1,000,000 tokens/);
+  assert.doesNotMatch(unknown, /0%/);
+});
+
+test('model-default estimates appear in the tooltip and accessible description without changing the ring', () => {
+  setLanguage('en');
+  const estimated = renderToStaticMarkup(createElement(SessionContextIcon, {
+    provider: 'claude',
+    usage: { usedTokens: 35_000, contextWindow: 1_000_000, usedPercent: 3.5, capacitySource: 'model-default' },
+    descriptionId: 'context-estimated',
+  }));
+  assert.match(estimated, /title="Context used: about 3.5% · 35,000 \/ 1,000,000 tokens · Based on the Claude CLI model&#x27;s default capacity; actual capacity may vary with settings\."/);
+  assert.match(estimated, /id="context-estimated" class="sr-only">Context used: about 3.5% · 35,000 \/ 1,000,000 tokens · Based on the Claude CLI model&#x27;s default capacity; actual capacity may vary with settings\./);
+  assert.match(estimated, /session-context-ring low/);
+  assert.match(estimated, /stroke-dasharray="3.5 100"/);
+});
+
 test('rendered context meters expose a description and keep the colored ring outside the provider face', () => {
   setLanguage('en');
   const known = renderToStaticMarkup(createElement(SessionContextIcon, { provider: 'codex', usage: { usedTokens: 90_000, usedPercent: 90 }, descriptionId: 'context-known' }));

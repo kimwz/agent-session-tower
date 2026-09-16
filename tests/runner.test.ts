@@ -28,7 +28,7 @@ async function until<T>(read: () => T | undefined, timeout = 5000): Promise<T> {
   throw new Error('Timed out waiting for the run state.');
 }
 
-async function fixture(options: { mode?: string; provider?: 'codex' | 'claude'; busy?: boolean; maxConcurrent?: number; refreshError?: boolean; path?: string; shebang?: boolean; openCodexBridge?: OpenCodexBridge } = {}) {
+async function fixture(options: { mode?: string; provider?: 'codex' | 'claude'; busy?: boolean; maxConcurrent?: number; refreshError?: boolean; path?: string; shebang?: boolean; openCodexBridge?: OpenCodexBridge; contextFrames?: unknown[] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'agent-monitor-runner-'));
   const script = join(directory, 'provider.mjs');
   await writeFile(script, `#!/usr/bin/env node
@@ -59,6 +59,7 @@ function processPrompt() {
   if (mode === 'hold') { setTimeout(() => send({type:'item.completed',item:{type:'agent_message',text:'too late'}}), 20000); return; }
   if (provider === 'claude') {
     send({type:'system',subtype:'init',session_id: mode === 'mismatch' ? '${ID2}' : id});
+    if (process.env.FIXTURE_CONTEXT_FRAMES) { for (const frame of JSON.parse(process.env.FIXTURE_CONTEXT_FRAMES)) send(frame); return; }
     send({type:'stream_event',event:{type:'message_start'}});
     send({type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text:'Hello '}}});
     send({type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text:'Claude'}}});
@@ -79,7 +80,8 @@ function processPrompt() {
     getSession: (id) => sessions.get(id), refreshSessions: async () => { refreshes++; if(options.refreshError) throw new Error('activity unavailable'); }, stateDir,
     pollMs: 25, maxConcurrent: options.maxConcurrent, findExecutable: async (provider) => `/fixture/${provider}`,
     openCodexBridge: options.openCodexBridge,
-    env: { FIXTURE_MODE: options.mode ?? '', RECEIVED_PATH: join(directory, 'received.json'), CLAUDECODE: '1', ...(options.path !== undefined ? { PATH: options.path } : {}) },
+    env: { FIXTURE_MODE: options.mode ?? '', RECEIVED_PATH: join(directory, 'received.json'), CLAUDECODE: '1', ...(options.path !== undefined ? { PATH: options.path } : {}),
+      ...(options.contextFrames ? { FIXTURE_CONTEXT_FRAMES: JSON.stringify(options.contextFrames) } : {}) },
     spawnProcess: (file, args, spawnOptions) => {
       launches.push({file,args,path:spawnOptions.env?.PATH});
       const child=options.shebang ? spawn(script, args, spawnOptions) : spawn(process.execPath, [script, ...args], spawnOptions); children.push(child); return child;
@@ -190,6 +192,99 @@ test('Claude partial text is streamed without duplicating the final assistant me
     assert.equal(result.status, 'completed');
     assert.equal(result.output.trim(), 'Hello Claude');
   } finally { await f.cleanup(); }
+});
+
+const contextAssistant = {
+  type: 'assistant', session_id: ID, parent_tool_use_id: null,
+  message: { model: 'claude-opus-5', content: [{ type: 'text', text: 'Context fixture.' }],
+    usage: { input_tokens: 5, cache_creation_input_tokens: 10, cache_read_input_tokens: 15, output_tokens: 50_000 } },
+};
+const contextResult = {
+  type: 'result', session_id: ID, is_error: false, result: 'Done.',
+  usage: { input_tokens: 9_000_000 },
+  modelUsage: { 'claude-opus-5': { contextWindow: 200_000, inputTokens: 9_000_000 }, 'claude-haiku-other': { contextWindow: 100_000 } },
+};
+
+test('Claude retains exact root context, persists it, and enriches only the matching native observation', async t => {
+  const f = await fixture({ provider: 'claude', contextFrames: [contextAssistant,
+    { ...contextAssistant, parent_tool_use_id: 'child-tool', message: { ...contextAssistant.message, model: 'claude-haiku-other', usage: { input_tokens: 999 } } },
+    { ...contextAssistant, isMeta: true, message: { ...contextAssistant.message, usage: { input_tokens: 888 } } },
+    { ...contextAssistant, is_meta: true, message: { ...contextAssistant.message, usage: { input_tokens: 666 } } },
+    { ...contextAssistant, message: { ...contextAssistant.message, model: '<synthetic>', usage: { input_tokens: 777 } } },
+    contextResult,
+  ] });
+  let restored: RunManager | undefined;
+  t.after(async () => { await restored?.close(); await f.cleanup(); });
+  const usage = { usedTokens: 30, contextWindow: 1_000_000, usedPercent: 0.003, capacitySource: 'model-default' as const, updatedAt: '2026-01-01T00:00:00.000Z' };
+  f.session.model = 'claude-opus-5'; f.session.contextUsage = usage;
+  const accepted = await f.manager.enqueue(f.session.id, 'Synthetic context observation');
+  const result = await finished(f.manager, accepted.id);
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(result.contextUsage, { model: 'claude-opus-5', usedTokens: 30, contextWindow: 200_000, usedPercent: 0.015, updatedAt: result.contextUsage!.updatedAt });
+  assert.equal(f.manager.getSession(f.session.id)?.contextUsage?.contextWindow, 200_000);
+  assert.equal(f.manager.getSession(f.session.id)?.contextUsage?.capacitySource, undefined);
+  assert.equal(f.manager.sessionList([f.session])[0]?.contextUsage?.contextWindow, 200_000);
+  result.contextUsage!.contextWindow = 1;
+  assert.equal(f.manager.list().find(run => run.id === accepted.id)?.contextUsage?.contextWindow, 200_000);
+  await f.manager.close();
+  const saved = JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'));
+  assert.equal(saved[0].contextUsage.contextWindow, 200_000);
+  restored = new RunManager({ getSession: id => f.sessions.get(id), refreshSessions: async () => {}, stateDir: f.stateDir });
+  await restored.start();
+  assert.equal(restored.getSession(f.session.id)?.contextUsage?.contextWindow, 200_000);
+  const cases: Array<Partial<Session>> = [
+    { contextUsage: undefined },
+    { model: 'claude-fable-5', contextUsage: usage },
+    { contextUsage: { ...usage, usedTokens: 31 } },
+    { contextUsage: { ...usage, updatedAt: new Date(Date.parse(saved[0].contextUsage.updatedAt) + 1000).toISOString() } },
+    { contextUsage: { ...usage, updatedAt: 'invalid' } },
+    { contextUsage: { ...usage, contextWindow: 100_000, usedPercent: 0.03, capacitySource: undefined } },
+  ];
+  for (const patch of cases) {
+    f.sessions.set(f.session.id, { ...f.session, ...patch });
+    assert.deepEqual(restored.getSession(f.session.id)?.contextUsage, patch.contextUsage);
+  }
+});
+
+test('Claude does not persist subagent, unconfirmed, compacted, mismatched-model or invalid-capacity context', async t => {
+  const cases = [
+    { mode: 'mismatch', frames: [contextAssistant, contextResult] },
+    { frames: [{ ...contextAssistant, parent_tool_use_id: 'child-tool' }, contextResult] },
+    { frames: [{ ...contextAssistant, session_id: ID2 }, contextResult] },
+    { frames: [{ ...contextAssistant, isMeta: true }, contextResult] },
+    { frames: [{ ...contextAssistant, is_meta: true }, contextResult] },
+    { frames: [{ ...contextAssistant, message: { ...contextAssistant.message, model: '<synthetic>' } }, contextResult] },
+    { frames: [contextAssistant, { type: 'system', subtype: 'compact_boundary', session_id: ID }, contextResult] },
+    { frames: [contextAssistant, { ...contextAssistant, message: { model: 'claude-fable-5', content: [] } }, contextResult] },
+    { frames: [contextAssistant, { ...contextAssistant, message: { content: [], usage: { input_tokens: 99 } } }, contextResult] },
+    { frames: [contextAssistant, { ...contextResult, modelUsage: { 'claude-other': { contextWindow: 200_000 } } }] },
+    { frames: [contextAssistant, { ...contextResult, modelUsage: { 'claude-opus-5': { contextWindow: '200000' } } }] },
+    { frames: [contextAssistant, { ...contextResult, parent_tool_use_id: 'child-tool' }] },
+  ];
+  for (const entry of cases) {
+    const f = await fixture({ provider: 'claude', mode: entry.mode, contextFrames: entry.frames }); t.after(f.cleanup);
+    const accepted = await f.manager.enqueue(f.session.id, 'Synthetic context observation');
+    const result = await finished(f.manager, accepted.id);
+    assert.equal(result.contextUsage, undefined);
+  }
+});
+
+test('invalid persisted context metadata is discarded without losing the saved run', async t => {
+  const f = await fixture({ provider: 'claude', contextFrames: [contextAssistant, contextResult] }); t.after(f.cleanup);
+  const accepted = await f.manager.enqueue(f.session.id, 'Synthetic context observation');
+  await finished(f.manager, accepted.id); await f.manager.close();
+  const path = join(f.stateDir, 'runs.json');
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  const original = saved[0].contextUsage;
+  for (const patch of [{ capacitySource: 'model-default' }, { model: '--invalid' }, { usedTokens: -1 }, { contextWindow: 0 }, { usedPercent: 25 }, { updatedAt: 'invalid' }]) {
+    saved[0].contextUsage = { ...original, ...patch }; await writeFile(path, JSON.stringify(saved));
+    const restored = new RunManager({ getSession: id => f.sessions.get(id), refreshSessions: async () => {}, stateDir: f.stateDir });
+    try {
+      await restored.start();
+      assert.equal(restored.list().length, 1);
+      assert.equal(restored.list()[0].contextUsage, undefined);
+    } finally { await restored.close(); }
+  }
 });
 
 for (const decision of ['allow', 'deny'] as const) test(`owned Codex exposes a live approval and sends exactly the selected ${decision}`, async t => {

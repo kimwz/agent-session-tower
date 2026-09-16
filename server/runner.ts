@@ -13,6 +13,7 @@ import type { CodexBridgeRun, CodexBridgeOptions } from './codex-app-server.js';
 import { requestedModel, validModelId } from './models.js';
 import { ClaudeControl } from './claude-control.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
+import { claudeInputTokens, contextCapacity, nativeContextObservation, withNativeContext } from './session-context.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -153,6 +154,8 @@ export class RunManager extends EventEmitter {
           ...(value.attachments ? { attachments: value.attachments.map(item => attachmentMetadata(item)!) } : {}) };
         // A permission request belongs to a live process, never a restored run.
         delete run.approvals;
+        const context = nativeContextObservation(run.contextUsage);
+        if (context) run.contextUsage = context; else delete run.contextUsage;
         if (run.status === 'running' || run.status === 'queued') {
           run.status = run.status === 'running' ? 'error' : 'cancelled';
           run.error = 'Agent Session Tower stopped before this task finished. It was not restarted; send the instruction again to continue.';
@@ -171,12 +174,21 @@ export class RunManager extends EventEmitter {
   }
 
   list(): Run[] { return [...this.runs.values()].map((run) => ({ ...run, ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
+    ...(run.contextUsage ? { contextUsage: { ...run.contextUsage } } : {}),
     ...(run.approvals ? { approvals: structuredClone(run.approvals) } : {}) })); }
   async attachment(id: string) {
     const { metadata, content } = await this.attachments.read(id);
     return { metadata, content };
   }
   settledRunIds(): ReadonlySet<string> { return new Set(this.settledRuns); }
+
+  private sessionWithContext(session: Session): Session {
+    let latest: Run['contextUsage'];
+    for (const run of this.runs.values()) {
+      if (run.sessionId === session.id && run.contextUsage && (!latest || run.contextUsage.updatedAt > latest.updatedAt)) latest = run.contextUsage;
+    }
+    return withNativeContext(session, latest);
+  }
 
   /** Stable monitor IDs keep layout, titles and closure attached after native discovery. */
   nativeSessionId(id: string): string {
@@ -190,12 +202,13 @@ export class RunManager extends EventEmitter {
     const created = this.createdSessions.get(id);
     if (!created) {
       const native = this.options.getSession(id);
-      return native?.parentId ? { ...native, parentId: this.monitorSessionId(native.parentId) } : native;
+      if (!native) return undefined;
+      return this.sessionWithContext(native.parentId ? { ...native, parentId: this.monitorSessionId(native.parentId) } : native);
     }
     const native = created.confirmed ? this.options.getSession(this.nativeSessionId(id)) : undefined;
     if (native && !created.seenNative) { created.seenNative = true; this.persist(); }
     const initialRun = this.runs.get(created.runId);
-    if (native) return { ...native, id, ...(native.parentId ? { parentId: this.monitorSessionId(native.parentId) } : {}), ...(created.title ? { customTitle: created.title } : {}) };
+    if (native) return this.sessionWithContext({ ...native, id, ...(native.parentId ? { parentId: this.monitorSessionId(native.parentId) } : {}), ...(created.title ? { customTitle: created.title } : {}) });
     if (created.seenNative && (!initialRun || FINISHED.has(initialRun.status))) return undefined;
     const live = initialRun?.status === 'queued' || initialRun?.status === 'running';
     return {
@@ -223,8 +236,8 @@ export class RunManager extends EventEmitter {
       const session = this.getSession(id);
       if (session) sessions.set(id, session);
     }
-    return [...sessions.values()].map(session => session.parentId && aliases.has(session.parentId)
-      ? { ...session, parentId: aliases.get(session.parentId) } : session);
+    return [...sessions.values()].map(session => this.sessionWithContext(session.parentId && aliases.has(session.parentId)
+      ? { ...session, parentId: aliases.get(session.parentId) } : session));
   }
 
   async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
@@ -618,6 +631,7 @@ export class RunManager extends EventEmitter {
     let sawSessionId = false;
     let sawPartial = false;
     let messageHasPartial = false;
+    let contextInput: { model: string; usedTokens: number } | undefined;
     let identitySaved: Promise<void> = Promise.resolve();
     owned.claude = new ClaudeControl({
       write: message => new Promise<void>((resolve, reject) => {
@@ -659,6 +673,16 @@ export class RunManager extends EventEmitter {
         this.stopOwned(run.id, owned);
         return;
       }
+      const mainContext = event.parent_tool_use_id == null && (event.session_id === undefined || event.session_id === session.nativeId);
+      if (mainContext && event.type === 'system' && event.subtype === 'compact_boundary') contextInput = undefined;
+      if (mainContext && event.type === 'assistant' && !event.isMeta && !event.is_meta) {
+        const model = event.message?.model;
+        if (!String(model || '').includes('synthetic')) {
+          contextInput = undefined;
+          const usedTokens = claudeInputTokens(event.message?.usage);
+          if (validModelId(model) && usedTokens !== undefined) contextInput = { model, usedTokens };
+        }
+      }
       if (event.type === 'stream_event') {
         if (event.event?.type === 'message_start') messageHasPartial = false;
         const delta = event.event?.delta;
@@ -673,6 +697,12 @@ export class RunManager extends EventEmitter {
         }
         messageHasPartial = false;
       } else if (event.type === 'result') {
+        const capacity = contextInput && mainContext ? event.modelUsage?.[contextInput.model]?.contextWindow : undefined;
+        if (contextInput && contextCapacity(capacity) && sawSessionId && !streamError) {
+          run.contextUsage = { ...contextInput, contextWindow: capacity, usedPercent: contextInput.usedTokens / capacity * 100,
+            updatedAt: new Date().toISOString() };
+          this.changed();
+        }
         sawCompletion = true;
         owned.claude?.close();
         child.stdin.end();

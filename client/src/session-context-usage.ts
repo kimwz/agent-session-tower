@@ -14,8 +14,9 @@ const validTokens = (value: unknown): value is number => typeof value === 'numbe
 /** A token count without an observed capacity must never be presented as zero percent. */
 export function contextUsageLabel(usage?: SessionContextUsage): string {
   const { percent } = contextUsageMeter(usage);
+  const estimatedCapacity = usage?.capacitySource === 'model-default';
   const parts = [percent === undefined ? t('컨텍스트 사용량: 알 수 없음')
-    : t('컨텍스트 사용량: {0}%', { 0: percent.toLocaleString(locale(), { maximumSignificantDigits: 15 }) })];
+    : t(estimatedCapacity ? '컨텍스트 사용량: 약 {0}%' : '컨텍스트 사용량: {0}%', { 0: percent.toLocaleString(locale(), { maximumSignificantDigits: 15 }) })];
   const used = usage?.usedTokens;
   const capacity = usage?.contextWindow;
   if (validTokens(used) && validTokens(capacity) && capacity > 0) {
@@ -25,5 +26,6 @@ export function contextUsageLabel(usage?: SessionContextUsage): string {
   } else if (validTokens(capacity) && capacity > 0) {
     parts.push(t('컨텍스트 한도: {0} 토큰', { 0: capacity.toLocaleString(locale()) }));
   }
+  if (estimatedCapacity) parts.push(t('Claude CLI 모델의 기본 한도 기준이며, 실제 한도는 설정에 따라 다를 수 있습니다.'));
   return parts.join(' · ');
 }

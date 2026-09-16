@@ -5,6 +5,7 @@ import { homedir } from 'node:os';
 import type { ChatMessage, Provider, Session, SessionDetail } from '../shared/types.js';
 import { sortSessions } from '../shared/session-activity.js';
 import { inspectProcesses, type ProcessSnapshot } from './processes.js';
+import { claudeContextUsage, claudeInputTokens, contextCapacity as contextWindow, contextTokens as tokenCount } from './session-context.js';
 
 type Json = Record<string, any>;
 type Activity = 'working' | 'completed' | 'error';
@@ -160,9 +161,6 @@ function ownHistory(state: RecordState, row: Json, offset: number): boolean {
   return Date.parse(time(row.timestamp, state.session.createdAt)) >= Date.parse(state.session.createdAt);
 }
 
-const tokenCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
-const contextWindow = (value: unknown): value is number => tokenCount(value) && value > 0;
-
 /** Latest native context observation, never the cumulative billing counters. */
 function consumeContext(session: Session, row: Json, timestamp: string): void {
   if (row.type === 'compacted' || (row.type === 'event_msg' && row.payload?.type === 'context_compacted')
@@ -182,24 +180,20 @@ function consumeContext(session: Session, row: Json, timestamp: string): void {
     return;
   }
   if (row.type === 'assistant' && !row.isMeta && !String(row.message?.model || '').includes('synthetic')) {
-    const usage = row.message?.usage;
-    if (!usage || !tokenCount(usage.input_tokens)) return;
-    const written = usage.cache_creation_input_tokens ?? 0;
-    const read = usage.cache_read_input_tokens ?? 0;
-    if (!tokenCount(written) || !tokenCount(read)) return;
-    const usedTokens = usage.input_tokens + written + read;
-    if (!tokenCount(usedTokens)) return;
+    const usedTokens = claudeInputTokens(row.message?.usage);
+    if (usedTokens === undefined) return;
     // Claude's native used_percentage counts prompt and cache tokens, excluding
     // output. Its capacity depends on native settings and cannot be inferred from
-    // a model name. Ordinary transcript rows therefore expose tokens only.
-    const capacity = session.contextUsage?.contextWindow;
-    session.contextUsage = { usedTokens, updatedAt: timestamp,
-      ...(contextWindow(capacity) ? { contextWindow: capacity, usedPercent: usedTokens / capacity * 100 } : {}) };
+    // a model name. Catalog defaults remain explicitly marked as estimates.
+    session.contextUsage = claudeContextUsage(session.model, usedTokens, timestamp, session.contextUsage);
   }
   if (row.type === 'result' && session.model && session.contextUsage) {
     const capacity = row.modelUsage?.[session.model]?.contextWindow;
-    if (contextWindow(capacity)) session.contextUsage = { ...session.contextUsage, contextWindow: capacity,
-      usedPercent: session.contextUsage.usedTokens / capacity * 100, updatedAt: timestamp };
+    if (contextWindow(capacity)) {
+      const { capacitySource: _estimated, ...usage } = session.contextUsage;
+      session.contextUsage = { ...usage, contextWindow: capacity,
+        usedPercent: usage.usedTokens / capacity * 100, updatedAt: timestamp };
+    }
   }
 }
 

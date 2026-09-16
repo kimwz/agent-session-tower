@@ -53,17 +53,20 @@ test('missing or invalid native capacity never invents a context percentage', as
   assert.equal(f.service.get(`codex:${id}`)?.contextUsage?.usedTokens, 100);
 });
 
-test('Claude counts current input and cache once, excludes output, and leaves capacity unknown', async t => {
+test('Claude counts current input and cache once and keeps model-default estimates labeled across updates', async t => {
   const f = await fixture(t);
   await writeFile(f.claude, lines({ type: 'user', sessionId: id, cwd: '/work', timestamp, message: { role: 'user', content: 'Fix the editor' } }, claudeUsage(2, 919, 444_460), claudeUsage(2, 919, 444_460)));
   await f.service.refresh();
-  assert.deepEqual(f.service.get(`claude:${id}`)?.contextUsage, { usedTokens: 445_381, updatedAt: timestamp });
+  assert.deepEqual(f.service.get(`claude:${id}`)?.contextUsage, { usedTokens: 445_381, updatedAt: timestamp,
+    contextWindow: 1_000_000, usedPercent: 44.5381, capacitySource: 'model-default' });
   await appendFile(f.claude, lines(claudeUsage(1, 0, 20)));
   await f.service.refresh();
   assert.equal(f.service.get(`claude:${id}`)?.contextUsage?.usedTokens, 21);
+  assert.equal(f.service.get(`claude:${id}`)?.contextUsage?.capacitySource, 'model-default');
   await appendFile(f.claude, lines(claudeUsage(0, 0, 0, '<synthetic>')));
   await f.service.refresh();
   assert.equal(f.service.get(`claude:${id}`)?.contextUsage?.usedTokens, 21);
+  assert.equal(f.service.get(`claude:${id}`)?.contextUsage?.capacitySource, 'model-default');
 });
 
 test('compaction, model changes, and transcript rewrites discard stale context observations', async t => {
@@ -100,7 +103,39 @@ test('explicit native Claude result capacity is model-specific and is invalidate
   await writeFile(f.claude, lines(claudeUsage(10, 20, 30), { type: 'result', timestamp, modelUsage: { 'claude-opus-5': { contextWindow: 1_000_000 } } }));
   await f.service.refresh();
   assert.equal(f.service.get(`claude:${id}`)?.contextUsage?.usedPercent, 0.006);
+  assert.equal(f.service.get(`claude:${id}`)?.contextUsage?.capacitySource, undefined);
+  await appendFile(f.claude, lines(claudeUsage(20, 0, 0)));
+  await f.service.refresh();
+  assert.equal(f.service.get(`claude:${id}`)?.contextUsage?.usedPercent, 0.002);
+  assert.equal(f.service.get(`claude:${id}`)?.contextUsage?.capacitySource, undefined);
   await appendFile(f.claude, lines(claudeUsage(10, 0, 0, 'claude-another')));
   await f.service.refresh();
   assert.deepEqual(f.service.get(`claude:${id}`)?.contextUsage, { usedTokens: 10, updatedAt: timestamp });
+});
+
+test('only exact verified Claude model IDs receive default estimates, including observed zero', async t => {
+  const f = await fixture(t);
+  for (const model of ['claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-5', 'claude-fable-5', 'claude-fable-5-1']) {
+    await writeFile(f.claude, lines(claudeUsage(0, 0, 0, model)));
+    await f.service.refresh();
+    assert.deepEqual(f.service.get(`claude:${id}`)?.contextUsage, {
+      usedTokens: 0, updatedAt: timestamp, contextWindow: 1_000_000, usedPercent: 0, capacitySource: 'model-default',
+    });
+  }
+  for (const model of ['opus', 'claude-opus-5-custom', 'claude-opus-5[1m]', 'provider/claude-opus-5', 'unknown-model']) {
+    await writeFile(f.claude, lines(claudeUsage(100, 0, 0, model)));
+    await f.service.refresh();
+    assert.deepEqual(f.service.get(`claude:${id}`)?.contextUsage, { usedTokens: 100, updatedAt: timestamp });
+  }
+});
+
+test('native capacity overrides a different default and a model switch does not inherit it', async t => {
+  const f = await fixture(t);
+  await writeFile(f.claude, lines(claudeUsage(100, 0, 0), { type: 'result', timestamp, modelUsage: { 'claude-opus-5': { contextWindow: 200_000 } } }));
+  await f.service.refresh();
+  assert.deepEqual(f.service.get(`claude:${id}`)?.contextUsage, { usedTokens: 100, updatedAt: timestamp, contextWindow: 200_000, usedPercent: 0.05 });
+  await appendFile(f.claude, lines(claudeUsage(100, 0, 0, 'claude-fable-5')));
+  await f.service.refresh();
+  assert.equal(f.service.get(`claude:${id}`)?.contextUsage?.contextWindow, 1_000_000);
+  assert.equal(f.service.get(`claude:${id}`)?.contextUsage?.capacitySource, 'model-default');
 });

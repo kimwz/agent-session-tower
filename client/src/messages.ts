@@ -1,10 +1,12 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
   '컨텍스트 사용량: {0}%': 'Context used: {0}%',
+  '컨텍스트 사용량: 약 {0}%': 'Context used: about {0}%',
   '컨텍스트 사용량: 알 수 없음': 'Context usage unavailable',
   '{0} / {1} 토큰': '{0} / {1} tokens',
   '사용한 토큰: {0}': 'Tokens used: {0}',
   '컨텍스트 한도: {0} 토큰': 'Context window: {0} tokens',
+  'Claude CLI 모델의 기본 한도 기준이며, 실제 한도는 설정에 따라 다를 수 있습니다.': "Based on the Claude CLI model's default capacity; actual capacity may vary with settings.",
   "요청에 맞는 폴더와 세션을 찾아 작업을 보냅니다.": "Find a folder and session for your request, then send it to work.",
   "Auto Prompt 창 닫기": "Close Auto Prompt",
   "{0} 폴더에서 Auto Prompt 열기": "Open Auto Prompt in {0}",

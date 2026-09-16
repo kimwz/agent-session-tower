@@ -32,6 +32,7 @@ export interface SessionContextUsage {
   contextWindow?: number;
   usedPercent?: number;
   updatedAt?: string;
+  capacitySource?: 'model-default';
 }
 export interface ChatMessage {
   id: string;
@@ -88,6 +89,7 @@ export interface Run {
   attachments?: Attachment[];
   model?: string;
   autoPromptId?: string;
+  contextUsage?: SessionContextUsage & { model: string; updatedAt: string };
   approvals?: RunApproval[];
 }
 export interface RunApproval {

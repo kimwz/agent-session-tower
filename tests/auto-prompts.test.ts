@@ -111,9 +111,10 @@ test('Auto selects among every directory including closed sessions and empty pin
   assert.equal((f.dispatches[0].input as CreateSessionRequest).provider, 'claude');
 });
 
-test('adjacent reuse accepts exactly 30% but rejects higher, unknown, busy, or already queued context', async t => {
-  for (const mode of ['boundary', 'higher', 'unknown', 'busy', 'queued'] as const) await t.test(mode, async t => {
+test('adjacent reuse accepts exactly 30% but rejects estimates, higher, unknown, busy, or already queued context', async t => {
+  for (const mode of ['boundary', 'estimated', 'higher', 'unknown', 'busy', 'queued'] as const) await t.test(mode, async t => {
     const f = await fixture(t);
+    if (mode === 'estimated') f.session.contextUsage!.capacitySource = 'model-default';
     if (mode === 'higher') f.session.contextUsage!.usedPercent = 30.01;
     if (mode === 'unknown') f.session.contextUsage = { usedTokens: 10 };
     if (mode === 'busy') f.session.status = 'working';
@@ -123,6 +124,18 @@ test('adjacent reuse accepts exactly 30% but rejects higher, unknown, busy, or a
     assert.equal((await f.finished(job.id)).status, mode === 'boundary' ? 'completed' : 'error');
     assert.equal(f.dispatches.length, mode === 'boundary' ? 1 : 0);
   });
+});
+
+test('an estimated context percentage does not block a direct task continuation', async t => {
+  const f = await fixture(t);
+  f.session.contextUsage!.capacitySource = 'model-default';
+  f.respond(async input => {
+    assert.match(input.systemPrompt, /model-default is an estimate/);
+    return resume(f.session.id, 'continuation');
+  });
+  const accepted = await f.manager.submit(request(f.cwd));
+  assert.equal((await f.finished(accepted.id)).status, 'completed');
+  assert.equal(f.dispatches.length, 1);
 });
 
 test('closed, other provider, other directory, subagent, and pending creation cannot become resume targets', async t => {
