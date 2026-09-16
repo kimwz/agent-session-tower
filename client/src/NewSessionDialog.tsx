@@ -100,7 +100,14 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
     }}
   >
     <form className="new-session-form" onSubmit={event => { void submit(event); }} onKeyDown={event => {
-      if (event.key === 'Enter' && (event.nativeEvent.isComposing || event.keyCode === 229)) event.preventDefault();
+      if (event.nativeEvent.isComposing || event.keyCode === 229) {
+        if (event.key === 'Enter') event.preventDefault();
+        return;
+      }
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        event.currentTarget.requestSubmit();
+      }
     }} aria-busy={submitting}>
       <header className="new-session-heading">
         <div>
