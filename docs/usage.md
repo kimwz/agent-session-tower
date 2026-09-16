@@ -69,7 +69,9 @@ You can upload up to 10 attachments per request: 10 MB per file, 5 MB per image,
 
 ## Auto Prompt
 
-Use the sparkle button in the upper-right corner of a machine or project box to open **Auto Prompt**. The machine button selects **Auto**; a project button selects that folder. Choose a folder on the left and **Claude Code** or **Codex** on the right, then enter a request. File attachments, image paste, drag and drop, and **Ctrl/Cmd+Enter** work as in chat. Plain Enter inserts a newline.
+Use the sparkle button in the upper-right corner of a machine or project box to open **Auto Prompt**. The machine button selects **Auto**; a project button selects that folder. On the canvas, **Shift+P** also opens it with **Auto** selected, regardless of the Korean or English keyboard layout. The shortcut does not interrupt text entry or another dialog, and reopening an unresolved request preserves its destination.
+
+Choose a folder on the left and the **Claude** or **Codex** icon on the right. The selected icon is colored; the other is gray. Then enter a request. File attachments, image paste, drag and drop, and **Ctrl/Cmd+Enter** work as in chat. Plain Enter inserts a newline.
 
 With **Auto**, a separate routing agent first chooses from Tower's known project folders, then considers sessions in that folder. Selecting a folder skips the first step. The router uses **Claude Opus** or **GPT-5.6-Sol** through your existing native sign-in. Routing consumes provider usage in addition to the eventual task. It does not change the model of the session receiving your request.
 

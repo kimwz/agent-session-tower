@@ -219,7 +219,12 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
     <header className="auto-prompt-heading"><div><h2 id={`${id}-heading`}><Sparkles size={22} aria-hidden="true" />Auto Prompt</h2><p id={`${id}-description`}>{t('요청에 맞는 폴더와 세션을 찾아 작업을 보냅니다.')}</p></div><button type="button" className="icon-button" aria-label={t('Auto Prompt 창 닫기')} onClick={onClose}><X size={19} /></button></header>
     <div className="auto-prompt-selectors">
       <label className="auto-prompt-directory"><span className="sr-only">{t('작업 폴더')}</span><Folder size={16} aria-hidden="true" /><select aria-label={t('작업 폴더')} title={cwd || 'Auto'} value={cwd} disabled={locked} onChange={event => setCwd(event.target.value)}><option value="">Auto</option>{[...choices].map(([path, label]) => <option key={path} value={path}>{label} · {path}</option>)}</select><ChevronDown size={13} aria-hidden="true" /></label>
-      <label className="auto-prompt-provider"><span className="sr-only">{t('에이전트 종류')}</span><ProviderIcon provider={provider} size={17} /><select aria-label={t('에이전트 종류')} value={provider} disabled={locked} onChange={event => setProvider(event.target.value as Provider)}>{(['claude', 'codex'] as const).map(value => <option key={value} value={value} disabled={!providers.some(item => item.provider === value && item.available)}>{value === 'claude' ? 'Claude' : 'Codex'}</option>)}</select><ChevronDown size={13} aria-hidden="true" /></label>
+      <div className="auto-prompt-providers" role="group" aria-label={t('에이전트 종류')}>
+        {(['claude', 'codex'] as const).map(value => {
+          const available = providers.some(item => item.provider === value && item.available);
+          return <button key={value} type="button" className={`auto-prompt-provider-button ${value}`} aria-label={value === 'claude' ? 'Claude' : 'Codex'} aria-pressed={provider === value} title={available ? providerLabels[value] : t('{0}를 현재 사용할 수 없습니다.', { 0: providerLabels[value] })} disabled={locked || !available} onClick={() => setProvider(value)}><ProviderIcon provider={value} size={24} /></button>;
+        })}
+      </div>
     </div>
     <form className={`composer auto-prompt-composer ${locked ? 'disabled' : ''} ${dragging ? 'composer-dragging' : ''}`} aria-busy={preparing || submitting || pending} onSubmit={event => { event.preventDefault(); void submit(); }}
       onDragOver={event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = locked ? 'none' : 'copy'; if (!locked) setDragging(true); } }}

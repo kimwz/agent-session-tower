@@ -1,0 +1,19 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { isAutoPromptShortcut } from '../client/src/canvas-shortcuts.js';
+
+const event = () => ({ code: 'KeyP', key: 'P', shiftKey: true, ctrlKey: false, metaKey: false, altKey: false, repeat: false, defaultPrevented: false, isComposing: false });
+
+test('canvas Shift+P follows the physical key under English and Korean IME layouts', () => {
+  assert.equal(isAutoPromptShortcut(event()), true);
+  assert.equal(isAutoPromptShortcut({ ...event(), key: 'ㅖ', isComposing: true }), true);
+  assert.equal(isAutoPromptShortcut({ ...event(), key: 'Process', isComposing: true }), true);
+  assert.equal(isAutoPromptShortcut({ ...event(), code: 'KeyQ' }), false, 'a translated P must not override a different physical key');
+});
+
+test('the shortcut does not intercept modifier combinations, held keys, or handled events', () => {
+  assert.equal(isAutoPromptShortcut({ ...event(), shiftKey: false }), false);
+  for (const modifier of ['ctrlKey', 'metaKey', 'altKey', 'repeat', 'defaultPrevented'] as const) {
+    assert.equal(isAutoPromptShortcut({ ...event(), [modifier]: true }), false, modifier);
+  }
+});

@@ -10,12 +10,14 @@ import { acknowledgeSession, conversationRevision, parseReadState, pruneReadStat
 import { NewSessionDialog } from './NewSessionDialog';
 import { AutoPromptDialog } from './AutoPromptDialog';
 import { projectGroupChoices, visiblePinnedProjectGroups } from './project-groups';
+import { isAutoPromptShortcut } from './canvas-shortcuts';
 
 type StatusFilter = 'all' | SessionStatus;
 const readSelection = () => new URLSearchParams(window.location.search).get('session');
 const ChatPanel = lazy(() => import('./ChatPanel').then(module => ({ default: module.ChatPanel })));
 const sidebarPreferenceKey = 'agent-monitor.sidebar-collapsed';
 const emptyProjectGroups: ProjectGroup[] = [];
+const editingControls = 'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]';
 
 function useMediaQuery(query: string) {
   const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
@@ -71,6 +73,8 @@ export function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [now, setNow] = useState(Date.now());
   const searchRef = useRef<HTMLInputElement>(null);
+  const canvasRef = useRef<HTMLElement>(null);
+  const canvasPointerScope = useRef(true);
   const sidebarToggleRef = useRef<HTMLButtonElement>(null);
   const mobileViewport = useMediaQuery('(max-width: 680px)');
   const narrowViewport = useMediaQuery('(max-width: 900px)');
@@ -132,6 +136,23 @@ export function App() {
   const openNewSession = useCallback((cwd?: string) => { setNewSessionCwd(cwd); setShowNewSession(true); }, []);
   const closeNewSession = useCallback(() => { setShowNewSession(false); setNewSessionCwd(undefined); }, []);
   const openAutoPrompt = useCallback((cwd?: string) => { setAutoPromptCwd(cwd); setShowAutoPrompt(true); }, []);
+  useEffect(() => {
+    const inCanvasContext = (element: Element | null) => {
+      if (!element || element.closest(`${editingControls}, .sidebar, .chat-panel, .help-popover, dialog, [role="dialog"]`)) return false;
+      return !!canvasRef.current?.contains(element) || (canvasPointerScope.current && (element === document.body || element === document.documentElement
+        || element.id === 'root' || element.matches('.app, .workspace')));
+    };
+    const handler = (event: KeyboardEvent) => {
+      if (!isAutoPromptShortcut(event) || showHelp || showNewSession || showAutoPrompt || (sidebarIsDrawer && showSidebar)
+        || document.querySelector('dialog[open], [aria-modal="true"]')) return;
+      if (!inCanvasContext(event.target instanceof Element ? event.target : document.activeElement) || !inCanvasContext(document.activeElement)) return;
+      event.preventDefault();
+      canvasRef.current?.focus({ preventScroll: true });
+      openAutoPrompt();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [openAutoPrompt, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar]);
   const closeAutoPrompt = useCallback(() => setShowAutoPrompt(false), []);
   const openAutoPromptSession = useCallback((id: string) => {
     setShowClosed(false); setProvider('all'); setStatus('all'); setProject('all'); setQuery(''); setPeriod('all');
@@ -202,16 +223,28 @@ export function App() {
     refresh();
   }, [refresh, selectSession]);
 
-  return <div className={`app ${selectedId ? 'has-chat' : ''}`}>
+  return <div className={`app ${selectedId ? 'has-chat' : ''}`} onPointerDownCapture={event => {
+    // Clicking ordinary sidebar/chat text can leave body focused. Preserve the
+    // interaction scope so that fallback does not turn a canvas key into a global one.
+    // Portalled dialogs bubble through React; keep their opener's scope intact.
+    if (!(event.target instanceof Element) || event.target.closest('dialog, [role="dialog"], [aria-modal="true"]')) return;
+    canvasPointerScope.current = !!canvasRef.current?.contains(event.target) || event.target === event.currentTarget || event.target.matches('.workspace');
+  }}>
     <header className="app-header"><div className="brand"><button ref={sidebarToggleRef} className="icon-button sidebar-toggle" onClick={() => sidebarIsDrawer ? setShowSidebar(value => !value) : setSidebarCollapsed(value => !value)} aria-label={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} title={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} aria-controls="session-sidebar" aria-expanded={sidebarOpen}>{sidebarOpen ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}</button><span className="brand-mark"><BrandMark /></span><h1>Agent Session Tower</h1><span className="brand-local">local</span></div><div className="header-center"><Monitor size={13} /><span>{snapshot?.hostname || t("이 Mac")}</span><span className="header-divider" /><span className="localhost">{window.location.host}</span></div><div className="header-actions"><label className="language-selector"><span className="sr-only">{t("언어")}</span><select aria-label={t("언어")} value={language} onChange={event => setLanguage(event.target.value as 'ko' | 'en')}><option value="ko" lang="ko">한국어</option><option value="en" lang="en">English</option></select></label><button className="new-session-button" onClick={() => openNewSession()} disabled={!token || connection !== 'connected'}><Plus size={15} /><span>{t("새 세션")}</span></button><span className={`connection-state ${connection}`} role="status">{connection === 'offline' ? <WifiOff size={12} /> : <i />}{connection === 'connected' ? t("실시간 연결") : connection === 'offline' ? t("재연결 중") : t("연결 중")}</span><button className={`icon-button ${showHelp ? 'active' : ''}`} title={t("사용 안내")} aria-label={t("사용 안내")} aria-expanded={showHelp} onClick={() => setShowHelp(!showHelp)}><CircleHelp size={18} /></button></div></header>
     {connection === 'offline' && <div className="connection-banner" role="alert"><WifiOff size={14} /><span>{t("Monitor와의 연결이 끊겼습니다. 저장된 화면을 표시하며 자동으로 다시 연결합니다.")}</span><button onClick={refresh}>{t("다시 확인")}</button></div>}
-    {showHelp && <div className="help-popover"><div className="help-heading"><h2>{t("내 컴퓨터의 에이전트를 한눈에")}</h2><button className="icon-button" onClick={() => setShowHelp(false)} aria-label={t("안내 닫기")}><X size={15} /></button></div><p>{t("Claude Code와 Codex의 로컬 세션 기록을 자동으로 읽습니다. 그래프의 에이전트를 선택하면 실제 대화를 보고 작업을 이어갈 수 있습니다.")}</p><div className="help-statuses"><span><i className="legend-dot working" /><b>{t("작업 중")}</b>{t("현재 실행 중인 작업")}</span><span><i className="legend-dot idle" /><b>{t("대기 중")}</b>{t("입력이나 다음 작업 대기")}</span><span><i className="legend-dot completed" /><b>{t("완료")}</b>{t("작업 종료가 기록된 세션")}</span></div><p>{t("상태는 프로세스와 세션 기록을 함께 확인합니다. 대화 상단의 프로젝트 이름을 누르면 상태 판단 근거를 볼 수 있습니다.")}</p><div className="help-privacy"><ShieldCheck size={16} /><span>{t("로컬에서 실행됩니다. 새 요청은 해당 CLI와 기존 로그인 계정을 사용합니다.")}</span></div><div className="help-shortcuts"><span><kbd>/</kbd> {' '}{t("세션 검색")}</span><span><kbd>Esc</kbd> {' '}{t("대화 닫기")}</span><span><kbd>⌘ Enter</kbd> {' '}{t("요청 보내기")}</span></div></div>}
+    {showHelp && <div className="help-popover"><div className="help-heading"><h2>{t("내 컴퓨터의 에이전트를 한눈에")}</h2><button className="icon-button" onClick={() => setShowHelp(false)} aria-label={t("안내 닫기")}><X size={15} /></button></div><p>{t("Claude Code와 Codex의 로컬 세션 기록을 자동으로 읽습니다. 그래프의 에이전트를 선택하면 실제 대화를 보고 작업을 이어갈 수 있습니다.")}</p><div className="help-statuses"><span><i className="legend-dot working" /><b>{t("작업 중")}</b>{t("현재 실행 중인 작업")}</span><span><i className="legend-dot idle" /><b>{t("대기 중")}</b>{t("입력이나 다음 작업 대기")}</span><span><i className="legend-dot completed" /><b>{t("완료")}</b>{t("작업 종료가 기록된 세션")}</span></div><p>{t("상태는 프로세스와 세션 기록을 함께 확인합니다. 대화 상단의 프로젝트 이름을 누르면 상태 판단 근거를 볼 수 있습니다.")}</p><div className="help-privacy"><ShieldCheck size={16} /><span>{t("로컬에서 실행됩니다. 새 요청은 해당 CLI와 기존 로그인 계정을 사용합니다.")}</span></div><div className="help-shortcuts"><span><kbd>/</kbd> {' '}{t("세션 검색")}</span><span><kbd>Shift P</kbd> Auto Prompt</span><span><kbd>Esc</kbd> {' '}{t("대화 닫기")}</span><span><kbd>⌘ Enter</kbd> {' '}{t("요청 보내기")}</span></div></div>}
     <div className="workspace">
       {sidebarIsDrawer && sidebarOpen && <button className="sidebar-scrim" aria-label={t("세션 목록 닫기")} onClick={() => setShowSidebar(false)} />}
       <aside id="session-sidebar" className={`sidebar ${sidebarOpen ? 'open' : ''}`} hidden={!sidebarOpen} aria-label={t("세션 탐색")}><div className="sidebar-heading"><h2>{t("세션")}</h2><span>{mainSessions.length.toLocaleString()}</span><button className="icon-button refresh-button" onClick={refresh} title={t("세션 새로고침")} aria-label={t("세션 새로고침")} disabled={refreshing}><RefreshCw size={14} className={refreshing ? 'spin' : ''} /></button></div><div className="search-wrap"><Search size={15} /><input ref={searchRef} type="search" placeholder={t("세션, 프로젝트 검색")} aria-label={t("세션 검색")} value={query} onChange={event => setQuery(event.target.value)} /><kbd>/</kbd></div><div className="provider-filters" aria-label={t("에이전트 종류")}><button className={provider === 'all' ? 'selected' : ''} onClick={() => setProvider('all')} aria-pressed={provider === 'all'}>{t("전체")}</button><button className={provider === 'claude' ? 'selected claude' : ''} onClick={() => setProvider('claude')} aria-pressed={provider === 'claude'}><ProviderIcon provider="claude" size={13} />Claude</button><button className={provider === 'codex' ? 'selected codex' : ''} onClick={() => setProvider('codex')} aria-pressed={provider === 'codex'}><ProviderIcon provider="codex" size={13} />Codex</button></div><div className="sidebar-selects"><label><Folder size={13} /><select aria-label={t("프로젝트 필터")} value={project} onChange={event => setProject(event.target.value)}><option value="all">{t("모든 프로젝트")}</option>{projects.map(([path, name]) => <option key={path} value={path}>{name}</option>)}</select><ChevronDown size={11} /></label><label><select aria-label={t("세션 상태 필터")} value={status} onChange={event => setStatus(event.target.value as StatusFilter)}><option value="all">{t("모든 상태")}</option><option value="working">{t("작업 중")}</option><option value="idle">{t("대기 중")}</option><option value="completed">{t("완료")}</option><option value="error">{t("중단·오류")}</option></select><ChevronDown size={11} /></label></div><button className={`closed-sessions-toggle ${showClosed ? 'selected' : ''}`} onClick={() => { setShowClosed(value => !value); setListLimit(80); }} aria-pressed={showClosed}><Archive size={12} /><span>{showClosed ? t("열린 세션 보기") : t("종료한 세션")}</span><b>{closedSessions.length}</b></button><div className="session-list-label"><span>{showClosed ? t("종료한 세션") : hasFilters ? t("검색 결과") : t("최근 활동")}</span><span>{listedSessions.length.toLocaleString()}{t("개")}{hasFilters && <button onClick={() => { setQuery(''); setProvider('all'); setProject('all'); setStatus('all'); }} aria-label={t("검색 및 필터 초기화")}><X size={12} /></button>}</span></div><div className="session-list">
         {!snapshot ? <div className="sidebar-loading"><LoaderCircle className="spin" size={17} /><span>{t("세션을 찾고 있습니다")}</span></div> : listedSessions.length ? <>{listedSessions.slice(0, listLimit).map(session => <SessionRow key={session.id} session={session} selected={selectedMainId === session.id} unread={unreadIds.has(session.id)} onSelect={onSelect} />)}{listedSessions.length > listLimit && <button className="load-more-sessions" onClick={() => setListLimit(value => value + 80)}>{t("세션 더 보기")}{' '}<ChevronDown size={13} /><span>{Math.min(listLimit, listedSessions.length)} / {listedSessions.length.toLocaleString()}</span></button>}</> : <div className="sidebar-empty"><Search size={22} /><span>{showClosed ? t("종료한 세션이 없습니다") : sessions.length ? t("조건에 맞는 세션이 없습니다") : t("아직 발견된 세션이 없습니다")}</span>{sessions.length > 0 && <button onClick={clearFilters}>{t("전체 기록 보기")}</button>}</div>}
       </div><div className="providers-health"><div className="providers-health-label"><Terminal size={12} /><span>{t("로컬 에이전트")}</span>{snapshot?.scanning && <LoaderCircle size={11} className="spin" />}</div>{(['claude', 'codex'] as const).map(name => { const health = snapshot?.providers.find(item => item.provider === name); return <div className="provider-health" key={name} title={(health?.error ? translateMessage(health.error) : undefined) || health?.executable || t("{0} 상태 확인 중", { 0: providerLabels[name] })}><ProviderIcon provider={name} size={13} /><span>{providerLabels[name]}</span><span className={health?.available ? 'available' : 'unavailable'}>{health ? health.available ? <><Check size={10} />{t("사용 가능")}</> : t("CLI 없음") : t("확인 중")}</span></div>; })}<p><ShieldCheck size={10} />{t("이 Mac의 에이전트와 연결됩니다")}</p></div></aside>
-      <main className="main-area">
+      <main ref={canvasRef} className="main-area" tabIndex={-1} onPointerDownCapture={event => {
+        // React Flow may prevent the browser's usual blur during a canvas drag.
+        // Focus the canvas explicitly while preserving its interactive controls.
+        if (event.button === 0 && event.target instanceof Element && !event.target.closest(`${editingControls}, button, a, summary, [role="button"]`)) {
+          event.currentTarget.focus({ preventScroll: true });
+        }
+      }}>
         <div className="canvas-toolbar" aria-label={t("캔버스 필터")}>
           <div className="stat-filters">
             <button className={status === 'all' ? 'selected' : ''} onClick={() => setStatus('all')} aria-pressed={status === 'all'}><Network size={12} /><span>{t("전체")}</span><b>{mainSessions.length.toLocaleString()}</b></button>
