@@ -900,6 +900,32 @@ kbd {
   height:72px;
   margin-bottom:6px
 }
+.agent-orb-wrap {
+  position:relative;
+  display:block;
+  flex-shrink:0;
+  width:59px;
+  height:59px
+}
+.agent-orb-wrap.claude { --ring:#e6b586; }
+.agent-orb-wrap.codex { --ring:#7bcebd; }
+.session-context-ring {
+  position:absolute;
+  top:-3px;
+  left:-3px;
+  width:65px;
+  height:65px;
+  transform:rotate(90deg);
+  fill:none;
+  stroke-width:3;
+  pointer-events:none
+}
+.session-context-track { stroke:#3a4555; }
+.session-context-fill { stroke:var(--context-color); stroke-linecap:butt; }
+.session-context-ring.low { --context-color:#72c896; }
+.session-context-ring.medium { --context-color:#e7cb67; }
+.session-context-ring.high { --context-color:#e7a067; }
+.session-context-ring.critical { --context-color:#e47e82; }
 .agent-orb {
   width:59px;
   height:59px;
@@ -922,25 +948,23 @@ kbd {
 }
 .agent-orb.claude {
   background:linear-gradient(145deg,#e7b478,#c5835c 55%,#99625f);
-  color:#ffead4;
-  --ring:#e6b586
+  color:#ffead4
 }
 .agent-orb.codex {
   background:linear-gradient(145deg,#89cabc,#4e9c97 55%,#37718a);
-  color:#d4fff5;
-  --ring:#7bcebd
+  color:#d4fff5
 }
-.agent-card.working .agent-orb:before {
+.agent-card.working .agent-orb-wrap:before {
   content:'';
   position:absolute;
-  inset:-6px;
+  inset:-8px;
   border-radius:50%;
   padding:2px;
   background:conic-gradient(transparent 0%,transparent 35%,var(--ring) 62%,#ffffffcc 77%,var(--ring) 86%,transparent 95%);
   mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
   mask-composite:exclude;
   animation:orbit 3s linear infinite;
-  filter:drop-shadow(0 0 4px var(--ring))
+  filter:drop-shadow(0 0 2px var(--ring))
 }
 .agent-card.completed .agent-orb {
   opacity:.82
@@ -2497,7 +2521,7 @@ kbd {
 .spin {
   animation:orbit 1s linear infinite
 }
-.motion-off .react-flow__edge.animated path,.motion-off .agent-card.working .agent-orb:before {
+.motion-off .react-flow__edge.animated path,.motion-off .agent-card.working .agent-orb-wrap:before {
   animation:none!important
 }
 .sidebar-scrim {
@@ -2922,7 +2946,7 @@ kbd {
   transition-duration:.01ms!important;
   scroll-behavior:auto!important
 }
-.react-flow__edge.animated path,.agent-card.working .agent-orb:before {
+.react-flow__edge.animated path,.agent-card.working .agent-orb-wrap:before {
   animation:none!important
 }
 

@@ -1,9 +1,9 @@
 import { translate as t, useI18n } from './i18n';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { applyNodeChanges, Background, BackgroundVariant, Handle, Position, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type FitViewOptions, type Node, type NodeChange, type NodeProps } from '@xyflow/react';
 import { ArrowUpRight, Check, ChevronRight, GitBranch, Maximize, Minus, Monitor, Move, Plus, Radio, Scan, Sparkles, Waypoints } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../shared/types';
-import { ProviderIcon } from './Icons';
+import { SessionContextIcon } from './SessionContextIcon';
 import { cleanPreview, providerLabels, relativeTime, sessionActivityAt, sessionTitle, statusLabels } from './lib';
 import { graphProjectId, graphSessionGroups, clearHostPosition, HOST_HEIGHT } from './graph-layout';
 import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualProjectBounds, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, reconcileManualGraph, setGraphLayoutMode, type GraphLayoutMode, type GraphPreferences } from './graph-layout-preferences';
@@ -19,13 +19,14 @@ type HostData = { name: string; active: number; providers: ProviderHealth[]; dis
 
 const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentData>>) {
   useI18n();
+  const contextDescriptionId = useId();
   const session = data.session;
   const activityAt = sessionActivityAt(session);
   return <>
     <Handle type="target" position={Position.Top} />
-    <button className={`agent-card ${session.provider} ${session.status} ${data.selected ? 'selected' : ''} ${data.unread ? 'has-unread' : ''}`} onClick={() => data.onSelect(session.id)} aria-label={t("{0}: {1}, {2}{3}. 대화 열기", { 0: providerLabels[session.provider], 1: sessionTitle(session), 2: statusLabels[session.status], 3: data.unread ? t(", 새 활동") : t(", 확인함") })}>
+    <button className={`agent-card ${session.provider} ${session.status} ${data.selected ? 'selected' : ''} ${data.unread ? 'has-unread' : ''}`} onClick={() => data.onSelect(session.id)} aria-describedby={contextDescriptionId} aria-label={t("{0}: {1}, {2}{3}. 대화 열기", { 0: providerLabels[session.provider], 1: sessionTitle(session), 2: statusLabels[session.status], 3: data.unread ? t(", 새 활동") : t(", 확인함") })}>
       {data.unread && <span className="agent-unread"><i />{t("새 활동")}</span>}
-      <div className="agent-card-top"><span className={`agent-orb ${session.provider}`}><ProviderIcon provider={session.provider} size={28} /></span>{session.isSubagent && <span className="subagent-mark" title={t("하위 에이전트")}><GitBranch size={12} /></span>}</div>
+      <div className="agent-card-top"><SessionContextIcon provider={session.provider} usage={session.contextUsage} descriptionId={contextDescriptionId} />{session.isSubagent && <span className="subagent-mark" title={t("하위 에이전트")}><GitBranch size={12} /></span>}</div>
       <div className="agent-card-title" title={sessionTitle(session)}>{sessionTitle(session)}</div>
       <div className="agent-card-bottom"><span className="agent-provider">{providerLabels[session.provider]}</span><span className={`agent-state ${session.status}`}>{session.status === 'completed' ? <Check size={11} /> : session.status === 'working' ? <Radio size={11} /> : <i />}{statusLabels[session.status]}</span></div>
       <p className="agent-card-preview">{cleanPreview(session.lastMessage) || t("대화 기록을 확인하세요")}</p><time className="agent-updated" dateTime={activityAt}>{relativeTime(activityAt)}<ArrowUpRight size={11} /></time>

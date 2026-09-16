@@ -9,7 +9,7 @@
 .usage-trigger:hover { background: #23364c; }
 .usage-trigger:focus-visible { background: #23364c; outline: 2px solid #97bff9; outline-offset: 1px; }
 .usage-donut { width: 32px; height: 32px; flex-shrink: 0; display: grid; place-items: center; position: relative; color: #b9cbe2; }
-.usage-donut > svg:first-child { position: absolute; inset: 0; width: 32px; height: 32px; transform: rotate(-90deg); fill: none; stroke-width: 3; }
+.usage-donut > svg:first-child { position: absolute; inset: 0; width: 32px; height: 32px; transform: rotate(90deg); fill: none; stroke-width: 3; }
 .usage-track { stroke: #344356; }
 .usage-fill { stroke: #d8a379; stroke-linecap: round; }
 .codex .usage-fill { stroke: #76c5b5; }
