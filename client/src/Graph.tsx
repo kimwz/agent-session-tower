@@ -1,7 +1,7 @@
 import { translate as t, useI18n } from './i18n';
 import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { applyNodeChanges, Background, BackgroundVariant, Handle, Position, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type FitViewOptions, type Node, type NodeChange, type NodeProps } from '@xyflow/react';
-import { ArrowUpRight, Check, GitBranch, Maximize, Minus, Monitor, Move, Plus, Radio, Scan, Sparkles, Waypoints } from 'lucide-react';
+import { ArrowUpRight, Check, GitBranch, Maximize, Minus, Monitor, Plus, Radio, Scan, Sparkles } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../shared/types';
 import { SessionContextIcon } from './SessionContextIcon';
 import { cleanPreview, providerLabels, relativeTime, sessionActivityAt, sessionTitle, statusLabels } from './lib';
@@ -12,6 +12,7 @@ import { ProjectGroupHeader, type ProjectGroupHeaderData } from './ProjectGroupH
 import './manual-graph.css';
 import './auto-prompt.css';
 import { ProviderUsage } from './ProviderUsage';
+import { CanvasSettings } from './CanvasSettings';
 
 type AgentData = { session: Session; selected: boolean; unread: boolean; onSelect: (id: string) => void };
 type ProjectData = ProjectGroupHeaderData & { onAutoPrompt: (cwd?: string) => void };
@@ -43,14 +44,14 @@ const HostNode = memo(function HostNode({ data }: NodeProps<Node<HostData>>) {
 });
 const nodeTypes = { agent: AgentNode, projectGroup: ProjectGroupNode, host: HostNode };
 
-type GraphProps = { providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void; filterControls: ReactNode; emptyState?: ReactNode };
+type GraphProps = { providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
 
 function readPreferences(): GraphPreferences {
   try { return parseGraphPreferences(window.localStorage.getItem(GRAPH_PREFERENCES_KEY)); }
   catch { return defaultGraphPreferences(); }
 }
 
-function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, filterControls, emptyState }: GraphProps) {
+function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
   const { language } = useI18n();
   const { fitView, zoomIn, zoomOut } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
@@ -159,22 +160,17 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
     return () => window.clearTimeout(timeout);
   }, [manualFitRequest, manual, fitVisibleGraph]);
 
-  return <div className="graph-view">
-    <div className="canvas-toolbar" aria-label={t("캔버스 보기 도구")}>
-      <div className="canvas-filter-row" aria-label={t("캔버스 필터")}>{filterControls}</div>
-      <div className="canvas-tool-row">
-        <div className="graph-layout-switch" role="group" aria-label={t("그래프 정렬 방식")}><button aria-pressed={!manual} onClick={() => changeMode('auto')} title={t("최근 활동 순서로 자동 정렬")}><Waypoints size={12} />{t("자동 정렬")}</button><button aria-pressed={manual} onClick={() => changeMode('manual')} title={t("폴더와 세션을 드래그해 위치 지정")}><Move size={12} />{t("수동 배치")}</button></div>
-        <div className="graph-controls" role="group" aria-label={t("그래프 보기 조절")}><button onClick={() => { void zoomOut({ duration: 0 }); }} aria-label={t("그래프 축소")} title={t("축소")}><Minus size={16} /></button><span>{zoom}%</span><button onClick={() => { void zoomIn({ duration: 0 }); }} aria-label={t("그래프 확대")} title={t("확대")}><Plus size={16} /></button><i /><button onClick={() => fitVisibleGraph({ padding: 0.13, maxZoom: 0.95 })} aria-label={t("전체 그래프 맞춤")} title={t("전체 맞춤")}><Maximize size={16} /></button>{selectedId && nodes.some(n => n.id === selectedId) && <button onClick={() => fitVisibleGraph({ nodes: [{ id: selectedId }], maxZoom: 1.1, padding: 0.7 })} aria-label={t("선택한 세션 위치로 이동")} title={t("선택한 세션 찾기")}><Scan size={16} /></button>}</div>
-        <label className="motion-toggle"><input type="checkbox" checked={motion} onChange={event => setMotion(event.target.checked)} />{t("흐름 표시")}</label>
-        {manual ? <div className="graph-limit manual-session-count">{shown.toLocaleString()}{t("개 세션 · 위치 자동 저장")}</div> : <div className="graph-limit"><span>{t("최근 활동")}{' '}{shown}{t("개 표시 · 전체")}{' '}{sessions.length.toLocaleString()}{t("개")}</span>{shown < sessions.length && graphLimit < 72 && <button onClick={() => setGraphLimit(value => Math.min(72, value + 8))}><Plus size={10} />{t("더 표시")}</button>}{graphLimit > 8 && <button onClick={() => setGraphLimit(8)}>{t("접기")}</button>}</div>}
-      </div>
+  const working = sessions.filter(session => session.status === 'working').length;
+  return <div ref={canvas} className={`graph-canvas ${manual ? 'manual-layout' : 'auto-layout'} ${motion ? '' : 'motion-off'}`}>
+    <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.1, minZoom: 0.15, maxZoom: 0.95, duration: 0 }} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(_, viewport) => setZoom(Math.round(viewport.zoom * 100))} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
+      <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#283343" />
+    </ReactFlow>
+    {emptyState}
+    <div className="canvas-quick-controls" aria-label={t("캔버스 보기 도구")}>
+      <div className="canvas-zoom-controls" role="group" aria-label={t("그래프 보기 조절")}><button onClick={() => { void zoomOut({ duration: 0 }); }} aria-label={t("그래프 축소")} title={t("축소")}><Minus size={15} /></button><span>{zoom}%</span><button onClick={() => { void zoomIn({ duration: 0 }); }} aria-label={t("그래프 확대")} title={t("확대")}><Plus size={15} /></button><i /><button onClick={() => fitVisibleGraph({ padding: 0.13, maxZoom: 0.95 })} aria-label={t("전체 그래프 맞춤")} title={t("전체 맞춤")}><Maximize size={15} /></button>{selectedId && nodes.some(n => n.id === selectedId) && <button className="canvas-find-session" onClick={() => fitVisibleGraph({ nodes: [{ id: selectedId }], maxZoom: 1.1, padding: 0.7 })} aria-label={t("선택한 세션 위치로 이동")} title={t("선택한 세션 찾기")}><Scan size={15} /></button>}</div>
+      <CanvasSettings manual={manual} onLayoutChange={changeMode} motion={motion} onMotionChange={setMotion} showHidden={showHidden} onShowHiddenChange={onShowHiddenChange} suspended={settingsSuspended} />
     </div>
-    <div ref={canvas} className={`graph-canvas ${manual ? 'manual-layout' : 'auto-layout'} ${motion ? '' : 'motion-off'}`}>
-      <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.1, minZoom: 0.15, maxZoom: 0.95, duration: 0 }} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(_, viewport) => setZoom(Math.round(viewport.zoom * 100))} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
-        <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#283343" />
-      </ReactFlow>
-      {emptyState}
-    </div>
+    <div className="canvas-session-summary"><span>{t("{0} / {1}개 세션 표시 · {2}개 작업 중", { 0: shown.toLocaleString(), 1: sessions.length.toLocaleString(), 2: working.toLocaleString() })}</span>{!manual && shown < sessions.length && graphLimit < 72 && <button onClick={() => setGraphLimit(value => Math.min(72, value + 8))}>{t("더 표시")}</button>}{!manual && graphLimit > 8 && <button onClick={() => setGraphLimit(8)}>{t("접기")}</button>}</div>
   </div>;
 }
 

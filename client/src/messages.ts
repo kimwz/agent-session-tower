@@ -1,5 +1,11 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  '캔버스 설정': 'Canvas settings',
+  '캔버스 설정 닫기': 'Close canvas settings',
+  '연결선 애니메이션': 'Animate connections',
+  '그 외 상태': 'Other status',
+  '그 외 세션 상태': 'Other session status',
+  '{0} / {1}개 세션 표시 · {2}개 작업 중': 'Showing {0} / {1} sessions · {2} working',
   '전체보기': 'Show all',
   '숨긴 폴더 표시 전환': 'Toggle hidden folders',
   '숨긴 폴더 포함 (Shift+A)': 'Include hidden folders (Shift+A)',
