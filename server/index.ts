@@ -20,8 +20,10 @@ import { openCodexBridgeRun } from './codex-app-server.js';
 import { ProviderCapabilities } from './provider-capabilities.js';
 import { trustWorkspace } from './workspace-trust.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
+import { defaultStateDir } from './state-dir.js';
+import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
 
-const HELP = `Agent Session Tower 0.1.0
+const HELP = `${APP_TITLE} ${APP_VERSION}
 
 Usage: agent-session-tower [run] [options]
 
@@ -30,7 +32,7 @@ Usage: agent-session-tower [run] [options]
   --port <number>      Listening port (default: 8000)
   --host <IPv4>        Bind address (default: 127.0.0.1; 0.0.0.0 for remote access)
   --no-open            Do not open the browser automatically
-  --state-dir <path>   Managed task state (default: ~/.agent-monitor)
+  --state-dir <path>   Managed task state (default: ~/${STATE_DIR_NAME})
   --help               Show this help
   --version            Print version
 
@@ -43,11 +45,11 @@ Native histories are read directly; tasks use the existing Codex app server or C
 async function main() {
   const args = process.argv.slice(2);
   if (args.includes('--help') || args.includes('-h')) { console.log(HELP); return; }
-  if (args.includes('--version')) { console.log('0.1.0'); return; }
+  if (args.includes('--version')) { console.log(APP_VERSION); return; }
   let port = 8000;
   let host = '127.0.0.1';
   let open = true;
-  let stateDir = join(homedir(), '.agent-monitor');
+  let stateDir = defaultStateDir();
   let command = 'run';
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -110,7 +112,7 @@ async function main() {
       sessions: projectSessionStates(all, managed, runs.settledRunIds()).map(session => closedSessions.apply(titles.apply(session))),
       groups: groups.list(),
       providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider).length })),
-      runs: dismissedRuns.visible(managed), autoPrompts: autoPrompts?.list() || [], scanning, hostname: hostname(), version: '0.1.0', updatedAt: new Date().toISOString(),
+      runs: dismissedRuns.visible(managed), autoPrompts: autoPrompts?.list() || [], scanning, hostname: hostname(), version: APP_VERSION, updatedAt: new Date().toISOString(),
     };
   };
   const detail = async (id: string, before?: number, limit?: number) => {

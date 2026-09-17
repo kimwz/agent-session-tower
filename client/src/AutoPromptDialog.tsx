@@ -9,6 +9,7 @@ import { addDraftFiles, formatAttachmentSize, prepareDraftAttachments, type Draf
 import { autoPromptPending, createAutoPromptAttempt, newerAutoPromptJob, type AutoPromptAttempt } from './auto-prompt-request';
 import { api, providerLabels, sessionTitle } from './lib';
 import { translate as t, translateMessage, useI18n } from './i18n';
+import { REQUEST_TOKEN_HEADER } from '../../shared/app-identity';
 import './auto-prompt.css';
 
 interface AutoPromptDialogProps {
@@ -199,7 +200,7 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
     setCancelling(true); setError('');
     try {
       const result = await api<{ job: AutoPromptJob }>(`/api/auto-prompts/${encodeURIComponent(job.id)}/cancel`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: '{}',
+        method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}',
       });
       receiveJob(result.job);
       onRefresh();

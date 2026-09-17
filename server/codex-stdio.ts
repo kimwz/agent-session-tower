@@ -5,6 +5,7 @@ import { validateApprovalResponse } from '../shared/approval-interactions.js';
 import type { RunApproval, RunApprovalResponse } from '../shared/types.js';
 import { requestedModel } from './models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
+import { APP_NAME, APP_TITLE, APP_VERSION } from '../shared/app-identity.js';
 
 // v2 wire shapes verified with Codex CLI 0.153.4 app-server generate-ts --experimental.
 type RequestId = string | number;
@@ -156,7 +157,7 @@ class StdioRun implements CodexStdioRun {
       if (!this.result) this.finish({ status: 'error', error: this.connectionError(this.stderr.trim() || `Codex exited ${signal ? `with signal ${signal}` : `with code ${code ?? 'unknown'}`}.`) });
       this.complete();
     });
-    await this.request('initialize', { clientInfo: { name: 'agent-session-tower', title: 'Agent Session Tower', version: '0.1.0' }, capabilities: { experimentalApi: true, requestAttestation: false } });
+    await this.request('initialize', { clientInfo: { name: APP_NAME, title: APP_TITLE, version: APP_VERSION }, capabilities: { experimentalApi: true, requestAttestation: false } });
     if (this.result) return;
     this.write({ method: 'initialized' });
     const resumed = await this.request(this.options.threadId ? 'thread/resume' : 'thread/start', {

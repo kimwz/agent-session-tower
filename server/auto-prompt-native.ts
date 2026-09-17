@@ -6,6 +6,7 @@ import { delimiter, isAbsolute, join } from 'node:path';
 import type { Provider } from '../shared/types.js';
 import { MAX_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../shared/attachments.js';
 import { findExecutable } from './runner.js';
+import { defaultStateDir } from './state-dir.js';
 
 export interface AutoPromptModelRequest {
   provider: Provider;
@@ -138,7 +139,7 @@ export async function runAutoPromptModel(options: AutoPromptModelRequest, depend
   delete env.CLAUDE_CODE_SESSION_ID;
   const executable = await (dependencies.findExecutable ?? findExecutable)(options.provider, env);
   if (!executable) throw failure(`${options.provider === 'claude' ? 'Claude Code' : 'Codex'} CLI was not found. Install and sign in to the native CLI first.`);
-  const tempRoot = join(dependencies.stateDir ?? join(homedir(), '.agent-monitor'), 'tmp');
+  const tempRoot = join(dependencies.stateDir ?? defaultStateDir(), 'tmp');
   await mkdir(tempRoot, { recursive: true, mode: 0o700 });
   const root = await lstat(tempRoot);
   if (!root.isDirectory() || root.isSymbolicLink()) throw failure('private routing directory is invalid.');

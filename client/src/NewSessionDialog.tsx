@@ -5,6 +5,7 @@ import { ArrowUpRight, Folder, LoaderCircle, X } from 'lucide-react';
 import type { Provider, ProviderHealth, Run, Session } from '../../shared/types';
 import { ProviderIcon } from './Icons';
 import { api, providerLabels } from './lib';
+import { REQUEST_TOKEN_HEADER } from '../../shared/app-identity';
 import './new-session.css';
 
 interface NewSessionDialogProps {
@@ -63,7 +64,7 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
     try {
       const result = await api<{ session: Session; run: Run }>('/api/sessions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token },
+        headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token },
         body: JSON.stringify({ provider, cwd: cwd.trim(), prompt: prompt.trim(), ...(title.trim() ? { title: title.trim() } : {}) }),
       });
       onCreated(result.session, result.run);

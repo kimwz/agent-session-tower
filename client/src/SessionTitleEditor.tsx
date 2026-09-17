@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Check, LoaderCircle, Pencil, X } from 'lucide-react';
 import type { Session } from '../../shared/types';
 import { api, sessionTitle } from './lib';
+import { REQUEST_TOKEN_HEADER } from '../../shared/app-identity';
 
 export function SessionTitleEditor({ session, token, connected, onSaved }: {
   session: Session;
@@ -34,7 +35,7 @@ export function SessionTitleEditor({ session, token, connected, onSaved }: {
     inFlight.current = true; setSaving(true); setError('');
     try {
       const result = await api<{ session: Session }>(`/api/sessions/${encodeURIComponent(session.id)}/title`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token },
+        method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token },
         body: JSON.stringify({ title: title.trim() }),
       });
       onSaved(result.session);

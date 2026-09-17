@@ -13,6 +13,7 @@ import { canvasVisibleSessions, projectGroupChoices, visiblePinnedProjectGroups 
 import { isAutoPromptShortcut, isNewSessionShortcut, isShowAllShortcut } from './canvas-shortcuts';
 import { SidebarFilters } from './SidebarFilters';
 import { reconcileApprovalDecisions } from './chat-approvals';
+import { REQUEST_TOKEN_HEADER } from '../../shared/app-identity';
 
 type StatusFilter = 'all' | SessionStatus;
 const readSelection = () => new URLSearchParams(window.location.search).get('session');
@@ -182,7 +183,7 @@ export function App() {
     setGroupSaving(new Set(groupInFlight.current));
     setGroupErrors(previous => ({ ...previous, [patch.cwd]: '' }));
     try {
-      const { group } = await api<{ group: ProjectGroup }>('/api/groups', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: JSON.stringify(patch) });
+      const { group } = await api<{ group: ProjectGroup }>('/api/groups', { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(patch) });
       setSnapshot(previous => previous ? { ...previous, groups: [...(previous.groups || []).filter(item => item.cwd !== group.cwd), group] } : previous);
       return true;
     } catch (error) {
@@ -228,7 +229,7 @@ export function App() {
     const closing = !selectedMainSession.closed;
     setChangingClosed(true);
     try {
-      await api(`/api/sessions/${encodeURIComponent(selectedMainSession.id)}/${closing ? 'close' : 'reopen'}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: '{}' });
+      await api(`/api/sessions/${encodeURIComponent(selectedMainSession.id)}/${closing ? 'close' : 'reopen'}`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' });
       setSnapshot(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === selectedMainSession.id ? { ...session, closed: closing } : session) } : previous);
       if (closing) closeChat();
       else setShowClosed(false);

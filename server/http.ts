@@ -8,6 +8,7 @@ import { isImageAttachment, MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '
 import { requestedModel } from './models.js';
 import { SseClient } from './sse-client.js';
 import { publicSnapshot } from './public-snapshot.js';
+import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../shared/app-identity.js';
 
 export interface Backend {
   snapshot(): Snapshot;
@@ -100,7 +101,7 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
       const url = new URL(req.url || '/', `http://${req.headers.host}`);
       const path = decodeURIComponent(url.pathname);
       if (req.method === 'GET' && path === '/api/health') return json(res, 200, {
-        ok: true, application: 'agent-monitor', pid: process.pid, version: '0.1.0',
+        ok: true, application: HEALTH_APPLICATION_ID, pid: process.pid, version: APP_VERSION,
         bindHost: address && typeof address === 'object' ? address.address : undefined,
         remoteAccess: Boolean(remote),
       });
@@ -109,7 +110,7 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
         return json(res, 401, { error: '원격 접속 인증이 필요합니다.' });
       }
       if (req.method === 'POST') {
-        const header = req.headers['x-agent-monitor-token'];
+        const header = req.headers[REQUEST_TOKEN_HEADER.toLowerCase()];
         if (typeof header !== 'string' || !/^[a-f0-9]{64}$/.test(header) || !timingSafeEqual(Buffer.from(header), Buffer.from(token))) {
           return json(res, 403, { error: '연결 인증이 만료되었습니다. 페이지를 새로고침하세요.' });
         }

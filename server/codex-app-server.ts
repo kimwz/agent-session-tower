@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import WebSocket from 'ws';
 import { requestedModel } from './models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
+import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../shared/app-identity.js';
 
 type Result = { status: 'completed' | 'error' | 'cancelled'; error?: string };
 type Item = { id: string; type: string; clientId?: string | null; text?: string; command?: string; aggregatedOutput?: string; changes?: { path: string }[] };
@@ -124,7 +125,7 @@ export async function openCodexBridgeRun(options: CodexBridgeOptions): Promise<C
       socket.once('error', reject);
       socket.once('close', () => reject(connectionLost()));
     });
-    await rpc.request('initialize', { clientInfo: { name: 'agent-monitor', title: 'Agent Session Tower', version: '0.1.0' }, capabilities: { experimentalApi: true, requestAttestation: false } });
+    await rpc.request('initialize', { clientInfo: { name: LEGACY_APP_NAME, title: APP_TITLE, version: APP_VERSION }, capabilities: { experimentalApi: true, requestAttestation: false } });
     rpc.initialized();
     if (!await loaded(rpc, options.threadId)) { rpc.close(); return undefined; }
     return new BridgeRun(rpc, options);

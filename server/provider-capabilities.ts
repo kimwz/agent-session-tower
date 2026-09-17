@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { ModelOption, Provider, ProviderHealth, ProviderUsage, UsageWindow } from '../shared/types.js';
 import { validModelId } from './models.js';
+import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../shared/app-identity.js';
 
 const execute = promisify(execFile);
 const MAX_JSON = 2 * 1024 * 1024;
@@ -217,7 +218,7 @@ export async function readCodexCapabilities(executable: string, env: NodeJS.Proc
   });
   child.stdin.on('error', () => fail(new Error('unreachable')));
   try {
-    await request('initialize', { clientInfo: { name: 'agent-monitor', title: 'Agent Session Tower', version: '0.1.0' }, capabilities: { experimentalApi: true, requestAttestation: false } });
+    await request('initialize', { clientInfo: { name: LEGACY_APP_NAME, title: APP_TITLE, version: APP_VERSION }, capabilities: { experimentalApi: true, requestAttestation: false } });
     child.stdin.write(JSON.stringify({ method: 'initialized' }) + '\n');
     const [usage, models] = await Promise.all([
       request('account/rateLimits/read', {}).then(parseCodexUsage).catch(error => unavailable(rpcReason(error))),

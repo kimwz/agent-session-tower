@@ -15,6 +15,7 @@ import { SteeringError } from './steering.js';
 import { ClaudeControl } from './claude-control.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
 import { claudeInputTokens, contextCapacity, nativeContextObservation, withNativeContext } from './session-context.js';
+import { defaultStateDir } from './state-dir.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -134,14 +135,14 @@ export class RunManager extends EventEmitter {
   constructor(options: RunnerOptions) {
     super();
     this.options = options;
-    this.stateFile = join(options.stateDir ?? join(homedir(), '.agent-monitor'), 'runs.json');
-    this.createdFile = join(options.stateDir ?? join(homedir(), '.agent-monitor'), 'created-sessions.json');
-    this.attachments = new AttachmentStore(options.stateDir ?? join(homedir(), '.agent-monitor'));
+    this.stateFile = join(options.stateDir ?? defaultStateDir(), 'runs.json');
+    this.createdFile = join(options.stateDir ?? defaultStateDir(), 'created-sessions.json');
+    this.attachments = new AttachmentStore(options.stateDir ?? defaultStateDir());
   }
 
   async start(): Promise<void> {
     if (this.started) return;
-    await mkdir(this.options.stateDir ?? join(homedir(), '.agent-monitor'), { recursive: true, mode: 0o700 });
+    await mkdir(this.options.stateDir ?? defaultStateDir(), { recursive: true, mode: 0o700 });
     await this.attachments.start();
     try {
       const saved = await readPrivateJson(this.createdFile);

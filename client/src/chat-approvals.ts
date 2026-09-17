@@ -1,5 +1,6 @@
 import { api, ApiError } from './lib';
 import type { Run, RunApprovalResponse } from '../../shared/types';
+import { REQUEST_TOKEN_HEADER } from '../../shared/app-identity';
 
 export type ApprovalDecision = RunApprovalResponse;
 type Result = 'accepted' | 'stale';
@@ -43,7 +44,7 @@ export function submitApprovalDecision(runId: string, approvalId: string, decisi
   if (existing) return existing.promise;
   const request = api(`/api/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token },
+    headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token },
     body: JSON.stringify(typeof decision === 'string' ? { decision } : decision),
   }).then(() => 'accepted' as const).catch(error => {
     if (error instanceof ApiError && error.status === 409) return 'stale' as const;

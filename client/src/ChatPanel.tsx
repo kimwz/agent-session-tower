@@ -18,6 +18,7 @@ import { matchChatRuns, type ChatRunMatch } from './chat-runs';
 import { ModelPicker } from './ModelPicker';
 import { RunApprovalCard } from './RunApprovalCard';
 import { useChatAppearance } from './chat-appearance';
+import { REQUEST_TOKEN_HEADER } from '../../shared/app-identity';
 
 const emptyMessages: readonly ChatMessage[] = [];
 
@@ -209,7 +210,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
     try {
       const prepared = await prepareDraftAttachments(submitted.attachments);
       markComposerSending(id);
-      await api<{ run: Run }>(`/api/sessions/${encodeURIComponent(id)}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: JSON.stringify({ prompt: message, ...prepared, ...(submitted.model ? { model: submitted.model } : {}) }) });
+      await api<{ run: Run }>(`/api/sessions/${encodeURIComponent(id)}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify({ prompt: message, ...prepared, ...(submitted.model ? { model: submitted.model } : {}) }) });
       finishComposerSend(id, submitted);
       if (mounted.current && sessionRef.current === id) { followRef.current = true; setFollowing(true); }
       onSnapshotRefresh();
@@ -219,7 +220,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
   const cancelRun = useCallback(async (id: string) => {
     if (!token || !connected) return;
     setCancelling(id); setSendError('');
-    try { await api(`/api/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: '{}' }); onSnapshotRefresh(); }
+    try { await api(`/api/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' }); onSnapshotRefresh(); }
     catch (error) { setSendError(error instanceof Error ? error.message : t("작업을 중지하지 못했습니다.")); }
     finally { setCancelling(''); }
   }, [connected, onSnapshotRefresh, setSendError, token]);
@@ -228,7 +229,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
     const requestedSession = sessionRef.current;
     setSteering(id); setSendError('');
     try {
-      await api(`/api/runs/${encodeURIComponent(id)}/steer`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: '{}' });
+      await api(`/api/runs/${encodeURIComponent(id)}/steer`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' });
       onSnapshotRefresh();
     } catch (error) {
       if (sessionRef.current === requestedSession) setSendError(error instanceof Error ? error.message : t("요청을 끼워넣지 못했습니다."));
@@ -240,7 +241,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
     const requestedSession = sessionRef.current;
     setDismissing(id); setSendError('');
     try {
-      await api(`/api/runs/${encodeURIComponent(id)}/dismiss`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: '{}' });
+      await api(`/api/runs/${encodeURIComponent(id)}/dismiss`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' });
       onSnapshotRefresh();
     } catch (error) { if (sessionRef.current === requestedSession) setSendError(error instanceof Error ? error.message : t("실패 내역을 지우지 못했습니다.")); }
     finally { setDismissing(''); }

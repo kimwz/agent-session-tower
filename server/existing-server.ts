@@ -1,5 +1,6 @@
 import { setTimeout } from 'node:timers/promises';
 import type { MonitorAlreadyRunning } from './state-lock.js';
+import { HEALTH_APPLICATION_ID } from '../shared/app-identity.js';
 
 /** A live PID alone is insufficient: verify that the owner serves our protocol. */
 export async function existingServerUrl(error: MonitorAlreadyRunning, expected?: {
@@ -18,7 +19,7 @@ export async function existingServerUrl(error: MonitorAlreadyRunning, expected?:
         health = await response.json();
         reachedServer = true;
       } catch { continue; }
-      if (!response.ok || !health || health.ok !== true || health.application !== 'agent-monitor' || health.pid !== pid) continue;
+      if (!response.ok || !health || health.ok !== true || health.application !== HEALTH_APPLICATION_ID || health.pid !== pid) continue;
       // Older local-only versions did not report binding information.
       const bindHost = health.bindHost || '127.0.0.1';
       const remoteAccess = health.remoteAccess === true;

@@ -1,5 +1,6 @@
 import type { AutoPromptJob, AutoPromptRequest } from '../../shared/types';
 import { api, ApiError } from './lib';
+import { REQUEST_TOKEN_HEADER } from '../../shared/app-identity';
 
 export const autoPromptPending = (job: AutoPromptJob) => job.status === 'queued' || job.status === 'routing' || job.status === 'dispatching';
 
@@ -31,7 +32,7 @@ export function createAutoPromptAttempt(request: AutoPromptRequest, requestApi: 
   async function submit(token: string): Promise<AutoPromptOutcome> {
     try {
       return await requestApi<{ job: AutoPromptJob }>('/api/auto-prompts', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body, signal: AbortSignal.timeout(20_000),
+        method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body, signal: AbortSignal.timeout(20_000),
       });
     } catch (error) {
       try {
