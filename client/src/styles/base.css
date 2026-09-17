@@ -1,0 +1,110 @@
+:root {
+  font-family:'Avenir Next','Apple SD Gothic Neo',-apple-system,BlinkMacSystemFont,sans-serif;
+  color:#d8e0ec;
+  background:#0b1018;
+  font-synthesis:none;
+  font-size:13px;
+  font-weight:400;
+  --bg:#0b1018;
+  --surface:#111823;
+  --surface-raised:#17212f;
+  --line:#263140;
+  --muted:#8390a4;
+  --subtle:#627087;
+  --text:#d8e0ec;
+  --bright:#f3f6fb;
+  --blue:#94b5f6;
+  --teal:#88d5c4;
+  --amber:#e9b783;
+  --danger:#ec9898
+}
+
+* {
+  box-sizing:border-box
+}
+body {
+  margin:0
+}
+button,input,select,textarea {
+  font:inherit
+}
+button,a,input,select,textarea {
+  -webkit-tap-highlight-color:transparent
+}
+button {
+  color:inherit;
+  cursor:pointer;
+  border:0;
+  background:none
+}
+button:disabled {
+  cursor:not-allowed;
+  opacity:.45
+}
+button:focus-visible,a:focus-visible,summary:focus-visible {
+  outline:2px solid var(--blue);
+  outline-offset:3px
+}
+input:focus-visible,select:focus-visible,textarea:focus-visible {
+  outline:none
+}
+input:focus-visible,select:focus-visible {
+  box-shadow:0 0 0 2px #7299d557
+}
+button,select,summary {
+  touch-action:manipulation
+}
+a {
+  color:var(--blue)
+}
+h1,h2,h3,p {
+  margin:0
+}
+svg {
+  flex-shrink:0
+}
+button svg {
+  pointer-events:none
+}
+.folder-tail {
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  direction:rtl;
+  text-align:left
+}
+select {
+  appearance:none;
+  cursor:pointer
+}
+option {
+  background:#17212f;
+  color:var(--text)
+}
+kbd {
+  font:10px ui-monospace,SFMono-Regular,Menlo,monospace;
+  border:1px solid #344054;
+  border-radius:4px;
+  padding:2px 4px;
+  color:#8493a9;
+  line-height:1.2
+}
+::selection {
+  color:#fff;
+  background:#385884
+}
+::-webkit-scrollbar {
+  width:6px;
+  height:6px
+}
+::-webkit-scrollbar-track {
+  background:transparent
+}
+::-webkit-scrollbar-thumb {
+  background:#334052;
+  border-radius:10px
+}
+::-webkit-scrollbar-thumb:hover {
+  background:#4d5d74
+}

@@ -6,7 +6,6 @@ import type { Provider, ProviderHealth, Run, Session } from '../../shared/types'
 import { ProviderIcon } from './Icons';
 import { api, providerLabels } from './lib';
 import { REQUEST_TOKEN_HEADER } from '../../shared/app-identity';
-import './new-session.css';
 
 interface NewSessionDialogProps {
   providers: ProviderHealth[];

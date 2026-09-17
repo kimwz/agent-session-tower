@@ -9,8 +9,6 @@ import { graphProjectId, graphProjectKey, graphSessionGroups, clearHostPosition,
 import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualProjectBounds, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, reconcileManualGraph, setGraphLayoutMode, type GraphLayoutMode, type GraphPreferences } from './graph-layout-preferences';
 import { includePinnedProjectGroups, projectGroupLabel } from './project-groups';
 import { ProjectGroupHeader, type ProjectGroupHeaderData } from './ProjectGroupHeader';
-import './manual-graph.css';
-import './auto-prompt.css';
 import { ProviderUsage } from './ProviderUsage';
 import { CanvasSettings } from './CanvasSettings';
 import { projectGroupMinimumWidth, projectGroupTitleMeasurer } from './project-group-title';

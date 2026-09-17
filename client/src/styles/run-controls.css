@@ -1,0 +1,316 @@
+.run-controls {
+  max-height:150px;
+  overflow:auto;
+  margin-bottom:10px;
+  overscroll-behavior:contain
+}
+.run-controls.has-approvals {
+  max-height:min(340px,42vh)
+}
+.run-control.awaiting-approval {
+  color:#ddbd83
+}
+.run-approval {
+  min-width:0;
+  margin-top:8px;
+  padding:10px;
+  border:1px solid #6c5c3f;
+  border-radius:7px;
+  background:#26251f;
+  color:#e1d5bb
+}
+.run-approval-heading {
+  display:flex;
+  align-items:center;
+  gap:6px
+}
+.run-approval-heading>strong {
+  min-width:0;
+  overflow-wrap:anywhere;
+  font-weight:550
+}
+.run-approval-heading>svg,.run-approval-heading>span {
+  flex-shrink:0
+}
+.run-approval-heading>span {
+  margin-left:auto;
+  color:#cdb783;
+  font-size:9px
+}
+.run-approval-details {
+  margin-top:7px;
+  max-height:160px;
+  overflow:auto;
+  overscroll-behavior:contain
+}
+.run-approval-description {
+  margin:0 0 5px;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere
+}
+.run-approval-details dl,.run-approval-details dd {
+  margin:0
+}
+.run-approval-details dt {
+  color:#a99c82;
+  font-size:9px
+}
+.run-approval-details pre {
+  margin:2px 0 6px;
+  padding:6px 8px;
+  border-radius:4px;
+  background:#171b22;
+  color:#d4dfef;
+  font:10px/1.6 var(--font-mono,monospace);
+  white-space:pre-wrap;
+  overflow-wrap:anywhere
+}
+.run-approval-actions {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  justify-content:flex-end;
+  gap:6px;
+  margin-top:8px
+}
+.run-approval-actions>span {
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+  flex:1 0 110px;
+  color:#a99c82;
+  font-size:9px
+}
+.run-approval-actions>button {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  gap:4px;
+  min-height:30px;
+  padding:5px 8px;
+  border:1px solid #62583f;
+  border-radius:4px;
+  color:#ded3ba;
+  font-size:10px;
+  white-space:nowrap
+}
+.run-approval-actions>button.run-approval-allow {
+  border-color:#bba26c;
+  background:#d4b87b;
+  color:#24251e
+}
+.run-approval-actions>button:hover:enabled {
+  filter:brightness(1.15)
+}
+.run-approval-actions>button:disabled {
+  opacity:.45;
+  cursor:default
+}
+.run-approval-actions>button:focus-visible {
+  outline:2px solid #e2c88f;
+  outline-offset:2px
+}
+.run-approval-error {
+  margin:7px 0 0;
+  color:#efaaa0;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere
+}
+.run-approval-origin,.run-approval-server {
+  margin:5px 0;
+  color:#b6c6e0;
+  font-size:10px;
+  overflow-wrap:anywhere
+}
+.run-approval-origin {
+  display:flex;
+  align-items:center;
+  gap:5px
+}
+.run-approval-origin svg {
+  flex-shrink:0
+}
+.run-approval-interaction {
+  max-height:230px
+}
+.run-approval-field {
+  display:flex;
+  flex-direction:column;
+  gap:5px;
+  min-width:0;
+  margin:12px 0;
+  padding:0;
+  border:0;
+  overflow-wrap:anywhere
+}
+.run-approval-field legend {
+  padding:0;
+  color:#e7d7b5;
+  font-weight:600
+}
+.run-approval-field p {
+  margin:3px 0 5px;
+  white-space:pre-wrap
+}
+.run-approval-required {
+  margin-left:6px;
+  color:#c9ad72;
+  font-size:9px
+}
+.run-approval-field small {
+  display:block;
+  color:#b4ac9b;
+  font-size:10px;
+  white-space:pre-wrap
+}
+.run-approval-field input:not([type=radio]):not([type=checkbox]),.run-approval-field select {
+  width:100%;
+  min-width:0;
+  min-height:34px;
+  padding:6px 8px;
+  border:1px solid #72654b;
+  border-radius:4px;
+  background:#171b22;
+  color:#e1e7f1;
+  font:inherit;
+  font-size:12px;
+  color-scheme:dark
+}
+.run-approval-field input:focus-visible,.run-approval-field select:focus-visible,.run-approval-link:focus-visible {
+  outline:2px solid #e2c88f;
+  outline-offset:2px
+}
+.run-approval-field:disabled,.run-approval-field input:disabled,.run-approval-field select:disabled {
+  opacity:.65
+}
+.run-approval-option {
+  display:flex;
+  align-items:flex-start;
+  gap:7px;
+  padding:6px 7px;
+  border:1px solid #534c3c;
+  border-radius:4px;
+  cursor:pointer
+}
+.run-approval-option input {
+  flex-shrink:0;
+  margin:3px 0 0;
+  accent-color:#d4b87b
+}
+.run-approval-answer {
+  display:flex;
+  flex-direction:column;
+  gap:4px
+}
+.run-approval-link {
+  display:flex;
+  align-items:flex-start;
+  gap:5px;
+  color:#b9d5ff;
+  overflow-wrap:anywhere
+}
+.run-approval-link svg {
+  flex-shrink:0;
+  margin-top:3px
+}
+@media (max-width:480px) {
+  .run-approval-field input:not([type=radio]):not([type=checkbox]),.run-approval-field select {
+    font-size:16px
+  }
+  .run-approval-actions>span {
+    flex-basis:100%
+  }
+  .run-approval-actions>button {
+    min-height:36px
+  }
+}
+.run-control {
+  padding:5px 0;
+  color:#8fabae;
+  font-size:10px;
+  line-height:1.6
+}
+.run-control-line {
+  display:flex;
+  align-items:center;
+  gap:6px;
+  min-width:0
+}
+.run-control-line>svg,.run-control-line>strong {
+  flex-shrink:0
+}
+.run-control-line>strong {
+  font-weight:450
+}
+.run-control-preview {
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  min-width:0;
+  color:#7690b0
+}
+.run-control-actions {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-shrink:0;
+  margin-left:auto
+}
+.run-control-actions>button {
+  display:inline-flex;
+  align-items:center;
+  gap:3px;
+  padding:3px 0;
+  color:#91aacb;
+  font-size:9px;
+  white-space:nowrap
+}
+.run-control-actions>button:hover:enabled {
+  color:#c7dcf7
+}
+.run-control-actions>button:disabled {
+  opacity:.45;
+  cursor:default
+}
+.run-control-actions>button:focus-visible {
+  outline:2px solid #76a4d3;
+  outline-offset:2px
+}
+.run-control.error {
+  color:#c39b8b
+}
+.run-control-error {
+  margin:3px 0 0 18px;
+  max-height:52px;
+  overflow:auto;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere;
+  font-size:9px;
+  color:#b48d83
+}
+.inline-error {
+  padding:10px 11px;
+  border:1px solid #704f49;
+  background:#342624;
+  border-radius:6px;
+  display:flex;
+  align-items:flex-start;
+  gap:7px;
+  font-size:10px;
+  line-height:1.7;
+  color:#d9aa9d;
+  margin-bottom:10px;
+  overflow-wrap:anywhere
+}
+.inline-error>svg {
+  margin-top:2px
+}
+.inline-error>span {
+  flex:1;
+  min-width:0
+}
+.inline-error>button {
+  padding:0;
+  display:flex;
+  color:#b48e82
+}

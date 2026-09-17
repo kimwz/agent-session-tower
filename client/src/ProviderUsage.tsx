@@ -4,7 +4,6 @@ import { ProviderIcon } from './Icons';
 import { absoluteTime, providerLabels, relativeTime } from './lib';
 import { useI18n } from './i18n';
 import { usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from './provider-usage';
-import './provider-usage.css';
 
 export function ProviderUsageMeter({ provider, health }: { provider: Provider; health?: ProviderHealth }) {
   const { t } = useI18n();

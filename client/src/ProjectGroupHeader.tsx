@@ -4,7 +4,6 @@ import { createPortal } from 'react-dom';
 import { Eye, EyeOff, Folder, Grip, LoaderCircle, Pencil, Pin, Plus, X } from 'lucide-react';
 import type { ProjectGroupPatch } from '../../shared/types';
 import { projectGroupDisplayTitle } from './project-group-title';
-import './project-groups.css';
 
 export type ProjectGroupHeaderData = {
   name: string;

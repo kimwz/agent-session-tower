@@ -1,0 +1,51 @@
+@media(prefers-reduced-motion:reduce) {
+  *,*:before,*:after {
+  animation-duration:.01ms!important;
+  animation-iteration-count:1!important;
+  transition-duration:.01ms!important;
+  scroll-behavior:auto!important
+}
+.react-flow__edge.animated path,.agent-activity-border {
+  animation:none!important
+}
+
+}
+
+.graph-limit {
+  display:flex;
+  align-items:center;
+  gap:9px;
+  pointer-events:auto
+}
+.graph-limit>button {
+  display:inline-flex;
+  align-items:center;
+  gap:3px;
+  color:#a4bedf;
+  font-size:9px;
+  border-left:1px solid #3a4f6b;
+  padding:0 0 0 9px;
+  white-space:nowrap
+}
+.graph-limit>button:hover {
+  color:#d2e3fc
+}
+
+.parent-session-link {
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:7px;
+  width:100%;
+  margin-bottom:12px;
+  padding:10px 12px;
+  border:1px solid #54769e;
+  border-radius:7px;
+  background:#213753;
+  color:#bfd5f2;
+  font-size:11px;
+}
+.parent-session-link:hover {
+  background:#2c486c;
+  border-color:#789ac4;
+}

@@ -1,0 +1,19 @@
+@keyframes orbit {
+  to {
+  transform:rotate(360deg)
+}
+
+}
+@keyframes agent-card-orbit {
+  to { --agent-activity-angle:360deg; }
+}
+@keyframes blink {
+  0%,80%,100% {
+  opacity:.3
+}
+40% {
+  opacity:1
+}
+
+}
+

@@ -1,0 +1,129 @@
+.app {
+  height:100dvh;
+  min-height:420px;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden
+}
+.app-header {
+  height:66px;
+  min-height:66px;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  border-bottom:1px solid var(--line);
+  padding:0 24px 0 21px;
+  background:#0d131d;
+  z-index:20;
+  gap:24px
+}
+.brand {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  white-space:nowrap
+}
+.brand-mark {
+  width:29px;
+  height:32px;
+  display:flex;
+  color:#acc2e8
+}
+.brand-mark svg {
+  width:100%;
+  height:100%
+}
+.brand h1 {
+  font-size:18px;
+  font-weight:600;
+  letter-spacing:-.65px;
+  line-height:1
+}
+.brand-local {
+  font-size:10px;
+  color:#98a9bd;
+  border:1px solid #344255;
+  border-radius:5px;
+  padding:3px 6px;
+  margin:2px 0 0 1px;
+  line-height:1
+}
+.header-center {
+  display:flex;
+  align-items:center;
+  gap:9px;
+  color:#8594a8;
+  font-size:11px;
+  margin-left:auto
+}
+.header-center>span:first-of-type {
+  max-width:190px;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap
+}
+.header-divider {
+  width:1px;
+  height:12px;
+  background:#344052;
+  margin:0 4px
+}
+.localhost {
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:10px;
+  color:#62738a
+}
+.header-actions {
+  display:flex;
+  align-items:center;
+  gap:17px
+}
+.connection-state {
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  font-size:11px;
+  color:#9dcdbc;
+  white-space:nowrap
+}
+.connection-state>i,.live-pip {
+  display:inline-block;
+  width:5px;
+  height:5px;
+  background:#83cfb4;
+  border-radius:50%;
+  box-shadow:0 0 0 3px #83cfb410
+}
+.connection-state.connecting {
+  color:#adbacd
+}
+.connection-state.connecting>i {
+  background:#adbacd
+}
+.connection-state.offline {
+  color:#deb584
+}
+.icon-button {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:29px;
+  height:29px;
+  border-radius:6px;
+  color:#8190a6;
+  padding:0;
+  flex-shrink:0
+}
+.icon-button:hover,.icon-button.active {
+  background:#1c2737;
+  color:#d0deef
+}
+.sidebar-toggle {
+  display:inline-flex
+}
+.workspace {
+  display:flex;
+  flex:1;
+  min-height:0;
+  position:relative
+}

@@ -10,7 +10,6 @@ import { autoPromptPending, createAutoPromptAttempt, newerAutoPromptJob, type Au
 import { api, providerLabels, sessionTitle } from './lib';
 import { translate as t, translateMessage, useI18n } from './i18n';
 import { REQUEST_TOKEN_HEADER } from '../../shared/app-identity';
-import './auto-prompt.css';
 
 interface AutoPromptDialogProps {
   visible: boolean;
