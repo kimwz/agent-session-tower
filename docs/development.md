@@ -28,6 +28,16 @@ npm run check
 
 This runs TypeScript checks, the test suite, and a production build. Tests use temporary session records and test processes; HTTP tests open local loopback ports.
 
+### Keep live checks out of personal session history
+
+A temporary working directory does not isolate native session storage. Codex writes conversations under `CODEX_HOME` (normally `~/.codex`), and Claude Code uses its configuration directory. Tower discovers those records, including conversations created by a smoke test.
+
+Run live native checks with a separately authenticated test configuration directory outside the directories monitored by your regular Tower instance. Use `isolatedSmokeEnv` from `scripts/native-smoke-env.ts` and pass its result as the native process environment. It requires `TOWER_SMOKE_CODEX_HOME` or `TOWER_SMOKE_CLAUDE_HOME` and refuses shared session storage. The local approval smoke harnesses use this guard before starting a provider. Do not copy personal credentials or symlink personal session directories into a test home. Keep the Tower state directory and working directory separate as well.
+
+Use nonpersistent execution when the native interface supports it, but verify that child agents also remain isolated. A temporary working directory or an ephemeral parent alone is not proof that descendants cannot write session records.
+
+If a check has already created personal history, use **Close session** in Tower to hide the specific test conversation. This preserves its native history and allows reopening it from **Closed sessions**. Do not hide all temporary paths: users may intentionally work in them.
+
 ## Package
 
 ```sh
