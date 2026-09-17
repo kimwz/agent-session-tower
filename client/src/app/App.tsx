@@ -1,10 +1,11 @@
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Archive, ArrowUpRight, Check, ChevronDown, CircleHelp, Folder, GitBranch, LoaderCircle, Monitor, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, ShieldCheck, Terminal, TriangleAlert, WifiOff, X } from 'lucide-react';
+import { Archive, Check, ChevronDown, CircleHelp, Folder, LoaderCircle, Monitor, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, ShieldCheck, Terminal, TriangleAlert, WifiOff, X } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, Provider, Run, Session, SessionStatus, Snapshot } from '../../../shared/types';
 import { Graph } from '../graph/Graph';
 import { BrandMark, ProviderIcon } from '../common/Icons';
-import { api, cleanPreview, providerLabels, relativeTime, sessionActivityAt, sessionTitle, sortSessions, statusLabels } from '../common/lib';
+import { useMediaQuery } from '../common/use-media-query';
+import { api, providerLabels, sessionActivityAt, sessionTitle, sortSessions } from '../common/lib';
 import { getMainSessionId, getMainSessions } from '../sessions/session-family';
 import { acknowledgeSession, conversationRevision, parseReadState, pruneReadState, readStateKey } from '../sessions/session-read-state';
 import { NewSessionDialog } from '../sessions/NewSessionDialog';
@@ -12,37 +13,18 @@ import { AutoPromptDialog } from '../auto-prompt/AutoPromptDialog';
 import { canvasVisibleSessions, projectGroupChoices, visiblePinnedProjectGroups } from '../project-groups/project-groups';
 import { isAutoPromptShortcut, isNewSessionShortcut, isShowAllShortcut } from '../graph/canvas-shortcuts';
 import { SidebarFilters } from '../sessions/SidebarFilters';
+import { SessionRow } from '../sessions/SessionRow';
 import { reconcileApprovalDecisions } from '../chat/chat-approvals';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 
 type StatusFilter = 'all' | SessionStatus;
 const readSelection = () => new URLSearchParams(window.location.search).get('session');
 const ChatPanel = lazy(() => import('../chat/ChatPanel').then(module => ({ default: module.ChatPanel })));
+// Storage keys keep the project's first name so saved user state survives the rename (shared/app-identity.ts LEGACY_APP_NAME).
 const sidebarPreferenceKey = 'agent-monitor.sidebar-collapsed';
 const emptyProjectGroups: ProjectGroup[] = [];
 const editingControls = 'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]';
 const shortcutEditingControls = 'input:not([type="checkbox"]):not([type="radio"]), textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]';
-
-function useMediaQuery(query: string) {
-  const [matches, setMatches] = useState(() => window.matchMedia(query).matches);
-  useEffect(() => {
-    const media = window.matchMedia(query);
-    const update = () => setMatches(media.matches);
-    update();
-    media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
-  }, [query]);
-  return matches;
-}
-
-function SessionRow({ session, selected, unread, onSelect }: { session: Session; selected: boolean; unread: boolean; onSelect: (id: string) => void }) {
-  useI18n();
-  const activityAt = sessionActivityAt(session);
-  return <button className={`session-row ${selected ? 'selected' : ''} ${unread ? 'unread' : ''}`} onClick={() => onSelect(session.id)} aria-pressed={selected}>
-    <span className={`session-row-icon ${session.provider} ${session.status}`}><ProviderIcon provider={session.provider} size={17} /><i className={`status-pip ${session.status}`} /></span>
-    <span className="session-row-main"><span className="session-row-heading"><span className="session-row-project folder-tail" title={session.cwd || session.project || t("프로젝트 없음")}><bdi dir="ltr">{session.project || t("프로젝트 없음")}</bdi></span><time dateTime={activityAt}>{relativeTime(activityAt)}</time></span><strong>{unread && <i className="unread-dot" title={t("새 활동")} aria-label={t("새 활동")} />}{sessionTitle(session)}</strong><span className="session-row-preview">{cleanPreview(session.lastMessage, 100) || providerLabels[session.provider]}</span><span className="session-row-meta"><span className={`row-status ${session.status}`}>{statusLabels[session.status]}</span>{session.isSubagent && <><GitBranch size={10} /><span>{t("하위 에이전트")}</span></>}{selected && <ArrowUpRight size={12} />}</span></span>
-  </button>;
-}
 
 export function App() {
   const { language } = useI18n();

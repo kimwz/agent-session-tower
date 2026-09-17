@@ -2,6 +2,7 @@ import type { Run, Session } from '../../../shared/types';
 import { computeConversationRevision } from '../../../shared/conversation-revision';
 
 export type ReadState = Record<string, string>;
+// Storage keys keep the project's first name so saved user state survives the rename (shared/app-identity.ts LEGACY_APP_NAME).
 export const readStateKey = 'agent-monitor.read-sessions.v1';
 
 // Only conversation and task boundaries count as new activity. Process probes,

@@ -2,6 +2,7 @@ import type { ProjectGroup, Session } from '../../../shared/types';
 import { graphProjectId, graphProjectKey, graphSessionGroups } from './graph-layout';
 import { includePinnedProjectGroups } from '../project-groups/project-groups';
 
+// Storage keys keep the project's first name so saved user state survives the rename (shared/app-identity.ts LEGACY_APP_NAME).
 export const GRAPH_PREFERENCES_KEY = 'agent-monitor:graph-layout:v1';
 export type GraphLayoutMode = 'auto' | 'manual';
 export type GraphPosition = { x: number; y: number };
