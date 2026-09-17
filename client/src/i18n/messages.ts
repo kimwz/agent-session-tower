@@ -351,6 +351,8 @@ export const english: Record<string, string> = {
   '모델': 'Model',
   '세션 ID': 'Session ID',
   '세션 ID 복사': 'Copy session ID',
+  '터미널': 'Terminal',
+  '터미널에서 이어가는 명령 복사': 'Copy the command to continue in your terminal',
   '상태 판단': 'Status details',
   '시작': 'Started',
   '대화 기록을 불러오는 중': 'Loading conversation history',

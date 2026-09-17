@@ -148,6 +148,11 @@
   height:17px;
   width:17px
 }
+.session-metadata .resume-command {
+  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+  color:#c4d4ea;
+  user-select:all
+}
 .chat-scroll {
   min-height:0;
   flex:1;

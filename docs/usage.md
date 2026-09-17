@@ -55,7 +55,7 @@ Status combines native lifecycle events, live process signals, and recent log ac
 
 Sending a request continues the same native session. Claude sessions resume through the CLI. Codex sessions use the existing local app server when available, or an app-server process started by Tower when the session is no longer owned by another writer. Busy sessions queue requests; unavailable app-server connections may leave them waiting until the original session is released. Tower runs up to two requests at once, with one active request per session.
 
-Subagent records without an independently resumable session ID are viewable through their parent. Existing terminals or desktop apps may need a refresh or resume to show changes made from the web. Usage is billed through the existing provider account.
+Subagent records without an independently resumable session ID are viewable through their parent. Existing terminals or desktop apps may need a refresh or resume to show changes made from the web. Claude Code does not list sessions started from Tower in its `claude --resume` picker; use the terminal button in the chat header to copy a command that resumes the session by ID in its project folder. Usage is billed through the existing provider account.
 
 ### Tool approvals
 
