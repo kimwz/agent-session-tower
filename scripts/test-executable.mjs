@@ -157,9 +157,9 @@ try {
   assert.equal((await discovered()).closed, undefined);
   const invalidCreate = await fetch(`${base}/api/sessions`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': secondToken },
-    body: JSON.stringify({ provider: 'codex', cwd: join(dir, 'absent-work-folder'), prompt: 'Must not run' }),
+    body: JSON.stringify({ provider: 'codex', cwd: 'relative-work-folder', prompt: 'Must not run' }),
   });
-  assert.equal(invalidCreate.status, 400, 'standalone create route validates missing work folders');
+  assert.equal(invalidCreate.status, 400, 'standalone create route rejects a work folder that is not an absolute path');
   const detail = await (await fetch(`${base}/api/sessions/${encodeURIComponent(sessionId)}`)).json();
   assert.equal(detail.session.customTitle, '실행파일 제목 저장 확인');
   assert.equal((await setTitle('', secondToken)).customTitle, undefined);
