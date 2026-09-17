@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { projectGroupDisplayTitle, projectGroupMinimumWidth } from '../client/src/project-group-title.js';
+import { projectGroupDisplayTitle, projectGroupMinimumWidth } from '../client/src/project-groups/project-group-title.js';
 
 test('folder labels retain up to 32 displayed characters and truncate only longer names', () => {
   for (const character of ['A', '한', '😀']) {

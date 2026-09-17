@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { draftFromRun, finishComposerSend, getComposerState, setComposerDraft, startComposerSend } from '../client/src/chat-drafts.js';
-import { modelChoices, ModelPicker } from '../client/src/ModelPicker.js';
-import { setLanguage } from '../client/src/i18n.js';
+import { draftFromRun, finishComposerSend, getComposerState, setComposerDraft, startComposerSend } from '../client/src/chat/chat-drafts.js';
+import { modelChoices, ModelPicker } from '../client/src/chat/ModelPicker.js';
+import { setLanguage } from '../client/src/i18n/i18n.js';
 import type { ProviderHealth, Run } from '../shared/types.js';
 
 const provider: ProviderHealth = { provider: 'codex', available: true, sessionCount: 1, defaultModel: 'provider-default', models: [{ id: 'model-a', label: 'Model A' }, { id: 'model-b', label: 'Model B' }] };

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { AutoPromptJob, AutoPromptRequest } from '../shared/types.js';
-import { createAutoPromptAttempt, newerAutoPromptJob } from '../client/src/auto-prompt-request.js';
-import { ApiError, type api } from '../client/src/lib.js';
+import { createAutoPromptAttempt, newerAutoPromptJob } from '../client/src/auto-prompt/auto-prompt-request.js';
+import { ApiError, type api } from '../client/src/common/lib.js';
 
 const request = (): AutoPromptRequest => ({ requestId: 'request-1', provider: 'claude', prompt: '  Keep this request exactly.\n', attachments: [{ name: 'diagram.png', mimeType: 'image/png', data: 'aGVsbG8=' }] });
 const job = (patch: Partial<AutoPromptJob> = {}): AutoPromptJob => ({ id: 'request-1', provider: 'claude', prompt: '  Keep this request exactly.\n', routerModel: 'opus', status: 'queued', createdAt: '2026-09-16T00:00:00Z', updatedAt: '2026-09-16T00:00:00Z', ...patch });

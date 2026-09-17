@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { ProjectGroup, Session } from '../shared/types.js';
-import { canvasVisibleSessions, includePinnedProjectGroups, projectGroupChoices, projectGroupLabel, visiblePinnedProjectGroups } from '../client/src/project-groups.js';
-import { graphProjectId, graphSessionGroups } from '../client/src/graph-layout.js';
-import { defaultGraphPreferences, moveManualGraphNodes, reconcileManualGraph } from '../client/src/graph-layout-preferences.js';
+import { canvasVisibleSessions, includePinnedProjectGroups, projectGroupChoices, projectGroupLabel, visiblePinnedProjectGroups } from '../client/src/project-groups/project-groups.js';
+import { graphProjectId, graphSessionGroups } from '../client/src/graph/graph-layout.js';
+import { defaultGraphPreferences, moveManualGraphNodes, reconcileManualGraph } from '../client/src/graph/graph-layout-preferences.js';
 
 function session(id: string, cwd: string, project = cwd.split('/').at(-1)!): Session {
   return { id, nativeId: id, provider: 'codex', title: id, cwd, project, status: 'idle', statusReason: '', createdAt: '2026-09-15T00:00:00Z', updatedAt: '2026-09-15T00:00:00Z', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true };

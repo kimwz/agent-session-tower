@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeLatestPage, prependOlderPage } from '../client/src/chat-history.js';
+import { mergeLatestPage, prependOlderPage } from '../client/src/chat/chat-history.js';
 import type { ChatMessage, Session, SessionDetail } from '../shared/types.js';
 
 const session: Session = {

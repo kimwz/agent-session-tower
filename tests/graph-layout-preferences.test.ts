@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { ProjectGroup, Session } from '../shared/types.js';
-import { graphProjectId, graphSessionGroups } from '../client/src/graph-layout.js';
-import { AGENT_HEIGHT, AGENT_WIDTH, defaultGraphPreferences, manualProjectBounds, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, reconcileManualGraph, setGraphLayoutMode, type ManualGraphLayout } from '../client/src/graph-layout-preferences.js';
+import { graphProjectId, graphSessionGroups } from '../client/src/graph/graph-layout.js';
+import { AGENT_HEIGHT, AGENT_WIDTH, defaultGraphPreferences, manualProjectBounds, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, reconcileManualGraph, setGraphLayoutMode, type ManualGraphLayout } from '../client/src/graph/graph-layout-preferences.js';
 
 function session(id: string, extra: Partial<Session> = {}): Session {
   return {

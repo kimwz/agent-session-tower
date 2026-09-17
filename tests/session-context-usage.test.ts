@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { SessionContextUsage } from '../shared/types.js';
-import { SessionContextIcon } from '../client/src/SessionContextIcon.js';
-import { contextUsageLabel, contextUsageMeter } from '../client/src/session-context-usage.js';
-import { getLanguage, setLanguage } from '../client/src/i18n.js';
+import { SessionContextIcon } from '../client/src/sessions/SessionContextIcon.js';
+import { contextUsageLabel, contextUsageMeter } from '../client/src/sessions/session-context-usage.js';
+import { getLanguage, setLanguage } from '../client/src/i18n/i18n.js';
 
 const originalLanguage = getLanguage();
 test.afterEach(() => setLanguage(originalLanguage));

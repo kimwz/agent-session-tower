@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { detectLanguage, getLanguage, setLanguage, translate, translateMessage } from '../client/src/i18n.js';
-import { absoluteTime, relativeTime, sessionTitle, statusLabels } from '../client/src/lib.js';
-import { ChatTranscript, RunControl } from '../client/src/ChatPanel.js';
+import { detectLanguage, getLanguage, setLanguage, translate, translateMessage } from '../client/src/i18n/i18n.js';
+import { absoluteTime, relativeTime, sessionTitle, statusLabels } from '../client/src/common/lib.js';
+import { ChatTranscript, RunControl } from '../client/src/chat/ChatPanel.js';
 import type { Run, Session } from '../shared/types.js';
 
 const originalLanguage = getLanguage();

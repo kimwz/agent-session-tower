@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { Run, Session } from '../shared/types.js';
-import { acknowledgeSession, conversationRevision, parseReadState, pruneReadState } from '../client/src/session-read-state.js';
+import { acknowledgeSession, conversationRevision, parseReadState, pruneReadState } from '../client/src/sessions/session-read-state.js';
 
 const session: Session = { id: 'codex:example', nativeId: 'example', provider: 'codex', title: 'Title', cwd: '/work', project: 'work', status: 'idle', statusReason: '', createdAt: '2026-09-15T00:00:00Z', updatedAt: '2026-09-15T01:00:00Z', lastMessage: 'Original answer', messageCount: 2, isSubagent: false, resumable: true };
 test('acknowledging displayed content remains read across title, process, and timestamp updates', () => {

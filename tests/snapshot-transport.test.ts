@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createMonitorServer } from '../server/http.js';
-import { conversationRevision } from '../client/src/session-read-state.js';
+import { conversationRevision } from '../client/src/sessions/session-read-state.js';
 import type { Session, Run, Snapshot } from '../shared/types.js';
 
 test('HTTP and successive SSE snapshots omit accumulated output while retaining exact unread changes', async t => {

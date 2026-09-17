@@ -2,11 +2,11 @@ import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { RunControl } from '../client/src/ChatPanel.js';
-import { RunApprovalCard } from '../client/src/RunApprovalCard.js';
-import { approvalDecisionState, formApprovalContent, reconcileApprovalDecisions, safeApprovalUrl, submitApprovalDecision } from '../client/src/chat-approvals.js';
-import { ApiError } from '../client/src/lib.js';
-import { setLanguage } from '../client/src/i18n.js';
+import { RunControl } from '../client/src/chat/ChatPanel.js';
+import { RunApprovalCard } from '../client/src/chat/RunApprovalCard.js';
+import { approvalDecisionState, formApprovalContent, reconcileApprovalDecisions, safeApprovalUrl, submitApprovalDecision } from '../client/src/chat/chat-approvals.js';
+import { ApiError } from '../client/src/common/lib.js';
+import { setLanguage } from '../client/src/i18n/i18n.js';
 import type { Run, RunApproval, RunApprovalResponse } from '../shared/types.js';
 
 const noop = () => {};

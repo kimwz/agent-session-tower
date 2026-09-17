@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { addDraftFiles, attachmentUrl, isPreviewableAttachment, prepareDraftAttachments, savedAttachmentDraft } from '../client/src/chat-attachments.js';
-import { finishComposerSend, getComposerState, markComposerSending, setComposerDraft, startComposerSend, subscribeComposer } from '../client/src/chat-drafts.js';
-import { SavedAttachments } from '../client/src/ChatAttachments.js';
-import { ChatTranscript } from '../client/src/ChatPanel.js';
-import { matchChatRuns } from '../client/src/chat-runs.js';
+import { addDraftFiles, attachmentUrl, isPreviewableAttachment, prepareDraftAttachments, savedAttachmentDraft } from '../client/src/chat/chat-attachments.js';
+import { finishComposerSend, getComposerState, markComposerSending, setComposerDraft, startComposerSend, subscribeComposer } from '../client/src/chat/chat-drafts.js';
+import { SavedAttachments } from '../client/src/chat/ChatAttachments.js';
+import { ChatTranscript } from '../client/src/chat/ChatPanel.js';
+import { matchChatRuns } from '../client/src/chat/chat-runs.js';
 import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../shared/attachments.js';
 import type { Attachment, Run } from '../shared/types.js';
 

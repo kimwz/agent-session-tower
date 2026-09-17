@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from '../client/src/provider-usage.js';
-import { clearHostPosition, HOST_HEIGHT } from '../client/src/graph-layout.js';
-import { setLanguage } from '../client/src/i18n.js';
+import { usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from '../client/src/providers/provider-usage.js';
+import { clearHostPosition, HOST_HEIGHT } from '../client/src/graph/graph-layout.js';
+import { setLanguage } from '../client/src/i18n/i18n.js';
 import type { ProviderUsage } from '../shared/types.js';
 
 const window = { id: 'primary', usedPercent: 42, windowMinutes: 10080 };

@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { SidebarFilters } from '../client/src/SidebarFilters.js';
-import { CanvasSettings } from '../client/src/CanvasSettings.js';
-import { getLanguage, setLanguage, translate } from '../client/src/i18n.js';
+import { SidebarFilters } from '../client/src/sessions/SidebarFilters.js';
+import { CanvasSettings } from '../client/src/graph/CanvasSettings.js';
+import { getLanguage, setLanguage, translate } from '../client/src/i18n/i18n.js';
 
 const originalLanguage = getLanguage();
 test.afterEach(() => setLanguage(originalLanguage));

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { isAutoPromptShortcut, isNewSessionShortcut, isShowAllShortcut } from '../client/src/canvas-shortcuts.js';
+import { isAutoPromptShortcut, isNewSessionShortcut, isShowAllShortcut } from '../client/src/graph/canvas-shortcuts.js';
 
 const event = () => ({ code: 'KeyP', key: 'P', shiftKey: true, ctrlKey: false, metaKey: false, altKey: false, repeat: false, defaultPrevented: false, isComposing: false });
 

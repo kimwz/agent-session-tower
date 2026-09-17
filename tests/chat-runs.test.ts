@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement, Fragment } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { matchChatRuns } from '../client/src/chat-runs.js';
-import { ChatTranscript, RunControl } from '../client/src/ChatPanel.js';
+import { matchChatRuns } from '../client/src/chat/chat-runs.js';
+import { ChatTranscript, RunControl } from '../client/src/chat/ChatPanel.js';
 import type { Attachment, ChatMessage, Run } from '../shared/types.js';
 
 const at = (milliseconds: number) => new Date(Date.UTC(2026, 8, 15) + milliseconds).toISOString();

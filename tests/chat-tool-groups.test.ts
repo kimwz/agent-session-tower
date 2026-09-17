@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { groupConsecutiveTools, type ToolGroup } from '../client/src/chat-tool-groups.js';
+import { groupConsecutiveTools, type ToolGroup } from '../client/src/chat/chat-tool-groups.js';
 import type { ChatMessage } from '../shared/types.js';
 
 function message(id: string, role: ChatMessage['role'] = 'tool', extra: Partial<ChatMessage> = {}): ChatMessage {

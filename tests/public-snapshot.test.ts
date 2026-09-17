@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { publicSnapshot } from '../server/public-snapshot.js';
-import { conversationRevision } from '../client/src/session-read-state.js';
+import { conversationRevision } from '../client/src/sessions/session-read-state.js';
 import type { Run, Session, Snapshot } from '../shared/types.js';
 
 const session: Session = { id: 'claude:example', nativeId: 'example', provider: 'claude', title: 'Fixture', cwd: '/work', project: 'work',
