@@ -26,7 +26,7 @@ const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentData>>) 
   const activityAt = sessionActivityAt(session);
   return <>
     <button className={`agent-card ${session.provider} ${session.status} ${data.selected ? 'selected' : ''} ${data.unread ? 'has-unread' : ''}`} onClick={() => data.onSelect(session.id)} aria-describedby={contextDescriptionId} aria-label={t("{0}: {1}, {2}{3}. 대화 열기", { 0: providerLabels[session.provider], 1: sessionTitle(session), 2: statusLabels[session.status], 3: data.unread ? t(", 새 활동") : t(", 확인함") })}>
-      {session.status === 'working' && <svg className="agent-activity-border" aria-hidden="true" focusable="false"><rect x="1" y="1" rx="13" pathLength="100" /></svg>}
+      {session.status === 'working' && <span className="agent-activity-border" aria-hidden="true" />}
       {data.unread && <span className="agent-unread"><i />{t("새 활동")}</span>}
       <div className="agent-card-top"><SessionContextIcon provider={session.provider} usage={session.contextUsage} descriptionId={contextDescriptionId} />{session.isSubagent && <span className="subagent-mark" title={t("하위 에이전트")}><GitBranch size={12} /></span>}</div>
       <div className="agent-card-title" title={sessionTitle(session)}>{sessionTitle(session)}</div>

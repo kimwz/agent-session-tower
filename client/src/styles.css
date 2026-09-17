@@ -892,27 +892,33 @@ kbd {
   background:#19293d;
   box-shadow:0 0 0 3px #658eb71b
 }
-.agent-card.claude { --activity-color:#e6b586; }
-.agent-card.codex { --activity-color:#7bcebd; }
+@property --agent-activity-angle {
+  syntax:'<angle>';
+  inherits:false;
+  initial-value:0deg
+}
+.agent-card.claude {
+  --activity-color:#e6b586;
+  --activity-color-mid:#c18b62;
+  --activity-color-soft:#9b714b
+}
+.agent-card.codex {
+  --activity-color:#7bcebd;
+  --activity-color-mid:#57adae;
+  --activity-color-soft:#3f8f84
+}
 .agent-activity-border {
   position:absolute;
   inset:-1px;
-  width:calc(100% + 2px);
-  height:calc(100% + 2px);
-  overflow:visible;
-  fill:none;
-  color:var(--activity-color);
-  pointer-events:none
-}
-.agent-activity-border rect {
-  width:calc(100% - 2px);
-  height:calc(100% - 2px);
-  stroke:currentColor;
-  stroke-width:2;
-  stroke-linecap:round;
-  stroke-dasharray:12 88;
-  filter:drop-shadow(0 0 3px currentColor);
-  animation:agent-card-orbit 3s linear infinite
+  padding:2px;
+  border-radius:inherit;
+  background:conic-gradient(from var(--agent-activity-angle),var(--activity-color-soft),var(--activity-color-mid) 25%,var(--activity-color) 50%,var(--activity-color-mid) 75%,var(--activity-color-soft));
+  -webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+  mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
+  -webkit-mask-composite:xor;
+  mask-composite:exclude;
+  pointer-events:none;
+  animation:agent-card-orbit 4s linear infinite
 }
 .agent-card-top {
   position:relative;
@@ -2529,13 +2535,8 @@ kbd {
 .spin {
   animation:orbit 1s linear infinite
 }
-.motion-off .react-flow__edge.animated path,.motion-off .agent-activity-border rect {
+.motion-off .react-flow__edge.animated path,.motion-off .agent-activity-border {
   animation:none!important
-}
-.motion-off .agent-activity-border rect {
-  stroke-dasharray:none;
-  opacity:.55;
-  filter:none
 }
 .sidebar-scrim {
   display:none
@@ -2548,7 +2549,7 @@ kbd {
 
 }
 @keyframes agent-card-orbit {
-  to { stroke-dashoffset:-100; }
+  to { --agent-activity-angle:360deg; }
 }
 @keyframes blink {
   0%,80%,100% {
@@ -2962,13 +2963,8 @@ kbd {
   transition-duration:.01ms!important;
   scroll-behavior:auto!important
 }
-.react-flow__edge.animated path,.agent-activity-border rect {
+.react-flow__edge.animated path,.agent-activity-border {
   animation:none!important
-}
-.agent-activity-border rect {
-  stroke-dasharray:none;
-  opacity:.55;
-  filter:none
 }
 
 }
