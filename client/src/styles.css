@@ -898,21 +898,22 @@ kbd {
   initial-value:0deg
 }
 .agent-card.claude {
-  --activity-color:#e6b586;
-  --activity-color-mid:#c18b62;
-  --activity-color-soft:#9b714b
+  --activity-cyan:#8ff2ff;
+  --activity-accent:#ffb48f
 }
 .agent-card.codex {
-  --activity-color:#7bcebd;
-  --activity-color-mid:#57adae;
-  --activity-color-soft:#3f8f84
+  --activity-cyan:#56edff;
+  --activity-accent:#ff87bc
+}
+.agent-card.working:not(.selected):not(:focus-visible) {
+  box-shadow:0 0 9px #60edff24,0 0 18px #b17bff18
 }
 .agent-activity-border {
   position:absolute;
   inset:-1px;
   padding:2px;
   border-radius:inherit;
-  background:conic-gradient(from var(--agent-activity-angle),var(--activity-color-soft),var(--activity-color-mid) 25%,var(--activity-color) 50%,var(--activity-color-mid) 75%,var(--activity-color-soft));
+  background:conic-gradient(from var(--agent-activity-angle),var(--activity-cyan),#668bff 22%,#b17bff 44%,var(--activity-accent) 62%,#b17bff 76%,var(--activity-cyan));
   -webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
   mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);
   -webkit-mask-composite:xor;
