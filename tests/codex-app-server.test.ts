@@ -54,7 +54,7 @@ class Fake {
     const index = this.queue.findIndex(item => item.id === queueId);
     assert.notEqual(index, -1);
     const queued = this.queue.splice(index, 1)[0];
-    const turn = { id: `turn-${queued.clientUserMessageId}`, status: 'inProgress', items: [{ type: 'userMessage', id: `user-${queued.id}`, clientId: queued.clientUserMessageId }] };
+    const turn: FakeTurn = { id: `turn-${queued.clientUserMessageId}`, status: 'inProgress', items: [{ type: 'userMessage', id: `user-${queued.id}`, clientId: queued.clientUserMessageId }] };
     this.turns.unshift(turn); this.active = true;
     if (announce) {
       this.notice('turn/started', { threadId: 'thread', turn: { ...turn, items: [] } });

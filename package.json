@@ -42,7 +42,7 @@
     "build": "tsc -p tsconfig.server.json && vite build",
     "build:executable": "npm run build && node scripts/build-executable.mjs",
     "start": "node bin/agent-session-tower.mjs run",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.tests.json --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
     "test:executable": "node scripts/test-executable.mjs",
     "check": "npm run typecheck && npm test && npm run build",

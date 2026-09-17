@@ -130,7 +130,7 @@ test('remote HTTP access requires credentials and preserves host, origin, and mu
       { 'Sec-Fetch-Site': 'cross-site' },
       { Host: 'evil.example', 'X-Forwarded-Host': publicHost, 'X-Forwarded-Proto': 'http' },
       { Origin: 'https://evil.example', Forwarded: `host=${publicHost};proto=http` },
-    ]) {
+    ] as Record<string, string>[]) {
       assert.equal((await send('/api/bootstrap', { ...headers, ...extra })).status, 403);
     }
     origins.add('https://monitor.example');

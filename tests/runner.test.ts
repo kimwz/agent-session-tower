@@ -499,7 +499,7 @@ test('an idle Codex desktop writer receives the exact instruction through its br
     assert.equal(bridgeOptions.prompt, prompt);
     assert.equal(f.manager.list().find(entry => entry.id === run.id)?.status, 'queued', 'opening the bridge does not claim the turn started');
     assert.equal(f.launches.length, 0);
-    bridgeOptions.onStarted();
+    bridgeOptions.onStarted('turn');
     const running = f.manager.list().find(entry => entry.id === run.id)!;
     assert.equal(running.status, 'running');
     assert.ok(running.startedAt);
@@ -530,7 +530,7 @@ test('cancel during bridge startup interrupts only the bridged turn and ignores 
     bridgeOptions = options;
     return {
       done,
-      start: async () => { options.onStarted(); await starting; },
+      start: async () => { options.onStarted('turn'); await starting; },
       cancel: async () => { cancels++; options.onFinished({status:'cancelled'}); resolveDone(); releaseStart(); },
       close: () => { resolveDone(); releaseStart(); },
     };
@@ -542,7 +542,7 @@ test('cancel during bridge startup interrupts only the bridged turn and ignores 
     await f.manager.cancel(run.id);
     assert.equal(cancels, 1, 'the bridge must be registered before start() finishes');
     assert.equal((await finished(f.manager, run.id)).status, 'cancelled');
-    bridgeOptions!.onStarted();
+    bridgeOptions!.onStarted('turn');
     bridgeOptions!.onOutput('late output after cancellation');
     const result = f.manager.list().find(entry => entry.id === run.id)!;
     assert.equal(result.status, 'cancelled');
@@ -559,7 +559,7 @@ test('a bridge submission error after possible delivery never falls back to a se
   const done = new Promise<void>(resolve => { resolveDone = resolve; });
   const f = await fixture({openCodexBridge: async options => ({
     done,
-    start: async () => { starts++; options.onStarted(); throw new Error('Desktop acknowledgement lost after possible delivery'); },
+    start: async () => { starts++; options.onStarted('turn'); throw new Error('Desktop acknowledgement lost after possible delivery'); },
     cancel: async () => { options.onFinished({status:'cancelled'}); resolveDone(); },
     close: () => { closes++; resolveDone(); },
   })});
