@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 // @ts-expect-error plain .mjs script without type declarations
-import { releaseNotes, withVersion } from '../../scripts/release.mjs';
+import { releaseDate, releaseNotes, withVersion } from '../../scripts/release.mjs';
 import { APP_VERSION } from '../../shared/app-identity.ts';
 
 const changelog = ['# Changelog', '', '## [1.1.0] - 2026-10-01', '', '### Added', '- Second thing', '', '## [1.0.0] - 2026-09-18', '', '- First thing', ''].join('\n');
@@ -26,4 +26,10 @@ test('preparing a release rewrites only the reported app version', () => {
 test('the current version already has release notes', async () => {
   const current = await readFile(new URL('../../CHANGELOG.md', import.meta.url), 'utf8');
   assert.ok(releaseNotes(current, APP_VERSION), `CHANGELOG.md is missing notes for ${APP_VERSION}`);
+});
+
+test('a release heading carries the day it ships', () => {
+  assert.equal(releaseDate(changelog, '1.1.0'), '2026-10-01');
+  assert.equal(releaseDate('## [2.0.0]\n- Undated', '2.0.0'), undefined);
+  assert.equal(releaseDate(changelog, '2.0.0'), undefined);
 });

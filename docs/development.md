@@ -75,8 +75,8 @@ One Node HTTP server serves the API and built React UI. Server-sent events updat
 
 ## Releasing
 
-1. Write the `## [x.y.z] - YYYY-MM-DD` section in `CHANGELOG.md`.
-2. Run `npm version x.y.z`. It runs `npm run check`, refuses to continue without that changelog section, syncs the version the app reports, commits, and tags `vx.y.z`.
+1. Write the `## [x.y.z] - YYYY-MM-DD` section in `CHANGELOG.md`, dated the day you release.
+2. Run `npm version x.y.z`. It runs `npm run check`, refuses to continue without that changelog section dated today, syncs the version the app reports, commits, and tags `vx.y.z`.
 3. `git push --follow-tags`. The Release workflow publishes the changelog section as the GitHub release notes.
 
 A specific release can be run with `npx --yes github:kimwz/agent-session-tower#vx.y.z`.

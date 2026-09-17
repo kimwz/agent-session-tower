@@ -19,6 +19,12 @@ export function releaseNotes(changelog, version) {
   return (end < 0 ? rest : rest.slice(0, end)).join('\n').trim() || undefined;
 }
 
+/** The date written in the `## [version] - YYYY-MM-DD` heading. */
+export function releaseDate(changelog, version) {
+  const heading = changelog.split('\n').find(line => line.startsWith(`## [${version}]`));
+  return heading?.match(/^## \[[^\]]+\] - (\d{4}-\d{2}-\d{2})$/)?.[1];
+}
+
 export function withVersion(identitySource, version) {
   if (!VERSION_LINE.test(identitySource)) throw new Error('APP_VERSION line not found in shared/app-identity.ts');
   return identitySource.replace(VERSION_LINE, `export const APP_VERSION = '${version}';`);
@@ -35,6 +41,8 @@ async function main([command, requested]) {
   if (command === 'prepare') {
     const { version } = JSON.parse(await readFile(new URL('package.json', root), 'utf8'));
     if (!releaseNotes(changelog, version)) throw new Error(`Write the "## [${version}] - YYYY-MM-DD" section in CHANGELOG.md before releasing.`);
+    const today = new Date().toLocaleDateString('sv-SE');
+    if (releaseDate(changelog, version) !== today) throw new Error(`Date the CHANGELOG.md heading today: "## [${version}] - ${today}".`);
     const identity = new URL('shared/app-identity.ts', root);
     await writeFile(identity, withVersion(await readFile(identity, 'utf8'), version));
     return;
