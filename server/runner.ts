@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
+import { access, mkdir, readFile, stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
@@ -16,6 +16,7 @@ import { ClaudeControl } from './claude-control.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
 import { claudeInputTokens, contextCapacity, nativeContextObservation, withNativeContext } from './session-context.js';
 import { defaultStateDir } from './state-dir.js';
+import { readPrivateJson, writePrivateJson } from './private-json.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -942,24 +943,4 @@ function isCreatedSession(value: unknown): value is CreatedSession {
     && typeof session.cwd === 'string' && isAbsolute(session.cwd)
     && typeof session.title === 'string' && typeof session.createdAt === 'string' && typeof session.updatedAt === 'string'
     && typeof session.lastMessage === 'string' && (created.title === undefined || typeof created.title === 'string');
-}
-
-async function readPrivateJson(path: string): Promise<unknown> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const info = await file.stat();
-    if (!info.isFile() || info.size > 12_000_000) throw new Error('Saved session identities are invalid or too large.');
-    await file.chmod(0o600);
-    return JSON.parse(await file.readFile('utf8'));
-  } finally { await file.close(); }
-}
-
-async function writePrivateJson(path: string, data: string): Promise<void> {
-  const temporary = `${path}.${process.pid}.${createHash('sha256').update(randomUUID()).digest('hex').slice(0, 12)}.tmp`;
-  try {
-    const file = await open(temporary, 'wx', 0o600);
-    try { await file.writeFile(data); await file.sync(); }
-    finally { await file.close(); }
-    await rename(temporary, path);
-  } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
 }
