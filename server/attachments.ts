@@ -29,7 +29,8 @@ export function attachmentMetadata(value: unknown): Attachment | undefined {
   return { id: item.id, name: item.name, mimeType: item.mimeType, size: item.size! };
 }
 
-function rasterMime(content: Buffer): string | undefined {
+/** Magic bytes decide the image type; a declared MIME type is only a claim. */
+export function rasterMime(content: Buffer): string | undefined {
   if (content.length >= 24 && content.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) && content.toString('ascii', 12, 16) === 'IHDR') return 'image/png';
   if (content.length >= 4 && content[0] === 0xff && content[1] === 0xd8 && content[2] === 0xff) return 'image/jpeg';
   if (content.length >= 13 && ['GIF87a', 'GIF89a'].includes(content.toString('ascii', 0, 6))) return 'image/gif';
