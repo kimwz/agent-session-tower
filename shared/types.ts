@@ -98,7 +98,15 @@ export interface RunApproval {
   input: Record<string, unknown>;
   description?: string;
   scope?: 'turn';
+  origin?: { threadId: string; turnId?: string; agentName?: string };
+  interaction?:
+    | { type: 'questions'; questions: Array<{ id: string; header: string; question: string; isOther: boolean; isSecret: boolean; options: Array<{ label: string; description: string }> | null }> }
+    | { type: 'mcp-form'; schema: Record<string, unknown>; serverName: string }
+    | { type: 'mcp-url'; url: string; serverName: string };
 }
+export type RunApprovalResponse = 'allow' | 'deny'
+  | { answers: Record<string, { answers: string[] }> }
+  | { action: 'accept' | 'decline' | 'cancel'; content: Record<string, unknown> | null };
 export interface Attachment {
   id: string;
   name: string;

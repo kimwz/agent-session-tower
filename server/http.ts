@@ -3,7 +3,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from './session-titles.js';
 import { normalizeProjectGroupPatch } from './project-groups.js';
-import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run } from '../shared/types.js';
+import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run, RunApprovalResponse } from '../shared/types.js';
 import { isImageAttachment, MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../shared/attachments.js';
 import { requestedModel } from './models.js';
 
@@ -20,7 +20,7 @@ export interface Backend {
   enqueue(id: string, prompt: string, attachments?: MessageAttachments): Promise<Run>;
   attachment?(id: string): Promise<{ metadata: Attachment; content: Buffer }>;
   cancel(id: string): Promise<void>;
-  respondToApproval?(runId: string, approvalId: string, decision: 'allow' | 'deny'): Promise<Run>;
+  respondToApproval?(runId: string, approvalId: string, response: RunApprovalResponse): Promise<Run>;
   dismiss?(id: string): Promise<void>;
   subscribe(listener: () => void): () => void;
 }
@@ -244,11 +244,10 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
       const approvalMatch = url.pathname.match(/^\/api\/runs\/([^/]+)\/approvals\/([^/]+)$/);
       if (req.method === 'POST' && approvalMatch) {
         const body = await readJson(req);
-        if ((body.decision !== 'allow' && body.decision !== 'deny') || Object.keys(body).length !== 1) {
-          return json(res, 400, { error: '승인 또는 거절을 선택하세요. 실행 내용은 변경할 수 없습니다.' });
-        }
+        const response = approvalResponse(body);
+        if (response === undefined) return json(res, 400, { error: '승인 응답 형식이 올바르지 않습니다. 실행 내용은 변경할 수 없습니다.' });
         if (!backend.respondToApproval) return json(res, 503, { error: '이 실행기의 승인 요청을 처리할 수 없습니다.' });
-        const run = await backend.respondToApproval(decodeURIComponent(approvalMatch[1]), decodeURIComponent(approvalMatch[2]), body.decision);
+        const run = await backend.respondToApproval(decodeURIComponent(approvalMatch[1]), decodeURIComponent(approvalMatch[2]), response);
         return json(res, 200, { run });
       }
       const cancelMatch = path.match(/^\/api\/runs\/([^/]+)\/cancel$/);
@@ -300,6 +299,23 @@ function authenticated(header: string | undefined, expectedHash: Buffer): boolea
   const credentials = Buffer.from(match[1], 'base64');
   if (credentials.toString('base64') !== match[1]) return false;
   return timingSafeEqual(createHash('sha256').update(credentials).digest(), expectedHash);
+}
+
+/** Accept one unambiguous response envelope; provider code validates its pending schema. */
+function approvalResponse(body: Record<string, unknown>): RunApprovalResponse | undefined {
+  const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+  const keys = Object.keys(body);
+  if (keys.length === 1 && (body.decision === 'allow' || body.decision === 'deny')) return body.decision;
+  if (keys.length === 1 && record(body.answers) && Object.values(body.answers).every(answer => record(answer)
+    && Object.keys(answer).length === 1 && Array.isArray(answer.answers) && answer.answers.every(value => typeof value === 'string'))) {
+    return body as Extract<RunApprovalResponse, { answers: unknown }>;
+  }
+  if (keys.length === 2 && keys.includes('action') && keys.includes('content')
+    && (body.action === 'accept' || body.action === 'decline' || body.action === 'cancel')
+    && (body.content === null || record(body.content)) && (body.action === 'accept' || body.content === null)) {
+    return body as Extract<RunApprovalResponse, { action: unknown }>;
+  }
+  return undefined;
 }
 
 async function readJson(req: IncomingMessage, maximum = 128 * 1024): Promise<Record<string, unknown>> {

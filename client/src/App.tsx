@@ -12,6 +12,7 @@ import { AutoPromptDialog } from './AutoPromptDialog';
 import { canvasVisibleSessions, projectGroupChoices, visiblePinnedProjectGroups } from './project-groups';
 import { isAutoPromptShortcut, isShowAllShortcut } from './canvas-shortcuts';
 import { SidebarFilters } from './SidebarFilters';
+import { reconcileApprovalDecisions } from './chat-approvals';
 
 type StatusFilter = 'all' | SessionStatus;
 const readSelection = () => new URLSearchParams(window.location.search).get('session');
@@ -85,6 +86,7 @@ export function App() {
   const sidebarOpen = sidebarIsDrawer ? showSidebar : !sidebarCollapsed;
 
   useEffect(() => { document.documentElement.lang = language; }, [language]);
+  useEffect(() => { if (snapshot) reconcileApprovalDecisions(snapshot.runs); }, [snapshot?.runs]);
 
   useEffect(() => {
     try { window.localStorage.setItem(sidebarPreferenceKey, String(sidebarCollapsed)); } catch { /* Keep the current preference when storage is unavailable. */ }

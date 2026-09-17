@@ -1,7 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { RunApproval } from '../shared/types.js';
+import { validateApprovalResponse } from '../shared/approval-interactions.js';
+import type { RunApproval, RunApprovalResponse } from '../shared/types.js';
 import { requestedModel } from './models.js';
 
 // v2 wire shapes verified with Codex CLI 0.153.4 app-server generate-ts --experimental.
@@ -30,7 +31,7 @@ export interface CodexStdioRun {
   cancel(): Promise<void>;
   close(): void;
   done: Promise<void>;
-  respondToApproval(id: string, decision: 'allow' | 'deny'): Promise<void>;
+  respondToApproval(id: string, decision: RunApprovalResponse): Promise<void>;
 }
 
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
@@ -50,7 +51,10 @@ export async function openCodexStdioRun(options: CodexStdioOptions): Promise<Cod
 }
 
 type PendingRpc = { resolve(value: any): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> };
-type PendingApproval = { rpcId: RequestId; method: string; permissions?: RecordValue; denial: 'decline' | 'cancel' };
+type PendingApproval = { rpcId: RequestId; method: string; threadId: string; turnId: string; request: RunApproval; permissions?: RecordValue; denial: 'decline' | 'cancel' };
+type LiveTurn = { id: string; startedAt?: number; observed: boolean };
+type IncomingRequest = { rpcId: RequestId; method: string; params: RecordValue; resolved: boolean };
+const scoped = (...parts: (string | number)[]) => JSON.stringify(parts);
 
 class StdioRun implements CodexStdioRun {
   readonly done: Promise<void>;
@@ -78,6 +82,15 @@ class StdioRun implements CodexStdioRun {
   private items = new Map<string, RecordValue>();
   private streamedText = new Map<string, string>();
   private completedItems = new Set<string>();
+  private threads = new Map<string, RecordValue>();
+  private liveTurns = new Map<string, LiveTurn>();
+  private retiredTurns = new Set<string>();
+  private turnVersions = new Map<string, number>();
+  private threadReads = new Map<string, Promise<RecordValue>>();
+  private incoming = new Map<string, IncomingRequest>();
+  private seenRequests = new Set<string>();
+  private rootStartedAt?: number;
+  private closedThreads = new Set<string>();
 
   constructor(private readonly options: CodexStdioOptions) {
     this.done = new Promise(resolve => { this.resolveDone = resolve; });
@@ -144,6 +157,8 @@ class StdioRun implements CodexStdioRun {
     if (typeof started?.turn?.id !== 'string' || !started.turn.id) throw new Error('Codex did not confirm the submitted turn ID. The request was not resent.');
     const turnId: string = started.turn.id;
     this.turnId = turnId;
+    this.rootStartedAt = typeof started.turn.startedAt === 'number' ? started.turn.startedAt : undefined;
+    this.liveTurns.set(id, { id: turnId, startedAt: this.rootStartedAt, observed: true });
     this.options.onStarted?.(turnId, timestamp(started.turn.startedAt));
     const early = this.early;
     this.early = []; this.earlyBytes = 0;
@@ -160,12 +175,14 @@ class StdioRun implements CodexStdioRun {
     this.child.stdin.write(JSON.stringify(value) + '\n');
   }
 
-  private request(method: string, params: object): Promise<any> {
+  private request(method: string, params: object, fatal = true): Promise<any> {
     if (this.result) return Promise.reject(new Error('The Codex connection is closed.'));
     const id = `tower-${++this.nextId}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.finish({ status: 'error', error: this.connectionError(`Codex did not acknowledge ${method} within 15 seconds.`) });
+        const error = new Error(this.connectionError(`Codex did not acknowledge ${method} within 15 seconds.`));
+        if (fatal) this.finish({ status: 'error', error: error.message });
+        else { this.pending.delete(id); reject(error); }
       }, 15_000);
       timer.unref();
       this.pending.set(id, { resolve, reject, timer });
@@ -208,42 +225,204 @@ class StdioRun implements CodexStdioRun {
     if (requestId(value.id) && value.method === 'currentTime/read') {
       this.write({ id: value.id, result: { currentTimeAt: Math.floor(Date.now() / 1000) } }); return;
     }
-    // Approvals and completion may arrive before the turn/start acknowledgement.
-    if (this.submitted && !this.turnId && params.threadId === this.threadId) {
+    // Include child events: their approval or patch may precede the root acknowledgement.
+    if (this.submitted && !this.turnId) {
       this.earlyBytes += JSON.stringify(value).length;
       if (this.earlyBytes > MAX_FRAME || this.early.length >= 1000) throw new Error('Codex sent too many events before confirming the turn.');
       this.early.push(value); return;
     }
-    if (requestId(value.id)) { this.approval(value.id, value.method, params); return; }
-    if (params.threadId !== this.threadId) return;
-    if (value.method === 'thread/closed') {
-      this.finish({ status: 'error', error: 'The owned Codex conversation closed before confirming completion. This request was not resent.' }); return;
+    if (requestId(value.id)) { this.receiveApproval(value.id, value.method, params); return; }
+    if (value.method === 'thread/started' && record(params.thread)) {
+      this.rememberThread(params.thread); return;
     }
+    if (typeof params.threadId !== 'string') return;
+    const threadId = params.threadId;
     if (value.method === 'serverRequest/resolved') {
-      for (const [id, approval] of this.approvals) if (approval.rpcId === params.requestId) this.clearApproval(id);
+      const key = scoped(threadId, typeof params.requestId, params.requestId);
+      const incoming = this.incoming.get(key);
+      // The native notification has no turnId; an optional one must still match.
+      if (incoming && (!params.turnId || params.turnId === incoming.params.turnId)) incoming.resolved = true;
+      for (const [id, approval] of this.approvals) {
+        if (approval.threadId === threadId && approval.rpcId === params.requestId && (!params.turnId || params.turnId === approval.turnId)) this.clearApproval(id);
+      }
+      return;
+    }
+    if (value.method === 'thread/closed') {
+      if (threadId === this.threadId) this.finish({ status: 'error', error: 'The owned Codex conversation closed before confirming completion. This request was not resent.' });
+      else {
+        this.closedThreads.add(threadId);
+        this.turnVersions.set(threadId, (this.turnVersions.get(threadId) || 0) + 1);
+        for (const request of this.incoming.values()) if (request.params.threadId === threadId) {
+          request.resolved = true;
+          if (typeof request.params.turnId === 'string') this.retireTurn(threadId, request.params.turnId);
+        }
+        this.retireTurn(threadId, this.liveTurns.get(threadId)?.id);
+      }
       return;
     }
     const turnId = params.turnId || params.turn?.id;
-    if (turnId !== this.turnId) return;
+    if (typeof turnId !== 'string' || !turnId) return;
+    if (threadId === this.threadId && turnId !== this.turnId) return;
+    if (value.method === 'turn/started' && record(params.turn) && threadId !== this.threadId) {
+      if (params.turn.status !== 'inProgress' || this.retiredTurns.has(scoped(threadId, turnId))) return;
+      if (typeof params.turn.startedAt === 'number' && this.rootStartedAt !== undefined && params.turn.startedAt < this.rootStartedAt) {
+        this.retireTurn(threadId, turnId); return;
+      }
+      this.closedThreads.delete(threadId);
+      this.setLiveTurn(threadId, { id: turnId, startedAt: typeof params.turn.startedAt === 'number' ? params.turn.startedAt : undefined, observed: true });
+      return;
+    }
+    if (value.method === 'turn/completed' && record(params.turn)) {
+      if (threadId === this.threadId) this.finishTurn(params.turn);
+      else this.retireTurn(threadId, turnId);
+      return;
+    }
+    if (this.retiredTurns.has(scoped(threadId, turnId))) return;
+    const itemId = params.item?.id || params.itemId;
+    const key = scoped(threadId, turnId, itemId);
     if (value.method === 'item/started' && record(params.item) && typeof params.item.id === 'string') {
-      if (this.items.size >= 256 && !this.items.has(params.item.id)) throw new Error('Codex sent too many unfinished items.');
-      this.items.set(params.item.id, params.item);
-    } else if (value.method === 'item/agentMessage/delta' && typeof params.itemId === 'string' && typeof params.delta === 'string') {
-      const streamed = (this.streamedText.get(params.itemId) || '') + params.delta;
-      if (streamed.length > MAX_FRAME || this.streamedText.size >= 256 && !this.streamedText.has(params.itemId)) throw new Error('Codex sent too much unfinished message output.');
-      this.streamedText.set(params.itemId, streamed);
+      // Cache exact identities even when a descendant's metadata has not arrived yet.
+      if (this.items.size >= 256 && !this.items.has(key)) throw new Error('Codex sent too many unfinished items.');
+      this.items.set(key, params.item);
+    } else if (threadId === this.threadId && value.method === 'item/agentMessage/delta' && typeof params.itemId === 'string' && typeof params.delta === 'string') {
+      const streamed = (this.streamedText.get(key) || '') + params.delta;
+      if (streamed.length > MAX_FRAME || this.streamedText.size >= 256 && !this.streamedText.has(key)) throw new Error('Codex sent too much unfinished message output.');
+      this.streamedText.set(key, streamed);
       this.options.onOutput(params.delta);
-    } else if (value.method === 'item/completed' && record(params.item)) this.completeItem(params.item);
-    else if (value.method === 'turn/completed' && record(params.turn)) this.finishTurn(params.turn);
+    } else if (value.method === 'item/completed' && record(params.item)) {
+      if (threadId === this.threadId) this.completeItem(params.item);
+      else this.items.delete(key);
+    }
+  }
+
+  private rememberThread(thread: RecordValue): void {
+    if (typeof thread.id !== 'string' || !UUID.test(thread.id)) return;
+    if (this.threads.size >= 256 && !this.threads.has(thread.id)) throw new Error('Codex sent too many thread identities.');
+    const prior = this.threads.get(thread.id);
+    if (prior && prior.parentThreadId !== thread.parentThreadId) throw new Error('Codex changed a thread parent identity.');
+    this.threads.set(thread.id, thread);
+  }
+
+  private setLiveTurn(threadId: string, turn: LiveTurn): void {
+    if (this.liveTurns.size >= 256 && !this.liveTurns.has(threadId)) throw new Error('Codex sent too many active child turns.');
+    const prior = this.liveTurns.get(threadId);
+    if (prior && prior.id !== turn.id) this.retireTurn(threadId, prior.id);
+    this.liveTurns.set(threadId, turn);
+    this.turnVersions.set(threadId, (this.turnVersions.get(threadId) || 0) + 1);
+  }
+
+  private retireTurn(threadId: string, turnId?: string): void {
+    if (!turnId) return;
+    this.retiredTurns.add(scoped(threadId, turnId));
+    this.turnVersions.set(threadId, (this.turnVersions.get(threadId) || 0) + 1);
+    if (this.liveTurns.get(threadId)?.id === turnId) this.liveTurns.delete(threadId);
+    for (const [id, approval] of this.approvals) if (approval.threadId === threadId && approval.turnId === turnId) this.clearApproval(id);
+    for (const key of this.items.keys()) {
+      const [thread, turn] = JSON.parse(key);
+      if (thread === threadId && turn === turnId) this.items.delete(key);
+    }
+  }
+
+  private async readThread(threadId: string, includeTurns: boolean): Promise<RecordValue> {
+    const version = this.turnVersions.get(threadId) || 0;
+    const wasClosed = this.closedThreads.has(threadId);
+    const key = scoped(threadId, String(includeTurns), version);
+    const prior = this.threadReads.get(key);
+    if (prior) return prior;
+    const reading = this.request('thread/read', { threadId, includeTurns: false }, false).then(async result => {
+      if (this.result) throw approvalError();
+      if (!record(result?.thread) || result.thread.id !== threadId) throw new Error('Codex returned a different child identity.');
+      this.rememberThread(result.thread);
+      if (includeTurns && version === (this.turnVersions.get(threadId) || 0)) {
+        // Read only the latest summary; reused agents can have very large histories.
+        const page = await this.request('thread/turns/list', { threadId, limit: 1, sortDirection: 'desc', itemsView: 'summary' }, false);
+        if (this.result) throw approvalError();
+        const turn = Array.isArray(page?.data) && page.data.length === 1 ? page.data[0] : undefined;
+        const reopened = !wasClosed || result.thread.status?.type === 'active' && record(turn) && typeof turn.startedAt === 'number' && this.rootStartedAt !== undefined && turn.startedAt >= this.rootStartedAt;
+        if (reopened && version === (this.turnVersions.get(threadId) || 0) && record(turn) && turn.status === 'inProgress' && typeof turn.id === 'string' && !this.retiredTurns.has(scoped(threadId, turn.id))) {
+          this.closedThreads.delete(threadId);
+          this.setLiveTurn(threadId, { id: turn.id, startedAt: typeof turn.startedAt === 'number' ? turn.startedAt : undefined, observed: false });
+        }
+      }
+      return result.thread;
+    }).finally(() => this.threadReads.delete(key));
+    this.threadReads.set(key, reading);
+    return reading;
+  }
+
+  private async ownedTurn(threadId: string, requestedTurn: unknown): Promise<string | undefined> {
+    if (!this.turnId || this.result || this.cancelRequested || !UUID.test(threadId)) return;
+    if (threadId === this.threadId) return requestedTurn === null || requestedTurn === this.turnId ? this.turnId : undefined;
+    let current = threadId;
+    const visited = new Set<string>();
+    for (let depth = 0; current !== this.threadId; depth++) {
+      if (depth >= 32 || visited.has(current) || !UUID.test(current)) return;
+      visited.add(current);
+      let thread = this.threads.get(current);
+      const needsTurn = current === threadId && (!this.liveTurns.has(threadId) || this.closedThreads.has(threadId));
+      if (!thread || needsTurn) thread = await this.readThread(current, needsTurn);
+      if (this.result || typeof thread.parentThreadId !== 'string') return;
+      current = thread.parentThreadId;
+    }
+    const turn = this.liveTurns.get(threadId);
+    if (this.closedThreads.has(threadId)) return;
+    if (!turn || this.retiredTurns.has(scoped(threadId, turn.id)) || requestedTurn !== null && requestedTurn !== turn.id) return;
+    if (turn.startedAt !== undefined && this.rootStartedAt !== undefined) {
+      if (turn.startedAt < this.rootStartedAt) return;
+    } else if (!turn.observed) return;
+    return turn.id;
+  }
+
+  private receiveApproval(rpcId: RequestId, method: string, params: RecordValue): void {
+    const key = scoped(String(params.threadId), typeof rpcId, rpcId);
+    if (this.seenRequests.has(key) || this.incoming.size >= 32 || this.seenRequests.size >= 4096) {
+      this.rejectRequest(rpcId, method, 'Duplicate or excessive interaction request.'); return;
+    }
+    const incoming = { rpcId, method, params, resolved: false };
+    this.incoming.set(key, incoming); this.seenRequests.add(key);
+    void this.prepareApproval(incoming).catch(error => {
+      if (!this.result && !incoming.resolved) this.rejectRequest(rpcId, method, message(error));
+    }).finally(() => this.incoming.delete(key));
+  }
+
+  private async prepareApproval(incoming: IncomingRequest): Promise<void> {
+    const { rpcId, method, params } = incoming;
+    const requestedTurn = method === 'mcpServer/elicitation/request' && params.turnId === null ? null : params.turnId;
+    if (requestedTurn !== null ? typeof requestedTurn !== 'string' || !requestedTurn : method !== 'mcpServer/elicitation/request') {
+      this.rejectRequest(rpcId, method, 'The request has no valid turn identity.'); return;
+    }
+    const turnId = typeof params.threadId === 'string' ? await this.ownedTurn(params.threadId, requestedTurn) : undefined;
+    if (this.result || incoming.resolved) return;
+    if (!turnId || this.cancelRequested || this.liveTurns.get(params.threadId)?.id !== turnId) {
+      this.rejectRequest(rpcId, method, 'The request does not belong to a live turn owned by this run.'); return;
+    }
+    if (method === 'item/fileChange/requestApproval' && params.threadId !== this.threadId && !this.items.has(scoped(params.threadId, turnId, params.itemId))) {
+      // A resumed child may already be waiting on an item whose start was not replayed.
+      let cursor: string | undefined;
+      for (let page = 0; page < 4; page++) {
+        const result = await this.request('thread/items/list', { threadId: params.threadId, turnId, limit: 32, sortDirection: 'desc', ...(cursor ? { cursor } : {}) }, false);
+        if (this.result || incoming.resolved || this.cancelRequested || this.liveTurns.get(params.threadId)?.id !== turnId) return;
+        const entry = Array.isArray(result?.data) ? result.data.find((entry: RecordValue) => entry.turnId === turnId && entry.item?.id === params.itemId) : undefined;
+        if (record(entry?.item)) { this.items.set(scoped(params.threadId, turnId, params.itemId), entry.item); break; }
+        if (typeof result?.nextCursor !== 'string' || !result.nextCursor) break;
+        cursor = result.nextCursor;
+      }
+    }
+    this.approval(rpcId, method, params, turnId);
+  }
+
+  private rejectRequest(id: RequestId, method: string, detail: string): void {
+    this.write({ id, error: { code: -32602, message: `Agent Session Tower cannot handle ${method}. ${detail}` } });
   }
 
   private completeItem(item: RecordValue): void {
-    if (typeof item.id !== 'string' || this.completedItems.has(item.id)) return;
-    this.completedItems.add(item.id); this.items.delete(item.id);
+    const key = scoped(this.threadId!, this.turnId!, item.id);
+    if (typeof item.id !== 'string' || this.completedItems.has(key)) return;
+    this.completedItems.add(key); this.items.delete(key);
     if (item.type === 'agentMessage' && typeof item.text === 'string') {
-      const streamed = this.streamedText.get(item.id) || '';
+      const streamed = this.streamedText.get(key) || '';
       this.options.onOutput((item.text.startsWith(streamed) ? item.text.slice(streamed.length) : `\n${item.text}`) + '\n\n');
-      this.streamedText.delete(item.id);
+      this.streamedText.delete(key);
     } else if (item.type === 'commandExecution') this.options.onOutput(`$ ${String(item.command || '')}\n${String(item.aggregatedOutput || '').slice(-4000)}\n`);
     else if (item.type === 'fileChange') this.options.onOutput(`Updated ${Array.isArray(item.changes) ? item.changes.map((change: RecordValue) => String(change.path || '')).join(', ') : 'workspace files'}\n`);
   }
@@ -257,14 +436,12 @@ class StdioRun implements CodexStdioRun {
     else this.finish({ status: 'error', error: 'Codex did not confirm a terminal turn status.' });
   }
 
-  private approval(rpcId: RequestId, method: string, params: RecordValue): void {
-    if (params.threadId !== this.threadId || params.turnId !== this.turnId || !this.turnId) {
-      this.unsupported(rpcId, method, 'The request does not belong to this monitored turn.'); return;
-    }
-    if (this.approvals.size >= 32 || [...this.approvals.values()].some(item => item.rpcId === rpcId)) throw new Error('Codex sent an invalid or duplicate approval request.');
+  private approval(rpcId: RequestId, method: string, params: RecordValue, turnId: string): void {
+    if (this.approvals.size >= 32 || [...this.approvals.values()].some(item => item.threadId === params.threadId && item.rpcId === rpcId)) throw new Error('Codex sent an invalid or duplicate approval request.');
     let toolName: string;
     let input: RecordValue;
     let permissions: RecordValue | undefined;
+    let interaction: RunApproval['interaction'];
     let denial: 'decline' | 'cancel' = 'decline';
     if (method === 'item/commandExecution/requestApproval') {
       if (params.availableDecisions !== undefined && params.availableDecisions !== null) {
@@ -277,16 +454,19 @@ class StdioRun implements CodexStdioRun {
       toolName = params.kind === 'writeStdin' ? 'Codex terminal input' : 'Codex command';
       // Subcommand and stdin callbacks may share a parent item. Its command is
       // only an exact fallback for an ordinary command approval.
-      const item = (!params.kind || params.kind === 'command') && !params.approvalId ? this.items.get(params.itemId) : undefined;
+      const item = (!params.kind || params.kind === 'command') && !params.approvalId ? this.items.get(scoped(params.threadId, turnId, params.itemId)) : undefined;
       const command = params.command ?? (item?.type === 'commandExecution' ? item.command : undefined);
-      if (typeof command !== 'string' || !command.trim()) {
+      const network = params.networkApprovalContext;
+      const managedNetwork = (!params.kind || params.kind === 'command') && record(network) && typeof network.host === 'string' && !!network.host.trim() && ['http', 'https', 'socks5Tcp', 'socks5Udp'].includes(network.protocol);
+      if ((typeof command !== 'string' || !command.trim()) && !managedNetwork) {
         this.unsupported(rpcId, method, 'Codex did not provide the exact command or terminal input for review. Continue in the native app.'); return;
       }
+      if (managedNetwork && (typeof command !== 'string' || !command.trim())) toolName = 'Codex network access';
       const details: RecordValue = { ...params, command, cwd: params.cwd ?? item?.cwd };
       input = Object.fromEntries(['command', 'cwd', 'environmentId', 'networkApprovalContext', 'additionalPermissions', 'commandActions', 'kind'].filter(key => details[key] !== undefined && details[key] !== null).map(key => [key, details[key]]));
     } else if (method === 'item/fileChange/requestApproval') {
       toolName = 'Codex file changes';
-      const item = this.items.get(params.itemId);
+      const item = this.items.get(scoped(params.threadId, turnId, params.itemId));
       if (!Array.isArray(item?.changes) || !item.changes.length) {
         this.unsupported(rpcId, method, 'Codex did not provide the file changes for review. Continue in the native app.'); return;
       }
@@ -299,22 +479,48 @@ class StdioRun implements CodexStdioRun {
       permissions = Object.fromEntries(Object.entries(params.permissions).filter(([, value]) => value !== null));
       toolName = 'Codex permissions';
       input = { cwd: params.cwd, ...(params.environmentId !== undefined && params.environmentId !== null ? { environmentId: params.environmentId } : {}), permissions, scope: 'turn' };
+    } else if (method === 'item/tool/requestUserInput') {
+      const questions = params.questions;
+      if (!Array.isArray(questions) || !questions.length || questions.length > 32 || new Set(questions.map(question => question?.id)).size !== questions.length || questions.some(question => !record(question) || typeof question.id !== 'string' || !question.id || typeof question.header !== 'string' || typeof question.question !== 'string' || typeof question.isOther !== 'boolean' || typeof question.isSecret !== 'boolean' || !(question.options === null || Array.isArray(question.options) && question.options.every((option: unknown) => record(option) && typeof option.label === 'string' && typeof option.description === 'string')))) {
+        this.unsupported(rpcId, method, 'Codex sent invalid questions.'); return;
+      }
+      toolName = 'Codex questions'; input = {};
+      interaction = { type: 'questions', questions };
+    } else if (method === 'mcpServer/elicitation/request') {
+      if (typeof params.serverName !== 'string' || !params.serverName || typeof params.message !== 'string') {
+        this.unsupported(rpcId, method, 'Codex sent an invalid MCP interaction.'); return;
+      }
+      toolName = `MCP: ${params.serverName}`; input = {};
+      if (['form', 'openai/form', 'openaiForm'].includes(params.mode) && record(params.requestedSchema)) interaction = { type: 'mcp-form', schema: params.requestedSchema, serverName: params.serverName };
+      else if (params.mode === 'url' && typeof params.url === 'string') {
+        try { if (!['https:', 'http:'].includes(new URL(params.url).protocol)) throw new Error(); }
+        catch { this.unsupported(rpcId, method, 'MCP supplied an unsupported URL.'); return; }
+        interaction = { type: 'mcp-url', url: params.url, serverName: params.serverName };
+      } else { this.unsupported(rpcId, method, 'Unsupported MCP elicitation mode.'); return; }
     } else { this.unsupported(rpcId, method, 'Continue in the native Codex app for this interaction.'); return; }
     const id = randomUUID();
-    this.approvals.set(id, { rpcId, method, permissions, denial });
-    this.options.onApproval({ id, toolName, input: structuredClone(input), ...(permissions ? { scope: 'turn' as const } : {}), ...(typeof params.reason === 'string' && params.reason ? { description: params.reason } : {}) });
+    const description = method === 'mcpServer/elicitation/request' ? params.message : params.reason;
+    const agentName = this.threads.get(params.threadId)?.agentNickname;
+    const request: RunApproval = structuredClone({ id, toolName, input, ...(params.threadId !== this.threadId ? { origin: { threadId: params.threadId, turnId, ...(typeof agentName === 'string' && agentName ? { agentName } : {}) } } : {}), ...(interaction ? { interaction } : {}), ...(permissions ? { scope: 'turn' as const } : {}), ...(typeof description === 'string' && description ? { description } : {}) });
+    this.approvals.set(id, { rpcId, method, threadId: params.threadId, turnId, request, permissions, denial });
+    this.options.onApproval(structuredClone(request));
   }
 
   private unsupported(id: RequestId, method: string, detail: string): void {
     this.write({ id, error: { code: -32601, message: `Agent Session Tower cannot handle ${method}. ${detail}` } });
-    this.finish({ status: 'error', error: `Codex requested an unsupported interaction (${method}). ${detail}` });
+    // Unsupported child interactions must not tear down a valid parent turn.
+    const request = [...this.incoming.values()].find(request => request.rpcId === id);
+    if (request?.params.threadId === this.threadId) this.finish({ status: 'error', error: `Codex requested an unsupported interaction (${method}). ${detail}` });
   }
 
-  async respondToApproval(id: string, decision: 'allow' | 'deny'): Promise<void> {
-    if (decision !== 'allow' && decision !== 'deny') throw Object.assign(new Error('Choose allow or deny.'), { statusCode: 400 });
+  async respondToApproval(id: string, response: RunApprovalResponse): Promise<void> {
     const approval = this.approvals.get(id);
-    if (!approval || this.result) throw approvalError();
-    const result = approval.method === 'item/permissions/requestApproval'
+    if (!approval || this.result || (this.cancelRequested && response !== 'deny') || this.liveTurns.get(approval.threadId)?.id !== approval.turnId) throw approvalError();
+    const decision = validateApprovalResponse(approval.request, response);
+    let result: RecordValue;
+    if (approval.request.interaction?.type === 'questions') result = decision === 'deny' ? { answers: {} } : decision as RecordValue;
+    else if (approval.request.interaction) result = { ...(decision === 'deny' ? { action: 'decline', content: null } : decision as RecordValue), _meta: null };
+    else result = approval.method === 'item/permissions/requestApproval'
       ? { permissions: decision === 'allow' ? approval.permissions : {}, scope: 'turn' }
       : { decision: decision === 'allow' ? 'accept' : approval.denial };
     this.write({ id: approval.rpcId, result });
@@ -340,8 +546,12 @@ class StdioRun implements CodexStdioRun {
         await this.startPromise?.catch(() => {});
         if (!this.result && this.turnId && this.threadId) {
           // Pending approval callbacks must not hold interruption open.
-          for (const id of [...this.approvals.keys()]) await this.respondToApproval(id, 'deny');
-          await this.request('turn/interrupt', { threadId: this.threadId, turnId: this.turnId }).catch(error => this.finish({ status: 'error', error: message(error) }));
+          for (const id of [...this.approvals.keys()]) {
+            if (this.result) break;
+            // A previous denial can resolve another child's pending callback.
+            if (this.approvals.has(id)) await this.respondToApproval(id, 'deny');
+          }
+          if (!this.result) await this.request('turn/interrupt', { threadId: this.threadId, turnId: this.turnId }).catch(error => this.finish({ status: 'error', error: message(error) }));
         }
       }
     }
@@ -361,7 +571,7 @@ class StdioRun implements CodexStdioRun {
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error(result.error || 'The Codex run ended.')); }
     this.pending.clear();
     for (const id of [...this.approvals.keys()]) this.clearApproval(id);
-    this.early = []; this.items.clear(); this.streamedText.clear();
+    this.early = []; this.items.clear(); this.streamedText.clear(); this.liveTurns.clear(); this.incoming.clear();
     if (!this.child || this.childClosed) { this.complete(); return; }
     this.child.stdin.end();
     this.signal('SIGTERM');

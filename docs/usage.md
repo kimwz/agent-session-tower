@@ -63,6 +63,10 @@ For task execution, Tower leaves the native permission and sandbox configuration
 
 When a Tower-launched session needs permission, the chat shows the requested tool and its input with **Allow once** and **Deny** buttons. Codex can also request additional filesystem or network access for the current turn; those requests show **Allow for this turn** and the requested access. Neither decision saves a permission rule or changes your global settings. The execution stays open while waiting. Canceling the run or stopping Tower clears its pending approvals, and an expired request cannot be approved later.
 
+Codex approvals from verified child agents appear in the parent conversation with the requesting agent's name. Each pending request is answered separately; a child approval or child completion does not end the parent task. Requests from unrelated conversations or finished turns cannot be approved.
+
+Codex questions show their choices and, when allowed, a text input. MCP connector requests can show a form or a link to an external flow. Complete the requested fields or follow the link yourself, then submit or decline the request. Tower supports the standard MCP form fields: text, numbers, booleans, and single or multiple selections. Unsupported form schemas remain visible for inspection and can be declined or canceled, but cannot be submitted. These controls do not automatically choose answers, open external links, or grant persistent permissions.
+
 For work sent to an already open Codex desktop session, its original app continues to handle approvals. Check that app when it is waiting for permission. Explicit provider deny rules still apply.
 
 You can upload up to 10 attachments per request: 10 MB per file, 5 MB per image, and 20 MB total. PNG, JPEG, GIF, and WebP images use native image input; other files are provided as local copies. Uploaded files remain on the host so the conversation can keep referencing them.

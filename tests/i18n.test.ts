@@ -202,3 +202,16 @@ test('Auto Prompt localization leaves model reasons, partial errors and unknown 
     for (const message of unknown) assert.equal(translateMessage(message), message);
   }
 });
+
+test('structured approval validation errors localize without altering field identifiers', () => {
+  const cases = [
+    ['Answer every question before submitting.', '제출하기 전에 모든 질문에 답변하세요.'],
+    ['Answer the required field: native_field.', '필수 항목에 답변하세요: native_field.'],
+    ['Enter a valid integer within the allowed range for native_count.', 'native_count에 허용 범위 내의 올바른 integer 값을 입력하세요.'],
+    ['Enter a valid email for native_email.', 'native_email에 올바른 email 값을 입력하세요.'],
+  ];
+  for (const [en, ko] of cases) {
+    setLanguage('ko'); assert.equal(translateMessage(en), ko);
+    setLanguage('en'); assert.equal(translateMessage(ko), en);
+  }
+});

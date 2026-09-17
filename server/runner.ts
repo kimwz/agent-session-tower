@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
-import type { CreateSessionRequest, MessageAttachments, Provider, ProviderHealth, Run, Session } from '../shared/types.js';
+import type { CreateSessionRequest, MessageAttachments, Provider, ProviderHealth, Run, RunApprovalResponse, Session } from '../shared/types.js';
 import { isImageAttachment } from '../shared/attachments.js';
 import { attachmentMetadata, attachmentPrompt, AttachmentStore } from './attachments.js';
 import { normalizeSessionTitle } from './session-titles.js';
@@ -352,7 +352,7 @@ export class RunManager extends EventEmitter {
     await this.flush();
   }
 
-  async respondToApproval(runId: string, approvalId: string, decision: 'allow' | 'deny'): Promise<Run> {
+  async respondToApproval(runId: string, approvalId: string, decision: RunApprovalResponse): Promise<Run> {
     const run = this.runs.get(runId);
     if (!run) throw new RunError('Task not found.', 404);
     const owned = this.owned.get(runId);
@@ -361,7 +361,10 @@ export class RunManager extends EventEmitter {
       throw new RunError('This permission request is no longer pending. Refresh the conversation.', 409);
     }
     if (stdio) await stdio.respondToApproval(approvalId, decision);
-    else await owned!.claude!.respond(approvalId, decision);
+    else {
+      if (decision !== 'allow' && decision !== 'deny') throw new RunError('Claude Code permission requests only accept allow or deny.', 400);
+      await owned!.claude!.respond(approvalId, decision);
+    }
     return this.list().find(item => item.id === runId)!;
   }
 

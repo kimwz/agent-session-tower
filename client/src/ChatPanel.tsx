@@ -70,7 +70,7 @@ export const RunControl = memo(function RunControl({ run, onCancel, onRetry, can
   return <div data-run-id={run.id} className={`run-control ${run.status}${approvals.length ? ' awaiting-approval' : ''}`}>
     <div className="run-control-line">
       {approvals.length ? <ShieldQuestion size={12} aria-hidden="true" /> : active ? <LoaderCircle className="spin" size={12} aria-hidden="true" /> : <TriangleAlert size={12} aria-hidden="true" />}
-      <strong>{approvals.length ? t('작업 승인 대기') : run.status === 'queued' ? t("전송 대기 중") : run.status === 'running' ? t("작업 중") : t("요청 실패")}</strong>
+      <strong>{approvals.length ? approvals.some(approval => approval.interaction) ? t('응답 대기') : t('작업 승인 대기') : run.status === 'queued' ? t("전송 대기 중") : run.status === 'running' ? t("작업 중") : t("요청 실패")}</strong>
       {showPrompt && <span className="run-control-preview" title={preview}>{cleanPreview(preview, 140)}</span>}
       <div className="run-control-actions">
         {active && <button type="button" disabled={disabled || cancelling} onClick={() => onCancel(run.id)}><Square size={10} aria-hidden="true" />{cancelling ? t("취소 중…") : run.status === 'queued' ? t("대기 취소") : t("중지")}</button>}

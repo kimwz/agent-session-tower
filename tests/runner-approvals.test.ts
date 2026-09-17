@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { RunManager } from '../server/runner.js';
-import type { Session } from '../shared/types.js';
+import type { RunApproval, RunApprovalResponse, Session } from '../shared/types.js';
 
 const ID = '40000000-0000-4000-8000-000000000001';
 async function until<T>(read: () => T | undefined): Promise<T> {
@@ -54,6 +54,10 @@ test('runner publishes a live approval, keeps stdin open, and sends only an expl
   assert.equal(pending.status, 'running'); assert.equal(pending.approvals![0].toolName, 'Bash');
   await assert.rejects(readFile(f.replies), { code: 'ENOENT' });
   pending.approvals![0].input.command = 'tampered copy';
+  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', { answers: { q: { answers: ['unsupported'] } } }), { statusCode: 400 });
+  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', { action: 'accept', content: {} }), { statusCode: 400 });
+  assert.equal(f.manager.list()[0].approvals?.length, 1);
+  await assert.rejects(readFile(f.replies), { code: 'ENOENT' });
   await f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow');
   await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow'), { statusCode: 409 });
   const finished = await until(() => f.manager.list().find(run => run.id === f.accepted.id && run.status === 'completed'));
@@ -97,4 +101,41 @@ test('a terminal native result clears an unanswered approval before process shut
   const finished = await until(() => f.manager.list().find(run => run.id === f.accepted.id && run.status === 'completed'));
   assert.equal(finished.approvals, undefined);
   await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow'), { statusCode: 409 });
+});
+
+test('runner forwards structured Codex answers and keeps child form metadata live without persisting answers', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-structured-approval-runner-'));
+  const session: Session = { id: `codex:${ID}`, nativeId: ID, provider: 'codex', title: 'Structured approvals', cwd: directory, project: 'fixture', status: 'idle', statusReason: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 0, isSubagent: false, resumable: true };
+  const questions: RunApproval = { id: 'child-question', toolName: 'Questions', input: {}, origin: { threadId: 'child', turnId: 'child-turn', agentName: 'Researcher' }, interaction: { type: 'questions', questions: [{ id: 'secret', header: 'Credential', question: 'Enter secret', isOther: false, isSecret: true, options: null }] } };
+  const form: RunApproval = { id: 'child-form', toolName: 'MCP form', input: {}, interaction: { type: 'mcp-form', serverName: 'fixture', schema: { type: 'object', properties: { enabled: { type: 'boolean' }, count: { type: 'integer' } } } } };
+  const responses: Array<{ id: string; response: RunApprovalResponse }> = [];
+  let resolveDone!: () => void;
+  const done = new Promise<void>(resolve => { resolveDone = resolve; });
+  const manager = new RunManager({ stateDir: directory, getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, pollMs: 20,
+    findExecutable: async () => '/fixture/codex', openCodexStdio: async options => ({ done,
+      start: async () => { await options.onSession(ID); options.onStarted?.('parent-turn'); options.onApproval(questions); options.onApproval(form); },
+      respondToApproval: async (id, response) => { responses.push({ id, response }); options.onApprovalCancelled?.(id); },
+      cancel: async () => { options.onFinished({ status: 'cancelled' }); resolveDone(); }, close: () => resolveDone(),
+    }),
+  });
+  await manager.start(); t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
+  const accepted = await manager.enqueue(session.id, 'Collect inputs');
+  const pending = await until(() => manager.list().find(run => run.id === accepted.id && run.approvals?.length === 2));
+  assert.deepEqual(pending.approvals![0].origin, questions.origin);
+  const published = pending.approvals![0].interaction;
+  if (published?.type !== 'questions') throw new Error('Questions were not published.');
+  published.questions[0].question = 'tampered snapshot';
+  assert.equal((manager.list()[0].approvals![0].interaction as typeof published).questions[0].question, 'Enter secret');
+  const answer = { answers: { secret: { answers: ['private-token-not-saved'] } } };
+  const formResponse = { action: 'accept' as const, content: { count: 0, enabled: false } };
+  await manager.respondToApproval(accepted.id, questions.id, answer);
+  assert.equal(manager.list()[0].approvals?.length, 1);
+  await manager.respondToApproval(accepted.id, form.id, formResponse);
+  assert.deepEqual(responses, [{ id: questions.id, response: answer }, { id: form.id, response: formResponse }]);
+  assert.equal(manager.list()[0].approvals, undefined);
+  await assert.rejects(manager.respondToApproval(accepted.id, questions.id, answer), { statusCode: 409 });
+  await (manager as unknown as { flush(): Promise<void> }).flush();
+  const saved = await readFile(join(directory, 'runs.json'), 'utf8');
+  assert.doesNotMatch(saved, /private-token-not-saved|Enter secret|Credential/);
+  assert.equal(manager.list()[0].output, '');
 });

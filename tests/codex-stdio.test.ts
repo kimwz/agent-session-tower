@@ -47,6 +47,7 @@ const approval = () => {
   if (mode === 'permissions') { method = 'item/permissions/requestApproval'; params = { threadId, turnId, itemId: 'tool', cwd: '/tmp/fixture', environmentId: 'remote:permissions-fixture', reason: 'Read an external repository', permissions: { network: { enabled: true }, fileSystem: { read: ['/tmp/fixture/source'], write: null } } }; }
   if (['cached-command', 'command-without-details', 'subcommand-without-details', 'stdin-without-details'].includes(mode)) {
     params.command = null;
+    params.networkApprovalContext = null;
     params.cwd = null;
     if (mode !== 'command-without-details') notice('item/started', { item: { id: 'tool', type: 'commandExecution', command: 'printf original-cached-command', cwd: '/tmp/fixture/cached' } });
     if (mode === 'subcommand-without-details') params.approvalId = 'distinct-native-subcommand';
@@ -231,7 +232,7 @@ test('permission profiles are granted for this turn only from retained native in
 });
 
 test('unsupported interactions, persistent-only decisions, and approvals for another turn fail without hanging', async t => {
-  for (const mode of ['unknown', 'amendment-only', 'accept-only', 'other-thread', 'file-without-patch', 'command-without-details', 'subcommand-without-details', 'stdin-without-details']) await t.test(mode, async t => {
+  for (const mode of ['unknown', 'amendment-only', 'accept-only', 'file-without-patch', 'command-without-details', 'subcommand-without-details', 'stdin-without-details']) await t.test(mode, async t => {
     const f = await fixture(t, mode);
     await f.run.start(); await f.run.done;
     assert.equal(f.approvals.length, 0);

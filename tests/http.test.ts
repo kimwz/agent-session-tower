@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMonitorServer } from '../server/http.js';
 import { AttachmentStore } from '../server/attachments.js';
-import type { Session, Run, Snapshot } from '../shared/types.js';
+import type { Session, Run, RunApprovalResponse, Snapshot } from '../shared/types.js';
 
 const session: Session = {
   id: 'codex:example', nativeId: 'example', provider: 'codex', title: 'A real session', cwd: '/tmp/project', project: 'project',
@@ -17,8 +17,8 @@ const run: Run = { id: 'run-1', sessionId: session.id, prompt: 'Continue', statu
 
 test('tool approvals require authentication, reject modified inputs, and preserve backend stale-request errors', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-http-approvals-'));
-  const decisions: Array<{ runId: string; approvalId: string; decision: string }> = [];
-  const pending = new Set(['allow-request', 'deny-request', 'permission/1']);
+  const decisions: Array<{ runId: string; approvalId: string; decision: RunApprovalResponse }> = [];
+  const pending = new Set(['allow-request', 'deny-request', 'permission/1', 'questions', 'form', 'cancel']);
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir,
     remote: { password: 'approval-fixture', origins: new Set() }, backend: {
       snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: new Date().toISOString() }),
@@ -42,7 +42,9 @@ test('tool approvals require authentication, reject modified inputs, and preserv
   assert.equal((await send({ decision: 'allow' }, { ...headers, 'X-Agent-Monitor-Token': '' })).status, 403);
   assert.equal((await send({ decision: 'allow' }, { ...headers, Origin: 'https://attacker.example' } as typeof headers)).status, 403);
   assert.equal((await send({ decision: 'allow' }, { ...headers, 'Sec-Fetch-Site': 'cross-site' } as typeof headers)).status, 403);
-  for (const body of [{}, { decision: 'always' }, { decision: true }, { decision: 'allow', input: { command: 'changed' } }, { decision: 'allow', updatedPermissions: [] }]) {
+  for (const body of [{}, { decision: 'always' }, { decision: true }, { decision: 'allow', input: { command: 'changed' } }, { decision: 'allow', updatedPermissions: [] },
+    { decision: 'allow', answers: {} }, { answers: [] }, { answers: { question: { answers: 'not-an-array' } } }, { answers: { question: { answers: ['one'], extra: true } } },
+    { action: 'accept' }, { action: 'accept', content: [], schema: {} }, { action: 'cancel', content: { hidden: 'value' } }, { action: 'accept', content: {}, _meta: {} }]) {
     assert.equal((await send(body)).status, 400);
   }
   assert.deepEqual(decisions, []);
@@ -57,6 +59,11 @@ test('tool approvals require authentication, reject modified inputs, and preserv
     { runId: run.id, approvalId: 'deny-request', decision: 'deny' },
     { runId: run.id, approvalId: 'permission/1', decision: 'allow' },
   ]);
+  const responses: RunApprovalResponse[] = [{ answers: { question: { answers: ['Original choice'] } } }, { action: 'accept', content: { count: 0, enabled: false } }, { action: 'cancel', content: null }];
+  for (const [index, id] of ['questions', 'form', 'cancel'].entries()) {
+    assert.equal((await send(responses[index], headers, `${base}/api/runs/${run.id}/approvals/${id}`)).status, 200);
+    assert.deepEqual(decisions.at(-1), { runId: run.id, approvalId: id, decision: responses[index] });
+  }
 });
 
 test('local HTTP service protects session data and task mutations, and streams real snapshots', async t => {

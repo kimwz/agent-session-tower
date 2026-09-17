@@ -38,7 +38,7 @@ Requires **Node.js 22.13+**, **npm**, and **Git**. Use your existing Claude Code
 - **Route a prompt automatically.** Open **Auto Prompt** from the sparkle button on a machine or folder. A separate Opus or GPT Sol agent chooses a suitable existing session or starts a new one, and shows its reason.
 - **Continue a conversation.** Read the original history and send the next instruction to the same native session. Attach files or paste images.
 - **Choose a model in chat.** Keep the agent's default or select a model for your next request.
-- **Approve tools in chat.** Tower-launched sessions keep native permission settings and show the requested action or access for approval or denial. Existing Codex desktop sessions handle approvals in their original app.
+- **Approve tools and answer questions in chat.** Tower-launched sessions keep native permission settings. Review actions from Codex and its child agents, answer questions, and complete supported connector forms in the web UI. Existing Codex desktop sessions handle approvals in their original app.
 - **Organize your workspace.** Rename sessions and project groups, pin projects, drag nodes, search, filter, and hide or reopen sessions.
 - **Catch new activity.** Unread indicators help you find replies and results you have not opened yet.
 - **Access it remotely.** Open the web UI from another device on your LAN or VPN, with password-protected access to the machine running your agents.
