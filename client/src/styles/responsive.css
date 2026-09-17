@@ -19,9 +19,6 @@
 .session-row-main>strong {
   font-size:12px
 }
-.graph-toolbar {
-  padding-inline:36px
-}
 
 }
 
@@ -43,40 +40,6 @@
   width:420px;
   flex-basis:420px
 }
-.has-chat .graph-toolbar {
-  padding-inline:20px
-}
-.has-chat .graph-interaction-hint {
-  display:none
-}
-.has-chat .stat-filters {
-  gap:4px
-}
-.has-chat .stat-filters button {
-  gap:4px;
-  font-size:9px;
-  padding:6px
-}
-.has-chat .stat-filters button>svg {
-  display:none
-}
-.has-chat .period-select select {
-  font-size:9px;
-  padding-left:9px
-}
-.has-chat .graph-limit {
-  bottom:108px;
-  left:22px;
-  right:auto;
-  max-width:calc(100% - 44px);
-  line-height:1.6
-}
-.graph-interaction-hint {
-  font-size:9px
-}
-.graph-toolbar {
-  padding-inline:25px
-}
 .header-center .localhost {
   display:none
 }
@@ -90,28 +53,6 @@
   .has-chat .sidebar {
   width:235px;
   flex-basis:235px
-}
-.has-chat .stat-filters button {
-  gap:4px;
-  padding:5px;
-  font-size:8px
-}
-.has-chat .stat-filters button b {
-  font-size:9px;
-  margin-left:1px
-}
-.has-chat .workspace-footer>span:last-child {
-  display:none
-}
-.has-chat .graph-legend {
-  gap:9px;
-  font-size:8px
-}
-.has-chat .motion-toggle {
-  font-size:8px
-}
-.has-chat .graph-footer {
-  padding-inline:17px
 }
 .chat-panel {
   width:400px;
@@ -143,9 +84,6 @@
 .app-header {
   gap:16px
 }
-.graph-interaction-hint {
-  display:none
-}
 
 }
 
@@ -170,33 +108,6 @@
   width:440px;
   flex-basis:440px;
   max-width:57vw
-}
-.has-chat .graph-toolbar {
-  padding-inline:20px
-}
-.has-chat .stat-filters button {
-  font-size:9px;
-  padding:6px 7px
-}
-.has-chat .stat-filters button b {
-  font-size:10px
-}
-.has-chat .graph-footer {
-  gap:8px;
-  flex-wrap:wrap
-}
-.has-chat .graph-legend {
-  font-size:9px;
-  gap:12px
-}
-.has-chat .motion-toggle {
-  font-size:9px
-}
-.has-chat .graph-limit {
-  bottom:111px
-}
-.graph-toolbar {
-  padding-inline:24px
 }
 .sidebar {
   width:249px;
@@ -259,51 +170,6 @@
   background:#050a12aa;
   z-index:40
 }
-.graph-toolbar {
-  padding:12px 20px
-}
-.graph-interaction-hint {
-  display:none
-}
-.stat-filters {
-  gap:6px
-}
-.stat-filters button {
-  padding:6px 8px;
-  font-size:10px
-}
-.canvas-caption {
-  left:17px;
-  top:17px;
-  font-size:9px
-}
-.graph-controls {
-  left:17px;
-  bottom:63px
-}
-.graph-limit {
-  left:17px;
-  right:auto;
-  bottom:111px;
-  font-size:9px;
-  max-width:calc(100% - 34px);
-  line-height:1.6
-}
-.graph-footer {
-  padding:18px 18px;
-  gap:14px
-}
-.graph-legend {
-  font-size:9px;
-  gap:12px
-}
-.workspace-footer {
-  padding-inline:17px;
-  font-size:8px
-}
-.footer-version {
-  display:none
-}
 .has-chat .main-area {
   display:none
 }
@@ -319,10 +185,6 @@
 }
 .chat-heading-line {
   gap:7px
-}
-.mobile-back {
-  display:flex;
-  margin-left:-7px
 }
 .close-chat {
   display:none

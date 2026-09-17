@@ -98,7 +98,6 @@
   .chat-panel .close-chat { right: 10px; top: 10px; }
   .chat-heading-line { padding-right: 28px; gap: 6px; }
   .chat-heading-line > .status-badge { margin-left: 0; }
-  .chat-heading-line > .mobile-back { display: none; }
   .chat-header h2 { margin-top: 6px; }
 }
 

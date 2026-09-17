@@ -148,9 +148,6 @@
   height:17px;
   width:17px
 }
-.mobile-back {
-  display:none
-}
 .chat-scroll {
   min-height:0;
   flex:1;

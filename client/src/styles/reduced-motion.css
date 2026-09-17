@@ -11,26 +11,6 @@
 
 }
 
-.graph-limit {
-  display:flex;
-  align-items:center;
-  gap:9px;
-  pointer-events:auto
-}
-.graph-limit>button {
-  display:inline-flex;
-  align-items:center;
-  gap:3px;
-  color:#a4bedf;
-  font-size:9px;
-  border-left:1px solid #3a4f6b;
-  padding:0 0 0 9px;
-  white-space:nowrap
-}
-.graph-limit>button:hover {
-  color:#d2e3fc
-}
-
 .parent-session-link {
   display:flex;
   align-items:center;
