@@ -1,8 +1,8 @@
 import { open, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
-import type { ChatMessage, Provider, Session } from '../shared/types.js';
+import type { ChatMessage, Provider, Session } from '../../shared/types.js';
 import type { ProcessSnapshot } from './processes.js';
-import { claudeContextUsage, claudeInputTokens, contextCapacity as contextWindow, contextTokens as tokenCount } from './session-context.js';
+import { claudeContextUsage, claudeInputTokens, contextCapacity as contextWindow, contextTokens as tokenCount } from './context.js';
 
 // Reading a session means replaying an append-only JSONL rollout written by
 // someone else's CLI: every record is untrusted, partial and format-specific.

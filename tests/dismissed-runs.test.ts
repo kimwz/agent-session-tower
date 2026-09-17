@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DismissedRunStore } from '../server/dismissed-runs.js';
-import { createMonitorServer } from '../server/http.js';
-import { projectSessionStates } from '../server/snapshot.js';
-import { RunManager } from '../server/runner.js';
+import { DismissedRunStore } from '../server/stores/dismissed-runs.js';
+import { createMonitorServer } from '../server/http/server.js';
+import { projectSessionStates } from '../server/sessions/snapshot.js';
+import { RunManager } from '../server/runs/manager.js';
 import type { Run, Session, Snapshot } from '../shared/types.js';
 import { computeConversationRevision } from '../shared/conversation-revision.js';
 

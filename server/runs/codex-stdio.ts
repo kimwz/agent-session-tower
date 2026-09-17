@@ -1,11 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import { validateApprovalResponse } from '../shared/approval-interactions.js';
-import type { RunApproval, RunApprovalResponse } from '../shared/types.js';
-import { requestedModel } from './models.js';
+import { validateApprovalResponse } from '../../shared/approval-interactions.js';
+import type { RunApproval, RunApprovalResponse } from '../../shared/types.js';
+import { requestedModel } from '../providers/models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
-import { APP_NAME, APP_TITLE, APP_VERSION } from '../shared/app-identity.js';
+import { APP_NAME, APP_TITLE, APP_VERSION } from '../../shared/app-identity.js';
 
 // v2 wire shapes verified with Codex CLI 0.153.4 app-server generate-ts --experimental.
 type RequestId = string | number;

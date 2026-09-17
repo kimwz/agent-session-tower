@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { publicSnapshot } from '../server/public-snapshot.js';
+import { publicSnapshot } from '../server/http/public-snapshot.js';
 import { conversationRevision } from '../client/src/session-read-state.js';
 import type { Run, Session, Snapshot } from '../shared/types.js';
 

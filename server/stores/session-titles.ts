@@ -2,8 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdir, open, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Session } from '../shared/types.js';
-import { defaultStateDir } from './state-dir.js';
+import type { Session } from '../../shared/types.js';
+import { defaultStateDir } from '../state-dir.js';
 
 export function normalizeSessionTitle(value: unknown): string {
   if (typeof value !== 'string' || value.trim().length > 120) {

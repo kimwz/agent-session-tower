@@ -3,8 +3,8 @@ import { mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { ClosedSessionStore } from '../server/closed-sessions.js';
-import { createMonitorServer } from '../server/http.js';
+import { ClosedSessionStore } from '../server/stores/closed-sessions.js';
+import { createMonitorServer } from '../server/http/server.js';
 import type { CreateSessionRequest, Run, Session, Snapshot } from '../shared/types.js';
 
 const session: Session = { id: 'claude:fixture', nativeId: 'fixture', provider: 'claude', title: 'Native task', cwd: '/tmp', project: 'tmp', status: 'working',

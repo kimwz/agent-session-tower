@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
-import { SseClient } from '../server/sse-client.js';
+import { SseClient } from '../server/http/sse-client.js';
 
 class Response extends EventEmitter {
   frames: string[] = [];

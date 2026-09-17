@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { RunManager } from '../server/runner.js';
+import { RunManager } from '../server/runs/manager.js';
 import type { RunApproval, RunApprovalResponse, Session } from '../shared/types.js';
 
 const ID = '40000000-0000-4000-8000-000000000001';

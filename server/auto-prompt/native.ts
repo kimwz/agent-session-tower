@@ -2,11 +2,11 @@ import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStd
 import { constants } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
 import { delimiter, isAbsolute, join } from 'node:path';
-import type { Provider } from '../shared/types.js';
-import { MAX_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../shared/attachments.js';
-import { rasterMime } from './attachments.js';
-import { findExecutable, providerDirectories } from './provider-discovery.js';
-import { defaultStateDir } from './state-dir.js';
+import type { Provider } from '../../shared/types.js';
+import { MAX_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
+import { rasterMime } from '../stores/attachments.js';
+import { findExecutable, providerDirectories } from '../providers/discovery.js';
+import { defaultStateDir } from '../state-dir.js';
 
 export interface AutoPromptModelRequest {
   provider: Provider;

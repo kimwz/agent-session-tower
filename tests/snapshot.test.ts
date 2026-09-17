@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { projectSessionStates } from '../server/snapshot.js';
+import { projectSessionStates } from '../server/sessions/snapshot.js';
 import type { Run, Session } from '../shared/types.js';
 
 const session: Session = {

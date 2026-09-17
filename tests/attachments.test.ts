@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from 
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test, { type TestContext } from 'node:test';
-import { AttachmentStore, attachmentPrompt } from '../server/attachments.js';
+import { AttachmentStore, attachmentPrompt } from '../server/stores/attachments.js';
 import { MAX_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES } from '../shared/attachments.js';
 import type { AttachmentInput } from '../shared/types.js';
 

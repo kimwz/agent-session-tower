@@ -1,9 +1,9 @@
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import WebSocket from 'ws';
-import { requestedModel } from './models.js';
+import { requestedModel } from '../providers/models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
-import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../shared/app-identity.js';
+import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../../shared/app-identity.js';
 
 type Result = { status: 'completed' | 'error' | 'cancelled'; error?: string };
 type Item = { id: string; type: string; clientId?: string | null; text?: string; command?: string; aggregatedOutput?: string; changes?: { path: string }[] };

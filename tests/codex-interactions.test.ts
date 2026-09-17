@@ -5,7 +5,7 @@ import { PassThrough, Writable } from 'node:stream';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { setImmediate as tick } from 'node:timers/promises';
 import type { RunApproval } from '../shared/types.js';
-import { openCodexStdioRun, type CodexStdioResult } from '../server/codex-stdio.js';
+import { openCodexStdioRun, type CodexStdioResult } from '../server/runs/codex-stdio.js';
 
 const ROOT = '10000000-0000-4000-8000-000000000001';
 const CHILD = '10000000-0000-4000-8000-000000000002';

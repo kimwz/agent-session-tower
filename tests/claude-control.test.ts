@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ClaudeControl } from '../server/claude-control.js';
+import { ClaudeControl } from '../server/runs/claude-control.js';
 import type { RunApproval } from '../shared/types.js';
 
 function fixture(timeout = 5000, steerTimeout = 5000) {

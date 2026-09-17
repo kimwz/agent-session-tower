@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { RunApproval } from '../shared/types.js';
+import type { RunApproval } from '../../shared/types.js';
 import { SteeringError } from './steering.js';
 
 type Message = Record<string, unknown>;

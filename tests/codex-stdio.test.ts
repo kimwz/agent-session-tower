@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { RunApproval } from '../shared/types.js';
-import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioResult } from '../server/codex-stdio.js';
+import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioResult } from '../server/runs/codex-stdio.js';
 
 const ID = '10000000-0000-4000-8000-000000000001';
 const OTHER = '10000000-0000-4000-8000-000000000002';

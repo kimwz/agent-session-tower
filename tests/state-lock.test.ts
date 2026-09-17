@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireStateLock } from '../server/state-lock.js';
+import { acquireStateLock } from '../server/instance/state-lock.js';
 
 async function fixture(t: { after: (fn: () => unknown) => void }) {
   const stateDir = await mkdtemp(join(tmpdir(), 'agent-monitor-lock-'));

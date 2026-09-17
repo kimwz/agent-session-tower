@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmod, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir, type NetworkInterfaceInfo } from 'node:os';
 import { join } from 'node:path';
-import { accessPasswordPath, loadAccessPassword, networkAccess } from '../server/remote-access.js';
+import { accessPasswordPath, loadAccessPassword, networkAccess } from '../server/http/remote-access.js';
 
 function entry(address: string, internal = false, family = 'IPv4'): NetworkInterfaceInfo {
   return { address, internal, family, netmask: '255.255.255.0', mac: '00:00:00:00:00:00', cidr: `${address}/24`, scopeid: 0 } as NetworkInterfaceInfo;

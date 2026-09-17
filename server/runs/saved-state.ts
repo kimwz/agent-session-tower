@@ -1,8 +1,8 @@
 import { isAbsolute } from 'node:path';
-import type { Run, Session } from '../shared/types.js';
-import { attachmentMetadata } from './attachments.js';
-import { validModelId } from './models.js';
-import { PROVIDERS } from './provider-discovery.js';
+import type { Run, Session } from '../../shared/types.js';
+import { attachmentMetadata } from '../stores/attachments.js';
+import { validModelId } from '../providers/models.js';
+import { PROVIDERS } from '../providers/discovery.js';
 
 /** Nothing restored from disk is trusted: these guards decide what may re-enter the queue. */
 export const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;

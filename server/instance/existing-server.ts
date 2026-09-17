@@ -1,6 +1,6 @@
 import { setTimeout } from 'node:timers/promises';
 import type { MonitorAlreadyRunning } from './state-lock.js';
-import { HEALTH_APPLICATION_ID } from '../shared/app-identity.js';
+import { HEALTH_APPLICATION_ID } from '../../shared/app-identity.js';
 
 /** A live PID alone is insufficient: verify that the owner serves our protocol. */
 export async function existingServerUrl(error: MonitorAlreadyRunning, expected?: {

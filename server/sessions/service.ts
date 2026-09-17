@@ -2,10 +2,10 @@ import { EventEmitter } from 'node:events';
 import { open, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
-import type { ChatMessage, Provider, Session, SessionDetail } from '../shared/types.js';
-import { sortSessions } from '../shared/session-activity.js';
+import type { ChatMessage, Provider, Session, SessionDetail } from '../../shared/types.js';
+import { sortSessions } from '../../shared/session-activity.js';
 import { inspectProcesses, type ProcessSnapshot } from './processes.js';
-import { appendFile, applyStatus, initial, ownHistory, parseMessages, walk, CHUNK, MAX_LINE, type RecordState } from './sessions-parser.js';
+import { appendFile, applyStatus, initial, ownHistory, parseMessages, walk, CHUNK, MAX_LINE, type RecordState } from './parser.js';
 
 interface SessionOptions { codexHome?: string; claudeHome?: string; pollIntervalMs?: number; inspectProcesses?: () => Promise<ProcessSnapshot> }
 

@@ -4,7 +4,7 @@ import { request, type IncomingHttpHeaders } from 'node:http';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createMonitorServer } from '../server/http.js';
+import { createMonitorServer } from '../server/http/server.js';
 import type { Session, Run, Snapshot } from '../shared/types.js';
 
 test('remote HTTP access requires credentials and preserves host, origin, and mutation protections', async t => {

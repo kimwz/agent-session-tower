@@ -2,8 +2,8 @@ import { constants } from 'node:fs';
 import { lstat, mkdir, open, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import type { Attachment, MessageAttachments } from '../shared/types.js';
-import { isImageAttachment, normalizeAttachmentMimeType, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../shared/attachments.js';
+import type { Attachment, MessageAttachments } from '../../shared/types.js';
+import { isImageAttachment, normalizeAttachmentMimeType, MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
 
 const ID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/;
 const MIME = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;

@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { existingServerUrl } from '../server/existing-server.js';
-import { MonitorAlreadyRunning } from '../server/state-lock.js';
+import { existingServerUrl } from '../server/instance/existing-server.js';
+import { MonitorAlreadyRunning } from '../server/instance/state-lock.js';
 
 test('repeat launch reuses only the matching live Monitor instance', async t => {
   let health: unknown = { ok: true, application: 'agent-monitor', pid: process.pid };

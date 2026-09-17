@@ -4,9 +4,9 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { AutoPromptManager } from '../server/auto-prompts.js';
-import type { AutoPromptModelRequest } from '../server/auto-prompt-native.js';
-import type { RunAdmission } from '../server/runner.js';
+import { AutoPromptManager } from '../server/auto-prompt/manager.js';
+import type { AutoPromptModelRequest } from '../server/auto-prompt/native.js';
+import type { RunAdmission } from '../server/runs/manager.js';
 import type { AttachmentInput, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, Session, Snapshot } from '../shared/types.js';
 
 const nativeId = '11111111-1111-4111-8111-111111111111';

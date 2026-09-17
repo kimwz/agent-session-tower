@@ -3,11 +3,11 @@ import { constants } from 'node:fs';
 import { mkdir, open, rename, stat, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, isAbsolute, join } from 'node:path';
-import type { Attachment, AttachmentInput, AutoPromptDecision, AutoPromptJob, AutoPromptRequest, Run, Session, SessionDetail, Snapshot } from '../shared/types.js';
-import { isImageAttachment } from '../shared/attachments.js';
-import { AttachmentStore, attachmentMetadata, type StoredAttachment } from './attachments.js';
-import { RunError, type RunManager } from './runner.js';
-import { runAutoPromptModel } from './auto-prompt-native.js';
+import type { Attachment, AttachmentInput, AutoPromptDecision, AutoPromptJob, AutoPromptRequest, Run, Session, SessionDetail, Snapshot } from '../../shared/types.js';
+import { isImageAttachment } from '../../shared/attachments.js';
+import { AttachmentStore, attachmentMetadata, type StoredAttachment } from '../stores/attachments.js';
+import { RunError, type RunManager } from '../runs/manager.js';
+import { runAutoPromptModel } from './native.js';
 
 interface AutoPromptOptions {
   stateDir: string;

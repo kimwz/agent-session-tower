@@ -1,5 +1,5 @@
-import type { Snapshot } from '../shared/types.js';
-import { computeConversationRevision } from '../shared/conversation-revision.js';
+import type { Snapshot } from '../../shared/types.js';
+import { computeConversationRevision } from '../../shared/conversation-revision.js';
 
 /** Native history supplies the transcript; broadcasts need only output change markers. */
 export function publicSnapshot(snapshot: Snapshot): Snapshot {

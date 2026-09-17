@@ -1,5 +1,5 @@
-import type { Session } from '../shared/types.js';
-import { requestedModel } from './models.js';
+import type { Session } from '../../shared/types.js';
+import { requestedModel } from '../providers/models.js';
 
 // The Claude Code command line is the whole protocol contract: stream-json both
 // ways, replayed user messages and host-side permission prompts. Codex needs no

@@ -2,7 +2,7 @@ import { constants } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
-import type { Provider, ProviderHealth } from '../shared/types.js';
+import type { Provider, ProviderHealth } from '../../shared/types.js';
 
 export const PROVIDERS: Provider[] = ['claude', 'codex'];
 
