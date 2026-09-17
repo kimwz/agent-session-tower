@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SessionService, parseMessages } from '../server/sessions.js';
+import { SessionService } from '../server/sessions.js';
+import { parseMessages } from '../server/sessions-parser.js';
 import { parseCodexOpenFiles } from '../server/processes.js';
 
 const rootId = '11111111-1111-4111-8111-111111111111';
