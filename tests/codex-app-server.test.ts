@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { openCodexBridgeRun, type CodexBridgeOptions } from '../server/codex-app-server.js';
+import { openCodexBridgeRun, type CodexBridgeOptions } from '../server/runs/codex-bridge.js';
 
 type Request = { id: number; method: string; params: any };
 type QueueItem = { id: string; clientUserMessageId: string; input: unknown[] };

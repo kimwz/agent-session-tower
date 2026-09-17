@@ -1,4 +1,4 @@
-import type { Run, Session } from '../shared/types.js';
+import type { Run, Session } from '../../shared/types.js';
 
 function latestTime(previous: string | undefined, candidate: string | undefined): string | undefined {
   const at = candidate ? Date.parse(candidate) : NaN;

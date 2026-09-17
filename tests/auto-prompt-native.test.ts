@@ -5,7 +5,7 @@ import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { runAutoPromptModel, type AutoPromptModelRequest, type AutoPromptNativeDependencies } from '../server/auto-prompt-native.js';
+import { runAutoPromptModel, type AutoPromptModelRequest, type AutoPromptNativeDependencies } from '../server/auto-prompt/native.js';
 
 const DECISION = { action: 'existing', sessionId: 'fixture-A' };
 const SCHEMA = { type: 'object', properties: { action: { const: 'existing' }, sessionId: { const: 'fixture-A' } }, required: ['action', 'sessionId'], additionalProperties: false };

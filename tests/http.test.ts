@@ -4,8 +4,8 @@ import { request } from 'node:http';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createMonitorServer } from '../server/http.js';
-import { AttachmentStore } from '../server/attachments.js';
+import { createMonitorServer } from '../server/http/server.js';
+import { AttachmentStore } from '../server/stores/attachments.js';
 import type { Session, Run, RunApprovalResponse, Snapshot } from '../shared/types.js';
 
 const session: Session = {

@@ -3,8 +3,8 @@ import test, { type TestContext } from 'node:test';
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RunManager } from '../server/runner.js';
-import { trustWorkspace } from '../server/workspace-trust.js';
+import { RunManager } from '../server/runs/manager.js';
+import { trustWorkspace } from '../server/providers/workspace-trust.js';
 
 async function homes(t: TestContext) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'agent-monitor-trust-')));

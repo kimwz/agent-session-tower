@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readWebAsset } from '../server/web-assets.js';
+import { readWebAsset } from '../server/http/web-assets.js';
 
 test('web asset paths serve SPA routes without allowing reads outside the UI root', async t => {
   const root = await mkdtemp(join(tmpdir(), 'monitor-assets-'));

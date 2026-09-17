@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { chmod, readFile, realpath, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { Provider } from '../shared/types.js';
+import type { Provider } from '../../shared/types.js';
 
 type RecordValue = Record<string, unknown>;
 

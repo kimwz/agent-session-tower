@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdir, open, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Session } from '../shared/types.js';
+import type { Session } from '../../shared/types.js';
 
 /** Monitor display state only. Native processes and conversation files are untouched. */
 export class ClosedSessionStore {

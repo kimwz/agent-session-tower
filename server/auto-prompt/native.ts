@@ -1,12 +1,12 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { constants } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
-import type { Provider } from '../shared/types.js';
-import { MAX_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../shared/attachments.js';
-import { findExecutable } from './runner.js';
-import { defaultStateDir } from './state-dir.js';
+import type { Provider } from '../../shared/types.js';
+import { MAX_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
+import { rasterMime } from '../stores/attachments.js';
+import { findExecutable, providerDirectories } from '../providers/discovery.js';
+import { defaultStateDir } from '../state-dir.js';
 
 export interface AutoPromptModelRequest {
   provider: Provider;
@@ -92,14 +92,6 @@ function codexArgs(options: AutoPromptModelRequest, directory: string, images: s
     ...images.flatMap(path => ['--image', path]), '-'];
 }
 
-function imageMime(content: Buffer): string | undefined {
-  if (content.length >= 24 && content.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) && content.toString('ascii', 12, 16) === 'IHDR') return 'image/png';
-  if (content.length >= 4 && content[0] === 0xff && content[1] === 0xd8 && content[2] === 0xff) return 'image/jpeg';
-  if (content.length >= 13 && ['GIF87a', 'GIF89a'].includes(content.toString('ascii', 0, 6))) return 'image/gif';
-  if (content.length >= 20 && content.toString('ascii', 0, 4) === 'RIFF' && content.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
-  return undefined;
-}
-
 async function imagesForRequest(paths: readonly string[], directory: string): Promise<{ paths: string[]; blocks: object[] }> {
   if (paths.length > MAX_ATTACHMENTS) throw failure('too many routing images.');
   const result: { paths: string[]; blocks: object[] } = { paths: [], blocks: [] };
@@ -115,7 +107,7 @@ async function imagesForRequest(paths: readonly string[], directory: string): Pr
       total += content.length;
       if (content.length > MAX_IMAGE_ATTACHMENT_BYTES || total > MAX_TOTAL_ATTACHMENT_BYTES) throw failure('routing images are too large.');
     } finally { await file.close(); }
-    const mime = imageMime(content);
+    const mime = rasterMime(content);
     if (!mime) throw failure('routing image format is unsupported.');
     const copied = join(directory, `image-${result.paths.length}.${mime.split('/')[1]}`);
     await writeFile(copied, content, { mode: 0o600, flag: 'wx' });
@@ -133,8 +125,7 @@ export async function runAutoPromptModel(options: AutoPromptModelRequest, depend
   if (!record(options.schema) || typeof options.prompt !== 'string' || typeof options.systemPrompt !== 'string'
     || Buffer.byteLength(options.prompt) > MAX_PROMPT || Buffer.byteLength(options.systemPrompt) > 64_000 || Buffer.byteLength(schema) > 64_000) throw failure('routing input is invalid or too large.');
   const env = { ...process.env, ...dependencies.env };
-  env.PATH = [...new Set([...(env.PATH ?? '').split(delimiter), join(homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'])]
-    .filter(directory => directory && isAbsolute(directory)).join(delimiter);
+  env.PATH = providerDirectories(env).join(delimiter);
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_SESSION_ID;
   const executable = await (dependencies.findExecutable ?? findExecutable)(options.provider, env);

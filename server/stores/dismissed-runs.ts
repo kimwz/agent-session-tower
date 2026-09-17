@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdir, open, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { Run } from '../shared/types.js';
+import type { Run } from '../../shared/types.js';
 
 /** Display preferences only: raw run history remains available for lifecycle projection. */
 export class DismissedRunStore {

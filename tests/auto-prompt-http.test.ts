@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createMonitorServer } from '../server/http.js';
+import { createMonitorServer } from '../server/http/server.js';
 import { MAX_ATTACHMENTS } from '../shared/attachments.js';
 import type { AutoPromptJob, AutoPromptRequest } from '../shared/types.js';
 

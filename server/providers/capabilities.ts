@@ -5,9 +5,9 @@ import { open } from 'node:fs/promises';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { ModelOption, Provider, ProviderHealth, ProviderUsage, UsageWindow } from '../shared/types.js';
+import type { ModelOption, Provider, ProviderHealth, ProviderUsage, UsageWindow } from '../../shared/types.js';
 import { validModelId } from './models.js';
-import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../shared/app-identity.js';
+import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../../shared/app-identity.js';
 
 const execute = promisify(execFile);
 const MAX_JSON = 2 * 1024 * 1024;

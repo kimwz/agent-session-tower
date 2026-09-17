@@ -3,7 +3,7 @@ import test from 'node:test';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseClaudeUsage, parseCodexUsage, parseCodexModels, claudeStorage, readClaudeCredential, readClaudeUsage, readCodexCapabilities, ProviderCapabilities } from '../server/provider-capabilities.js';
+import { parseClaudeUsage, parseCodexUsage, parseCodexModels, claudeStorage, readClaudeCredential, readClaudeUsage, readCodexCapabilities, ProviderCapabilities } from '../server/providers/capabilities.js';
 import type { ProviderHealth } from '../shared/types.js';
 
 const now = Date.parse('2026-09-15T00:00:00Z');

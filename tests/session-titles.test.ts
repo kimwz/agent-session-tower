@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SessionTitleStore, normalizeSessionTitle } from '../server/session-titles.js';
-import { createMonitorServer } from '../server/http.js';
+import { SessionTitleStore, normalizeSessionTitle } from '../server/stores/session-titles.js';
+import { createMonitorServer } from '../server/http/server.js';
 import type { Session } from '../shared/types.js';
 import { computeConversationRevision } from '../shared/conversation-revision.js';
 

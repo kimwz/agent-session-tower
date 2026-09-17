@@ -4,8 +4,8 @@ import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { RunManager } from '../server/runner.js';
-import { SessionTitleStore } from '../server/session-titles.js';
+import { RunManager } from '../server/runs/manager.js';
+import { SessionTitleStore } from '../server/stores/session-titles.js';
 import type { Provider, Run, Session } from '../shared/types.js';
 
 const CODEX_ID = '20000000-0000-4000-8000-000000000001';

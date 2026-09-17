@@ -4,7 +4,9 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { test } from 'node:test';
-import { buildCreateArgs, buildResumeArgs, findExecutable, RunManager } from '../server/runner.js';
+import { RunManager } from '../server/runs/manager.js';
+import { buildCreateArgs, buildResumeArgs } from '../server/runs/claude-args.js';
+import { findExecutable } from '../server/providers/discovery.js';
 import type { Run, Session } from '../shared/types.js';
 
 const ID = '10000000-0000-4000-8000-000000000001';

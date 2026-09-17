@@ -6,7 +6,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { RunManager } from '../server/runner.js';
+import { RunManager } from '../server/runs/manager.js';
 import type { Run, Session } from '../shared/types.js';
 
 const nativeId = '10000000-0000-4000-8000-000000000001';

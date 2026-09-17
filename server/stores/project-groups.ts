@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { mkdir, open, rename, unlink } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
-import type { ProjectGroup, ProjectGroupPatch } from '../shared/types.js';
+import type { ProjectGroup, ProjectGroupPatch } from '../../shared/types.js';
 import { normalizeSessionTitle } from './session-titles.js';
 
 const invalid = (message: string) => Object.assign(new Error(message), { statusCode: 400 });

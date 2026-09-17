@@ -4,10 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
-import { RunManager } from '../server/runner.js';
-import { AttachmentStore } from '../server/attachments.js';
-import { SteeringError, type SteeringInput } from '../server/steering.js';
-import type { CodexStdioResult } from '../server/codex-stdio.js';
+import { RunManager } from '../server/runs/manager.js';
+import { AttachmentStore } from '../server/stores/attachments.js';
+import { SteeringError, type SteeringInput } from '../server/runs/steering.js';
+import type { CodexStdioResult } from '../server/runs/codex-stdio.js';
 import type { Run, Session } from '../shared/types.js';
 
 const ID = '10000000-0000-4000-8000-000000000001';

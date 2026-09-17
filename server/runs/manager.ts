@@ -1,21 +1,24 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
-import { constants } from 'node:fs';
-import { access, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, readFile, stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
-import type { CreateSessionRequest, MessageAttachments, Provider, ProviderHealth, Run, RunApprovalResponse, Session } from '../shared/types.js';
-import { isImageAttachment } from '../shared/attachments.js';
-import { attachmentMetadata, attachmentPrompt, AttachmentStore } from './attachments.js';
-import { normalizeSessionTitle } from './session-titles.js';
-import type { CodexBridgeRun, CodexBridgeOptions } from './codex-app-server.js';
-import { requestedModel, validModelId } from './models.js';
+import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, Session } from '../../shared/types.js';
+import { isImageAttachment } from '../../shared/attachments.js';
+import { attachmentMetadata, attachmentPrompt, AttachmentStore } from '../stores/attachments.js';
+import { normalizeSessionTitle } from '../stores/session-titles.js';
+import type { CodexBridgeRun, CodexBridgeOptions } from './codex-bridge.js';
+import { requestedModel, validModelId } from '../providers/models.js';
 import { SteeringError } from './steering.js';
 import { ClaudeControl } from './claude-control.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
-import { claudeInputTokens, contextCapacity, nativeContextObservation, withNativeContext } from './session-context.js';
-import { defaultStateDir } from './state-dir.js';
+import { claudeInputTokens, contextCapacity, nativeContextObservation, withNativeContext } from '../sessions/context.js';
+import { defaultStateDir } from '../state-dir.js';
+import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { findExecutable, providerDirectories, PROVIDERS } from '../providers/discovery.js';
+import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
+import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -39,13 +42,6 @@ interface OwnedProcess {
   claude?: ClaudeControl;
   finishInput?: () => void;
 }
-interface CreatedSession {
-  session: Session;
-  runId: string;
-  confirmed: boolean;
-  seenNative?: boolean;
-  title?: string;
-}
 /** Internal admission data is never accepted from the public message endpoint. */
 export interface RunAdmission {
   autoPromptId?: string;
@@ -57,56 +53,9 @@ const MAX_PROMPT = 32_000;
 const MAX_RUNS = 100;
 const MAX_QUEUED = 32;
 const FINISHED = new Set<Run['status']>(['completed', 'error', 'cancelled']);
-const PROVIDERS: Provider[] = ['claude', 'codex'];
-const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 
 export class RunError extends Error {
   constructor(message: string, public readonly statusCode = 400) { super(message); }
-}
-
-/** Resolve executables without invoking a shell or evaluating shell startup files. */
-function providerDirectories(env: NodeJS.ProcessEnv): string[] {
-  // Finder starts programs with a minimal PATH. Use the same safe lookup for the
-  // CLI and its interpreters/tools; empty or relative entries would search its cwd.
-  return [...new Set([...(env.PATH ?? '').split(delimiter), join(homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'])]
-    .filter(directory => directory && isAbsolute(directory));
-}
-
-export async function findExecutable(provider: Provider, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
-  for (const directory of providerDirectories(env)) {
-    const candidate = join(directory, provider);
-    try {
-      await access(candidate, constants.X_OK);
-      if ((await stat(candidate)).isFile()) return candidate;
-    } catch { /* Try the next installed location. */ }
-  }
-  return undefined;
-}
-
-export async function getProviderHealth(counts: Partial<Record<Provider, number>> = {}): Promise<ProviderHealth[]> {
-  return Promise.all(PROVIDERS.map(async (provider) => {
-    const executable = await findExecutable(provider);
-    return { provider, available: Boolean(executable), executable, sessionCount: counts[provider] ?? 0,
-      ...(!executable ? { error: `${provider === 'claude' ? 'Claude Code' : 'Codex'} CLI was not found in PATH.` } : {}) };
-  }));
-}
-
-export function buildResumeArgs(session: Session, model?: string): string[] {
-  const override = requestedModel(model);
-  if (session.provider === 'claude') return [
-    '-p', '--resume', session.nativeId, '--output-format', 'stream-json', '--verbose',
-    '--include-partial-messages', '--replay-user-messages', '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--permission-prompts', 'host', ...(override ? ['--model', override] : []),
-  ];
-  return ['app-server', '--stdio'];
-}
-
-export function buildCreateArgs(session: Session, model?: string): string[] {
-  const override = requestedModel(model);
-  if (session.provider === 'claude') return [
-    '-p', '--session-id', session.nativeId, '--output-format', 'stream-json', '--verbose',
-    '--include-partial-messages', '--replay-user-messages', '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--permission-prompts', 'host', ...(override ? ['--model', override] : []),
-  ];
-  return ['app-server', '--stdio'];
 }
 
 /** Owns only processes launched by this monitor; never signals an external agent. */
@@ -908,58 +857,3 @@ export class RunManager extends EventEmitter {
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-
-function isSavedRun(value: unknown): value is Run {
-  if (!value || typeof value !== 'object') return false;
-  const run = value as Partial<Run>;
-  return typeof run.id === 'string' && typeof run.sessionId === 'string' && typeof run.prompt === 'string'
-    && typeof run.createdAt === 'string' && typeof run.output === 'string'
-    && (run.model === undefined || validModelId(run.model))
-    && (run.autoPromptId === undefined || UUID.test(run.autoPromptId))
-    && (run.steering === undefined || isSavedSteering(run.steering, run))
-    && (run.attachments === undefined || (Array.isArray(run.attachments) && run.attachments.length <= 10 && run.attachments.every(item => attachmentMetadata(item))))
-    && ['queued', 'running', 'completed', 'error', 'cancelled'].includes(run.status ?? '');
-}
-
-function isSavedSteering(value: unknown, run: Partial<Run>): boolean {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  const steering = value as Partial<NonNullable<Run['steering']>>;
-  const timestamp = (candidate: unknown): candidate is string => typeof candidate === 'string' && Number.isFinite(Date.parse(candidate));
-  return typeof steering.targetRunId === 'string' && UUID.test(steering.targetRunId) && steering.targetRunId !== run.id
-    && ['sending', 'delivered', 'uncertain'].includes(steering.state ?? '') && timestamp(steering.requestedAt)
-    && (steering.deliveredAt === undefined || timestamp(steering.deliveredAt))
-    && (steering.state !== 'delivered' || steering.deliveredAt !== undefined)
-    && run.status !== 'queued';
-}
-
-function isCreatedSession(value: unknown): value is CreatedSession {
-  if (!value || typeof value !== 'object') return false;
-  const created = value as Partial<CreatedSession>;
-  const session = created.session;
-  return typeof created.runId === 'string' && typeof created.confirmed === 'boolean' && !!session
-    && PROVIDERS.includes(session.provider) && typeof session.id === 'string' && session.id.startsWith(`${session.provider}:`)
-    && typeof session.nativeId === 'string' && (!created.confirmed || UUID.test(session.nativeId))
-    && typeof session.cwd === 'string' && isAbsolute(session.cwd)
-    && typeof session.title === 'string' && typeof session.createdAt === 'string' && typeof session.updatedAt === 'string'
-    && typeof session.lastMessage === 'string' && (created.title === undefined || typeof created.title === 'string');
-}
-
-async function readPrivateJson(path: string): Promise<unknown> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const info = await file.stat();
-    if (!info.isFile() || info.size > 12_000_000) throw new Error('Saved session identities are invalid or too large.');
-    await file.chmod(0o600);
-    return JSON.parse(await file.readFile('utf8'));
-  } finally { await file.close(); }
-}
-
-async function writePrivateJson(path: string, data: string): Promise<void> {
-  const temporary = `${path}.${process.pid}.${createHash('sha256').update(randomUUID()).digest('hex').slice(0, 12)}.tmp`;
-  try {
-    const file = await open(temporary, 'wx', 0o600);
-    try { await file.writeFile(data); await file.sync(); }
-    finally { await file.close(); }
-    await rename(temporary, path);
-  } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
-}

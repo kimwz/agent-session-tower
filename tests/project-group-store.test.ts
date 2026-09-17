@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { normalizeProjectGroupPatch, ProjectGroupStore } from '../server/project-groups.js';
-import { createMonitorServer } from '../server/http.js';
+import { normalizeProjectGroupPatch, ProjectGroupStore } from '../server/stores/project-groups.js';
+import { createMonitorServer } from '../server/http/server.js';
 import type { Session } from '../shared/types.js';
 
 test('project labels and pins survive restart privately without changing cwd identity or native history', async t => {

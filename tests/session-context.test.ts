@@ -3,7 +3,7 @@ import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { SessionService } from '../server/sessions.js';
+import { SessionService } from '../server/sessions/service.js';
 
 const id = '11111111-1111-4111-8111-111111111111';
 const child = '22222222-2222-4222-8222-222222222222';
