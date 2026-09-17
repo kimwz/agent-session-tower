@@ -34,11 +34,13 @@ Requires **Node.js 22.13+**, **npm**, and **Git**. Use your existing Claude Code
 - **See existing sessions immediately.** Automatically discovers local Claude Code and Codex histories, including sessions started outside Tower.
 - **Follow work on a live graph.** View projects, sessions, and subagents together, with working, waiting, completed, and error states.
 - **Check account usage.** See Claude Code and Codex usage as small donuts inside the machine node. Hover or focus for usage windows and reset times.
-- **Create new sessions.** Choose Claude Code or Codex, pick an existing project folder, and send the first request from the web.
+- **Create new sessions.** Choose Claude Code or Codex, pick a project folder, and send the first request from the web. A folder that does not exist yet is created, and the folder is marked as trusted for that CLI so it does not stop at the trust prompt.
 - **Route a prompt automatically.** Open **Auto Prompt** from the sparkle button on a machine or folder. A separate Opus or GPT Sol agent chooses a suitable existing session or starts a new one, and shows its reason.
 - **Continue a conversation.** Read the original history and send the next instruction to the same native session. Attach files or paste images.
+- **Insert a queued request into active work.** Click **Send into current turn** on an eligible queued request to deliver it to the same active Claude Code or Codex turn without stopping it. Available for turns controlled by Tower; a different model must wait for the next turn. Unconfirmed delivery is never retried automatically.
 - **Choose a model in chat.** Keep the agent's default or select a model for your next request.
 - **Approve tools and answer questions in chat.** Tower-launched sessions keep native permission settings. Review actions from Codex and its child agents, answer questions, and complete supported connector forms in the web UI. Existing Codex desktop sessions handle approvals in their original app.
+- **Keep projects stable.** Sessions stay grouped under their starting folder even when an agent changes directories while working. Resuming from Tower uses that project folder.
 - **Organize your workspace.** Rename sessions and project groups, pin projects, drag nodes, search, filter, and hide or reopen sessions.
 - **Catch new activity.** Unread indicators help you find replies and results you have not opened yet.
 - **Access it remotely.** Open the web UI from another device on your LAN or VPN, with password-protected access to the machine running your agents.

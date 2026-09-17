@@ -11,6 +11,7 @@ import { attachmentMetadata, attachmentPrompt, AttachmentStore } from './attachm
 import { normalizeSessionTitle } from './session-titles.js';
 import type { CodexBridgeRun, CodexBridgeOptions } from './codex-app-server.js';
 import { requestedModel, validModelId } from './models.js';
+import { SteeringError } from './steering.js';
 import { ClaudeControl } from './claude-control.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
 import { claudeInputTokens, contextCapacity, nativeContextObservation, withNativeContext } from './session-context.js';
@@ -27,12 +28,15 @@ interface RunnerOptions {
   pollMs?: number;
   openCodexBridge?: (options: Omit<CodexBridgeOptions, 'codexHome'>) => Promise<CodexBridgeRun | undefined>;
   openCodexStdio?: (options: CodexStdioOptions) => Promise<CodexStdioRun>;
+  /** Pre-accepts the native folder trust prompt for a newly created session. */
+  trustWorkspace?: (provider: Provider, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
 }
 interface OwnedProcess {
   child: ChildProcessWithoutNullStreams;
   done: Promise<void>;
   killTimer?: ReturnType<typeof setTimeout>;
   claude?: ClaudeControl;
+  finishInput?: () => void;
 }
 interface CreatedSession {
   session: Session;
@@ -90,7 +94,7 @@ export function buildResumeArgs(session: Session, model?: string): string[] {
   const override = requestedModel(model);
   if (session.provider === 'claude') return [
     '-p', '--resume', session.nativeId, '--output-format', 'stream-json', '--verbose',
-    '--include-partial-messages', '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--permission-prompts', 'host', ...(override ? ['--model', override] : []),
+    '--include-partial-messages', '--replay-user-messages', '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--permission-prompts', 'host', ...(override ? ['--model', override] : []),
   ];
   return ['app-server', '--stdio'];
 }
@@ -99,7 +103,7 @@ export function buildCreateArgs(session: Session, model?: string): string[] {
   const override = requestedModel(model);
   if (session.provider === 'claude') return [
     '-p', '--session-id', session.nativeId, '--output-format', 'stream-json', '--verbose',
-    '--include-partial-messages', '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--permission-prompts', 'host', ...(override ? ['--model', override] : []),
+    '--include-partial-messages', '--replay-user-messages', '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--permission-prompts', 'host', ...(override ? ['--model', override] : []),
   ];
   return ['app-server', '--stdio'];
 }
@@ -154,11 +158,15 @@ export class RunManager extends EventEmitter {
           ...(value.attachments ? { attachments: value.attachments.map(item => attachmentMetadata(item)!) } : {}) };
         // A permission request belongs to a live process, never a restored run.
         delete run.approvals;
+        delete run.canSteer;
+        if (run.steering?.state === 'sending') run.steering.state = 'uncertain';
         const context = nativeContextObservation(run.contextUsage);
         if (context) run.contextUsage = context; else delete run.contextUsage;
         if (run.status === 'running' || run.status === 'queued') {
           run.status = run.status === 'running' ? 'error' : 'cancelled';
-          run.error = 'Agent Session Tower stopped before this task finished. It was not restarted; send the instruction again to continue.';
+          run.error = run.steering
+            ? 'Agent Session Tower stopped before this inserted instruction finished. It was not resent. Check the conversation before sending again.'
+            : 'Agent Session Tower stopped before this task finished. It was not restarted; send the instruction again to continue.';
           run.finishedAt = new Date().toISOString();
         }
         this.runs.set(run.id, run);
@@ -173,7 +181,7 @@ export class RunManager extends EventEmitter {
     this.pollTimer.unref();
   }
 
-  list(): Run[] { return [...this.runs.values()].map((run) => ({ ...run, ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
+  list(): Run[] { return [...this.runs.values()].map((run) => ({ ...run, canSteer: Boolean(this.steeringTarget(run)), ...(run.steering ? { steering: { ...run.steering } } : {}), ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
     ...(run.contextUsage ? { contextUsage: { ...run.contextUsage } } : {}),
     ...(run.approvals ? { approvals: structuredClone(run.approvals) } : {}) })); }
   async attachment(id: string) {
@@ -208,7 +216,9 @@ export class RunManager extends EventEmitter {
     const native = created.confirmed ? this.options.getSession(this.nativeSessionId(id)) : undefined;
     if (native && !created.seenNative) { created.seenNative = true; this.persist(); }
     const initialRun = this.runs.get(created.runId);
-    if (native) return this.sessionWithContext({ ...native, id, ...(native.parentId ? { parentId: this.monitorSessionId(native.parentId) } : {}), ...(created.title ? { customTitle: created.title } : {}) });
+    // The folder explicitly chosen at creation remains the project's identity.
+    // Native discovery may observe a later working directory or incomplete metadata.
+    if (native) return this.sessionWithContext({ ...native, id, cwd: created.session.cwd, project: created.session.project, ...(native.parentId ? { parentId: this.monitorSessionId(native.parentId) } : {}), ...(created.title ? { customTitle: created.title } : {}) });
     if (created.seenNative && (!initialRun || FINISHED.has(initialRun.status))) return undefined;
     const live = initialRun?.status === 'queued' || initialRun?.status === 'running';
     return {
@@ -245,11 +255,17 @@ export class RunManager extends EventEmitter {
     this.validateAdmission(input.prompt, Boolean(input.attachments?.length));
     if (!PROVIDERS.includes(input.provider)) throw new RunError('Claude 또는 Codex를 선택하세요.');
     const model = requestedModel(input.model);
-    if (typeof input.cwd !== 'string' || !isAbsolute(input.cwd) || input.cwd.includes('\0') || input.cwd.length > 4096) throw new RunError('기존 작업 폴더의 절대 경로를 입력하세요.');
-    try { if (!(await stat(input.cwd)).isDirectory()) throw new Error(); }
-    catch { throw new RunError('작업 폴더를 찾을 수 없습니다. 기존 폴더의 절대 경로를 입력하세요.'); }
+    if (typeof input.cwd !== 'string' || input.cwd.includes('\0') || input.cwd.length > 4096) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
+    const cwd = input.cwd === '~' || input.cwd.startsWith('~/') ? join(homedir(), input.cwd.slice(1)) : input.cwd;
+    if (!isAbsolute(cwd)) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
+    input = { ...input, cwd };
     const title = input.title === undefined ? '' : normalizeSessionTitle(input.title);
     if (!(await this.executable(input.provider))) throw new RunError(`Install the ${input.provider} CLI and ensure it is in PATH before creating a session.`, 503);
+    // A folder that does not exist yet is created, like `mkdir -p` before starting the CLI there.
+    try { await mkdir(cwd, { recursive: true }); if (!(await stat(cwd)).isDirectory()) throw new Error(); }
+    catch { throw new RunError('작업 폴더를 만들 수 없습니다. 경로와 권한을 확인하세요.'); }
+    // Best effort: without it the CLI only asks its usual trust question.
+    await this.options.trustWorkspace?.(input.provider, cwd, { ...process.env, ...this.options.env }).catch(() => {});
     const uuid = randomUUID();
     const id = `${input.provider}:${input.provider === 'codex' ? 'monitor-' : ''}${uuid}`;
     const prepared = await this.attachments.prepare(id, { attachments: input.attachments });
@@ -326,10 +342,65 @@ export class RunManager extends EventEmitter {
     return { ...run };
   }
 
+  private steeringTarget(run: Run) {
+    if (this.stopping || run.status !== 'queued' || run.steering || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
+    const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering);
+    if (!target || (run.model && run.model !== (target.model ?? this.getSession(run.sessionId)?.model))) return undefined;
+    const adapter = this.stdio.get(target.id) ?? this.bridged.get(target.id) ?? this.owned.get(target.id)?.claude;
+    return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : undefined;
+  }
+
+  async steer(runId: string): Promise<Run> {
+    const run = this.runs.get(runId);
+    if (!run) throw new RunError('Task not found.', 404);
+    if (run.steering) return this.list().find(item => item.id === runId)!;
+    const selected = this.steeringTarget(run);
+    if (!selected) throw new RunError('This queued instruction cannot be inserted into an active Tower turn.', 409);
+    // Reserve synchronously before attachment reads so duplicate clicks cannot submit twice.
+    this.admissions.add(run.id);
+    let submitted = false;
+    try {
+      const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
+      this.admissions.delete(run.id);
+      const current = this.steeringTarget(run);
+      this.admissions.add(run.id);
+      if (!current || current.target !== selected.target || current.adapter !== selected.adapter) throw new SteeringError('The active turn changed before delivery.', 'rejected');
+      run.status = 'running'; run.startedAt = new Date().toISOString(); run.output = '';
+      run.steering = { targetRunId: selected.target.id, state: 'sending', requestedAt: run.startedAt };
+      this.changed();
+      await this.flush();
+      if (this.stopping || selected.target.status !== 'running' || !selected.adapter.canSteer?.()) throw new SteeringError('The active turn finished before delivery.', 'rejected');
+      const prompt = attachmentPrompt(run.prompt, attachments);
+      submitted = true;
+      if (selected.adapter instanceof ClaudeControl) {
+        await selected.adapter.steer({ type: 'user', uuid: run.id, session_id: this.getSession(run.sessionId)!.nativeId, parent_tool_use_id: null,
+          message: { role: 'user', content: [{ type: 'text', text: prompt }, ...attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => ({
+            type: 'image', source: { type: 'base64', media_type: item.metadata.mimeType, data: item.content.toString('base64') },
+          }))] } });
+      } else await selected.adapter.steer!({ id: run.id, prompt, imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) });
+      run.steering!.state = 'delivered'; run.steering!.deliveredAt = new Date().toISOString();
+      this.changed(); await this.flush();
+      return this.list().find(item => item.id === runId)!;
+    } catch (error) {
+      if (!submitted || (error instanceof SteeringError && error.disposition === 'rejected')) {
+        if (run.steering) { delete run.steering; delete run.startedAt; run.status = 'queued'; }
+      } else {
+        run.steering!.state = 'uncertain'; run.status = 'error'; run.finishedAt = new Date().toISOString();
+        run.error = `Delivery could not be confirmed. Check the conversation before sending again. ${errorMessage(error)}`;
+      }
+      this.changed(); await this.flush();
+      throw error;
+    } finally {
+      this.admissions.delete(run.id);
+      this.owned.get(selected.target.id)?.finishInput?.();
+    }
+  }
+
   async cancel(runId: string): Promise<void> {
     const run = this.runs.get(runId);
     if (!run) throw new RunError('Task not found.', 404);
     if (FINISHED.has(run.status)) return;
+    if (run.steering) throw new RunError('An inserted instruction belongs to the active turn. Stop the active turn instead.', 409);
     const bridge = this.bridged.get(runId);
     if (bridge) {
       // The shared server owns the process. Interrupt only our correlated turn.
@@ -431,7 +502,9 @@ export class RunManager extends EventEmitter {
       await this.options.refreshSessions();
       for (const run of this.runs.values()) {
         if (this.stopping) break;
-        if (this.owned.size + this.bridged.size + this.stdio.size >= (this.options.maxConcurrent ?? 2)) break;
+        // Independent conversations can run immediately. Only callers that
+        // explicitly configure a worker limit impose a global queue.
+        if (this.options.maxConcurrent !== undefined && this.owned.size + this.bridged.size + this.stdio.size >= this.options.maxConcurrent) break;
         if (run.status !== 'queued' || this.admissions.has(run.id)) continue;
         const session = this.getSession(run.sessionId);
         const creating = this.createdSessions.get(run.sessionId)?.runId === run.id;
@@ -650,12 +723,18 @@ export class RunManager extends EventEmitter {
       },
       onError: error => { streamError = error.message; this.stopOwned(run.id, owned); },
     });
+    owned.finishInput = () => {
+      if (sawCompletion && !owned.claude?.hasPendingSteers()) { owned.claude?.close(); child.stdin.end(); }
+    };
     const parseEventLine = (line: string): void => {
       if (!line.trim()) return;
       let event: Record<string, any>;
       try { event = JSON.parse(line); } catch { this.append(run, line + '\n'); return; }
       if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error('Expected a provider event object.');
-      if (owned.claude?.handle(event)) return;
+      if (owned.claude?.handle(event)) {
+        if (event.type === 'user' && event.isReplay) sawCompletion = false;
+        return;
+      }
       const actualId = event.type === 'system' && event.subtype === 'init' ? event.session_id : undefined;
       const created = creating ? this.createdSessions.get(session.id) : undefined;
       if (actualId && created && !created.confirmed && typeof actualId === 'string' && UUID.test(actualId)
@@ -707,10 +786,11 @@ export class RunManager extends EventEmitter {
           this.changed();
         }
         sawCompletion = true;
-        owned.claude?.close();
-        child.stdin.end();
+        owned.finishInput?.();
         if (event.is_error) streamError = (event.errors ?? [event.result ?? 'Claude Code could not complete this turn.']).join('\n');
-        if (event.permission_denials?.length) {
+        // A denied tool call (by the user or the auto mode classifier) is part of a turn that
+        // still finished; Claude's own reply explains it. Only a failed turn is reported.
+        if (event.is_error && event.permission_denials?.length) {
           const denied = [...new Set(event.permission_denials.map((denial: any) => denial.tool_name ?? 'tool'))].join(', ');
           streamError = `Permission was denied for: ${denied}. The instruction could not complete with the current permissions.`;
           this.append(run, `\n${streamError}\n`);
@@ -789,7 +869,17 @@ export class RunManager extends EventEmitter {
     }
   }
 
-  private changed(): void { this.persist(); this.emit('change'); }
+  private changed(): void {
+    for (const run of this.runs.values()) {
+      if (run.status !== 'running' || run.steering?.state !== 'delivered') continue;
+      const target = this.runs.get(run.steering.targetRunId);
+      if (target && FINISHED.has(target.status)) {
+        run.status = target.status; run.finishedAt = target.finishedAt; run.error = target.error;
+        this.settledRuns.add(run.id);
+      }
+    }
+    this.persist(); this.emit('change');
+  }
 
   private prune(): void {
     for (const [id, run] of this.runs) {
@@ -799,7 +889,7 @@ export class RunManager extends EventEmitter {
   }
 
   private persist(): void {
-    const data = JSON.stringify(this.list().map(({ approvals: _liveApprovals, ...run }) => run));
+    const data = JSON.stringify(this.list().map(({ approvals: _liveApprovals, canSteer: _liveSteering, ...run }) => run));
     const created = JSON.stringify([...this.createdSessions.values()]);
     this.writes = this.writes.then(async () => {
       // Write identities first. A crash between commits may leave an orphaned
@@ -825,8 +915,20 @@ function isSavedRun(value: unknown): value is Run {
     && typeof run.createdAt === 'string' && typeof run.output === 'string'
     && (run.model === undefined || validModelId(run.model))
     && (run.autoPromptId === undefined || UUID.test(run.autoPromptId))
+    && (run.steering === undefined || isSavedSteering(run.steering, run))
     && (run.attachments === undefined || (Array.isArray(run.attachments) && run.attachments.length <= 10 && run.attachments.every(item => attachmentMetadata(item))))
     && ['queued', 'running', 'completed', 'error', 'cancelled'].includes(run.status ?? '');
+}
+
+function isSavedSteering(value: unknown, run: Partial<Run>): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const steering = value as Partial<NonNullable<Run['steering']>>;
+  const timestamp = (candidate: unknown): candidate is string => typeof candidate === 'string' && Number.isFinite(Date.parse(candidate));
+  return typeof steering.targetRunId === 'string' && UUID.test(steering.targetRunId) && steering.targetRunId !== run.id
+    && ['sending', 'delivered', 'uncertain'].includes(steering.state ?? '') && timestamp(steering.requestedAt)
+    && (steering.deliveredAt === undefined || timestamp(steering.deliveredAt))
+    && (steering.state !== 'delivered' || steering.deliveredAt !== undefined)
+    && run.status !== 'queued';
 }
 
 function isCreatedSession(value: unknown): value is CreatedSession {

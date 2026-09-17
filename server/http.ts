@@ -6,6 +6,8 @@ import { normalizeProjectGroupPatch } from './project-groups.js';
 import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run, RunApprovalResponse } from '../shared/types.js';
 import { isImageAttachment, MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../shared/attachments.js';
 import { requestedModel } from './models.js';
+import { SseClient } from './sse-client.js';
+import { publicSnapshot } from './public-snapshot.js';
 
 export interface Backend {
   snapshot(): Snapshot;
@@ -20,6 +22,7 @@ export interface Backend {
   enqueue(id: string, prompt: string, attachments?: MessageAttachments): Promise<Run>;
   attachment?(id: string): Promise<{ metadata: Attachment; content: Buffer }>;
   cancel(id: string): Promise<void>;
+  steerRun?(id: string): Promise<Run>;
   respondToApproval?(runId: string, approvalId: string, response: RunApprovalResponse): Promise<Run>;
   dismiss?(id: string): Promise<void>;
   subscribe(listener: () => void): () => void;
@@ -42,7 +45,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
 export function createMonitorServer({ port, clientDir, backend, remote }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const credentialHash = remote ? createHash('sha256').update(`monitor:${remote.password}`).digest() : undefined;
-  const clients = new Set<ServerResponse>();
+  const clients = new Set<SseClient>();
   const rates = new Map<string, { count: number; at: number }>();
   let sequence = 0;
   let scheduled: ReturnType<typeof setTimeout> | undefined;
@@ -50,26 +53,19 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(body));
   };
-  const snapshot = () => {
-    const data = backend.snapshot();
-    return { ...data, sessions: data.sessions.map(publicSession) };
-  };
+  const snapshot = () => publicSnapshot(backend.snapshot());
   const frame = () => `id: ${++sequence}\nevent: snapshot\ndata: ${JSON.stringify(snapshot())}\n\n`;
   const broadcast = () => {
     scheduled = undefined;
     if (!clients.size) return;
     const data = frame();
-    for (const res of clients) {
-      // Drop slow connections; EventSource reconnects with a fresh full snapshot.
-      if (res.writableLength > 2 * 1024 * 1024) { clients.delete(res); res.destroy(); }
-      else res.write(data);
-    }
+    for (const client of clients) client.snapshot(data);
   };
   const unsubscribe = backend.subscribe(() => {
     if (!scheduled) scheduled = setTimeout(broadcast, 200);
   });
   const heartbeat = setInterval(() => {
-    for (const res of clients) res.write(': heartbeat\n\n');
+    for (const client of clients) client.heartbeat();
   }, 15_000);
   heartbeat.unref();
 
@@ -182,16 +178,15 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
       if (req.method === 'GET' && path === '/api/events') {
         if (clients.size >= 40) return json(res, 503, { error: '열린 모니터 연결이 너무 많습니다.' });
         res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
-        res.write('retry: 2000\n\n');
-        res.write(frame());
-        clients.add(res);
-        res.on('close', () => clients.delete(res));
+        const client = new SseClient(res, () => clients.delete(client));
+        clients.add(client);
+        client.snapshot(`retry: 2000\n\n${frame()}`);
         return;
       }
       if (req.method === 'POST' && path === '/api/sessions') {
         const body = await readJson(req);
         if (body.provider !== 'claude' && body.provider !== 'codex') return json(res, 400, { error: 'Claude 또는 Codex를 선택하세요.' });
-        if (typeof body.cwd !== 'string' || !body.cwd.trim()) return json(res, 400, { error: '기존 작업 폴더의 절대 경로를 입력하세요.' });
+        if (typeof body.cwd !== 'string' || !body.cwd.trim()) return json(res, 400, { error: '작업 폴더의 절대 경로를 입력하세요.' });
         if (typeof body.prompt !== 'string' || !body.prompt.trim() || body.prompt.length > 32_000) return json(res, 400, { error: '메시지는 1자 이상, 32,000자 이하여야 합니다.' });
         const title = body.title === undefined ? undefined : normalizeSessionTitle(body.title);
         if (!backend.createSession) return json(res, 503, { error: '새 세션을 생성할 수 없습니다.' });
@@ -250,6 +245,13 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
         const run = await backend.respondToApproval(decodeURIComponent(approvalMatch[1]), decodeURIComponent(approvalMatch[2]), response);
         return json(res, 200, { run });
       }
+      const steerMatch = path.match(/^\/api\/runs\/([^/]+)\/steer$/);
+      if (req.method === 'POST' && steerMatch) {
+        const body = await readJson(req);
+        if (Object.keys(body).length) return json(res, 400, { error: '끼워넣기 요청의 내용은 변경할 수 없습니다.' });
+        if (!backend.steerRun) return json(res, 503, { error: '이 실행기는 요청 끼워넣기를 지원하지 않습니다.' });
+        return json(res, 200, { run: await backend.steerRun(decodeURIComponent(steerMatch[1])) });
+      }
       const cancelMatch = path.match(/^\/api\/runs\/([^/]+)\/cancel$/);
       if (req.method === 'POST' && cancelMatch) {
         await readJson(req);
@@ -285,7 +287,7 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
     unsubscribe();
     clearInterval(heartbeat);
     if (scheduled) clearTimeout(scheduled);
-    for (const res of clients) res.end();
+    for (const client of clients) client.end();
     clients.clear();
   };
   server.on('close', dispose);

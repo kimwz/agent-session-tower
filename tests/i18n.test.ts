@@ -215,3 +215,20 @@ test('structured approval validation errors localize without altering field iden
     setLanguage('en'); assert.equal(translateMessage(ko), en);
   }
 });
+
+test('steering controls expose only eligible sends and never offer uncertain delivery retries', () => {
+  setLanguage('ko');
+  const run: Run = { id: 'queued', sessionId: 's', prompt: '추가 요청', createdAt: '2026-09-17T00:00:00Z', status: 'queued', output: '' };
+  const render = (value: Run) => renderToStaticMarkup(createElement(RunControl, { run: value, onCancel() {}, onRetry() {}, onSteer() {}, onDismiss() {}, cancelling: false }));
+  assert.doesNotMatch(render(run), /지금 끼워넣기/);
+  assert.match(render({ ...run, canSteer: true }), /지금 끼워넣기/);
+  const steering: NonNullable<Run['steering']> = { targetRunId: 'active', state: 'delivered', requestedAt: run.createdAt };
+  const delivered = render({ ...run, status: 'running', steering });
+  assert.match(delivered, /현재 작업에 전달됨/);
+  assert.doesNotMatch(delivered, /<button/);
+  const uncertain = render({ ...run, status: 'error', steering: { ...steering, state: 'uncertain' } });
+  assert.match(uncertain, /전달 여부 확인 필요/);
+  assert.match(uncertain, /실패 내역 지우기/);
+  assert.doesNotMatch(uncertain, /요청 다시 작성|지금 끼워넣기/);
+  assert.equal(render({ ...run, status: 'completed', steering }), '');
+});

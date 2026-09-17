@@ -4,6 +4,7 @@ import { isAbsolute } from 'node:path';
 import { validateApprovalResponse } from '../shared/approval-interactions.js';
 import type { RunApproval, RunApprovalResponse } from '../shared/types.js';
 import { requestedModel } from './models.js';
+import { SteeringError, type SteeringInput } from './steering.js';
 
 // v2 wire shapes verified with Codex CLI 0.153.4 app-server generate-ts --experimental.
 type RequestId = string | number;
@@ -28,6 +29,8 @@ export interface CodexStdioOptions {
 }
 export interface CodexStdioRun {
   start(): Promise<void>;
+  canSteer?(): boolean;
+  steer?(input: SteeringInput): Promise<void>;
   cancel(): Promise<void>;
   close(): void;
   done: Promise<void>;
@@ -66,6 +69,7 @@ class StdioRun implements CodexStdioRun {
   private startPromise?: Promise<void>;
   private cancelPromise?: Promise<void>;
   private cancelRequested = false;
+  private steeringPending = false;
   private submitted = false;
   private threadId?: string;
   private turnId?: string;
@@ -102,6 +106,26 @@ class StdioRun implements CodexStdioRun {
       this.finish({ status: 'error', error: message(error) });
       throw error;
     });
+  }
+
+  canSteer(): boolean {
+    return !this.result && !this.cancelRequested && !this.steeringPending && !!this.turnId;
+  }
+
+  async steer(input: SteeringInput): Promise<void> {
+    if (!this.canSteer()) throw new SteeringError('There is no active owned Codex turn available for steering.', 'rejected');
+    const turnId = this.turnId!;
+    this.steeringPending = true;
+    try {
+      const result = await this.request('turn/steer', {
+        threadId: this.threadId, expectedTurnId: turnId, clientUserMessageId: input.id,
+        input: [{ type: 'text', text: input.prompt, text_elements: [] }, ...(input.imagePaths || []).map(path => ({ type: 'localImage', path }))],
+      }, false);
+      if (!result || (result as { turnId?: unknown }).turnId !== turnId) throw new SteeringError('Codex did not confirm the expected turn. The message was not resent.', 'uncertain');
+    } catch (error) {
+      if (error instanceof SteeringError) throw error;
+      throw new SteeringError(message(error), (error as { rpcRejected?: boolean })?.rpcRejected ? 'rejected' : 'uncertain');
+    } finally { this.steeringPending = false; }
   }
 
   private async submit(): Promise<void> {
@@ -215,7 +239,7 @@ class StdioRun implements CodexStdioRun {
       const pending = this.pending.get(value.id);
       if (!pending) return;
       this.pending.delete(value.id); clearTimeout(pending.timer);
-      if (value.error) pending.reject(new Error(String(value.error.message || 'Codex request failed.')));
+      if (value.error) pending.reject(Object.assign(new Error(String(value.error.message || 'Codex request failed.')), { rpcRejected: true }));
       else if (Object.hasOwn(value, 'result')) pending.resolve(value.result);
       else pending.reject(new Error('Codex sent a response without a result.'));
       return;

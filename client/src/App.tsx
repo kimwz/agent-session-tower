@@ -10,7 +10,7 @@ import { acknowledgeSession, conversationRevision, parseReadState, pruneReadStat
 import { NewSessionDialog } from './NewSessionDialog';
 import { AutoPromptDialog } from './AutoPromptDialog';
 import { canvasVisibleSessions, projectGroupChoices, visiblePinnedProjectGroups } from './project-groups';
-import { isAutoPromptShortcut, isShowAllShortcut } from './canvas-shortcuts';
+import { isAutoPromptShortcut, isNewSessionShortcut, isShowAllShortcut } from './canvas-shortcuts';
 import { SidebarFilters } from './SidebarFilters';
 import { reconcileApprovalDecisions } from './chat-approvals';
 
@@ -44,7 +44,7 @@ function SessionRow({ session, selected, unread, onSelect }: { session: Session;
 }
 
 export function App() {
-  const { language, setLanguage } = useI18n();
+  const { language } = useI18n();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   const [loadError, setLoadError] = useState('');
@@ -92,6 +92,7 @@ export function App() {
     try { window.localStorage.setItem(sidebarPreferenceKey, String(sidebarCollapsed)); } catch { /* Keep the current preference when storage is unavailable. */ }
   }, [sidebarCollapsed]);
   useEffect(() => { setShowSidebar(false); }, [sidebarIsDrawer]);
+  useEffect(() => { if (!sidebarOpen) setShowHelp(false); }, [sidebarOpen]);
   useEffect(() => {
     try { window.localStorage.setItem(readStateKey, JSON.stringify(readState)); } catch { /* Reading remains usable when browser storage is unavailable. */ }
   }, [readState]);
@@ -117,16 +118,6 @@ export function App() {
     return () => { events.close(); window.clearInterval(timer); window.removeEventListener('popstate', onPop); };
   }, [refresh]);
 
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement;
-      if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) && !target.isContentEditable) { event.preventDefault(); if (sidebarIsDrawer) setShowSidebar(true); else setSidebarCollapsed(false); requestAnimationFrame(() => searchRef.current?.focus()); }
-      if (event.key === 'Escape') { setShowHelp(false); if (sidebarIsDrawer && showSidebar) { setShowSidebar(false); sidebarToggleRef.current?.focus(); } }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [sidebarIsDrawer, showSidebar]);
-
   const selectSession = useCallback((id: string | null) => {
     const url = new URL(window.location.href);
     if (id) url.searchParams.set('session', id); else url.searchParams.delete('session');
@@ -135,6 +126,23 @@ export function App() {
   }, []);
   const onSelect = useCallback((id: string) => selectSession(id), [selectSession]);
   const closeChat = useCallback(() => selectSession(null), [selectSession]);
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (event.key === '/' && !['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) && !target.isContentEditable) { event.preventDefault(); if (sidebarIsDrawer) setShowSidebar(true); else setSidebarCollapsed(false); requestAnimationFrame(() => searchRef.current?.focus()); }
+      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+      if (showNewSession || showAutoPrompt || document.querySelector('dialog[open], [aria-modal="true"]')) return;
+      if (showHelp) { event.preventDefault(); setShowHelp(false); return; }
+      if (sidebarIsDrawer && showSidebar) { event.preventDefault(); setShowSidebar(false); sidebarToggleRef.current?.focus(); return; }
+      if (selectedId) {
+        event.preventDefault();
+        closeChat();
+        requestAnimationFrame(() => canvasRef.current?.focus({ preventScroll: true }));
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [closeChat, selectedId, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar]);
   const onSessionUpdate = useCallback((updated: Session) => {
     setSnapshot(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === updated.id ? { ...session, customTitle: updated.customTitle } : session) } : previous);
   }, []);
@@ -149,17 +157,20 @@ export function App() {
     };
     const handler = (event: KeyboardEvent) => {
       const showAllShortcut = isShowAllShortcut(event);
-      if ((!isAutoPromptShortcut(event) && !showAllShortcut) || showHelp || showNewSession || showAutoPrompt || (sidebarIsDrawer && showSidebar)
+      const newSessionShortcut = isNewSessionShortcut(event);
+      if ((!isAutoPromptShortcut(event) && !showAllShortcut && !newSessionShortcut) || showHelp || showNewSession || showAutoPrompt || (sidebarIsDrawer && showSidebar)
         || !canvasRef.current?.getClientRects().length
         || document.querySelector('dialog[open], [aria-modal="true"]')) return;
-      if (!inCanvasContext(event.target instanceof Element ? event.target : document.activeElement) || !inCanvasContext(document.activeElement)) return;
+      const inShortcutContext = (element: Element | null) => inCanvasContext(element) || (newSessionShortcut && !!element?.closest('.sidebar-toggle'));
+      if (!inShortcutContext(event.target instanceof Element ? event.target : document.activeElement) || !inShortcutContext(document.activeElement)) return;
+      if (newSessionShortcut && (!token || connection !== 'connected')) return;
       event.preventDefault();
       if (showAllShortcut) setShowHidden(value => !value);
-      else { canvasRef.current?.focus({ preventScroll: true }); openAutoPrompt(); }
+      else { canvasRef.current?.focus({ preventScroll: true }); if (newSessionShortcut) openNewSession(); else openAutoPrompt(); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [openAutoPrompt, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar]);
+  }, [openAutoPrompt, openNewSession, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar, token, connection]);
   const closeAutoPrompt = useCallback(() => setShowAutoPrompt(false), []);
   const openAutoPromptSession = useCallback((id: string) => {
     selectSession(id);
@@ -237,16 +248,16 @@ export function App() {
     {hasHiddenMatches ? <button className="secondary-button" onClick={() => setShowHidden(true)}>{t("전체보기 켜기")}</button> : mainSessions.length ? <button className="secondary-button" onClick={clearFilters}><RefreshCw size={13} />{t("전체 기록 보기")}</button> : <button className="secondary-button" onClick={() => openNewSession()} disabled={!token || connection !== 'connected'}><Plus size={13} />{t("새 세션")}</button>}
   </div>;
 
-  return <div className={`app ${selectedId ? 'has-chat' : ''}`} onPointerDownCapture={event => {
+  return <div className={`app ${selectedId ? 'has-chat' : ''} ${sidebarOpen ? '' : 'canvas-only'}`} onPointerDownCapture={event => {
     // Clicking ordinary sidebar/chat text can leave body focused. Preserve the
     // interaction scope so that fallback does not turn a canvas key into a global one.
     // Portalled dialogs bubble through React; keep their opener's scope intact.
     if (!(event.target instanceof Element) || event.target.closest('dialog, [role="dialog"], [aria-modal="true"]')) return;
     canvasPointerScope.current = !!canvasRef.current?.contains(event.target) || event.target === event.currentTarget || event.target.matches('.workspace');
   }}>
-    <header className="app-header"><div className="brand"><button ref={sidebarToggleRef} className="icon-button sidebar-toggle" onClick={() => sidebarIsDrawer ? setShowSidebar(value => !value) : setSidebarCollapsed(value => !value)} aria-label={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} title={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} aria-controls="session-sidebar" aria-expanded={sidebarOpen}>{sidebarOpen ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}</button><span className="brand-mark"><BrandMark /></span><h1>Agent Session Tower</h1><span className="brand-local">local</span></div><div className="header-center"><Monitor size={13} /><span>{snapshot?.hostname || t("이 Mac")}</span><span className="header-divider" /><span className="localhost">{window.location.host}</span></div><div className="header-actions"><label className="language-selector"><span className="sr-only">{t("언어")}</span><select aria-label={t("언어")} value={language} onChange={event => setLanguage(event.target.value as 'ko' | 'en')}><option value="ko" lang="ko">한국어</option><option value="en" lang="en">English</option></select></label><button className="new-session-button" onClick={() => openNewSession()} disabled={!token || connection !== 'connected'}><Plus size={15} /><span>{t("새 세션")}</span></button><span className={`connection-state ${connection}`} role="status">{connection === 'offline' ? <WifiOff size={12} /> : <i />}{connection === 'connected' ? t("실시간 연결") : connection === 'offline' ? t("재연결 중") : t("연결 중")}</span><button className={`icon-button ${showHelp ? 'active' : ''}`} title={t("사용 안내")} aria-label={t("사용 안내")} aria-expanded={showHelp} onClick={() => setShowHelp(!showHelp)}><CircleHelp size={18} /></button></div></header>
+    <header className="app-header"><div className="brand"><button ref={sidebarToggleRef} className="icon-button sidebar-toggle" onClick={() => sidebarIsDrawer ? setShowSidebar(value => !value) : setSidebarCollapsed(value => !value)} aria-label={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} title={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} aria-controls="session-sidebar" aria-expanded={sidebarOpen}>{sidebarOpen ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}</button><span className="brand-mark"><BrandMark /></span><h1>Agent Session Tower</h1><span className="brand-local">local</span></div><div className="header-center"><Monitor size={13} /><span>{snapshot?.hostname || t("이 Mac")}</span><span className="header-divider" /><span className="localhost">{window.location.host}</span></div><div className="header-actions"><span className={`connection-state ${connection}`} role="status">{connection === 'offline' ? <WifiOff size={12} /> : <i />}{connection === 'connected' ? t("실시간 연결") : connection === 'offline' ? t("재연결 중") : t("연결 중")}</span><button className={`icon-button ${showHelp ? 'active' : ''}`} title={t("사용 안내")} aria-label={t("사용 안내")} aria-expanded={showHelp} onClick={() => setShowHelp(!showHelp)}><CircleHelp size={18} /></button></div></header>
     {connection === 'offline' && <div className="connection-banner" role="alert"><WifiOff size={14} /><span>{t("Monitor와의 연결이 끊겼습니다. 저장된 화면을 표시하며 자동으로 다시 연결합니다.")}</span><button onClick={refresh}>{t("다시 확인")}</button></div>}
-    {showHelp && <div className="help-popover"><div className="help-heading"><h2>{t("내 컴퓨터의 에이전트를 한눈에")}</h2><button className="icon-button" onClick={() => setShowHelp(false)} aria-label={t("안내 닫기")}><X size={15} /></button></div><p>{t("Claude Code와 Codex의 로컬 세션 기록을 자동으로 읽습니다. 그래프의 에이전트를 선택하면 실제 대화를 보고 작업을 이어갈 수 있습니다.")}</p><div className="help-statuses"><span><i className="legend-dot working" /><b>{t("작업 중")}</b>{t("현재 실행 중인 작업")}</span><span><i className="legend-dot idle" /><b>{t("대기 중")}</b>{t("입력이나 다음 작업 대기")}</span><span><i className="legend-dot completed" /><b>{t("완료")}</b>{t("작업 종료가 기록된 세션")}</span></div><p>{t("상태는 프로세스와 세션 기록을 함께 확인합니다. 대화 상단의 프로젝트 이름을 누르면 상태 판단 근거를 볼 수 있습니다.")}</p><div className="help-privacy"><ShieldCheck size={16} /><span>{t("로컬에서 실행됩니다. 새 요청은 해당 CLI와 기존 로그인 계정을 사용합니다.")}</span></div><div className="help-shortcuts"><span><kbd>/</kbd> {' '}{t("세션 검색")}</span><span><kbd>Shift P</kbd> Auto Prompt</span><span><kbd>Shift A</kbd> {t("숨긴 폴더 표시 전환")}</span><span><kbd>Esc</kbd> {' '}{t("대화 닫기")}</span><span><kbd>⌘ Enter</kbd> {' '}{t("요청 보내기")}</span></div></div>}
+    {showHelp && <div className="help-popover"><div className="help-heading"><h2>{t("내 컴퓨터의 에이전트를 한눈에")}</h2><button className="icon-button" onClick={() => setShowHelp(false)} aria-label={t("안내 닫기")}><X size={15} /></button></div><p>{t("Claude Code와 Codex의 로컬 세션 기록을 자동으로 읽습니다. 그래프의 에이전트를 선택하면 실제 대화를 보고 작업을 이어갈 수 있습니다.")}</p><div className="help-statuses"><span><i className="legend-dot working" /><b>{t("작업 중")}</b>{t("현재 실행 중인 작업")}</span><span><i className="legend-dot idle" /><b>{t("대기 중")}</b>{t("입력이나 다음 작업 대기")}</span><span><i className="legend-dot completed" /><b>{t("완료")}</b>{t("작업 종료가 기록된 세션")}</span></div><p>{t("상태는 프로세스와 세션 기록을 함께 확인합니다. 대화 상단의 프로젝트 이름을 누르면 상태 판단 근거를 볼 수 있습니다.")}</p><div className="help-privacy"><ShieldCheck size={16} /><span>{t("로컬에서 실행됩니다. 새 요청은 해당 CLI와 기존 로그인 계정을 사용합니다.")}</span></div><div className="help-shortcuts"><span><kbd>/</kbd> {' '}{t("세션 검색")}</span><span><kbd>Shift N</kbd> {t("새 세션")}</span><span><kbd>Shift P</kbd> Auto Prompt</span><span><kbd>Shift A</kbd> {t("숨긴 폴더 표시 전환")}</span><span><kbd>Esc</kbd> {' '}{t("대화 닫기")}</span><span><kbd>⌘ Enter</kbd> {' '}{t("요청 보내기")}</span></div></div>}
     <div className="workspace">
       {sidebarIsDrawer && sidebarOpen && <button className="sidebar-scrim" aria-label={t("세션 목록 닫기")} onClick={() => setShowSidebar(false)} />}
       <aside id="session-sidebar" className={`sidebar ${sidebarOpen ? 'open' : ''}`} hidden={!sidebarOpen} aria-label={t("세션 탐색")}><div className="sidebar-heading"><h2>{t("세션")}</h2><span>{mainSessions.length.toLocaleString()}</span><button className="icon-button refresh-button" onClick={refresh} title={t("세션 새로고침")} aria-label={t("세션 새로고침")} disabled={refreshing}><RefreshCw size={14} className={refreshing ? 'spin' : ''} /></button></div><div className="search-wrap"><Search size={15} /><input ref={searchRef} type="search" placeholder={t("세션, 프로젝트 검색")} aria-label={t("세션 검색")} value={query} onChange={event => setQuery(event.target.value)} /><kbd>/</kbd></div><div className="provider-filters" aria-label={t("에이전트 종류")}><button className={provider === 'all' ? 'selected' : ''} onClick={() => setProvider('all')} aria-pressed={provider === 'all'}>{t("전체")}</button><button className={provider === 'claude' ? 'selected claude' : ''} onClick={() => setProvider('claude')} aria-pressed={provider === 'claude'}><ProviderIcon provider="claude" size={13} />Claude</button><button className={provider === 'codex' ? 'selected codex' : ''} onClick={() => setProvider('codex')} aria-pressed={provider === 'codex'}><ProviderIcon provider="codex" size={13} />Codex</button></div><div className="sidebar-selects"><label><Folder size={13} /><select aria-label={t("프로젝트 필터")} value={project} onChange={event => setProject(event.target.value)}><option value="all">{t("모든 프로젝트")}</option>{projects.map(([path, name]) => <option key={path} value={path}>{name}</option>)}</select><ChevronDown size={11} /></label></div><SidebarFilters status={status} onStatusChange={setStatus} period={period} onPeriodChange={setPeriod} total={mainSessions.length} working={working} completed={completed} /><button className={`closed-sessions-toggle ${showClosed ? 'selected' : ''}`} onClick={() => { setShowClosed(value => !value); setListLimit(80); }} aria-pressed={showClosed}><Archive size={12} /><span>{showClosed ? t("열린 세션 보기") : t("종료한 세션")}</span><b>{closedSessions.length}</b></button><div className="session-list-label"><span>{showClosed ? t("종료한 세션") : hasFilters ? t("검색 결과") : t("최근 활동")}</span><span>{listedSessions.length.toLocaleString()}{t("개")}{hasFilters && <button onClick={() => { setQuery(''); setProvider('all'); setProject('all'); setStatus('all'); }} aria-label={t("검색 및 필터 초기화")}><X size={12} /></button>}</span></div><div className="session-list">
@@ -259,10 +270,11 @@ export function App() {
           event.currentTarget.focus({ preventScroll: true });
         }
       }}>
+        <button className="new-session-button canvas-new-session" onClick={() => openNewSession()} disabled={!token || connection !== 'connected'} aria-label={t("새 세션")} title={`${t("새 세션")} (Shift+N)`} aria-keyshortcuts="Shift+N"><Plus size={15} /><span>{t("새 세션")}</span></button>
         {loadError && <div className="main-error canvas-error" role="alert"><TriangleAlert size={15} /><span>{translateMessage(loadError)}</span><button onClick={refresh}>{t("다시 시도")}</button></div>}
         {!snapshot || (snapshot.scanning && sessions.length === 0 && !visiblePins.length) ? <>
           <div className="graph-loading"><div className="loading-constellation"><span /><span /><span /><Monitor size={25} /></div><h3>{t("이 Mac의 에이전트를 찾고 있습니다")}</h3><p>{t("Claude Code와 Codex의 실제 세션 기록을 연결합니다.")}</p></div>
-        </> : <Graph providers={snapshot.providers} sessions={canvasSessions} allSessions={mainSessions} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} filterKey={`${filterKey}:${showHidden}`} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} onAutoPrompt={openAutoPrompt} showHidden={showHidden} onShowHiddenChange={setShowHidden} settingsSuspended={showHelp || showNewSession || showAutoPrompt || (sidebarIsDrawer && showSidebar) || (mobileViewport && !!selectedId)} emptyState={canvasEmptyState} />}
+        </> : <Graph providers={snapshot.providers} sessions={canvasSessions} allSessions={mainSessions} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} onCanvasClick={closeChat} filterKey={`${filterKey}:${showHidden}`} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} onAutoPrompt={openAutoPrompt} showHidden={showHidden} onShowHiddenChange={setShowHidden} settingsSuspended={showHelp || showNewSession || showAutoPrompt || (sidebarIsDrawer && showSidebar) || (mobileViewport && !!selectedId)} emptyState={canvasEmptyState} />}
       </main>
       {selectedId && <Suspense fallback={<aside className="chat-panel"><div className="chat-loading"><LoaderCircle className="spin" size={20} /><span>{t("대화를 여는 중")}</span></div></aside>}><ChatPanel key={selectedId} sessionId={selectedId} session={selectedSession} allSessions={sessions} provider={snapshot?.providers.find(item => item.provider === (selectedSession?.provider || (selectedId.startsWith('claude') ? 'claude' : 'codex')))} runs={currentRuns} token={token} connected={connection === 'connected'} onClose={closeChat} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate} onSessionClose={changeSessionClosed} sessionClosed={!!selectedMainSession?.closed} changingClosed={changingClosed} readRevision={showNewSession || showAutoPrompt || (sidebarIsDrawer && sidebarOpen) ? '' : revisions.get(selectedId)} onRead={onRead} /></Suspense>}
     </div>

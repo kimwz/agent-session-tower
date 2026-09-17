@@ -10,3 +10,8 @@ export function isShowAllShortcut(event: ShortcutKey): boolean {
   return event.code === 'KeyA' && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
     && !event.repeat && !event.defaultPrevented;
 }
+
+export function isNewSessionShortcut(event: ShortcutKey): boolean {
+  return event.code === 'KeyN' && event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
+    && !event.repeat && !event.defaultPrevented;
+}

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { ClaudeControl } from '../server/claude-control.js';
 import type { RunApproval } from '../shared/types.js';
 
-function fixture(timeout = 5000) {
+function fixture(timeout = 5000, steerTimeout = 5000) {
   const written: Record<string, any>[] = [];
   const approvals: RunApproval[] = [];
   const cancelled: string[] = [];
@@ -11,7 +11,7 @@ function fixture(timeout = 5000) {
   let failWrites = false;
   const control = new ClaudeControl({
     write: async message => { if (failWrites) throw new Error('private transport error'); written.push(message); },
-    onApproval: approval => approvals.push(approval), onCancelled: id => cancelled.push(id), onError: error => errors.push(error), initializeTimeoutMs: timeout,
+    onApproval: approval => approvals.push(approval), onCancelled: id => cancelled.push(id), onError: error => errors.push(error), initializeTimeoutMs: timeout, steerTimeoutMs: steerTimeout,
   });
   const input = { type: 'user', session_id: 'native-session', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'text', text: 'literal $(not a command)' }] } };
   control.start(input);
@@ -98,4 +98,74 @@ test('an unresponsive initialization times out before the first user message', a
   const f = fixture(10); t.after(() => f.control.close());
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(f.errors.length, 1); assert.equal(f.written.length, 1);
+});
+
+test('steering sends once at next priority and waits for the matching conversation replay', async t => {
+  const f = fixture(); t.after(() => f.control.close());
+  const input = { ...f.input, uuid: 'steer-1', priority: 'now' };
+  assert.equal(f.control.canSteer(), false);
+  await assert.rejects(f.control.steer(input), { disposition: 'rejected' });
+  f.initialize(); assert.equal(f.control.canSteer(), true);
+  const sent = f.control.steer(input);
+  assert.equal(f.control.hasPendingSteers(), true);
+  assert.deepEqual(f.written.at(-1), { ...input, priority: 'next' });
+  await assert.rejects(f.control.steer(input), { disposition: 'uncertain' });
+  const replay = { ...input, isReplay: true };
+  for (const mismatch of [{ uuid: 'other' }, { session_id: 'other' }, { isReplay: false }, { parent_tool_use_id: 'subagent' }]) {
+    assert.equal(f.control.handle({ ...replay, ...mismatch }), false);
+    assert.equal(f.control.hasPendingSteers(), true);
+  }
+  assert.equal(f.control.handle(replay), true);
+  assert.equal(f.control.hasPendingSteers(), false);
+  await sent;
+  await assert.rejects(f.control.steer(input), { disposition: 'uncertain' });
+  assert.equal(f.written.length, 3); assert.deepEqual(f.errors, []);
+});
+
+test('steering rejects a different session without writing', async t => {
+  const f = fixture(); t.after(() => f.control.close()); f.initialize();
+  await assert.rejects(f.control.steer({ ...f.input, uuid: 'steer-1', session_id: 'other' }), { disposition: 'rejected' });
+  assert.equal(f.written.length, 2); assert.equal(f.control.hasPendingSteers(), false);
+});
+
+test('a steering write failure is uncertain and does not kill the running permission channel', async t => {
+  const f = fixture(); t.after(() => f.control.close()); f.initialize(); f.failWrites();
+  await assert.rejects(f.control.steer({ ...f.input, uuid: 'steer-1' }), { disposition: 'uncertain' });
+  assert.equal(f.control.hasPendingSteers(), false);
+  assert.equal(f.control.canSteer(), true); assert.deepEqual(f.errors, []);
+});
+
+test('steering timeout remains uncertain without cancelling the current turn', async t => {
+  const f = fixture(5000, 10); t.after(() => f.control.close()); f.initialize();
+  const rejection = assert.rejects(f.control.steer({ ...f.input, uuid: 'steer-1' }), { disposition: 'uncertain' });
+  await new Promise(resolve => setTimeout(resolve, 30)); await rejection;
+  assert.equal(f.control.hasPendingSteers(), false);
+  assert.equal(f.control.canSteer(), true); assert.deepEqual(f.errors, []);
+  f.ask(); assert.equal(f.approvals.length, 1);
+});
+
+test('closing the process rejects every pending steering request as uncertain', async () => {
+  const f = fixture(); f.initialize();
+  const first = assert.rejects(f.control.steer({ ...f.input, uuid: 'steer-1' }), { disposition: 'uncertain' });
+  const second = assert.rejects(f.control.steer({ ...f.input, uuid: 'steer-2' }), { disposition: 'uncertain' });
+  f.control.close(); await Promise.all([first, second]);
+  assert.equal(f.control.canSteer(), false); assert.equal(f.control.hasPendingSteers(), false);
+  assert.deepEqual(f.errors, []);
+});
+
+test('steering registers its replay handler before transport write returns', async t => {
+  let control: ClaudeControl;
+  const written: Record<string, any>[] = [];
+  control = new ClaudeControl({
+    write: async message => {
+      written.push(message);
+      if (message.uuid) control.handle({ ...message, isReplay: true });
+    }, onApproval: () => {}, onCancelled: () => {}, onError: error => { throw error; },
+  });
+  t.after(() => control.close());
+  const input = { type: 'user', session_id: 'native-session', parent_tool_use_id: null, message: { role: 'user', content: 'hello' } };
+  control.start(input);
+  control.handle({ type: 'control_response', response: { subtype: 'success', request_id: written[0].request_id } });
+  await control.steer({ ...input, uuid: 'steer-1' });
+  assert.equal(control.hasPendingSteers(), false);
 });

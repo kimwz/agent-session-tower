@@ -50,7 +50,7 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (inFlight.current || unavailable || !prompt.trim() || !cwd.trim()) return;
-    if (!cwd.trim().startsWith('/')) {
+    if (!/^(\/|~(\/|$))/.test(cwd.trim())) {
       setFolderError(t("/로 시작하는 전체 폴더 경로를 입력해 주세요."));
       folderInput.current?.focus();
       return;
@@ -138,7 +138,7 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
           <input ref={folderInput} id={`${id}-folder`} list={`${id}-projects`} value={cwd} placeholder={t("/Users/…/프로젝트")} required disabled={submitting} autoComplete="off" spellCheck={false} aria-describedby={`${id}-folder-help${folderError ? ` ${id}-folder-error` : ''}`} aria-invalid={!!folderError} onChange={event => { setCwd(event.target.value); setFolderError(''); }} />
         </div>
         <datalist id={`${id}-projects`}>{uniqueProjects.map(([path, label]) => <option key={path} value={path}>{label}</option>)}</datalist>
-        <p id={`${id}-folder-help`} className="new-session-help">{t("이 Mac의 기존 폴더 경로")}</p>
+        <p id={`${id}-folder-help`} className="new-session-help">{t("이 Mac의 폴더 경로. 없는 폴더는 새로 만듭니다.")}</p>
         {folderError && <p id={`${id}-folder-error`} className="new-session-error" role="alert">{translateMessage(folderError)}</p>}
       </div>
 

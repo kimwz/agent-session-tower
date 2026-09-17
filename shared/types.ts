@@ -8,6 +8,7 @@ export interface Session {
   customTitle?: string;
   closed?: boolean;
   creationPending?: boolean;
+  /** Stable starting project directory, not the agent shell's latest directory. */
   cwd: string;
   project: string;
   parentId?: string;
@@ -22,6 +23,8 @@ export interface Session {
   lastCompletedAt?: string;
   lastMessage: string;
   messageCount: number;
+  /** Snapshot change marker calculated before provider output is omitted. */
+  readRevision?: string;
   isSubagent: boolean;
   resumable: boolean;
   activeProcess?: boolean;
@@ -91,6 +94,8 @@ export interface Run {
   autoPromptId?: string;
   contextUsage?: SessionContextUsage & { model: string; updatedAt: string };
   approvals?: RunApproval[];
+  canSteer?: boolean;
+  steering?: { targetRunId: string; state: 'sending' | 'delivered' | 'uncertain'; requestedAt: string; deliveredAt?: string };
 }
 export interface RunApproval {
   id: string;

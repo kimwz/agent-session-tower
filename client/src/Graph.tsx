@@ -1,5 +1,5 @@
 import { translate as t, useI18n } from './i18n';
-import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
 import { applyNodeChanges, Background, BackgroundVariant, Handle, Position, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type FitViewOptions, type Node, type NodeChange, type NodeProps } from '@xyflow/react';
 import { ArrowUpRight, Check, GitBranch, Maximize, Minus, Monitor, Plus, Radio, Scan, Sparkles } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../shared/types';
@@ -46,23 +46,56 @@ const HostNode = memo(function HostNode({ data }: NodeProps<Node<HostData>>) {
 });
 const nodeTypes = { agent: AgentNode, projectGroup: ProjectGroupNode, host: HostNode };
 
-type GraphProps = { providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
+type GraphProps = { providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
 
 function readPreferences(): GraphPreferences {
   try { return parseGraphPreferences(window.localStorage.getItem(GRAPH_PREFERENCES_KEY)); }
   catch { return defaultGraphPreferences(); }
 }
 
-function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
+function viewportTransitionDuration() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 280;
+}
+
+function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
   const { language } = useI18n();
-  const { fitView, zoomIn, zoomOut } = useReactFlow();
+  const { fitView, zoomIn, zoomOut, getViewport, setViewport } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
+  const doubleClickZoomed = useRef(false);
   const fitVisibleGraph = useCallback((options: FitViewOptions) => {
     const bounds = canvas.current?.getBoundingClientRect();
     if (!bounds?.width || !bounds.height) return;
-    // Mobile chat can hide the pane between frames; D3 zoom animation cannot use a zero-size extent.
-    void fitView({ ...options, duration: 0 });
+    if (!options.nodes) doubleClickZoomed.current = false;
+    void fitView({ ...options, duration: options.duration ?? 0 });
   }, [fitView]);
+  useEffect(() => {
+    const element = canvas.current;
+    if (!element) return;
+    // Cancel a pending D3 transition before a hidden mobile pane gives it a zero-size extent.
+    const observer = new ResizeObserver(() => {
+      const bounds = element.getBoundingClientRect();
+      if (!bounds.width || !bounds.height) void setViewport(getViewport(), { duration: 0 });
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [getViewport, setViewport]);
+  const onCanvasDoubleClick = useCallback((event: MouseEvent<HTMLDivElement>) => {
+    if (!(event.target instanceof Element) || !event.target.matches('.react-flow__pane')) return;
+    event.preventDefault();
+    if (doubleClickZoomed.current) {
+      fitVisibleGraph({ padding: 0.13, maxZoom: 0.95, duration: viewportTransitionDuration() });
+      return;
+    }
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (!bounds.width || !bounds.height) return;
+    const viewport = getViewport();
+    const nextZoom = Math.min(viewport.zoom * 2, 1.75);
+    const ratio = nextZoom / viewport.zoom;
+    const x = event.clientX - bounds.left;
+    const y = event.clientY - bounds.top;
+    doubleClickZoomed.current = true;
+    void setViewport({ x: x - (x - viewport.x) * ratio, y: y - (y - viewport.y) * ratio, zoom: nextZoom }, { duration: viewportTransitionDuration() });
+  }, [fitVisibleGraph, getViewport, setViewport]);
   const [motion, setMotion] = useState(() => !window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const [zoom, setZoom] = useState(100);
   const [graphLimit, setGraphLimit] = useState(8);
@@ -180,7 +213,7 @@ function Canvas({ providers, sessions, allSessions = sessions, sessionsReady = t
 
   const working = sessions.filter(session => session.status === 'working').length;
   return <div ref={canvas} className={`graph-canvas ${manual ? 'manual-layout' : 'auto-layout'} ${motion ? '' : 'motion-off'}`}>
-    <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.1, minZoom: 0.15, maxZoom: 0.95, duration: 0 }} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(_, viewport) => setZoom(Math.round(viewport.zoom * 100))} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
+    <ReactFlow onPaneClick={onCanvasClick} onDoubleClick={onCanvasDoubleClick} zoomOnDoubleClick={false} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.1, minZoom: 0.15, maxZoom: 0.95, duration: 0 }} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(_, viewport) => setZoom(Math.round(viewport.zoom * 100))} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
       <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#283343" />
     </ReactFlow>
     {emptyState}

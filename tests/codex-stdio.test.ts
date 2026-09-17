@@ -80,10 +80,17 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     reply(request, { turn: { id: turnId, status: 'inProgress', startedAt: 1789516800, items: [] } });
     if (mode === 'early-approval' || mode === 'early-complete') return;
     if (mode === 'thread-closed') { notice('thread/closed', {}); return; }
-    if (mode === 'hold' || mode === 'cancel-no-ack' || mode === 'ignore-stop') return;
+    if (mode.startsWith('steer-') || mode === 'hold' || mode === 'cancel-no-ack' || mode === 'ignore-stop') return;
     if (mode === 'orphan') { spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', process.stdout, process.stderr] }); process.exit(0); return; }
     if (mode === 'premature-exit') { process.exit(0); return; }
     if (mode === 'complete') finish(); else approval();
+    return;
+  }
+  if (request.method === 'turn/steer') {
+    if (mode === 'steer-timeout') return;
+    if (mode === 'steer-lost') { process.exit(3); return; }
+    if (mode === 'steer-rejected') { send({ id: request.id, error: { message: 'active turn mismatch' } }); return; }
+    reply(request, { turnId: mode === 'steer-mismatch' ? 'other-turn' : turnId });
     return;
   }
   if (request.method === 'turn/interrupt') {
@@ -310,3 +317,32 @@ test('owned processes that ignore termination or leave stdout descendants are re
     if (mode === 'ignore-stop') assert.equal(f.child().signalCode, 'SIGKILL');
   });
 });
+
+for (const mode of ['steer-ok', 'steer-rejected', 'steer-mismatch', 'steer-lost', 'steer-timeout']) {
+  test(`stdio steering ${mode} preserves identity and delivery certainty`, async t => {
+    const f = await fixture(t, mode);
+    assert.equal(f.run.canSteer!(), false);
+    await assert.rejects(f.run.steer!({ id: 'queued', prompt: 'later' }), { disposition: 'rejected' });
+    await f.run.start();
+    assert.equal(f.run.canSteer!(), true);
+    const result = f.run.steer!({ id: 'queued', prompt: 'New instruction', imagePaths: ['/tmp/image path.png'] });
+    assert.equal(f.run.canSteer!(), false);
+    await assert.rejects(f.run.steer!({ id: 'duplicate', prompt: 'later' }), { disposition: 'rejected' });
+    if (mode === 'steer-ok') await result;
+    else await assert.rejects(result, { disposition: mode === 'steer-rejected' ? 'rejected' : 'uncertain' });
+    assert.deepEqual(f.sent.find(frame => frame.method === 'turn/steer')?.params, {
+      threadId: ID, expectedTurnId: TURN, clientUserMessageId: 'queued',
+      input: [{ type: 'text', text: 'New instruction', text_elements: [] }, { type: 'localImage', path: '/tmp/image path.png' }],
+    });
+    assert.equal(f.sent.filter(frame => frame.method === 'turn/start').length, 1);
+    assert.equal(f.sent.some(frame => frame.method === 'turn/interrupt'), false);
+    if (mode !== 'steer-lost') {
+      assert.equal(f.finished.length, 0);
+      assert.equal(f.run.canSteer!(), true);
+      await f.run.cancel(); // The original live turn can still be controlled after rejection.
+    } else await f.run.done;
+    assert.equal(f.run.canSteer!(), false);
+    await assert.rejects(f.run.steer!({ id: 'late', prompt: 'later' }), { disposition: 'rejected' });
+    assert.equal(f.sent.filter(frame => frame.method === 'turn/steer').length, 1);
+  });
+}

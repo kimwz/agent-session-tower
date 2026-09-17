@@ -2,6 +2,7 @@ import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { requestedModel } from './models.js';
+import { SteeringError, type SteeringInput } from './steering.js';
 
 type Result = { status: 'completed' | 'error' | 'cancelled'; error?: string };
 type Item = { id: string; type: string; clientId?: string | null; text?: string; command?: string; aggregatedOutput?: string; changes?: { path: string }[] };
@@ -22,6 +23,8 @@ export interface CodexBridgeOptions {
 }
 export interface CodexBridgeRun {
   start(): Promise<void>;
+  canSteer?(): boolean;
+  steer?(input: SteeringInput): Promise<void>;
   cancel(): Promise<void>;
   close(): void;
   done: Promise<void>;
@@ -51,7 +54,7 @@ class Rpc {
       const request = this.pending.get(value.id);
       if (!request) return;
       this.pending.delete(value.id); clearTimeout(request.timer);
-      if (value.error) request.reject(new Error(String(value.error.message || 'Codex request failed.')));
+      if (value.error) request.reject(Object.assign(new Error(String(value.error.message || 'Codex request failed.')), { rpcRejected: true }));
       else if ('result' in value) request.resolve(value.result);
       else request.reject(new Error('Codex 데스크톱 응답에 결과가 없습니다.'));
     });
@@ -59,11 +62,15 @@ class Rpc {
     socket.on('close', () => this.fail(connectionLost()));
   }
 
-  request<T>(method: string, params: object): Promise<T> {
+  request<T>(method: string, params: object, fatal = true): Promise<T> {
     if (this.stopped || this.socket.readyState !== WebSocket.OPEN) return Promise.reject(connectionLost());
     const id = ++this.nextId;
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => this.fail(new Error(`Codex ${method} 응답을 확인하지 못했습니다. 요청을 다시 보내지 않았습니다. 원래 앱에서 확인하세요.`)), 15_000);
+      const timer = setTimeout(() => {
+        const error = new Error(`Codex ${method} 응답을 확인하지 못했습니다. 요청을 다시 보내지 않았습니다. 원래 앱에서 확인하세요.`);
+        if (fatal) this.fail(error);
+        else { this.pending.delete(id); reject(error); }
+      }, 15_000);
       timer.unref();
       this.pending.set(id, { resolve, reject, timer });
       this.socket.send(JSON.stringify({ id, method, params }), error => { if (error) this.fail(connectionLost()); });
@@ -138,6 +145,7 @@ class BridgeRun implements CodexBridgeRun {
   private startPromise?: Promise<void>;
   private cancelPromise?: Promise<void>;
   private cancelRequested = false;
+  private steeringPending = false;
   private submitted = false;
   private queueId?: string;
   private turnId?: string;
@@ -163,6 +171,26 @@ class BridgeRun implements CodexBridgeRun {
       this.finish({ status: 'error', error: message(error) });
       throw error;
     });
+  }
+
+  canSteer(): boolean {
+    return !this.settled && !this.cancelRequested && !this.steeringPending && !!this.turnId;
+  }
+
+  async steer(input: SteeringInput): Promise<void> {
+    if (!this.canSteer()) throw new SteeringError('There is no active owned Codex turn available for steering.', 'rejected');
+    const turnId = this.turnId!;
+    this.steeringPending = true;
+    try {
+      const result = await this.rpc.request('turn/steer', {
+        threadId: this.options.threadId, expectedTurnId: turnId, clientUserMessageId: input.id,
+        input: [{ type: 'text', text: input.prompt, text_elements: [] }, ...(input.imagePaths || []).map(path => ({ type: 'localImage', path }))],
+      }, false);
+      if (!result || (result as { turnId?: unknown }).turnId !== turnId) throw new SteeringError('Codex did not confirm the expected turn. The message was not resent.', 'uncertain');
+    } catch (error) {
+      if (error instanceof SteeringError) throw error;
+      throw new SteeringError(message(error), (error as { rpcRejected?: boolean })?.rpcRejected ? 'rejected' : 'uncertain');
+    } finally { this.steeringPending = false; }
   }
 
   private async submit(): Promise<void> {

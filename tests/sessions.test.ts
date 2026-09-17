@@ -51,6 +51,80 @@ test('Codex starts, completes and resumes a real turn using append-only updates'
   assert.equal(service.get(`codex:${rootId}`)?.messageCount, 4);
 });
 
+for (const provider of ['claude', 'codex'] as const) {
+  test(`${provider} keeps its originating project across directory changes and a fresh scan`, async t => {
+    const f = await fixture(t);
+    const path = provider === 'claude' ? f.claude : f.codex;
+    const cwd = '/work/twoflex-mono';
+    const context = (folder: string) => provider === 'claude'
+      ? { type: 'user', sessionId: rootId, cwd: folder, timestamp: now(), message: { role: 'user', content: 'Continue' } }
+      : row('turn_context', { cwd: folder, model: 'codex-model' });
+    await writeFile(path, lines(provider === 'claude' ? [context(cwd)] : [row('session_meta', { id: rootId, cwd, timestamp: now() })]));
+    await f.service.refresh();
+    for (const folder of [`${cwd}/twoflex/src/twoflex/src`, cwd, `${cwd}/another`]) {
+      await appendFile(path, lines([context(folder)]));
+      await f.service.refresh();
+      assert.equal(f.service.get(`${provider}:${rootId}`)?.cwd, cwd);
+      assert.equal(f.service.get(`${provider}:${rootId}`)?.project, 'twoflex-mono');
+    }
+    const fresh = new SessionService({ codexHome: f.codexHome, claudeHome: f.claudeHome });
+    t.after(() => fresh.stop());
+    await fresh.refresh();
+    assert.equal(fresh.get(`${provider}:${rootId}`)?.cwd, cwd);
+    assert.equal(fresh.get(`${provider}:${rootId}`)?.project, 'twoflex-mono');
+  });
+
+  test(`${provider} ignores malformed initial folders and preserves the first valid path literally`, async t => {
+    const f = await fixture(t);
+    const path = provider === 'claude' ? f.claude : f.codex;
+    const context = (cwd: unknown) => provider === 'claude'
+      ? { type: 'user', sessionId: rootId, cwd, timestamp: now(), message: { role: 'user', content: 'Continue' } }
+      : row('turn_context', { cwd });
+    const metadata = provider === 'codex' ? [row('session_meta', { id: rootId, cwd: 'relative/invalid', timestamp: now() })] : [];
+    await writeFile(path, lines([...metadata, ...[undefined, null, '', '  ', './relative', '/invalid\0path', 42].map(context)]));
+    await f.service.refresh();
+    assert.equal(f.service.get(`${provider}:${rootId}`)?.cwd, '');
+    const valid = '/work/project with spaces ';
+    await appendFile(path, lines([context(valid), context('/another/project'), context('')]));
+    await f.service.refresh();
+    assert.equal(f.service.get(`${provider}:${rootId}`)?.cwd, valid);
+    assert.equal(f.service.get(`${provider}:${rootId}`)?.project, 'project with spaces ');
+    const fresh = new SessionService({ codexHome: f.codexHome, claudeHome: f.claudeHome });
+    t.after(() => fresh.stop()); await fresh.refresh();
+    assert.equal(fresh.get(`${provider}:${rootId}`)?.cwd, valid);
+  });
+}
+
+test('Claude child keeps its own first project folder when later tool records change cwd', async t => {
+  const { service, claudeHome } = await fixture(t);
+  const folder = join(claudeHome, 'projects', 'test', rootId, 'subagents');
+  await mkdir(folder, { recursive: true });
+  const path = join(folder, 'agent-child-project.jsonl');
+  const message = (cwd: string) => ({ type: 'user', sessionId: rootId, cwd, timestamp: now(), message: { role: 'user', content: 'Child task' } });
+  await writeFile(path, lines([message('/work/child-project')]));
+  await service.refresh();
+  await appendFile(path, lines([message('/work/child-project/deep/src')]));
+  await service.refresh();
+  assert.equal(service.get('claude:child-project')?.cwd, '/work/child-project');
+  assert.equal(service.get('claude:child-project')?.parentId, `claude:${rootId}`);
+});
+
+test('Codex malformed child metadata falls back only to its own history and ignores copied metadata', async t => {
+  const { service, codex } = await fixture(t);
+  const created = now();
+  await writeFile(codex, lines([
+    row('session_meta', { id: childId, timestamp: created, cwd: '/invalid\0path', thread_source: 'subagent', parent_thread_id: rootId, subagent_history_start_ordinal: 3 }, created),
+    row('session_meta', { id: rootId, cwd: '/parent', timestamp: old }, old),
+    row('turn_context', { cwd: '/parent/copied' }, created),
+    row('turn_context', { cwd: '/work/child' }, created),
+    row('session_meta', { id: childId, cwd: '/later/duplicate', timestamp: created }, created),
+    row('turn_context', { cwd: '/work/child/nested' }, created),
+  ]));
+  await service.refresh();
+  assert.equal(service.get(`codex:${childId}`)?.cwd, '/work/child');
+  assert.equal(service.get(`codex:${childId}`)?.project, 'child');
+});
+
 test('freshly copied old unfinished transcripts never appear working', async (t) => {
   const { service, codex } = await fixture(t);
   await writeFile(codex, lines([row('session_meta', { id: rootId, cwd: '/old', timestamp: old }, old), row('event_msg', { type: 'task_started' }, old), codexMessage('user', 'An old abandoned task', old)]));

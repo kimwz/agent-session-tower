@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { RunApproval } from '../shared/types.js';
+import { SteeringError } from './steering.js';
 
 type Message = Record<string, unknown>;
 type Pending = { requestId: string; approval: RunApproval; serializedInput: string; toolUseId?: string };
@@ -13,6 +14,7 @@ interface ClaudeControlOptions {
   onCancelled(id: string): void;
   onError(error: Error): void;
   initializeTimeoutMs?: number;
+  steerTimeoutMs?: number;
 }
 
 /** Native stream-json control protocol, with one explicit decision per request. */
@@ -24,17 +26,27 @@ export class ClaudeControl {
   private closed = false;
   private initialized = false;
   private timer?: ReturnType<typeof setTimeout>;
+  private sessionId?: string;
+  private readonly steers = new Map<string, { sessionId: string; resolve(): void; reject(error: SteeringError): void; timer: ReturnType<typeof setTimeout> }>();
+  private readonly submittedSteers = new Set<string>();
 
   constructor(private readonly options: ClaudeControlOptions) {}
 
   start(input: Message): void {
     this.input = input;
+    this.sessionId = typeof input.session_id === 'string' ? input.session_id : undefined;
     this.timer = setTimeout(() => this.fail(new Error('Claude Code did not initialize its permission connection. No instruction was submitted.')), this.options.initializeTimeoutMs ?? 15_000);
     this.timer.unref();
     void this.send({ type: 'control_request', request_id: this.initializeId, request: { subtype: 'initialize' } });
   }
 
   handle(event: Message): boolean {
+    if (event.type === 'user' && event.isReplay === true && typeof event.uuid === 'string') {
+      const pending = this.steers.get(event.uuid);
+      if (pending && event.session_id === pending.sessionId && event.parent_tool_use_id == null) {
+        clearTimeout(pending.timer); this.steers.delete(event.uuid); pending.resolve(); return true;
+      }
+    }
     if (event.type !== 'control_response' && event.type !== 'control_request' && event.type !== 'control_cancel_request') return false;
     if (this.closed) return true;
     if (event.type === 'control_response') {
@@ -107,9 +119,44 @@ export class ClaudeControl {
     }
   }
 
+  canSteer(): boolean { return this.initialized && !this.closed; }
+
+  hasPendingSteers(): boolean { return this.steers.size > 0; }
+
+  steer(input: Message): Promise<void> {
+    const id = input.uuid;
+    if (!this.canSteer() || !validId(id) || !validId(this.sessionId) || input.session_id !== this.sessionId
+      || input.type !== 'user' || input.parent_tool_use_id != null || !record(input.message) || input.message.role !== 'user') {
+      return Promise.reject(new SteeringError('Claude Code is not ready to receive this instruction in the running conversation.', 'rejected'));
+    }
+    if (this.submittedSteers.has(id)) return Promise.reject(new SteeringError('This instruction was already submitted and will not be sent again.', 'uncertain'));
+    this.submittedSteers.add(id);
+    // Register before write: a replay can arrive before the write callback.
+    return new Promise<void>((resolve, reject) => {
+      const fail = (message: string) => {
+        const pending = this.steers.get(id);
+        if (!pending) return;
+        clearTimeout(pending.timer); this.steers.delete(id);
+        reject(new SteeringError(message, 'uncertain'));
+      };
+      const timer = setTimeout(() => fail('Claude Code has not acknowledged this instruction. Delivery is uncertain; it will not be sent again automatically.'), this.options.steerTimeoutMs ?? 15_000);
+      timer.unref();
+      this.steers.set(id, { sessionId: this.sessionId!, resolve, reject, timer });
+      // "now" interrupts the native turn; "next" folds into its next processing checkpoint.
+      try {
+        void this.options.write({ ...input, priority: 'next' }).catch(() => fail('Claude Code disconnected while the instruction was being sent. Delivery is uncertain.'));
+      } catch { fail('Claude Code disconnected while the instruction was being sent. Delivery is uncertain.'); }
+    });
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true; this.input = undefined;
+    for (const pending of this.steers.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new SteeringError('Claude Code closed before acknowledging the instruction. Delivery is uncertain.', 'uncertain'));
+    }
+    this.steers.clear();
     if (this.timer) clearTimeout(this.timer);
     for (const pending of this.pending.values()) this.options.onCancelled(pending.approval.id);
     this.pending.clear(); this.settled.clear();

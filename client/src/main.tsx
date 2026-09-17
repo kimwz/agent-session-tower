@@ -6,5 +6,6 @@ import './styles.css';
 import './session-title.css';
 import './session-family.css';
 import './workspace-controls.css';
+import './chat-layout.css';
 
 createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);

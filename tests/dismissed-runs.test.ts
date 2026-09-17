@@ -8,6 +8,7 @@ import { createMonitorServer } from '../server/http.js';
 import { projectSessionStates } from '../server/snapshot.js';
 import { RunManager } from '../server/runner.js';
 import type { Run, Session, Snapshot } from '../shared/types.js';
+import { computeConversationRevision } from '../shared/conversation-revision.js';
 
 const session: Session = {
   id: 'codex:example', nativeId: 'example', provider: 'codex', title: 'Native conversation', cwd: '/tmp/project', project: 'project',
@@ -146,19 +147,20 @@ test('dismiss HTTP authenticates, validates, commits before SSE, and preserves l
       }
     };
     try {
-      assert.deepEqual((await readSnapshot()).runs, raw);
+      assert.deepEqual((await readSnapshot()).runs, raw.map(run => ({ ...run, output: '' })));
       const result = await send();
       assert.equal(result.status, 200);
       assert.deepEqual(await result.json(), { ok: true });
       assert.deepEqual(JSON.parse(await readFile(join(stateDir, 'dismissed-runs.json'), 'utf8')), [failed.id]);
       const data = await readSnapshot();
-      assert.deepEqual(data.runs, raw.slice(1));
+      assert.deepEqual(data.runs, raw.slice(1).map(run => ({ ...run, output: '' })));
       assert.deepEqual(snapshot().sessions, before);
       const { filePath: _, ...publicSession } = before[0]!;
-      assert.deepEqual(data.sessions, [publicSession]);
-      assert.deepEqual((await (await fetch(`${base}/api/snapshot`, { headers: { Authorization: authorization } })).json()).runs, raw.slice(1));
+      assert.deepEqual(data.sessions, [{ ...publicSession, readRevision: computeConversationRevision(before[0]!, raw.slice(1)) }]);
+      assert.deepEqual((await (await fetch(`${base}/api/snapshot`, { headers: { Authorization: authorization } })).json()).runs, raw.slice(1).map(run => ({ ...run, output: '' })));
       assert.equal((await send()).status, 200, 'duplicate dismissal is idempotent');
       assert.equal(raw[0]!.error, 'Fixture failure');
+      assert.equal(raw[0]!.output, 'Partial output', 'public projection does not clear stored execution output');
       const restarted = new DismissedRunStore(stateDir);
       await restarted.start();
       assert.deepEqual(restarted.visible(raw), raw.slice(1));

@@ -66,12 +66,12 @@ test('runner publishes a live approval, keeps stdin open, and sends only an expl
   assert.equal(frames.length, 1); assert.equal(frames[0].response.response.updatedInput.command, 'gh --version');
 });
 
-test('runner surfaces an explicit denial and retires its permission request', async t => {
+test('a denied tool call does not fail a turn that Claude still completed', async t => {
   const f = await fixture(t);
   await until(() => f.manager.list().find(run => run.approvals?.length));
   await f.manager.respondToApproval(f.accepted.id, 'permission-1', 'deny');
-  const finished = await until(() => f.manager.list().find(run => run.id === f.accepted.id && run.status === 'error'));
-  assert.match(finished.error || '', /Permission was denied for: Bash/); assert.equal(finished.approvals, undefined);
+  const finished = await until(() => f.manager.list().find(run => run.id === f.accepted.id && run.status === 'completed'));
+  assert.equal(finished.error, undefined); assert.match(finished.output, /Declined/); assert.equal(finished.approvals, undefined);
 });
 
 test('cancel and restart cannot revive or answer a pending permission request', async t => {

@@ -1,8 +1,8 @@
 import { translate as t, translateMessage, useI18n } from './i18n';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ComponentPropsWithoutRef, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ComponentPropsWithoutRef, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, ChevronLeft, Copy, Folder, GitBranch, LoaderCircle, MessageSquare, Paperclip, RefreshCw, Send, ShieldQuestion, Square, Terminal, Trash2, TriangleAlert, X } from 'lucide-react';
+import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, Copy, Folder, GitBranch, LoaderCircle, MessageSquare, Paperclip, RefreshCw, Send, ShieldQuestion, Square, Terminal, Trash2, TriangleAlert, X } from 'lucide-react';
 import type { ChatMessage, ProviderHealth, Run, Session, SessionDetail } from '../../shared/types';
 import { ProviderIcon } from './Icons';
 import { SessionTitleEditor } from './SessionTitleEditor';
@@ -17,6 +17,7 @@ import { draftFromRun, finishComposerSend, getComposerState, markComposerSending
 import { matchChatRuns, type ChatRunMatch } from './chat-runs';
 import { ModelPicker } from './ModelPicker';
 import { RunApprovalCard } from './RunApprovalCard';
+import { useChatAppearance } from './chat-appearance';
 
 const emptyMessages: readonly ChatMessage[] = [];
 
@@ -61,7 +62,7 @@ export const ChatTranscript = memo(function ChatTranscript({ messages, runMatche
   return <>{entries.map(entry => entry.kind === 'tools' ? <ToolMessageGroup key={`tools:${entry.id}`} group={entry} /> : <Message key={`message:${entry.message.id}`} message={entry.message} runMatch={runMatches?.get(entry.message.id)} />)}</>;
 });
 
-export const RunControl = memo(function RunControl({ run, onCancel, onRetry, cancelling, onDismiss, dismissing = false, disabled = false, retryDisabled = false, showPrompt = true, token = '', onSnapshotRefresh }: { run: Run; onCancel: (id: string) => void; onRetry: (run: Run) => void; cancelling: boolean; onDismiss?: (id: string) => void; dismissing?: boolean; disabled?: boolean; retryDisabled?: boolean; showPrompt?: boolean; token?: string; onSnapshotRefresh?: () => void }) {
+export const RunControl = memo(function RunControl({ run, onCancel, onRetry, cancelling, onDismiss, dismissing = false, onSteer, steering = false, disabled = false, retryDisabled = false, showPrompt = true, token = '', onSnapshotRefresh }: { run: Run; onCancel: (id: string) => void; onRetry: (run: Run) => void; cancelling: boolean; onDismiss?: (id: string) => void; dismissing?: boolean; onSteer?: (id: string) => void; steering?: boolean; disabled?: boolean; retryDisabled?: boolean; showPrompt?: boolean; token?: string; onSnapshotRefresh?: () => void }) {
   useI18n();
   if (run.status === 'completed' || run.status === 'cancelled') return null;
   const active = run.status === 'running' || run.status === 'queued';
@@ -69,12 +70,13 @@ export const RunControl = memo(function RunControl({ run, onCancel, onRetry, can
   const preview = run.prompt || (run.attachments?.length ? run.attachments.map(file => file.name).join(', ') : t("보낸 요청"));
   return <div data-run-id={run.id} className={`run-control ${run.status}${approvals.length ? ' awaiting-approval' : ''}`}>
     <div className="run-control-line">
-      {approvals.length ? <ShieldQuestion size={12} aria-hidden="true" /> : active ? <LoaderCircle className="spin" size={12} aria-hidden="true" /> : <TriangleAlert size={12} aria-hidden="true" />}
-      <strong>{approvals.length ? approvals.some(approval => approval.interaction) ? t('응답 대기') : t('작업 승인 대기') : run.status === 'queued' ? t("전송 대기 중") : run.status === 'running' ? t("작업 중") : t("요청 실패")}</strong>
+      {run.steering?.state === 'delivered' ? <Check size={12} aria-hidden="true" /> : approvals.length ? <ShieldQuestion size={12} aria-hidden="true" /> : active ? <LoaderCircle className="spin" size={12} aria-hidden="true" /> : <TriangleAlert size={12} aria-hidden="true" />}
+      <strong>{run.steering ? run.steering.state === 'sending' ? t('끼워넣는 중') : run.steering.state === 'delivered' ? t('현재 작업에 전달됨') : t('전달 여부 확인 필요') : approvals.length ? approvals.some(approval => approval.interaction) ? t('응답 대기') : t('작업 승인 대기') : run.status === 'queued' ? t("전송 대기 중") : run.status === 'running' ? t("작업 중") : t("요청 실패")}</strong>
       {showPrompt && <span className="run-control-preview" title={preview}>{cleanPreview(preview, 140)}</span>}
       <div className="run-control-actions">
-        {active && <button type="button" disabled={disabled || cancelling} onClick={() => onCancel(run.id)}><Square size={10} aria-hidden="true" />{cancelling ? t("취소 중…") : run.status === 'queued' ? t("대기 취소") : t("중지")}</button>}
-        {run.status === 'error' && <><button type="button" aria-label={t("요청 다시 작성")} disabled={disabled || retryDisabled} onClick={() => onRetry(run)}><RefreshCw size={11} aria-hidden="true" />{t("다시 작성")}</button>{onDismiss && <button type="button" aria-label={t("실패 내역 지우기")} disabled={disabled || dismissing} onClick={() => onDismiss(run.id)}>{dismissing ? <LoaderCircle className="spin" size={11} aria-hidden="true" /> : <Trash2 size={11} aria-hidden="true" />}{t("지우기")}</button>}</>}
+        {run.status === 'queued' && run.canSteer && !run.steering && onSteer && <button type="button" disabled={disabled || steering} onClick={() => onSteer(run.id)}>{steering ? <LoaderCircle className="spin" size={11} aria-hidden="true" /> : <Send size={11} aria-hidden="true" />}{t("지금 끼워넣기")}</button>}
+        {active && !run.steering && <button type="button" disabled={disabled || cancelling} onClick={() => onCancel(run.id)}><Square size={10} aria-hidden="true" />{cancelling ? t("취소 중…") : run.status === 'queued' ? t("대기 취소") : t("중지")}</button>}
+        {run.status === 'error' && <>{!run.steering && <button type="button" aria-label={t("요청 다시 작성")} disabled={disabled || retryDisabled} onClick={() => onRetry(run)}><RefreshCw size={11} aria-hidden="true" />{t("다시 작성")}</button>}{onDismiss && <button type="button" aria-label={t("실패 내역 지우기")} disabled={disabled || dismissing} onClick={() => onDismiss(run.id)}>{dismissing ? <LoaderCircle className="spin" size={11} aria-hidden="true" /> : <Trash2 size={11} aria-hidden="true" />}{t("지우기")}</button>}</>}
       </div>
     </div>
     {run.status === 'error' && run.error && <p className="run-control-error">{translateMessage(run.error)}</p>}
@@ -84,6 +86,7 @@ export const RunControl = memo(function RunControl({ run, onCancel, onRetry, can
 
 export function ChatPanel({ sessionId, session, allSessions, provider, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, sessionClosed = false, changingClosed = false, readRevision = '', onRead }: { sessionId: string; session?: Session; allSessions: Session[]; provider?: ProviderHealth; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
   useI18n();
+  const appearance = useChatAppearance();
   const [detail, setDetail] = useState<ChatHistory | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -98,6 +101,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
   const [dragging, setDragging] = useState(false);
   const [cancelling, setCancelling] = useState('');
   const [dismissing, setDismissing] = useState('');
+  const [steering, setSteering] = useState('');
   const [copied, setCopied] = useState(false);
   const [following, setFollowing] = useState(true);
   const [showMetadata, setShowMetadata] = useState(false);
@@ -140,7 +144,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
 
   useLayoutEffect(() => {
     if (followRef.current && scroller.current && !loadingOlder) scroller.current.scrollTop = scroller.current.scrollHeight;
-  }, [detail?.messages, runs, loadingOlder]);
+  }, [detail?.messages, runs, loadingOlder, appearance.fontSize, appearance.width]);
 
   useEffect(() => {
     const updateVisibility = () => setPageVisible(document.visibilityState === 'visible');
@@ -219,6 +223,18 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
     catch (error) { setSendError(error instanceof Error ? error.message : t("작업을 중지하지 못했습니다.")); }
     finally { setCancelling(''); }
   }, [connected, onSnapshotRefresh, setSendError, token]);
+  const steerRun = useCallback(async (id: string) => {
+    if (!token || !connected) return;
+    const requestedSession = sessionRef.current;
+    setSteering(id); setSendError('');
+    try {
+      await api(`/api/runs/${encodeURIComponent(id)}/steer`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: '{}' });
+      onSnapshotRefresh();
+    } catch (error) {
+      if (sessionRef.current === requestedSession) setSendError(error instanceof Error ? error.message : t("요청을 끼워넣지 못했습니다."));
+      onSnapshotRefresh();
+    } finally { setSteering(''); }
+  }, [connected, onSnapshotRefresh, setSendError, token]);
   const dismissRun = useCallback(async (id: string) => {
     if (!token || !connected) return;
     const requestedSession = sessionRef.current;
@@ -244,8 +260,26 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
   const disabled = !connected || !current?.resumable || !provider?.available || !token;
   const sendingLabel = stage === 'preparing' ? t("파일 준비 중") : t("보내는 중");
 
-  return <aside className="chat-panel" aria-label={t("세션 대화")} onKeyDown={event => { if (event.key === 'Escape' && !event.nativeEvent.isComposing) onClose(); }}>
-    <header className="chat-header"><div className="chat-heading-line"><button className="icon-button mobile-back" onClick={onClose} aria-label={t("그래프로 돌아가기")}><ChevronLeft size={20} /></button>{current && <span className={`provider-square ${current.provider} ${current.status}`}><ProviderIcon provider={current.provider} /></span>}<span>{current ? providerLabels[current.provider] : t("세션 대화")}</span>{current && <span className={`status-badge ${current.status}`} title={translateMessage(current.statusReason)}><i />{statusLabels[current.status]}</span>}{onSessionClose && <button className="icon-button session-close-button" aria-label={sessionClosed ? t("세션 다시 열기") : t("세션 종료")} title={sessionClosed ? t("그래프에 다시 표시") : t("그래프에서 숨기기 · 실행 중인 작업은 계속됩니다")} disabled={changingClosed || !connected || !token} onClick={() => { setSendError(''); void Promise.resolve(onSessionClose()).catch(error => setSendError(error instanceof Error ? error.message : t("세션 상태를 저장하지 못했습니다."))); }}>{changingClosed ? <LoaderCircle className="spin" size={15} /> : sessionClosed ? <ArchiveRestore size={16} /> : <Archive size={16} />}</button>}<button className="icon-button close-chat" onClick={onClose} aria-label={t("대화 닫기")} title={t("닫기 (Esc)")}><X size={18} /></button></div>{current ? <SessionTitleEditor key={current.id} session={current} token={token} connected={connected} onSaved={updated => { onSessionUpdate(updated); setDetail(previous => previous ? { ...previous, session: { ...previous.session, customTitle: updated.customTitle } } : previous); onSnapshotRefresh(); }} /> : <h2>{t("대화 불러오는 중")}</h2>}<div className="chat-context-row"><button className="chat-project" onClick={() => setShowMetadata(!showMetadata)} aria-expanded={showMetadata}><Folder size={12} /><span className="folder-tail" title={current?.cwd || current?.project || t("세션 정보")}><bdi dir="ltr">{current?.project || t("세션 정보")}</bdi></span>{current?.isSubagent && <><GitBranch size={12} /><span>{t("하위 에이전트")}</span></>}<ChevronDown size={12} className={showMetadata ? 'rotate' : ''} /></button><SessionFamilyNav sessions={allSessions} selectedId={sessionId} onNavigate={onNavigate} /></div>{showMetadata && current && <dl className="session-metadata"><div><dt>{t("작업 폴더")}</dt><dd>{current.cwd || t("정보 없음")}</dd></div>{current.model && <div><dt>{t("모델")}</dt><dd>{current.model}</dd></div>}<div><dt>{t("세션 ID")}</dt><dd>{current.nativeId}<button className="icon-button" title={t("세션 ID 복사")} aria-label={t("세션 ID 복사")} onClick={() => { void copyText(current.nativeId).then(success => { setCopied(success); window.setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button></dd></div><div><dt>{t("상태 판단")}</dt><dd>{translateMessage(current.statusReason)}</dd></div><div><dt>{t("시작")}</dt><dd>{absoluteTime(current.createdAt)}</dd></div></dl>}</header>
+  return <><div className="chat-panel-spacer" aria-hidden="true" style={{ width: appearance.width, flexBasis: appearance.width }} /><aside className="chat-panel" style={{ '--chat-font-size': `${appearance.fontSize}px`, '--chat-width': `${appearance.width}px` } as CSSProperties} aria-label={t("세션 대화")}>
+    <div className="chat-resize-handle" role="separator" tabIndex={0} aria-label={t("대화창 너비 조절")} aria-orientation="vertical" aria-valuemin={320} aria-valuemax={appearance.maxWidth} aria-valuenow={appearance.width}
+      onPointerDown={appearance.startResize} onPointerMove={appearance.resize} onPointerUp={appearance.stopResize} onPointerCancel={appearance.stopResize} onLostPointerCapture={appearance.stopResize}
+      onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); appearance.changeWidth(appearance.width + (event.key === 'ArrowLeft' ? 20 : -20)); } }} />
+    <header className="chat-header">
+      <div className="chat-heading-line">
+        {current && <span className={`provider-square ${current.provider} ${current.status}`} role="img" aria-label={providerLabels[current.provider]} title={providerLabels[current.provider]}><ProviderIcon provider={current.provider} /></span>}
+        {current ? <SessionTitleEditor key={current.id} session={current} token={token} connected={connected} onSaved={updated => { onSessionUpdate(updated); setDetail(previous => previous ? { ...previous, session: { ...previous.session, customTitle: updated.customTitle } } : previous); onSnapshotRefresh(); }} /> : <h2 className="chat-loading-title">{t("대화 불러오는 중")}</h2>}
+        <div className="chat-header-actions">
+          {onSessionClose && <button className="icon-button session-close-button" aria-label={sessionClosed ? t("세션 다시 열기") : t("세션 종료")} title={sessionClosed ? t("그래프에 다시 표시") : t("그래프에서 숨기기 · 실행 중인 작업은 계속됩니다")} disabled={changingClosed || !connected || !token} onClick={() => { setSendError(''); void Promise.resolve(onSessionClose()).catch(error => setSendError(error instanceof Error ? error.message : t("세션 상태를 저장하지 못했습니다."))); }}>{changingClosed ? <LoaderCircle className="spin" size={15} /> : sessionClosed ? <ArchiveRestore size={16} /> : <Archive size={16} />}</button>}
+          <button className="icon-button close-chat" onClick={onClose} aria-label={t("대화 닫기")} title={t("닫기 (Esc)")}><X size={18} /></button>
+        </div>
+      </div>
+      <div className="chat-context-row">
+        {current && <span className={`status-badge ${current.status}`} title={translateMessage(current.statusReason)}><i />{statusLabels[current.status]}</span>}
+        <button className="chat-project" onClick={() => setShowMetadata(!showMetadata)} aria-expanded={showMetadata}><Folder size={12} /><span className="folder-tail" title={current?.cwd || current?.project || t("세션 정보")}><bdi dir="ltr">{current?.project || t("세션 정보")}</bdi></span><ChevronDown size={12} className={showMetadata ? 'rotate' : ''} /></button>
+        <SessionFamilyNav sessions={allSessions} selectedId={sessionId} onNavigate={onNavigate} />
+      </div>
+      {showMetadata && current && <dl className="session-metadata"><div><dt>{t("작업 폴더")}</dt><dd>{current.cwd || t("정보 없음")}</dd></div>{current.model && <div><dt>{t("모델")}</dt><dd>{current.model}</dd></div>}<div><dt>{t("세션 ID")}</dt><dd>{current.nativeId}<button className="icon-button" title={t("세션 ID 복사")} aria-label={t("세션 ID 복사")} onClick={() => { void copyText(current.nativeId).then(success => { setCopied(success); window.setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button></dd></div><div><dt>{t("상태 판단")}</dt><dd>{translateMessage(current.statusReason)}</dd></div><div><dt>{t("시작")}</dt><dd>{absoluteTime(current.createdAt)}</dd></div></dl>}
+    </header>
     <div className="chat-scroll" ref={scroller} onScroll={() => { const el = scroller.current; if (!el) return; const near = el.scrollHeight - el.scrollTop - el.clientHeight < 100; followRef.current = near; setFollowing(near); }}>
       {loading && !detail ? <div className="chat-loading"><LoaderCircle className="spin" size={22} /><span>{t("대화 기록을 불러오는 중")}</span></div> : <>
         {loadError && <div className="chat-load-error"><TriangleAlert size={18} /><p>{translateMessage(loadError)}</p><button className="secondary-button" onClick={() => setRetry(value => value + 1)}><RefreshCw size={13} />{t("다시 불러오기")}</button></div>}
@@ -260,7 +294,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
     <div className="composer-section">
       {current?.resumable === false && current.parentId && <button className="parent-session-link" onClick={() => onNavigate(current.parentId!)}><GitBranch size={14} /><span>{t("부모 세션에서 이어가기")}</span><ArrowUp size={13} /></button>}
       {sendError && <div className="inline-error" role="alert"><TriangleAlert size={15} /><span>{translateMessage(sendError)}</span><button aria-label={t("오류 메시지 닫기")} onClick={() => setSendError('')}><X size={13} /></button></div>}
-      {controlRuns.length > 0 && <div ref={runControls} className={`run-controls${approvalKey ? ' has-approvals' : ''}`} aria-label={t("진행 중이거나 실패한 요청")}>{controlRuns.map(run => <RunControl key={run.id} run={run} onCancel={cancelRun} onRetry={retryPrompt} onDismiss={dismissRun} cancelling={cancelling === run.id} dismissing={dismissing === run.id} disabled={!connected || !token || !!cancelling || !!dismissing} retryDisabled={disabled || sending} showPrompt={!runProjection.matchedRunIds.has(run.id)} token={token} onSnapshotRefresh={onSnapshotRefresh} />)}</div>}
+      {controlRuns.length > 0 && <div ref={runControls} className={`run-controls${approvalKey ? ' has-approvals' : ''}`} aria-label={t("진행 중이거나 실패한 요청")}>{controlRuns.map(run => <RunControl key={run.id} run={run} onCancel={cancelRun} onRetry={retryPrompt} onDismiss={dismissRun} onSteer={steerRun} steering={steering === run.id} cancelling={cancelling === run.id} dismissing={dismissing === run.id} disabled={!connected || !token || !!cancelling || !!dismissing || !!steering} retryDisabled={disabled || sending} showPrompt={!runProjection.matchedRunIds.has(run.id)} token={token} onSnapshotRefresh={onSnapshotRefresh} />)}</div>}
       <form className={`composer ${disabled ? 'disabled' : ''} ${dragging ? 'composer-dragging' : ''}`} onSubmit={event => { event.preventDefault(); void sendPrompt(); }}
         onDragOver={event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = disabled || sending ? 'none' : 'copy'; if (!disabled && !sending) setDragging(true); } }}
         onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
@@ -287,5 +321,5 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
       </form>
       <p className="composer-note"><Terminal size={11} />{t("이 기기의 {0}에서 기존 대화를 이어갑니다.", { 0: current ? providerLabels[current.provider] : t("에이전트") })}</p>
     </div>
-  </aside>;
+  </aside></>;
 }

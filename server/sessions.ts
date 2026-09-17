@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events';
 import { open, readdir, stat } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import type { ChatMessage, Provider, Session, SessionDetail } from '../shared/types.js';
 import { sortSessions } from '../shared/session-activity.js';
@@ -46,6 +46,9 @@ function text(value: unknown, maximum = MAX_TEXT): string {
 }
 
 function compact(value: string, max = 180): string { return value.replace(/\s+/g, ' ').trim().slice(0, max); }
+function validCwd(value: unknown): value is string {
+  return typeof value === 'string' && isAbsolute(value) && !value.includes('\0');
+}
 function time(value: unknown, fallback: string): string {
   const ms = typeof value === 'number' ? value : typeof value === 'string' ? Date.parse(value) : NaN;
   return Number.isFinite(ms) ? new Date(ms).toISOString() : fallback;
@@ -217,7 +220,7 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
     s.id = `codex:${s.nativeId}`;
     s.createdAt = time(value.timestamp ?? row.timestamp, s.createdAt);
     s.updatedAt = s.createdAt;
-    s.cwd = typeof value.cwd === 'string' ? value.cwd : s.cwd;
+    if (validCwd(value.cwd)) s.cwd = value.cwd;
     const spawned = value.source?.subagent?.thread_spawn;
     const parent = value.parent_thread_id || spawned?.parent_thread_id;
     // A user-created fork can also have a parent. Only native spawn metadata makes it a subagent.
@@ -242,13 +245,14 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
       if (!s.isSubagent) { s.nativeId = row.sessionId; s.id = `claude:${s.nativeId}`; }
       else s.parentId = `claude:${row.sessionId}`;
     }
-    if (typeof row.cwd === 'string') s.cwd = row.cwd;
+    // Project membership follows the originating folder, not later shell `cd`s.
+    if (!s.cwd && validCwd(row.cwd)) s.cwd = row.cwd;
     if (row.message?.model && !String(row.message.model).includes('synthetic')) s.model = row.message.model;
     const title = row.customTitle || row.aiTitle;
     if (typeof title === 'string' && title.trim()) { s.title = compact(title, 120); state.titleSet = true; }
   } else if (row.type === 'turn_context') {
     if (typeof row.payload?.model === 'string') s.model = row.payload.model;
-    if (!s.cwd && typeof row.payload?.cwd === 'string') s.cwd = row.payload.cwd;
+    if (!s.cwd && validCwd(row.payload?.cwd)) s.cwd = row.payload.cwd;
   }
   if (previousModel && s.model !== previousModel) delete s.contextUsage;
   consumeContext(s, row, timestamp);

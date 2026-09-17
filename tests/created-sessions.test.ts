@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -240,7 +240,7 @@ test('invalid input and a partially committed admission cannot launch a provider
     { provider: 'codex', cwd: 'relative', prompt: 'hi' },
     { provider: 'codex', cwd: f.directory, prompt: '' },
     { provider: 'bad', cwd: f.directory, prompt: 'hi' },
-    { provider: 'codex', cwd: join(f.directory, 'missing'), prompt: 'hi' },
+    { provider: 'codex', cwd: join(f.stateDir, 'runs.json', 'child'), prompt: 'hi' },
     { provider: 'codex', cwd: f.directory, prompt: 'hi', title: 't'.repeat(121) },
   ]) await assert.rejects(f.manager.create(input as Parameters<RunManager['create']>[0]), { statusCode: 400 });
   await rm(join(f.stateDir, 'runs.json'));
@@ -257,3 +257,34 @@ test('invalid input and a partially committed admission cannot launch a provider
   try { assert.equal(restarted.sessionList([])[0]?.status, 'error'); assert.equal(restarted.sessionList([])[0]?.resumable, false); }
   finally { await restarted.close(); }
 });
+
+for (const provider of ['claude', 'codex'] as const) {
+  test(`created ${provider} project keeps its chosen folder after native discovery and restart`, async t => {
+    const f = await fixture(t);
+    const accepted = await f.manager.create({ provider, cwd: f.directory, prompt: 'Create in the chosen folder' });
+    assert.equal((await finished(f.manager, accepted.run.id)).status, 'completed');
+    const confirmed = f.manager.getSession(accepted.session.id)!;
+    const nativeId = f.manager.nativeSessionId(confirmed.id);
+    for (const cwd of ['', join(f.directory, 'different-project')]) {
+      f.native.set(nativeId, { ...confirmed, id: nativeId, cwd, project: 'Changed native project', title: 'Native title', creationPending: undefined });
+      const merged = f.manager.getSession(confirmed.id)!;
+      assert.equal(merged.cwd, f.directory);
+      assert.equal(merged.project, accepted.session.project);
+      assert.equal(merged.title, 'Native title');
+      assert.equal(f.manager.getSession(nativeId)?.cwd, f.directory);
+      assert.equal(f.manager.sessionList([...f.native.values()])[0].cwd, f.directory);
+    }
+    // A subsequent launch also uses the creation folder, not the discovered cwd.
+    const resumed = await f.manager.enqueue(confirmed.id, 'Continue in the original project');
+    assert.equal((await finished(f.manager, resumed.id)).status, 'completed');
+    assert.equal(JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8')).cwd, await realpath(f.directory));
+    await f.manager.close();
+    const restarted = new RunManager({ stateDir: f.stateDir, getSession: id => f.native.get(id), refreshSessions: async () => {},
+      findExecutable: async () => { throw new Error('Restart verification must not launch providers'); } });
+    try {
+      await restarted.start();
+      assert.equal(restarted.getSession(confirmed.id)?.cwd, f.directory);
+      assert.equal(restarted.getSession(confirmed.id)?.project, accepted.session.project);
+    } finally { await restarted.close(); }
+  });
+}

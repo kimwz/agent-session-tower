@@ -577,6 +577,31 @@ test('a bridge submission error after possible delivery never falls back to a se
   } finally { await f.cleanup(); }
 });
 
+test('Auto Prompt tasks in independent sessions start despite two active tasks, while the same session waits', async () => {
+  const f = await fixture({ mode: 'hold' });
+  try {
+    const secondSession = makeSession(f.directory, { id: `codex:${ID2}`, nativeId: ID2 });
+    const thirdId = '10000000-0000-4000-8000-000000000003';
+    const thirdSession = makeSession(f.directory, { id: `codex:${thirdId}`, nativeId: thirdId });
+    f.sessions.set(secondSession.id, secondSession);
+    f.sessions.set(thirdSession.id, thirdSession);
+    const first = await f.manager.enqueue(f.session.id, 'already running');
+    const second = await f.manager.enqueue(secondSession.id, 'first auto prompt', {}, { autoPromptId: ID });
+    await until(() => f.manager.list().filter(run => run.startedAt).length === 2 ? true : undefined);
+    const queued = await f.manager.enqueue(secondSession.id, 'same agent follow-up');
+    const third = await f.manager.enqueue(thirdSession.id, 'second auto prompt', {}, { autoPromptId: ID2 });
+    await until(() => f.manager.list().find(run => run.id === third.id)?.startedAt);
+    const runs = f.manager.list();
+    for (const run of [first, second, third]) assert.equal(runs.find(value => value.id === run.id)?.status, 'running');
+    assert.equal(runs.find(run => run.id === queued.id)?.status, 'queued');
+    assert.equal(f.launches.length, 3);
+    await f.manager.cancel(second.id);
+    await until(() => f.manager.list().find(run => run.id === queued.id)?.startedAt);
+    assert.equal(f.manager.list().find(run => run.id === queued.id)?.status, 'running');
+    assert.equal(f.launches.length, 4);
+  } finally { await f.cleanup(); }
+});
+
 test('serializes a conversation while allowing independent sessions up to concurrency limit', async () => {
   const f = await fixture({mode:'slow', maxConcurrent:2});
   try {

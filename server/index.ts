@@ -18,6 +18,7 @@ import { readWebAsset } from './web-assets.js';
 import { projectSessionStates } from './snapshot.js';
 import { openCodexBridgeRun } from './codex-app-server.js';
 import { ProviderCapabilities } from './provider-capabilities.js';
+import { trustWorkspace } from './workspace-trust.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 
 const HELP = `Agent Session Tower 0.1.0
@@ -91,7 +92,7 @@ async function main() {
   const closedSessions = new ClosedSessionStore(stateDir);
   const groups = new ProjectGroupStore(stateDir);
   const runs = new RunManager({ getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true), stateDir,
-    openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }),
+    openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }), trustWorkspace,
   });
   // Load persisted history before shutdown or an HTTP request can touch the runner.
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await runs.start(); } catch (error) { await releaseLock(); throw error; }
@@ -145,7 +146,7 @@ async function main() {
     cancelAutoPrompt: id => autoPrompts!.cancel(id),
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
     enqueue: (id, prompt, attachments) => runs.enqueue(id, prompt, attachments),
-    attachment: id => runs.attachment(id), cancel: id => runs.cancel(id),
+    attachment: id => runs.attachment(id), cancel: id => runs.cancel(id), steerRun: id => runs.steer(id),
     respondToApproval: (runId, approvalId, decision) => runs.respondToApproval(runId, approvalId, decision),
     dismiss: async id => {
       await dismissedRuns.dismiss(id, runs.list().find(run => run.id === id));

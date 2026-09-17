@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { SessionTitleStore, normalizeSessionTitle } from '../server/session-titles.js';
 import { createMonitorServer } from '../server/http.js';
 import type { Session } from '../shared/types.js';
+import { computeConversationRevision } from '../shared/conversation-revision.js';
 
 const native: Session = {
   id: 'codex:example', nativeId: 'example', provider: 'codex', title: 'First conversation', cwd: '/tmp/project', project: 'project',
@@ -152,8 +153,11 @@ test('title HTTP endpoint validates, authenticates, persists, and broadcasts san
       assert.doesNotMatch(events, /native-log|filePath/);
       for (const url of [`${base}/api/snapshot`, `${base}/api/sessions/${encodeURIComponent(native.id)}`]) {
         const body = await (await fetch(url, { headers: { Authorization: authorization } })).json();
-        assert.deepEqual(body.session || body.sessions[0], data.session);
+        if (url.endsWith('/api/snapshot')) {
+          assert.deepEqual(body.sessions[0], { ...data.session, readRevision: computeConversationRevision(data.session, []) });
+        } else assert.deepEqual(body.session, data.session);
       }
+      assert.equal(native.readRevision, undefined, 'snapshot revisions do not mutate native metadata');
       const reset = await send({ title: '' });
       assert.equal(reset.status, 200);
       assert.deepEqual((await reset.json()).session, publicNative);

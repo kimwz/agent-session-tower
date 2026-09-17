@@ -217,3 +217,35 @@ test('attachment uploads and downloads retain authentication, size limits, safe 
     assert.equal((await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify(invalid) })).status, 400);
   }
 });
+
+test('steering requires authentication and preserves queued content and backend conflicts', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-http-steer-'));
+  const calls: string[] = [];
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir,
+    remote: { password: 'steer-fixture', origins: new Set() }, backend: {
+      snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: new Date().toISOString() }),
+      detail: async () => undefined, enqueue: async () => run, cancel: async () => {}, subscribe: () => () => {},
+      steerRun: async id => {
+        calls.push(id);
+        if (id !== 'queued-request') throw Object.assign(new Error('No active turn.'), { statusCode: 409 });
+        return { ...run, steering: { targetRunId: 'active-run', state: 'delivered', requestedAt: run.createdAt } };
+      },
+    },
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const authorization = `Basic ${Buffer.from('monitor:steer-fixture').toString('base64')}`;
+  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { authorization } })).json();
+  const headers = { authorization, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+  const endpoint = `${base}/api/runs/queued%2Drequest/steer`;
+  assert.equal((await fetch(endpoint, { method: 'POST', body: '{}' })).status, 401);
+  assert.equal((await fetch(endpoint, { method: 'POST', headers: { authorization, 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
+  assert.equal((await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ prompt: 'replacement' }) })).status, 400);
+  assert.deepEqual(calls, []);
+  const response = await fetch(endpoint, { method: 'POST', headers, body: '{}' });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).run.steering.state, 'delivered');
+  assert.deepEqual(calls, ['queued-request']);
+  assert.equal((await fetch(`${base}/api/runs/stale/steer`, { method: 'POST', headers, body: '{}' })).status, 409);
+});

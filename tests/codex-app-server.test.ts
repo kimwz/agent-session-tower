@@ -511,3 +511,42 @@ test('an acknowledged interrupt times out without marking a still-running turn c
   assert.equal(finished[0].status, 'error');
   assert.equal(fake.turns[0].status, 'inProgress');
 });
+
+for (const mode of ['ok', 'rejected', 'mismatch', 'lost', 'timeout']) {
+  test(`bridge steering ${mode} stays on the correlated active turn`, async t => {
+    const fake = await fixture(t, (request, fake) => {
+      if (request.method !== 'turn/steer') return;
+      if (mode === 'timeout') return true;
+      if (mode === 'lost') fake.socket.terminate();
+      else if (mode === 'rejected') fake.error(request, 'active turn mismatch');
+      else fake.reply(request, { turnId: mode === 'mismatch' ? 'other-turn' : fake.turns[0].id });
+      return true;
+    });
+    const run = await open(fake);
+    t.after(() => run.bridge.close());
+    assert.equal(run.bridge.canSteer!(), false);
+    await assert.rejects(run.bridge.steer!({ id: 'queued', prompt: 'later' }), { disposition: 'rejected' });
+    await run.bridge.start();
+    assert.equal(run.bridge.canSteer!(), true);
+    const result = run.bridge.steer!({ id: 'queued', prompt: 'New instruction', imagePaths: ['/tmp/image path.png'] });
+    assert.equal(run.bridge.canSteer!(), false);
+    await assert.rejects(run.bridge.steer!({ id: 'duplicate', prompt: 'later' }), { disposition: 'rejected' });
+    if (mode === 'ok') await result;
+    else await assert.rejects(result, { disposition: mode === 'rejected' ? 'rejected' : 'uncertain' });
+    assert.deepEqual(fake.requests.find(request => request.method === 'turn/steer')?.params, {
+      threadId: 'thread', expectedTurnId: 'turn-monitor-run', clientUserMessageId: 'queued',
+      input: [{ type: 'text', text: 'New instruction', text_elements: [] }, { type: 'localImage', path: '/tmp/image path.png' }],
+    });
+    assert.equal(fake.requests.filter(request => request.method === 'thread/queue/add').length, 1);
+    assert.equal(fake.requests.some(request => request.method === 'turn/interrupt'), false);
+    if (mode !== 'lost') {
+      assert.equal(run.finished.length, 0);
+      assert.equal(run.bridge.canSteer!(), true);
+      fake.complete(fake.turns[0], 'Original turn continued');
+    }
+    await run.bridge.done;
+    assert.equal(run.bridge.canSteer!(), false);
+    await assert.rejects(run.bridge.steer!({ id: 'late', prompt: 'later' }), { disposition: 'rejected' });
+    assert.equal(fake.requests.filter(request => request.method === 'turn/steer').length, 1);
+  });
+}

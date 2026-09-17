@@ -29,3 +29,13 @@ test('read state survives serialization, rejects malformed state and prunes only
   assert.deepEqual(parseReadState('{"valid":"revision","invalid":32}'), { valid: 'revision' });
   assert.deepEqual(pruneReadState(read, [session]), { [session.id]: read[session.id] });
 });
+
+test('server-provided read revisions retain stored markers when run output is omitted', () => {
+  const run: Run = { id: 'run', sessionId: session.id, prompt: 'Work', status: 'running', createdAt: '2026-09-15T02:00:00Z', output: '진행 중 😀' };
+  const revision = conversationRevision(session, [run]);
+  const read = acknowledgeSession({}, session.id, revision);
+  const projected = { ...session, readRevision: revision };
+  assert.equal(conversationRevision(projected, [{ ...run, output: '' }]), revision);
+  assert.equal(acknowledgeSession(read, session.id, conversationRevision(projected)), read);
+  assert.notEqual(conversationRevision({ ...projected, readRevision: 'updated-marker' }), revision);
+});
