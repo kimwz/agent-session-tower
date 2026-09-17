@@ -2,7 +2,7 @@ import test, { afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { RunControl } from '../client/src/chat/ChatPanel.js';
+import { RunControl } from '../client/src/chat/RunControl.js';
 import { RunApprovalCard } from '../client/src/chat/RunApprovalCard.js';
 import { approvalDecisionState, formApprovalContent, reconcileApprovalDecisions, safeApprovalUrl, submitApprovalDecision } from '../client/src/chat/chat-approvals.js';
 import { ApiError } from '../client/src/common/lib.js';

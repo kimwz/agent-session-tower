@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { addDraftFiles, attachmentUrl, isPreviewableAttachment, prepareDraftAttachments, savedAttachmentDraft } from '../client/src/chat/chat-attachments.js';
 import { finishComposerSend, getComposerState, markComposerSending, setComposerDraft, startComposerSend, subscribeComposer } from '../client/src/chat/chat-drafts.js';
 import { SavedAttachments } from '../client/src/chat/ChatAttachments.js';
-import { ChatTranscript } from '../client/src/chat/ChatPanel.js';
+import { ChatTranscript } from '../client/src/chat/ChatTranscript.js';
 import { matchChatRuns } from '../client/src/chat/chat-runs.js';
 import { MAX_ATTACHMENTS, MAX_ATTACHMENT_BYTES, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../shared/attachments.js';
 import type { Attachment, Run } from '../shared/types.js';

@@ -1,89 +1,24 @@
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ComponentPropsWithoutRef, type ReactNode } from 'react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, Copy, Folder, GitBranch, LoaderCircle, MessageSquare, Paperclip, RefreshCw, Send, ShieldQuestion, Square, Terminal, Trash2, TriangleAlert, X } from 'lucide-react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
+import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, Copy, Folder, GitBranch, LoaderCircle, MessageSquare, Paperclip, RefreshCw, Send, Terminal, TriangleAlert, X } from 'lucide-react';
 import type { ChatMessage, ProviderHealth, Run, Session, SessionDetail } from '../../../shared/types';
 import { ProviderIcon } from '../common/Icons';
 import { SessionTitleEditor } from '../sessions/SessionTitleEditor';
 import { SessionFamilyNav } from '../sessions/SessionFamilyNav';
-import { absoluteTime, api, cleanPreview, copyText, providerLabels, statusLabels } from '../common/lib';
+import { absoluteTime, api, copyText, providerLabels, statusLabels } from '../common/lib';
 import { mergeLatestPage, prependOlderPage, type ChatHistory } from './chat-history';
-import { groupConsecutiveTools, type ToolGroup } from './chat-tool-groups';
-import { DraftAttachments, SavedAttachments } from './ChatAttachments';
+import { ChatTranscript } from './ChatTranscript';
+import { RunControl } from './RunControl';
+import { DraftAttachments } from './ChatAttachments';
 import { addDraftFiles, formatAttachmentSize, prepareDraftAttachments } from './chat-attachments';
 import { MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../../shared/attachments';
 import { draftFromRun, finishComposerSend, getComposerState, markComposerSending, setComposerDraft, setComposerError, startComposerSend, subscribeComposer, type ChatDraft } from './chat-drafts';
-import { matchChatRuns, type ChatRunMatch } from './chat-runs';
+import { matchChatRuns } from './chat-runs';
 import { ModelPicker } from './ModelPicker';
-import { RunApprovalCard } from './RunApprovalCard';
 import { useChatAppearance } from './chat-appearance';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 
 const emptyMessages: readonly ChatMessage[] = [];
-
-function CodeBlock({ children, ...props }: ComponentPropsWithoutRef<'pre'>) {
-  useI18n();
-  const ref = useRef<HTMLPreElement>(null);
-  const [copied, setCopied] = useState(false);
-  return <div className="code-block"><button aria-label={t("코드 복사")} onClick={() => { void copyText(ref.current?.textContent || '').then(success => { setCopied(success); window.setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={13} /> : <Copy size={13} />}{copied ? t("복사됨") : t("복사")}</button><pre {...props} ref={ref}>{children}</pre></div>;
-}
-const Markdown = memo(function Markdown({ children }: { children: string }) {
-  useI18n();
-  return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ pre: CodeBlock, a: ({ children, ...props }) => <a {...props} target="_blank" rel="noreferrer noopener">{children}</a>, img: ({ alt }) => <span className="attachment-label">{t("[이미지:")}{' '}{alt || t("첨부 파일")}]</span> }}>{children}</ReactMarkdown></div>;
-});
-
-export const Message = memo(function Message({ message, runMatch }: { message: ChatMessage; runMatch?: ChatRunMatch }) {
-  useI18n();
-  const [expanded, setExpanded] = useState(false);
-  if (message.role === 'tool' || message.role === 'system') return <details className={`tool-message ${message.isError ? 'tool-error' : ''}`} open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}><summary><Terminal size={13} /><strong>{message.toolName || (message.role === 'system' ? t("세션 정보") : t("도구 실행"))}</strong><span>{cleanPreview(message.text, 110)}</span><ChevronDown size={13} /></summary>{expanded && <div><Markdown>{message.text}</Markdown></div>}</details>;
-  const text = runMatch?.text ?? message.text;
-  const long = message.role === 'user' && text.length > 2400;
-  return <article className={`chat-message ${message.role} ${message.isError ? 'message-error' : ''}`}>
-    <div className="message-meta"><span>{message.role === 'user' ? t("나") : t("에이전트")}</span><time dateTime={message.timestamp}>{absoluteTime(message.timestamp)}</time></div>
-    <div className="message-content">{text && <div className={long && !expanded ? 'message-truncated' : undefined}><Markdown>{long && !expanded ? `${text.slice(0, 2100)}…` : text}</Markdown></div>}{!!runMatch?.attachments?.length && <SavedAttachments attachments={runMatch.attachments} />}</div>
-    {long && <button className="text-button message-expand" onClick={() => setExpanded(!expanded)}>{expanded ? t("간략히 보기") : t("메시지 전체 보기")}<ChevronDown size={12} className={expanded ? 'rotate' : ''} /></button>}
-  </article>;
-});
-
-export const ToolMessageGroup = memo(function ToolMessageGroup({ group }: { group: ToolGroup }) {
-  useI18n();
-  const [expanded, setExpanded] = useState(false);
-  const summary = useRef<HTMLElement>(null);
-  return <details className={`tool-group ${group.errorCount ? 'tool-group-error' : ''}`} open={expanded} onToggle={event => {
-    if (event.target === event.currentTarget) setExpanded(event.currentTarget.open);
-  }}>
-    <summary ref={summary}><strong>{group.workCount ? t("{0}개의 작업", { 0: group.workCount }) : t("세션 정보")}</strong>{group.errorCount > 0 && <span className="tool-group-errors"><TriangleAlert size={10} aria-hidden="true" />{t("오류")}{' '}{group.errorCount}{t("건")}</span>}<ChevronDown size={11} aria-hidden="true" /></summary>
-    {expanded && <div className="tool-group-content">{group.messages.map(message => <Message key={message.id} message={message} />)}<button className="tool-group-collapse" onClick={() => { setExpanded(false); summary.current?.focus(); }}>{group.workCount ? t("작업 접기") : t("세션 정보 접기")}<ChevronDown size={11} aria-hidden="true" /></button></div>}
-  </details>;
-});
-
-export const ChatTranscript = memo(function ChatTranscript({ messages, runMatches }: { messages: readonly ChatMessage[]; runMatches?: ReadonlyMap<string, ChatRunMatch> }) {
-  const entries = useMemo(() => groupConsecutiveTools(messages), [messages]);
-  return <>{entries.map(entry => entry.kind === 'tools' ? <ToolMessageGroup key={`tools:${entry.id}`} group={entry} /> : <Message key={`message:${entry.message.id}`} message={entry.message} runMatch={runMatches?.get(entry.message.id)} />)}</>;
-});
-
-export const RunControl = memo(function RunControl({ run, onCancel, onRetry, cancelling, onDismiss, dismissing = false, onSteer, steering = false, disabled = false, retryDisabled = false, showPrompt = true, token = '', onSnapshotRefresh }: { run: Run; onCancel: (id: string) => void; onRetry: (run: Run) => void; cancelling: boolean; onDismiss?: (id: string) => void; dismissing?: boolean; onSteer?: (id: string) => void; steering?: boolean; disabled?: boolean; retryDisabled?: boolean; showPrompt?: boolean; token?: string; onSnapshotRefresh?: () => void }) {
-  useI18n();
-  if (run.status === 'completed' || run.status === 'cancelled') return null;
-  const active = run.status === 'running' || run.status === 'queued';
-  const approvals = active ? run.approvals || [] : [];
-  const preview = run.prompt || (run.attachments?.length ? run.attachments.map(file => file.name).join(', ') : t("보낸 요청"));
-  return <div data-run-id={run.id} className={`run-control ${run.status}${approvals.length ? ' awaiting-approval' : ''}`}>
-    <div className="run-control-line">
-      {run.steering?.state === 'delivered' ? <Check size={12} aria-hidden="true" /> : approvals.length ? <ShieldQuestion size={12} aria-hidden="true" /> : active ? <LoaderCircle className="spin" size={12} aria-hidden="true" /> : <TriangleAlert size={12} aria-hidden="true" />}
-      <strong>{run.steering ? run.steering.state === 'sending' ? t('끼워넣는 중') : run.steering.state === 'delivered' ? t('현재 작업에 전달됨') : t('전달 여부 확인 필요') : approvals.length ? approvals.some(approval => approval.interaction) ? t('응답 대기') : t('작업 승인 대기') : run.status === 'queued' ? t("전송 대기 중") : run.status === 'running' ? t("작업 중") : t("요청 실패")}</strong>
-      {showPrompt && <span className="run-control-preview" title={preview}>{cleanPreview(preview, 140)}</span>}
-      <div className="run-control-actions">
-        {run.status === 'queued' && run.canSteer && !run.steering && onSteer && <button type="button" disabled={disabled || steering} onClick={() => onSteer(run.id)}>{steering ? <LoaderCircle className="spin" size={11} aria-hidden="true" /> : <Send size={11} aria-hidden="true" />}{t("지금 끼워넣기")}</button>}
-        {active && !run.steering && <button type="button" disabled={disabled || cancelling} onClick={() => onCancel(run.id)}><Square size={10} aria-hidden="true" />{cancelling ? t("취소 중…") : run.status === 'queued' ? t("대기 취소") : t("중지")}</button>}
-        {run.status === 'error' && <>{!run.steering && <button type="button" aria-label={t("요청 다시 작성")} disabled={disabled || retryDisabled} onClick={() => onRetry(run)}><RefreshCw size={11} aria-hidden="true" />{t("다시 작성")}</button>}{onDismiss && <button type="button" aria-label={t("실패 내역 지우기")} disabled={disabled || dismissing} onClick={() => onDismiss(run.id)}>{dismissing ? <LoaderCircle className="spin" size={11} aria-hidden="true" /> : <Trash2 size={11} aria-hidden="true" />}{t("지우기")}</button>}</>}
-      </div>
-    </div>
-    {run.status === 'error' && run.error && <p className="run-control-error">{translateMessage(run.error)}</p>}
-    {approvals.map(approval => <RunApprovalCard key={approval.id} runId={run.id} approval={approval} token={token} disabled={disabled || cancelling || !onSnapshotRefresh} onSnapshotRefresh={onSnapshotRefresh || (() => {})} />)}
-  </div>;
-});
 
 export function ChatPanel({ sessionId, session, allSessions, provider, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, sessionClosed = false, changingClosed = false, readRevision = '', onRead }: { sessionId: string; session?: Session; allSessions: Session[]; provider?: ProviderHealth; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
   useI18n();

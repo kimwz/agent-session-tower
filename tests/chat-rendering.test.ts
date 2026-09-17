@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ChatTranscript, Message, RunControl } from '../client/src/chat/ChatPanel.js';
+import { ChatTranscript } from '../client/src/chat/ChatTranscript.js';
+import { Message } from '../client/src/chat/Message.js';
+import { RunControl } from '../client/src/chat/RunControl.js';
 import type { ChatMessage, Run } from '../shared/types.js';
 
 for (const role of ['tool', 'system'] as const) {
