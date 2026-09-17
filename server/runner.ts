@@ -1,11 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
-import { constants } from 'node:fs';
-import { access, mkdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
-import type { CreateSessionRequest, MessageAttachments, Provider, ProviderHealth, Run, RunApprovalResponse, Session } from '../shared/types.js';
+import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, Session } from '../shared/types.js';
 import { isImageAttachment } from '../shared/attachments.js';
 import { attachmentMetadata, attachmentPrompt, AttachmentStore } from './attachments.js';
 import { normalizeSessionTitle } from './session-titles.js';
@@ -17,6 +16,7 @@ import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from '.
 import { claudeInputTokens, contextCapacity, nativeContextObservation, withNativeContext } from './session-context.js';
 import { defaultStateDir } from './state-dir.js';
 import { readPrivateJson, writePrivateJson } from './private-json.js';
+import { findExecutable, providerDirectories, PROVIDERS } from './provider-discovery.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -58,38 +58,10 @@ const MAX_PROMPT = 32_000;
 const MAX_RUNS = 100;
 const MAX_QUEUED = 32;
 const FINISHED = new Set<Run['status']>(['completed', 'error', 'cancelled']);
-const PROVIDERS: Provider[] = ['claude', 'codex'];
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 
 export class RunError extends Error {
   constructor(message: string, public readonly statusCode = 400) { super(message); }
-}
-
-/** Resolve executables without invoking a shell or evaluating shell startup files. */
-function providerDirectories(env: NodeJS.ProcessEnv): string[] {
-  // Finder starts programs with a minimal PATH. Use the same safe lookup for the
-  // CLI and its interpreters/tools; empty or relative entries would search its cwd.
-  return [...new Set([...(env.PATH ?? '').split(delimiter), join(homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'])]
-    .filter(directory => directory && isAbsolute(directory));
-}
-
-export async function findExecutable(provider: Provider, env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
-  for (const directory of providerDirectories(env)) {
-    const candidate = join(directory, provider);
-    try {
-      await access(candidate, constants.X_OK);
-      if ((await stat(candidate)).isFile()) return candidate;
-    } catch { /* Try the next installed location. */ }
-  }
-  return undefined;
-}
-
-export async function getProviderHealth(counts: Partial<Record<Provider, number>> = {}): Promise<ProviderHealth[]> {
-  return Promise.all(PROVIDERS.map(async (provider) => {
-    const executable = await findExecutable(provider);
-    return { provider, available: Boolean(executable), executable, sessionCount: counts[provider] ?? 0,
-      ...(!executable ? { error: `${provider === 'claude' ? 'Claude Code' : 'Codex'} CLI was not found in PATH.` } : {}) };
-  }));
 }
 
 export function buildResumeArgs(session: Session, model?: string): string[] {

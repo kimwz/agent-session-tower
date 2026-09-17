@@ -1,11 +1,10 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { constants } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 import type { Provider } from '../shared/types.js';
 import { MAX_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../shared/attachments.js';
-import { findExecutable } from './runner.js';
+import { findExecutable, providerDirectories } from './provider-discovery.js';
 import { defaultStateDir } from './state-dir.js';
 
 export interface AutoPromptModelRequest {
@@ -133,8 +132,7 @@ export async function runAutoPromptModel(options: AutoPromptModelRequest, depend
   if (!record(options.schema) || typeof options.prompt !== 'string' || typeof options.systemPrompt !== 'string'
     || Buffer.byteLength(options.prompt) > MAX_PROMPT || Buffer.byteLength(options.systemPrompt) > 64_000 || Buffer.byteLength(schema) > 64_000) throw failure('routing input is invalid or too large.');
   const env = { ...process.env, ...dependencies.env };
-  env.PATH = [...new Set([...(env.PATH ?? '').split(delimiter), join(homedir(), '.local', 'bin'), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin'])]
-    .filter(directory => directory && isAbsolute(directory)).join(delimiter);
+  env.PATH = providerDirectories(env).join(delimiter);
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_SESSION_ID;
   const executable = await (dependencies.findExecutable ?? findExecutable)(options.provider, env);
