@@ -72,3 +72,11 @@ If the builder cannot locate the Node.js license beside the installed runtime, s
 | `scripts/` | Standalone executable build and smoke test |
 
 One Node HTTP server serves the API and built React UI. Server-sent events update the browser. No database or external backend is required. The graph uses React Flow.
+
+## Releasing
+
+1. Write the `## [x.y.z] - YYYY-MM-DD` section in `CHANGELOG.md`.
+2. Run `npm version x.y.z`. It runs `npm run check`, refuses to continue without that changelog section, syncs the version the app reports, commits, and tags `vx.y.z`.
+3. `git push --follow-tags`. The Release workflow publishes the changelog section as the GitHub release notes.
+
+A specific release can be run with `npx --yes github:kimwz/agent-session-tower#vx.y.z`.
