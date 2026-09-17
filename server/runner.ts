@@ -18,6 +18,7 @@ import { defaultStateDir } from './state-dir.js';
 import { readPrivateJson, writePrivateJson } from './private-json.js';
 import { findExecutable, providerDirectories, PROVIDERS } from './provider-discovery.js';
 import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
+import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -55,24 +56,6 @@ const FINISHED = new Set<Run['status']>(['completed', 'error', 'cancelled']);
 
 export class RunError extends Error {
   constructor(message: string, public readonly statusCode = 400) { super(message); }
-}
-
-export function buildResumeArgs(session: Session, model?: string): string[] {
-  const override = requestedModel(model);
-  if (session.provider === 'claude') return [
-    '-p', '--resume', session.nativeId, '--output-format', 'stream-json', '--verbose',
-    '--include-partial-messages', '--replay-user-messages', '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--permission-prompts', 'host', ...(override ? ['--model', override] : []),
-  ];
-  return ['app-server', '--stdio'];
-}
-
-export function buildCreateArgs(session: Session, model?: string): string[] {
-  const override = requestedModel(model);
-  if (session.provider === 'claude') return [
-    '-p', '--session-id', session.nativeId, '--output-format', 'stream-json', '--verbose',
-    '--include-partial-messages', '--replay-user-messages', '--input-format', 'stream-json', '--permission-prompt-tool', 'stdio', '--permission-prompts', 'host', ...(override ? ['--model', override] : []),
-  ];
-  return ['app-server', '--stdio'];
 }
 
 /** Owns only processes launched by this monitor; never signals an external agent. */
