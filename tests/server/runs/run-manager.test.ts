@@ -8,6 +8,7 @@ import { RunManager } from '../../../server/runs/manager.js';
 import { buildCreateArgs, buildResumeArgs } from '../../../server/runs/claude-args.js';
 import { findExecutable } from '../../../server/providers/discovery.js';
 import type { Run, Session } from '../../../shared/types.js';
+import { until } from '../../helpers/until.ts';
 
 const ID = '10000000-0000-4000-8000-000000000001';
 const ID2 = '10000000-0000-4000-8000-000000000002';
@@ -20,15 +21,6 @@ function makeSession(cwd: string, overrides: Partial<Session> = {}): Session {
     updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true, ...overrides };
 }
 
-async function until<T>(read: () => T | undefined, timeout = 5000): Promise<T> {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = read();
-    if (value !== undefined) return value;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  throw new Error('Timed out waiting for the run state.');
-}
 
 async function fixture(options: { mode?: string; provider?: 'codex' | 'claude'; busy?: boolean; maxConcurrent?: number; refreshError?: boolean; path?: string; shebang?: boolean; openCodexBridge?: OpenCodexBridge; contextFrames?: unknown[] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'agent-monitor-runner-'));

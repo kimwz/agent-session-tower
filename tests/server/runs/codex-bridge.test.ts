@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { openCodexBridgeRun, type CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
+import { until } from '../../helpers/until.ts';
 
 type Request = { id: number; method: string; params: any };
 type QueueItem = { id: string; clientUserMessageId: string; input: unknown[] };
@@ -107,10 +108,6 @@ async function open(fake: Fake, runId = 'monitor-run', imagePaths?: string[], mo
   return { bridge, started, output, finished };
 }
 
-async function until(check: () => boolean) {
-  const deadline = Date.now() + 4000;
-  while (!check()) { if (Date.now() > deadline) assert.fail('Timed out waiting for bridge state'); await delay(10); }
-}
 
 test('explicit model is acknowledged before queue admission and omission preserves native settings', async t => {
   const fake = await fixture(t, (request, fake) => {

@@ -7,19 +7,11 @@ import test from 'node:test';
 import { RunManager } from '../../../server/runs/manager.js';
 import { SessionTitleStore } from '../../../server/stores/session-titles.js';
 import type { Provider, Run, Session } from '../../../shared/types.js';
+import { until } from '../../helpers/until.ts';
 
 const CODEX_ID = '20000000-0000-4000-8000-000000000001';
 const OTHER_ID = '20000000-0000-4000-8000-000000000002';
 
-async function until<T>(read: () => T | undefined): Promise<T> {
-  const deadline = Date.now() + 5000;
-  while (Date.now() < deadline) {
-    const result = read();
-    if (result !== undefined) return result;
-    await new Promise(resolve => setTimeout(resolve, 15));
-  }
-  throw new Error('Timed out waiting for created session.');
-}
 
 async function fixture(t: test.TestContext, mode = '', maxConcurrent = 2) {
   const directory = await mkdtemp(join(tmpdir(), 'monitor-created-'));

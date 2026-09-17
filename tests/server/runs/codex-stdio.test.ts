@@ -7,16 +7,13 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { RunApproval } from '../../../shared/types.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioResult } from '../../../server/runs/codex-stdio.js';
+import { until } from '../../helpers/until.ts';
 
 const ID = '10000000-0000-4000-8000-000000000001';
 const OTHER = '10000000-0000-4000-8000-000000000002';
 const TURN = '20000000-0000-4000-8000-000000000001';
 type Frame = { id?: string | number; method?: string; params?: any; result?: any; error?: any };
 
-async function until(check: () => boolean): Promise<void> {
-  const deadline = Date.now() + 4000;
-  while (!check()) { if (Date.now() > deadline) assert.fail('Timed out waiting for the Codex stdio fixture.'); await delay(5); }
-}
 
 async function fixture(t: TestContext, mode = 'complete', overrides: Partial<CodexStdioOptions> = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-codex-stdio-'));

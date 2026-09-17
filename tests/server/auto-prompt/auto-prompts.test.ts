@@ -8,6 +8,7 @@ import { AutoPromptManager } from '../../../server/auto-prompt/manager.js';
 import type { AutoPromptModelRequest } from '../../../server/auto-prompt/native.js';
 import type { RunAdmission } from '../../../server/runs/manager.js';
 import type { AttachmentInput, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, Session, Snapshot } from '../../../shared/types.js';
+import { until } from '../../helpers/until.ts';
 
 const nativeId = '11111111-1111-4111-8111-111111111111';
 const makeSession = (cwd: string, values: Partial<Session> = {}): Session => ({ id: `codex:${nativeId}`, nativeId, provider: 'codex',
@@ -19,14 +20,6 @@ const resume = (sessionId: string, relation = 'continuation') => ({ action: 'res
 const create = () => ({ action: 'create', sessionId: null, relation: 'new', reason: 'A separate task needs a new conversation.' });
 const request = (cwd?: string, values: Partial<AutoPromptRequest> = {}): AutoPromptRequest => ({ requestId: randomUUID(), provider: 'codex', prompt: 'Continue the editor work', ...(cwd ? { cwd } : {}), ...values });
 
-async function until<T>(read: () => T | undefined, timeout = 4000): Promise<T> {
-  const end = Date.now() + timeout;
-  while (Date.now() < end) {
-    const value = read(); if (value !== undefined) return value;
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  throw new Error('Timed out');
-}
 async function fixture(t: TestContext) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-auto-prompts-'));
   const cwd = join(directory, 'project'); const other = join(directory, 'other');

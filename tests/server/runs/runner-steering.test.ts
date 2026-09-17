@@ -9,13 +9,10 @@ import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { SteeringError, type SteeringInput } from '../../../server/runs/steering.js';
 import type { CodexStdioResult } from '../../../server/runs/codex-stdio.js';
 import type { Run, Session } from '../../../shared/types.js';
+import { until } from '../../helpers/until.ts';
 
 const ID = '10000000-0000-4000-8000-000000000001';
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; }
-async function until(check: () => boolean) {
-  const deadline = Date.now() + 3000;
-  while (!check()) { assert.ok(Date.now() < deadline, 'Runner fixture timed out'); await delay(5); }
-}
 async function fixture(t: TestContext, options: { external?: boolean; onSteer?: (input: SteeringInput) => Promise<void> } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-runner-steering-'));
   const stateDir = join(directory, 'state');

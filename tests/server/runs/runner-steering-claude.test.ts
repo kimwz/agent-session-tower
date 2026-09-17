@@ -8,12 +8,9 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { RunManager } from '../../../server/runs/manager.js';
 import type { Run, Session } from '../../../shared/types.js';
+import { until } from '../../helpers/until.ts';
 
 const nativeId = '10000000-0000-4000-8000-000000000001';
-async function until(check: () => boolean): Promise<void> {
-  for (let i = 0; i < 300; i++) { if (check()) return; await new Promise(resolve => setTimeout(resolve, 5)); }
-  throw new Error('Fixture state did not settle');
-}
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'tower-claude-steering-'));
