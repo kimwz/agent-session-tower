@@ -10,6 +10,7 @@ import { autoPromptPending, createAutoPromptAttempt, newerAutoPromptJob, type Au
 import { api, providerLabels, sessionTitle } from '../common/lib';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
+import { codexApprovalsRequest, readCodexApprovalsChoice } from '../sessions/codex-approvals-preference';
 
 interface AutoPromptDialogProps {
   visible: boolean;
@@ -169,7 +170,10 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
         setPreparing(true);
         const prepared = await prepareDraftAttachments(attachments);
         seenTerminalId.current = '';
-        attempt.current = createAutoPromptAttempt({ requestId: crypto.randomUUID(), provider, ...(cwd ? { cwd } : {}), prompt, ...prepared });
+        // Auto Prompt has no approval-review control of its own; a Codex session it
+        // creates follows the choice last made in the New Session dialog.
+        attempt.current = createAutoPromptAttempt({ requestId: crypto.randomUUID(), provider, ...(cwd ? { cwd } : {}), prompt, ...prepared,
+          ...codexApprovalsRequest(provider, readCodexApprovalsChoice()) });
         setAttemptId(attempt.current.id);
         setPreparing(false);
       }

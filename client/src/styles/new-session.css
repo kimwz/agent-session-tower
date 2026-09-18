@@ -126,6 +126,7 @@
   font-weight: 400;
 }
 .new-session-field input,
+.new-session-field select,
 .new-session-field textarea {
   display: block;
   width: 100%;
@@ -142,6 +143,7 @@
   color: #697d98;
 }
 .new-session-field input:focus-visible,
+.new-session-field select:focus-visible,
 .new-session-field textarea:focus-visible {
   outline: 2px solid #94b5f6;
   outline-offset: 2px;
@@ -151,6 +153,7 @@
   border-color: #d19191;
 }
 .new-session-field input:disabled,
+.new-session-field select:disabled,
 .new-session-field textarea:disabled {
   opacity: .65;
 }
@@ -235,6 +238,7 @@
   .new-session-provider > svg { width: 18px; height: 18px; }
   .new-session-provider strong { font-size: 11px; }
   .new-session-field input,
+  .new-session-field select,
   .new-session-field textarea { font-size: 16px; }
   .new-session-folder-input > svg { top: 17px; }
 }
