@@ -110,3 +110,5 @@
   .auto-prompt-composer .composer-hint>span { display:none; }
   .auto-prompt-result { padding:15px; }
 }
+.auto-prompt-approvals { flex:1; max-width:420px; }
+.auto-prompt-approvals>span { flex-shrink:0; color:#95a9c3; font-size:12px; }

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, Folder, LoaderCircle, Paperclip, Send, Sparkles, Square, TriangleAlert, X } from 'lucide-react';
+import { Check, ChevronDown, Folder, LoaderCircle, Paperclip, Send, ShieldCheck, Sparkles, Square, TriangleAlert, X } from 'lucide-react';
 import type { AutoPromptJob, Provider, ProviderHealth, Session } from '../../../shared/types';
 import { MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../../shared/attachments';
 import { DraftAttachments } from '../chat/ChatAttachments';
@@ -10,7 +10,8 @@ import { autoPromptPending, createAutoPromptAttempt, newerAutoPromptJob, type Au
 import { api, providerLabels, sessionTitle } from '../common/lib';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
-import { codexApprovalsRequest, readCodexApprovalsChoice } from '../sessions/codex-approvals-preference';
+import { codexApprovalsRequest, readCodexApprovalsChoice, type CodexApprovalsChoice } from '../sessions/codex-approvals-preference';
+import { CodexApprovalsSelect } from '../sessions/CodexApprovalsSelect';
 
 interface AutoPromptDialogProps {
   visible: boolean;
@@ -47,6 +48,7 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
   const sending = useRef(false);
   const generation = useRef(0);
   const [provider, setProvider] = useState<Provider>('claude');
+  const [approvals, setApprovals] = useState<CodexApprovalsChoice>(readCodexApprovalsChoice);
   const [cwd, setCwd] = useState('');
   const [prompt, setPrompt] = useState('');
   const [attachments, setAttachments] = useState<DraftAttachment[]>([]);
@@ -170,10 +172,8 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
         setPreparing(true);
         const prepared = await prepareDraftAttachments(attachments);
         seenTerminalId.current = '';
-        // Auto Prompt has no approval-review control of its own; a Codex session it
-        // creates follows the choice last made in the New Session dialog.
         attempt.current = createAutoPromptAttempt({ requestId: crypto.randomUUID(), provider, ...(cwd ? { cwd } : {}), prompt, ...prepared,
-          ...codexApprovalsRequest(provider, readCodexApprovalsChoice()) });
+          ...codexApprovalsRequest(provider, approvals) });
         setAttemptId(attempt.current.id);
         setPreparing(false);
       }
@@ -244,6 +244,7 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
         })}
       </div>
     </div>
+    {provider === 'codex' && <div className="auto-prompt-selectors"><label className="auto-prompt-approvals"><ShieldCheck size={16} aria-hidden="true" /><span>{t('승인 검토')}</span><CodexApprovalsSelect value={approvals} disabled={locked} onChange={setApprovals} /></label></div>}
     <form className={`composer auto-prompt-composer ${locked ? 'disabled' : ''} ${dragging ? 'composer-dragging' : ''}`} aria-busy={preparing || submitting || pending} onSubmit={event => { event.preventDefault(); void submit(); }}
       onDragOver={event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = locked ? 'none' : 'copy'; if (!locked) setDragging(true); } }}
       onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}

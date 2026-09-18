@@ -6,7 +6,8 @@ import type { Provider, ProviderHealth, Run, Session } from '../../../shared/typ
 import { ProviderIcon } from '../common/Icons';
 import { api, providerLabels } from '../common/lib';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
-import { codexApprovalsRequest, readCodexApprovalsChoice, storeCodexApprovalsChoice, type CodexApprovalsChoice } from './codex-approvals-preference';
+import { codexApprovalsRequest, readCodexApprovalsChoice, type CodexApprovalsChoice } from './codex-approvals-preference';
+import { CodexApprovalsSelect } from './CodexApprovalsSelect';
 
 interface NewSessionDialogProps {
   providers: ProviderHealth[];
@@ -146,13 +147,7 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
 
       {provider === 'codex' && <div className="new-session-field">
         <label htmlFor={`${id}-approvals`}>{t("승인 검토")}</label>
-        <select id={`${id}-approvals`} value={approvals} disabled={submitting}
-          title={t("자동 검토를 고르면 Codex의 검토 에이전트가 샌드박스 예외 요청을 판단합니다. 샌드박스 설정 자체는 그대로입니다.")}
-          onChange={event => { const choice = event.target.value as CodexApprovalsChoice; setApprovals(choice); storeCodexApprovalsChoice(choice); }}>
-          <option value="default">{t("Codex 기본값")}</option>
-          <option value="auto_review">{t("자동 검토 (Approve for me)")}</option>
-          <option value="user">{t("직접 확인 (Ask)")}</option>
-        </select>
+        <CodexApprovalsSelect id={`${id}-approvals`} value={approvals} disabled={submitting} onChange={setApprovals} />
         <p className="new-session-help">{t("이 선택은 새 대화와 함께 저장되며 나중에 Codex에서 바꿀 수 있습니다.")}</p>
       </div>}
 

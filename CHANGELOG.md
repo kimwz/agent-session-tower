@@ -7,7 +7,7 @@ format, and saved browser preferences are the compatibility surface.
 ## [1.1.0] - 2026-09-18
 
 ### Added
-- Choose who reviews Codex approval requests when creating a session: Codex's own default, its automatic reviewer ("Approve for me"), or always asking you. The choice is remembered in the browser, applies to Auto Prompt's new Codex sessions, and is stored with the Codex thread.
+- Choose who reviews Codex approval requests when creating a session: Codex's own default, its automatic reviewer ("Approve for me"), or always asking you. Tower used to start every Codex session asking you, even when your own Codex sessions use auto review. The same control appears in Auto Prompt, where it applies only when a new Codex session is created; an existing session keeps the reviewer stored with its thread. The choice is remembered in the browser, and the sandbox itself is unchanged.
 - Copy a ready-to-paste terminal command that continues the open session in Claude Code or Codex, from the chat header or the session details. It changes to the session's project folder first so the agent keeps working there.
 
 ### Notes
