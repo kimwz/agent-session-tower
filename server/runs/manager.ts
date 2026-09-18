@@ -10,6 +10,7 @@ import { attachmentMetadata, attachmentPrompt, AttachmentStore } from '../stores
 import { normalizeSessionTitle } from '../stores/session-titles.js';
 import type { CodexBridgeRun, CodexBridgeOptions } from './codex-bridge.js';
 import { requestedModel, validModelId } from '../providers/models.js';
+import { requestedApprovalsReviewer } from '../providers/approvals.js';
 import { SteeringError } from './steering.js';
 import { ClaudeControl } from './claude-control.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
@@ -205,6 +206,8 @@ export class RunManager extends EventEmitter {
     this.validateAdmission(input.prompt, Boolean(input.attachments?.length));
     if (!PROVIDERS.includes(input.provider)) throw new RunError('Claude 또는 Codex를 선택하세요.');
     const model = requestedModel(input.model);
+    // Only a Codex thread has an approvals reviewer; Claude keeps its own permission flow.
+    const approvalsReviewer = input.provider === 'codex' ? requestedApprovalsReviewer(input.codexApprovalsReviewer) : undefined;
     if (typeof input.cwd !== 'string' || input.cwd.includes('\0') || input.cwd.length > 4096) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
     const cwd = input.cwd === '~' || input.cwd.startsWith('~/') ? join(homedir(), input.cwd.slice(1)) : input.cwd;
     if (!isAbsolute(cwd)) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
@@ -232,6 +235,7 @@ export class RunManager extends EventEmitter {
       lastRequestAt: createdAt, lastMessage: input.prompt.trim().slice(0, 512), messageCount: 0, isSubagent: false, resumable: false, creationPending: true,
     };
     const run: Run = { id: randomUUID(), sessionId: id, prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}),
+      ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
     this.createdSessions.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}) });
     this.runs.set(run.id, run);
@@ -557,7 +561,8 @@ export class RunManager extends EventEmitter {
     let registered = false;
     const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
       executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
-      ...(!creating ? { threadId: session.nativeId } : {}), ...(run.model ? { model: run.model } : {}),
+      ...(!creating ? { threadId: session.nativeId } : { ...(run.codexApprovalsReviewer ? { approvalsReviewer: run.codexApprovalsReviewer } : {}) }),
+      ...(run.model ? { model: run.model } : {}),
       prompt: attachmentPrompt(run.prompt, attachments),
       imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path),
       onSession: async id => {

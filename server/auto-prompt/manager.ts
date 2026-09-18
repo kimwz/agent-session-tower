@@ -151,9 +151,11 @@ export class AutoPromptManager extends EventEmitter {
     if (!input || typeof input.requestId !== 'string' || !UUID.test(input.requestId) || !['claude', 'codex'].includes(input.provider)) throw new RunError('올바른 요청 ID와 Claude 또는 Codex가 필요합니다.');
     if (typeof input.prompt !== 'string' || input.prompt.length > 32_000 || (!input.prompt.trim() && !input.attachments?.length)) throw new RunError('지시문 또는 첨부 파일이 필요하며 지시문은 32,000자 이하여야 합니다.');
     if (input.cwd !== undefined && (typeof input.cwd !== 'string' || !isAbsolute(input.cwd) || input.cwd.includes('\0') || input.cwd.length > 4096)) throw new RunError('목록에 있는 작업 폴더를 선택하세요.');
+    if (input.codexApprovalsReviewer !== undefined && !['user', 'auto_review'].includes(input.codexApprovalsReviewer)) throw new RunError('승인 검토는 자동 검토 또는 직접 확인만 선택할 수 있습니다.');
     input = copy(input);
     input.requestId = input.requestId.toLowerCase();
-    const fingerprint = createHash('sha256').update(JSON.stringify({ provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: input.attachments ?? [] })).digest('hex');
+    const fingerprint = createHash('sha256').update(JSON.stringify({ provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: input.attachments ?? [],
+      ...(input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}) })).digest('hex');
     const previous = this.entries.get(input.requestId);
     const admitting = this.admissions.get(input.requestId);
     if ((previous && previous.fingerprint !== fingerprint) || (admitting && admitting.fingerprint !== fingerprint)) throw new RunError('같은 요청 ID에 다른 지시문을 사용할 수 없습니다.', 409);
@@ -175,6 +177,7 @@ export class AutoPromptManager extends EventEmitter {
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, staged: prepared.attachments, job: {
       id: input.requestId, provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
+      ...(input.provider === 'codex' && input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}),
       routerModel: MODELS[input.provider], status: 'queued', createdAt: now, updatedAt: now,
       ...(prepared.attachments.length ? { attachments: prepared.attachments.map(({ name, mimeType, size }) => ({ name, mimeType, size })) } : {}),
     } };
@@ -341,7 +344,8 @@ export class AutoPromptManager extends EventEmitter {
     const internal = { autoPromptId: job.id, validate };
     const run = decision.action === 'resume'
       ? await this.options.runs.enqueue(decision.sessionId!, job.prompt, { attachments }, internal)
-      : (await this.options.runs.create({ provider: job.provider, cwd, prompt: job.prompt, attachments }, internal)).run;
+      : (await this.options.runs.create({ provider: job.provider, cwd, prompt: job.prompt, attachments,
+        ...(job.codexApprovalsReviewer ? { codexApprovalsReviewer: job.codexApprovalsReviewer } : {}) }, internal)).run;
     this.complete(entry, run);
     await this.persist(); this.emit('change');
   }
@@ -387,5 +391,6 @@ function validEntry(value: unknown): value is Entry {
     && typeof job.prompt === 'string' && job.prompt.length <= 32_000 && typeof job.routerModel === 'string'
     && typeof job.createdAt === 'string' && typeof job.updatedAt === 'string'
     && ['queued', 'routing', 'dispatching', 'completed', 'error', 'cancelled'].includes(String(job.status))
-    && (job.cwd === undefined || typeof job.cwd === 'string' && isAbsolute(job.cwd) && job.cwd.length <= 4096);
+    && (job.cwd === undefined || typeof job.cwd === 'string' && isAbsolute(job.cwd) && job.cwd.length <= 4096)
+    && (job.codexApprovalsReviewer === undefined || ['user', 'auto_review'].includes(String(job.codexApprovalsReviewer)));
 }

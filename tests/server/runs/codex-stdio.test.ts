@@ -160,6 +160,20 @@ test('new native identity is durable before prompt admission, with only an expli
   assert.equal(f.sent.some(frame => frame.method === 'thread/resume'), false);
 });
 
+test('a chosen approval reviewer is sent only when the conversation is created', async t => {
+  const created = await fixture(t, 'complete', { threadId: undefined, approvalsReviewer: 'auto_review' });
+  await created.run.start(); await created.run.done;
+  // The fixture answers with a different effective reviewer; the run still proceeds.
+  assert.deepEqual(created.sent.find(frame => frame.method === 'thread/start')?.params, { cwd: created.directory, approvalsReviewer: 'auto_review' });
+  assert.equal(created.finished[0].status, 'completed');
+  const resumed = await fixture(t, 'complete', { approvalsReviewer: 'auto_review' });
+  await resumed.run.start(); await resumed.run.done;
+  assert.deepEqual(resumed.sent.find(frame => frame.method === 'thread/resume')?.params, { threadId: ID, excludeTurns: true });
+  const omitted = await fixture(t, 'complete', { threadId: undefined });
+  await omitted.run.start(); await omitted.run.done;
+  assert.deepEqual(omitted.sent.find(frame => frame.method === 'thread/start')?.params, { cwd: omitted.directory });
+});
+
 test('identity persistence failure and resume ownership conflicts never submit a prompt', async t => {
   for (const mode of ['save-failure', 'mismatch', 'active', 'writer-conflict']) await t.test(mode, async t => {
     const f = await fixture(t, mode, mode === 'save-failure' ? { onSession: async () => { throw new Error('Cannot save native identity.'); } } : {});

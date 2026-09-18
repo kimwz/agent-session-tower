@@ -21,6 +21,7 @@ export function isSavedRun(value: unknown): value is Run {
   return typeof run.id === 'string' && typeof run.sessionId === 'string' && typeof run.prompt === 'string'
     && typeof run.createdAt === 'string' && typeof run.output === 'string'
     && (run.model === undefined || validModelId(run.model))
+    && (run.codexApprovalsReviewer === undefined || ['user', 'auto_review'].includes(run.codexApprovalsReviewer))
     && (run.autoPromptId === undefined || UUID.test(run.autoPromptId))
     && (run.steering === undefined || isSavedSteering(run.steering, run))
     && (run.attachments === undefined || (Array.isArray(run.attachments) && run.attachments.length <= 10 && run.attachments.every(item => attachmentMetadata(item))))

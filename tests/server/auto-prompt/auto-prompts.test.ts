@@ -104,6 +104,21 @@ test('Auto selects among every directory including closed sessions and empty pin
   assert.equal((f.dispatches[0].input as CreateSessionRequest).provider, 'claude');
 });
 
+test('a new session created by Auto Prompt uses the chosen approval reviewer, and Claude never carries it', async t => {
+  const f = await fixture(t);
+  f.respond(async () => create());
+  const chosen = await f.manager.submit(request(f.cwd, { codexApprovalsReviewer: 'auto_review' }));
+  assert.equal((await f.finished(chosen.id)).status, 'completed');
+  assert.equal((f.dispatches[0].input as CreateSessionRequest).codexApprovalsReviewer, 'auto_review');
+  const claude = await f.manager.submit(request(f.cwd, { provider: 'claude', codexApprovalsReviewer: 'auto_review' }));
+  assert.equal((await f.finished(claude.id)).status, 'completed');
+  assert.equal((f.dispatches[1].input as CreateSessionRequest).codexApprovalsReviewer, undefined);
+  const plain = await f.manager.submit(request(f.cwd));
+  assert.equal((await f.finished(plain.id)).status, 'completed');
+  assert.equal((f.dispatches[2].input as CreateSessionRequest).codexApprovalsReviewer, undefined);
+  await assert.rejects(f.manager.submit(request(f.cwd, { codexApprovalsReviewer: 'always' as 'user' })), { statusCode: 400 });
+});
+
 test('hidden-only folders without sessions remain available to Auto and explicit folder routing without being pinned', async t => {
   for (const mode of ['auto', 'explicit'] as const) await t.test(mode, async t => {
     const f = await fixture(t);

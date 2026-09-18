@@ -79,6 +79,40 @@ test('new-session model is persisted and passed as a native override', async t =
   assert.equal(f.manager.list().length, count);
 });
 
+test('a chosen approval reviewer reaches the new Codex conversation only, and never a resume', async t => {
+  const f = await fixture(t);
+  const threadParams = async () => JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8')).threadParams;
+  const accepted = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Create with auto review', codexApprovalsReviewer: 'auto_review' });
+  assert.equal(accepted.run.codexApprovalsReviewer, 'auto_review');
+  assert.equal((await finished(f.manager, accepted.run.id)).status, 'completed');
+  assert.equal((await threadParams()).approvalsReviewer, 'auto_review');
+  const resumed = await f.manager.enqueue(accepted.session.id, 'continue in the same conversation');
+  assert.equal((await finished(f.manager, resumed.id)).status, 'completed');
+  assert.equal((await threadParams()).approvalsReviewer, undefined, 'Codex keeps the choice with the thread');
+  const untouched = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Create with the Codex default' });
+  assert.equal((await finished(f.manager, untouched.run.id)).status, 'completed');
+  assert.equal((await threadParams()).approvalsReviewer, undefined);
+  const claude = await f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Claude ignores it', codexApprovalsReviewer: 'auto_review' });
+  assert.equal(claude.run.codexApprovalsReviewer, undefined);
+  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Invalid reviewer', codexApprovalsReviewer: 'always' as 'user' }), { statusCode: 400 });
+});
+
+test('a queued creation keeps its approval reviewer across a Tower restart', async t => {
+  const f = await fixture(t, 'hold-before-id', 1);
+  const holding = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'hold', codexApprovalsReviewer: 'user' });
+  await until(() => f.manager.list().find(run => run.id === holding.run.id && run.status === 'running'));
+  const queued = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'queued', codexApprovalsReviewer: 'auto_review' });
+  const claude = await f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'queued claude', codexApprovalsReviewer: 'auto_review' });
+  await f.manager.close();
+  const restarted = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {},
+    findExecutable: async () => { throw new Error('Restart verification must not launch providers'); } });
+  await restarted.start();
+  try {
+    assert.equal(restarted.list().find(run => run.id === queued.run.id)?.codexApprovalsReviewer, 'auto_review');
+    assert.equal(restarted.list().find(run => run.id === claude.run.id)?.codexApprovalsReviewer, undefined);
+  } finally { await restarted.close(); }
+});
+
 for (const provider of ['claude', 'codex'] as Provider[]) {
   test(`creates a real ${provider} CLI invocation, confirms identity, then resumes that exact conversation`, async t => {
     const f = await fixture(t);

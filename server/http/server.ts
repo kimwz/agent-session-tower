@@ -6,6 +6,7 @@ import { normalizeProjectGroupPatch } from '../stores/project-groups.js';
 import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
 import { isImageAttachment, MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
 import { requestedModel } from '../providers/models.js';
+import { requestedApprovalsReviewer } from '../providers/approvals.js';
 import { SseClient } from './sse-client.js';
 import { publicSnapshot } from './public-snapshot.js';
 import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
@@ -125,7 +126,7 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
       if (req.method === 'GET' && path === '/api/snapshot') return json(res, 200, snapshot());
       if (req.method === 'POST' && path === '/api/auto-prompts') {
         const body = await readJson(req, Math.ceil(MAX_TOTAL_ATTACHMENT_BYTES / 3) * 4 + 256 * 1024);
-        if (Object.keys(body).some(key => !['requestId', 'provider', 'cwd', 'prompt', 'attachments'].includes(key))) {
+        if (Object.keys(body).some(key => !['requestId', 'provider', 'cwd', 'prompt', 'attachments', 'codexApprovalsReviewer'].includes(key))) {
           return json(res, 400, { error: 'Auto Prompt 요청에는 폴더, 도구, 프롬프트와 첨부 파일만 지정할 수 있습니다.' });
         }
         if (typeof body.requestId !== 'string' || !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(body.requestId)) {
@@ -141,9 +142,11 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
         if (typeof body.prompt !== 'string' || (!body.prompt.trim() && !attachments?.length) || body.prompt.length > 32_000) {
           return json(res, 400, { error: '메시지나 첨부 파일을 추가하세요. 메시지는 32,000자 이하여야 합니다.' });
         }
+        const reviewer = requestedApprovalsReviewer(body.codexApprovalsReviewer);
         if (!backend.startAutoPrompt) return json(res, 503, { error: 'Auto Prompt를 현재 사용할 수 없습니다.' });
         const job = await backend.startAutoPrompt({ requestId: body.requestId, provider: body.provider, prompt: body.prompt,
-          ...(body.cwd !== undefined ? { cwd: body.cwd as string } : {}), ...(attachments ? { attachments } : {}) });
+          ...(body.cwd !== undefined ? { cwd: body.cwd as string } : {}), ...(attachments ? { attachments } : {}),
+          ...(reviewer && body.provider === 'codex' ? { codexApprovalsReviewer: reviewer } : {}) });
         return json(res, 202, { job });
       }
       const autoPromptMatch = url.pathname.match(/^\/api\/auto-prompts\/([a-f\d-]+)(\/cancel)?$/i);
@@ -192,7 +195,10 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
         const title = body.title === undefined ? undefined : normalizeSessionTitle(body.title);
         if (!backend.createSession) return json(res, 503, { error: '새 세션을 생성할 수 없습니다.' });
         const model = requestedModel(body.model);
-        const result = await backend.createSession({ provider: body.provider, cwd: body.cwd, prompt: body.prompt.trim(), ...(title ? { title } : {}), ...(model ? { model } : {}) });
+        // Like the model override, an unusable value fails before admission; only a Codex thread has a reviewer.
+        const reviewer = requestedApprovalsReviewer(body.codexApprovalsReviewer);
+        const result = await backend.createSession({ provider: body.provider, cwd: body.cwd, prompt: body.prompt.trim(), ...(title ? { title } : {}), ...(model ? { model } : {}),
+          ...(reviewer && body.provider === 'codex' ? { codexApprovalsReviewer: reviewer } : {}) });
         return json(res, 202, { ...result, session: publicSession(result.session) });
       }
       const detailMatch = path.match(/^\/api\/sessions\/([^/]+)$/);

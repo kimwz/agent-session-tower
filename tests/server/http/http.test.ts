@@ -76,7 +76,8 @@ test('local HTTP service protects session data and task mutations, and streams r
     snapshot: () => snapshot,
     detail: async id => id === session.id ? { session, messages: [], hasMore: false } : undefined,
     enqueue: async (_id, prompt, request) => { enqueued++; return { ...run, prompt, ...(request?.model ? { model: request.model } : {}) }; },
-    createSession: async input => { created++; return { session, run: { ...run, prompt: input.prompt, ...(input.model ? { model: input.model } : {}) } }; },
+    createSession: async input => { created++; return { session, run: { ...run, prompt: input.prompt, ...(input.model ? { model: input.model } : {}),
+      ...(input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}) } }; },
     cancel: async () => {}, subscribe: () => () => {},
   } });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -140,6 +141,24 @@ test('local HTTP service protects session data and task mutations, and streams r
     assert.equal(created, 0);
     const create = await fetch(`${base}/api/sessions`, { method: 'POST', headers, body: JSON.stringify({ ...body, model: 'sonnet' }) });
     assert.equal(create.status, 202); assert.equal((await create.json()).run.model, 'sonnet'); assert.equal(created, 1);
+  });
+  await t.test('the chosen approval reviewer reaches session creation and unknown values are refused', async () => {
+    const { token } = await (await fetch(`${base}/api/bootstrap`)).json();
+    const headers = { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+    const body = { provider: 'codex', cwd: '/tmp/project', prompt: 'new session' };
+    const before = created;
+    for (const codexApprovalsReviewer of ['', 'auto', 'AUTO_REVIEW', 42, null]) {
+      assert.equal((await fetch(`${base}/api/sessions`, { method: 'POST', headers, body: JSON.stringify({ ...body, codexApprovalsReviewer }) })).status, 400);
+    }
+    assert.equal(created, before);
+    const chosen = await fetch(`${base}/api/sessions`, { method: 'POST', headers, body: JSON.stringify({ ...body, codexApprovalsReviewer: 'auto_review' }) });
+    assert.equal(chosen.status, 202);
+    assert.equal((await chosen.json()).run.codexApprovalsReviewer, 'auto_review');
+    const claude = await fetch(`${base}/api/sessions`, { method: 'POST', headers, body: JSON.stringify({ ...body, provider: 'claude', codexApprovalsReviewer: 'auto_review' }) });
+    assert.equal(claude.status, 202);
+    assert.equal((await claude.json()).run.codexApprovalsReviewer, undefined);
+    const plain = await fetch(`${base}/api/sessions`, { method: 'POST', headers, body: JSON.stringify(body) });
+    assert.equal((await plain.json()).run.codexApprovalsReviewer, undefined);
   });
   await t.test('SSE connects with an immediate sanitized snapshot', async () => {
     const controller = new AbortController();

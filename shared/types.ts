@@ -1,4 +1,6 @@
 export type Provider = 'claude' | 'codex';
+/** Who reviews Codex approval requests. Absent keeps Codex's own configured reviewer. */
+export type CodexApprovalsReviewer = 'user' | 'auto_review';
 export type SessionStatus = 'working' | 'idle' | 'completed' | 'error';
 export interface Session {
   id: string;
@@ -91,6 +93,7 @@ export interface Run {
   error?: string;
   attachments?: Attachment[];
   model?: string;
+  codexApprovalsReviewer?: CodexApprovalsReviewer;
   autoPromptId?: string;
   contextUsage?: SessionContextUsage & { model: string; updatedAt: string };
   approvals?: RunApproval[];
@@ -134,6 +137,7 @@ export interface CreateSessionRequest {
   prompt: string;
   title?: string;
   model?: string;
+  codexApprovalsReviewer?: CodexApprovalsReviewer;
   attachments?: AttachmentInput[];
 }
 export interface AutoPromptRequest {
@@ -141,6 +145,7 @@ export interface AutoPromptRequest {
   provider: Provider;
   cwd?: string;
   prompt: string;
+  codexApprovalsReviewer?: CodexApprovalsReviewer;
   attachments?: AttachmentInput[];
 }
 export interface AutoPromptDecision {
@@ -154,6 +159,7 @@ export interface AutoPromptJob {
   provider: Provider;
   cwd?: string;
   prompt: string;
+  codexApprovalsReviewer?: CodexApprovalsReviewer;
   routerModel: string;
   status: 'queued' | 'routing' | 'dispatching' | 'completed' | 'error' | 'cancelled';
   stage?: 'directory' | 'session';

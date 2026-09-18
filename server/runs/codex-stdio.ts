@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStd
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { validateApprovalResponse } from '../../shared/approval-interactions.js';
-import type { RunApproval, RunApprovalResponse } from '../../shared/types.js';
+import type { CodexApprovalsReviewer, RunApproval, RunApprovalResponse } from '../../shared/types.js';
 import { requestedModel } from '../providers/models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
 import { APP_NAME, APP_TITLE, APP_VERSION } from '../../shared/app-identity.js';
@@ -18,6 +18,8 @@ export interface CodexStdioOptions {
   env?: NodeJS.ProcessEnv;
   threadId?: string;
   model?: string;
+  /** Only a new thread accepts it; Codex stores the choice with the thread itself. */
+  approvalsReviewer?: CodexApprovalsReviewer;
   prompt: string;
   imagePaths?: readonly string[];
   spawnProcess?: SpawnProcess;
@@ -161,9 +163,12 @@ class StdioRun implements CodexStdioRun {
     if (this.result) return;
     this.write({ method: 'initialized' });
     const resumed = await this.request(this.options.threadId ? 'thread/resume' : 'thread/start', {
-      ...(this.options.threadId ? { threadId: this.options.threadId, excludeTurns: true } : { cwd: this.options.cwd }),
+      ...(this.options.threadId ? { threadId: this.options.threadId, excludeTurns: true }
+        : { cwd: this.options.cwd, ...(this.options.approvalsReviewer ? { approvalsReviewer: this.options.approvalsReviewer } : {}) }),
       ...(this.options.model ? { model: this.options.model } : {}),
     });
+    // An older Codex may echo a different approvalsReviewer. The conversation is
+    // still the requested one, so continue rather than discarding the new thread.
     if (this.result) return;
     const id = resumed?.thread?.id;
     if (typeof id !== 'string' || !UUID.test(id) || (this.options.threadId && id !== this.options.threadId)) {
