@@ -4,9 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.0.1] - 2026-09-17
+## [1.1.0] - 2026-09-18
 
 ### Added
+- Choose who reviews Codex approval requests when creating a session: Codex's own default, its automatic reviewer ("Approve for me"), or always asking you. The choice is remembered in the browser, applies to Auto Prompt's new Codex sessions, and is stored with the Codex thread.
 - Copy a ready-to-paste terminal command that continues the open session in Claude Code or Codex, from the chat header or the session details. It changes to the session's project folder first so the agent keeps working there.
 
 ### Notes
