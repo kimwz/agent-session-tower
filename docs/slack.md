@@ -15,6 +15,12 @@ This initial integration uses a private Slack app with Socket Mode and a **user 
 
 Socket Mode needs outbound HTTPS and WebSocket access to Slack; it does not require a public callback URL. Slack delivers only messages accessible to the app's authorized user and scopes. This version processes newly delivered direct user mentions (`<@USER_ID>`), not historic mentions, edits that introduce a mention, group mentions, or bot-generated messages. Events missed during a prolonged outage are not backfilled.
 
+## Canvas monitor
+
+Connecting an account adds a **Slack monitor** to the canvas. Drag its header to move it; its position is remembered in both automatic and manual layouts. New mentions appear as cards inside it, and active work uses the same animated rainbow border as agent sessions. Connection problems remain visible alongside running work.
+
+Click a mention to see the original thread, matched instruction and decision summary, Auto Prompt routing, recent execution messages, and the resulting Slack reply. Open the execution session for its full conversation. An uncertain reply delivery is labeled as unconfirmed. Click the monitor header for the mention list; canvas cards show the latest eight initially with a **Show more** control.
+
 ## Instructions
 
 Each item has a name, matching condition, execution instructions, reply instructions, provider, optional known working folder, and enabled flag. The tool-free classifier selects the first applicable rule in display order. A mention runs at most one rule. No clear match means no execution or reply. The first enabled rule's provider performs classification; the matched rule's provider performs routing, execution, and reply composition.

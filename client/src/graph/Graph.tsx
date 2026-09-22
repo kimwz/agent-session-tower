@@ -4,13 +4,18 @@ import { applyNodeChanges, Background, BackgroundVariant, ReactFlow, ReactFlowPr
 import { Maximize, Minus, Plus, Scan } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../../shared/types';
 import { nodeTypes, type ProjectData } from './GraphNodes';
+import type { SlackPublicStatus } from '../../../shared/slack';
+import { SlackMonitorNode, SlackMentionNode } from './SlackGraphNodes';
+import { SLACK_MONITOR_ID, SLACK_POSITION_KEY, parseSlackPosition, visibleSlackMentions } from './slack-graph';
+import { slackWorkflowWorking } from '../slack/slack-monitor';
+const canvasNodeTypes = { ...nodeTypes, slackMonitor: SlackMonitorNode, slackMention: SlackMentionNode };
 import { graphProjectId, graphProjectKey, graphSessionGroups, clearHostPosition, HOST_HEIGHT } from './graph-layout';
 import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualProjectBounds, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, reconcileManualGraph, setGraphLayoutMode, type GraphLayoutMode, type GraphPreferences } from './graph-layout-preferences';
 import { includePinnedProjectGroups, projectGroupLabel } from '../project-groups/project-groups';
 import { CanvasSettings } from './CanvasSettings';
 import { projectGroupMinimumWidth, projectGroupTitleMeasurer } from '../project-groups/project-group-title';
 
-type GraphProps = { token?: string; providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
+type GraphProps = { slack?: SlackPublicStatus | null; selectedSlackId?: string | null; onSelectSlack?: (id: string | null) => void; token?: string; providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
 
 function readPreferences(): GraphPreferences {
   try { return parseGraphPreferences(window.localStorage.getItem(GRAPH_PREFERENCES_KEY)); }
@@ -21,7 +26,7 @@ function viewportTransitionDuration() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 280;
 }
 
-function Canvas({ token = '', providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
+function Canvas({ slack, selectedSlackId, onSelectSlack, token = '', providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
   const { language } = useI18n();
   const { fitView, zoomIn, zoomOut, getViewport, setViewport } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
@@ -63,6 +68,9 @@ function Canvas({ token = '', providers, sessions, allSessions = sessions, sessi
   const [motion, setMotion] = useState(() => !window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const [zoom, setZoom] = useState(100);
   const [graphLimit, setGraphLimit] = useState(8);
+  const [slackLimit, setSlackLimit] = useState(8);
+  const [slackPosition, setSlackPosition] = useState(() => { try { return parseSlackPosition(window.localStorage.getItem(SLACK_POSITION_KEY)); } catch { return null; } });
+  const showMoreSlack = useCallback(() => setSlackLimit(value => value + 8), []);
   const [preferences, setPreferences] = useState(readPreferences);
   const [manualFitRequest, setManualFitRequest] = useState(0);
   const manual = preferences.mode === 'manual';
@@ -129,13 +137,23 @@ function Canvas({ token = '', providers, sessions, allSessions = sessions, sessi
       });
       x += width + 36;
     });
+    if (slack?.connected) {
+      const mentions = visibleSlackMentions(slack.events, slackLimit, selectedSlackId);
+      const right = ns.filter(node => node.type === 'projectGroup').reduce((max, node) => Math.max(max, node.position.x + Number(node.style?.width || 0) + 36), 0);
+      const columns = mentions.length > 1 ? 2 : 1;
+      const rows = Math.max(1, Math.ceil(mentions.length / columns));
+      const remaining = slack.events.length - mentions.length;
+      ns.push({ id: SLACK_MONITOR_ID, type: 'slackMonitor', position: slackPosition || { x: right, y: 185 }, style: { width: columns * 268 + 14, height: rows * 215 + 140 + (remaining > 0 ? 30 : 0) }, zIndex: 1, draggable: true, dragHandle: '.slack-monitor-drag-handle', selectable: false, focusable: false, data: { name: slack.account?.teamName || 'Slack', enabled: slack.enabled, status: slack.status, error: slack.error, count: slack.events.length, active: slack.events.filter(slackWorkflowWorking).length, remaining, onMore: showMoreSlack, onSelect: onSelectSlack } });
+      mentions.forEach((event, index) => ns.push({ id: `slack:mention:${event.id}`, type: 'slackMention', parentId: SLACK_MONITOR_ID, extent: 'parent', style: { pointerEvents: 'all' }, position: { x: 20 + (index % columns) * 268, y: 120 + Math.floor(index / columns) * 215 }, zIndex: 3, draggable: false, selectable: false, focusable: false, data: { event, selected: event.id === selectedSlackId, onSelect: onSelectSlack } }));
+      es.push({ id: 'host-slack', source: 'host', target: SLACK_MONITOR_ID, type: 'smoothstep', animated: motion && slack.events.some(slackWorkflowWorking), style: { stroke: '#675077', strokeWidth: 1.2 } });
+    }
     const hostPosition = manual ? clearHostPosition(manualLayout.host, ns.filter(node => node.type === 'projectGroup').map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }))) : { x: Math.max(0, (x - 36) / 2 - 128), y: 0 };
     ns.push({ id: 'host', type: 'host', position: hostPosition, data: { name: hostname, active: sessions.filter(s => s.status === 'working').length, providers, disabled: groupActionsDisabled, onAutoPrompt }, style: { width: 256, height: HOST_HEIGHT, pointerEvents: 'all' }, zIndex: 20, draggable: manual, dragHandle: '.host-node', selectable: false, focusable: false });
     return { modelNodes: ns, edges: es, shown: grouped.reduce((total, [, members]) => total + members.length, 0) };
-  }, [token, sessions, selectedId, onSelect, hostname, providers, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt]);
+  }, [slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, token, sessions, selectedId, onSelect, hostname, providers, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt]);
 
   const [nodes, setNodes] = useState(modelNodes);
-  const visibleProjectKey = modelNodes.filter(node => node.type === 'projectGroup').map(node => node.id).join('|');
+  const visibleProjectKey = modelNodes.filter(node => node.type === 'projectGroup' || node.type === 'slackMonitor').map(node => node.id).join('|');
   useLayoutEffect(() => {
     setNodes(current => {
       const prior = new Map(current.map(node => [node.id, node]));
@@ -145,8 +163,15 @@ function Canvas({ token = '', providers, sessions, allSessions = sessions, sessi
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     setNodes(current => applyNodeChanges(changes, current));
+    for (const change of changes) {
+      if (change.type === 'position' && change.id === SLACK_MONITOR_ID && change.position) {
+        const position = { ...change.position };
+        setSlackPosition(position);
+        try { window.localStorage.setItem(SLACK_POSITION_KEY, JSON.stringify(position)); } catch { /* Dragging remains usable without storage. */ }
+      }
+    }
     if (!manual) return;
-    const moves = changes.flatMap(change => change.type === 'position' && change.position ? [{ id: change.id, position: change.position }] : []);
+    const moves = changes.flatMap(change => change.type === 'position' && change.id !== SLACK_MONITOR_ID && !change.id.startsWith('slack:mention:') && change.position ? [{ id: change.id, position: change.position }] : []);
     if (!moves.length) return;
     setPreferences(current => {
       const reconciled = reconcileManualGraph(current.layout, allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions);
@@ -167,7 +192,7 @@ function Canvas({ token = '', providers, sessions, allSessions = sessions, sessi
     if (manual) return;
     const timeout = window.setTimeout(() => fitVisibleGraph({ padding: 0.1, minZoom: 0.15, maxZoom: 0.95 }), 100);
     return () => window.clearTimeout(timeout);
-  }, [filterKey, fitVisibleGraph, graphLimit, manual, visibleProjectKey]);
+  }, [filterKey, fitVisibleGraph, graphLimit, manual, visibleProjectKey, slackLimit]);
 
   useEffect(() => {
     if (!manual || !manualFitRequest) return;
@@ -177,10 +202,10 @@ function Canvas({ token = '', providers, sessions, allSessions = sessions, sessi
 
   const working = sessions.filter(session => session.status === 'working').length;
   return <div ref={canvas} className={`graph-canvas ${manual ? 'manual-layout' : 'auto-layout'} ${motion ? '' : 'motion-off'}`}>
-    <ReactFlow onPaneClick={onCanvasClick} onDoubleClick={onCanvasDoubleClick} zoomOnDoubleClick={false} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={nodeTypes} fitView fitViewOptions={{ padding: 0.1, minZoom: 0.15, maxZoom: 0.95, duration: 0 }} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(_, viewport) => setZoom(Math.round(viewport.zoom * 100))} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
+    <ReactFlow onPaneClick={onCanvasClick} onDoubleClick={onCanvasDoubleClick} zoomOnDoubleClick={false} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={canvasNodeTypes} fitView fitViewOptions={{ padding: 0.1, minZoom: 0.15, maxZoom: 0.95, duration: 0 }} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(_, viewport) => setZoom(Math.round(viewport.zoom * 100))} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
       <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#283343" />
     </ReactFlow>
-    {emptyState}
+    {!slack?.connected && emptyState}
     <div className="canvas-quick-controls" aria-label={t("캔버스 보기 도구")}>
       <div className="canvas-zoom-controls" role="group" aria-label={t("그래프 보기 조절")}><button onClick={() => { void zoomOut({ duration: 0 }); }} aria-label={t("그래프 축소")} title={t("축소")}><Minus size={15} /></button><span>{zoom}%</span><button onClick={() => { void zoomIn({ duration: 0 }); }} aria-label={t("그래프 확대")} title={t("확대")}><Plus size={15} /></button><i /><button onClick={() => fitVisibleGraph({ padding: 0.13, maxZoom: 0.95 })} aria-label={t("전체 그래프 맞춤")} title={t("전체 맞춤")}><Maximize size={15} /></button>{selectedId && nodes.some(n => n.id === selectedId) && <button className="canvas-find-session" onClick={() => fitVisibleGraph({ nodes: [{ id: selectedId }], maxZoom: 1.1, padding: 0.7 })} aria-label={t("선택한 세션 위치로 이동")} title={t("선택한 세션 찾기")}><Scan size={15} /></button>}</div>
       <CanvasSettings manual={manual} onLayoutChange={changeMode} motion={motion} onMotionChange={setMotion} showHidden={showHidden} onShowHiddenChange={onShowHiddenChange} suspended={settingsSuspended} />

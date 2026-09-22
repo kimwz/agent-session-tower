@@ -1,0 +1,15 @@
+.slack-monitor-panel .chat-header { border-top: 3px solid #a779c6; }
+.slack-monitor-panel h2 { font-size: 15px; margin: 0; }
+.slack-monitor-content { overflow-y: auto; flex: 1; min-height: 0; padding: 18px; font-size: var(--chat-font-size); }
+.slack-monitor-content section { margin: 20px 0; padding-top: 14px; border-top: 1px solid var(--border); }
+.slack-monitor-content h3 { font-size: 13px; margin: 0 0 10px; }
+.slack-monitor-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.65; }
+.slack-monitor-muted, .slack-monitor-thread-message small { opacity: .65; font-size: 12px; }
+.slack-monitor-back { display: inline-flex; align-items: center; gap: 6px; padding: 7px 9px; border-radius: 6px; }
+.slack-monitor-entry { width: 100%; text-align: left; display: grid; gap: 7px; padding: 12px; margin: 8px 0; border: 1px solid var(--border); border-radius: 9px; background: transparent; color: inherit; }
+.slack-monitor-entry strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slack-monitor-entry time { font-size: 11px; opacity: .6; }
+.slack-monitor-state { margin-top: 14px; font-weight: 600; color: #b793cf; }
+.slack-monitor-thread-message { padding: 10px; margin-top: 8px; border-left: 2px solid #a779c6; }
+.slack-monitor-content [role=alert] { color: var(--red, #e78888); overflow-wrap: anywhere; }
+.slack-monitor-content details summary { cursor: pointer; }

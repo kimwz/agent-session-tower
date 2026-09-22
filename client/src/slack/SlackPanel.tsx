@@ -5,6 +5,7 @@ import { api } from '../common/lib';
 import { authPost } from '../auth/AuthGate';
 import { translateMessage, useI18n } from '../i18n/i18n';
 import type { SlackRule, SlackPublicStatus } from '../../../shared/slack';
+import { SLACK_CHANGED_EVENT } from './use-slack-monitor';
 
 export function SlackButton({ token }: { token: string }) {
   const { t } = useI18n();
@@ -50,6 +51,7 @@ export function SlackPanel({ token, onClose }: { token: string; onClose: () => v
     inFlight.current = true; ++revision.current; setBusy(true); setError(''); setNotice('');
     try {
       await authPost(path, token, body);
+      window.dispatchEvent(new Event(SLACK_CHANGED_EVENT));
       if (savedRules) { dirtyRef.current = false; setDirty(false); setNotice(t('지침을 저장했습니다.')); }
       await refreshRef.current();
       return true;
