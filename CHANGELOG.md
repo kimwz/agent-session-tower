@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.5.2] - 2026-09-22
+
+### Fixed
+- Keep projects under `/tmp` and `/private/tmp` off the canvas in both layout modes, while preserving their session history and sidebar access.
+
 ## [1.5.1] - 2026-09-22
 
 ### Fixed

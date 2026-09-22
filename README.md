@@ -38,7 +38,7 @@ The integrated terminal runs an interactive shell in that folder on the Tower se
 ## What you can do
 
 - **See existing sessions immediately.** Automatically discovers local Claude Code and Codex histories, including sessions started outside Tower.
-- **Follow work on a live graph.** View projects, sessions, and subagents together, with working, waiting, completed, and error states.
+- **Follow work on a live graph.** View projects, sessions, and subagents together, with working, waiting, completed, and error states. Temporary projects under `/tmp` and `/private/tmp` stay off the canvas; their sessions remain accessible in the sidebar.
 - **Check account usage.** See Claude Code and Codex usage as small donuts inside the machine node. Hover or focus for usage windows and reset times.
 - **Create new sessions.** Choose Claude Code or Codex, pick a project folder, and send the first request from the web. A folder that does not exist yet is created, and the folder is marked as trusted for that CLI so it does not stop at the trust prompt.
 - **Route a prompt automatically.** Open **Auto Prompt** from the sparkle button on a machine or folder. A separate Opus or GPT Sol agent chooses a suitable existing session or starts a new one, and shows its reason.

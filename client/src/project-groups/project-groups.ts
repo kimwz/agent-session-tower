@@ -1,6 +1,11 @@
 import { translate as t } from '../i18n/i18n';
 import type { ProjectGroup, Session } from '../../../shared/types';
 
+/** Temporary worktrees stay in session history but do not occupy the canvas. */
+function temporaryCanvasProject(cwd: string): boolean {
+  return /^\/(?:private\/)?tmp(?:\/|$)/.test(cwd);
+}
+
 export function projectGroupLabel(cwd: string, title?: string, fallback?: string): string {
   return title?.trim() || fallback || cwd.split('/').filter(Boolean).at(-1) || t("프로젝트 없음");
 }
@@ -22,7 +27,7 @@ export function visiblePinnedProjectGroups(groups: ProjectGroup[], sessions: Ses
   const term = query.trim().toLocaleLowerCase();
   const labels = new Map(sessions.filter(session => session.cwd).map(session => [session.cwd, session.project]));
   const matchingFolders = new Set(matchingSessions.map(session => session.cwd));
-  return groups.filter(group => (group.pinned || (showHidden && group.hidden)) && (showHidden || !group.hidden)
+  return groups.filter(group => !temporaryCanvasProject(group.cwd) && (group.pinned || (showHidden && group.hidden)) && (showHidden || !group.hidden)
     && (project === 'all' || group.cwd === project)
     && (!term || `${group.title} ${group.cwd} ${labels.get(group.cwd) || ''}`.toLocaleLowerCase().includes(term)
       || (showHidden && group.hidden && matchingFolders.has(group.cwd))));
@@ -30,9 +35,9 @@ export function visiblePinnedProjectGroups(groups: ProjectGroup[], sessions: Ses
 
 /** Hiding changes only the canvas projection, never session membership or the existing filters. */
 export function canvasVisibleSessions(sessions: Session[], groups: ProjectGroup[], showHidden: boolean): Session[] {
-  if (showHidden) return sessions;
   const hidden = new Set(groups.filter(group => group.hidden).map(group => group.cwd));
-  return sessions.filter(session => !hidden.has(session.cwd));
+  const visible = sessions.filter(session => !temporaryCanvasProject(session.cwd) && (showHidden || !hidden.has(session.cwd)));
+  return visible.length === sessions.length ? sessions : visible;
 }
 
 /** Keep the card ordering intact; empty pins follow in a stable, readable order. */

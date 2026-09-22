@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { ProjectGroup, Session } from '../../../shared/types.js';
 import { canvasVisibleSessions, includePinnedProjectGroups, projectGroupChoices, projectGroupLabel, visiblePinnedProjectGroups } from '../../../client/src/project-groups/project-groups.js';
 import { graphProjectId, graphSessionGroups } from '../../../client/src/graph/graph-layout.js';
-import { defaultGraphPreferences, moveManualGraphNodes, reconcileManualGraph } from '../../../client/src/graph/graph-layout-preferences.js';
+import { defaultGraphPreferences, manualSessionGroups, moveManualGraphNodes, reconcileManualGraph } from '../../../client/src/graph/graph-layout-preferences.js';
 
 function session(id: string, cwd: string, project = cwd.split('/').at(-1)!): Session {
   return { id, nativeId: id, provider: 'codex', title: id, cwd, project, status: 'idle', statusReason: '', createdAt: '2026-09-15T00:00:00Z', updatedAt: '2026-09-15T00:00:00Z', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true };
@@ -15,6 +15,30 @@ const groups: ProjectGroup[] = [
   { cwd: '/한글 폴더/앱 100%', title: '', pinned: true },
   { cwd: '/work/title-only', title: '숨은 이름', pinned: false },
 ];
+
+test('temporary worktrees never occupy canvas slots, including selected sessions and pinned frames', () => {
+  const paths = ['/tmp', '/tmp/pr834-wt', '/private/tmp', '/private/tmp/pr834-wt', '/tmpfoo/project', '/private/tmpfoo/project', '/work/tmp/project', '/work/main'];
+  const items = paths.map((cwd, index) => session(String(index), cwd));
+  items[1].status = 'working';
+  const metadata = paths.map(cwd => ({ cwd, title: '', pinned: true, hidden: true }));
+  const expected = items.slice(4);
+  for (const showHidden of [false, true]) {
+    const visible = canvasVisibleSessions(items, [], showHidden);
+    assert.deepEqual(visible, expected);
+    const pins = visiblePinnedProjectGroups(metadata, items, 'all', '', true, items);
+    assert.deepEqual(pins.map(group => group.cwd), paths.slice(4));
+    for (const grouped of [graphSessionGroups(visible, 1, '1'), manualSessionGroups(visible)]) {
+      const frames = includePinnedProjectGroups(grouped, pins);
+      assert.deepEqual(frames.map(([cwd]) => cwd).sort(), paths.slice(4).sort());
+      assert.ok(frames.flatMap(([, members]) => members).every(item => expected.includes(item)));
+    }
+    assert.equal(graphSessionGroups(visible, 1, '1').flatMap(([, members]) => members).length, 1);
+  }
+  assert.equal(items.length, 8, 'the native/session-list input remains intact');
+  assert.equal(items[1].status, 'working', 'canvas exclusion does not stop delegated work');
+  assert.ok(projectGroupChoices(items, metadata).some(([cwd]) => cwd === '/tmp/pr834-wt'), 'temporary work remains accessible outside the canvas');
+  assert.deepEqual(visiblePinnedProjectGroups(metadata, items, '/tmp/pr834-wt', '', true, items), []);
+});
 
 test('group identity stays the exact cwd despite matching basenames, spaces, Unicode, and percent signs', () => {
   const choices = projectGroupChoices([session('a', '/work/api'), session('b', '/other/api')], groups);
