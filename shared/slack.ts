@@ -47,6 +47,7 @@ export interface SlackWorkflow {
   error?: string;
 }
 export interface SlackPublicStatus {
+  language?: 'ko' | 'en';
   allowSelfMentions?: boolean;
   connected: boolean;
   enabled: boolean;

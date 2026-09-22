@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.8.6] - 2026-09-23
+
+### Fixed
+- Make Slack coordinator responses follow Tower’s language preference, including background mentions and follow-up turns in existing conversations.
+
 ## [1.8.5] - 2026-09-22
 
 ### Fixed

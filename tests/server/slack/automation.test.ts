@@ -524,3 +524,28 @@ test('conditional replacement preserves only latest exact wording and rejects st
   await f.manager.tool(f.id, 'tower_task_complete', { ...args, runId: f.run.id });
   assert.equal(f.counts().sends, 0); assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'blocked');
 });
+
+test('coordinator language follows current preference on creation, owner followups and task continuations', async t => {
+  const f = await fixture(t);
+  let language: 'ko' | 'en' = 'ko';
+  let initial = '', resumed = '';
+  f.options.language = () => language;
+  f.options.startConversation = async (_workflow, prompt) => { initial = prompt; return { sessionId: 'coordinator', runId: 'initial' }; };
+  f.options.getSessionRuns = () => [];
+  f.options.resumeConversation = async (_workflow, prompt) => { resumed = prompt; return { runId: 'result' }; };
+  await f.manager.ingest(mention); await f.manager.tick();
+  assert.match(initial, /^\[Tower 대화 언어: 한국어\]/);
+  const id = f.manager.list()[0].id;
+  await f.manager.tool(id, 'slack_reply', { requestKey: 'exact', text: 'Keep this exact English wording.' });
+  language = 'en';
+  assert.match(await f.manager.ownerChat('coordinator', 'explain'), /\[Tower conversation language: English\]/);
+  assert.equal(await f.manager.ownerChat('unrelated', 'explain'), 'explain');
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'task', prompt: 'Review PR' });
+  f.finish(); await f.manager.tick();
+  assert.match(resumed, /^\[Tower conversation language: English\]/);
+  language = 'ko';
+  assert.match(await f.manager.ownerChat('coordinator', '설명해주세요'), /\[Tower 대화 언어: 한국어\]/);
+  assert.equal(f.manager.list()[0].replies?.[0].text, 'Keep this exact English wording.');
+  assert.equal(f.counts().sends, 0);
+  assert.equal(f.submitted[0].prompt, 'Review PR', 'coordinator language/policy must not pollute delegated task prompt');
+});

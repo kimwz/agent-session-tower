@@ -47,10 +47,10 @@ function TowerApp() {
   const { language } = useI18n();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
-  const { slack, error: slackError } = useSlackMonitor(connection === 'connected');
   const [requestedSlackId, setSelectedSlackId] = useState<string | null | undefined>(undefined);
   const [loadError, setLoadError] = useState('');
   const [token, setToken] = useState('');
+  const { slack, error: slackError } = useSlackMonitor(connection === 'connected', token);
   const [selectedId, setSelectedId] = useState<string | null>(readSelection);
   const { mentionId: selectedSlackId, chatId: activeChatId } = slackChatSelection(slack?.events || [], requestedSlackId, selectedId);
   const [provider, setProvider] = useState<'all' | Provider>('all');

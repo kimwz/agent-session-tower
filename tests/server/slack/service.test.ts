@@ -152,3 +152,23 @@ test('coordinator result notifications retain the snapshotted model after rule e
   await service.tool(service.overview().events[0].id, 'tower_auto_prompt', { requestKey: 'work', ruleId: 'r', prompt: 'Review' });
   await service.automation.tick(); assert.equal(resumed, 1);
 });
+
+test('Slack language persists independently of connection and validates authenticated settings input', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-language-'));
+  const options = { stateDir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} };
+  const dependencies = { client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw new Error('Must not send'); } }) };
+  const service = new SlackService(options, dependencies);
+  const restarted = new SlackService(options, dependencies);
+  t.after(async () => { service.close(); restarted.close(); await rm(stateDir, { recursive: true, force: true }); });
+  await service.start();
+  assert.equal(service.overview().language, 'ko');
+  for (const language of ['fr', '', true, null, {}]) await assert.rejects(service.mutate('settings', { language }), /설정/);
+  await service.mutate('settings', { language: 'en' });
+  await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  assert.equal(service.overview().language, 'en');
+  await service.mutate('disconnect', {});
+  await restarted.start();
+  assert.equal(restarted.overview().language, 'en');
+  await restarted.mutate('settings', { language: 'ko' });
+  assert.equal(JSON.parse(await readFile(join(stateDir, 'slack-connection.json'), 'utf8')).language, 'ko');
+});

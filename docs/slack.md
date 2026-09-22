@@ -17,6 +17,10 @@ Socket Mode needs outbound HTTPS and WebSocket access to Slack; it does not requ
 
 Your own messages are excluded by default. To test a saved rule, enable **Process my own mentions (for testing)** in Slack automation settings, then send a new message mentioning yourself. This works in accessible private channels too when `groups:history` and `message.groups` are configured. The setting is saved across restarts. Test mentions perform the real configured task and generate reply proposals, so disable this option after testing if you only want other people’s requests. Earlier ignored messages are not replayed. Tower escapes mentions in its own generated replies to prevent reply loops; bot messages and message edits remain excluded.
 
+## Conversation language
+
+Slack coordinator responses follow Tower’s Korean/English language setting. Opening a connected Tower page or changing its language synchronizes the preference to the execution worker, where it persists for background mentions while the browser is closed. Existing conversations use the current preference on their next turn or delegated result. Quoted Slack messages, user-approved reply text, code, and identifiers stay unchanged.
+
 ## Canvas monitor
 
 Connecting an account adds a **Slack monitor** to the canvas. Drag its header to move it; its position is remembered in both automatic and manual layouts. New mentions appear as cards inside it, and active work uses the same animated rainbow border as agent sessions. Connection problems remain visible alongside running work.
