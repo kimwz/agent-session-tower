@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.9.1] - 2026-09-23
+
+### Fixed
+- Ensure writing-style collection controls have visible borders, button backgrounds, and keyboard focus styling in the monitor panel.
+
 ## [1.9.0] - 2026-09-23
 
 ### Added
