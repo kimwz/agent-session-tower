@@ -161,7 +161,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (!backend.slackOverview) return json(res, 503, { error: 'Slack 연동을 사용할 수 없습니다.' });
         return json(res, 200, await backend.slackOverview());
       }
-      const slackAction = path.match(/^\/api\/slack\/(connect|disconnect|settings|rules)$/);
+      const slackAction = path.match(/^\/api\/slack\/(connect|disconnect|settings|rules|replies\/approve)$/);
       if (slackAction && req.method === 'POST') {
         if (!backend.slackMutate) return json(res, 503, { error: 'Slack 연동을 사용할 수 없습니다.' });
         const body = await readJson(req, 1_000_000);

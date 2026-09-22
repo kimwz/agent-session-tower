@@ -1,5 +1,13 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  "내 멘션을 읽고 작업한 뒤 답변을 제안합니다. Slack 전송은 채팅에서 사용자가 승인해야 합니다.": "Reads your mentions, performs tasks, and proposes replies. Sending to Slack requires your approval in chat.",
+  "원하는 답변을 골라 전송을 승인하세요.": "Choose a reply and approve sending it.",
+  "Slack 답변 제안": "Slack reply proposals",
+  "원하는 답변을 골라 전송을 승인하세요. 수정은 아래 채팅에서 요청할 수 있습니다.": "Choose a reply and approve sending it. Request changes in the chat below.",
+  "이 내용으로 Slack에 전송": "Approve and send this to Slack",
+  "Slack에 전송됨": "Sent to Slack",
+  "답변 제안 가이드": "Reply proposal guidance",
+  "답변 후보를 작성할 때 참고합니다. Slack 전송에는 채팅에서 사용자의 승인이 필요합니다.": "Used to draft reply proposals. Sending to Slack requires the user's approval in chat.",
   "멘션 더 보기": "Show more mentions",
   "Slack 연결 오류": "Slack connection error",
   "Slack 연결 중": "Connecting to Slack",

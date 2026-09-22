@@ -33,8 +33,12 @@ test('Slack settings and credentials require existing authentication, origin, CS
   assert.equal((await post('rules', {}, { 'Content-Type': 'text/plain' })).status, 415);
   for (const body of [null, [], 'invalid']) assert.equal((await post('settings', body)).status,400);
   assert.equal((await post('settings', {payload:'a'.repeat(1_000_001)})).status,413);
+  const approval = { workflowId: 'workflow', requestKey: 'proposal', text: 'Exact preview' };
+  assert.equal((await post('replies/approve', approval, { cookie: '' })).status, 401);
+  assert.equal((await post('replies/approve', approval, { 'X-Agent-Monitor-Token': '' })).status, 403);
+  assert.equal((await post('replies/approve', approval, { Origin: 'https://untrusted.example' })).status, 403);
   assert.equal(mutations.length, 0);
-  for (const [action, body] of [['connect',{appToken:'fixture-app',userToken:'fixture-user'}], ['settings',{enabled:true}], ['rules',{rules:[]}], ['disconnect',{}]] as const) {
+  for (const [action, body] of [['connect',{appToken:'fixture-app',userToken:'fixture-user'}], ['settings',{enabled:true}], ['rules',{rules:[]}], ['disconnect',{}], ['replies/approve', approval]] as const) {
     assert.equal((await post(action, body)).status,200);
     assert.deepEqual(mutations.at(-1),{action,body});
   }

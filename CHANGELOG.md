@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.6.0] - 2026-09-22
+
+### Changed
+- Slack agents now present numbered reply proposals in Tower chat. Reply guides only inform drafting; automatic Slack replies are disabled for both new conversations and legacy workflows.
+- Sending requires explicit user approval of the exact proposal in Tower, with durable duplicate-send and uncertain-delivery protection.
+
 ## [1.5.2] - 2026-09-22
 
 ### Fixed

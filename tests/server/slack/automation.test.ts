@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -45,7 +45,7 @@ test('admission does no network/model work; dedup and actual execution completio
   await f.manager.tick();
   assert.equal(f.manager.list()[0].status, 'running'); assert.equal(f.counts().sends, 0);
   f.finish(); await f.manager.tick(); await f.manager.ingest(mention); await f.manager.tick();
-  assert.deepEqual(f.counts(), { sends: 1, submissions: 1, fetches: 1 });
+  assert.deepEqual(f.counts(), { sends: 0, submissions: 1, fetches: 1 });
   assert.equal(f.manager.list()[0].status, 'completed');
 });
 test('rule snapshots remain immutable after settings change and restart', async t => {
@@ -74,7 +74,10 @@ test('uncertain sends are not retried, including restart during sending', async 
   const f = await fixture(t); let attempts = 0;
   f.options.sendReply = async () => { attempts++; throw new Error('connection lost after acceptance'); };
   await f.manager.ingest(mention); f.finish(); await f.manager.tick(); await f.manager.tick();
-  assert.equal(attempts, 1); assert.equal(f.manager.list()[0].status, 'reply-uncertain');
+  const item = f.manager.list()[0];
+  assert.equal(attempts, 0);
+  await assert.rejects(f.manager.approveReply(item.id, item.replies![0].requestKey, item.replies![0].text), /connection lost/);
+  assert.equal(attempts, 1); assert.equal(f.manager.list()[0].replies![0].status, 'uncertain');
   const path = join(f.directory, 'slack-automation.json');
   const saved = JSON.parse(await readFile(path, 'utf8')); saved.workflows[0].status = 'sending';
   await writeFile(path, JSON.stringify(saved));
@@ -144,6 +147,10 @@ test('conversation creates one native session, skips legacy matching and leaves 
   assert.equal(f.manager.list()[0].status, 'completed'); assert.equal(f.counts().sends, 0);
   const id = f.manager.list()[0].id;
   await Promise.all([f.manager.tool(id, 'slack_reply', { requestKey: 'reply-1', text: 'Done' }), f.manager.tool(id, 'slack_reply', { requestKey: 'reply-1', text: 'Done' })]);
+  assert.equal(f.counts().sends, 0);
+  await assert.rejects(f.manager.approveReply(id, 'reply-1', 'Changed'), /변경/);
+  await assert.rejects(f.manager.tool(id, 'approveReply', { requestKey: 'reply-1', text: 'Done' }), /Unknown/);
+  await Promise.all([f.manager.approveReply(id, 'reply-1', 'Done'), f.manager.approveReply(id, 'reply-1', 'Done')]);
   assert.equal(f.counts().sends, 1);
   await assert.rejects(f.manager.tool(id, 'slack_reply', { requestKey: 'reply-1', text: 'Other' }), /different text/);
 });
@@ -161,11 +168,15 @@ test('uncertain conversational send persists across restart and never resends', 
   const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'session', runId: 'run' });
   let attempts = 0; f.options.sendReply = async () => { attempts++; throw new Error('lost response'); };
   await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
-  await assert.rejects(f.manager.tool(id, 'slack_reply', { requestKey: 'r', text: 'Result' }), /lost response/);
+  await f.manager.tool(id, 'slack_reply', { requestKey: 'r', text: 'Result' });
+  assert.equal(attempts, 0);
+  await assert.rejects(f.manager.approveReply(id, 'r', 'Result'), /lost response/);
   const restarted = new SlackAutomationManager(f.options); await restarted.start();
   const result = await restarted.tool(id, 'slack_reply', { requestKey: 'r', text: 'Result' }) as { status: string };
   assert.equal(result.status, 'uncertain'); assert.equal(attempts, 1);
-  await assert.rejects(restarted.tool(id, 'slack_reply', { requestKey: 'other', text: 'Result' }), /uncertain/);
+  await restarted.tool(id, 'slack_reply', { requestKey: 'other', text: 'Result' });
+  await assert.rejects(restarted.approveReply(id, 'other', 'Result'), /불확실/);
+  await assert.rejects(restarted.approveReply(id, 'r', 'Result'), /불확실/);
 });
 test('claimed conversation creation recovers correlated run without spawning twice', async t => {
   const f = await fixture(t); let attempts = 0;
@@ -246,4 +257,25 @@ test('delegated run survives pruned routing history without being submitted agai
   await f.manager.tick(); assert.equal(resumes, 1);
   await assert.rejects(f.manager.tool(id, 'tower_auto_prompt', args), /refusing to submit/);
   assert.equal(f.counts().submissions, 1);
+});
+
+test('persisted legacy composing work produces only an approval proposal after restart', async t => {
+  const f = await fixture(t); await f.manager.ingest(mention); await f.manager.tick(); f.finish();
+  const path = join(f.directory, 'slack-automation.json'); const saved = JSON.parse(await readFile(path, 'utf8'));
+  saved.workflows[0].status = 'composing'; await writeFile(path, JSON.stringify(saved));
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  const item = restarted.list()[0]; assert.equal(f.counts().sends, 0); assert.equal(item.replies![0].status, 'proposed');
+  await restarted.approveReply(item.id, item.replies![0].requestKey, item.replies![0].text);
+  assert.equal(f.counts().sends, 1);
+});
+
+test('approval fails closed before network when its durable send claim cannot be written', async t => {
+  const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'session', runId: 'run' });
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  await f.manager.tool(id, 'slack_reply', { requestKey: 'r', text: 'Exact reply' });
+  const path = join(f.directory, 'slack-automation.json'); await rm(path); await mkdir(path);
+  await assert.rejects(f.manager.approveReply(id, 'r', 'Exact reply'));
+  assert.equal(f.counts().sends, 0);
+  await assert.rejects(f.manager.approveReply(id, 'r', 'Exact reply'), /불확실/);
+  assert.equal(f.counts().sends, 0);
 });

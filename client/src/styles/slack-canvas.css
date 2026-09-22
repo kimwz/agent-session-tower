@@ -20,3 +20,12 @@
 .slack-mention-card.agent-card.selected { border-color:#c89ae7; background:#382a47; box-shadow:0 0 0 3px #c89ae72b; }
 .slack-monitor-status .slack-monitor-connection { margin-left:0; display:flex; align-items:center; gap:4px; }
 .slack-monitor-status.connection-warning .slack-monitor-connection { color:#ecc17c; }
+
+.slack-reply-proposals { flex-shrink:0; max-height:40vh; overflow:auto; padding:12px 18px; border-bottom:1px solid #675077; background:#282036; font-size:12px; }
+.slack-reply-proposals h3 { margin:0 0 8px; font-size:13px; }
+.slack-reply-proposals > p { color:#c4b3d3; line-height:1.5; }
+.slack-reply-proposals ol { padding-left:24px; }
+.slack-reply-proposals li { margin:12px 0; padding-left:4px; }
+.slack-reply-proposals .slack-monitor-text { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.6; }
+.slack-reply-proposals button { font-size:12px; }
+.slack-reply-proposals [role=status] { color:#c4b3d3; }
