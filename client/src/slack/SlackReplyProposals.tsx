@@ -4,7 +4,7 @@ import { authPost } from '../auth/AuthGate';
 import { useI18n, translateMessage } from '../i18n/i18n';
 import { SLACK_CHANGED_EVENT } from './use-slack-monitor';
 
-/** Only a direct user click can approve the exact, displayed proposal. */
+/** Displays persisted proposals and provides direct approval alongside chat authorization. */
 export function SlackReplyProposals({ workflow, token = '' }: { workflow?: SlackWorkflow; token?: string }) {
   const { t } = useI18n();
   const locked = useRef(new Set<string>());
@@ -28,7 +28,7 @@ export function SlackReplyProposals({ workflow, token = '' }: { workflow?: Slack
   }
   return <section className="slack-reply-proposals" aria-label={t('Slack 답변 제안')}>
     <h3>{t('Slack 답변 제안')}</h3>
-    <p>{t(workflow.mode === 'conversation' ? '원하는 답변을 골라 전송을 승인하세요. 수정은 아래 채팅에서 요청할 수 있습니다.' : '원하는 답변을 골라 전송을 승인하세요.')}</p>
+    <p>{t(workflow.mode === 'conversation' ? '아래 채팅에서 “3번 답변을 Slack에 보내주세요”처럼 요청하거나 전송 버튼을 누르세요. 답변 수정도 채팅에서 요청할 수 있습니다.' : '원하는 답변을 골라 전송을 승인하세요.')}</p>
     <ol>{workflow.replies.map(reply => {
       const status = reply.status === 'proposed' ? local[reply.requestKey] || reply.status : reply.status;
       return <li key={reply.requestKey}>

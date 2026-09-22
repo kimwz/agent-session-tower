@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.8.1] - 2026-09-22
+
+### Fixed
+- Honor explicit owner approval in Slack coordinator chat, including sending a numbered saved proposal or approving a previously selected proposal. Automatic messages and proposal tools cannot grant consent.
+- Clarify reply approval controls and retain the original owner message alongside delivery results.
+
 ## [1.8.0] - 2026-09-22
 
 ### Added

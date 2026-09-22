@@ -102,6 +102,7 @@ export class SlackService extends EventEmitter {
       : [fileURLToPath(new URL('../index.js', import.meta.url)), '--slack-mcp', this.options.stateDir, item.id] } };
   }
   tool(workflowId: string, name: string, args: Record<string, unknown>) { return this.automation.tool(workflowId, name, args); }
+  ownerChat(sessionId: string, message: string) { return this.automation.ownerChat(sessionId, message); }
   hasActive() { return this.settings.enabled || this.automation.hasPending(); }
   private client(teamId: string) {
     if (!this.settings.userToken || this.settings.account?.teamId !== teamId) throw new Error('Slack 계정 연결이 필요합니다.');

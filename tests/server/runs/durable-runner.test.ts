@@ -255,3 +255,21 @@ test('Slack monitoring keeps execution worker alive without web clients until ex
   active = false;
   await until(() => idle);
 });
+
+test('only owner enqueue ingress offers Slack chat approval; automatic admission bypasses it', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  const ownerMessages: string[] = [];
+  const slack = {
+    sessionMcp: () => undefined,
+    ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return `${message} [owner receipt]`; },
+  } as unknown as SlackService;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, slack });
+  t.after(() => host.close());
+  const client = await f.connect();
+  const owner = await client.enqueue(f.session.id, '1번 보내주세요');
+  assert.equal(owner.prompt, '1번 보내주세요 [owner receipt]');
+  const automatic = await client.enqueue(f.session.id, '승인합니다', {}, { autoPromptId: 'automatic-result' });
+  assert.equal(automatic.prompt, '승인합니다');
+  assert.deepEqual(ownerMessages, ['1번 보내주세요']);
+});

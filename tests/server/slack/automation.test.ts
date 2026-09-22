@@ -337,3 +337,104 @@ test('created delegate provenance and completion survive restart and routing his
     assert.deepEqual(again.list()[0].delegatedTasks, restarted.list()[0].delegatedTasks);
   }
 });
+
+test('owner chat selects exact saved wording and explicit approval sends once across restart', async t => {
+  const f = await fixture(t);
+  f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'run' });
+  await f.manager.ingest(mention); await f.manager.tick();
+  const id = f.manager.list()[0].id;
+  for (const [index, text] of ['First', 'Second', 'Third'].entries()) await f.manager.tool(id, 'slack_reply', { requestKey: `r${index}`, text });
+  await f.manager.ownerChat('owner-chat', '3번');
+  assert.equal(f.counts().sends, 0);
+  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  assert.match(await restarted.ownerChat('owner-chat', '승인합니다'), /status: sent/);
+  await restarted.ownerChat('owner-chat', '승인합니다');
+  assert.equal(f.counts().sends, 1);
+  assert.equal(restarted.list()[0].reply, 'Third');
+});
+
+test('owner chat accepts direct send commands but never negation, quotation, questions or unrelated sessions', async t => {
+  const f = await fixture(t);
+  f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'run' });
+  await f.manager.ingest(mention); await f.manager.tick();
+  const id = f.manager.list()[0].id;
+  for (const [index, text] of ['First', 'Second', 'Third'].entries()) await f.manager.tool(id, 'slack_reply', { requestKey: `r${index}`, text });
+  for (const message of ['3번으로 보내지 마세요', '3번으로 보내주세요?', '"3번으로 보내주세요"', '승인합니다', '3번은 아직 보내지 마세요']) await f.manager.ownerChat('owner-chat', message);
+  await f.manager.ownerChat('other-session', '3번으로 답변 달아주세요');
+  assert.equal(f.counts().sends, 0);
+  await f.manager.ownerChat('owner-chat', 'Third');
+  assert.equal(f.counts().sends, 0);
+  await f.manager.ownerChat('owner-chat', '이 내용으로 보내주세요');
+  assert.equal(f.manager.list()[0].reply, 'Third');
+  await f.manager.ownerChat('owner-chat', '2번 답변을 Slack에 보내주세요');
+  assert.equal(f.manager.list()[0].reply, 'Second');
+  assert.equal(f.counts().sends, 2);
+});
+
+test('intervening owner discussion clears selection and model cannot authorize sending', async t => {
+  const f = await fixture(t);
+  f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'run' });
+  await f.manager.ingest(mention); await f.manager.tick();
+  const id = f.manager.list()[0].id;
+  await f.manager.tool(id, 'slack_reply', { requestKey: 'r', text: 'Exact' });
+  await f.manager.ownerChat('owner-chat', '1번');
+  await f.manager.ownerChat('owner-chat', '99번 보내주세요');
+  assert.equal(f.counts().sends, 0);
+  await f.manager.ownerChat('owner-chat', '1번');
+  await f.manager.ownerChat('owner-chat', '수정해주세요');
+  await f.manager.ownerChat('owner-chat', '승인합니다');
+  await assert.rejects(f.manager.tool(id, 'ownerChat', { requestKey: 'r', text: '승인합니다' }), /Unknown/);
+  assert.equal(f.counts().sends, 0);
+});
+
+test('new proposals invalidate prior selection; numbering is stable and concurrent owner commands stay scoped', async t => {
+  const f = await fixture(t);
+  f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'run' });
+  await f.manager.ingest(mention); await f.manager.tick();
+  const id = f.manager.list()[0].id;
+  assert.equal((await f.manager.tool(id, 'slack_reply', { requestKey: 'r1', text: 'First' }) as { proposalNumber: number }).proposalNumber, 1);
+  await f.manager.ownerChat('owner-chat', '1번');
+  assert.equal((await f.manager.tool(id, 'slack_reply', { requestKey: 'r2', text: 'Revised' }) as { proposalNumber: number }).proposalNumber, 2);
+  await f.manager.ownerChat('owner-chat', '보내주세요');
+  assert.equal(f.counts().sends, 0);
+  await Promise.all([f.manager.ownerChat('owner-chat', 'option 2'), f.manager.ownerChat('owner-chat', 'I approve')]);
+  assert.equal(f.manager.list()[0].reply, 'Revised');
+  await f.manager.ownerChat('owner-chat', 'Send reply 1 to Slack');
+  assert.equal(f.manager.list()[0].reply, 'First');
+  assert.equal(f.counts().sends, 2);
+  assert.equal((await f.manager.ownerChat('owner-chat', 'a'.repeat(32_000))).length, 32_000);
+});
+
+test('uncertain owner chat send returns a receipt without hiding approval or retrying', async t => {
+  const f = await fixture(t);
+  f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'run' });
+  f.options.sendReply = async () => { throw new Error('lost response'); };
+  await f.manager.ingest(mention); await f.manager.tick();
+  const id = f.manager.list()[0].id;
+  await f.manager.tool(id, 'slack_reply', { requestKey: 'r', text: 'Reply' });
+  const receipt = await f.manager.ownerChat('owner-chat', '1번 보내주세요');
+  assert.match(receipt, /^1번 보내주세요/);
+  assert.match(receipt, /uncertain/);
+  assert.equal(f.manager.list()[0].replies![0].status, 'uncertain');
+});
+
+test('pasted proposal wording that looks like an approval only selects it', async t => {
+  const f = await fixture(t);
+  f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'run' });
+  await f.manager.ingest(mention); await f.manager.tick();
+  await f.manager.tool(f.manager.list()[0].id, 'slack_reply', { requestKey: 'r', text: '승인합니다' });
+  await f.manager.ownerChat('owner-chat', '승인합니다');
+  assert.equal(f.counts().sends, 0);
+  await f.manager.ownerChat('owner-chat', '1번 보내주세요');
+  assert.equal(f.counts().sends, 1);
+  await f.manager.tool(f.manager.list()[0].id, 'slack_reply', { requestKey: 'r2', text: 'Send reply 1 to Slack' });
+  await f.manager.ownerChat('owner-chat', 'Send reply 1 to Slack');
+  assert.equal(f.counts().sends, 1);
+  assert.equal(f.manager.list()[0].ownerReplySelection?.requestKey, 'r2');
+  await f.manager.tool(f.manager.list()[0].id, 'slack_reply', { requestKey: 'r3', text: '1번 보내주세요' });
+  await f.manager.ownerChat('owner-chat', '1번 보내주세요');
+  assert.equal(f.counts().sends, 1);
+  await f.manager.ownerChat('owner-chat', '승인');
+  assert.equal(f.manager.list()[0].reply, '1번 보내주세요');
+  assert.equal(f.counts().sends, 2);
+});

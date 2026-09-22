@@ -62,7 +62,12 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     switch (method) {
       case 'snapshot': return undefined;
       case 'create': return options.runs.create(args[0] as CreateSessionRequest, admission(args[1]));
-      case 'enqueue': return options.runs.enqueue(args[0] as string, args[1] as string, args[2] as MessageAttachments, admission(args[3]));
+      case 'enqueue': {
+        const admitted = admission(args[3]);
+        const prompt = options.slack && !admitted.autoPromptId
+          ? await options.slack.ownerChat(args[0] as string, args[1] as string) : args[1] as string;
+        return options.runs.enqueue(args[0] as string, prompt, args[2] as MessageAttachments, admitted);
+      }
       case 'steer': return options.runs.steer(args[0] as string);
       case 'cancel': return options.runs.cancel(args[0] as string);
       case 'respondToApproval': return options.runs.respondToApproval(args[0] as string, args[1] as string, args[2] as RunApprovalResponse);
