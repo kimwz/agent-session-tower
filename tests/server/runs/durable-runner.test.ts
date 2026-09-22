@@ -269,7 +269,7 @@ test('only owner enqueue ingress offers Slack chat approval; automatic admission
   const client = await f.connect();
   const owner = await client.enqueue(f.session.id, '1번 보내주세요');
   assert.equal(owner.prompt, '1번 보내주세요 [owner receipt]');
-  const automatic = await client.enqueue(f.session.id, '승인합니다', {}, { autoPromptId: 'automatic-result' });
+  const automatic = await client.enqueue(f.session.id, '승인합니다', {}, { autoPromptId: '12345678-1234-4234-8234-123456789abc' });
   assert.equal(automatic.prompt, '승인합니다');
   assert.deepEqual(ownerMessages, ['1번 보내주세요']);
 });
