@@ -1,3 +1,5 @@
+import { SlackTonePanel } from './SlackTonePanel';
+import { slackCardState } from './slack-read-state';
 import { useEffect, useState, type CSSProperties } from 'react';
 import { ArrowLeft, ExternalLink, MessageSquare, X } from 'lucide-react';
 import type { SlackPublicStatus, SlackWorkflow } from '../../../shared/slack';
@@ -10,13 +12,14 @@ import { ChatTranscript } from '../chat/ChatTranscript';
 import { SlackReplyProposals } from './SlackReplyProposals';
 import { slackMentionTitle, slackWorkflowLabel, slackWorkflowWorking } from './slack-monitor';
 
-export function SlackMonitorPanel({ slack, error, mentionId, jobs, token, onClose, onSelectMention, onNavigate }: {
-  token: string; slack: SlackPublicStatus | null; error: string; mentionId: string | null; jobs: AutoPromptJob[];
+export function SlackMonitorPanel({ onRead, unreadIds, slack, error, mentionId, jobs, token, onClose, onSelectMention, onNavigate }: {
+  onRead?: () => void; unreadIds?: ReadonlySet<string>; token: string; slack: SlackPublicStatus | null; error: string; mentionId: string | null; jobs: AutoPromptJob[];
   onClose: () => void; onSelectMention: (id: string | null) => void; onNavigate: (id: string) => void;
 }) {
   const { t } = useI18n();
   const appearance = useChatAppearance();
   const workflow = slack?.events.find(event => event.id === mentionId);
+  useEffect(() => { if (workflow) onRead?.(); }, [workflow, onRead]);
   const job = jobs.find(item => item.id === workflow?.autoPromptId);
   const sessionId = workflow?.sessionId || job?.sessionId;
   const [detail, setDetail] = useState<SessionDetail | null>(null);
@@ -46,7 +49,7 @@ export function SlackMonitorPanel({ slack, error, mentionId, jobs, token, onClos
     <div className="slack-monitor-content">
       {error && <p role="alert">{translateMessage(error)}</p>}
       {mentionId !== null && <button className="slack-monitor-back" onClick={() => onSelectMention(null)}><ArrowLeft size={14} />{t('전체 멘션')}</button>}
-      {mentionId === null ? <><p>{slack?.account?.teamName} · {slack?.account?.userName}</p><p>{slack?.connected ? slack.enabled ? t('멘션 감시 중') : t('멘션 감시 꺼짐') : t('Slack 연결 없음')}</p>{slack?.error && <p role="alert">{translateMessage(slack.error)}</p>}{!slack?.events.length && <p>{t('아직 받은 멘션이 없습니다.')}</p>}{visibleSlackMentions(slack?.events || [], mentionLimit).map(event => <button key={event.id} className="slack-monitor-entry" onClick={() => onSelectMention(event.id)}><strong>{slackMentionTitle(event)}</strong><span>{slackWorkflowLabel(event.status)}</span><time>{new Date(event.createdAt).toLocaleString()}</time></button>)}{slack && slack.events.length > mentionLimit && <button className="slack-monitor-back" onClick={() => setMentionLimit(limit => limit + SLACK_PAGE_SIZE)}>{t('멘션 더 보기')} ({slack.events.length - mentionLimit})</button>}</> : workflow ? <>
+      {mentionId === null ? <>{slack?.connected && <SlackTonePanel key={`${slack.account?.teamId}:${slack.account?.userId}`} slack={slack} token={token} />}<p>{slack?.account?.teamName} · {slack?.account?.userName}</p><p>{slack?.connected ? slack.enabled ? t('멘션 감시 중') : t('멘션 감시 꺼짐') : t('Slack 연결 없음')}</p>{slack?.error && <p role="alert">{translateMessage(slack.error)}</p>}{!slack?.events.length && <p>{t('아직 받은 멘션이 없습니다.')}</p>}{visibleSlackMentions(slack?.events || [], mentionLimit).map(event => <button key={event.id} className={`slack-monitor-entry ${slackCardState(event, !!unreadIds?.has(event.id))}`} onClick={() => onSelectMention(event.id)}><strong>{slackMentionTitle(event)}</strong><span>{slackWorkflowLabel(event.status)}</span><time>{new Date(event.createdAt).toLocaleString()}</time></button>)}{slack && slack.events.length > mentionLimit && <button className="slack-monitor-back" onClick={() => setMentionLimit(limit => limit + SLACK_PAGE_SIZE)}>{t('멘션 더 보기')} ({slack.events.length - mentionLimit})</button>}</> : workflow ? <>
         <SlackWorkflowSummary token={token} workflow={workflow} job={job} />
         {sessionId && <section><h3>{t('에이전트 응답')}</h3><button className="slack-monitor-back" onClick={() => onNavigate(sessionId)}><ExternalLink size={14} />{t('실행 세션 열기')}</button>{sessionError && <p role="alert">{translateMessage(sessionError)}</p>}{currentDetail ? <><p className="slack-monitor-muted">{t('실행 세션의 최근 대화입니다. 전체 기록은 실행 세션에서 확인하세요.')}</p><ChatTranscript messages={currentDetail.messages} /></> : !sessionError && <p>{t('대화를 여는 중')}</p>}</section>}
         {!sessionId && <p>{t('아직 실행 세션이 생성되지 않았습니다.')}</p>}

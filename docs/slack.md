@@ -25,7 +25,15 @@ Slack coordinator responses follow Tower’s Korean/English language setting. Op
 
 Connecting an account adds a **Slack monitor** to the canvas. Drag its header to move it; its position is remembered in both automatic and manual layouts. New mentions appear as cards inside it, and active work uses the same animated rainbow border as agent sessions. Connection problems remain visible alongside running work.
 
+Completed threads you have not opened have an unread border. Opening the thread marks its current result as read in that browser; a later completed result becomes unread again. Threads with a confirmed sent reply use a success border. Active work keeps its animated border.
+
 The monitor shows the latest five mentions as short cards in descending order. **Show more** loads five older conversations at a time. Click a card to open the ordinary session chat, including its composer and active-run controls. Follow-up instructions remain in the same dedicated conversation. These one-off coordinator sessions stay out of the ordinary session list and project canvas; their histories remain available through Slack monitor. Records created before this conversation feature retain their previous detail view and are not replayed.
+
+## Writing style collection
+
+Open the Slack monitor header, then expand **Writing style / 말투 수집**. **Collect my messages** reads up to 200 of the connected account’s messages from the last 90 days and asks the configured agent provider to summarize their writing style. This optional feature needs `search:read` in the Slack app’s **User Token Scopes**; add it, reinstall the app, and reconnect the user token if collection reports missing scope.
+
+Collection only reads Slack. Messages from other users, bots, and known Tower-sent replies are excluded. Samples are processed by the model but are not saved as a Tower message archive; only the resulting guide and collection metadata are stored locally. Review or edit the guide and enable **Use for reply proposals** before using it. You can reset it at any time. The guide is specific to the connected account, influences drafting style only, and never changes project instructions, send authorization, or exact text already approved by the owner.
 
 ## Instructions
 

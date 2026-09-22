@@ -47,6 +47,7 @@ export interface SlackWorkflow {
   error?: string;
 }
 export interface SlackPublicStatus {
+  tone?: SlackToneGuide;
   language?: 'ko' | 'en';
   allowSelfMentions?: boolean;
   connected: boolean;
@@ -57,3 +58,5 @@ export interface SlackPublicStatus {
   rules: SlackRule[];
   events: SlackWorkflow[];
 }
+
+export interface SlackToneGuide { guide: string; enabled: boolean; status: 'idle' | 'collecting' | 'ready' | 'error'; sampleCount?: number; updatedAt?: string; error?: string }

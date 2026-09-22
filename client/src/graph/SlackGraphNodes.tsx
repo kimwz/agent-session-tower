@@ -1,3 +1,4 @@
+import { slackCardState } from '../slack/slack-read-state';
 import { memo } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import { Slack, GripHorizontal, ArrowUpRight, Radio } from 'lucide-react';
@@ -6,7 +7,7 @@ import { translate as t, useI18n } from '../i18n/i18n';
 import { relativeTime } from '../common/lib';
 import { slackWorkflowWorking, slackWorkflowLabel, slackMentionTitle } from '../slack/slack-monitor';
 export type SlackMonitorData = { name: string; enabled: boolean; status: string; error?: string; count: number; active: number; onSelect?: (id: string | null) => void; remaining: number; onMore: () => void };
-export type SlackMentionData = { event: SlackWorkflow; selected: boolean; onSelect?: (id: string | null) => void };
+export type SlackMentionData = { event: SlackWorkflow; unread?: boolean; selected: boolean; onSelect?: (id: string | null) => void };
 export const SlackMonitorNode = memo(function SlackMonitorNode({ data }: NodeProps<Node<SlackMonitorData>>) {
   useI18n();
   const connectionLabel = !data.enabled ? t('멘션 감시 꺼짐') : data.error || data.status === 'error' ? t('Slack 연결 오류') : data.status === 'connected' ? t('멘션을 기다리는 중') : t('Slack 연결 중');
@@ -23,10 +24,10 @@ export const SlackMonitorNode = memo(function SlackMonitorNode({ data }: NodePro
   </div>;
 });
 export const SlackMentionNode = memo(function SlackMentionNode({ data }: NodeProps<Node<SlackMentionData>>) {
-  useI18n(); const event = data.event; const working = slackWorkflowWorking(event);
-  return <button className={`agent-card slack-mention-card ${working ? 'working' : ''} ${data.selected ? 'selected' : ''}`} onClick={() => data.onSelect?.(event.id)} title={event.error || undefined} aria-label={`${slackMentionTitle(event)}: ${slackWorkflowLabel(event)}`}>
+  useI18n(); const event = data.event; const working = slackWorkflowWorking(event); const state = slackCardState(event, !!data.unread); const stateLabel = state === 'unread' ? t('읽지 않음') : state === 'replied' ? t('Slack에 전송됨') : slackWorkflowLabel(event);
+  return <button className={`agent-card slack-mention-card ${state} ${data.selected ? 'selected' : ''}`} onClick={() => data.onSelect?.(event.id)} title={event.error || undefined} aria-label={`${slackMentionTitle(event)}: ${stateLabel}`}>
     {working && <span className="agent-activity-border" aria-hidden="true" />}
-    <div className="slack-mention-top"><Slack size={12} /><span>{slackWorkflowLabel(event)}</span><time dateTime={event.createdAt}>{relativeTime(event.createdAt)}</time><ArrowUpRight size={11} /></div>
+    <div className="slack-mention-top"><Slack size={12} /><span>{stateLabel}</span><time dateTime={event.createdAt}>{relativeTime(event.createdAt)}</time><ArrowUpRight size={11} /></div>
     <div className="agent-card-title" title={slackMentionTitle(event)}>{slackMentionTitle(event)}</div>
   </button>;
 });

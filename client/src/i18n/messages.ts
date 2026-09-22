@@ -1,5 +1,6 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  "읽지 않음": "Unread",
   "내 멘션을 읽고 작업한 뒤 답변을 제안합니다. Slack 전송은 채팅에서 사용자가 승인해야 합니다.": "Reads your mentions, performs tasks, and proposes replies. Sending to Slack requires your approval in chat.",
   "답변 텍스트를 클릭하면 Slack에 전송됩니다.": "Click a reply to send it to Slack.",
   "Slack 답변 제안": "Slack reply proposals",

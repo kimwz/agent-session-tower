@@ -33,3 +33,15 @@
 .slack-reply-proposals .slack-reply-text:focus-visible { outline:2px solid #dfb6fa; outline-offset:1px; }
 .slack-reply-proposals .slack-reply-text:disabled { opacity:.5; cursor:not-allowed; }
 .slack-reply-proposals [role=status] { color:#c4b3d3; }
+
+.slack-mention-card.agent-card.unread, .slack-monitor-entry.unread { border-color:#ab8af7; box-shadow:0 0 0 1px #ab8af755; }
+.slack-mention-card.agent-card.replied, .slack-monitor-entry.replied { border-color:var(--green, #5ac99b); box-shadow:0 0 0 1px #5ac99b33; }
+
+.slack-tone-panel { margin-bottom: 16px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.slack-tone-panel summary { cursor: pointer; font-weight: 600; }
+.slack-tone-panel p { font-size: 12px; line-height: 1.5; }
+.slack-tone-panel textarea { width: 100%; box-sizing: border-box; color: inherit; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; resize: vertical; }
+.slack-tone-panel .secondary-button { padding: 6px 10px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; background: var(--surface); color: inherit; }
+.slack-tone-panel .secondary-button:hover:not(:disabled) { border-color: var(--accent); }
+.slack-tone-panel .secondary-button:disabled { opacity: .5; cursor: default; }
+.slack-tone-panel :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

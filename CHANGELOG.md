@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.9.0] - 2026-09-23
+
+### Added
+- Distinguish unread completed Slack threads and successfully sent replies with monitor card borders; opening a thread marks its current result as read.
+- Collect a bounded sample of your own Slack messages to create an editable tone guide for reply proposals.
+
 ## [1.8.6] - 2026-09-23
 
 ### Fixed

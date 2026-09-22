@@ -96,6 +96,27 @@ export class SlackClient {
     throw new SlackApiError('thread_too_large');
   }
 
+  /** Bounded owner-only search. Never consume adjacent/context messages. */
+  async searchOwnMessages(userId: string, excluded: Set<string>, now = Date.now()): Promise<string[]> {
+    if (!/^[A-Z0-9]+$/.test(userId)) throw new SlackApiError('invalid_response');
+    const after = now - 90 * 86400_000;
+    const texts: string[] = []; let characters = 0; const seen = new Set<string>();
+    for (let page = 1; page <= 2; page++) {
+      const data = await this.call('search.messages', { query: `from:<@${userId}> after:${new Date(after).toISOString().slice(0, 10)}`, count: '100', page: String(page), sort: 'timestamp', sort_dir: 'desc', highlight: 'false' }, true);
+      if (!Array.isArray(data.messages?.matches)) throw new SlackApiError('invalid_response');
+      for (const message of data.messages.matches.slice(0, 100)) {
+        const key = `${message.channel?.id}:${message.ts}`;
+        if (message.user !== userId || message.bot_id || message.subtype || typeof message.text !== 'string' || typeof message.channel?.id !== 'string'
+          || !Number.isFinite(Number(message.ts)) || Number(message.ts) * 1000 < after || Number(message.ts) * 1000 > now || excluded.has(key) || seen.has(key)) continue;
+        seen.add(key);
+        const text = message.text.trim();
+        if (text && characters < 80_000) { const sample = text.slice(0, Math.min(2000, 80_000 - characters)); texts.push(sample); characters += sample.length; }
+      }
+      if (data.messages.matches.length < 100) break;
+    }
+    return texts;
+  }
+
   async reply(channel: string, threadTs: string, text: string): Promise<{ ts: string }> {
     if (!text.trim() || text.length > 12_000) throw new SlackApiError('invalid_reply');
     const data = await this.call('chat.postMessage', {
