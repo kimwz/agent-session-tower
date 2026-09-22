@@ -139,7 +139,7 @@ test('overbudget event admission rolls back and remains unacknowledged', async t
 
 test('conversation creates one native session, skips legacy matching and leaves replies to explicit tools', async t => {
   const f = await fixture(t); let creates = 0;
-  f.options.startConversation = async (workflow, prompt) => { creates++; assert.equal(workflow.mode, 'conversation'); assert.match(prompt, /tower_auto_prompt/); return { sessionId: 'session', runId: 'run' }; };
+  f.options.startConversation = async (workflow, prompt) => { creates++; assert.equal(workflow.mode, 'conversation'); assert.match(prompt, /tower_auto_prompt/); assert.match(prompt, /Let the project agent inspect its local context/); return { sessionId: 'session', runId: 'run' }; };
   f.options.match = async () => { throw new Error('legacy classifier must not run'); };
   await f.manager.ingest(mention); await f.manager.tick(); await f.manager.tick();
   assert.equal(creates, 1); assert.equal(f.manager.list()[0].sessionId, 'session');
@@ -157,9 +157,16 @@ test('conversation creates one native session, skips legacy matching and leaves 
 test('conversation tools scope task reads and deduplicate delegation with Auto review', async t => {
   const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'session', runId: 'run' });
   await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
-  const args = { requestKey: 'review', prompt: 'Review actual repo' };
+  const args = { requestKey: 'review', prompt: 'Review PR #42 in /repos/verse8. Read-only: do not modify files. Report actionable findings with evidence.' };
   await Promise.all([f.manager.tool(id, 'tower_auto_prompt', args), f.manager.tool(id, 'tower_auto_prompt', args)]);
   assert.equal(f.counts().submissions, 1); assert.equal(f.submitted[0].codexApprovalsReviewer, 'auto_review');
+  assert.equal(f.submitted[0].prompt, args.prompt, 'preserve the task and owner constraints without injecting coordinator policy');
+  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  await restarted.tool(id, 'tower_auto_prompt', args);
+  assert.equal(f.counts().submissions, 1);
+  const followup = await restarted.ownerChat('session', '다음 PR도 같은 범위로 검토해주세요');
+  assert.match(followup, /Let the project agent inspect its local context/);
+  assert.match(followup, /Preserve owner requirements such as read-only/);
   await assert.rejects(f.manager.tool(id, 'tower_task_status', { requestId: 'unrelated' }), /does not belong/);
   const status = await f.manager.tool(id, 'tower_task_status', { requestKey: 'review' }) as { run: { output: string } };
   assert.match(status.run.output, /Review finished/);
@@ -197,6 +204,7 @@ test('delegated completion resumes an idle coordinator once and does not occupy 
   f.options.getSessionRuns = () => coordinatorRuns;
   f.options.resumeConversation = async (_workflow, prompt, correlationId) => {
     resumes++; assert.match(prompt, /Review finished/);
+    assert.match(prompt, /Let the project agent inspect its local context/);
     const run: Run = { ...coordinator, id: 'notification', status: 'queued', autoPromptId: correlationId };
     coordinatorRuns.push(run); return { runId: run.id };
   };

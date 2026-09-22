@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.8.5] - 2026-09-22
+
+### Fixed
+- Delegate project goals and explicit user constraints without injecting Slack reply policy or prescribing coordinator-generated execution steps; project agents plan from their own local context.
+
 ## [1.8.4] - 2026-09-22
 
 ### Fixed

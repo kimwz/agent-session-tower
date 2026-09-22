@@ -37,6 +37,8 @@ If a folder is omitted, Auto Prompt chooses from known Tower folders. Codex auto
 
 You can authorize a completion reply in advance: **작업이 완료되면 그냥 배포됐습니다 라고 코멘트 다세요.** Tower saves the exact wording and binds it to the single pending delegated task. When that task finishes, the coordinator verifies its result and reports the outcome and evidence with `tower_task_complete`. Only a successful assessment of the matching completed run can send the already authorized wording; you do not have to approve it again. Failed, cancelled, or uncertain work does not send a success reply. The tool cannot grant approval or change the approved text. If multiple tasks are pending, clarify the target first. A reply rule alone is never advance approval.
 
+Delegation passes the requested outcome, relevant project context, and explicit owner constraints. The project agent reads its own instructions and plans implementation and verification locally. The coordinator does not add Slack reply policy, its own command sequences, or invented restrictions to the delegated prompt. Explicit scope such as a read-only investigation remains binding. Slack reply approval stays in the coordinator conversation.
+
 ## Execution and recovery
 
 The independent execution worker owns monitoring. Closing the browser or stopping/restarting the web server does not stop it. Disable monitoring explicitly to stop accepting new mentions; already accepted work continues. To cancel an executing task, use Tower's ordinary run controls. Disconnect/account replacement is available once accepted workflows finish.
