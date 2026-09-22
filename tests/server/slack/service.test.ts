@@ -10,7 +10,7 @@ test('Slack connection stays private, admits only personal mentions, and pauses 
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-service-'));
   let socket: SlackSocketOptions | undefined;
   let starts = 0, stops = 0;
-  const service = new SlackService({ stateDir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} }, {
+  const service: SlackService = new SlackService({ stateDir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} }, {
     client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw new Error('Must not send'); } }),
     socket: options => { socket = options; return { start: () => { starts++; }, stop: () => { stops++; } }; },
     model: async () => { throw new Error('Must not start a provider'); },
@@ -96,4 +96,32 @@ test('self-mention testing is opt-in, persists, and keeps bot, edit, and escaped
   await service.mutate('settings', { enabled: false, allowSelfMentions: true });
   assert.equal(service.overview().enabled, false);
   assert.equal(service.overview().allowSelfMentions, true);
+});
+
+test('dedicated coordinator exposes scoped MCP during creation and follows later native turns', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-coordinator-'));
+  const runs: import('../../../shared/types.js').Run[] = [];
+  const service: SlackService = new SlackService({ stateDir, runs: {
+    list: () => runs,
+    create: async (input, internal) => {
+      assert.equal(input.cwd, join(stateDir, 'slack-sessions', service.overview().events[0].id));
+      assert.equal(input.codexApprovalsReviewer, 'auto_review');
+      const run: import('../../../shared/types.js').Run = { id: 'r1', sessionId: 'codex:test', prompt: input.prompt, status: 'running', output: '', createdAt: '2026-01-01', autoPromptId: internal?.autoPromptId };
+      runs.push(run);
+      assert.equal(service.overview().events[0].sessionId, undefined);
+      assert.ok(service.sessionMcp(run.sessionId)?.tower_slack.args.includes('--slack-mcp'));
+      assert.equal(service.sessionMcp('unrelated'), undefined);
+      return { run, session: { id: run.sessionId, nativeId: 'test', provider: 'codex', title: 'Slack', cwd: input.cwd, project: 'Slack', status: 'working', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true } };
+    },
+  }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('unexpected delegation'); } }, refresh: async () => {} }, {
+    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [{ user: 'U2', text: 'hello', ts: '1' }], reply: async () => { throw new Error('unexpected reply'); } }),
+    model: async () => { throw new Error('unexpected classifier'); },
+  });
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  await service.start(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await service.automation.ingest({ id: 'event', teamId: 'T1', channel: 'G1', user: 'U2', ts: '1', threadTs: '1', text: '<@U1> hello' });
+  await service.automation.tick(); assert.deepEqual(service.coordinatorSessionIds(), ['codex:test']);
+  runs[0].status = 'completed'; await service.automation.tick(); assert.equal(service.overview().events[0].status, 'completed');
+  runs.push({ ...runs[0], id: 'r2', createdAt: '2026-01-02', status: 'running' });
+  assert.equal(service.overview().events[0].status, 'running'); assert.equal(service.hasActive(), true);
 });

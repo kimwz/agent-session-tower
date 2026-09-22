@@ -133,3 +133,117 @@ test('overbudget event admission rolls back and remains unacknowledged', async t
   const again = new SlackAutomationManager(f.options); await again.start();
   assert.equal(again.list().length, 1); assert.equal(again.list()[0].thread?.length, 251);
 });
+
+test('conversation creates one native session, skips legacy matching and leaves replies to explicit tools', async t => {
+  const f = await fixture(t); let creates = 0;
+  f.options.startConversation = async (workflow, prompt) => { creates++; assert.equal(workflow.mode, 'conversation'); assert.match(prompt, /tower_auto_prompt/); return { sessionId: 'session', runId: 'run' }; };
+  f.options.match = async () => { throw new Error('legacy classifier must not run'); };
+  await f.manager.ingest(mention); await f.manager.tick(); await f.manager.tick();
+  assert.equal(creates, 1); assert.equal(f.manager.list()[0].sessionId, 'session');
+  f.finish(); await f.manager.tick();
+  assert.equal(f.manager.list()[0].status, 'completed'); assert.equal(f.counts().sends, 0);
+  const id = f.manager.list()[0].id;
+  await Promise.all([f.manager.tool(id, 'slack_reply', { requestKey: 'reply-1', text: 'Done' }), f.manager.tool(id, 'slack_reply', { requestKey: 'reply-1', text: 'Done' })]);
+  assert.equal(f.counts().sends, 1);
+  await assert.rejects(f.manager.tool(id, 'slack_reply', { requestKey: 'reply-1', text: 'Other' }), /different text/);
+});
+test('conversation tools scope task reads and deduplicate delegation with Auto review', async t => {
+  const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'session', runId: 'run' });
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  const args = { requestKey: 'review', prompt: 'Review actual repo' };
+  await Promise.all([f.manager.tool(id, 'tower_auto_prompt', args), f.manager.tool(id, 'tower_auto_prompt', args)]);
+  assert.equal(f.counts().submissions, 1); assert.equal(f.submitted[0].codexApprovalsReviewer, 'auto_review');
+  await assert.rejects(f.manager.tool(id, 'tower_task_status', { requestId: 'unrelated' }), /does not belong/);
+  const status = await f.manager.tool(id, 'tower_task_status', { requestKey: 'review' }) as { run: { output: string } };
+  assert.match(status.run.output, /Review finished/);
+});
+test('uncertain conversational send persists across restart and never resends', async t => {
+  const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'session', runId: 'run' });
+  let attempts = 0; f.options.sendReply = async () => { attempts++; throw new Error('lost response'); };
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  await assert.rejects(f.manager.tool(id, 'slack_reply', { requestKey: 'r', text: 'Result' }), /lost response/);
+  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  const result = await restarted.tool(id, 'slack_reply', { requestKey: 'r', text: 'Result' }) as { status: string };
+  assert.equal(result.status, 'uncertain'); assert.equal(attempts, 1);
+  await assert.rejects(restarted.tool(id, 'slack_reply', { requestKey: 'other', text: 'Result' }), /uncertain/);
+});
+test('claimed conversation creation recovers correlated run without spawning twice', async t => {
+  const f = await fixture(t); let attempts = 0;
+  f.options.startConversation = async () => { attempts++; throw new Error('lost creation response'); };
+  await f.manager.ingest(mention); await f.manager.tick();
+  const path = join(f.directory, 'slack-automation.json'); const saved = JSON.parse(await readFile(path, 'utf8'));
+  saved.workflows[0].status = 'dispatching'; await writeFile(path, JSON.stringify(saved));
+  f.options.findConversation = () => ({ sessionId: 'session', runId: 'run' });
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  assert.equal(restarted.list()[0].sessionId, 'session'); assert.equal(attempts, 1);
+});
+
+test('delegated completion resumes an idle coordinator once and does not occupy its running turn', async t => {
+  const f = await fixture(t);
+  const coordinator: Run = { id: 'coordinator-1', sessionId: 'coordinator', prompt: '', status: 'running', createdAt: '', output: '' };
+  const coordinatorRuns = [coordinator]; let resumes = 0;
+  f.options.startConversation = async () => ({ sessionId: coordinator.sessionId, runId: coordinator.id });
+  f.options.getSessionRuns = () => coordinatorRuns;
+  f.options.resumeConversation = async (_workflow, prompt, correlationId) => {
+    resumes++; assert.match(prompt, /Review finished/);
+    const run: Run = { ...coordinator, id: 'notification', status: 'queued', autoPromptId: correlationId };
+    coordinatorRuns.push(run); return { runId: run.id };
+  };
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'review', prompt: 'Review PR' });
+  f.finish(); await f.manager.tick(); assert.equal(resumes, 0, 'do not enqueue while coordinator is still active');
+  coordinator.status = 'completed'; await f.manager.tick(); assert.equal(resumes, 1);
+  await f.manager.tick(); assert.equal(resumes, 1);
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  assert.equal(resumes, 1); assert.equal(restarted.list()[0].delegatedTasks?.[0].notifiedRunId, 'notification');
+});
+
+test('settled conversational ticks do not emit changes or rewrite history while delegation is pending', async t => {
+  const f = await fixture(t);
+  const coordinator: Run = { id: 'coordinator', sessionId: 'session', prompt: '', status: 'completed', createdAt: '', output: '' };
+  f.options.startConversation = async () => ({ sessionId: coordinator.sessionId, runId: coordinator.id });
+  f.options.getSessionRuns = () => [coordinator];
+  await f.manager.ingest(mention); await f.manager.tick();
+  const id = f.manager.list()[0].id;
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'pending', prompt: 'Review' });
+  await f.manager.tick();
+  let changes = 0; f.manager.on('change', () => { changes++; });
+  const path = join(f.directory, 'slack-automation.json'); const before = await readFile(path, 'utf8');
+  await f.manager.tick(); await f.manager.tick();
+  assert.equal(changes, 0); assert.equal(await readFile(path, 'utf8'), before);
+  assert.match(f.manager.list()[0].prompt!, /first whose condition clearly matches/);
+});
+
+test('rejected delegation becomes a durable visible error and the same key can retry successfully', async t => {
+  const f = await fixture(t);
+  const coordinator: Run = { id: 'coordinator', sessionId: 'session', prompt: '', status: 'completed', createdAt: '', output: '' };
+  f.options.startConversation = async () => ({ sessionId: coordinator.sessionId, runId: coordinator.id });
+  f.options.getSessionRuns = () => [coordinator];
+  await f.manager.ingest(mention); await f.manager.tick(); await f.manager.tick(); const id = f.manager.list()[0].id;
+  const submit = f.options.submitAutoPrompt;
+  f.options.submitAutoPrompt = async () => { throw new Error('Queue full'); };
+  const args = { requestKey: 'retry', prompt: 'Review' };
+  await assert.rejects(f.manager.tool(id, 'tower_auto_prompt', args), /Queue full/);
+  assert.equal(f.manager.list()[0].status, 'error'); assert.equal(f.manager.hasPending(), false);
+  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  assert.match(restarted.list()[0].delegatedTasks![0].submissionError!, /Queue full/);
+  f.options.submitAutoPrompt = submit;
+  await restarted.tool(id, 'tower_auto_prompt', args);
+  assert.equal(restarted.list()[0].delegatedTasks![0].submissionError, undefined);
+  assert.equal(restarted.list()[0].status, 'running');
+  assert.equal(f.counts().submissions, 1);
+});
+test('delegated run survives pruned routing history without being submitted again', async t => {
+  const f = await fixture(t); let resumes = 0;
+  const coordinator: Run = { id: 'coordinator', sessionId: 'session', prompt: '', status: 'completed', createdAt: '', output: '' };
+  f.options.startConversation = async () => ({ sessionId: coordinator.sessionId, runId: coordinator.id });
+  f.options.getSessionRuns = () => [coordinator];
+  f.options.resumeConversation = async () => { resumes++; return { runId: 'notification' }; };
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  const args = { requestKey: 'pruned', prompt: 'Review' };
+  await f.manager.tool(id, 'tower_auto_prompt', args);
+  f.options.getAutoPrompt = () => undefined; f.finish();
+  await f.manager.tick(); assert.equal(resumes, 1);
+  await assert.rejects(f.manager.tool(id, 'tower_auto_prompt', args), /refusing to submit/);
+  assert.equal(f.counts().submissions, 1);
+});

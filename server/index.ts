@@ -10,6 +10,7 @@ import { ClosedSessionStore } from './stores/closed-sessions.js';
 import { ProjectGroupStore } from './stores/project-groups.js';
 import { DurableRunManager } from './runs/durable-runner.js';
 import { runRunnerWorker } from './runs/worker.js';
+import { startSlackMcp } from './slack/mcp-bridge.js';
 import { getProviderHealth } from './providers/discovery.js';
 import { createMonitorServer } from './http/server.js';
 import { acquireStateLock, MonitorAlreadyRunning } from './instance/state-lock.js';
@@ -45,6 +46,11 @@ Native histories are read directly; tasks use the existing Codex app server or C
 
 async function main() {
   const args = process.argv.slice(2);
+  if (args[0] === '--slack-mcp') {
+    if (args.length !== 3) throw new Error('Slack MCP requires a state directory and workflow ID.');
+    await startSlackMcp(resolve(args[1]), args[2]);
+    return;
+  }
   if (args[0] === '--runner-worker') {
     if (args.length !== 2 || !args[1]) throw new Error('Runner worker requires a state directory.');
     await runRunnerWorker(resolve(args[1]));

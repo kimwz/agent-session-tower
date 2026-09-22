@@ -20,9 +20,12 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { findExecutable, providerDirectories, PROVIDERS } from '../providers/discovery.js';
 import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
+import type { SessionMcpServers } from './session-mcp.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
+  /** Resolve trusted, session-bound tools again on every resumed turn. */
+  getSessionMcp?: (sessionId: string) => SessionMcpServers | undefined;
   getSession: (id: string) => Session | undefined;
   refreshSessions: () => Promise<void>;
   stateDir?: string;
@@ -88,6 +91,10 @@ export class RunManager extends EventEmitter {
     this.stateFile = join(options.stateDir ?? defaultStateDir(), 'runs.json');
     this.createdFile = join(options.stateDir ?? defaultStateDir(), 'created-sessions.json');
     this.attachments = new AttachmentStore(options.stateDir ?? defaultStateDir());
+  }
+
+  setSessionMcpResolver(resolver: NonNullable<RunnerOptions['getSessionMcp']>): void {
+    this.options.getSessionMcp = resolver;
   }
 
   async start(): Promise<void> {
@@ -493,6 +500,7 @@ export class RunManager extends EventEmitter {
   }
 
   private async launchBridge(run: Run, session: Session): Promise<boolean> {
+    if (this.options.getSessionMcp?.(session.id)) return false;
     if (!this.options.openCodexBridge) return false;
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     let started = false;
@@ -558,9 +566,12 @@ export class RunManager extends EventEmitter {
     delete env.CLAUDE_CODE_SESSION_ID;
     let started = false;
     let registered = false;
+    const mcpServers = this.options.getSessionMcp?.(session.id);
     const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
       executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
+      mcpServers,
       ...(!creating ? { threadId: session.nativeId } : { ...(run.codexApprovalsReviewer ? { approvalsReviewer: run.codexApprovalsReviewer } : {}) }),
+      ...(mcpServers?.tower_slack ? { approvalsReviewer: 'auto_review' as const } : {}),
       ...(run.model ? { model: run.model } : {}),
       prompt: attachmentPrompt(run.prompt, attachments),
       imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path),
@@ -623,6 +634,8 @@ export class RunManager extends EventEmitter {
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     const images = attachments.filter(item => isImageAttachment(item.metadata.mimeType));
     const args = creating ? buildCreateArgs(session, run.model) : buildResumeArgs(session, run.model);
+    const mcpServers = this.options.getSessionMcp?.(session.id);
+    if (mcpServers) args.push('--mcp-config', JSON.stringify({ mcpServers }));
     for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
     const prompt = attachmentPrompt(run.prompt, attachments);
     const input = {

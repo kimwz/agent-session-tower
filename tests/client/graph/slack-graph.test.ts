@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createElement, type FunctionComponent } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { ReactFlowProvider } from '@xyflow/react';
-import { parseSlackPosition, visibleSlackMentions } from '../../../client/src/graph/slack-graph.js';
+import { parseSlackPosition, visibleSlackMentions, SLACK_PAGE_SIZE, slackMentionLayout } from '../../../client/src/graph/slack-graph.js';
 import { SlackMonitorNode, SlackMentionNode } from '../../../client/src/graph/SlackGraphNodes.js';
 import type { SlackWorkflow } from '../../../shared/slack.js';
 const event = (id: string, status: SlackWorkflow['status'] = 'running'): SlackWorkflow => ({ id, status, createdAt: `2026-09-${id.padStart(2, '0')}T00:00:00Z`, updatedAt: '2026-09-22T00:00:00Z', rules: [], mention: { id, teamId: 'team', channel: 'channel', user: 'user', ts: '1', threadTs: '1', text: 'Please review this PR' } });
@@ -17,6 +17,20 @@ test('mention window sorts newest first and retains an older selected mention wi
   assert.deepEqual(visibleSlackMentions(events, 1, '1').map(item => item.id), ['3', '1']);
   assert.deepEqual(events.map(item => item.id), ['1', '3', '2']);
   assert.equal(visibleSlackMentions(events, 2, '3').length, 2);
+});
+test('compact mention list pages five newest conversations and expands without losing selection', () => {
+  const events = Array.from({ length: 12 }, (_, index) => event(String(index + 1)));
+  assert.deepEqual(visibleSlackMentions(events, SLACK_PAGE_SIZE).map(item => item.id), ['12', '11', '10', '9', '8']);
+  const selected = visibleSlackMentions(events, SLACK_PAGE_SIZE, '1');
+  assert.deepEqual(selected.map(item => item.id), ['12', '11', '10', '9', '8', '1']);
+  const expanded = visibleSlackMentions(events, SLACK_PAGE_SIZE * 2, '1');
+  assert.equal(expanded.length, 11);
+  assert.equal(expanded.at(-1)?.id, '1');
+  const layout = slackMentionLayout(selected.length, true);
+  assert.equal(new Set(layout.positions.map(position => position.x)).size, 1);
+  for (let index = 1; index < layout.positions.length; index++) assert.equal(layout.positions[index].y - layout.positions[index - 1].y, 78);
+  assert.ok(layout.positions.at(-1)!.y + 70 < layout.height - 30, 'last card leaves room for the More button');
+  assert.ok(slackMentionLayout(0, false).height >= 190, 'empty state retains usable canvas space');
 });
 test('monitor offers draggable header, overview and empty state even with no sessions', () => {
   const markup = node(SlackMonitorNode, { name: 'Team', enabled: true, status: 'connected', count: 0, active: 0, remaining: 0, onMore() {} });

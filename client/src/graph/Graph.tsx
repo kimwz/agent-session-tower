@@ -6,7 +6,7 @@ import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '.
 import { nodeTypes, type ProjectData } from './GraphNodes';
 import type { SlackPublicStatus } from '../../../shared/slack';
 import { SlackMonitorNode, SlackMentionNode } from './SlackGraphNodes';
-import { SLACK_MONITOR_ID, SLACK_POSITION_KEY, parseSlackPosition, visibleSlackMentions } from './slack-graph';
+import { SLACK_MONITOR_ID, SLACK_POSITION_KEY, SLACK_PAGE_SIZE, parseSlackPosition, visibleSlackMentions, slackMentionLayout } from './slack-graph';
 import { slackWorkflowWorking } from '../slack/slack-monitor';
 const canvasNodeTypes = { ...nodeTypes, slackMonitor: SlackMonitorNode, slackMention: SlackMentionNode };
 import { graphProjectId, graphProjectKey, graphSessionGroups, clearHostPosition, HOST_HEIGHT } from './graph-layout';
@@ -68,9 +68,9 @@ function Canvas({ slack, selectedSlackId, onSelectSlack, token = '', providers, 
   const [motion, setMotion] = useState(() => !window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   const [zoom, setZoom] = useState(100);
   const [graphLimit, setGraphLimit] = useState(8);
-  const [slackLimit, setSlackLimit] = useState(8);
+  const [slackLimit, setSlackLimit] = useState(SLACK_PAGE_SIZE);
   const [slackPosition, setSlackPosition] = useState(() => { try { return parseSlackPosition(window.localStorage.getItem(SLACK_POSITION_KEY)); } catch { return null; } });
-  const showMoreSlack = useCallback(() => setSlackLimit(value => value + 8), []);
+  const showMoreSlack = useCallback(() => setSlackLimit(value => value + SLACK_PAGE_SIZE), []);
   const [preferences, setPreferences] = useState(readPreferences);
   const [manualFitRequest, setManualFitRequest] = useState(0);
   const manual = preferences.mode === 'manual';
@@ -140,11 +140,10 @@ function Canvas({ slack, selectedSlackId, onSelectSlack, token = '', providers, 
     if (slack?.connected) {
       const mentions = visibleSlackMentions(slack.events, slackLimit, selectedSlackId);
       const right = ns.filter(node => node.type === 'projectGroup').reduce((max, node) => Math.max(max, node.position.x + Number(node.style?.width || 0) + 36), 0);
-      const columns = mentions.length > 1 ? 2 : 1;
-      const rows = Math.max(1, Math.ceil(mentions.length / columns));
       const remaining = slack.events.length - mentions.length;
-      ns.push({ id: SLACK_MONITOR_ID, type: 'slackMonitor', position: slackPosition || { x: right, y: 185 }, style: { width: columns * 268 + 14, height: rows * 215 + 140 + (remaining > 0 ? 30 : 0) }, zIndex: 1, draggable: true, dragHandle: '.slack-monitor-drag-handle', selectable: false, focusable: false, data: { name: slack.account?.teamName || 'Slack', enabled: slack.enabled, status: slack.status, error: slack.error, count: slack.events.length, active: slack.events.filter(slackWorkflowWorking).length, remaining, onMore: showMoreSlack, onSelect: onSelectSlack } });
-      mentions.forEach((event, index) => ns.push({ id: `slack:mention:${event.id}`, type: 'slackMention', parentId: SLACK_MONITOR_ID, extent: 'parent', style: { pointerEvents: 'all' }, position: { x: 20 + (index % columns) * 268, y: 120 + Math.floor(index / columns) * 215 }, zIndex: 3, draggable: false, selectable: false, focusable: false, data: { event, selected: event.id === selectedSlackId, onSelect: onSelectSlack } }));
+      const layout = slackMentionLayout(mentions.length, remaining > 0);
+      ns.push({ id: SLACK_MONITOR_ID, type: 'slackMonitor', position: slackPosition || { x: right, y: 185 }, style: { width: layout.width, height: layout.height }, zIndex: 1, draggable: true, dragHandle: '.slack-monitor-drag-handle', selectable: false, focusable: false, data: { name: slack.account?.teamName || 'Slack', enabled: slack.enabled, status: slack.status, error: slack.error, count: slack.events.length, active: slack.events.filter(slackWorkflowWorking).length, remaining, onMore: showMoreSlack, onSelect: onSelectSlack } });
+      mentions.forEach((event, index) => ns.push({ id: `slack:mention:${event.id}`, type: 'slackMention', parentId: SLACK_MONITOR_ID, extent: 'parent', style: { pointerEvents: 'all' }, position: layout.positions[index], zIndex: 3, draggable: false, selectable: false, focusable: false, data: { event, selected: event.id === selectedSlackId, onSelect: onSelectSlack } }));
       es.push({ id: 'host-slack', source: 'host', target: SLACK_MONITOR_ID, type: 'smoothstep', animated: motion && slack.events.some(slackWorkflowWorking), style: { stroke: '#675077', strokeWidth: 1.2 } });
     }
     const hostPosition = manual ? clearHostPosition(manualLayout.host, ns.filter(node => node.type === 'projectGroup').map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }))) : { x: Math.max(0, (x - 36) / 2 - 128), y: 0 };

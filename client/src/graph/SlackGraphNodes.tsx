@@ -24,11 +24,9 @@ export const SlackMonitorNode = memo(function SlackMonitorNode({ data }: NodePro
 });
 export const SlackMentionNode = memo(function SlackMentionNode({ data }: NodeProps<Node<SlackMentionData>>) {
   useI18n(); const event = data.event; const working = slackWorkflowWorking(event);
-  return <button className={`agent-card slack-mention-card ${working ? 'working' : ''} ${data.selected ? 'selected' : ''}`} onClick={() => data.onSelect?.(event.id)} aria-label={`${slackMentionTitle(event)}: ${slackWorkflowLabel(event)}`}>
+  return <button className={`agent-card slack-mention-card ${working ? 'working' : ''} ${data.selected ? 'selected' : ''}`} onClick={() => data.onSelect?.(event.id)} title={event.error || undefined} aria-label={`${slackMentionTitle(event)}: ${slackWorkflowLabel(event)}`}>
     {working && <span className="agent-activity-border" aria-hidden="true" />}
-    <div className="slack-mention-top"><Slack size={19} /><span>{slackWorkflowLabel(event)}</span></div>
+    <div className="slack-mention-top"><Slack size={12} /><span>{slackWorkflowLabel(event)}</span><time dateTime={event.createdAt}>{relativeTime(event.createdAt)}</time><ArrowUpRight size={11} /></div>
     <div className="agent-card-title" title={slackMentionTitle(event)}>{slackMentionTitle(event)}</div>
-    <p className="agent-card-preview">{event.error || event.reason || event.mention.text}</p>
-    <time className="agent-updated" dateTime={event.updatedAt}>{relativeTime(event.updatedAt)}<ArrowUpRight size={11} /></time>
   </button>;
 });

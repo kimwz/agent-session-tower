@@ -23,6 +23,10 @@ export interface SlackMention {
 export type SlackWorkflowState = 'received' | 'matching' | 'ignored' | 'dispatching' | 'running' | 'composing' | 'sending' | 'completed' | 'error' | 'reply-uncertain';
 export interface SlackWorkflow {
   id: string;
+  mode?: 'conversation';
+  conversationClaimed?: boolean;
+  delegatedTasks?: Array<{ requestKey: string; requestId: string; prompt: string; provider: Provider; cwd?: string; submitted?: boolean; submissionError?: string; delegatedRunId?: string; notificationClaimed?: boolean; notifiedRunId?: string; notificationError?: string }>;
+  replies?: Array<{ requestKey: string; text: string; status: 'sending' | 'sent' | 'uncertain'; ts?: string }>;
   mention: SlackMention;
   status: SlackWorkflowState;
   createdAt: string;

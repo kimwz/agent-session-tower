@@ -10,11 +10,11 @@
 .slack-monitor-status > span { margin-left:auto; }
 .slack-monitor-empty { display:block; margin:45px auto; background:none; border:0; color:#a497b2; font-size:12px; }
 .slack-monitor-more { position:absolute; bottom:13px; left:50%; transform:translateX(-50%); background:#332841; border:1px solid #675077; border-radius:7px; color:#d9c7e5; padding:6px 14px; font-size:11px; }
-.slack-mention-card.agent-card { width:248px; height:202px; min-height:202px; border-color:#5c496e; background:#241f31; --activity-cyan:#65e2cb; --activity-accent:#e598cb; cursor:pointer; }
-.slack-mention-top { display:flex; align-items:center; justify-content:space-between; height:35px; color:#d1addf; margin-bottom:12px; }
-.slack-mention-top span { font-size:11px; }
-.slack-mention-card .agent-card-preview { -webkit-line-clamp:3; }
-.slack-mention-card .agent-updated { position:absolute; bottom:14px; left:18px; right:18px; }
+.slack-mention-card.agent-card { width:312px; height:70px; min-height:70px; padding:10px 12px; text-align:left; border-radius:10px; border-color:#5c496e; background:#241f31; --activity-cyan:#65e2cb; --activity-accent:#e598cb; cursor:pointer; }
+.slack-mention-top { display:flex; align-items:center; gap:6px; height:16px; color:#d1addf; margin-bottom:7px; }
+.slack-mention-top span { font-size:10px; }
+.slack-mention-top time { margin-left:auto; font-size:9px; color:#ae9fbd; }
+.slack-mention-card .agent-card-title { display:block; max-width:100%; min-height:0; max-height:20px; font-size:12px; line-height:20px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .react-flow__node.dragging .slack-monitor-drag-handle { cursor:grabbing; }
 
 .slack-mention-card.agent-card.selected { border-color:#c89ae7; background:#382a47; box-shadow:0 0 0 3px #c89ae72b; }

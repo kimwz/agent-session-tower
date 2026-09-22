@@ -1,6 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { isSea } from 'node:sea';
+import type { SessionMcpServers } from '../runs/session-mcp.js';
 import type { AutoPromptManager } from '../auto-prompt/manager.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
 import type { RunManager } from '../runs/manager.js';
@@ -27,10 +30,23 @@ export class SlackService extends EventEmitter {
   private error?: string;
   private operations: Promise<unknown> = Promise.resolve();
   readonly automation: SlackAutomationManager;
-  constructor(private readonly options: { stateDir: string; runs: Pick<RunManager, 'list'>; autoPrompts: Pick<AutoPromptManager, 'get' | 'submit'>; refresh: () => Promise<void> }, private readonly dependencies: Dependencies = {}) {
+  constructor(private readonly options: { stateDir: string; runs: Pick<RunManager, 'list'> & Partial<Pick<RunManager, 'create' | 'enqueue' | 'getSession' | 'sessionList'>>; autoPrompts: Pick<AutoPromptManager, 'get' | 'submit'>; refresh: () => Promise<void> }, private readonly dependencies: Dependencies = {}) {
     super();
     this.automation = new SlackAutomationManager({
       stateDir: options.stateDir,
+      ...(options.runs.create ? { startConversation: async (workflow, prompt) => {
+        const provider = workflow.rules[0]?.provider ?? 'codex';
+        const created = await options.runs.create!({ provider, cwd: join(options.stateDir, 'slack-sessions', workflow.id), prompt,
+          title: `Slack: ${workflow.mention.text.replace(/\s+/g, ' ').slice(0, 100)}`,
+          ...(provider === 'codex' ? { codexApprovalsReviewer: 'auto_review' as const } : {}) }, { autoPromptId: workflow.id });
+        return { sessionId: created.session.id, runId: created.run.id };
+      } } : {}),
+      ...(options.runs.enqueue ? { resumeConversation: async (workflow, prompt, correlationId) => {
+        const run = await options.runs.enqueue!(workflow.sessionId!, prompt, {}, { autoPromptId: correlationId });
+        return { runId: run.id };
+      } } : {}),
+      findConversation: id => { const run = options.runs.list().find(run => run.autoPromptId === id); return run ? { sessionId: run.sessionId, runId: run.id } : undefined; },
+      getSessionRuns: id => options.runs.list().filter(run => run.sessionId === id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
       fetchThread: mention => this.client(mention.teamId).thread(mention.channel, mention.threadTs),
       match: async input => {
         const provider = input.rules[0]?.provider ?? 'codex';
@@ -75,6 +91,17 @@ export class SlackService extends EventEmitter {
       ...(this.error ? { error: this.error } : {}), ...(this.settings.account ? { account: { ...this.settings.account } } : {}),
       rules: this.automation.rules(), events: this.automation.list() };
   }
+  coordinatorSessionIds(): string[] {
+    const workflows = this.automation.list().filter(item => item.mode === 'conversation');
+    return [...new Set(workflows.flatMap(item => item.sessionId ? [item.sessionId] : this.options.runs.list().filter(run => run.autoPromptId === item.id).map(run => run.sessionId)))];
+  }
+  sessionMcp(sessionId: string): SessionMcpServers | undefined {
+    const item = this.automation.list().find(item => item.mode === 'conversation' && (item.sessionId === sessionId || this.options.runs.list().some(run => run.sessionId === sessionId && run.autoPromptId === item.id)));
+    if (!item) return undefined;
+    return { tower_slack: { command: process.execPath, args: isSea() ? ['--slack-mcp', this.options.stateDir, item.id]
+      : [fileURLToPath(new URL('../index.js', import.meta.url)), '--slack-mcp', this.options.stateDir, item.id] } };
+  }
+  tool(workflowId: string, name: string, args: Record<string, unknown>) { return this.automation.tool(workflowId, name, args); }
   hasActive() { return this.settings.enabled || this.automation.hasPending(); }
   private client(teamId: string) {
     if (!this.settings.userToken || this.settings.account?.teamId !== teamId) throw new Error('Slack 계정 연결이 필요합니다.');

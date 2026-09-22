@@ -2,7 +2,9 @@ import { WorkspaceOverlayProvider } from '../workspace/WorkspaceOverlay';
 import { AuthGate } from '../auth/AuthGate';
 import { AccountButton } from '../auth/AccountPanel';
 import { SlackMonitorPanel } from '../slack/SlackMonitorPanel';
+import { SlackConversationAlert } from '../slack/SlackConversationAlert';
 import { useSlackMonitor } from '../slack/use-slack-monitor';
+import { slackChatSelection, slackCoordinatorSessionIds } from '../slack/slack-chat-selection';
 import { SlackButton } from '../slack/SlackPanel';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -44,10 +46,11 @@ function TowerApp() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   const { slack, error: slackError } = useSlackMonitor(connection === 'connected');
-  const [selectedSlackId, setSelectedSlackId] = useState<string | null | undefined>(undefined);
+  const [requestedSlackId, setSelectedSlackId] = useState<string | null | undefined>(undefined);
   const [loadError, setLoadError] = useState('');
   const [token, setToken] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(readSelection);
+  const { mentionId: selectedSlackId, chatId: activeChatId } = slackChatSelection(slack?.events || [], requestedSlackId, selectedId);
   const [provider, setProvider] = useState<'all' | Provider>('all');
   const [status, setStatus] = useState<StatusFilter>('all');
   const [project, setProject] = useState('all');
@@ -196,12 +199,13 @@ function TowerApp() {
   const sessions = snapshot?.sessions || [];
   const groups = snapshot?.groups || emptyProjectGroups;
   const groupTitles = useMemo(() => new Map(groups.map(group => [group.cwd, group.title])), [groups]);
-  const allMainSessions = useMemo(() => getMainSessions(sessions), [sessions]);
+  const coordinatorIds = useMemo(() => slackCoordinatorSessionIds(slack?.events || []), [slack?.events]);
+  const allMainSessions = useMemo(() => getMainSessions(sessions).filter(session => !coordinatorIds.has(session.id)), [sessions, coordinatorIds]);
   const mainSessions = useMemo(() => allMainSessions.filter(session => !session.closed), [allMainSessions]);
   const closedSessions = useMemo(() => allMainSessions.filter(session => session.closed).sort(sortSessions), [allMainSessions]);
-  const selectedMainId = useMemo(() => getMainSessionId(sessions, selectedId), [sessions, selectedId]);
-  const selectedSession = sessions.find(session => session.id === selectedId);
-  const selectedMainSession = allMainSessions.find(session => session.id === selectedMainId);
+  const selectedMainId = useMemo(() => getMainSessionId(sessions, activeChatId), [sessions, activeChatId]);
+  const selectedSession = sessions.find(session => session.id === activeChatId);
+  const selectedMainSession = sessions.find(session => session.id === selectedMainId);
   const revisions = useMemo(() => new Map(sessions.map(session => [session.id, conversationRevision(session, snapshot?.runs)])), [sessions, snapshot?.runs]);
   const unreadIds = useMemo(() => new Set(mainSessions.filter(session => readState[session.id] !== revisions.get(session.id)).map(session => session.id)), [mainSessions, readState, revisions]);
   useEffect(() => { if (snapshot && !snapshot.scanning) setReadState(previous => pruneReadState(previous, snapshot.sessions)); }, [snapshot]);
@@ -219,7 +223,7 @@ function TowerApp() {
   const hasHiddenMatches = !showHidden && (canvasSessions.length < filtered.length || revealableGroups.some(group => group.hidden));
   const working = mainSessions.filter(session => session.status === 'working').length;
   const completed = mainSessions.filter(session => session.status === 'completed').length;
-  const currentRuns = useMemo(() => (snapshot?.runs || []).filter(run => run.sessionId === selectedId).sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt)), [snapshot?.runs, selectedId]);
+  const currentRuns = useMemo(() => (snapshot?.runs || []).filter(run => run.sessionId === activeChatId).sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt)), [snapshot?.runs, activeChatId]);
   const clearFilters = () => { setProvider('all'); setStatus('all'); setProject('all'); setPeriod('all'); setQuery(''); };
   const hasFilters = provider !== 'all' || status !== 'all' || project !== 'all' || !!query;
   const listedSessions = showClosed ? closedSessions.filter(session => (provider === 'all' || session.provider === provider) && (project === 'all' || session.cwd === project) && (!query.trim() || `${groupTitles.get(session.cwd) || ''} ${sessionTitle(session)} ${session.cwd} ${session.lastMessage}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))) : filtered;
@@ -276,8 +280,8 @@ function TowerApp() {
           <div className="graph-loading"><div className="loading-constellation"><span /><span /><span /><Monitor size={25} /></div><h3>{t("이 Mac의 에이전트를 찾고 있습니다")}</h3><p>{t("Claude Code와 Codex의 실제 세션 기록을 연결합니다.")}</p></div>
         </> : <Graph slack={slack || undefined} selectedSlackId={selectedSlackId} onSelectSlack={selectSlack} token={token} providers={snapshot.providers} sessions={canvasSessions} allSessions={mainSessions} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} onCanvasClick={closeChat} filterKey={`${filterKey}:${showHidden}`} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} onAutoPrompt={openAutoPrompt} showHidden={showHidden} onShowHiddenChange={setShowHidden} settingsSuspended={showHelp || showNewSession || showAutoPrompt || (sidebarIsDrawer && showSidebar) || (mobileViewport && (!!selectedId || selectedSlackId !== undefined))} emptyState={canvasEmptyState} />}
       </main>
-      {selectedSlackId !== undefined && <SlackMonitorPanel slack={slack} error={slackError} mentionId={selectedSlackId} jobs={snapshot?.autoPrompts || []} onClose={closeChat} onSelectMention={selectSlack} onNavigate={onSelect} />}
-      {selectedId && <Suspense fallback={<aside className="chat-panel"><div className="chat-loading"><LoaderCircle className="spin" size={20} /><span>{t("대화를 여는 중")}</span></div></aside>}><ChatPanel key={selectedId} sessionId={selectedId} session={selectedSession} allSessions={sessions} provider={snapshot?.providers.find(item => item.provider === (selectedSession?.provider || (selectedId.startsWith('claude') ? 'claude' : 'codex')))} runs={currentRuns} token={token} connected={connection === 'connected'} onClose={closeChat} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate} onSessionClose={changeSessionClosed} sessionClosed={!!selectedMainSession?.closed} changingClosed={changingClosed} readRevision={showNewSession || showAutoPrompt || (sidebarIsDrawer && sidebarOpen) ? '' : revisions.get(selectedId)} onRead={onRead} /></Suspense>}
+      {selectedSlackId !== undefined && !activeChatId && <SlackMonitorPanel slack={slack} error={slackError} mentionId={selectedSlackId} jobs={snapshot?.autoPrompts || []} onClose={closeChat} onSelectMention={selectSlack} onNavigate={onSelect} />}
+      {activeChatId && <Suspense fallback={<aside className="chat-panel"><div className="chat-loading"><LoaderCircle className="spin" size={20} /><span>{t("대화를 여는 중")}</span></div></aside>}><ChatPanel contextBanner={<SlackConversationAlert workflow={slack?.events.find(event => event.id === selectedSlackId)} />} key={activeChatId} sessionId={activeChatId} session={selectedSession} allSessions={sessions} provider={snapshot?.providers.find(item => item.provider === (selectedSession?.provider || (activeChatId.startsWith('claude') ? 'claude' : 'codex')))} runs={currentRuns} token={token} connected={connection === 'connected'} onClose={closeChat} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate} onSessionClose={changeSessionClosed} sessionClosed={!!selectedMainSession?.closed} changingClosed={changingClosed} readRevision={showNewSession || showAutoPrompt || (sidebarIsDrawer && sidebarOpen) ? '' : revisions.get(activeChatId)} onRead={onRead} /></Suspense>}
     </div>
     <AutoPromptDialog visible={showAutoPrompt} initialCwd={autoPromptCwd} providers={snapshot?.providers || []} projects={projects} sessions={sessions} jobs={snapshot?.autoPrompts || []} token={token} connected={connection === 'connected'} onClose={closeAutoPrompt} onNavigate={openAutoPromptSession} onRefresh={refresh} />
     {showNewSession && <NewSessionDialog providers={snapshot?.providers || []} projects={projects} initialCwd={newSessionCwd || selectedSession?.cwd || (project !== 'all' ? project : undefined)} token={token} connected={connection === 'connected'} onClose={closeNewSession} onCreated={sessionCreated} />}

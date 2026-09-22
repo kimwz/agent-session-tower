@@ -1,6 +1,6 @@
 # Slack automation
 
-Tower can watch mentions of your Slack user, read the surrounding thread, match an ordered list of instructions, run a matching task through Auto Prompt, and reply in that thread after execution finishes.
+Tower watches mentions of your Slack user and opens a dedicated conversation for each new mention. Its agent reads the thread and configured instructions, delegates work through Auto Prompt, and can reply to the original Slack thread using tools. You can continue the conversation directly in Tower.
 
 This initial integration uses a private Slack app with Socket Mode and a **user OAuth token**. Replies are posted as that user. There is no hosted OAuth callback or one-click installation flow. Tokens stay in an owner-readable file in Tower's state directory and are never returned to the browser or passed to the agent.
 
@@ -21,11 +21,11 @@ Your own messages are excluded by default. To test a saved rule, enable **Proces
 
 Connecting an account adds a **Slack monitor** to the canvas. Drag its header to move it; its position is remembered in both automatic and manual layouts. New mentions appear as cards inside it, and active work uses the same animated rainbow border as agent sessions. Connection problems remain visible alongside running work.
 
-Click a mention to see the original thread, matched instruction and decision summary, Auto Prompt routing, recent execution messages, and the resulting Slack reply. Open the execution session for its full conversation. An uncertain reply delivery is labeled as unconfirmed. Click the monitor header for the mention list; canvas cards show the latest eight initially with a **Show more** control.
+The monitor shows the latest five mentions as short cards in descending order. **Show more** loads five older conversations at a time. Click a card to open the ordinary session chat, including its composer and active-run controls. Follow-up instructions remain in the same dedicated conversation. These one-off coordinator sessions stay out of the ordinary session list and project canvas; their histories remain available through Slack monitor. Records created before this conversation feature retain their previous detail view and are not replayed.
 
 ## Instructions
 
-Each item has a name, matching condition, execution instructions, reply instructions, provider, optional known working folder, and enabled flag. The tool-free classifier selects the first applicable rule in display order. A mention runs at most one rule. No clear match means no execution or reply. The first enabled rule's provider performs classification; the matched rule's provider performs routing, execution, and reply composition.
+Each item has a name, matching condition, execution instructions, reply instructions, provider, optional known working folder, and enabled flag. The dedicated agent receives a snapshot of enabled rules and the original thread, chooses the first applicable rule, and explains its decision in chat. No clear match means it should explain and wait for your direction rather than execute or reply. The first enabled rule selects the coordinator's provider, defaulting to Codex when no rule is enabled. Delegated work follows the selected rule's provider and folder.
 
 The **Verse8 PR review** example is disabled until you enable and save it. Customize it with your actual repository scope and review process. For example:
 
@@ -33,15 +33,15 @@ The **Verse8 PR review** example is disabled until you enable and save it. Custo
 - Execution: Read the PR and relevant code, review correctness and regressions, and post findings to the PR if any. Do not merge the PR. Report what you checked and whether review comments were posted.
 - Reply: After a completed review, reply `확인 했습니다.` when there are no findings, or `코멘트 확인 부탁드립니다.` when review comments were posted. Do not claim completion when blocked.
 
-If a folder is omitted, Auto Prompt chooses from known Tower folders. Codex automation always requests Auto approval review (`auto_review`); its review agent evaluates approval requests within the existing sandbox rules. To apply this setting reliably, Codex automation starts a new session in the selected folder even if the router finds an existing session. If Codex does not confirm Auto review, Tower stops before submitting the task. Native provider authentication still applies. Waiting for approval is not successful completion. The agent receives the saved instruction plus Slack context; Tower handles the final Slack reply itself.
+If a folder is omitted, Auto Prompt chooses from known Tower folders. Codex automation always requests Auto approval review (`auto_review`); its review agent evaluates approval requests within the existing sandbox rules. To apply this setting reliably, Codex automation starts a new session in the selected folder even if the router finds an existing session. If Codex does not confirm Auto review, Tower stops before submitting the task. Native provider authentication still applies. Waiting for approval is not successful completion. The coordinator receives four workflow-bound tools: `tower_auto_prompt`, `tower_task_status`, `slack_thread`, and `slack_reply`. Slack replies always target the original thread, and credentials are not included in model prompts or tool results. A normal chat answer is not automatically sent to Slack; ask the agent to use its reply tool when you want a follow-up posted. Auto approval review is also checked when resuming the coordinator.
 
 ## Execution and recovery
 
 The independent execution worker owns monitoring. Closing the browser or stopping/restarting the web server does not stop it. Disable monitoring explicitly to stop accepting new mentions; already accepted work continues. To cancel an executing task, use Tower's ordinary run controls. Disconnect/account replacement is available once accepted workflows finish.
 
-Activity shows matching, routing, execution, reply, ignored, and error states. `Auto Prompt completed` only means execution was admitted; Slack waits for the actual run to complete and generates a reply grounded in its output. A failed/cancelled run or unverifiable result produces no success reply.
+After delegation, the coordinator ends its turn to free the execution slot. Tower tracks the actual delegated run and automatically resumes the coordinator with its result when it finishes. The agent then assesses the result and uses the reply tool as appropriate. The monitor remains active while delegated work is outstanding. `Auto Prompt completed` alone only means execution was admitted, not that the work succeeded.
 
-Events, the matching rule snapshot, the execution prompt, and run IDs are persisted to prevent duplicate work across event redelivery and restart. Slack reply transmission is not automatically retried after an uncertain network result; check the original thread manually when activity says **reply uncertain**. Read/model/routing failures are recorded without automatically rerunning the work.
+Events, rule snapshots, coordinator identities, delegated tasks, result notifications, and reply request keys are persisted to prevent duplicate work across event redelivery and restart. Slack reply transmission is not automatically retried after an uncertain network result; check the original thread manually when activity says **reply uncertain**. Read/model/routing failures are recorded without automatically rerunning the work.
 
 Threads that cannot be fetched completely or fit the bounded execution context stop with an error; Tower never silently executes from a partial thread. Slack may rate limit reads; the client respects short `Retry-After` delays and reports longer limits. Processing history is local and contains Slack thread text: protect Tower's state directory accordingly.
 

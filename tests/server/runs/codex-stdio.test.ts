@@ -160,22 +160,33 @@ test('new native identity is durable before prompt admission, with only an expli
   assert.equal(f.sent.some(frame => frame.method === 'thread/resume'), false);
 });
 
-test('a chosen approval reviewer is sent only when the conversation is created', async t => {
+test('session tools are attached to both new and resumed native conversations', async t => {
+  const mcpServers = { tower_slack: { command: '/fixture/node', args: ['/fixture/bridge.mjs', 'workflow-id'] } };
+  for (const threadId of [undefined, ID]) {
+    const f = await fixture(t, 'complete', { threadId, mcpServers });
+    await f.run.start(); await f.run.done;
+    const request = f.sent.find(frame => frame.method === (threadId ? 'thread/resume' : 'thread/start'))!;
+    assert.deepEqual(request.params.config, { mcp_servers: mcpServers });
+    assert.equal(f.finished[0].status, 'completed');
+  }
+});
+
+test('an explicit approval reviewer is sent on create and resume, while omitted settings stay native', async t => {
   const created = await fixture(t, 'complete', { threadId: undefined, approvalsReviewer: 'auto_review' });
   await created.run.start(); await created.run.done;
   assert.deepEqual(created.sent.find(frame => frame.method === 'thread/start')?.params, { cwd: created.directory, approvalsReviewer: 'auto_review' });
   assert.equal(created.finished[0].status, 'completed');
   const resumed = await fixture(t, 'complete', { approvalsReviewer: 'auto_review' });
   await resumed.run.start(); await resumed.run.done;
-  assert.deepEqual(resumed.sent.find(frame => frame.method === 'thread/resume')?.params, { threadId: ID, excludeTurns: true });
+  assert.deepEqual(resumed.sent.find(frame => frame.method === 'thread/resume')?.params, { threadId: ID, excludeTurns: true, approvalsReviewer: 'auto_review' });
   const omitted = await fixture(t, 'complete', { threadId: undefined });
   await omitted.run.start(); await omitted.run.done;
   assert.deepEqual(omitted.sent.find(frame => frame.method === 'thread/start')?.params, { cwd: omitted.directory });
 });
 
 test('explicit Auto approval review fails before submitting a task if Codex does not confirm it', async t => {
-  for (const mode of ['reviewer-mismatch', 'reviewer-missing']) await t.test(mode, async t => {
-    const f = await fixture(t, mode, { threadId: undefined, approvalsReviewer: 'auto_review' });
+  for (const threadId of [undefined, ID]) for (const mode of ['reviewer-mismatch', 'reviewer-missing']) await t.test(`${threadId ? 'resume' : 'create'} ${mode}`, async t => {
+    const f = await fixture(t, mode, { threadId, approvalsReviewer: 'auto_review' });
     await assert.rejects(f.run.start(), /did not confirm Auto approval review/);
     await f.run.done;
     assert.equal(f.sent.some(frame => frame.method === 'turn/start'), false);

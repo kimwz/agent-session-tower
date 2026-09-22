@@ -36,6 +36,7 @@ export interface RunnerHostOptions {
 
 /** Hosts an already-started engine, including one adopted during an in-place upgrade. */
 export async function startRunnerHost(options: RunnerHostOptions) {
+  options.runs.setSessionMcpResolver(id => options.slack?.sessionMcp(id));
   const paths = await runnerPaths(options.stateDir);
   const release = options.releaseStateLock ?? await acquireStateLock(paths.runtime, 0);
   let context: Awaited<ReturnType<typeof runnerContext>> | undefined;
@@ -76,6 +77,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'cancelAutoPrompt': if (options.autoPrompts) return options.autoPrompts.cancel(args[0] as string); break;
       case 'slackOverview': if (options.slack) return options.slack.overview(); break;
       case 'slackMutate': if (options.slack) return options.slack.mutate(args[0] as string, args[1] as Record<string, unknown>); break;
+      case 'slackTool': if (options.slack) return options.slack.tool(args[0] as string, args[1] as string, args[2] as Record<string, unknown>); break;
     }
     throw Object.assign(new Error('Unknown runner operation.'), { statusCode: 400 });
   };
@@ -111,7 +113,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       reply.result = await dispatch(input.method, input.args);
       // Keystrokes, resizes and attachment downloads do not change run state.
       // Keep their replies small; the regular snapshot poll publishes engine changes.
-      if (input.instance !== instance || (input.method === 'snapshot' ? input.revision !== revision : !SNAPSHOT_FREE_OPERATIONS.has(input.method))) reply.snapshot = snapshot();
+      if (input.method !== 'slackTool' && (input.instance !== instance || (input.method === 'snapshot' ? input.revision !== revision : !SNAPSHOT_FREE_OPERATIONS.has(input.method)))) reply.snapshot = snapshot();
     } catch (error) {
       const value = error as { message?: string; statusCode?: number; disposition?: string };
       reply.error = { message: value.message ?? 'Runner operation failed.', statusCode: value.statusCode ?? 500, ...(value.disposition ? { disposition: value.disposition } : {}) };
@@ -161,7 +163,7 @@ function admission(value: unknown): RunAdmission {
   return { autoPromptId: (value as { autoPromptId?: string }).autoPromptId };
 }
 
-async function runnerContext({ stateDir, runs, sessions }: Pick<RunnerHostOptions, 'stateDir' | 'runs' | 'sessions'>) {
+async function runnerContext({ stateDir, runs, sessions, slack }: Pick<RunnerHostOptions, 'stateDir' | 'runs' | 'sessions' | 'slack'>) {
   let titles = new SessionTitleStore(stateDir);
   let closed = new ClosedSessionStore(stateDir);
   let groups = new ProjectGroupStore(stateDir);
@@ -172,7 +174,7 @@ async function runnerContext({ stateDir, runs, sessions }: Pick<RunnerHostOption
   };
   await metadata();
   const providers = await getProviderHealth();
-  const snapshot = (): Snapshot => ({ sessions: projectSessionStates(runs.sessionList(sessions.list()), runs.list(), runs.settledRunIds()).map(session => closed.apply(titles.apply(session))),
+  const snapshot = (): Snapshot => ({ sessions: projectSessionStates(runs.sessionList(sessions.list()), runs.list(), runs.settledRunIds()).filter(session => !slack?.coordinatorSessionIds().includes(session.id)).map(session => closed.apply(titles.apply(session))),
     runs: runs.list(), groups: groups.list(), providers, scanning: false, hostname: hostname(), version: APP_VERSION, updatedAt: new Date().toISOString() });
   return { snapshot,
     refresh: async () => { await Promise.all([sessions.refresh(true), metadata()]); },
@@ -196,6 +198,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const autoPrompts = new AutoPromptManager({ stateDir, runs, ...context });
     await autoPrompts.start();
     const slack = new SlackService({ stateDir, runs, autoPrompts, refresh: context.refresh });
+    runs.setSessionMcpResolver(id => slack.sessionMcp(id));
+    autoPrompts.updateContext(await runnerContext({ stateDir, runs, sessions, slack }));
     await slack.start();
     await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, releaseStateLock: release,
       onIdle: async () => { slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); } });

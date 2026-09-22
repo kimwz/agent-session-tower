@@ -6,6 +6,7 @@ import type { CodexApprovalsReviewer, RunApproval, RunApprovalResponse } from '.
 import { requestedModel } from '../providers/models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
 import { APP_NAME, APP_TITLE, APP_VERSION } from '../../shared/app-identity.js';
+import type { SessionMcpServers } from './session-mcp.js';
 
 // v2 wire shapes verified with Codex CLI 0.153.4 app-server generate-ts --experimental.
 type RequestId = string | number;
@@ -13,12 +14,13 @@ type RecordValue = Record<string, any>;
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 export type CodexStdioResult = { status: 'completed' | 'error' | 'cancelled'; error?: string; finishedAt?: string };
 export interface CodexStdioOptions {
+  mcpServers?: SessionMcpServers;
   executable: string;
   cwd: string;
   env?: NodeJS.ProcessEnv;
   threadId?: string;
   model?: string;
-  /** Only a new thread accepts it; Codex stores the choice with the thread itself. */
+  /** Explicit requirements are confirmed before submitting either a new or resumed turn. */
   approvalsReviewer?: CodexApprovalsReviewer;
   prompt: string;
   imagePaths?: readonly string[];
@@ -163,14 +165,16 @@ class StdioRun implements CodexStdioRun {
     if (this.result) return;
     this.write({ method: 'initialized' });
     const resumed = await this.request(this.options.threadId ? 'thread/resume' : 'thread/start', {
+      ...(this.options.mcpServers ? { config: { mcp_servers: this.options.mcpServers } } : {}),
       ...(this.options.threadId ? { threadId: this.options.threadId, excludeTurns: true }
-        : { cwd: this.options.cwd, ...(this.options.approvalsReviewer ? { approvalsReviewer: this.options.approvalsReviewer } : {}) }),
+        : { cwd: this.options.cwd }),
+      ...(this.options.approvalsReviewer ? { approvalsReviewer: this.options.approvalsReviewer } : {}),
       ...(this.options.model ? { model: this.options.model } : {}),
     });
     if (this.result) return;
     // Auto approval review is an execution requirement, not a preference. Older
     // providers that ignore it must not receive the user's task under another mode.
-    if (!this.options.threadId && this.options.approvalsReviewer === 'auto_review' && resumed?.approvalsReviewer !== 'auto_review') {
+    if (this.options.approvalsReviewer === 'auto_review' && resumed?.approvalsReviewer !== 'auto_review') {
       throw new Error('Codex did not confirm Auto approval review. No message was submitted. Update Codex and retry.');
     }
     const id = resumed?.thread?.id;

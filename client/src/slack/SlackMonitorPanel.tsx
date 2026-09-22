@@ -3,7 +3,7 @@ import { ArrowLeft, ExternalLink, MessageSquare, X } from 'lucide-react';
 import type { SlackPublicStatus, SlackWorkflow } from '../../../shared/slack';
 import type { AutoPromptJob, SessionDetail } from '../../../shared/types';
 import { api } from '../common/lib';
-import { visibleSlackMentions } from '../graph/slack-graph';
+import { SLACK_PAGE_SIZE, visibleSlackMentions } from '../graph/slack-graph';
 import { useI18n, translateMessage } from '../i18n/i18n';
 import { useChatAppearance } from '../chat/chat-appearance';
 import { ChatTranscript } from '../chat/ChatTranscript';
@@ -20,7 +20,7 @@ export function SlackMonitorPanel({ slack, error, mentionId, jobs, onClose, onSe
   const sessionId = workflow?.sessionId || job?.sessionId;
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [sessionError, setSessionError] = useState('');
-  const [mentionLimit, setMentionLimit] = useState(50);
+  const [mentionLimit, setMentionLimit] = useState(SLACK_PAGE_SIZE);
   useEffect(() => {
     setDetail(null); setSessionError('');
     if (!sessionId) return;
@@ -45,7 +45,7 @@ export function SlackMonitorPanel({ slack, error, mentionId, jobs, onClose, onSe
     <div className="slack-monitor-content">
       {error && <p role="alert">{translateMessage(error)}</p>}
       {mentionId !== null && <button className="slack-monitor-back" onClick={() => onSelectMention(null)}><ArrowLeft size={14} />{t('전체 멘션')}</button>}
-      {mentionId === null ? <><p>{slack?.account?.teamName} · {slack?.account?.userName}</p><p>{slack?.connected ? slack.enabled ? t('멘션 감시 중') : t('멘션 감시 꺼짐') : t('Slack 연결 없음')}</p>{slack?.error && <p role="alert">{translateMessage(slack.error)}</p>}{!slack?.events.length && <p>{t('아직 받은 멘션이 없습니다.')}</p>}{visibleSlackMentions(slack?.events || [], mentionLimit).map(event => <button key={event.id} className="slack-monitor-entry" onClick={() => onSelectMention(event.id)}><strong>{slackMentionTitle(event)}</strong><span>{slackWorkflowLabel(event.status)}</span><time>{new Date(event.createdAt).toLocaleString()}</time></button>)}{slack && slack.events.length > mentionLimit && <button className="slack-monitor-back" onClick={() => setMentionLimit(limit => limit + 50)}>{t('멘션 더 보기')} ({slack.events.length - mentionLimit})</button>}</> : workflow ? <>
+      {mentionId === null ? <><p>{slack?.account?.teamName} · {slack?.account?.userName}</p><p>{slack?.connected ? slack.enabled ? t('멘션 감시 중') : t('멘션 감시 꺼짐') : t('Slack 연결 없음')}</p>{slack?.error && <p role="alert">{translateMessage(slack.error)}</p>}{!slack?.events.length && <p>{t('아직 받은 멘션이 없습니다.')}</p>}{visibleSlackMentions(slack?.events || [], mentionLimit).map(event => <button key={event.id} className="slack-monitor-entry" onClick={() => onSelectMention(event.id)}><strong>{slackMentionTitle(event)}</strong><span>{slackWorkflowLabel(event.status)}</span><time>{new Date(event.createdAt).toLocaleString()}</time></button>)}{slack && slack.events.length > mentionLimit && <button className="slack-monitor-back" onClick={() => setMentionLimit(limit => limit + SLACK_PAGE_SIZE)}>{t('멘션 더 보기')} ({slack.events.length - mentionLimit})</button>}</> : workflow ? <>
         <SlackWorkflowSummary workflow={workflow} job={job} />
         {sessionId && <section><h3>{t('에이전트 응답')}</h3><button className="slack-monitor-back" onClick={() => onNavigate(sessionId)}><ExternalLink size={14} />{t('실행 세션 열기')}</button>{sessionError && <p role="alert">{translateMessage(sessionError)}</p>}{currentDetail ? <><p className="slack-monitor-muted">{t('실행 세션의 최근 대화입니다. 전체 기록은 실행 세션에서 확인하세요.')}</p><ChatTranscript messages={currentDetail.messages} /></> : !sessionError && <p>{t('대화를 여는 중')}</p>}</section>}
         {!sessionId && <p>{t('아직 실행 세션이 생성되지 않았습니다.')}</p>}
