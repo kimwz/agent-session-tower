@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.8.4] - 2026-09-22
+
+### Fixed
+- Honor explicit owner instructions to send an exact Slack reply after a specific delegated task succeeds, preserving approval across restart without asking again.
+- Require task outcome verification before consuming conditional approval; failed or uncertain work cannot send a success reply.
+
 ## [1.8.3] - 2026-09-22
 
 ### Changed

@@ -438,3 +438,81 @@ test('pasted proposal wording that looks like an approval only selects it', asyn
   assert.equal(f.manager.list()[0].reply, '1번 보내주세요');
   assert.equal(f.counts().sends, 2);
 });
+
+async function conditionalFixture(t: TestContext) {
+  const f = await fixture(t);
+  f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
+  await f.manager.ingest(mention); await f.manager.tick();
+  const id = f.manager.list()[0].id;
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', prompt: 'Deploy the fix' });
+  const task = f.manager.list()[0].delegatedTasks![0];
+  const job = f.options.getAutoPrompt(task.requestId)!;
+  const run: Run = { id: job.runId!, sessionId: job.sessionId!, autoPromptId: task.requestId, status: 'running', prompt: '', output: 'Deployment verified at release abc123.', createdAt: '' };
+  f.options.getRun = () => run;
+  return { ...f, id, task, run, job };
+}
+const conditionalCommand = '작업이 완료되면 그냥 배포됐습니다 라고 코멘트 다세요.';
+test('conditional owner authorization survives restart and sends exact text only after evidenced success', async t => {
+  const f = await conditionalFixture(t);
+  assert.match(await f.manager.ownerChat('owner-chat', conditionalCommand), /authorization saved/);
+  assert.equal(f.manager.list()[0].ownerConditionalReply?.text, '배포됐습니다');
+  const args = { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Release abc123 deployed and health verified.' };
+  await f.manager.tool(f.id, 'tower_task_complete', args);
+  assert.equal(f.counts().sends, 0);
+  f.run.status = 'completed';
+  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  await restarted.tick(); assert.equal(f.counts().sends, 0);
+  await Promise.all([restarted.tool(f.id, 'tower_task_complete', args), restarted.tool(f.id, 'tower_task_complete', args)]);
+  assert.equal(f.counts().sends, 1); assert.equal(restarted.list()[0].reply, '배포됐습니다');
+  assert.equal(restarted.list()[0].ownerConditionalReply?.status, 'sent');
+});
+test('conditional reply requires owner permission and never sends failed uncertain cancelled or mismatched tasks', async t => {
+  for (const outcome of ['failed', 'uncertain', 'error', 'cancelled', 'mismatch', 'no-owner']) {
+    const f = await conditionalFixture(t);
+    if (outcome !== 'no-owner') await f.manager.ownerChat('owner-chat', conditionalCommand);
+    f.run.status = outcome === 'error' || outcome === 'cancelled' ? outcome : 'completed';
+    if (outcome === 'mismatch') f.run.autoPromptId = 'other';
+    const work = f.manager.tool(f.id, 'tower_task_complete', { requestId: f.task.requestId, runId: f.run.id, outcome: outcome === 'failed' || outcome === 'uncertain' ? outcome : 'succeeded', evidence: 'Checked task result.' });
+    if (outcome === 'no-owner') await assert.rejects(work, /No owner authorization/); else await work;
+    assert.equal(f.counts().sends, 0);
+  }
+});
+test('owner cancellation is serialized before completion and uncertain delivery never retries after restart', async t => {
+  const f = await conditionalFixture(t); await f.manager.ownerChat('owner-chat', conditionalCommand); f.run.status = 'completed';
+  const args = { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Deployment verified.' };
+  await Promise.all([f.manager.ownerChat('owner-chat', '댓글 취소해주세요'), f.manager.tool(f.id, 'tower_task_complete', args)]);
+  assert.equal(f.counts().sends, 0);
+  const g = await conditionalFixture(t); await g.manager.ownerChat('owner-chat', conditionalCommand); g.run.status = 'completed';
+  let attempts = 0; g.options.sendReply = async () => { attempts++; throw Error('uncertain'); };
+  await g.manager.tool(g.id, 'tower_task_complete', { ...args, requestId: g.task.requestId });
+  const restarted = new SlackAutomationManager(g.options); await restarted.start();
+  await restarted.tool(g.id, 'tower_task_complete', { ...args, requestId: g.task.requestId });
+  assert.equal(attempts, 1); assert.equal(restarted.list()[0].ownerConditionalReply?.status, 'uncertain');
+});
+test('conditional commands fail closed on ambiguity and exact proposal paste retains selection semantics', async t => {
+  const f = await conditionalFixture(t);
+  await f.manager.tool(f.id, 'slack_reply', { requestKey: 'literal', text: conditionalCommand });
+  await f.manager.ownerChat('owner-chat', conditionalCommand);
+  assert.equal(f.manager.list()[0].ownerConditionalReply, undefined);
+  assert.equal(f.manager.list()[0].ownerReplySelection?.requestKey, 'literal');
+  const g = await conditionalFixture(t);
+  await g.manager.tool(g.id, 'tower_auto_prompt', { requestKey: 'second', prompt: 'Other task' });
+  assert.match(await g.manager.ownerChat('owner-chat', conditionalCommand), /not authorized/);
+  assert.equal(g.manager.list()[0].ownerConditionalReply, undefined);
+  for (const message of ['"' + conditionalCommand + '"', conditionalCommand + '?', '작업이 완료되면 보내지 마세요']) {
+    await g.manager.ownerChat('owner-chat', message); assert.equal(g.manager.list()[0].ownerConditionalReply, undefined);
+  }
+});
+test('conditional replacement preserves only latest exact wording and rejects stale run evidence', async t => {
+  const f = await conditionalFixture(t);
+  await f.manager.ownerChat('owner-chat', conditionalCommand);
+  await f.manager.ownerChat('owner-chat', '작업이 완료되면 그냥 수정했습니다 라고 코멘트 다세요.');
+  await f.manager.ownerChat('owner-chat', '진행 상황은 어떤가요?');
+  assert.equal(f.manager.list()[0].ownerConditionalReply?.text, '수정했습니다');
+  f.run.status = 'completed';
+  const args = { requestId: f.task.requestId, runId: 'stale', outcome: 'succeeded', evidence: 'Verified.' };
+  await f.manager.tool(f.id, 'tower_task_complete', args); assert.equal(f.counts().sends, 0);
+  await f.manager.tool(f.id, 'tower_task_complete', { ...args, runId: f.run.id, outcome: 'uncertain' });
+  await f.manager.tool(f.id, 'tower_task_complete', { ...args, runId: f.run.id });
+  assert.equal(f.counts().sends, 0); assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'blocked');
+});
