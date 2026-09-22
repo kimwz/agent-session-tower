@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.7.0] - 2026-09-22
+
+### Added
+- Per-instruction Slack model selection using the connected agent’s available models, applied to coordinator conversations and delegated task execution. Existing instructions can keep the agent default.
+
 ## [1.6.0] - 2026-09-22
 
 ### Changed

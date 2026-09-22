@@ -141,6 +141,7 @@ export interface CreateSessionRequest {
   attachments?: AttachmentInput[];
 }
 export interface AutoPromptRequest {
+  model?: string;
   requestId: string;
   provider: Provider;
   cwd?: string;
@@ -155,6 +156,7 @@ export interface AutoPromptDecision {
   reason: string;
 }
 export interface AutoPromptJob {
+  model?: string;
   id: string;
   provider: Provider;
   cwd?: string;

@@ -51,7 +51,7 @@ test('Auto Prompt uses the existing remote, origin and mutation protections befo
   for (const input of [
     { ...request, requestId: 'not-a-uuid' }, { ...request, provider: 'other' },
     { ...request, cwd: '../elsewhere' }, { ...request, cwd: '/tmp/\0path' },
-    { ...request, model: 'other-model' }, { ...request, sessionId: 'choose-for-me' },
+    { ...request, model: '--invalid model' }, { ...request, sessionId: 'choose-for-me' },
     { ...request, decision: { action: 'create' } }, { ...request, autoPromptId: 'bypass' },
     { ...request, prompt: '' }, { ...request, prompt: 'a'.repeat(32_001) },
     { ...request, attachments: {} }, { ...request, attachments: Array(MAX_ATTACHMENTS + 1).fill({}) },
@@ -68,6 +68,8 @@ test('Auto Prompt uses the existing remote, origin and mutation protections befo
   assert.equal((await post({ ...request, cwd: '/tmp/project', prompt: '', attachments: files })).status, 202);
   assert.deepEqual(submissions[1].attachments, files);
   assert.equal(submissions[1].cwd, '/tmp/project');
+  assert.equal((await post({ ...request, model: 'opus' })).status, 202);
+  assert.equal(submissions[2].model, 'opus');
   const read = await fetch(`${base}/api/auto-prompts/${id}`, { headers: { cookie } });
   assert.equal(read.status, 200); assert.equal((await read.json()).job.stage, 'session');
   assert.equal((await fetch(`${base}/api/auto-prompts/00000000-0000-0000-0000-000000000000`, { headers: { cookie } })).status, 404);

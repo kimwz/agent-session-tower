@@ -106,6 +106,7 @@ test('dedicated coordinator exposes scoped MCP during creation and follows later
     create: async (input, internal) => {
       assert.equal(input.cwd, join(stateDir, 'slack-sessions', service.overview().events[0].id));
       assert.equal(input.codexApprovalsReviewer, 'auto_review');
+      assert.equal(input.model, 'gpt-6-astra');
       const run: import('../../../shared/types.js').Run = { id: 'r1', sessionId: 'codex:test', prompt: input.prompt, status: 'running', output: '', createdAt: '2026-01-01', autoPromptId: internal?.autoPromptId };
       runs.push(run);
       assert.equal(service.overview().events[0].sessionId, undefined);
@@ -119,9 +120,35 @@ test('dedicated coordinator exposes scoped MCP during creation and follows later
   });
   t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
   await service.start(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await service.mutate('rules', { rules: [{ id: 'r', name: 'Review', enabled: true, condition: 'PR', instructions: 'Review', replyInstructions: 'Propose', provider: 'codex', model: 'gpt-6-astra' }] });
   await service.automation.ingest({ id: 'event', teamId: 'T1', channel: 'G1', user: 'U2', ts: '1', threadTs: '1', text: '<@U1> hello' });
   await service.automation.tick(); assert.deepEqual(service.coordinatorSessionIds(), ['codex:test']);
   runs[0].status = 'completed'; await service.automation.tick(); assert.equal(service.overview().events[0].status, 'completed');
   runs.push({ ...runs[0], id: 'r2', createdAt: '2026-01-02', status: 'running' });
   assert.equal(service.overview().events[0].status, 'running'); assert.equal(service.hasActive(), true);
+});
+
+test('coordinator result notifications retain the snapshotted model after rule edits', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-model-'));
+  const runs: import('../../../shared/types.js').Run[] = [{ id: 'delegated', sessionId: 'work', prompt: '', status: 'completed', createdAt: '', output: 'Done' }];
+  const service = new SlackService({ stateDir, runs: {
+    list: () => runs,
+    create: async input => {
+      const run: import('../../../shared/types.js').Run = { id: 'coordinator', sessionId: 'chat', prompt: '', status: 'completed', createdAt: '', output: '' };
+      runs.push(run);
+      return { run, session: { id: 'chat', nativeId: 'chat', provider: input.provider, cwd: input.cwd, project: 'Slack', title: 'Slack', status: 'completed', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true } };
+    },
+    enqueue: async (_id, _prompt, options) => { assert.equal(options?.model, 'opus'); resumed++; return { ...runs[1], id: 'resumed', status: 'queued' }; },
+  }, autoPrompts: { get: () => undefined, submit: async input => ({ id: input.requestId, provider: input.provider, prompt: input.prompt, routerModel: 'opus', status: 'completed', createdAt: '', updatedAt: '', runId: 'delegated' }) }, refresh: async () => {} }, {
+    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [{ user: 'U2', text: 'Review', ts: '1' }], reply: async () => { throw new Error('Must not send'); } }),
+  });
+  let resumed = 0;
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  await service.start(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  const rule = { id: 'r', name: 'Review', enabled: true, condition: 'PR', instructions: 'Review', replyInstructions: 'Propose', provider: 'claude', model: 'opus' };
+  await service.mutate('rules', { rules: [rule] });
+  await service.automation.ingest({ id: 'event', teamId: 'T1', channel: 'G1', user: 'U2', ts: '1', threadTs: '1', text: 'Review' }); await service.automation.tick();
+  await service.mutate('rules', { rules: [{ ...rule, model: 'sonnet' }] });
+  await service.tool(service.overview().events[0].id, 'tower_auto_prompt', { requestKey: 'work', ruleId: 'r', prompt: 'Review' });
+  await service.automation.tick(); assert.equal(resumed, 1);
 });

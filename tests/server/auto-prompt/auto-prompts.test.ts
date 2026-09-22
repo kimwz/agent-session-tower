@@ -368,3 +368,18 @@ test('unavailable provider or explicitly unavailable Sol model rejects before ro
   const revised = await f.manager.submit({ ...unsupported, provider: 'claude' });
   assert.equal((await f.finished(revised.id)).status, 'completed', 'an unaccepted request can select an available provider');
 });
+
+test('execution models reach new and resumed runs without changing the fixed router model', async t => {
+  for (const action of ['create', 'resume']) {
+    const f = await fixture(t);
+    f.respond(async () => action === 'create' ? create() : resume(f.session.id));
+    const input = request(f.cwd, { model: 'gpt-6-astra' });
+    await f.manager.submit(input);
+    assert.equal((await f.finished(input.requestId)).status, 'completed');
+    assert.equal(f.dispatches[0].input.model, 'gpt-6-astra');
+    assert.equal(f.calls[0].model, 'gpt-5.6-sol');
+    assert.equal(f.manager.get(input.requestId)?.model, 'gpt-6-astra');
+    await assert.rejects(f.manager.submit({ ...input, model: 'gpt-5.6-sol' }), /같은 요청 ID/);
+    await assert.rejects(f.manager.submit(request(f.cwd, { model: '--bad model' })), /Invalid model/);
+  }
+});

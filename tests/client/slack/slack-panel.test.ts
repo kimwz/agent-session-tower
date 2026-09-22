@@ -24,3 +24,10 @@ test('rule editor exposes editable criteria, execution, reply and disabled activ
   assert.match(html, /aria-label="지침 위로 이동" disabled=""/);
   assert.match(html, /aria-label="지침 아래로 이동" disabled=""/);
 });
+
+test('Slack rules use provider model choices and preserve the saved selection', () => {
+  const html = renderToStaticMarkup(createElement(SlackRules, { rules: [{ id: 'r', name: 'Review', enabled: true, condition: 'PR', instructions: 'Review', replyInstructions: 'Propose', provider: 'claude', model: 'opus' }], providers: [{ provider: 'claude', available: true, sessionCount: 0, models: [{ id: 'opus', label: 'Opus' }, { id: 'sonnet', label: 'Sonnet' }] }], onChange() {} }));
+  assert.match(html, /aria-label="모델"/);
+  assert.match(html, /value="opus" selected=""/);
+  assert.match(html, /Sonnet/);
+});

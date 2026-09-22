@@ -25,7 +25,7 @@ The monitor shows the latest five mentions as short cards in descending order. *
 
 ## Instructions
 
-Each item has a name, matching condition, execution instructions, reply instructions, provider, optional known working folder, and enabled flag. The dedicated agent receives a snapshot of enabled rules and the original thread, chooses the first applicable rule, and explains its decision in chat. No clear match means it should explain and wait for your direction rather than execute or reply. The first enabled rule selects the coordinator's provider, defaulting to Codex when no rule is enabled. Delegated work follows the selected rule's provider and folder.
+Each item has a name, matching condition, execution instructions, reply instructions, provider, optional model, optional known working folder, and enabled flag. The dedicated agent receives a snapshot of enabled rules and the original thread, chooses the first applicable rule, and explains its decision in chat. No clear match means it should explain and wait for your direction rather than execute or reply. The first enabled rule selects the coordinator's provider and model, defaulting to Codex when no rule is enabled. Choose a model beside the agent using the same available-model list as ordinary chat, or keep the agent default. Changing the agent clears the previous model selection. Delegated work follows the matched rule's provider, model, and folder. Auto Prompt's routing model stays fixed; this setting controls task execution. Saved changes apply to new mentions; existing conversations retain their rule snapshots.
 
 The **Verse8 PR review** example is disabled until you enable and save it. Customize it with your actual repository scope and review process. For example:
 

@@ -279,3 +279,37 @@ test('approval fails closed before network when its durable send claim cannot be
   await assert.rejects(f.manager.approveReply(id, 'r', 'Exact reply'), /불확실/);
   assert.equal(f.counts().sends, 0);
 });
+
+test('configured models survive snapshot restart and delegate through matched rule IDs', async t => {
+  const f = await fixture(t);
+  await f.manager.setRules([{ ...rule, model: 'gpt-6-astra' }]);
+  await f.manager.ingest(mention);
+  await f.manager.setRules([{ ...rule, model: 'gpt-5.6-sol' }]);
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  assert.equal(f.submitted[0].model, 'gpt-6-astra');
+  f.options.getAutoPrompt = () => undefined;
+  f.options.startConversation = async () => ({ sessionId: 'coordinator', runId: 'coordinator-run' });
+  await restarted.ingest({ ...mention, id: 'second' }); await restarted.tick();
+  const workflow = restarted.list().find(item => item.mode === 'conversation')!;
+  await restarted.tool(workflow.id, 'tower_auto_prompt', { requestKey: 'a', ruleId: rule.id, prompt: 'Review' });
+  assert.equal(f.submitted.at(-1)?.model, 'gpt-5.6-sol');
+  assert.equal(workflow.rules[0].model, 'gpt-5.6-sol');
+  await restarted.tool(workflow.id, 'tower_auto_prompt', { requestKey: 'default-rule', prompt: 'Review' });
+  assert.equal(f.submitted.at(-1)?.model, 'gpt-5.6-sol');
+  await assert.rejects(restarted.tool(workflow.id, 'tower_auto_prompt', { requestKey: 'a', ruleId: rule.id, prompt: 'Review', model: 'opus' }), /match the selected rule/);
+  await assert.rejects(restarted.tool(workflow.id, 'tower_auto_prompt', { requestKey: 'bad', ruleId: 'unknown', prompt: 'Review' }), /Unknown ruleId/);
+  await assert.rejects(restarted.setRules([{ ...rule, model: '--bad model' }]), /지침/);
+  assert.equal(f.counts().sends, 0);
+});
+
+test('multiple configured models require an explicit matched rule and cannot reuse task keys across models', async t => {
+  const f = await fixture(t);
+  f.options.startConversation = async () => ({ sessionId: 'coordinator', runId: 'coordinator-run' });
+  await f.manager.setRules([{ ...rule, model: 'gpt-6-astra' }, { ...rule, id: 'other', model: 'gpt-5.6-sol' }]);
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  await assert.rejects(f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'a', prompt: 'Review' }), /ruleId is required/);
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'a', ruleId: 'review', prompt: 'Review' });
+  await assert.rejects(f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'a', ruleId: 'other', prompt: 'Review' }), /different arguments/);
+  assert.equal(f.submitted[0].model, 'gpt-6-astra');
+  assert.equal(f.counts().sends, 0);
+});

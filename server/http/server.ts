@@ -243,7 +243,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       }
       if (req.method === 'POST' && path === '/api/auto-prompts') {
         const body = await readJson(req, Math.ceil(MAX_TOTAL_ATTACHMENT_BYTES / 3) * 4 + 256 * 1024);
-        if (Object.keys(body).some(key => !['requestId', 'provider', 'cwd', 'prompt', 'attachments', 'codexApprovalsReviewer'].includes(key))) {
+        if (Object.keys(body).some(key => !['requestId', 'provider', 'cwd', 'prompt', 'attachments', 'codexApprovalsReviewer', 'model'].includes(key))) {
           return json(res, 400, { error: 'Auto Prompt 요청에는 폴더, 도구, 프롬프트와 첨부 파일만 지정할 수 있습니다.' });
         }
         if (typeof body.requestId !== 'string' || !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(body.requestId)) {
@@ -261,7 +261,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         }
         const reviewer = requestedApprovalsReviewer(body.codexApprovalsReviewer);
         if (!backend.startAutoPrompt) return json(res, 503, { error: 'Auto Prompt를 현재 사용할 수 없습니다.' });
-        const job = await backend.startAutoPrompt({ requestId: body.requestId, provider: body.provider, prompt: body.prompt,
+        const model = requestedModel(body.model);
+        const job = await backend.startAutoPrompt({ ...(model ? { model } : {}), requestId: body.requestId, provider: body.provider, prompt: body.prompt,
           ...(body.cwd !== undefined ? { cwd: body.cwd as string } : {}), ...(attachments ? { attachments } : {}),
           ...(reviewer && body.provider === 'codex' ? { codexApprovalsReviewer: reviewer } : {}) });
         return json(res, 202, { job });

@@ -36,13 +36,13 @@ export class SlackService extends EventEmitter {
       stateDir: options.stateDir,
       ...(options.runs.create ? { startConversation: async (workflow, prompt) => {
         const provider = workflow.rules[0]?.provider ?? 'codex';
-        const created = await options.runs.create!({ provider, cwd: join(options.stateDir, 'slack-sessions', workflow.id), prompt,
+        const created = await options.runs.create!({ provider, model: workflow.rules[0]?.model, cwd: join(options.stateDir, 'slack-sessions', workflow.id), prompt,
           title: `Slack: ${workflow.mention.text.replace(/\s+/g, ' ').slice(0, 100)}`,
           ...(provider === 'codex' ? { codexApprovalsReviewer: 'auto_review' as const } : {}) }, { autoPromptId: workflow.id });
         return { sessionId: created.session.id, runId: created.run.id };
       } } : {}),
       ...(options.runs.enqueue ? { resumeConversation: async (workflow, prompt, correlationId) => {
-        const run = await options.runs.enqueue!(workflow.sessionId!, prompt, {}, { autoPromptId: correlationId });
+        const run = await options.runs.enqueue!(workflow.sessionId!, prompt, { model: workflow.rules[0]?.model }, { autoPromptId: correlationId });
         return { runId: run.id };
       } } : {}),
       findConversation: id => { const run = options.runs.list().find(run => run.autoPromptId === id); return run ? { sessionId: run.sessionId, runId: run.id } : undefined; },
