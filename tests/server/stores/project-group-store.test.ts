@@ -1,3 +1,4 @@
+import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
@@ -152,7 +153,8 @@ test('group HTTP validates authentication, commits before SSE and allows groups 
   };
   const original = structuredClone(native);
   let saves = 0; let notify = () => {};
-  const { server, dispose } = createMonitorServer({ port: 0, clientDir: join(dir, 'client'), remote: { password: 'test-password', origins: new Set() }, backend: {
+  const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(dir);
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: join(dir, 'client'), auth, remote: { origins }, backend: {
     snapshot: () => ({ sessions: [native], groups: store.list(), runs: [], providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: native.updatedAt }),
     detail: async () => undefined,
     setGroup: async patch => { const group = await store.set(patch); saves++; notify(); return group; },
@@ -162,12 +164,11 @@ test('group HTTP validates authentication, commits before SSE and allows groups 
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await store.flush(); await rm(dir, { recursive: true, force: true }); });
-  const authorization = `Basic ${Buffer.from('monitor:test-password').toString('base64')}`;
-  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { authorization } })).json();
-  const headers = { authorization, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).json();
+  const headers = { cookie, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
   const send = (body: unknown, extra: Record<string, string> = {}) => fetch(`${base}/api/groups`, { method: 'POST', headers: { ...headers, ...extra }, body: JSON.stringify(body) });
   const patch = { cwd: '/no-session-and-no-directory', title: '  Pinned project  ', pinned: true, hidden: true };
-  assert.equal((await send(patch, { authorization: '' })).status, 401);
+  assert.equal((await send(patch, { cookie: '' })).status, 401);
   assert.equal((await send(patch, { 'X-Agent-Monitor-Token': '' })).status, 403);
   assert.equal((await send(patch, { Origin: 'https://attacker.example' })).status, 403);
   assert.equal((await send(patch, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
@@ -176,7 +177,7 @@ test('group HTTP validates authentication, commits before SSE and allows groups 
   assert.equal((await fetch(`${base}/api/groups`, { method: 'POST', headers, body: '{bad' })).status, 400);
   assert.equal(saves, 0);
   const controller = new AbortController();
-  const events = await fetch(`${base}/api/events`, { headers: { authorization }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]) });
+  const events = await fetch(`${base}/api/events`, { headers: { cookie }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]) });
   const reader = events.body!.getReader();
   try {
     await reader.read();
@@ -188,7 +189,7 @@ test('group HTTP validates authentication, commits before SSE and allows groups 
     let stream = '';
     while (!stream.includes('Pinned project')) { const next = await reader.read(); if (next.done) break; stream += new TextDecoder().decode(next.value); }
     assert.match(stream, /Pinned project/); assert.doesNotMatch(stream, /private\/native-log/);
-    assert.deepEqual((await (await fetch(`${base}/api/snapshot`, { headers: { authorization } })).json()).groups, [group]);
+    assert.deepEqual((await (await fetch(`${base}/api/snapshot`, { headers: { cookie } })).json()).groups, [group]);
     const savedDir = join(dir, 'saved'); await rename(stateDir, savedDir); await writeFile(stateDir, 'Blocked');
     assert.equal((await send({ cwd: patch.cwd, title: 'Must not publish' })).status, 503);
     assert.equal(saves, 1);

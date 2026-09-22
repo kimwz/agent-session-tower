@@ -1,3 +1,4 @@
+import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { request } from 'node:http';
@@ -19,8 +20,9 @@ test('tool approvals require authentication, reject modified inputs, and preserv
   const dir = await mkdtemp(join(tmpdir(), 'tower-http-approvals-'));
   const decisions: Array<{ runId: string; approvalId: string; decision: RunApprovalResponse }> = [];
   const pending = new Set(['allow-request', 'deny-request', 'permission/1', 'questions', 'form', 'cancel']);
+  const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(dir);
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir,
-    remote: { password: 'approval-fixture', origins: new Set() }, backend: {
+    auth, remote: { origins }, backend: {
       snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: new Date().toISOString() }),
       detail: async () => undefined, enqueue: async () => run, cancel: async () => {}, subscribe: () => () => {},
       respondToApproval: async (runId, approvalId, decision) => {
@@ -33,12 +35,11 @@ test('tool approvals require authentication, reject modified inputs, and preserv
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
-  const authorization = `Basic ${Buffer.from('monitor:approval-fixture').toString('base64')}`;
-  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { authorization } })).json();
-  const headers = { authorization, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).json();
+  const headers = { cookie, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
   const endpoint = `${base}/api/runs/${run.id}/approvals/allow-request`;
   const send = (body: unknown, suppliedHeaders = headers, url = endpoint) => fetch(url, { method: 'POST', headers: suppliedHeaders, body: JSON.stringify(body) });
-  assert.equal((await send({ decision: 'allow' }, { ...headers, authorization: '' })).status, 401);
+  assert.equal((await send({ decision: 'allow' }, { ...headers, cookie: '' })).status, 401);
   assert.equal((await send({ decision: 'allow' }, { ...headers, 'X-Agent-Monitor-Token': '' })).status, 403);
   assert.equal((await send({ decision: 'allow' }, { ...headers, Origin: 'https://attacker.example' } as typeof headers)).status, 403);
   assert.equal((await send({ decision: 'allow' }, { ...headers, 'Sec-Fetch-Site': 'cross-site' } as typeof headers)).status, 403);
@@ -182,8 +183,9 @@ test('attachment uploads and downloads retain authentication, size limits, safe 
   await writeFile(join(directory, 'index.html'), '<!doctype html><title>Agent Session Tower</title>');
   const store = new AttachmentStore(directory); await store.start();
   const runs: Run[] = [];
+  const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(directory);
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: directory,
-    remote: { password: 'fixture-password', origins: new Set() },
+    auth, remote: { origins },
     backend: {
       snapshot: () => ({ sessions: [session], runs, providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: new Date().toISOString() }),
       detail: async () => undefined,
@@ -199,9 +201,8 @@ test('attachment uploads and downloads retain authentication, size limits, safe 
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(directory, { recursive: true, force: true }); });
-  const authorization = `Basic ${Buffer.from('monitor:fixture-password').toString('base64')}`;
-  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { authorization } })).json();
-  const headers = { authorization, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).json();
+  const headers = { cookie, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
   const endpoint = `${base}/api/sessions/${session.id}/messages`;
   const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a2S8AAAAASUVORK5CYII=';
   const body = JSON.stringify({ prompt: '', attachments: [
@@ -217,18 +218,18 @@ test('attachment uploads and downloads retain authentication, size limits, safe 
   assert.doesNotMatch(JSON.stringify(saved), /base64|\/attachments\//);
   const path = `${base}/api/attachments/${saved.attachments[0].id}`;
   assert.equal((await fetch(path)).status, 401);
-  assert.equal((await fetch(path, { headers: { authorization, Origin: 'https://attacker.example' } })).status, 403);
-  assert.equal((await fetch(path, { headers: { authorization, 'Sec-Fetch-Site': 'cross-site' } })).status, 403);
-  const image = await fetch(path, { headers: { authorization } });
+  assert.equal((await fetch(path, { headers: { cookie, Origin: 'https://attacker.example' } })).status, 403);
+  assert.equal((await fetch(path, { headers: { cookie, 'Sec-Fetch-Site': 'cross-site' } })).status, 403);
+  const image = await fetch(path, { headers: { cookie } });
   assert.equal(image.headers.get('content-type'), 'image/png');
   assert.match(image.headers.get('content-disposition') || '', /^inline;/);
   assert.equal(Buffer.from(await image.arrayBuffer()).toString('base64'), png);
-  const unsafe = await fetch(`${base}/api/attachments/${saved.attachments[1].id}`, { headers: { authorization } });
+  const unsafe = await fetch(`${base}/api/attachments/${saved.attachments[1].id}`, { headers: { cookie } });
   assert.equal(unsafe.headers.get('content-type'), 'application/octet-stream');
   assert.match(unsafe.headers.get('content-disposition') || '', /^attachment;/);
   assert.match(unsafe.headers.get('content-security-policy') || '', /sandbox; default-src 'none'/);
   assert.equal(unsafe.headers.get('x-content-type-options'), 'nosniff');
-  assert.equal((await fetch(`${base}/api/attachments/unknown`, { headers: { authorization } })).status, 404);
+  assert.equal((await fetch(`${base}/api/attachments/unknown`, { headers: { cookie } })).status, 404);
   assert.equal((await fetch(`${base}/api/sessions`, { method: 'POST', headers, body })).status, 413, 'other endpoints retain the original 128 KiB body limit');
   assert.equal((await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ prompt: '', attachmentIds: [saved.attachments[0].id] }) })).status, 202);
   assert.equal((await fetch(`${base}/api/sessions/another/messages`, { method: 'POST', headers, body: JSON.stringify({ prompt: '', attachmentIds: [saved.attachments[0].id] }) })).status, 404);
@@ -240,8 +241,9 @@ test('attachment uploads and downloads retain authentication, size limits, safe 
 test('steering requires authentication and preserves queued content and backend conflicts', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-http-steer-'));
   const calls: string[] = [];
+  const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(dir);
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir,
-    remote: { password: 'steer-fixture', origins: new Set() }, backend: {
+    auth, remote: { origins }, backend: {
       snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: new Date().toISOString() }),
       detail: async () => undefined, enqueue: async () => run, cancel: async () => {}, subscribe: () => () => {},
       steerRun: async id => {
@@ -254,12 +256,11 @@ test('steering requires authentication and preserves queued content and backend 
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const authorization = `Basic ${Buffer.from('monitor:steer-fixture').toString('base64')}`;
-  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { authorization } })).json();
-  const headers = { authorization, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).json();
+  const headers = { cookie, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
   const endpoint = `${base}/api/runs/queued%2Drequest/steer`;
   assert.equal((await fetch(endpoint, { method: 'POST', body: '{}' })).status, 401);
-  assert.equal((await fetch(endpoint, { method: 'POST', headers: { authorization, 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
+  assert.equal((await fetch(endpoint, { method: 'POST', headers: { cookie, 'Content-Type': 'application/json' }, body: '{}' })).status, 403);
   assert.equal((await fetch(endpoint, { method: 'POST', headers, body: JSON.stringify({ prompt: 'replacement' }) })).status, 400);
   assert.deepEqual(calls, []);
   const response = await fetch(endpoint, { method: 'POST', headers, body: '{}' });

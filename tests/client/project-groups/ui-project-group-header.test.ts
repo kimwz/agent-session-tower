@@ -2,14 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { WorkspaceContext } from '../../../client/src/workspace/WorkspaceOverlay.js';
 import { ProjectGroupHeader, type ProjectGroupHeaderData } from '../../../client/src/project-groups/ProjectGroupHeader.js';
 
 const data = (patch: Partial<ProjectGroupHeaderData> = {}): ProjectGroupHeaderData => ({
-  name: 'monitor', title: '', path: '/Users/me/monitor', count: 3, active: 0, pinned: false, hidden: false, manual: false,
+  token: 'test-token', name: 'monitor', title: '', path: '/Users/me/monitor', count: 3, active: 0, pinned: false, hidden: false, manual: false,
   disabled: false, saving: false, onUpdate: async () => true, onCreate() {}, ...patch,
 });
 const header = (patch: Partial<ProjectGroupHeaderData> = {}) =>
-  renderToStaticMarkup(createElement(ProjectGroupHeader, { data: data(patch) }));
+  renderToStaticMarkup(createElement(WorkspaceContext.Provider, { value: () => {} }, createElement(ProjectGroupHeader, { data: data(patch) })));
 
 test('a folder group shows its name, full path and how many sessions it holds', () => {
   const markup = header();
@@ -33,11 +34,11 @@ test('pinning and hiding report their current state to assistive technology', ()
 
 test('a group that is not a real folder cannot be renamed, pinned or hidden', () => {
   const markup = header({ path: '알 수 없음', name: '알 수 없음' });
-  assert.equal((markup.match(/disabled=""/g) || []).length, 4);
+  assert.equal((markup.match(/<button\b[^>]*\sdisabled=""[^>]*>/g) || []).length, 6);
 });
 
 test('a save still in flight blocks every group action', () => {
-  assert.equal((header({ saving: true }).match(/disabled=""/g) || []).length, 3);
+  assert.equal((header({ saving: true }).match(/<button\b[^>]*\sdisabled=""[^>]*>/g) || []).length, 5);
   assert.doesNotMatch(header(), /disabled=""/);
 });
 

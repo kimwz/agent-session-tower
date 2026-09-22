@@ -36,7 +36,7 @@ const port = portProbe.address().port;
 await new Promise(resolve => portProbe.close(resolve));
 const base = `http://127.0.0.1:${port}`;
 const args = ['--no-open', '--port', String(port), '--state-dir', join(dir, 'state')];
-const env = { ...process.env, PATH: '/usr/bin:/bin', CODEX_HOME: join(dir, 'codex'), CLAUDE_CONFIG_DIR: join(dir, 'claude') };
+const env = { ...process.env, HOME: dir, SHELL: '/bin/sh', PATH: '/usr/bin:/bin', CODEX_HOME: join(dir, 'codex'), CLAUDE_CONFIG_DIR: join(dir, 'claude') };
 let child;
 let output = '';
 let completion;
@@ -93,6 +93,7 @@ try {
   await ready();
   const config = JSON.parse(await readFile(join(root, 'dist/executable/sea-config.json'), 'utf8'));
   for (const [key, path] of Object.entries(config.assets)) {
+    if (!key.startsWith('web/')) continue;
     const response = await fetch(`${base}/${key.slice(4)}`);
     assert.equal(response.status, 200, key);
     assert.deepEqual(Buffer.from(await response.arrayBuffer()), await readFile(path), key);
@@ -101,6 +102,33 @@ try {
   assert.equal((await fetch(`${base}/dist/client/index.html`)).status, 404);
   const firstToken = (await (await fetch(`${base}/api/bootstrap`)).json()).token;
   const original = await discovered();
+  // Exercise the extracted native binding from the copied executable, with an
+  // isolated shell and no provider calls or personal shell configuration.
+  const workspaceHeaders = { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': firstToken };
+  const createdTerminal = await fetch(`${base}/api/workspace/terminals`, {
+    method: 'POST', headers: workspaceHeaders, body: JSON.stringify({ cwd: dir, cols: 83, rows: 29 }),
+  });
+  assert.equal(createdTerminal.status, 200, await createdTerminal.clone().text());
+  const { id: terminalId } = await createdTerminal.json();
+  const eventsAbort = new AbortController();
+  const events = await fetch(`${base}/api/workspace/terminals/${terminalId}/events`, { signal: eventsAbort.signal });
+  const terminalInput = await fetch(`${base}/api/workspace/terminals/${terminalId}/input`, {
+    method: 'POST', headers: workspaceHeaders, body: JSON.stringify({ data: 'printf "TOWER_PTY_%s\\n" OK; stty size; exit\r' }),
+  });
+  assert.equal(terminalInput.status, 200);
+  const reader = events.body.getReader();
+  let terminalOutput = '';
+  const terminalTimeout = globalThis.setTimeout(() => eventsAbort.abort(), 10_000);
+  try {
+    while (!terminalOutput.includes('event: exit')) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      terminalOutput += new TextDecoder().decode(value);
+    }
+  } finally { clearTimeout(terminalTimeout); eventsAbort.abort(); }
+  assert.match(terminalOutput, /TOWER_PTY_OK/);
+  assert.match(terminalOutput, /29 83/);
+  await fetch(`${base}/api/workspace/terminals/${terminalId}/close`, { method: 'POST', headers: workspaceHeaders, body: '{}' });
   assert.deepEqual((await (await fetch(`${base}/api/snapshot`)).json()).groups, []);
   await Promise.all([setGroup({ cwd: dir, title: '  실행파일 그룹 제목  ' }, firstToken), setGroup({ cwd: dir, pinned: true }, firstToken)]);
   const emptyGroupCwd = `${dir}/project-with-no-sessions`;
@@ -177,24 +205,46 @@ try {
   const remoteHealth = await (await fetch(`${base}/api/health`)).json();
   assert.equal(remoteHealth.bindHost, '0.0.0.0');
   assert.equal(remoteHealth.remoteAccess, true);
-  assert.equal((await fetch(`${base}/api/snapshot`)).status, 401);
-  const passwordFile = join(dir, 'state', 'access-password');
-  const password = (await readFile(passwordFile, 'utf8')).trim();
-  assert.equal((await stat(passwordFile)).mode & 0o777, 0o600);
-  const headers = { Authorization: `Basic ${Buffer.from(`monitor:${password}`).toString('base64')}` };
-  assert.equal((await fetch(`${base}/api/snapshot`, { headers })).status, 200);
+  assert.equal((await fetch(`${base}/api/snapshot`)).status, 200, 'direct loopback bypasses login');
+  const { token: authToken } = await (await fetch(`${base}/api/auth/status`)).json();
+  const credentials = { username: 'monitor', password: 'executable-fixture-password' };
+  assert.equal((await fetch(`${base}/api/auth/credentials`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': authToken }, body: JSON.stringify(credentials),
+  })).status, 200);
+  const authFile = join(dir, 'state', 'auth.json');
+  const savedAuth = await readFile(authFile, 'utf8');
+  assert.equal((await stat(authFile)).mode & 0o777, 0o600);
+  assert.ok(!savedAuth.includes(credentials.password), 'only a password hash is persisted');
   const external = Object.values(networkInterfaces()).flat().find(address => address && address.family === 'IPv4' && !address.internal);
+  // Forwarded requests must never inherit the direct-loopback login bypass.
+  const remoteHeaders = { ...(external ? { Host: `${external.address}:${port}` } : {}), 'X-Forwarded-For': '192.0.2.1' };
+  async function loginRemote(url = base, requestHeaders = remoteHeaders) {
+    const { token } = await (await fetch(`${url}/api/auth/status`, { headers: requestHeaders })).json();
+    const response = await fetch(`${url}/api/auth/login`, {
+      method: 'POST', headers: { ...requestHeaders, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: JSON.stringify(credentials),
+    });
+    assert.equal(response.status, 200);
+    const cookie = response.headers.get('set-cookie')?.split(';')[0];
+    assert.ok(cookie?.startsWith('tower_session='));
+    return { ...requestHeaders, Cookie: cookie };
+  }
+  assert.equal((await fetch(`${base}/api/snapshot`, { headers: remoteHeaders })).status, 401);
+  const headers = await loginRemote();
+  assert.equal((await fetch(`${base}/api/snapshot`, { headers })).status, 200);
   if (external) {
     const url = `http://${external.address}:${port}`;
-    assert.equal((await fetch(url)).status, 401);
-    assert.equal((await fetch(`${url}/api/snapshot`, { headers })).status, 200);
+    assert.equal((await fetch(`${url}/api/snapshot`)).status, 401);
+    const externalHeaders = await loginRemote(url, {});
+    assert.equal((await fetch(`${url}/api/snapshot`, { headers: externalHeaders })).status, 200);
   }
   await stop();
   start();
   await ready();
-  assert.equal((await readFile(passwordFile, 'utf8')).trim(), password);
-  assert.equal((await fetch(`${base}/api/snapshot`, { headers })).status, 200);
-  console.log(`PASS: copied executable alone, minimal PATH, ${Object.keys(config.assets).length} embedded assets, duplicate launch, persistent private session titles and reset, persistent private project group titles/pins and reset without sessions, durable session close/reopen and creation validation, persistent failure dismissal with unchanged lifecycle and raw history, unchanged native history, shutdown/restart, authenticated public-interface binding and persistent 0600 password.`);
+  assert.equal(await readFile(authFile, 'utf8'), savedAuth);
+  assert.equal((await fetch(`${base}/api/snapshot`, { headers })).status, 401, 'restart invalidates in-memory sessions');
+  const renewedHeaders = await loginRemote();
+  assert.equal((await fetch(`${base}/api/snapshot`, { headers: renewedHeaders })).status, 200);
+  console.log(`PASS: copied executable alone, minimal PATH, ${Object.keys(config.assets).length} embedded assets, duplicate launch, persistent private session titles and reset, persistent private project group titles/pins and reset without sessions, durable session close/reopen and creation validation, persistent failure dismissal with unchanged lifecycle and raw history, unchanged native history, shutdown/restart, authenticated public-interface binding and persistent 0600 password hash, local bypass and remote session renewal.`);
 } finally {
   await stop();
   await rm(dir, { recursive: true, force: true });

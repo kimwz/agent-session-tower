@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, use
 import { Archive, ArchiveRestore, ArrowDown, ArrowUp, Check, ChevronDown, Copy, Folder, GitBranch, LoaderCircle, MessageSquare, Paperclip, RefreshCw, Send, Terminal, TriangleAlert, X } from 'lucide-react';
 import type { ChatMessage, ProviderHealth, Run, Session, SessionDetail } from '../../../shared/types';
 import { ProviderIcon } from '../common/Icons';
+import { WorkspaceActions } from '../workspace/WorkspaceActions';
 import { SessionTitleEditor } from '../sessions/SessionTitleEditor';
 import { SessionFamilyNav } from '../sessions/SessionFamilyNav';
 import { ResumeCommandButton } from '../sessions/ResumeCommandButton';
@@ -207,7 +208,6 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
         {current && <span className={`provider-square ${current.provider} ${current.status}`} role="img" aria-label={providerLabels[current.provider]} title={providerLabels[current.provider]}><ProviderIcon provider={current.provider} /></span>}
         {current ? <SessionTitleEditor key={current.id} session={current} token={token} connected={connected} onSaved={updated => { onSessionUpdate(updated); setDetail(previous => previous ? { ...previous, session: { ...previous.session, customTitle: updated.customTitle } } : previous); onSnapshotRefresh(); }} /> : <h2 className="chat-loading-title">{t("대화 불러오는 중")}</h2>}
         <div className="chat-header-actions">
-          {current && <ResumeCommandButton session={current} />}
           {onSessionClose && <button className="icon-button session-close-button" aria-label={sessionClosed ? t("세션 다시 열기") : t("세션 종료")} title={sessionClosed ? t("그래프에 다시 표시") : t("그래프에서 숨기기 · 실행 중인 작업은 계속됩니다")} disabled={changingClosed || !connected || !token} onClick={() => { setSendError(''); void Promise.resolve(onSessionClose()).catch(error => setSendError(error instanceof Error ? error.message : t("세션 상태를 저장하지 못했습니다."))); }}>{changingClosed ? <LoaderCircle className="spin" size={15} /> : sessionClosed ? <ArchiveRestore size={16} /> : <Archive size={16} />}</button>}
           <button className="icon-button close-chat" onClick={onClose} aria-label={t("대화 닫기")} title={t("닫기 (Esc)")}><X size={18} /></button>
         </div>
@@ -215,6 +215,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
       <div className="chat-context-row">
         {current && <span className={`status-badge ${current.status}`} title={translateMessage(current.statusReason)}><i />{statusLabels[current.status]}</span>}
         <button className="chat-project" onClick={() => setShowMetadata(!showMetadata)} aria-expanded={showMetadata}><Folder size={12} /><span className="folder-tail" title={current?.cwd || current?.project || t("세션 정보")}><bdi dir="ltr">{current?.project || t("세션 정보")}</bdi></span><ChevronDown size={12} className={showMetadata ? 'rotate' : ''} /></button>
+        {current?.cwd && <WorkspaceActions key={current.cwd} cwd={current.cwd} token={token} disabled={!connected} />}
         <SessionFamilyNav sessions={allSessions} selectedId={sessionId} onNavigate={onNavigate} />
       </div>
       {showMetadata && current && <dl className="session-metadata"><div><dt>{t("작업 폴더")}</dt><dd>{current.cwd || t("정보 없음")}</dd></div>{current.model && <div><dt>{t("모델")}</dt><dd>{current.model}</dd></div>}<div><dt>{t("세션 ID")}</dt><dd>{current.nativeId}<button className="icon-button" title={t("세션 ID 복사")} aria-label={t("세션 ID 복사")} onClick={() => { void copyText(current.nativeId).then(success => { setCopied(success); window.setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button></dd></div>{resumeCommand(current) && <div><dt>{t("터미널")}</dt><dd><code className="resume-command">{resumeCommand(current)}</code><ResumeCommandButton session={current} size={12} /></dd></div>}<div><dt>{t("상태 판단")}</dt><dd>{translateMessage(current.statusReason)}</dd></div><div><dt>{t("시작")}</dt><dd>{absoluteTime(current.createdAt)}</dd></div></dl>}

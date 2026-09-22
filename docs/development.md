@@ -71,7 +71,13 @@ If the builder cannot locate the Node.js license beside the installed runtime, s
 | `tests/` | Parser, state, UI logic, runner, and HTTP tests |
 | `scripts/` | Standalone executable build and smoke test |
 
-One Node HTTP server serves the API and built React UI. Server-sent events update the browser. No database or external backend is required. The graph uses React Flow.
+A Node HTTP process serves the API and built React UI. A separate detached execution worker owns provider connections, queued work, approvals, Auto Prompt routing, and terminal shells. The web process reconnects through an authenticated owner-only local socket; stopping the web process does not stop work. Server-sent events update the browser. No database or hosted backend is required. The graph uses React Flow.
+
+### Browser workspace
+
+Project editor/terminal controls open a resizable workspace overlay on the same authenticated page, to the left of chat when it is open. The minimum width is 420px, limited by the viewport; screens without enough horizontal space stack workspace above chat. Direct `/?workspace=<absolute-directory>&tool=editor|terminal` URLs remain available. CodeMirror edits UTF-8 files up to 2 MiB, with revision checks and atomic saves; the explorer lists up to 2,000 entries per directory and skips symbolic links. xterm.js connects to an interactive `node-pty` shell through authenticated SSE and token-protected input/resize requests. Closing the terminal stops its shell; hiding its panel keeps it running. Active shells survive web disconnects and restarts; only explicit terminal close or shell exit ends them. The tab remembers its terminal ID for reconnecting. Exited terminal records are cleaned up after 30 seconds.
+
+`node-pty` uses native bindings. Platforms without a matching prebuild need a C++ build toolchain and Python during dependency installation. Standalone builds embed the matching bindings and extract them into a private temporary directory when the first terminal starts. The PTY smoke test uses `/bin/sh` with an isolated HOME and never launches a native agent provider.
 
 ## Releasing
 
@@ -80,3 +86,12 @@ One Node HTTP server serves the API and built React UI. Server-sent events updat
 3. `git push --follow-tags`. The Release workflow publishes the changelog section as the GitHub release notes.
 
 A specific release can be run with `npx --yes github:kimwz/agent-session-tower#vx.y.z`.
+
+
+### Web restart and execution worker
+
+Restart the web PID only. Its shutdown closes HTTP streams and authentication sessions, but never sends provider cancellation or termination. The worker owns `runs.json`, `created-sessions.json`, and `auto-prompts.json`; only one worker may write them. Its separate lock is in `<state-dir>/runner-runtime/`. Local RPC uses a short Unix socket in an owner-only `/tmp/tower-runner-<uid>-<hash>/` directory plus a private random credential. This worker transport currently targets POSIX systems.
+
+After the web server stops, running and queued work and approval waits remain live. Restarting with the same state directory reattaches without resubmitting prompts. Mutating RPC requests are not retried after uncertain transport failures. An incompatible worker is never replaced while handling work. The worker exits only after at least 30 seconds without a web client and with no active runs, routing jobs, or terminal shells. An idle restart therefore picks up a new worker build; active work keeps its existing engine until it finishes.
+
+The first upgrade from an older in-process runner needs a handoff or a fully drained old server: its old SIGTERM handler still cancels work. Do not start a new worker against the same state files while the old runner is writing them. Test with fixtures; never kill the old process merely to test restart behavior.

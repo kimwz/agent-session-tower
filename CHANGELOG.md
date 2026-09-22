@@ -4,6 +4,21 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.2.0] - 2026-09-22
+
+### Added
+- Slack personal-account automation: monitor direct mentions, match configurable instructions, execute through Auto Prompt, and reply in the original thread after completion. Includes an inline setup guide, processing history, durable event deduplication, and guarded reply delivery.
+- Workspace file browsing and editing, plus persistent interactive terminals in a resizable workspace panel.
+- Local account management and authenticated remote access with persistent login-attempt history and IP blocking.
+
+### Changed
+- Agent execution, approvals, Auto Prompt routing, and terminal shells run in an independent worker and survive web-server restarts.
+- Slack Codex tasks always request Auto approval review. Explicit approval settings use a new session when existing-session settings cannot be verified; Codex must confirm Auto before a task is submitted.
+- Deployment completion now requires synchronized versions, release notes, a commit and release tag pushed to the configured remote, and verification of the running version.
+
+### Fixed
+- Improved approval interactions, workspace layout, and standalone executable packaging for the editor and terminal runtime.
+
 ## [1.1.0] - 2026-09-18
 
 ### Added

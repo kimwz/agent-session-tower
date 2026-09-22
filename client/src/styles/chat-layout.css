@@ -9,7 +9,8 @@
 .chat-header-actions { display: flex; align-items: center; flex-shrink: 0; gap: 2px; margin-left: auto; }
 .chat-panel .chat-header-actions .icon-button { width: 26px; height: 26px; margin: 0; }
 .chat-panel .chat-header-actions .close-chat { position: static; display: inline-flex; }
-.chat-panel .chat-context-row { min-height: 25px; margin-top: 4px; gap: 8px; }
+.chat-panel .chat-context-row { position: relative; flex-wrap: wrap; min-width: 0; min-height: 25px; margin-top: 4px; gap: 8px; }
+.chat-context-row > .workspace-actions { position: static; }
 .chat-context-row > .status-badge { flex-shrink: 0; margin: 0; }
 .chat-context-row .chat-project { flex: 0 1 auto; min-width: 0; }
 .chat-context-row .session-family-nav { margin-left: auto; }

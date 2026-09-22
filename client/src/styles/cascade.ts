@@ -22,3 +22,10 @@ import './session-title.css';
 import './session-family.css';
 import './workspace-controls.css';
 import './chat-layout.css';
+
+import '@xterm/xterm/css/xterm.css';
+import './workspace-page.css';
+
+import "./auth.css";
+
+import './slack.css';

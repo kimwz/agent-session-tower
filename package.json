@@ -51,12 +51,22 @@
     "prepare": "npm run build"
   },
   "devDependencies": {
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-markdown": "^6.5.2",
+    "@codemirror/language": "^6.12.4",
+    "@codemirror/state": "^6.7.5",
+    "@codemirror/view": "^6.43.12",
+    "@lezer/highlight": "^1.2.3",
     "@types/node": "^22.19.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.1.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "@xyflow/react": "^12.10.0",
+    "codemirror": "^6.0.2",
     "esbuild": "^0.28.2",
     "lucide-react": "^0.577.0",
     "react": "^19.2.0",
@@ -68,6 +78,7 @@
     "vite": "^7.3.0"
   },
   "dependencies": {
+    "node-pty": "^1.1.0",
     "ws": "^8.21.3"
   }
 }

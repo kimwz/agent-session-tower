@@ -137,3 +137,7 @@
   .chat-resize-handle { display: block; position: absolute; z-index: 20; inset: 0 auto 0 -5px; width: 10px; cursor: col-resize; touch-action: none; }
   .chat-resize-handle:hover, .chat-resize-handle:focus-visible { background: #97c4ff55; }
 }
+
+.workspace-actions { position:relative; flex-shrink:0; }
+.workspace-action-buttons { display:flex; gap:1px; }
+.project-group-bottom>span { overflow:hidden; text-overflow:ellipsis; }

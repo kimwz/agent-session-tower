@@ -108,7 +108,7 @@ export interface RunApproval {
   scope?: 'turn';
   origin?: { threadId: string; turnId?: string; agentName?: string };
   interaction?:
-    | { type: 'questions'; questions: Array<{ id: string; header: string; question: string; isOther: boolean; isSecret: boolean; options: Array<{ label: string; description: string }> | null }> }
+    | { type: 'questions'; requireAnswers?: boolean; questions: Array<{ id: string; header: string; question: string; isOther: boolean; isSecret: boolean; multiSelect?: boolean; options: Array<{ label: string; description: string }> | null }> }
     | { type: 'mcp-form'; schema: Record<string, unknown>; serverName: string }
     | { type: 'mcp-url'; url: string; serverName: string };
 }

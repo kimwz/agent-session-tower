@@ -1,0 +1,32 @@
+.slack-dialog { width: min(760px, calc(100vw - 32px)); max-height: calc(100dvh - 40px); padding: 0; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: 14px; }
+.slack-dialog::backdrop { background: #0009; }
+.slack-panel { padding: 24px; }
+.slack-panel header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.slack-panel h2 { margin: 0; font-size: 20px; }
+.slack-panel h3 { font-size: 15px; }
+.slack-panel p { font-size: 12px; line-height: 1.6; color: var(--muted); }
+.slack-panel section { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 8px; }
+.slack-panel label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.slack-panel input:not([type=checkbox]), .slack-panel textarea, .slack-panel select { width: 100%; min-width: 0; border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 6px; padding: 8px; font: inherit; }
+.slack-panel textarea { resize: vertical; }
+.slack-panel .slack-check { flex-direction: row; align-items: center; }
+.slack-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.slack-actions button { display: inline-flex; align-items: center; gap: 6px; }
+.slack-actions span { font-size: 12px; }
+.slack-connect, .slack-rule { display: grid; gap: 12px; }
+.slack-connect > button { justify-self: start; }
+.slack-rules { padding: 0; border: 0; min-width: 0; }
+.slack-rule { padding: 16px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.slack-rule-options { display: grid; grid-template-columns: 120px 1fr; gap: 12px; }
+.slack-panel a { color: var(--blue); font-size: 12px; }
+.slack-panel .slack-error { color: var(--danger, #f87171); overflow-wrap: anywhere; }
+.slack-activity { list-style: none; padding: 0; }
+.slack-activity li { display: flex; flex-wrap: wrap; gap: 8px 16px; padding: 12px 0; border-bottom: 1px solid var(--line); font-size: 12px; overflow-wrap: anywhere; }
+.slack-activity li span, .slack-activity li p { width: 100%; margin: 0; }
+@media (max-width: 680px) { .slack-panel { padding: 16px; } .slack-rule-options { grid-template-columns: 1fr; } }
+
+.slack-setup-guide { padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.slack-setup-guide summary { cursor: pointer; font-weight: 600; }
+.slack-setup-guide ol { padding-left: 24px; line-height: 1.6; }
+.slack-setup-guide li + li { margin-top: 10px; }
+.slack-setup-guide code { display: block; margin: 4px 0; overflow-wrap: anywhere; }

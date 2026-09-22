@@ -1,7 +1,7 @@
 import { build } from 'esbuild';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readdir, readFile, realpath, writeFile, chmod, rename } from 'node:fs/promises';
+import { mkdir, readdir, readFile, realpath, writeFile, chmod, rename, access } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -32,6 +32,21 @@ async function collect(directory, prefix) {
   }
 }
 await collect(join(root, 'dist/client'), 'web');
+
+// PTY native bindings and their helper must be extracted to real paths at runtime.
+// Include only this executable's platform/architecture, plus the unbundled JS loader.
+const ptyRoot = join(root, 'node_modules/node-pty');
+await collect(join(ptyRoot, 'lib'), 'pty/lib');
+let ptyNative;
+for (const candidate of ['build/Release', `prebuilds/${process.platform}-${process.arch}`]) {
+  try { await access(join(ptyRoot, candidate, process.platform === 'win32' ? 'conpty.node' : 'pty.node')); ptyNative = candidate; break; }
+  catch { /* A source build or a matching prebuild must exist. */ }
+}
+if (!ptyNative) throw new Error('node-pty native binding is missing. Rebuild node-pty before packaging.');
+await collect(join(ptyRoot, ptyNative), `pty/${ptyNative}`);
+const ptyManifest = join(staging, 'pty-manifest.json');
+await writeFile(ptyManifest, JSON.stringify(Object.keys(assets).filter(key => key.startsWith('pty/')).map(key => key.slice(4))));
+assets['pty/manifest.json'] = ptyManifest;
 
 // The binary carries its licenses too, so it can be moved without companion files.
 const nodePath = await realpath(process.execPath);

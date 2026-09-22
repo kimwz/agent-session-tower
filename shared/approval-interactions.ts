@@ -83,10 +83,11 @@ export function validateApprovalResponse(approval: RunApproval, response: unknow
     const answers = value.answers as ObjectValue;
     const questions = interaction.questions;
     if (Object.keys(answers).some(id => !questions.some(question => question.id === id))) invalid('The response contains an unknown question.');
-    if (Object.keys(answers).length) {
+    if (interaction.requireAnswers || Object.keys(answers).length) {
       for (const question of questions) {
         const answer = Object.hasOwn(answers, question.id) ? answers[question.id] : undefined;
         if (!object(answer) || !only(answer, ['answers']) || !strings(answer.answers) || !answer.answers.length || answer.answers.length > 32 || !unique(answer.answers) || answer.answers.some((text: string) => !text.trim() || text.length > 100_000)) invalid('Answer every question before submitting.');
+        if (question.multiSelect === false && answer.answers.length !== 1) invalid('Choose one answer for this question.');
         if (question.options?.length && !question.isOther && answer.answers.some((text: string) => !question.options!.some(option => option.label === text))) invalid('Choose one of the listed answers.');
       }
     }

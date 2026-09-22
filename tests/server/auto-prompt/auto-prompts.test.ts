@@ -104,6 +104,24 @@ test('Auto selects among every directory including closed sessions and empty pin
   assert.equal((f.dispatches[0].input as CreateSessionRequest).provider, 'claude');
 });
 
+test('an explicit Codex reviewer creates a configured thread even when routing selects an existing continuation', async t => {
+  const f = await fixture(t);
+  for (const codexApprovalsReviewer of ['auto_review', 'user'] as const) {
+    const accepted = await f.manager.submit(request(f.cwd, { codexApprovalsReviewer }));
+    const job = await f.finished(accepted.id);
+    assert.equal(job.status, 'completed');
+    assert.equal(job.decision?.action, 'create');
+    assert.match(job.decision!.reason, /승인 검토/);
+    const dispatch = f.dispatches.at(-1)!;
+    assert.equal(dispatch.action, 'create');
+    assert.equal((dispatch.input as CreateSessionRequest).codexApprovalsReviewer, codexApprovalsReviewer);
+    assert.equal((dispatch.input as CreateSessionRequest).cwd, f.cwd);
+  }
+  const ordinary = await f.manager.submit(request(f.cwd));
+  assert.equal((await f.finished(ordinary.id)).decision?.action, 'resume');
+  assert.equal(f.dispatches.at(-1)!.action, 'resume');
+});
+
 test('a new session created by Auto Prompt uses the chosen approval reviewer, and Claude never carries it', async t => {
   const f = await fixture(t);
   f.respond(async () => create());

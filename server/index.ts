@@ -8,18 +8,17 @@ import { SessionTitleStore } from './stores/session-titles.js';
 import { DismissedRunStore } from './stores/dismissed-runs.js';
 import { ClosedSessionStore } from './stores/closed-sessions.js';
 import { ProjectGroupStore } from './stores/project-groups.js';
-import { RunManager } from './runs/manager.js';
+import { DurableRunManager } from './runs/durable-runner.js';
+import { runRunnerWorker } from './runs/worker.js';
 import { getProviderHealth } from './providers/discovery.js';
-import { AutoPromptManager } from './auto-prompt/manager.js';
 import { createMonitorServer } from './http/server.js';
 import { acquireStateLock, MonitorAlreadyRunning } from './instance/state-lock.js';
 import { existingServerUrl } from './instance/existing-server.js';
-import { accessPasswordPath, loadAccessPassword, networkAccess } from './http/remote-access.js';
+import { networkAccess } from './http/remote-access.js';
+import { AuthStore } from './auth/store.js';
 import { readWebAsset } from './http/web-assets.js';
 import { projectSessionStates } from './sessions/snapshot.js';
-import { openCodexBridgeRun } from './runs/codex-bridge.js';
 import { ProviderCapabilities } from './providers/capabilities.js';
-import { trustWorkspace } from './providers/workspace-trust.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
@@ -37,14 +36,20 @@ Usage: agent-session-tower [run] [options]
   --help               Show this help
   --version            Print version
 
-Non-loopback bindings require username monitor and a generated password.
-The password is stored in <state-dir>/access-password with private permissions.
+Direct localhost access requires no login. Set a remote account in local Account management.
+Remote access requires login; 5 failed attempts permanently block that IP until locally unblocked.
+Only salted password hashes are stored in <state-dir>/auth.json.
 Uses existing Claude Code and Codex sign-ins.
 Native histories are read directly; tasks use the existing Codex app server or CLI.
 `;
 
 async function main() {
   const args = process.argv.slice(2);
+  if (args[0] === '--runner-worker') {
+    if (args.length !== 2 || !args[1]) throw new Error('Runner worker requires a state directory.');
+    await runRunnerWorker(resolve(args[1]));
+    return;
+  }
   if (args.includes('--help') || args.includes('-h')) { console.log(HELP); return; }
   if (args.includes('--version')) { console.log(APP_VERSION); return; }
   let port = 8000;
@@ -86,26 +91,27 @@ async function main() {
     }
     throw error;
   }
-  let password: string | undefined;
-  try { if (access.remote) password = await loadAccessPassword(stateDir); }
-  catch (error) { await releaseLock(); throw error; }
+  const auth = new AuthStore(stateDir);
+  try { await auth.start(); }
+  catch (error) { auth.close(); await releaseLock(); throw error; }
+  if (!auth.configured() && access.remote && host !== '0.0.0.0') {
+    auth.close(); await releaseLock();
+    throw new Error('Configure an account first: start with --host 127.0.0.1 or --host 0.0.0.0, then open local Account management.');
+  }
   const sessions = new SessionService();
   const titles = new SessionTitleStore(stateDir);
   const dismissedRuns = new DismissedRunStore(stateDir);
   const closedSessions = new ClosedSessionStore(stateDir);
   const groups = new ProjectGroupStore(stateDir);
-  const runs = new RunManager({ getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true), stateDir,
-    openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }), trustWorkspace,
-  });
+  const runs = new DurableRunManager({ stateDir });
   // Load persisted history before shutdown or an HTTP request can touch the runner.
-  try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await runs.start(); } catch (error) { await releaseLock(); throw error; }
+  try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
   let scanning = true;
   const listeners = new Set<() => void>();
   const changed = () => { for (const listener of listeners) listener(); };
   const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed });
   sessions.on('change', changed);
   runs.on('change', changed);
-  let autoPrompts: AutoPromptManager | undefined;
   const snapshot = (): Snapshot => {
     const all = runs.sessionList(sessions.list());
     const managed = runs.list();
@@ -113,7 +119,7 @@ async function main() {
       sessions: projectSessionStates(all, managed, runs.settledRunIds()).map(session => closedSessions.apply(titles.apply(session))),
       groups: groups.list(),
       providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider).length })),
-      runs: dismissedRuns.visible(managed), autoPrompts: autoPrompts?.list() || [], scanning, hostname: hostname(), version: APP_VERSION, updatedAt: new Date().toISOString(),
+      runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning, hostname: hostname(), version: APP_VERSION, updatedAt: new Date().toISOString(),
     };
   };
   const detail = async (id: string, before?: number, limit?: number) => {
@@ -122,12 +128,8 @@ async function main() {
     const history = await sessions.detail(runs.nativeSessionId(id), before, limit);
     return { ...(history || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
   };
-  autoPrompts = new AutoPromptManager({ stateDir, snapshot, detail, refresh: () => sessions.refresh(true), runs });
-  autoPrompts.on('change', changed);
-  try { await autoPrompts.start(); }
-  catch (error) { try { await runs.close(); } finally { await releaseLock(); } throw error; }
   const { server, dispose } = createMonitorServer({ port, clientDir,
-    remote: password ? { password, origins: access.origins } : undefined, backend: {
+    auth, workspaceTerminals: runs.terminals, remote: access.remote ? { origins: access.origins } : undefined, backend: {
     snapshot, detail,
     setTitle: async (id, title) => {
       const session = runs.getSession(id);
@@ -144,9 +146,11 @@ async function main() {
       return titles.apply(updated);
     },
     createSession: input => runs.create(input),
-    startAutoPrompt: input => autoPrompts!.submit(input),
-    getAutoPrompt: id => autoPrompts!.get(id),
-    cancelAutoPrompt: id => autoPrompts!.cancel(id),
+    startAutoPrompt: input => runs.submitAutoPrompt(input),
+    getAutoPrompt: id => runs.getAutoPrompt(id),
+    cancelAutoPrompt: id => runs.cancelAutoPrompt(id),
+    slackOverview: () => runs.slackOverview(),
+    slackMutate: (action, body) => runs.slackMutate(action, body),
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
     enqueue: (id, prompt, attachments) => runs.enqueue(id, prompt, attachments),
     attachment: id => runs.attachment(id), cancel: id => runs.cancel(id), steerRun: id => runs.steer(id),
@@ -162,26 +166,28 @@ async function main() {
     server.listen(port, host, () => { server.removeListener('error', reject); accept(); });
   }).catch(async error => {
     dispose();
-    try { await finishCleanup([autoPrompts!.close(), titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), runs.close()]); } finally { await releaseLock(); }
+    auth.close();
+    try { await finishCleanup([auth.flush(), titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), runs.close()]); } finally { await releaseLock(); }
     if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') throw new Error(`Port ${port} is already in use. Open http://localhost:${port} if Agent Session Tower is already running, or choose --port 8001.`);
     throw error;
   });
   console.log(`\n  Agent Session Tower\n  ${access.browserUrl}\n`);
   printRemoteAccess(host, port, stateDir);
-  console.log('  Reading local Claude Code and Codex sessions…\n  Press Ctrl+C to stop.\n');
+  if (!auth.configured()) console.log(`  Remote account not configured. Open http://localhost:${port} and select Account management in the expanded navigation.\n`);
+  console.log('  Reading local Claude Code and Codex sessions…\n  Press Ctrl+C to stop the web server. Agent work continues independently.\n');
   if (open) openBrowser(access.browserUrl);
   let closing = false;
   capabilities.start();
   const shutdown = async () => {
     if (closing) return;
     closing = true;
-    const stoppingAutoPrompts = autoPrompts!.close();
     const stoppingCapabilities = capabilities.stop();
     sessions.stop();
+    auth.close();
     dispose();
     server.closeAllConnections();
     server.close();
-    try { await finishCleanup([stoppingAutoPrompts, stoppingCapabilities, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), runs.close()]); } finally { await releaseLock(); }
+    try { await finishCleanup([auth.flush(), stoppingCapabilities, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), runs.close()]); } finally { await releaseLock(); }
   };
   const onSignal = () => { void shutdown().catch(error => { console.error(`Agent Session Tower shutdown: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }); };
   process.once('SIGINT', onSignal);
@@ -204,7 +210,7 @@ async function finishCleanup(operations: Promise<unknown>[]): Promise<void> {
 function printRemoteAccess(host: string, port: number, stateDir: string) {
   const access = networkAccess(host, port);
   if (!access.remote) return;
-  console.log(`  Remote URLs:\n${access.urls.map(url => `  ${url}`).join('\n')}\n  Username: monitor\n  Password file: ${accessPasswordPath(stateDir)}\n`);
+  console.log(`  Remote URLs:\n${access.urls.map(url => `  ${url}`).join('\n')}\n  Remote login: account configured in local Account management\n  Account state: ${join(stateDir, 'auth.json')}\n  ${host === '0.0.0.0' ? 'Direct localhost access does not require login.' : 'For local account management, stop and restart with --host 127.0.0.1 using the same state directory.'}\n`);
 }
 
 function openBrowser(url: string) {

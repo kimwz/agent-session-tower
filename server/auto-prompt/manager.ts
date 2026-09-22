@@ -111,6 +111,11 @@ export class AutoPromptManager extends EventEmitter {
     this.attachments = new AttachmentStore(join(options.stateDir, 'auto-prompt-staging'));
   }
 
+  /** Reattach display metadata when a live execution host outlives its web server. */
+  updateContext(context: Pick<AutoPromptOptions, 'snapshot' | 'detail' | 'refresh'>): void {
+    Object.assign(this.options, context);
+  }
+
   async start(): Promise<void> {
     if (this.started) return;
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
@@ -323,6 +328,12 @@ export class AutoPromptManager extends EventEmitter {
       if (relation === 'new') throw new RunError('라우터가 새 작업을 기존 세션 재사용으로 선택했습니다. 선택이 명확하지 않아 실행하지 않았습니다.', 502);
       if (relation === 'adjacent' && !adjacentAllowed(selected, snapshot)) throw new RunError('선택한 세션은 인접 작업에 재사용할 수 없습니다. 컨텍스트 사용률이 확인된 30% 이하의 대기 세션이 필요합니다.');
       decision = { action: 'resume', cwd, sessionId: selected.id, reason: explanation };
+    }
+    // The native resume path preserves the thread's reviewer, which Tower cannot
+    // verify from session metadata. An explicit reviewer therefore needs a new
+    // thread so that a routing choice cannot silently discard the requested policy.
+    if (decision.action === 'resume' && job.provider === 'codex' && job.codexApprovalsReviewer) {
+      decision = { action: 'create', cwd, reason: `${explanation} 요청한 승인 검토 설정을 적용하기 위해 새 세션을 생성합니다.` };
     }
     await this.options.refresh(); active();
     await this.checkDirectory(cwd, directories(this.options.snapshot())); active();

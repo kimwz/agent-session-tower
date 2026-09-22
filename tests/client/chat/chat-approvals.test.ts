@@ -234,3 +234,13 @@ test('valid empty required text and array values remain distinct from omitted op
   assert.match(html, /<option value="0">빈 값<\/option>/);
   assert.doesNotMatch(html, /value="do not submit"/);
 });
+
+test('Claude multi-select questions render checkboxes with descriptions and an other answer', () => {
+  const approval: RunApproval = { id: 'claude-questions', toolName: 'AskUserQuestion', input: {}, interaction: { type: 'questions', requireAnswers: true, questions: [
+    { id: '0', header: 'Game code', question: 'Which sources?', multiSelect: true, isOther: true, isSecret: false, options: [{ label: 'Clone', description: 'Read source' }, { label: 'Bundle', description: 'Read build' }] },
+  ] } };
+  const html = renderApproval(approval);
+  assert.equal((html.match(/type="checkbox"/g) || []).length, 3);
+  assert.doesNotMatch(html, /type="radio"|한 번 허용|Allow once/);
+  assert.match(html, /Read source/); assert.match(html, /Which sources/);
+});

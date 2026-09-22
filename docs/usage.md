@@ -53,7 +53,7 @@ Custom `CLAUDE_CONFIG_DIR` and `CODEX_HOME` locations are supported. CLI credent
 
 Status combines native lifecycle events, live process signals, and recent log activity. Some CLI versions provide fewer signals, so a status may be inferred; the UI's status explanation distinguishes this. macOS is the verified platform. Linux has not been verified. Windows is not currently supported.
 
-Sending a request continues the same native session. Claude sessions resume through the CLI. Codex sessions use the existing local app server when available, or an app-server process started by Tower when the session is no longer owned by another writer. Busy sessions queue requests; unavailable app-server connections may leave them waiting until the original session is released. Tower runs up to two requests at once, with one active request per session.
+Sending a request continues the same native session. Claude sessions resume through the CLI. Codex sessions use the existing local app server when available, or an app-server process started by Tower when the session is no longer owned by another writer. Busy sessions queue requests; unavailable app-server connections may leave them waiting until the original session is released. Tower keeps one active request per session; independent sessions can run concurrently.
 
 Subagent records without an independently resumable session ID are viewable through their parent. Existing terminals or desktop apps may need a refresh or resume to show changes made from the web. Claude Code does not list sessions started from Tower in its `claude --resume` picker; use the terminal button in the chat header to copy a command that resumes the session by ID in its project folder. Usage is billed through the existing provider account.
 
@@ -109,20 +109,26 @@ Stop the existing server before changing its bind address:
 agent-session-tower --host 0.0.0.0 --port 8000
 ```
 
-The terminal prints reachable interface addresses, the username `monitor`, and the password-file path. By default, read the generated password with:
+Open `http://localhost:8000` on the server computer. Expand the navigation and select the **Account management** icon at the upper right to set an ID and a password (12–256 characters). Direct localhost access requires no login. Other devices see a login page; remote access stays unavailable until an account is configured. With `--state-dir`, the account and security records belong to that state directory.
 
-```sh
-cat ~/.agent-monitor/access-password
-```
+Use the network address printed in the terminal from your other device and sign in with the configured ID/password. Passwords are stored only as salted scrypt hashes. Login sessions last up to 12 hours and end on logout, password change, IP block, or server restart. Ending a session also disconnects its live event and terminal-output streams.
 
-Enter those credentials in the browser's login prompt. The password persists across restarts. With `--state-dir`, use the password file in that directory instead. To listen on one interface, use `--host <the-machine's-IPv4-address>`.
+Account management is available only through a direct localhost connection. It shows the latest 1,000 successful, failed, and blocked login attempts, with timestamps, entered IDs, and connection IPs. Local access without login does not create a login attempt.
 
-The client device must be able to reach the host and port. A firewall, NAT, or VPN may require network configuration; Tower does not create a tunnel or public URL. Direct access uses HTTP Basic authentication over HTTP, which does not encrypt credentials or conversations. Use a trusted LAN or VPN. Custom domains and HTTPS reverse-proxy configuration are not built-in features. The host machine and Tower must stay running.
+Five cumulative failed logins from the same IP permanently block that IP. A successful login does not reset the count, and restarting Tower does not remove the block. In **Blocked IPs**, select **Unblock** to remove the block and reset its failure count. Devices sharing a network's public IP also share this limit. The fifth failed attempt is shown as **Blocked** because it activates the block.
+
+`--host 0.0.0.0` permits both localhost administration and network access. To listen on only one nonloopback interface, configure the account first, then restart with `--host <the-machine's-IPv4-address>`. That mode does not listen on localhost; to change credentials, inspect history, or unblock an IP, stop Tower and restart on `127.0.0.1` or `0.0.0.0` with the same state directory.
+
+The client device must be able to reach the host and port. Tower does not create a tunnel or public URL. Direct access uses HTTP, which does not encrypt passwords or conversations; use an encrypted VPN or a separately secured HTTPS deployment. The host machine and Tower must stay running.
+
+Reverse-proxy configuration is not a built-in feature. Tower identifies clients by the socket address and does not trust forwarded IP values. Proxied clients therefore share the proxy's IP for blocking. Never expose Tower through a localhost proxy that rewrites the Host header to localhost and omits forwarding headers: such requests are indistinguishable from direct local administration. A proxy must preserve an explicitly allowed public Host and send forwarding headers so local bypass is disabled; public origins currently require server integration rather than a CLI option.
+
+Earlier versions generated a plaintext `access-password` file and used HTTP Basic authentication. That credential is no longer accepted or loaded. Set an account locally after upgrading. An existing legacy file is left untouched; it may be removed after confirming the new account works.
 
 ## Stored settings
 
-The default state directory is `~/.agent-monitor/`, retained for compatibility with earlier local builds. `--state-dir` overrides it. It contains generated access credentials, managed request history, custom titles, project pins, hidden-session settings, and uploaded attachments. State directories use private permissions; the access password file is mode `0600`.
+The default state directory is `~/.agent-monitor/`, retained for compatibility with earlier local builds. `--state-dir` overrides it. It contains account credentials, login security records, managed request history, custom titles, project pins, hidden-session settings, and uploaded attachments. `auth.json` stores the ID, salt, scrypt parameters, and password hash; `auth-security.json` stores login history, failure counts, and blocked IPs. These files use mode `0600`, and the state directory uses mode `0700`. Session cookies are not persisted on the server.
 
 Only one Tower server may use a state directory at a time. Launching it again opens the existing server. Avoid running separate state directories that control the same native session concurrently.
 
-Stopping Tower does not automatically replay interrupted requests on restart. Hiding a session, clearing a failed-request notification, or renaming a session does not delete its original Claude Code or Codex history.
+Stopping or restarting the Tower web server leaves accepted agent work running in a separate local execution process. Restart with the same state directory to reconnect to output, approvals, and queued requests. Use the task’s Stop action to cancel it. If the execution process itself crashes or the machine restarts, uncertain requests are not automatically replayed. Hiding a session, clearing a failed-request notification, or renaming a session does not delete its original Claude Code or Codex history.

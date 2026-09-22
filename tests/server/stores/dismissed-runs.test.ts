@@ -1,3 +1,4 @@
+import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
@@ -87,9 +88,8 @@ test('dismiss HTTP authenticates, validates, commits before SSE, and preserves l
   assert.equal(before[0]!.status, 'error');
   assert.equal(before[0]!.lastRequestAt, failed.createdAt);
   assert.equal(before[0]!.lastCompletedAt, failed.finishedAt);
-  const password = 'fixture-access-password';
-  const authorization = `Basic ${Buffer.from(`monitor:${password}`).toString('base64')}`;
-  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, remote: { password, origins: new Set() }, backend: {
+  const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(dir);
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, auth, remote: { origins }, backend: {
     snapshot,
     detail: async () => ({ session, messages: [], hasMore: false }),
     enqueue: async () => { throw new Error('Dismiss must not enqueue'); },
@@ -100,12 +100,12 @@ test('dismiss HTTP authenticates, validates, commits before SSE, and preserves l
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await store.flush(); await rm(dir, { recursive: true, force: true }); });
-  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { Authorization: authorization } })).json();
-  const headers = { Authorization: authorization, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).json();
+  const headers = { cookie, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
   const send = (id = failed.id, extra: Record<string, string> = {}, body = '{}') => fetch(`${base}/api/runs/${id}/dismiss`, { method: 'POST', headers: { ...headers, ...extra }, body });
 
   await t.test('rejects unauthenticated, invalid-origin, CSRF, non-JSON and malformed requests', async () => {
-    assert.equal((await send(failed.id, { Authorization: '' })).status, 401);
+    assert.equal((await send(failed.id, { cookie: '' })).status, 401);
     assert.equal((await send(failed.id, { 'X-Agent-Monitor-Token': '' })).status, 403);
     assert.equal((await send(failed.id, { Origin: 'https://attacker.example' })).status, 403);
     assert.equal((await send(failed.id, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
@@ -128,7 +128,7 @@ test('dismiss HTTP authenticates, validates, commits before SSE, and preserves l
   });
   await t.test('a committed dismissal removes only its card from live and reconnected snapshots', async () => {
     const controller = new AbortController();
-    const response = await fetch(`${base}/api/events`, { headers: { Authorization: authorization }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]) });
+    const response = await fetch(`${base}/api/events`, { headers: { cookie }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]) });
     const reader = response.body!.getReader();
     let buffered = '';
     const readSnapshot = async () => {
@@ -157,7 +157,7 @@ test('dismiss HTTP authenticates, validates, commits before SSE, and preserves l
       assert.deepEqual(snapshot().sessions, before);
       const { filePath: _, ...publicSession } = before[0]!;
       assert.deepEqual(data.sessions, [{ ...publicSession, readRevision: computeConversationRevision(before[0]!, raw.slice(1)) }]);
-      assert.deepEqual((await (await fetch(`${base}/api/snapshot`, { headers: { Authorization: authorization } })).json()).runs, raw.slice(1).map(run => ({ ...run, output: '' })));
+      assert.deepEqual((await (await fetch(`${base}/api/snapshot`, { headers: { cookie } })).json()).runs, raw.slice(1).map(run => ({ ...run, output: '' })));
       assert.equal((await send()).status, 200, 'duplicate dismissal is idempotent');
       assert.equal(raw[0]!.error, 'Fixture failure');
       assert.equal(raw[0]!.output, 'Partial output', 'public projection does not clear stored execution output');

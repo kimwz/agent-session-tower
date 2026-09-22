@@ -1,3 +1,4 @@
+import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -16,8 +17,9 @@ test('Auto Prompt uses the existing remote, origin and mutation protections befo
   const submissions: AutoPromptRequest[] = [];
   let cancellations = 0;
   let job = { ...pending };
+  const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(dir);
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir,
-    remote: { password: 'router-fixture', origins: new Set() }, backend: {
+    auth, remote: { origins }, backend: {
       snapshot: () => ({ sessions: [], runs: [], providers: [], autoPrompts: [job], scanning: false, hostname: 'test', version: 'test', updatedAt: now }),
       detail: async () => undefined, enqueue: async () => { throw new Error('Not used'); }, cancel: async () => {}, subscribe: () => () => {},
       startAutoPrompt: async input => { submissions.push(input); return job; },
@@ -32,19 +34,18 @@ test('Auto Prompt uses the existing remote, origin and mutation protections befo
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
-  const authorization = `Basic ${Buffer.from('monitor:router-fixture').toString('base64')}`;
-  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { authorization } })).json();
-  const headers = { authorization, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).json();
+  const headers = { cookie, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
   const request: AutoPromptRequest = { requestId: id, provider: 'claude', prompt: '  Continue the change\n' };
   const post = (body: unknown, extra: Record<string, string> = {}, suffix = '') => fetch(`${base}/api/auto-prompts${suffix}`, { method: 'POST', headers: { ...headers, ...extra }, body: JSON.stringify(body) });
 
-  assert.equal((await post(request, { authorization: '' })).status, 401);
+  assert.equal((await post(request, { cookie: '' })).status, 401);
   assert.equal((await post(request, { 'X-Agent-Monitor-Token': '' })).status, 403);
   assert.equal((await post(request, { Origin: 'https://untrusted.example' })).status, 403);
   assert.equal((await post(request, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
   assert.equal((await post(request, { 'Content-Type': 'text/plain' })).status, 415);
   assert.equal((await fetch(`${base}/api/auto-prompts/${id}`)).status, 401);
-  assert.equal((await fetch(`${base}/api/auto-prompts/${id}`, { headers: { authorization, Origin: 'https://untrusted.example' } })).status, 403);
+  assert.equal((await fetch(`${base}/api/auto-prompts/${id}`, { headers: { cookie, Origin: 'https://untrusted.example' } })).status, 403);
   assert.equal(submissions.length, 0);
 
   for (const input of [
@@ -67,10 +68,10 @@ test('Auto Prompt uses the existing remote, origin and mutation protections befo
   assert.equal((await post({ ...request, cwd: '/tmp/project', prompt: '', attachments: files })).status, 202);
   assert.deepEqual(submissions[1].attachments, files);
   assert.equal(submissions[1].cwd, '/tmp/project');
-  const read = await fetch(`${base}/api/auto-prompts/${id}`, { headers: { authorization } });
+  const read = await fetch(`${base}/api/auto-prompts/${id}`, { headers: { cookie } });
   assert.equal(read.status, 200); assert.equal((await read.json()).job.stage, 'session');
-  assert.equal((await fetch(`${base}/api/auto-prompts/00000000-0000-0000-0000-000000000000`, { headers: { authorization } })).status, 404);
-  const snapshot = await (await fetch(`${base}/api/snapshot`, { headers: { authorization } })).json();
+  assert.equal((await fetch(`${base}/api/auto-prompts/00000000-0000-0000-0000-000000000000`, { headers: { cookie } })).status, 404);
+  const snapshot = await (await fetch(`${base}/api/snapshot`, { headers: { cookie } })).json();
   assert.equal(snapshot.autoPrompts[0].id, id);
   assert.equal((await post({ decision: 'create' }, {}, `/${id}/cancel`)).status, 400);
   assert.equal(cancellations, 0);

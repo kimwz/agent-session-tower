@@ -1,3 +1,4 @@
+import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -56,15 +57,14 @@ test('session creation, closure and reopen HTTP routes authenticate, validate, a
   const dir = await mkdtemp(join(tmpdir(), 'monitor-session-actions-'));
   const store = new ClosedSessionStore(join(dir, 'state'));
   await store.start();
-  const password = 'fixture-password';
-  const authorization = `Basic ${Buffer.from(`monitor:${password}`).toString('base64')}`;
   const created: CreateSessionRequest[] = [];
   let changes = 0;
   const listeners = new Set<() => void>();
   const changed = () => { changes++; listeners.forEach(listener => listener()); };
   const run: Run = { id: 'fixture-run', sessionId: session.id, prompt: 'first', status: 'queued', createdAt: session.createdAt, output: '' };
   const snapshot = (): Snapshot => ({ sessions: [store.apply(session)], runs: [run], providers: [], scanning: false, hostname: 'fixture', version: '0.1.0', updatedAt: session.updatedAt });
-  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, remote: { password, origins: new Set() }, backend: {
+  const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(dir);
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, auth, remote: { origins }, backend: {
     snapshot, detail: async () => ({ session: store.apply(session), messages: [], hasMore: false }),
     setClosed: async (id, closed) => { if (id !== session.id) return undefined; const result = await store.set(session, closed); changed(); return result; },
     createSession: async input => { created.push(input); return { session, run }; },
@@ -75,11 +75,11 @@ test('session creation, closure and reopen HTTP routes authenticate, validate, a
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await store.flush(); await rm(dir, { recursive: true, force: true }); });
-  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { Authorization: authorization } })).json();
-  const headers = { Authorization: authorization, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).json();
+  const headers = { cookie, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
   const send = (path: string, body = '{}', extra: Record<string, string> = {}) => fetch(`${base}${path}`, { method: 'POST', body, headers: { ...headers, ...extra } });
   const closePath = `/api/sessions/${session.id}/close`;
-  assert.equal((await send(closePath, '{}', { Authorization: '' })).status, 401);
+  assert.equal((await send(closePath, '{}', { cookie: '' })).status, 401);
   assert.equal((await send(closePath, '{}', { 'X-Agent-Monitor-Token': '' })).status, 403);
   assert.equal((await send(closePath, '{}', { Origin: 'https://attacker.example' })).status, 403);
   assert.equal((await send(closePath, '{}', { 'Content-Type': 'text/plain' })).status, 415);
@@ -93,7 +93,7 @@ test('session creation, closure and reopen HTTP routes authenticate, validate, a
   assert.equal(closedBody.session.filePath, undefined);
   assert.equal(closedBody.session.status, 'working');
   assert.equal(changes, 1);
-  assert.equal((await (await fetch(`${base}/api/snapshot`, { headers: { Authorization: authorization } })).json()).sessions[0].closed, true);
+  assert.equal((await (await fetch(`${base}/api/snapshot`, { headers: { cookie } })).json()).sessions[0].closed, true);
   const reopened = await send(`/api/sessions/${session.id}/reopen`);
   assert.equal(reopened.status, 200);
   assert.equal((await reopened.json()).session.closed, undefined);

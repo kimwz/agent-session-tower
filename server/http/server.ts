@@ -1,5 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
 import { normalizeProjectGroupPatch } from '../stores/project-groups.js';
@@ -10,8 +10,16 @@ import { requestedApprovalsReviewer } from '../providers/approvals.js';
 import { SseClient } from './sse-client.js';
 import { publicSnapshot } from './public-snapshot.js';
 import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
+import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
+import { WorkspaceTerminals, type WorkspaceTerminalBackend } from '../workspace-terminals.js';
+import type { AuthStore } from '../auth/store.js';
+import { requestIdentity, sessionCookie, setSessionCookie } from './auth.js';
+import type { AuthStatus } from '../../shared/auth.js';
+import type { SlackPublicStatus } from '../../shared/slack.js';
 
 export interface Backend {
+  slackOverview?(): Promise<SlackPublicStatus>;
+  slackMutate?(action: string, body: Record<string, unknown>): Promise<SlackPublicStatus>;
   snapshot(): Snapshot;
   detail(id: string, before?: number, limit?: number): Promise<SessionDetail | undefined>;
   setTitle?(id: string, title: string): Promise<Session | undefined>;
@@ -33,7 +41,9 @@ export interface HttpOptions {
   port: number;
   clientDir: string;
   backend: Backend;
-  remote?: { password: string; origins: ReadonlySet<string> };
+  remote?: { origins: ReadonlySet<string> };
+  auth?: AuthStore;
+  workspaceTerminals?: WorkspaceTerminalBackend;
 }
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -44,9 +54,20 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote }: HttpOptions) {
+export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals() }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
-  const credentialHash = remote ? createHash('sha256').update(`monitor:${remote.password}`).digest() : undefined;
+  const streams = new Map<string, Set<() => void>>();
+  const unsubscribeAuth = auth?.onRevoke(id => {
+    for (const close of streams.get(id) || []) close();
+    streams.delete(id);
+  });
+  const trackStream = (id: string, res: ServerResponse, close: () => void) => {
+    if (!id) return;
+    const active = streams.get(id) || new Set<() => void>();
+    active.add(close);
+    streams.set(id, active);
+    res.once('close', () => { active.delete(close); if (!active.size) streams.delete(id); });
+  };
   const clients = new Set<SseClient>();
   const rates = new Map<string, { count: number; at: number }>();
   let sequence = 0;
@@ -106,24 +127,120 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
         bindHost: address && typeof address === 'object' ? address.address : undefined,
         remoteAccess: Boolean(remote),
       });
-      if (credentialHash && !authenticated(req.headers.authorization, credentialHash)) {
-        res.setHeader('WWW-Authenticate', 'Basic realm="Agent Session Tower", charset="UTF-8"');
-        return json(res, 401, { error: '원격 접속 인증이 필요합니다.' });
-      }
+      const identity = requestIdentity(req);
+      const sessionId = sessionCookie(req);
+      const authenticated = identity.local || Boolean(auth?.session(sessionId, identity.ip));
+      const authStatus = (signedIn = authenticated): AuthStatus => ({
+        local: identity.local, authenticated: signedIn, configured: Boolean(auth?.configured()), token,
+        ...(signedIn && auth?.username() ? { username: auth.username() } : {}),
+      });
+      // Only the login shell and its static assets are public; all application data stays behind this gate.
+      const publicAsset = (req.method === 'GET' || req.method === 'HEAD') && (path === '/' || path === '/favicon.svg' || path.startsWith('/assets/'));
+      if (req.method === 'GET' && path === '/api/auth/status') return json(res, 200, authStatus());
+      const login = req.method === 'POST' && path === '/api/auth/login';
+      if (!authenticated && !login && !publicAsset) return json(res, 401, { error: '로그인이 필요합니다.' });
+      const adminRoute = ['/api/auth/overview', '/api/auth/credentials', '/api/auth/unblock'].includes(path);
+      if (adminRoute && !identity.local) return json(res, 403, { error: '계정 관리는 로컬 접속에서만 사용할 수 있습니다.' });
       if (req.method === 'POST') {
         const header = req.headers[REQUEST_TOKEN_HEADER.toLowerCase()];
         if (typeof header !== 'string' || !/^[a-f0-9]{64}$/.test(header) || !timingSafeEqual(Buffer.from(header), Buffer.from(token))) {
           return json(res, 403, { error: '연결 인증이 만료되었습니다. 페이지를 새로고침하세요.' });
         }
         if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON 요청이 필요합니다.' });
-        const key = req.socket.remoteAddress || 'local';
-        const now = Date.now();
-        const rate = rates.get(key);
-        if (!rate || now - rate.at > 60_000) rates.set(key, { count: 1, at: now });
-        else if (++rate.count > 30) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+        // Keystrokes and resize events have their own per-terminal byte/request budget.
+        if (!login && !/^\/api\/workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
+          const key = req.socket.remoteAddress || 'local';
+          const now = Date.now();
+          const rate = rates.get(key);
+          if (!rate || now - rate.at > 60_000) rates.set(key, { count: 1, at: now });
+          else if (++rate.count > 30) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+        }
+      }
+      const secureOrigin = origins.has(`https://${req.headers.host}`) && !origins.has(`http://${req.headers.host}`);
+      if (path === '/api/slack' && req.method === 'GET') {
+        if (!backend.slackOverview) return json(res, 503, { error: 'Slack 연동을 사용할 수 없습니다.' });
+        return json(res, 200, await backend.slackOverview());
+      }
+      const slackAction = path.match(/^\/api\/slack\/(connect|disconnect|settings|rules)$/);
+      if (slackAction && req.method === 'POST') {
+        if (!backend.slackMutate) return json(res, 503, { error: 'Slack 연동을 사용할 수 없습니다.' });
+        const body = await readJson(req, 1_000_000);
+        return json(res, 200, await backend.slackMutate(slackAction[1], body));
+      }
+      if (login) {
+        if (identity.local) return json(res, 200, authStatus(true));
+        if (!auth) return json(res, 503, { error: '서버의 로컬 계정 관리에서 계정을 설정하세요.' });
+        const body = await readJson(req, 4096);
+        if (typeof body.username !== 'string' || typeof body.password !== 'string' || body.username.length > 64 || body.password.length > 256
+          || Object.keys(body).some(key => key !== 'username' && key !== 'password')) return json(res, 400, { error: '로그인 요청 형식이 올바르지 않습니다.' });
+        const result = await auth.login(identity.ip, body.username, body.password);
+        if (result.status === 'blocked') return json(res, 403, { error: '이 IP는 로그인 5회 실패로 차단되었습니다. 로컬 계정 관리에서 해제하세요.' });
+        if (result.status === 'unconfigured') return json(res, 503, { error: '서버의 로컬 계정 관리에서 계정을 설정하세요.' });
+        if (result.status !== 'success' || !result.sessionId) return json(res, 401, { error: 'ID 또는 비밀번호가 올바르지 않습니다.' });
+        if (sessionId) auth.logout(sessionId);
+        setSessionCookie(req, res, result.sessionId, secureOrigin);
+        return json(res, 200, authStatus(true));
+      }
+      if (req.method === 'POST' && path === '/api/auth/logout') {
+        auth?.logout(sessionId);
+        setSessionCookie(req, res, '', secureOrigin);
+        return json(res, 200, { ok: true });
+      }
+      if (adminRoute && !auth) return json(res, 503, { error: '계정 관리를 사용할 수 없습니다.' });
+      if (req.method === 'GET' && path === '/api/auth/overview') return json(res, 200, auth!.overview());
+      if (req.method === 'POST' && path === '/api/auth/credentials') {
+        const body = await readJson(req, 4096);
+        if (typeof body.username !== 'string' || typeof body.password !== 'string' || Object.keys(body).some(key => key !== 'username' && key !== 'password')) return json(res, 400, { error: '계정 요청 형식이 올바르지 않습니다.' });
+        await auth!.setCredentials(body.username, body.password);
+        return json(res, 200, auth!.overview());
+      }
+      if (req.method === 'POST' && path === '/api/auth/unblock') {
+        const body = await readJson(req, 4096);
+        if (typeof body.ip !== 'string' || Object.keys(body).some(key => key !== 'ip')) return json(res, 400, { error: 'IP 주소를 지정하세요.' });
+        await auth!.unblock(body.ip);
+        return json(res, 200, auth!.overview());
       }
       if (req.method === 'GET' && path === '/api/bootstrap') return json(res, 200, { token });
       if (req.method === 'GET' && path === '/api/snapshot') return json(res, 200, snapshot());
+      if (req.method === 'GET' && path === '/api/workspace/tree') {
+        return json(res, 200, await listWorkspaceTree(url.searchParams.get('cwd'), url.searchParams.get('path') ?? '', backend.snapshot()));
+      }
+      if (req.method === 'GET' && path === '/api/workspace/file') {
+        return json(res, 200, await readWorkspaceFile(url.searchParams.get('cwd'), url.searchParams.get('path'), backend.snapshot()));
+      }
+      if (req.method === 'POST' && path === '/api/workspace/file') {
+        return json(res, 200, await saveWorkspaceFile(await readJson(req, 6 * MAX_WORKSPACE_FILE_BYTES + 16 * 1024), backend.snapshot()));
+      }
+      if (req.method === 'POST' && path === '/api/workspace/directory') {
+        return json(res, 200, await createWorkspaceDirectory(await readJson(req), backend.snapshot()));
+      }
+      if (req.method === 'POST' && path === '/api/workspace/terminals') {
+        const body = await readJson(req);
+        if (Object.keys(body).some(key => !['cwd', 'cols', 'rows'].includes(key))) return json(res, 400, { error: '폴더와 터미널 크기만 지정할 수 있습니다.' });
+        const cwd = await assertWorkspace(body.cwd, backend.snapshot());
+        return json(res, 200, await workspaceTerminals.create(cwd, body.cols, body.rows));
+      }
+      const terminalMatch = path.match(/^\/api\/workspace\/terminals\/([0-9a-f-]{36})\/(events|input|resize|close)$/);
+      if (terminalMatch && req.method === 'GET' && terminalMatch[2] === 'events') {
+        const cursor = req.headers['last-event-id'];
+        if (Array.isArray(cursor)) return json(res, 400, { error: '터미널 출력 위치가 올바르지 않습니다.' });
+        await workspaceTerminals.attach(terminalMatch[1], res, cursor);
+        if (!identity.local) {
+          if (!auth?.session(sessionId, identity.ip)) res.end();
+          else trackStream(sessionId, res, () => { res.end(); });
+        }
+        return;
+      }
+      if (terminalMatch && req.method === 'POST' && terminalMatch[2] !== 'events') {
+        const body = await readJson(req);
+        const action = terminalMatch[2];
+        const allowed = action === 'input' ? ['data'] : action === 'resize' ? ['cols', 'rows'] : [];
+        if (Object.keys(body).some(key => !allowed.includes(key))) return json(res, 400, { error: '터미널 요청 형식이 올바르지 않습니다.' });
+        if (action === 'input') await workspaceTerminals.input(terminalMatch[1], body.data);
+        else if (action === 'resize') await workspaceTerminals.resize(terminalMatch[1], body.cols, body.rows);
+        else await workspaceTerminals.close(terminalMatch[1]);
+        return json(res, 200, { ok: true });
+      }
       if (req.method === 'POST' && path === '/api/auto-prompts') {
         const body = await readJson(req, Math.ceil(MAX_TOTAL_ATTACHMENT_BYTES / 3) * 4 + 256 * 1024);
         if (Object.keys(body).some(key => !['requestId', 'provider', 'cwd', 'prompt', 'attachments', 'codexApprovalsReviewer'].includes(key))) {
@@ -184,6 +301,7 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
         res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
         const client = new SseClient(res, () => clients.delete(client));
         clients.add(client);
+        if (!identity.local) trackStream(sessionId, res, () => client.end());
         client.snapshot(`retry: 2000\n\n${frame()}`);
         return;
       }
@@ -291,6 +409,10 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
   server.headersTimeout = 10_000;
   server.on('clientError', (_err, socket) => socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'));
   const dispose = () => {
+    workspaceTerminals.dispose();
+    unsubscribeAuth?.();
+    for (const active of streams.values()) for (const close of active) close();
+    streams.clear();
     unsubscribe();
     clearInterval(heartbeat);
     if (scheduled) clearTimeout(scheduled);
@@ -299,15 +421,6 @@ export function createMonitorServer({ port, clientDir, backend, remote }: HttpOp
   };
   server.on('close', dispose);
   return { server, dispose };
-}
-
-function authenticated(header: string | undefined, expectedHash: Buffer): boolean {
-  if (!header || header.length > 2048) return false;
-  const match = /^Basic ([A-Za-z0-9+/]+={0,2})$/i.exec(header);
-  if (!match) return false;
-  const credentials = Buffer.from(match[1], 'base64');
-  if (credentials.toString('base64') !== match[1]) return false;
-  return timingSafeEqual(createHash('sha256').update(credentials).digest(), expectedHash);
 }
 
 /** Accept one unambiguous response envelope; provider code validates its pending schema. */

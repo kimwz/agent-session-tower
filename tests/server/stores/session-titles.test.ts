@@ -1,3 +1,4 @@
+import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
@@ -87,10 +88,10 @@ test('title HTTP endpoint validates, authenticates, persists, and broadcasts san
   const store = new SessionTitleStore(join(dir, 'state'));
   await store.start();
   await mkdir(join(dir, 'client'));
-  const authorization = `Basic ${Buffer.from('monitor:test-password').toString('base64')}`;
   let notify = () => {};
   let saves = 0;
-  const { server, dispose } = createMonitorServer({ port: 0, clientDir: join(dir, 'client'), remote: { password: 'test-password', origins: new Set() }, backend: {
+  const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(dir);
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: join(dir, 'client'), auth, remote: { origins }, backend: {
     snapshot: () => ({ sessions: [store.apply(native)], providers: [], runs: [], scanning: false, updatedAt: native.updatedAt, hostname: 'test', version: '0.1.0' }),
     detail: async id => id === native.id ? { session: store.apply(native), messages: [], hasMore: false } : undefined,
     setTitle: async (id, title) => {
@@ -112,12 +113,12 @@ test('title HTTP endpoint validates, authenticates, persists, and broadcasts san
     await rm(dir, { recursive: true, force: true });
   });
   const path = `${base}/api/sessions/${encodeURIComponent(native.id)}/title`;
-  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { Authorization: authorization } })).json();
-  const headers = { Authorization: authorization, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
+  const { token } = await (await fetch(`${base}/api/bootstrap`, { headers: { cookie } })).json();
+  const headers = { cookie, 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token };
   const send = (value: unknown, extra: Record<string, string> = {}, url = path) => fetch(url, { method: 'POST', headers: { ...headers, ...extra }, body: JSON.stringify(value) });
 
   await t.test('requires remote credentials, CSRF token, trusted origin, and JSON', async () => {
-    assert.equal((await send({ title: 'bad' }, { Authorization: '' })).status, 401);
+    assert.equal((await send({ title: 'bad' }, { cookie: '' })).status, 401);
     assert.equal((await send({ title: 'bad' }, { 'X-Agent-Monitor-Token': '' })).status, 403);
     assert.equal((await send({ title: 'bad' }, { Origin: 'https://attacker.example' })).status, 403);
     assert.equal((await send({ title: 'bad' }, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
@@ -134,7 +135,7 @@ test('title HTTP endpoint validates, authenticates, persists, and broadcasts san
   });
   await t.test('publishes committed title to POST, snapshot, detail, and SSE without exposing the native file', async () => {
     const controller = new AbortController();
-    const response = await fetch(`${base}/api/events`, { headers: { Authorization: authorization }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]) });
+    const response = await fetch(`${base}/api/events`, { headers: { cookie }, signal: AbortSignal.any([controller.signal, AbortSignal.timeout(5000)]) });
     const reader = response.body!.getReader();
     try {
       await reader.read();
@@ -152,7 +153,7 @@ test('title HTTP endpoint validates, authenticates, persists, and broadcasts san
       assert.match(events, /Custom session title/);
       assert.doesNotMatch(events, /native-log|filePath/);
       for (const url of [`${base}/api/snapshot`, `${base}/api/sessions/${encodeURIComponent(native.id)}`]) {
-        const body = await (await fetch(url, { headers: { Authorization: authorization } })).json();
+        const body = await (await fetch(url, { headers: { cookie } })).json();
         if (url.endsWith('/api/snapshot')) {
           assert.deepEqual(body.sessions[0], { ...data.session, readRevision: computeConversationRevision(data.session, []) });
         } else assert.deepEqual(body.session, data.session);

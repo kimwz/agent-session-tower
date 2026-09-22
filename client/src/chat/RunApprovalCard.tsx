@@ -43,7 +43,7 @@ export const RunApprovalCard = memo(function RunApprovalCard({ runId, approval, 
   useI18n();
   const state = useSyncExternalStore(subscribeApprovalDecisions, () => approvalDecisionState(runId, approval.id), () => approvalDecisionState(runId, approval.id));
   const [error, setError] = useState('');
-  const [answers, setAnswers] = useState<Record<string, { selection?: string; text?: string }>>({});
+  const [answers, setAnswers] = useState<Record<string, { selection?: string; selections?: string[]; text?: string }>>({});
   const [content, setContent] = useState<Record<string, unknown>>({});
   const interaction = approval.interaction;
   const fields = Object.entries(approval.input);
@@ -74,7 +74,8 @@ export const RunApprovalCard = memo(function RunApprovalCard({ runId, approval, 
         const answer = answers[question.id];
         const option = question.options?.[Number(answer?.selection)];
         const value = answer?.selection !== undefined && answer.selection !== 'other' ? option?.label : answer?.text;
-        return [question.id, { answers: value === undefined || value === '' ? [] : [value] }];
+        const values = question.multiSelect ? (answer?.selections || []).flatMap(selection => selection === 'other' ? answer?.text ? [answer.text] : [] : [question.options![Number(selection)].label]) : value === undefined || value === '' ? [] : [value];
+        return [question.id, { answers: values }];
       }));
       void decide({ answers: response });
     } else if (interaction) void decide({ action: 'accept', content: interaction.type === 'mcp-form' ? formApprovalContent(interaction.schema, content) : null });
@@ -90,12 +91,16 @@ export const RunApprovalCard = memo(function RunApprovalCard({ runId, approval, 
         {interaction?.type === 'questions' ? interaction.questions.map(question => {
           const answer = answers[question.id];
           const options = question.options || [];
-          const freeText = !options.length || answer?.selection === 'other';
-          const update = (value: { selection?: string; text?: string }) => setAnswers(previous => ({ ...previous, [question.id]: { ...previous[question.id], ...value } }));
+          const freeText = !options.length || (question.multiSelect ? answer?.selections?.includes('other') : answer?.selection === 'other');
+          const update = (value: { selection?: string; selections?: string[]; text?: string }) => setAnswers(previous => ({ ...previous, [question.id]: { ...previous[question.id], ...value } }));
+          const selected = (value: string) => question.multiSelect ? !!answer?.selections?.includes(value) : answer?.selection === value;
+          const choose = (value: string) => question.multiSelect
+            ? update({ selections: selected(value) ? answer!.selections!.filter(item => item !== value) : [...(answer?.selections || []), value] })
+            : update({ selection: value, text: undefined });
           return <fieldset className="run-approval-field" key={question.id} disabled={inactive}>
             <legend>{question.header}</legend><p>{question.question}</p>
-            {options.map((option, index) => <label className="run-approval-option" key={index}><input type="radio" name={`${runId}:${approval.id}:${question.id}`} required checked={answer?.selection === String(index)} onChange={() => update({ selection: String(index), text: undefined })} /><span>{option.label}{option.description && <small>{option.description}</small>}</span></label>)}
-            {options.length > 0 && question.isOther && <label className="run-approval-option"><input type="radio" name={`${runId}:${approval.id}:${question.id}`} checked={answer?.selection === 'other'} onChange={() => update({ selection: 'other' })} /><span>{t('직접 입력')}</span></label>}
+            {options.map((option, index) => <label className="run-approval-option" key={index}><input type={question.multiSelect ? "checkbox" : "radio"} name={`${runId}:${approval.id}:${question.id}`} required={!question.multiSelect} checked={selected(String(index))} onChange={() => choose(String(index))} /><span>{option.label}{option.description && <small>{option.description}</small>}</span></label>)}
+            {options.length > 0 && question.isOther && <label className="run-approval-option"><input type={question.multiSelect ? "checkbox" : "radio"} name={`${runId}:${approval.id}:${question.id}`} checked={selected('other')} onChange={() => choose('other')} /><span>{t('직접 입력')}</span></label>}
             {freeText && <label className="run-approval-answer"><span>{question.isSecret ? t('비밀 답변') : t('답변')}</span><input type={question.isSecret ? 'password' : 'text'} required value={answer?.text || ''} autoComplete={question.isSecret ? 'new-password' : 'off'} onChange={event => update({ text: event.target.value })} /></label>}
           </fieldset>;
         }) : interaction?.type === 'mcp-form' ? <>

@@ -25,7 +25,7 @@ export function startCodexFixture({ defaultId, otherId, created = false }) {
       if (mode === 'hold-before-id') return;
       if (mode === 'break-registry') { rmSync(process.env.CREATED_PATH, { force: true }); mkdirSync(process.env.CREATED_PATH); }
       const actual = mode === 'invalid-id' ? 'bad-id' : mode === 'mismatch' ? otherId : threadId;
-      send({ id: request.id, result: { thread: { id: actual, status: { type: 'idle' } } } });
+      send({ id: request.id, result: { thread: { id: actual, status: { type: 'idle' } }, approvalsReviewer: request.params.approvalsReviewer || 'user' } });
     } else if (request.method === 'turn/start') {
       received = { prompt: request.params.input[0].text, args: process.argv.slice(2), cwd: process.cwd(), nested: process.env.CLAUDECODE, threadMethod, threadParams, input: request.params.input };
       writeFileSync(process.env.RECEIVED_PATH, JSON.stringify(received));

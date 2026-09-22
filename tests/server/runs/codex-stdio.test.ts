@@ -67,7 +67,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   if (request.method === 'initialized') return;
   if (request.method === 'thread/start' || request.method === 'thread/resume') {
     if (mode === 'writer-conflict') { send({ id: request.id, error: { code: -32000, message: 'thread-store conflict: already has an active writer' } }); return; }
-    reply(request, { thread: { id: mode === 'mismatch' ? '${OTHER}' : threadId, status: { type: mode === 'active' ? 'active' : 'idle' } }, approvalPolicy: 'on-request', approvalsReviewer: 'user', sandbox: { type: 'readOnly', networkAccess: false } }); return;
+    reply(request, { thread: { id: mode === 'mismatch' ? '${OTHER}' : threadId, status: { type: mode === 'active' ? 'active' : 'idle' } }, approvalPolicy: 'on-request', approvalsReviewer: mode === 'reviewer-missing' ? undefined : mode === 'reviewer-mismatch' ? 'user' : request.params.approvalsReviewer || 'user', sandbox: { type: 'readOnly', networkAccess: false } }); return;
   }
   if (request.method === 'turn/start') {
     if (mode === 'lost-start') { process.exit(3); return; }
@@ -163,7 +163,6 @@ test('new native identity is durable before prompt admission, with only an expli
 test('a chosen approval reviewer is sent only when the conversation is created', async t => {
   const created = await fixture(t, 'complete', { threadId: undefined, approvalsReviewer: 'auto_review' });
   await created.run.start(); await created.run.done;
-  // The fixture answers with a different effective reviewer; the run still proceeds.
   assert.deepEqual(created.sent.find(frame => frame.method === 'thread/start')?.params, { cwd: created.directory, approvalsReviewer: 'auto_review' });
   assert.equal(created.finished[0].status, 'completed');
   const resumed = await fixture(t, 'complete', { approvalsReviewer: 'auto_review' });
@@ -172,6 +171,16 @@ test('a chosen approval reviewer is sent only when the conversation is created',
   const omitted = await fixture(t, 'complete', { threadId: undefined });
   await omitted.run.start(); await omitted.run.done;
   assert.deepEqual(omitted.sent.find(frame => frame.method === 'thread/start')?.params, { cwd: omitted.directory });
+});
+
+test('explicit Auto approval review fails before submitting a task if Codex does not confirm it', async t => {
+  for (const mode of ['reviewer-mismatch', 'reviewer-missing']) await t.test(mode, async t => {
+    const f = await fixture(t, mode, { threadId: undefined, approvalsReviewer: 'auto_review' });
+    await assert.rejects(f.run.start(), /did not confirm Auto approval review/);
+    await f.run.done;
+    assert.equal(f.sent.some(frame => frame.method === 'turn/start'), false);
+    assert.equal(f.finished[0].status, 'error');
+  });
 });
 
 test('identity persistence failure and resume ownership conflicts never submit a prompt', async t => {

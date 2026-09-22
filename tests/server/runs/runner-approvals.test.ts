@@ -23,7 +23,7 @@ createInterface({input:process.stdin}).on('line',line=>{
  if(value.type==='control_request')send({type:'control_response',response:{subtype:'success',request_id:value.request_id,response:{}}});
  if(value.type==='user'){
   send({type:'system',subtype:'init',session_id:'${ID}'});
-  send({type:'control_request',request_id:'permission-1',request:{subtype:'can_use_tool',tool_name:'Bash',tool_use_id:'tool-1',input:{command:'gh --version'},description:'Read CLI version'}});
+  send({type:'control_request',request_id:'permission-1',request:{subtype:'can_use_tool',tool_name:process.env.FIXTURE_MODE==='questions'?'AskUserQuestion':'Bash',tool_use_id:'tool-1',input:process.env.FIXTURE_MODE==='questions'?{questions:[{question:'Get game code?',header:'Game code',options:[{label:'Clone',description:'Read source'},{label:'Admin',description:'Find bundle'}],multiSelect:false}]}:{command:'gh --version'},description:'Read CLI version'}});
   if(process.env.FIXTURE_MODE==='finish-pending')send({type:'result',is_error:false,result:'Finished without executing the pending tool'});
  }
  if(value.type==='control_response'){
@@ -134,4 +134,24 @@ test('runner forwards structured Codex answers and keeps child form metadata liv
   const saved = await readFile(join(directory, 'runs.json'), 'utf8');
   assert.doesNotMatch(saved, /private-token-not-saved|Enter secret|Credential/);
   assert.equal(manager.list()[0].output, '');
+});
+
+test('runner roundtrips Claude question answers through the owned provider transport', async t => {
+  const f = await fixture(t, 'questions');
+  const pending = await until(() => f.manager.list().find(run => run.id === f.accepted.id && run.approvals?.length));
+  const interaction = pending.approvals![0].interaction;
+  assert.equal(interaction?.type, 'questions');
+  if (interaction?.type !== 'questions') throw new Error('Expected question interaction');
+  await assert.rejects(f.manager.respondToApproval(f.accepted.id, 'permission-1', 'allow'), { statusCode: 400 });
+  await assert.rejects(readFile(f.replies), { code: 'ENOENT' });
+  await f.manager.respondToApproval(f.accepted.id, 'permission-1', { answers: { [interaction.questions[0].id]: { answers: ['private-fixture-answer'] } } });
+  const finished = await until(() => f.manager.list().find(run => run.id === f.accepted.id && run.status === 'completed'));
+  assert.equal(finished.approvals, undefined);
+  const frames = (await readFile(f.replies, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+  assert.equal(frames.length, 1);
+  assert.deepEqual(frames[0].response.response.updatedInput.answers, { 'Get game code?': 'private-fixture-answer' });
+  await (f.manager as unknown as { flush(): Promise<void> }).flush();
+  const saved = await readFile(join(f.stateDir, 'runs.json'), 'utf8');
+  assert.doesNotMatch(saved, /private-fixture-answer|Get game code/);
+  assert.equal(JSON.parse(saved)[0].approvals, undefined);
 });

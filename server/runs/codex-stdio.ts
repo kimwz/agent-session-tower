@@ -167,9 +167,12 @@ class StdioRun implements CodexStdioRun {
         : { cwd: this.options.cwd, ...(this.options.approvalsReviewer ? { approvalsReviewer: this.options.approvalsReviewer } : {}) }),
       ...(this.options.model ? { model: this.options.model } : {}),
     });
-    // An older Codex may echo a different approvalsReviewer. The conversation is
-    // still the requested one, so continue rather than discarding the new thread.
     if (this.result) return;
+    // Auto approval review is an execution requirement, not a preference. Older
+    // providers that ignore it must not receive the user's task under another mode.
+    if (!this.options.threadId && this.options.approvalsReviewer === 'auto_review' && resumed?.approvalsReviewer !== 'auto_review') {
+      throw new Error('Codex did not confirm Auto approval review. No message was submitted. Update Codex and retry.');
+    }
     const id = resumed?.thread?.id;
     if (typeof id !== 'string' || !UUID.test(id) || (this.options.threadId && id !== this.options.threadId)) {
       throw new Error('Codex returned a different or invalid conversation ID. No message was submitted.');

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { RunApproval } from '../../shared/types.js';
+import { validateApprovalResponse } from '../../shared/approval-interactions.js';
+import type { RunApproval, RunApprovalResponse } from '../../shared/types.js';
 import { SteeringError } from './steering.js';
 
 type Message = Record<string, unknown>;
@@ -7,6 +8,21 @@ type Pending = { requestId: string; approval: RunApproval; serializedInput: stri
 const record = (value: unknown): value is Message => !!value && typeof value === 'object' && !Array.isArray(value);
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\x00-\x1f]/.test(value);
 const failed = (message: string) => Object.assign(new Error(message), { statusCode: 409 });
+
+/** Claude keys its returned answers by question text; Tower uses stable per-request IDs. */
+function questionInteraction(input: Message): RunApproval['interaction'] {
+  const questions = input.questions;
+  if (!Array.isArray(questions) || !questions.length || questions.length > 4
+    || questions.some(question => !record(question) || typeof question.question !== 'string' || !question.question.trim()
+      || typeof question.header !== 'string' || (question.multiSelect !== undefined && typeof question.multiSelect !== 'boolean')
+      || !Array.isArray(question.options) || question.options.length < 2 || new Set(question.options.map(option => record(option) ? option.label : undefined)).size !== question.options.length || question.options.some(option => !record(option) || typeof option.label !== 'string' || !option.label.trim() || typeof option.description !== 'string'))
+    || new Set(questions.map(question => question.question)).size !== questions.length) throw new Error('Claude Code sent invalid AskUserQuestion input.');
+  return { type: 'questions', requireAnswers: true, questions: questions.map((question, index) => ({
+    id: String(index), header: question.header, question: question.question,
+    multiSelect: question.multiSelect === true, isOther: true, isSecret: false,
+    options: question.options.map((option: Message) => ({ label: option.label as string, description: option.description as string })),
+  })) };
+}
 
 interface ClaudeControlOptions {
   write(message: Message): Promise<void>;
@@ -96,20 +112,28 @@ export class ClaudeControl {
     }
     const approval: RunApproval = { id: requestId, toolName: request.tool_name, input: JSON.parse(input),
       ...(typeof request.description === 'string' ? { description: request.description.slice(0, 2000) } : {}) };
+    if (request.tool_name === 'AskUserQuestion') {
+      try { approval.interaction = questionInteraction(approval.input); }
+      catch (error) { this.fail(error as Error); return true; }
+    }
     this.pending.set(requestId, { requestId, approval, serializedInput: input,
       ...(validId(request.tool_use_id) ? { toolUseId: request.tool_use_id } : {}) });
     this.options.onApproval(structuredClone(approval));
     return true;
   }
 
-  async respond(id: string, decision: 'allow' | 'deny'): Promise<void> {
-    if (decision !== 'allow' && decision !== 'deny') throw failed('Choose allow or deny for this permission request.');
+  async respond(id: string, decision: RunApprovalResponse): Promise<void> {
     const pending = this.pending.get(id);
     if (this.closed || !pending) throw failed('This permission request is no longer pending. Refresh the conversation.');
+    const validated = validateApprovalResponse(pending.approval, decision);
+    const updatedInput = JSON.parse(pending.serializedInput);
+    if (typeof validated === 'object' && 'answers' in validated && pending.approval.interaction?.type === 'questions') {
+      updatedInput.answers = Object.fromEntries(pending.approval.interaction.questions.map(question => [question.question, validated.answers[question.id].answers.join(', ')]));
+    }
     // Claim synchronously before writing so repeated clicks cannot answer twice.
     this.remove(pending);
-    const response = decision === 'allow'
-      ? { behavior: 'allow', updatedInput: JSON.parse(pending.serializedInput), ...(pending.toolUseId ? { toolUseID: pending.toolUseId } : {}) }
+    const response = validated !== 'deny'
+      ? { behavior: 'allow', updatedInput, ...(pending.toolUseId ? { toolUseID: pending.toolUseId } : {}) }
       : { behavior: 'deny', message: 'The user denied this tool request in Agent Session Tower.', ...(pending.toolUseId ? { toolUseID: pending.toolUseId } : {}) };
     try {
       await this.options.write({ type: 'control_response', response: { subtype: 'success', request_id: pending.requestId, response } });

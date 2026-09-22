@@ -1,0 +1,38 @@
+import { createHash } from 'node:crypto';
+import { lstat, mkdir, realpath } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { AutoPromptJob, Run, Session } from '../../shared/types.js';
+
+export const RUNNER_PROTOCOL = 1;
+export const MAX_RPC_BYTES = 40 * 1024 * 1024;
+export interface RunnerSnapshot {
+  instance: string;
+  revision: number;
+  runs: Run[];
+  sessions: Session[];
+  nativeIds: Record<string, string>;
+  settled: string[];
+  autoPrompts: AutoPromptJob[];
+}
+export interface RunnerReply {
+  protocol: number;
+  stateDir: string;
+  instance: string;
+  snapshot?: RunnerSnapshot;
+  result?: unknown;
+  error?: { message: string; statusCode: number; disposition?: string };
+}
+
+/** Short UDS paths work on macOS; an owner-only directory protects socket and token. */
+export async function runnerPaths(stateDir: string) {
+  await mkdir(stateDir, { recursive: true, mode: 0o700 });
+  const canonical = await realpath(stateDir);
+  const hash = createHash('sha256').update(canonical).digest('hex').slice(0, 24);
+  const directory = join('/tmp', `tower-runner-${process.getuid?.() ?? 'user'}-${hash}`);
+  await mkdir(directory, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'EEXIST') throw error; });
+  const info = await lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077)) {
+    throw new Error('Runner socket directory must be owned by this user with mode 0700.');
+  }
+  return { stateDir: canonical, directory, socket: join(directory, 'rpc.sock'), token: join(directory, 'token'), runtime: join(canonical, 'runner-runtime') };
+}

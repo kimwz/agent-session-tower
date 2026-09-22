@@ -29,6 +29,12 @@ Your browser opens at **http://localhost:8000** with a canvas like this:
 
 Requires **Node.js 22.13+**, **npm**, and **Git**. Use your existing Claude Code or Codex installation and sign-in. The first run downloads and builds the app; later runs reuse npm's cache. Tested on macOS. The web UI supports **English and Korean**.
 
+## Browser editor and terminal
+
+Use the editor or terminal icons on a project folder or session to open its workspace in a resizable overlay on the right. When chat is open, the workspace sits to its left without overlapping it. Drag the overlay’s left edge to adjust its width (minimum 420px, or the available viewport width). The workspace and chat each remember their last adjusted width in this browser. On narrow screens, the workspace and chat stack vertically. The file explorer supports opening files, creating files and folders, and saving edits with Ctrl/Cmd+S. Unsaved changes prompt before switching files or leaving. Saves detect external changes instead of overwriting them; use Reload file to load the latest version after resolving a conflict.
+
+The integrated terminal runs an interactive shell in that folder on the Tower server. It works remotely without a desktop editor or terminal app. The terminal icon opens a terminal-only view. Use **Restore terminal** to show the editor and file browser alongside it, or **Maximize terminal** to hide them again. Toggle the terminal panel without ending its shell, or use **Close terminal** to stop it. File edits and terminal commands affect the server's actual workspace.
+
 ## What you can do
 
 - **See existing sessions immediately.** Automatically discovers local Claude Code and Codex histories, including sessions started outside Tower.
@@ -45,7 +51,7 @@ Requires **Node.js 22.13+**, **npm**, and **Git**. Use your existing Claude Code
 - **Catch new activity.** Unread indicators help you find replies and results you have not opened yet.
 - **Access it remotely.** Open the web UI from another device on your LAN or VPN, with password-protected access to the machine running your agents.
 
-No separate Tower account, API key, database, or CLI hooks. Your agents keep using their existing CLI accounts and model settings.
+Local use needs no Tower login, API key, database, or CLI hooks. Remote use requires an account configured on the host. Your agents keep using their existing CLI accounts and model settings.
 
 ## Remote access
 
@@ -55,9 +61,9 @@ Stop the running Tower with `Ctrl+C`, then start it with:
 npx --yes github:kimwz/agent-session-tower --host 0.0.0.0 --port 8000
 ```
 
-Open the network address printed in the terminal from your other device. Sign in as `monitor` with the password stored at the printed password-file path. Keep the host machine and Tower running.
+On the host, open `http://localhost:8000`, expand the navigation, and use the account icon at the upper right to set an ID/password. Then open the printed network address from your other device and sign in. Local access needs no login. Five failed logins from an IP permanently block it; review attempts and unblock IPs in local Account management. Passwords are stored only as salted hashes. Keep the host machine and Tower running.
 
-Direct access uses HTTP, so use a trusted LAN or VPN. See [remote access details](docs/usage.md#remote-access).
+Direct access uses HTTP, so use an encrypted VPN or a separately secured HTTPS deployment. See [remote access details](docs/usage.md#remote-access).
 
 ## More
 

@@ -387,7 +387,6 @@ export class RunManager extends EventEmitter {
     }
     if (stdio) await stdio.respondToApproval(approvalId, decision);
     else {
-      if (decision !== 'allow' && decision !== 'deny') throw new RunError('Claude Code permission requests only accept allow or deny.', 400);
       await owned!.claude!.respond(approvalId, decision);
     }
     return this.list().find(item => item.id === runId)!;

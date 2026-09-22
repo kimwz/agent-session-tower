@@ -35,7 +35,7 @@ test('a pending permission waits for an explicit response and retains the exact 
   f.ask();
   assert.equal(f.written.length, 2); assert.equal(f.approvals.length, 1);
   f.approvals[0].input.command = 'browser must not replace the command';
-  await assert.rejects(f.control.respond('permission-1', 'invalid' as 'allow'), { statusCode: 409 });
+  await assert.rejects(f.control.respond('permission-1', 'invalid' as 'allow'), { statusCode: 400 });
   await f.control.respond('permission-1', 'allow');
   assert.deepEqual(f.written[2], { type: 'control_response', response: { subtype: 'success', request_id: 'permission-1',
     response: { behavior: 'allow', updatedInput: { command: 'gh --version' }, toolUseID: 'tool-1' } } });
@@ -168,4 +168,37 @@ test('steering registers its replay handler before transport write returns', asy
   control.handle({ type: 'control_response', response: { subtype: 'success', request_id: written[0].request_id } });
   await control.steer({ ...input, uuid: 'steer-1' });
   assert.equal(control.hasPendingSteers(), false);
+});
+
+const questionInput = { questions: [
+  { header: 'Game code', question: 'How should we get the code?', multiSelect: false, options: [{ label: 'Clone', description: 'Read source' }, { label: 'Bundle', description: 'Read build' }] },
+  { header: 'Scope', question: 'Which checks?', multiSelect: true, options: [{ label: 'Source', description: '' }, { label: 'Build', description: '' }] },
+] };
+function askQuestions(f: ReturnType<typeof fixture>, input: object = questionInput) {
+  f.control.handle({ type: 'control_request', request_id: 'questions', request: { subtype: 'can_use_tool', tool_name: 'AskUserQuestion', tool_use_id: 'question-tool', input } });
+}
+test('Claude questions require complete answers and return native question-text keys exactly once', async t => {
+  const f = fixture(); t.after(() => f.control.close()); f.initialize(); askQuestions(f);
+  assert.equal(f.approvals[0].interaction?.type, 'questions');
+  for (const answer of ['allow', { answers: {} }, { answers: { '0': { answers: ['Clone', 'Bundle'] }, '1': { answers: ['Source'] } } }]) {
+    await assert.rejects(f.control.respond('questions', answer as any), { statusCode: 400 });
+  }
+  assert.equal(f.written.length, 2);
+  await f.control.respond('questions', { answers: { '0': { answers: ['Get it from admin'] }, '1': { answers: ['Source', 'Build'] } } });
+  assert.deepEqual(f.written.at(-1)!.response.response, { behavior: 'allow', toolUseID: 'question-tool', updatedInput: {
+    ...questionInput, answers: { 'How should we get the code?': 'Get it from admin', 'Which checks?': 'Source, Build' },
+  } });
+  await assert.rejects(f.control.respond('questions', 'deny'), { statusCode: 409 });
+});
+test('question cancellation denies without inventing an answer', async t => {
+  const f = fixture(); t.after(() => f.control.close()); f.initialize(); askQuestions(f);
+  await f.control.respond('questions', 'deny');
+  assert.equal(f.written.at(-1)!.response.response.behavior, 'deny');
+  assert.equal(f.written.at(-1)!.response.response.updatedInput, undefined);
+});
+test('malformed or ambiguous questions cannot fall back to a generic allow button', t => {
+  for (const input of [{ questions: [] }, { questions: [{ ...questionInput.questions[0], multiSelect: true, options: [] }] }, { questions: [questionInput.questions[0], questionInput.questions[0]] }, { questions: [{ ...questionInput.questions[0], options: [questionInput.questions[0].options[0], questionInput.questions[0].options[0]] }] }]) {
+    const f = fixture(); t.after(() => f.control.close()); f.initialize(); askQuestions(f, input);
+    assert.equal(f.approvals.length, 0); assert.equal(f.errors.length, 1); assert.equal(f.written.length, 2);
+  }
 });
