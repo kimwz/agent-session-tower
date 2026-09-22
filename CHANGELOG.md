@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.8.2] - 2026-09-22
+
+### Fixed
+- Give Slack reply approval actions a filled button appearance with clear hover, keyboard focus, and disabled states.
+
 ## [1.8.1] - 2026-09-22
 
 ### Fixed

@@ -27,5 +27,9 @@
 .slack-reply-proposals ol { padding-left:24px; }
 .slack-reply-proposals li { margin:12px 0; padding-left:4px; }
 .slack-reply-proposals .slack-monitor-text { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.6; }
-.slack-reply-proposals button { font-size:12px; }
+.slack-reply-proposals .primary-button { display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 14px; border:1px solid #ad86c5; border-radius:7px; background:#70478b; color:#fff; font-size:12px; font-weight:600; line-height:1.4; cursor:pointer; }
+.slack-reply-proposals .primary-button:hover:not(:disabled) { background:#8555a4; border-color:#c89ae7; }
+.slack-reply-proposals .primary-button:active:not(:disabled) { background:#5e3976; }
+.slack-reply-proposals .primary-button:focus-visible { outline:2px solid #dfb6fa; outline-offset:3px; }
+.slack-reply-proposals .primary-button:disabled { opacity:.5; cursor:not-allowed; }
 .slack-reply-proposals [role=status] { color:#c4b3d3; }
