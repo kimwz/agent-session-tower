@@ -15,6 +15,8 @@ This initial integration uses a private Slack app with Socket Mode and a **user 
 
 Socket Mode needs outbound HTTPS and WebSocket access to Slack; it does not require a public callback URL. Slack delivers only messages accessible to the app's authorized user and scopes. This version processes newly delivered direct user mentions (`<@USER_ID>`), not historic mentions, edits that introduce a mention, group mentions, or bot-generated messages. Events missed during a prolonged outage are not backfilled.
 
+Your own messages are excluded by default. To test a saved rule, enable **Process my own mentions (for testing)** in Slack automation settings, then send a new message mentioning yourself. This works in accessible private channels too when `groups:history` and `message.groups` are configured. The setting is saved across restarts. Test mentions perform the real configured task and reply, so disable this option after testing if you only want other people’s requests. Earlier ignored messages are not replayed. Tower escapes mentions in its own generated replies to prevent reply loops; bot messages and message edits remain excluded.
+
 ## Canvas monitor
 
 Connecting an account adds a **Slack monitor** to the canvas. Drag its header to move it; its position is remembered in both automatic and manual layouts. New mentions appear as cards inside it, and active work uses the same animated rainbow border as agent sessions. Connection problems remain visible alongside running work.

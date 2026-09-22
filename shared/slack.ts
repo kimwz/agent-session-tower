@@ -40,6 +40,7 @@ export interface SlackWorkflow {
   error?: string;
 }
 export interface SlackPublicStatus {
+  allowSelfMentions?: boolean;
   connected: boolean;
   enabled: boolean;
   status: string;

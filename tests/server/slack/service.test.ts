@@ -50,3 +50,50 @@ test('Slack connection stays private, admits only personal mentions, and pauses 
   await assert.rejects(service.mutate('rules', { rules: [{}] }), { statusCode: 400 });
   await assert.rejects(service.mutate('settings', { enabled: true, extra: true }), { statusCode: 400 });
 });
+
+test('self-mention testing is opt-in, persists, and keeps bot, edit, and escaped reply filters', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-self-'));
+  let socket: SlackSocketOptions | undefined;
+  let socketStarts = 0;
+  const create = () => new SlackService({ stateDir, runs: { list: () => [] }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} }, {
+    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [], reply: async () => { throw new Error('Must not send'); } }),
+    socket: options => { socket = options; return { start() { socketStarts++; }, stop() {} }; },
+    model: async () => { throw new Error('Must not start a provider'); },
+  });
+  let service = create();
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  await service.start();
+  await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  assert.equal(service.overview().allowSelfMentions, false);
+  await service.mutate('settings', { enabled: true });
+  const event = { type: 'message', channel: 'GPRIVATE', channel_type: 'group', user: 'U1', ts: '100.001', text: '<@U1> test review' };
+  const send = (id: string, patch = {}) => socket!.onEvent({ team_id: 'T1', event_id: id, event: { ...event, ...patch } });
+  await send('default-off');
+  assert.equal(service.overview().events.length, 0);
+  for (const body of [{}, { allowSelfMentions: 'true' }, { enabled: null }, { allowSelfMentions: true, unexpected: true }]) {
+    await assert.rejects(service.mutate('settings', body), { statusCode: 400 });
+  }
+  await service.mutate('settings', { allowSelfMentions: true });
+  assert.equal(service.overview().enabled, true, 'partial settings preserve monitoring');
+  assert.equal(socketStarts, 1, 'self-mention changes preserve the connected socket');
+  await send('self-private');
+  assert.equal(service.overview().events[0]?.mention.channel, 'GPRIVATE');
+  await service.automation.tick();
+  service.close();
+  service = create();
+  await service.start();
+  assert.equal(service.overview().allowSelfMentions, true);
+  assert.equal(service.overview().enabled, true);
+  await send('after-restart');
+  for (const [id, patch] of [
+    ['bot', { bot_id: 'B1' }], ['edit', { subtype: 'message_changed' }],
+    ['hidden', { hidden: true }], ['escaped-reply', { text: '&lt;@U1&gt; review complete' }],
+  ] as const) await send(id, patch);
+  assert.equal(service.overview().events.length, 2);
+  await service.mutate('settings', { allowSelfMentions: false });
+  await send('disabled-again');
+  assert.equal(service.overview().events.length, 2);
+  await service.mutate('settings', { enabled: false, allowSelfMentions: true });
+  assert.equal(service.overview().enabled, false);
+  assert.equal(service.overview().allowSelfMentions, true);
+});

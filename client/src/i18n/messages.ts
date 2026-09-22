@@ -788,6 +788,7 @@ export const english: Record<string, string> = {
   "내 멘션을 읽고 지침에 맞는 작업을 수행한 뒤 스레드에 답합니다.": "Read mentions, perform matching tasks, and reply in the thread.",
   "지침을 저장했습니다.": "Rules saved.",
   "Slack 계정": "Slack account",
+  "내 멘션도 처리 (테스트용)": "Process my own mentions (for testing)",
   "멘션 감시": "Monitor mentions",
   "연결 해제": "Disconnect",
   "Slack 앱의 Socket Mode 토큰과 사용자 OAuth 토큰을 입력하세요.": "Enter your Slack app Socket Mode token and user OAuth token.",

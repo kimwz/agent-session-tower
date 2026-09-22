@@ -10,7 +10,7 @@ import { SlackClient } from './client.js';
 import { SlackSocket, type SlackSocketOptions } from './socket.js';
 
 type Account = { teamId: string; userId: string; teamName?: string; userName?: string };
-type Settings = { enabled: boolean; appToken?: string; userToken?: string; account?: Account };
+type Settings = { enabled: boolean; allowSelfMentions?: boolean; appToken?: string; userToken?: string; account?: Account };
 interface Dependencies {
   client?: (token: string) => Pick<SlackClient, 'auth' | 'thread' | 'reply'>;
   socket?: (options: SlackSocketOptions) => Pick<SlackSocket, 'start' | 'stop'>;
@@ -60,7 +60,7 @@ export class SlackService extends EventEmitter {
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
     try {
       const saved = await readPrivateJson(this.path) as Settings;
-      if (typeof saved.enabled !== 'boolean' || (saved.userToken && typeof saved.userToken !== 'string') || (saved.appToken && typeof saved.appToken !== 'string')) throw new Error('Invalid Slack connection settings.');
+      if ((saved.allowSelfMentions !== undefined && typeof saved.allowSelfMentions !== 'boolean') || typeof saved.enabled !== 'boolean' || (saved.userToken && typeof saved.userToken !== 'string') || (saved.appToken && typeof saved.appToken !== 'string')) throw new Error('Invalid Slack connection settings.');
       this.settings = saved;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     await this.automation.start();
@@ -71,7 +71,7 @@ export class SlackService extends EventEmitter {
     this.timer.unref();
   }
   overview() {
-    return { connected: Boolean(this.settings.userToken), enabled: this.settings.enabled, status: this.status,
+    return { connected: Boolean(this.settings.userToken), enabled: this.settings.enabled, allowSelfMentions: this.settings.allowSelfMentions === true, status: this.status,
       ...(this.error ? { error: this.error } : {}), ...(this.settings.account ? { account: { ...this.settings.account } } : {}),
       rules: this.automation.rules(), events: this.automation.list() };
   }
@@ -87,7 +87,7 @@ export class SlackService extends EventEmitter {
     return work;
   }
   private async update(action: string, body: Record<string, unknown>) {
-    const fields: Record<string, string[]> = { connect: ['appToken', 'userToken'], settings: ['enabled'], rules: ['rules'], disconnect: [] };
+    const fields: Record<string, string[]> = { connect: ['appToken', 'userToken'], settings: ['enabled', 'allowSelfMentions'], rules: ['rules'], disconnect: [] };
     if (!body || typeof body !== 'object' || Array.isArray(body) || !fields[action] || Object.keys(body).some(key => !fields[action].includes(key))) throw invalid('Slack 설정 요청이 올바르지 않습니다.');
     if (action === 'connect') {
       if (typeof body.appToken !== 'string' || !/^xapp-[\w-]{10,500}$/.test(body.appToken) || typeof body.userToken !== 'string' || !/^xoxp-[\w-]{10,500}$/.test(body.userToken)) throw invalid('Slack App 토큰(xapp)과 사용자 토큰(xoxp)을 입력하세요.');
@@ -98,12 +98,13 @@ export class SlackService extends EventEmitter {
       this.settings = next;
       this.restartSocket();
     } else if (action === 'settings') {
-      if (typeof body.enabled !== 'boolean') throw invalid('감시 상태가 올바르지 않습니다.');
+      if (!Object.keys(body).length || Object.values(body).some(value => typeof value !== 'boolean')) throw invalid('감시 설정이 올바르지 않습니다.');
       if (body.enabled && !this.settings.userToken) throw invalid('Slack 계정을 먼저 연결하세요.');
-      const next = { ...this.settings, enabled: body.enabled };
+      const next = { ...this.settings, ...('enabled' in body ? { enabled: body.enabled as boolean } : {}), ...('allowSelfMentions' in body ? { allowSelfMentions: body.allowSelfMentions as boolean } : {}) };
       await writePrivateJson(this.path, JSON.stringify(next));
+      const monitoringChanged = next.enabled !== this.settings.enabled;
       this.settings = next;
-      this.restartSocket();
+      if (monitoringChanged) this.restartSocket();
     } else if (action === 'rules') {
       try { validateSlackRules(body.rules); } catch { throw invalid('Slack 처리 지침이 올바르지 않습니다.'); }
       await this.automation.setRules(body.rules);
@@ -126,7 +127,7 @@ export class SlackService extends EventEmitter {
       onEvent: async payload => {
         if (!payload.event || typeof payload.event !== 'object' || Array.isArray(payload.event)) return;
         const event = payload.event as Record<string, unknown>;
-        if (payload.team_id !== account.teamId || event?.type !== 'message' || event.bot_id || event.hidden || event.user === account.userId
+        if (payload.team_id !== account.teamId || event?.type !== 'message' || event.bot_id || event.hidden || (event.user === account.userId && !this.settings.allowSelfMentions)
           || (event.subtype && !['file_share', 'thread_broadcast'].includes(String(event.subtype)))
           || typeof event.text !== 'string' || !event.text.includes(`<@${account.userId}>`)
           || typeof event.user !== 'string' || typeof event.channel !== 'string' || typeof event.ts !== 'string' || typeof payload.event_id !== 'string') return;
