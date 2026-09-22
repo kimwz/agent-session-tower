@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowDown, ArrowUp, MessageSquare, Plus, Trash2, X } from 'lucide-react';
+import { ArrowDown, ArrowUp, Slack, Plus, Trash2, X } from 'lucide-react';
 import { api } from '../common/lib';
 import { authPost } from '../auth/AuthGate';
 import { translateMessage, useI18n } from '../i18n/i18n';
@@ -10,7 +10,7 @@ import { SLACK_CHANGED_EVENT } from './use-slack-monitor';
 export function SlackButton({ token }: { token: string }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
-  return <><button className="icon-button" aria-label={t('Slack 자동화')} title={t('Slack 자동화')} disabled={!token} onClick={() => setOpen(true)}><MessageSquare size={18} /></button>{open && <SlackPanel token={token} onClose={() => setOpen(false)} />}</>;
+  return <><button className="icon-button" aria-label={t('Slack 자동화')} title={t('Slack 자동화')} disabled={!token} onClick={() => setOpen(true)}><Slack size={18} /></button>{open && <SlackPanel token={token} onClose={() => setOpen(false)} />}</>;
 }
 
 export function SlackPanel({ token, onClose }: { token: string; onClose: () => void }) {
