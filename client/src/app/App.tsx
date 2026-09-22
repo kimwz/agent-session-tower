@@ -6,6 +6,7 @@ import { SlackReplyProposals } from '../slack/SlackReplyProposals';
 import { SlackConversationAlert } from '../slack/SlackConversationAlert';
 import { useSlackMonitor } from '../slack/use-slack-monitor';
 import { slackChatSelection, slackCoordinatorSessionIds } from '../slack/slack-chat-selection';
+import { finishedSlackDelegatedSessionIds } from '../../../shared/slack-delegated-sessions';
 import { SlackButton } from '../slack/SlackPanel';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -218,10 +219,12 @@ function TowerApp() {
     const cutoff = period === 'all' ? 0 : now - Number(period) * 86_400_000;
     return mainSessions.filter(session => (provider === 'all' || session.provider === provider) && (status === 'all' || session.status === status) && (project === 'all' || session.cwd === project) && (session.status === 'working' || session.activeProcess || +new Date(sessionActivityAt(session)) >= cutoff) && (!term || `${groupTitles.get(session.cwd) || ''} ${session.customTitle || ''} ${session.title} ${session.agentName || ''} ${session.project} ${session.cwd} ${session.nativeId} ${session.lastMessage}`.toLocaleLowerCase().includes(term))).sort(sortSessions);
   }, [mainSessions, provider, status, project, period, query, now, groupTitles]);
-  const canvasSessions = useMemo(() => canvasVisibleSessions(filtered, groups, showHidden), [filtered, groups, showHidden]);
-  const revealableGroups = useMemo(() => visiblePinnedProjectGroups(groups, allMainSessions, project, query, true, filtered), [groups, allMainSessions, project, query, filtered]);
+  const finishedSlackIds = useMemo(() => finishedSlackDelegatedSessionIds(slack?.events || [], sessions, snapshot?.runs || []), [slack?.events, sessions, snapshot?.runs]);
+  const canvasCandidates = useMemo(() => filtered.filter(session => !finishedSlackIds.has(session.id)), [filtered, finishedSlackIds]);
+  const canvasSessions = useMemo(() => canvasVisibleSessions(canvasCandidates, groups, showHidden), [canvasCandidates, groups, showHidden]);
+  const revealableGroups = useMemo(() => visiblePinnedProjectGroups(groups, allMainSessions, project, query, true, canvasCandidates), [groups, allMainSessions, project, query, canvasCandidates]);
   const visiblePins = useMemo(() => showHidden ? revealableGroups : revealableGroups.filter(group => !group.hidden), [showHidden, revealableGroups]);
-  const hasHiddenMatches = !showHidden && (canvasSessions.length < canvasVisibleSessions(filtered, groups, true).length || revealableGroups.some(group => group.hidden));
+  const hasHiddenMatches = !showHidden && (canvasSessions.length < canvasVisibleSessions(canvasCandidates, groups, true).length || revealableGroups.some(group => group.hidden));
   const working = mainSessions.filter(session => session.status === 'working').length;
   const completed = mainSessions.filter(session => session.status === 'completed').length;
   const currentRuns = useMemo(() => (snapshot?.runs || []).filter(run => run.sessionId === activeChatId).sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt)), [snapshot?.runs, activeChatId]);
@@ -247,7 +250,7 @@ function TowerApp() {
     refresh();
   }, [refresh, selectSession]);
 
-  const hasCanvasHistory = canvasVisibleSessions(mainSessions, [], true).length > 0;
+  const hasCanvasHistory = canvasVisibleSessions(mainSessions.filter(session => !finishedSlackIds.has(session.id)), [], true).length > 0;
   const canvasEmptyState = !canvasSessions.length && !visiblePins.length && <div className="graph-empty canvas-empty">
     <h3>{hasHiddenMatches ? t("폴더가 숨겨져 있습니다") : hasCanvasHistory ? t("표시할 세션이 없습니다") : t("새 세션을 시작해 보세요")}</h3>
     <p>{hasHiddenMatches ? t("전체보기를 켜면 현재 필터에 맞는 숨긴 폴더와 세션을 볼 수 있습니다.") : hasCanvasHistory ? t("검색어나 필터를 바꾸면 다른 세션을 볼 수 있습니다.") : t("Claude Code 또는 Codex를 선택해 이곳에서 작업을 시작할 수 있습니다.")}</p>

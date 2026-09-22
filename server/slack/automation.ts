@@ -81,6 +81,8 @@ export class SlackAutomationManager extends EventEmitter {
         if (item.conversationClaimed !== undefined && typeof item.conversationClaimed !== 'boolean') throw new Error('Saved Slack creation claim is invalid.');
         if (item.delegatedTasks !== undefined && (!Array.isArray(item.delegatedTasks) || item.delegatedTasks.length > 100 || item.delegatedTasks.some(task => !record(task)
           || !text(task.requestKey, 200) || !text(task.requestId, 200) || !text(task.prompt, 32_000) || !['claude', 'codex'].includes(String(task.provider))
+          || (task.createdSessionId !== undefined && !text(task.createdSessionId, 500))
+          || (task.delegatedFinished !== undefined && typeof task.delegatedFinished !== 'boolean')
           || (task.model !== undefined && !validModelId(task.model))
           || (task.cwd !== undefined && (!text(task.cwd, 4096) || !isAbsolute(task.cwd)))))) throw new Error('Saved Slack tasks are invalid.');
         if (item.replies !== undefined && (!Array.isArray(item.replies) || item.replies.length > 100 || item.replies.some(reply => !record(reply)
@@ -145,6 +147,7 @@ export class SlackAutomationManager extends EventEmitter {
   }
   private async drain(): Promise<void> {
     for (const item of this.items) {
+      await this.captureDelegatedSessions(item);
       if ((terminal.has(item.status) && !(item.mode === 'conversation' && item.delegatedTasks?.some(task => !task.notifiedRunId && !task.notificationError && !task.submissionError))) || this.admissions.has(item.id)) continue;
       try { await this.advance(item); }
       catch (error) {
@@ -212,6 +215,26 @@ export class SlackAutomationManager extends EventEmitter {
     try { created = await this.options.startConversation!(structuredClone(item), prompt); }
     catch (error) { const recovered = this.options.findConversation?.(item.id); if (!recovered) throw error; created = recovered; }
     await this.save(item, { ...created, status: 'running' });
+  }
+  private async captureDelegatedSessions(item: SlackWorkflow): Promise<void> {
+    for (const task of item.delegatedTasks ?? []) {
+      const job = this.options.getAutoPrompt(task.requestId);
+      const run = this.options.getRun(job?.runId ?? task.delegatedRunId ?? '');
+      if (!run || run.autoPromptId !== task.requestId) continue;
+      const previous = { ...task };
+      let changed = false;
+      if (task.delegatedRunId !== run.id) { task.delegatedRunId = run.id; changed = true; }
+      if (!task.createdSessionId && job?.decision?.action === 'create' && job.sessionId === run.sessionId && run.sessionId !== item.sessionId) {
+        task.createdSessionId = run.sessionId; changed = true;
+      }
+      if (task.createdSessionId === run.sessionId && !task.delegatedFinished && ['completed', 'error', 'cancelled'].includes(run.status)) {
+        task.delegatedFinished = true; changed = true;
+      }
+      if (changed) {
+        try { await this.save(item, {}); }
+        catch (error) { delete task.createdSessionId; delete task.delegatedFinished; delete task.delegatedRunId; Object.assign(task, previous); throw error; }
+      }
+    }
   }
   private async notifyDelegatedResults(item: SlackWorkflow): Promise<void> {
     if (!this.options.resumeConversation || !item.sessionId) return;

@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.8.0] - 2026-09-22
+
+### Added
+- Automatically remove completed Slack-created delegated work sessions and their finished subagents from the canvas, preserving session history and active or reused user sessions.
+
 ## [1.7.0] - 2026-09-22
 
 ### Added

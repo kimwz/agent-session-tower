@@ -313,3 +313,27 @@ test('multiple configured models require an explicit matched rule and cannot reu
   assert.equal(f.submitted[0].model, 'gpt-6-astra');
   assert.equal(f.counts().sends, 0);
 });
+
+test('created delegate provenance and completion survive restart and routing history pruning; resumed sessions are never owned', async t => {
+  for (const action of ['create', 'resume'] as const) {
+    const f = await fixture(t);
+    f.options.startConversation = async () => ({ sessionId: 'coordinator', runId: 'coordinator-run' });
+    await f.manager.ingest(mention); await f.manager.tick();
+    const id = f.manager.list()[0].id;
+    await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'research', prompt: 'Research' });
+    const task = f.manager.list()[0].delegatedTasks![0];
+    const job = f.options.getAutoPrompt(task.requestId)!;
+    job.decision = { action, cwd: '/repo', reason: 'fixture' };
+    let run: Run = { id: job.runId!, sessionId: job.sessionId!, prompt: '', createdAt: '', output: '', status: 'running', autoPromptId: task.requestId };
+    f.options.getRun = () => run;
+    await f.manager.tick();
+    assert.equal(f.manager.list()[0].delegatedTasks![0].createdSessionId, action === 'create' ? run.sessionId : undefined);
+    assert.equal(f.manager.list()[0].delegatedTasks![0].delegatedFinished, undefined);
+    f.options.getAutoPrompt = () => undefined;
+    run = { ...run, status: 'completed' };
+    const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+    assert.equal(restarted.list()[0].delegatedTasks![0].delegatedFinished, action === 'create' ? true : undefined);
+    const again = new SlackAutomationManager(f.options); await again.start();
+    assert.deepEqual(again.list()[0].delegatedTasks, restarted.list()[0].delegatedTasks);
+  }
+});

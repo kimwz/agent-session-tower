@@ -1,3 +1,4 @@
+import { finishedSlackDelegatedSessionIds } from '../../shared/slack-delegated-sessions.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -174,7 +175,12 @@ async function runnerContext({ stateDir, runs, sessions, slack }: Pick<RunnerHos
   };
   await metadata();
   const providers = await getProviderHealth();
-  const snapshot = (): Snapshot => ({ sessions: projectSessionStates(runs.sessionList(sessions.list()), runs.list(), runs.settledRunIds()).filter(session => !slack?.coordinatorSessionIds().includes(session.id)).map(session => closed.apply(titles.apply(session))),
+  const visibleSessions = () => {
+    const projected = projectSessionStates(runs.sessionList(sessions.list()), runs.list(), runs.settledRunIds());
+    const finished = finishedSlackDelegatedSessionIds(slack?.automation.list() ?? [], projected, runs.list());
+    return projected.filter(session => !finished.has(session.id) && !slack?.coordinatorSessionIds().includes(session.id)).map(session => closed.apply(titles.apply(session)));
+  };
+  const snapshot = (): Snapshot => ({ sessions: visibleSessions(),
     runs: runs.list(), groups: groups.list(), providers, scanning: false, hostname: hostname(), version: APP_VERSION, updatedAt: new Date().toISOString() });
   return { snapshot,
     refresh: async () => { await Promise.all([sessions.refresh(true), metadata()]); },

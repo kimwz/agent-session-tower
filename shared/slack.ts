@@ -26,7 +26,7 @@ export interface SlackWorkflow {
   id: string;
   mode?: 'conversation';
   conversationClaimed?: boolean;
-  delegatedTasks?: Array<{ requestKey: string; requestId: string; prompt: string; provider: Provider; model?: string; cwd?: string; submitted?: boolean; submissionError?: string; delegatedRunId?: string; notificationClaimed?: boolean; notifiedRunId?: string; notificationError?: string }>;
+  delegatedTasks?: Array<{ requestKey: string; requestId: string; prompt: string; provider: Provider; model?: string; cwd?: string; submitted?: boolean; submissionError?: string; delegatedRunId?: string; createdSessionId?: string; delegatedFinished?: boolean; notificationClaimed?: boolean; notifiedRunId?: string; notificationError?: string }>;
   replies?: Array<{ requestKey: string; text: string; status: 'proposed' | 'sending' | 'sent' | 'uncertain'; approvedAt?: string; ts?: string }>;
   mention: SlackMention;
   status: SlackWorkflowState;
