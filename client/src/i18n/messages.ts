@@ -1,9 +1,9 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
   "내 멘션을 읽고 작업한 뒤 답변을 제안합니다. Slack 전송은 채팅에서 사용자가 승인해야 합니다.": "Reads your mentions, performs tasks, and proposes replies. Sending to Slack requires your approval in chat.",
-  "원하는 답변을 골라 전송을 승인하세요.": "Choose a reply and approve sending it.",
+  "답변 텍스트를 클릭하면 Slack에 전송됩니다.": "Click a reply to send it to Slack.",
   "Slack 답변 제안": "Slack reply proposals",
-  "아래 채팅에서 “3번 답변을 Slack에 보내주세요”처럼 요청하거나 전송 버튼을 누르세요. 답변 수정도 채팅에서 요청할 수 있습니다.": "Ask in the chat below, for example, “Send reply 3 to Slack”, or press the send button. You can also request changes in chat.",
+  "답변 텍스트를 클릭하면 Slack에 전송됩니다. 채팅에서 “3번 답변을 Slack에 보내주세요” 또는 수정을 요청할 수도 있습니다.": "Click a reply to send it to Slack. You can also ask in chat to send reply 3 or revise it.",
   "이 내용으로 Slack에 전송": "Approve and send this to Slack",
   "Slack에 전송됨": "Sent to Slack",
   "답변 제안 가이드": "Reply proposal guidance",

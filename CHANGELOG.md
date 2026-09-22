@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.8.3] - 2026-09-22
+
+### Changed
+- Make Slack reply suggestions directly clickable with compact hover and keyboard focus styling, removing separate approval buttons.
+
 ## [1.8.2] - 2026-09-22
 
 ### Fixed

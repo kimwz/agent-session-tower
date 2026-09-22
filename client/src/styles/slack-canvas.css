@@ -22,14 +22,14 @@
 .slack-monitor-status.connection-warning .slack-monitor-connection { color:#ecc17c; }
 
 .slack-reply-proposals { flex-shrink:0; max-height:40vh; overflow:auto; padding:12px 18px; border-bottom:1px solid #675077; background:#282036; font-size:12px; }
-.slack-reply-proposals h3 { margin:0 0 8px; font-size:13px; }
-.slack-reply-proposals > p { color:#c4b3d3; line-height:1.5; }
-.slack-reply-proposals ol { padding-left:24px; }
-.slack-reply-proposals li { margin:12px 0; padding-left:4px; }
-.slack-reply-proposals .slack-monitor-text { white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.6; }
-.slack-reply-proposals .primary-button { display:inline-flex; align-items:center; justify-content:center; min-height:36px; padding:8px 14px; border:1px solid #ad86c5; border-radius:7px; background:#70478b; color:#fff; font-size:12px; font-weight:600; line-height:1.4; cursor:pointer; }
-.slack-reply-proposals .primary-button:hover:not(:disabled) { background:#8555a4; border-color:#c89ae7; }
-.slack-reply-proposals .primary-button:active:not(:disabled) { background:#5e3976; }
-.slack-reply-proposals .primary-button:focus-visible { outline:2px solid #dfb6fa; outline-offset:3px; }
-.slack-reply-proposals .primary-button:disabled { opacity:.5; cursor:not-allowed; }
+.slack-reply-proposals h3 { margin:0 0 6px; font-size:13px; }
+.slack-reply-proposals > p { margin:0 0 6px; color:#c4b3d3; line-height:1.5; }
+.slack-reply-proposals ol { margin:0; padding-left:24px; }
+.slack-reply-proposals li { margin:4px 0; padding-left:4px; }
+.slack-reply-proposals .slack-monitor-text, .slack-reply-proposals .slack-reply-text { margin:0; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.6; }
+.slack-reply-proposals .slack-reply-text { display:block; width:100%; padding:3px 5px; border:0; border-radius:4px; background:transparent; color:inherit; font:inherit; line-height:1.6; text-align:left; cursor:pointer; }
+.slack-reply-proposals .slack-reply-text:hover:not(:disabled) { background:#493254; color:#f0dcff; }
+.slack-reply-proposals .slack-reply-text:active:not(:disabled) { background:#5e3976; }
+.slack-reply-proposals .slack-reply-text:focus-visible { outline:2px solid #dfb6fa; outline-offset:1px; }
+.slack-reply-proposals .slack-reply-text:disabled { opacity:.5; cursor:not-allowed; }
 .slack-reply-proposals [role=status] { color:#c4b3d3; }

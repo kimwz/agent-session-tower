@@ -28,13 +28,12 @@ export function SlackReplyProposals({ workflow, token = '' }: { workflow?: Slack
   }
   return <section className="slack-reply-proposals" aria-label={t('Slack 답변 제안')}>
     <h3>{t('Slack 답변 제안')}</h3>
-    <p>{t(workflow.mode === 'conversation' ? '아래 채팅에서 “3번 답변을 Slack에 보내주세요”처럼 요청하거나 전송 버튼을 누르세요. 답변 수정도 채팅에서 요청할 수 있습니다.' : '원하는 답변을 골라 전송을 승인하세요.')}</p>
+    <p>{t(workflow.mode === 'conversation' ? '답변 텍스트를 클릭하면 Slack에 전송됩니다. 채팅에서 “3번 답변을 Slack에 보내주세요” 또는 수정을 요청할 수도 있습니다.' : '답변 텍스트를 클릭하면 Slack에 전송됩니다.')}</p>
     <ol>{workflow.replies.map(reply => {
       const status = reply.status === 'proposed' ? local[reply.requestKey] || reply.status : reply.status;
       return <li key={reply.requestKey}>
-        <p className="slack-monitor-text">{reply.text}</p>
-        {status === 'proposed' ? <button type="button" className="primary-button" disabled={!token} onClick={() => void approve(reply.requestKey, reply.text)}>{t('이 내용으로 Slack에 전송')}</button>
-          : <span role="status">{t(status === 'sent' ? 'Slack에 전송됨' : status === 'sending' ? '댓글 전송 중' : '답글 전송 여부를 확인할 수 없습니다. 원본 Slack 스레드를 확인하세요.')}</span>}
+        {status === 'proposed' ? <button type="button" className="slack-reply-text" title={t('이 내용으로 Slack에 전송')} disabled={!token} onClick={() => void approve(reply.requestKey, reply.text)}>{reply.text}</button>
+          : <><p className="slack-monitor-text">{reply.text}</p><span role="status">{t(status === 'sent' ? 'Slack에 전송됨' : status === 'sending' ? '댓글 전송 중' : '답글 전송 여부를 확인할 수 없습니다. 원본 Slack 스레드를 확인하세요.')}</span></>}
       </li>;
     })}</ol>
     {error && <p role="alert">{translateMessage(error)}</p>}

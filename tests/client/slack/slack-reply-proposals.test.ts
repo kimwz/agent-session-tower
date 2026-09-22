@@ -15,7 +15,9 @@ test('reply candidates are numbered and each requires explicit approval of visib
   assert.equal((html.match(/이 내용으로 Slack에 전송/g) || []).length, 3);
   assert.match(html, /First &lt;script&gt;/);
   assert.match(html, /3번 답변을 Slack에 보내주세요/);
-  assert.match(html, /답변 수정도 채팅에서 요청/);
+  assert.match(html, /또는 수정을 요청/);
+  assert.match(html, /<button[^>]*>First &lt;script&gt;<\/button>/);
+  assert.match(html, /답변 텍스트를 클릭하면 Slack에 전송됩니다/);
   assert.equal(render(undefined), '');
 });
 
