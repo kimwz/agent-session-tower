@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.15.0] - 2026-09-24
+
+### Added
+- **Triggers.** The lightning button in the header replaces the Slack button. The trigger panel lists Slack and your scheduled runs, with history and limits in their own tabs. Slack settings open from the Slack row, as before.
+- **Scheduled runs.** Run instructions on a cron schedule (minute hour day month weekday, with a time zone) or at a fixed interval, and send them to Auto Prompt, a new session in a chosen folder, or an existing session. Runs approve automatically by default (Codex auto review, Claude auto mode) or wait for your approval in Tower. You choose what happens if the previous run is still working (skip, keep one waiting, or run in parallel), and a trigger pauses itself if it runs more often than its hourly limit. After the computer sleeps, the latest missed time runs once, within a day. A time that does not exist on a daylight-saving day is skipped.
+- Trigger history shows each run and every change, including who made it. Content changes can be undone, and deleted triggers can be restored for a while. Turning a trigger off also stops runs it already fired that have not started.
+- Sessions a trigger created leave the canvas once their work is done; their history stays in the session list.
+
+### Changed
+- Slack and trigger work together run at most three turns at a time by default; the rest wait. Your own requests are never held back. The limit is in the trigger panel's settings.
+
 ## [1.14.0] - 2026-09-24
 
 ### Added
