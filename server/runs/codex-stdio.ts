@@ -45,6 +45,8 @@ export interface CodexStdioRun {
 
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const MAX_FRAME = 2_000_000;
+// Completed image items carry the whole base64 image inline, so one protocol line can be tens of megabytes.
+const MAX_LINE = 64_000_000;
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const record = (value: unknown): value is RecordValue => !!value && typeof value === 'object' && !Array.isArray(value);
 const requestId = (value: unknown): value is RequestId => typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value));
@@ -233,19 +235,21 @@ class StdioRun implements CodexStdioRun {
 
   private read(chunk: string): void {
     if (this.result) return;
-    this.buffer += chunk;
-    let newline: number;
-    while (!this.result && (newline = this.buffer.indexOf('\n')) >= 0) {
-      const line = this.buffer.slice(0, newline); this.buffer = this.buffer.slice(newline + 1);
+    // Scan only the new chunk so a large frame arriving in many chunks stays linear.
+    let start = 0, newline: number;
+    while (!this.result && (newline = chunk.indexOf('\n', start)) >= 0) {
+      const line = this.buffer + chunk.slice(start, newline); this.buffer = ''; start = newline + 1;
       if (!line.trim()) continue;
-      if (line.length > MAX_FRAME) { this.finish({ status: 'error', error: 'Codex emitted an oversized protocol message.' }); break; }
+      if (line.length > MAX_LINE) { this.finish({ status: 'error', error: 'Codex emitted an oversized protocol message.' }); break; }
       try {
         const value = JSON.parse(line);
         if (!record(value)) throw new Error('Invalid protocol frame.');
         this.dispatch(value);
       } catch (error) { this.finish({ status: 'error', error: `Could not read the Codex protocol: ${message(error)}` }); }
     }
-    if (this.buffer.length > MAX_FRAME) this.finish({ status: 'error', error: 'Codex emitted an oversized protocol message.' });
+    if (this.result) return;
+    this.buffer += chunk.slice(start);
+    if (this.buffer.length > MAX_LINE) this.finish({ status: 'error', error: 'Codex emitted an oversized protocol message.' });
   }
 
   private dispatch(value: RecordValue): void {

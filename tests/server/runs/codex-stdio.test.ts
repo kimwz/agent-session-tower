@@ -80,7 +80,8 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     if (mode.startsWith('steer-') || mode === 'hold' || mode === 'cancel-no-ack' || mode === 'ignore-stop') return;
     if (mode === 'orphan') { spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', process.stdout, process.stderr] }); process.exit(0); return; }
     if (mode === 'premature-exit') { process.exit(0); return; }
-    if (mode === 'complete') finish(); else approval();
+    if (mode === 'image') notice('item/completed', { item: { id: 'image', type: 'imageGeneration', result: 'A'.repeat(3_000_000) } });
+    if (mode === 'complete' || mode === 'image') finish(); else approval();
     return;
   }
   if (request.method === 'turn/steer') {
@@ -289,6 +290,13 @@ test('lost acknowledgement, invalid frames and exit without terminal status neve
     assert.equal(f.launches.length, 1);
     if (mode !== 'badframe') assert.match(f.finished[0].error!, /not resent automatically/);
   });
+});
+
+test('a generated image frame larger than a text frame does not abort the turn', async t => {
+  const f = await fixture(t, 'image');
+  await f.run.start(); await f.run.done;
+  assert.equal(f.finished[0].status, 'completed');
+  assert.equal(f.output.join(''), 'Hello Codex\n\n');
 });
 
 test('early turn completion is correlated and emitted once', async t => {

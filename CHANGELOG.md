@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.13.2] - 2026-09-23
+
+### Fixed
+- Codex conversations that generate images no longer fail with "Codex emitted an oversized protocol message." Codex sends each finished image inline, about 2.5 MB for one image, which exceeded Tower's 2 MB limit per message and ended the request just as the image was done. Tower now accepts messages up to 64 MB and reads large ones without rescanning them.
+
 ## [1.13.1] - 2026-09-23
 
 ### Fixed
