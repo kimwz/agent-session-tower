@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { OPERATIONS, isOperationName, type OperationName } from '../../shared/api/operations.js';
 import type { TriggerActor } from '../../shared/triggers.js';
 import type { AutoPromptJob, AutoPromptRequest, ChatMessage, Run, RunOrigin, Session } from '../../shared/types.js';
+import type { SlackWorkflow } from '../../shared/slack.js';
 import type { RunAdmission } from '../runs/manager.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { TriggerService } from '../triggers/service.js';
@@ -19,6 +20,7 @@ export interface TowerServices {
   runs?: { list(): Run[] };
   projects?: () => Array<{ cwd: string; title: string; sessions: number; pinned: boolean }>;
   autoPrompts?: { submit(request: AutoPromptRequest, internal: Pick<RunAdmission, 'origin'>): Promise<AutoPromptJob>; get(id: string): AutoPromptJob | undefined };
+  github?: { workflow(sessionId: string): SlackWorkflow | undefined; approveReply(workflowId: string, requestKey: string, text: string): Promise<unknown> };
 }
 interface RequestRecord { at: number; fingerprint: string; status: 'pending' | 'done'; result?: unknown }
 
@@ -135,6 +137,16 @@ export class TowerApi {
       case 'triggers.testHttp': return { result: await triggers.testHttp(value.request, value.condition, actor) };
       case 'triggers.checkGitHub': return { result: await triggers.checkGitHub(value.auth, actor) };
       case 'secrets.list': return { secrets: triggers.secretList() };
+      case 'github.conversation': {
+        const workflow = this.services.github?.workflow(value.sessionId);
+        if (!workflow) throw failure('This session is not a GitHub coordinator conversation.', 404);
+        return { conversation: { id: workflow.id, status: workflow.status, repository: workflow.mention.channel, issue: Number(workflow.mention.threadTs), replies: workflow.replies ?? [],
+          ...(workflow.ownerConditionalReply ? { permission: workflow.ownerConditionalReply } : {}), ...(workflow.error ? { error: workflow.error } : {}) } };
+      }
+      case 'github.approveReply': {
+        if (!this.services.github) throw failure('GitHub conversations are unavailable.', 503);
+        return { reply: await this.services.github.approveReply(value.workflowId, value.requestKey, value.text) };
+      }
       case 'secrets.create': return { secret: await triggers.createSecret(value.secret, actor) };
       case 'secrets.delete': await triggers.deleteSecret(value.id, actor); return { deleted: true };
     }

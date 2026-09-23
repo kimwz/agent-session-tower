@@ -159,6 +159,8 @@ export class SlackService extends EventEmitter {
   }
   tool(workflowId: string, name: string, args: Record<string, unknown>) { return this.automation.tool(workflowId, name, args); }
   ownerChat(sessionId: string, message: string) { return this.automation.ownerChat(sessionId, message); }
+  /** The language the owner chose for automation conversations. */
+  language(): 'ko' | 'en' { return this.settings.language ?? 'ko'; }
   hasActive() { return this.settings.enabled || this.tone.overview().status === 'collecting' || this.automation.hasPending(); }
   /** Work already accepted and underway. Monitoring alone does not count; unstarted held mentions do not either. */
   hasInFlight() { return this.tone.overview().status === 'collecting' || this.automation.inFlight(); }

@@ -2,11 +2,12 @@ import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { OPERATIONS, type OperationName } from '../../shared/api/operations.js';
 import type { Run } from '../../shared/types.js';
+import { GITHUB_SESSION_TOOLS } from '../triggers/github-coordinator.js';
 import { SLACK_SESSION_TOOLS } from '../slack/mcp-bridge.js';
 import type { TowerApi } from './tower-api.js';
 
 /** What a capability lets its holder do. The holder never chooses; the worker decides when it issues one. */
-export type Capability = { kind: 'owner-run'; runId: string; sessionId: string } | { kind: 'slack-workflow'; workflowId: string };
+export type Capability = { kind: 'owner-run'; runId: string; sessionId: string } | { kind: 'slack-workflow'; workflowId: string } | { kind: 'github-workflow'; workflowId: string };
 const MAX_CAPABILITIES = 2000;
 
 /**
@@ -56,6 +57,7 @@ export interface McpContext {
   /** The run a credential was issued for, as the run registry knows it now. */
   run(runId: string): Run | undefined;
   slackTool?(workflowId: string, name: string, args: Record<string, unknown>): Promise<unknown>;
+  githubTool?(workflowId: string, name: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
 /** Handles one request from a tool server process. Only the capability decides what it may do. */
@@ -67,6 +69,12 @@ export async function handleMcpRequest(context: McpContext, token: string, body:
     if (body.method !== 'tools/call' || typeof body.name !== 'string' || !SLACK_SESSION_TOOLS.some(tool => tool.name === body.name)) throw Object.assign(new Error('Unknown Slack session tool.'), { statusCode: 404 });
     if (!context.slackTool) throw Object.assign(new Error('Slack is unavailable.'), { statusCode: 503 });
     return context.slackTool(capability.workflowId, body.name, (body.arguments ?? {}) as Record<string, unknown>);
+  }
+  if (capability.kind === 'github-workflow') {
+    if (body.method === 'tools/list') return { tools: GITHUB_SESSION_TOOLS };
+    if (body.method !== 'tools/call' || typeof body.name !== 'string' || !GITHUB_SESSION_TOOLS.some(tool => tool.name === body.name)) throw Object.assign(new Error('Unknown GitHub conversation tool.'), { statusCode: 404 });
+    if (!context.githubTool) throw Object.assign(new Error('GitHub conversations are unavailable.'), { statusCode: 503 });
+    return context.githubTool(capability.workflowId, body.name, (body.arguments ?? {}) as Record<string, unknown>);
   }
   // The credential works only for its own run, only while that run works, and only if Tower's tools were
   // actually attached to it (not a turn forwarded to the desktop app).

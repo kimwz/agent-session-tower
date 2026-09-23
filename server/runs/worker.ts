@@ -21,6 +21,7 @@ import { RunManager, type RunAdmission } from './manager.js';
 import { parseRunOrigin } from './origin.js';
 import { parseSuccessor, spawnSuccessor, writeHandoff, type SuccessorCommand } from './handoff.js';
 import { TriggerService } from '../triggers/service.js';
+import { GitHubCoordinator } from '../triggers/github-coordinator.js';
 import { TowerApi } from '../api/tower-api.js';
 import { CapabilityRegistry, handleMcpRequest } from '../api/mcp.js';
 import { runToolResolver } from '../api/run-tools.js';
@@ -34,6 +35,8 @@ export interface RunnerHostOptions {
   sessions: SessionService;
   autoPrompts?: AutoPromptManager;
   slack?: SlackService;
+  /** Coordinator conversations for GitHub issue events. */
+  github?: GitHubCoordinator;
   triggers?: TriggerService;
   api?: TowerApi;
   terminals?: WorkspaceTerminals;
@@ -63,7 +66,7 @@ const READS_DURING_HANDOFF = new Set(['snapshot', 'sessionHistory', 'attachment'
 /** Hosts an already-started engine, including one adopted during an in-place upgrade. */
 export async function startRunnerHost(options: RunnerHostOptions) {
   const capabilities = options.capabilities ?? new CapabilityRegistry();
-  options.runs.setRunToolResolver(runToolResolver({ stateDir: options.stateDir, runs: options.runs, slack: options.slack, capabilities }));
+  options.runs.setRunToolResolver(runToolResolver({ stateDir: options.stateDir, runs: options.runs, slack: options.slack, github: options.github, capabilities }));
   const paths = await runnerPaths(options.stateDir);
   const release = options.releaseStateLock ?? await acquireStateLock(paths.runtime, 0);
   let context: Awaited<ReturnType<typeof runnerContext>> | undefined;
@@ -103,8 +106,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'enqueue': {
         const admitted = admission(args[3]);
         // Only the owner's own message may carry Slack send approval; the origin decides, never a correlation ID.
-        const prompt = options.slack && admitted.origin?.kind === 'owner'
+        let prompt = options.slack && admitted.origin?.kind === 'owner'
           ? await options.slack.ownerChat(args[0] as string, args[1] as string) : args[1] as string;
+        // The same holds in a GitHub coordinator conversation: only the owner's message can approve a comment.
+        if (options.github && admitted.origin?.kind === 'owner') prompt = await options.github.ownerChat(args[0] as string, prompt);
         return options.runs.enqueue(args[0] as string, prompt, args[2] as MessageAttachments, admitted);
       }
       case 'steer': return options.runs.steer(args[0] as string);
@@ -136,6 +141,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     throw Object.assign(new Error('Unknown runner operation.'), { statusCode: 400 });
   };
   const mcp = { api: options.api, capabilities, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
+    githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined,
     run: (runId: string) => options.runs.list().find(run => run.id === runId) };
   const server = createServer(async (req, res) => {
     // Tool servers attached to provider turns hold a capability, not the worker credential; it opens only /mcp.
@@ -264,6 +270,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (options.autoPrompts?.list().some(job => !['completed', 'error', 'cancelled'].includes(job.status))) return;
         if (options.terminals?.hasActive()) return;
         if (options.slack?.hasActive()) return;
+        if (options.github?.hasPending() || options.github?.inFlight()) return;
         if (options.triggers?.hasActive() || options.triggers?.inFlight()) return;
         // Stop accepting requests and finish writes before releasing the worker lock.
         void close(true).catch(error => { console.error('Runner idle cleanup failed:', error); });
@@ -336,9 +343,13 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const autoPrompts = new AutoPromptManager({ stateDir, runs, ...context });
     await autoPrompts.start();
     const slack = new SlackService({ stateDir, runs, autoPrompts, refresh: context.refresh });
-    const capabilities = new CapabilityRegistry(capability => capability.kind === 'slack-workflow'
+    // GitHub coordinators use a trigger's credentials; the trigger engine starts right after.
+    let triggerEngine: TriggerService | undefined;
+    const github = new GitHubCoordinator({ stateDir, runs, autoPrompts, refresh: context.refresh, language: () => slack.language(),
+      github: (triggerId, fresh) => { if (!triggerEngine) throw new Error('Triggers are still starting.'); return triggerEngine.githubClient(triggerId, fresh); } });
+    const capabilities = new CapabilityRegistry(capability => capability.kind === 'slack-workflow' || capability.kind === 'github-workflow'
       || runs.list().some(run => run.id === capability.runId && (run.status === 'running' || run.status === 'queued')));
-    runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, capabilities }));
+    runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, github, capabilities }));
     const visible = await runnerContext({ stateDir, runs, sessions, slack });
     autoPrompts.updateContext(visible);
     await slack.start();
@@ -358,15 +369,20 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       enqueue: (id, prompt, request, internal) => runs.enqueue(id, prompt, request, internal),
       runs: () => runs.list(),
       session: id => runs.getSession(id),
+      coordinate: event => github.coordinate(event),
+      coordination: id => github.coordination(id),
     } });
+    triggerEngine = triggers;
     await triggers.start();
+    await github.start();
     // Slack and triggers share one limit on provider turns running at once.
     runs.setAutomationLimit(triggers.settings().maxConcurrentRuns);
     triggers.on('settings', (settings: { maxConcurrentRuns: number }) => runs.setAutomationLimit(settings.maxConcurrentRuns));
     // A run still waiting when its trigger is turned off or deleted never starts.
-    runs.setLaunchGate(run => run.origin?.kind === 'trigger' && run.origin.triggerId && !triggers.launchAllowed(run.origin.triggerId, run.origin.eventId)
-      ? 'The trigger was turned off before this run started, so it did not run.' : undefined);
-    const api = new TowerApi({ stateDir, triggers, runs,
+    // A coordinator conversation already under way continues, like an accepted Slack conversation; only its first turn waits on the trigger.
+    runs.setLaunchGate(run => run.origin?.kind === 'trigger' && run.origin.triggerId && !(run.origin.workflowId && run.autoPromptId !== run.origin.workflowId)
+      && !triggers.launchAllowed(run.origin.triggerId, run.origin.eventId) ? 'The trigger was turned off before this run started, so it did not run.' : undefined);
+    const api = new TowerApi({ stateDir, triggers, runs, github,
       projects: () => {
         const snapshot = visible.snapshot();
         const titles = new Map((snapshot.groups ?? []).map(group => [group.cwd, group]));
@@ -378,13 +394,13 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       },
       sessions: { list: () => visible.snapshot().sessions, read: async (id, limit) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), undefined, limit))?.messages ?? [] : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
-    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, triggers, api, capabilities, releaseStateLock: release, handoffNonce,
-      onIdle: async () => { triggers.close(); await triggers.settle(); slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => slack.hasInFlight() || triggers.inFlight(), holdIntake: () => { slack.holdNewWork(); triggers.hold(); },
-      quiesce: async () => { slack.pause(); triggers.pause(); await Promise.all([slack.flush(), triggers.flush(), runs.flushState(), autoPrompts.flush()]); },
-      resume: () => { slack.resume(); triggers.resume(); },
+    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, api, capabilities, releaseStateLock: release, handoffNonce,
+      onIdle: async () => { triggers.close(); await triggers.settle(); github.close(); slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight(), holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); },
+      quiesce: async () => { slack.pause(); triggers.pause(); github.pause(); await Promise.all([slack.flush(), triggers.flush(), github.flush(), runs.flushState(), autoPrompts.flush()]); },
+      resume: () => { slack.resume(); triggers.resume(); github.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { triggers.close(); slack.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { triggers.close(); github.close(); slack.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});

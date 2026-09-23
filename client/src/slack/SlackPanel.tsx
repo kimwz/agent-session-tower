@@ -100,8 +100,13 @@ export function SlackPanel({ token, onClose, providers = [] }: { token: string; 
   </div></dialog>, document.body);
 }
 
-export function SlackRules({ rules, onChange, providers = [], expanded, onExpand }: { rules: SlackRule[]; onChange: (rules: SlackRule[]) => void; providers?: ProviderHealth[]; expanded?: string | null; onExpand?: (id: string | null) => void }) {
+export function SlackRules({ rules, onChange, providers = [], expanded, onExpand, channel = 'slack', autoReview = true }: { rules: SlackRule[]; onChange: (rules: SlackRule[]) => void; providers?: ProviderHealth[]; expanded?: string | null; onExpand?: (id: string | null) => void;
+  /** GitHub coordinators use the same rules; only the words about where replies go differ. */
+  channel?: 'slack' | 'github';
+  /** Whether delegated Codex work is reviewed automatically; Slack always is. */
+  autoReview?: boolean }) {
   const { t } = useI18n();
+  const github = channel === 'github';
   const [local, setLocal] = useState<string | null>(rules.length === 1 ? rules[0].id : null);
   const open = expanded === undefined ? local : expanded;
   const setOpen = onExpand ?? setLocal;
@@ -130,14 +135,14 @@ export function SlackRules({ rules, onChange, providers = [], expanded, onExpand
       </div>
       {isOpen && <div className="slack-rule-editor">
         <label>{t('지침 이름')}<input required value={rule.name} onChange={event => update(index, { name: event.target.value })} /></label>
-        <label>{t('일치 조건')}<small>{t('어떤 멘션에 이 지침을 적용할지 설명합니다.')}</small><textarea required rows={2} value={rule.condition} onChange={event => update(index, { condition: event.target.value })} /></label>
+        <label>{t('일치 조건')}<small>{github ? t('어떤 이슈에 이 지침을 적용할지 설명합니다.') : t('어떤 멘션에 이 지침을 적용할지 설명합니다.')}</small><textarea required rows={2} value={rule.condition} onChange={event => update(index, { condition: event.target.value })} /></label>
         <label>{t('작업 지침')}<textarea required rows={4} value={rule.instructions} onChange={event => update(index, { instructions: event.target.value })} /></label>
-        <fieldset className="slack-group"><legend>{t('Slack 답변')}</legend>
-          <label>{t('답변 제안 가이드')}<small>{rule.autoReply ? t('자동 답변을 작성할 때 따릅니다.') : t('답변 후보를 작성할 때 참고합니다. Slack 전송에는 채팅에서 사용자의 승인이 필요합니다.')}</small><textarea required rows={2} value={rule.replyInstructions} onChange={event => update(index, { replyInstructions: event.target.value })} /></label>
-          <label className="slack-check"><input type="checkbox" checked={rule.autoReply === true} onChange={event => update(index, { autoReply: event.target.checked || undefined })} /><span><strong>{t('승인 없이 결과 자동 답변')}</strong><small>{t('이 지침으로 위임한 작업이 끝나면 답변 가이드대로 결과를 한 번 전송하고, 요청 메시지에 진행 이모지를 달 수 있습니다. 채팅에서 “보내지 마세요”로 취소할 수 있습니다.')}</small></span></label>
+        <fieldset className="slack-group"><legend>{github ? t('GitHub 댓글') : t('Slack 답변')}</legend>
+          <label>{t('답변 제안 가이드')}<small>{rule.autoReply ? t('자동 답변을 작성할 때 따릅니다.') : github ? t('댓글 후보를 작성할 때 참고합니다. GitHub 게시에는 채팅에서 사용자의 승인이 필요합니다.') : t('답변 후보를 작성할 때 참고합니다. Slack 전송에는 채팅에서 사용자의 승인이 필요합니다.')}</small><textarea required rows={2} value={rule.replyInstructions} onChange={event => update(index, { replyInstructions: event.target.value })} /></label>
+          <label className="slack-check"><input type="checkbox" checked={rule.autoReply === true} onChange={event => update(index, { autoReply: event.target.checked || undefined })} /><span><strong>{t('승인 없이 결과 자동 답변')}</strong><small>{github ? t('이 지침으로 위임한 작업이 끝나면 가이드대로 결과 댓글을 한 번 게시하고, 이슈에 반응을 달 수 있습니다. 채팅에서 “보내지 마세요”로 취소할 수 있습니다.') : t('이 지침으로 위임한 작업이 끝나면 답변 가이드대로 결과를 한 번 전송하고, 요청 메시지에 진행 이모지를 달 수 있습니다. 채팅에서 “보내지 마세요”로 취소할 수 있습니다.')}</small></span></label>
         </fieldset>
         <fieldset className="slack-group"><legend>{t('실행')}</legend><div className="slack-rule-options">
-          <label>{t('에이전트')}<select value={rule.provider} onChange={event => update(index, { provider: event.target.value as SlackRule['provider'], model: undefined })}><option value="codex">Codex</option><option value="claude">Claude</option></select>{rule.provider === 'codex' && <small>{t('승인 검토: 항상 Auto')}</small>}</label>
+          <label>{t('에이전트')}<select value={rule.provider} onChange={event => update(index, { provider: event.target.value as SlackRule['provider'], model: undefined })}><option value="codex">Codex</option><option value="claude">Claude</option></select>{rule.provider === 'codex' && <small>{autoReview ? t('승인 검토: 항상 Auto') : t('승인: Tower에서 직접')}</small>}</label>
           <label>{t('모델')}<ModelPicker provider={providers.find(provider => provider.provider === rule.provider)} value={rule.model} onChange={model => update(index, { model })} /></label>
           <label className="wide">{t('작업 폴더 (선택)')}<input value={rule.cwd || ''} placeholder={t('비워 두면 Auto Prompt가 선택합니다')} onChange={event => update(index, { cwd: event.target.value || undefined })} /></label>
         </div></fieldset>

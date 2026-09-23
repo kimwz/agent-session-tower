@@ -118,7 +118,31 @@ export const TaskHandlerSchema = z.object({
   approvals: z.enum(['auto', 'owner']).default('auto'),
   target: TargetSchema,
 }).strict();
-export const TriggerHandlerSchema = z.discriminatedUnion('kind', [TaskHandlerSchema]);
+/** A coordinator rule, the same shape Slack uses: when it applies, what to do, and how to propose a reply. */
+export const CoordinatorRuleSchema = z.object({
+  id: text(100),
+  name: text(200),
+  enabled: z.boolean(),
+  condition: text(4000),
+  instructions: text(8000),
+  replyInstructions: text(4000),
+  provider: z.enum(['claude', 'codex']),
+  model: text(200).optional(),
+  cwd: absolutePath.optional(),
+  /** Standing permission: delegating under this rule allows one truthful result reply without asking again. */
+  autoReply: z.boolean().optional(),
+}).strict();
+export type CoordinatorRule = z.infer<typeof CoordinatorRuleSchema>;
+/**
+ * A coordinator conversation per event: it reads the issue, picks at most one rule, delegates the work, and
+ * proposes replies that are posted only when the owner approves them in Tower.
+ */
+export const CoordinatorHandlerSchema = z.object({
+  kind: z.literal('coordinator'),
+  rules: z.array(CoordinatorRuleSchema).min(1).max(20).refine(rules => new TextEncoder().encode(JSON.stringify(rules)).length <= 100_000, 'Coordinator rules may use at most 100 KB together.'),
+  approvals: z.enum(['auto', 'owner']).default('auto'),
+}).strict();
+export const TriggerHandlerSchema = z.discriminatedUnion('kind', [TaskHandlerSchema, CoordinatorHandlerSchema]);
 export type TriggerHandler = z.infer<typeof TriggerHandlerSchema>;
 
 export const PolicySchema = z.object({
@@ -168,7 +192,9 @@ export interface TriggerEvent {
   updatedAt: string;
   status: TriggerEventStatus;
   /** The configuration in force when it fired; later edits never change what this event runs. */
-  input: { instructions: string; provider: 'claude' | 'codex'; model?: string; effort?: string; approvals: 'auto' | 'owner'; target: TriggerTarget; untrustedInput: boolean; overlap: TriggerPolicy['overlap'] };
+  input: { instructions: string; provider: 'claude' | 'codex'; model?: string; effort?: string; approvals: 'auto' | 'owner'; target: TriggerTarget; untrustedInput: boolean; overlap: TriggerPolicy['overlap'];
+    /** A coordinator event carries the rules in force when it fired. */
+    handler?: 'task' | 'coordinator'; rules?: CoordinatorRule[] };
   summary: string;
   reason?: string;
   error?: string;
@@ -177,7 +203,7 @@ export interface TriggerEvent {
   /** Saved before any work is submitted; a claim without a result is never submitted again. */
   requestId: string;
   claimedAt?: string;
-  dispatch?: { runId?: string; sessionId?: string; createdSessionId?: string };
+  dispatch?: { runId?: string; sessionId?: string; createdSessionId?: string; /** The coordinator conversation that took the event. */ workflowId?: string };
 }
 
 export interface TriggerAuditEntry {

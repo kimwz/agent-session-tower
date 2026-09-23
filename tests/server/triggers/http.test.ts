@@ -419,6 +419,17 @@ test('private host settings accept host names, addresses and ranges, and refuse 
   assert.deepEqual(TriggerSettingsSchema.parse({ maxTriggers: 10 }).privateHosts, [], 'a settings object without the list keeps it empty, and the panel always sends the list');
 });
 
+test('a write that is not to follow redirects stops at one and reports the POST as possibly delivered', async t => {
+  const server = await endpoint(t, (request, _body, response) => {
+    if (request.url === '/post') { response.writeHead(303, { location: '/gone' }); response.end(); return; }
+    response.statusCode = 404; response.end('{}');
+  });
+  const outcome = await performHttp({ method: 'POST', url: `${server.origin}/post`, headers: {}, secretHeaders: {}, body: '{}', timeoutMs: 2000, noRedirects: true }, OPEN);
+  assert.equal(outcome.ok, false);
+  assert.equal(!outcome.ok && outcome.uncertain, true);
+  assert.deepEqual(server.received.map(request => request.url), ['/post'], 'the redirect was not followed');
+});
+
 test('a secret echoed in a response header is removed too', async t => {
   const server = await endpoint(t, (request, _body, response) => { response.setHeader('etag', `"${request.headers.authorization}"`); response.end('{}'); });
   const outcome = await performHttp({ method: 'GET', url: `${server.origin}/`, headers: {}, secretHeaders: { authorization: 'Bearer h3ader-token' }, secretOrigin: server.origin, timeoutMs: 2000 }, OPEN);

@@ -4,6 +4,7 @@ import type { Run, Session } from '../../shared/types.js';
 import type { RunManager } from '../runs/manager.js';
 import { NO_RUN_TOOLS, type RunTools, type SessionMcpServer } from '../runs/session-mcp.js';
 import type { SlackService } from '../slack/service.js';
+import type { GitHubCoordinator } from '../triggers/github-coordinator.js';
 import type { CapabilityRegistry } from './mcp.js';
 
 /** This build's own entry, so a tool server always matches the worker that issued its capability. */
@@ -18,7 +19,7 @@ function toolServer(stateDir: string, mode: '--tower-mcp' | '--slack-mcp', extra
  * from Tower gets Tower's tools, unless its conversation holds outside content or its origin cannot be proven.
  * Trigger, Slack and agent-started turns never get Tower's tools.
  */
-export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; capabilities: CapabilityRegistry }) {
+export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry }) {
   return (run: Run, session: Session): RunTools => {
     const origin = run.origin;
     const slack = options.slack?.sessionMcp(session.id)?.tower_slack;
@@ -26,6 +27,9 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
       const workflowId = slack.args.at(-1)!;
       return { servers: { tower_slack: toolServer(options.stateDir, '--slack-mcp', [workflowId], options.capabilities.issue({ kind: 'slack-workflow', workflowId })) }, required: true };
     }
+    // A GitHub coordinator conversation gets its conversation tools, whoever started the turn.
+    const coordinated = options.github?.sessionWorkflow(session.id);
+    if (coordinated) return { servers: { tower_github: toolServer(options.stateDir, '--tower-mcp', [], options.capabilities.issue({ kind: 'github-workflow', workflowId: coordinated })) }, required: true };
     if (origin?.kind !== 'owner') return NO_RUN_TOOLS;
     const provenance = options.runs.sessionOrigin(session.id);
     if (provenance?.untrustedInput) return { required: false, towerTools: 'external-input' };

@@ -2,12 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { CalendarClock, CircleDot, Globe, History, KeyRound, Pencil, Play, Plus, RotateCcw, Settings2, Slack, Trash2, X, Zap } from 'lucide-react';
 import type { ProviderHealth, Session } from '../../../shared/types';
-import { GITHUB_API, type GitHubCheck, type HttpCondition, type HttpTestResult, type Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOverview, TriggerSecret, TriggerSettings, TriggerSummary } from '../../../shared/triggers';
+import { GITHUB_API, type CoordinatorRule, type GitHubCheck, type HttpCondition, type HttpTestResult, type Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOverview, TriggerSecret, TriggerSettings, TriggerSummary } from '../../../shared/triggers';
 import { EffortPicker, ModelPicker } from '../chat/ModelPicker';
 import { authPost } from '../auth/AuthGate';
 import { absoluteTime, relativeTime, sessionTitle } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
-import { SlackPanel } from '../slack/SlackPanel';
+import { SlackPanel, SlackRules } from '../slack/SlackPanel';
 
 type Tab = 'triggers' | 'history' | 'settings';
 type Source = TriggerInput['source'];
@@ -133,7 +133,7 @@ function TriggerRow({ trigger, summary, busy, onToggle, onRun, onEdit, onDelete 
       {trigger.source.kind === 'http' ? <Globe size={16} /> : trigger.source.kind === 'github' ? <CircleDot size={16} /> : <CalendarClock size={16} />}
       <span className="slack-rule-text"><strong>{trigger.name}</strong><small>{scheduleLabel(trigger, t)}{summary?.nextRunAt ? ` · ${t('다음 실행')} ${absoluteTime(summary.nextRunAt)}` : ''}</small></span>
       <span className="slack-badges">
-        <span>{trigger.handler.provider === 'claude' ? 'Claude' : 'Codex'}</span>
+        <span>{trigger.handler.kind === 'coordinator' ? t('코디네이터') : trigger.handler.provider === 'claude' ? 'Claude' : 'Codex'}</span>
         {trigger.updatedBy.kind === 'agent' && <span className="accent" title={trigger.updatedBy.sessionId}>{t('에이전트가 변경')}</span>}
         {status && <span className={summary?.paused || last?.status === 'error' || last?.status === 'uncertain' ? 'warn' : ''} title={summary?.paused?.reason ?? last?.error ?? last?.reason}>{status}</span>}
         {summary?.error && <span className="warn" title={summary.error}>{t('요청 실패')}</span>}
@@ -170,7 +170,9 @@ function TriggerEditor({ trigger, token, providers, projects, sessions, busy, on
   const [input, setInput] = useState<TriggerInput>(() => trigger ? { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy } : blankTrigger());
   const [preview, setPreview] = useState<string[] | string>('');
   const schedule = input.source.schedule;
-  const handler = input.handler;
+  // A coordinator exists only for GitHub; any other source runs a task.
+  const handler: TaskHandler = input.handler.kind === 'task' ? input.handler : { ...blankTrigger().handler as TaskHandler, approvals: input.handler.approvals };
+  const coordinator = input.handler.kind === 'coordinator' ? input.handler : undefined;
   const setSchedule = (next: typeof schedule) => setInput({ ...input, source: { ...input.source, schedule: next } });
   const http = input.source.kind !== 'schedule';
   const setKind = (kind: Source['kind']) => {
@@ -178,9 +180,12 @@ function TriggerEditor({ trigger, token, providers, projects, sessions, busy, on
     // Outside content never continues an existing session.
     const target = kind !== 'schedule' && handler.target.mode === 'session' ? { node: 'local' as const, mode: 'auto' as const } : handler.target;
     const interval = schedule.type === 'interval' ? schedule : undefined;
-    setInput({ ...input, source: kind === 'http' ? blankHttpSource(interval) : kind === 'github' ? blankGitHubSource(interval) : { kind: 'schedule', schedule, catchUp: 'latest' }, handler: { ...handler, target } });
+    setInput({ ...input, source: kind === 'http' ? blankHttpSource(interval) : kind === 'github' ? blankGitHubSource(interval) : { kind: 'schedule', schedule, catchUp: 'latest' },
+      handler: kind === 'github' && coordinator ? coordinator : { ...handler, target } });
   };
-  const setHandler = (patch: Partial<typeof handler>) => setInput({ ...input, handler: { ...handler, ...patch } });
+  const setHandler = (patch: Partial<TaskHandler>) => setInput({ ...input, handler: { ...handler, ...patch } });
+  const setMode = (mode: 'task' | 'coordinator') => setInput({ ...input, handler: mode === 'coordinator'
+    ? { kind: 'coordinator', rules: coordinator?.rules ?? [newRule()], approvals: handler.approvals } : handler });
   const provider = providers.find(item => item.provider === handler.provider);
   const candidates = sessions.filter(session => session.provider === handler.provider && !session.isSubagent && session.resumable).slice(0, 80);
   const showPreview = async () => {
@@ -208,6 +213,9 @@ function TriggerEditor({ trigger, token, providers, projects, sessions, busy, on
     <div className="trigger-preview"><button type="button" className="secondary-button" onClick={() => void showPreview()}>{t('다음 실행 시간 보기')}</button>
       {typeof preview === 'string' ? preview && <p className="slack-error">{translateMessage(preview)}</p> : <ol>{preview.map(time => <li key={time}>{absoluteTime(time)}</li>)}</ol>}</div>
     </fieldset>
+    {input.source.kind === 'github' && <label>{t('처리 방식')}<select value={coordinator ? 'coordinator' : 'task'} onChange={event => setMode(event.target.value as 'task' | 'coordinator')}>
+      <option value="task">{t('이슈마다 작업 실행')}</option><option value="coordinator">{t('코디네이터: 지침으로 판단하고 댓글은 승인 후 게시')}</option></select></label>}
+    {coordinator ? <CoordinatorFields handler={coordinator} providers={providers} onChange={next => setInput({ ...input, handler: next })} /> : <>
     <label>{t('지시')}<small>{input.source.kind === 'github' ? t('이슈마다 에이전트에게 보내는 내용입니다. 이슈 내용은 지시가 아닌 참고 자료로 함께 전달됩니다.') : http ? t('실행될 때마다 에이전트에게 보내는 내용입니다. 받은 응답은 지시가 아닌 참고 자료로 함께 전달됩니다.') : t('실행될 때마다 에이전트에게 보내는 내용입니다.')}</small><textarea required rows={5} maxLength={8000} value={handler.instructions} onChange={event => setHandler({ instructions: event.target.value })} /></label>
     <fieldset className="slack-group"><legend>{t('실행')}</legend><div className="slack-rule-options">
       <label>{t('에이전트')}<select value={handler.provider} onChange={event => setHandler({ provider: event.target.value as 'claude' | 'codex', model: undefined, effort: undefined,
@@ -226,7 +234,7 @@ function TriggerEditor({ trigger, token, providers, projects, sessions, busy, on
       {handler.target.mode === 'session' && <label className="wide">{t('세션')}<select required value={handler.target.sessionId} onChange={event => setHandler({ target: { node: 'local', mode: 'session', sessionId: event.target.value } })}>
         {candidates.map(session => <option key={session.id} value={session.id}>{sessionTitle(session)} — {session.project}</option>)}</select>
         {handler.provider === 'codex' && <small>{t('기존 Codex 세션은 자체 승인 설정을 유지합니다.')}</small>}</label>}
-    </div></fieldset>
+    </div></fieldset></>}
     <fieldset className="slack-group"><legend>{t('정책')}</legend><div className="slack-rule-options">
       <label>{t('이전 실행이 끝나지 않았을 때')}<select value={input.policy.overlap} onChange={event => setInput({ ...input, policy: { ...input.policy, overlap: event.target.value as 'skip' | 'queue' | 'parallel' } })}>
         <option value="skip">{t('건너뛰기')}</option><option value="queue">{t('하나만 대기')}</option><option value="parallel">{t('동시에 실행')}</option></select></label>
@@ -234,6 +242,23 @@ function TriggerEditor({ trigger, token, providers, projects, sessions, busy, on
     </div></fieldset>
     <div className="slack-actions"><button type="button" className="secondary-button" onClick={onCancel}>{t('취소')}</button><button className="primary-button">{trigger ? t('저장') : t('만들기')}</button></div>
   </fieldset></form>;
+}
+
+type TaskHandler = Extract<TriggerInput['handler'], { kind: 'task' }>;
+type CoordinatorHandler = Extract<TriggerInput['handler'], { kind: 'coordinator' }>;
+const newRule = (): CoordinatorRule => ({ id: crypto.randomUUID(), name: '', enabled: true, condition: '', instructions: '', replyInstructions: '', provider: 'codex' });
+
+/** Rules a GitHub coordinator follows, in the same editor Slack uses. */
+function CoordinatorFields({ handler, providers, onChange }: { handler: CoordinatorHandler; providers: ProviderHealth[]; onChange: (handler: CoordinatorHandler) => void }) {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState<string | null>(handler.rules.length === 1 ? handler.rules[0].id : null);
+  return <fieldset className="slack-group"><legend>{t('코디네이터')}</legend>
+    <p className="trigger-note">{t('이슈마다 대화를 하나 엽니다. 코디네이터는 첫 번째로 맞는 지침 하나만 따르고, 작업은 프로젝트 에이전트에게 맡기며, 댓글은 Tower에서 승인해야 게시됩니다.')}</p>
+    <label>{t('승인')}<select value={handler.approvals} onChange={event => onChange({ ...handler, approvals: event.target.value as 'auto' | 'owner' })}>
+      <option value="auto">{t('맡긴 작업은 자동 승인 (사람 개입 최소)')}</option><option value="owner">{t('맡긴 작업도 직접 승인 (Tower에서 대기)')}</option></select></label>
+    <SlackRules channel="github" autoReview={handler.approvals === 'auto'} rules={handler.rules} providers={providers} expanded={expanded} onExpand={setExpanded} onChange={rules => onChange({ ...handler, rules: rules as CoordinatorRule[] })} />
+    {handler.rules.length < 20 && <button type="button" className="secondary-button" onClick={() => { const rule = newRule(); onChange({ ...handler, rules: [...handler.rules, rule] }); setExpanded(rule.id); }}><Plus size={13} />{t('지침 추가')}</button>}
+  </fieldset>;
 }
 
 const CONDITIONS: Array<[HttpCondition['type'], string]> = [['changed', '값이 바뀌면 실행'], ['match', '조건을 만족하게 되면 실행'], ['every-success', '성공 응답마다 실행']];

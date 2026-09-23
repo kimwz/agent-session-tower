@@ -39,6 +39,8 @@ export interface HttpCall {
   beforeSend?: () => string | undefined;
   /** Largest response body kept; the rest is cut off and marked truncated. */
   maxBytes?: number;
+  /** Stop at a redirect instead of following it; a POST answered with one arrived and is reported as uncertain. */
+  noRedirects?: boolean;
 }
 export type HttpOutcome =
   | { ok: true; status: number; contentType?: string; body: string; truncated: boolean; url: string; headers: Record<string, string> }
@@ -177,6 +179,7 @@ async function perform(call: HttpCall, destination: Destination, resolve: typeof
     if (!outcome.ok) return { ...outcome, uncertain: outcome.uncertain || delivered };
     if (!('redirect' in outcome)) return outcome;
     delivered ||= method === 'POST';
+    if (call.noRedirects) return stop(`The server redirected (HTTP ${outcome.status}) and the redirect was not followed.`);
     if (hop >= MAX_REDIRECTS) return stop('Too many redirects.');
     let next: URL;
     try { next = new URL(outcome.redirect, url); } catch { return stop('The server redirected to an invalid address.'); }

@@ -52,3 +52,13 @@ test('a new GitHub trigger from the panel needs repositories and a checked accou
   assert.equal(scheduleLabel(parsed, (key, values) => translate(key, values)), 'GitHub · New issues · octo/app +1 · Every 5 min');
 });
 
+test('a GitHub coordinator trigger from the panel carries its rules and approval choice', () => {
+  const source = blankGitHubSource();
+  const input = { ...blankTrigger(), name: 'Triage', source: { ...source, account: 'octocat', watch: { ...source.watch, repos: ['octo/app'] } },
+    handler: { kind: 'coordinator' as const, approvals: 'owner' as const, rules: [{ id: 'r1', name: 'Bugs', enabled: true, condition: 'A bug report', instructions: 'Fix it', replyInstructions: 'Say what changed', provider: 'claude' as const, autoReply: true }] } };
+  const parsed = TriggerInputSchema.parse(input);
+  assert.equal(parsed.handler.kind, 'coordinator');
+  assert.equal(parsed.handler.kind === 'coordinator' && parsed.handler.rules[0].autoReply, true);
+  assert.equal(TriggerInputSchema.safeParse({ ...input, handler: { ...input.handler, rules: [] } }).success, false, 'a coordinator needs at least one rule');
+});
+

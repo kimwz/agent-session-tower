@@ -2,7 +2,8 @@ import type { GitHubWatch } from '../../shared/triggers.js';
 
 /** One GitHub API answer, reduced to what checking needs. */
 export interface GitHubResponse { status: number; body: unknown; etag?: string; truncated?: boolean; remaining?: number; reset?: number }
-export type GitHubFetch = (path: string, etag?: string) => Promise<GitHubResponse>;
+/** Reads by default; `send` makes it a POST, whose failure may mean it arrived (`uncertain` on the error). */
+export type GitHubFetch = (path: string, etag?: string, send?: { method: 'POST'; body: unknown }) => Promise<GitHubResponse>;
 
 /** An issue as a run receives it: outside content, shortened. */
 export interface GitHubIssue {

@@ -4,7 +4,7 @@ import { mkdir, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunOrigin, Session } from '../../shared/types.js';
 import {
-  GITHUB_API, TriggerInputSchema, TriggerSettingsSchema, carriesOutsideContent, type GitHubAuth, type GitHubCheck, type HttpCondition, type HttpRequest, type HttpTestResult, type SecretInput, type Trigger, type TriggerActor,
+  GITHUB_API, TriggerInputSchema, type CoordinatorRule, TriggerSettingsSchema, carriesOutsideContent, type GitHubAuth, type GitHubCheck, type HttpCondition, type HttpRequest, type HttpTestResult, type SecretInput, type Trigger, type TriggerActor,
   type TriggerAuditEntry, type TriggerEvent, type TriggerInput, type TriggerOverview, type TriggerSecret, type TriggerSettings, type TriggerSummary, type Schedule,
 } from '../../shared/triggers.js';
 import { requestedEffort, requestedModel } from '../providers/models.js';
@@ -25,6 +25,13 @@ export interface TriggerExecutor {
   enqueue(sessionId: string, prompt: string, request: MessageAttachments, internal: RunAdmission): Promise<Run>;
   runs(): Run[];
   session(id: string): Session | undefined;
+  /**
+   * Hands an event to the coordinator conversation of its channel. Taking the same event again returns the
+   * same conversation, so a claim cut off by a stop is simply handed over again.
+   */
+  coordinate?(event: TriggerEvent): Promise<{ workflowId: string }>;
+  /** Where a coordinator conversation stands. */
+  coordination?(workflowId: string): { status: 'running' | 'completed' | 'error'; sessionId?: string; runId?: string; error?: string } | undefined;
 }
 
 /** A read-only view of the Slack connection so it appears among triggers without moving its data. */
@@ -297,6 +304,7 @@ export class TriggerService extends EventEmitter {
       if (state.triggers.length >= state.settings.maxTriggers) throw failure(`At most ${state.settings.maxTriggers} triggers can exist. Delete one first.`, 409);
       const now = new Date(this.now()).toISOString();
       const trigger: Trigger = { ...input, id: randomUUID(), revision: 1, createdAt: now, updatedAt: now, createdBy: actor, updatedBy: actor };
+      this.guardAutoReply(trigger, undefined, actor, 'refuse');
       this.grantSecrets(state, trigger, actor);
       state.triggers.push(trigger);
       this.schedule(state, trigger);
@@ -310,6 +318,7 @@ export class TriggerService extends EventEmitter {
     const input = await this.validate(value);
     return this.commit(state => {
       const current = this.revisionOf(state, id, expectedRevision);
+      this.guardAutoReply({ ...current, ...structuredClone(input) }, current, actor, 'refuse');
       const next = this.replace(state, current, { ...input }, actor);
       this.log(state, actor, 'update', next, current.revision, next.revision, `Changed ${this.changes(current, next)}`);
       return structuredClone(next);
@@ -350,8 +359,10 @@ export class TriggerService extends EventEmitter {
       const current = this.revisionOf(state, id, expectedRevision);
       const earlier = (state.revisions[id] ?? []).find(item => item.revision === revision);
       if (!earlier) throw failure(`Revision ${revision} is no longer kept. Only the last ${MAX_REVISIONS} revisions can be restored.`, 404);
-      const next = this.replace(state, current, this.inputOf(earlier), actor);
-      this.log(state, actor, 'revert', next, current.revision, next.revision, `Restored revision ${revision}`);
+      const restored = structuredClone(this.inputOf(earlier));
+      const note = this.guardAutoReply({ ...current, ...restored }, current, actor, 'strip') ?? '';
+      const next = this.replace(state, current, restored, actor);
+      this.log(state, actor, 'revert', next, current.revision, next.revision, `Restored revision ${revision}${note}`);
       return structuredClone(next);
     });
   }
@@ -363,12 +374,13 @@ export class TriggerService extends EventEmitter {
       if (state.triggers.some(item => item.id === id)) throw failure('This trigger already exists.', 409);
       if (state.triggers.length >= state.settings.maxTriggers) throw failure(`At most ${state.settings.maxTriggers} triggers can exist. Delete one first.`, 409);
       const now = new Date(this.now()).toISOString();
-      const trigger: Trigger = { ...deleted, revision: deleted.revision + 1, updatedAt: now, updatedBy: actor, enabled: false };
+      const trigger: Trigger = { ...structuredClone(deleted), revision: deleted.revision + 1, updatedAt: now, updatedBy: actor, enabled: false };
+      const note = this.guardAutoReply(trigger, undefined, actor, 'strip') ?? '';
       this.grantSecrets(state, trigger, actor);
       state.triggers.push(trigger);
       state.tombstones = state.tombstones.filter(item => item !== deleted);
       this.schedule(state, trigger);
-      this.log(state, actor, 'restore', trigger, deleted.revision, trigger.revision, 'Restored after deletion, turned off');
+      this.log(state, actor, 'restore', trigger, deleted.revision, trigger.revision, `Restored after deletion, turned off${note}`);
       return structuredClone(trigger);
     });
   }
@@ -661,21 +673,23 @@ export class TriggerService extends EventEmitter {
       if ((response.status === 403 || response.status === 429) && response.remaining === 0 && response.reset) this.githubBlocked.set(identity, response.reset * 1000);
       return response;
     };
+    // Refused here, a request never left: `uncertain: false` tells a write that nothing was sent.
     const blocked = () => {
       const until = this.githubBlocked.get(identity);
-      if (until !== undefined && until > this.now()) throw new GitHubError(`GitHub's rate limit is used up until ${new Date(until).toISOString()}; checking resumes then.`, until);
+      if (until !== undefined && until > this.now()) throw Object.assign(new GitHubError(`GitHub's rate limit is used up until ${new Date(until).toISOString()}; checking resumes then.`, until), { uncertain: false });
     };
     if (this.options.githubTransport) {
       const transport = this.options.githubTransport(authorization);
-      return { identity, fetch: async (path, etag) => { blocked(); const over = this.spend(); if (over) throw new GitHubError(over); return guard(await transport(path, etag)); } };
+      return { identity, fetch: async (path, etag, send) => { blocked(); const over = this.spend(); if (over) throw Object.assign(new GitHubError(over), { uncertain: false }); return guard(await transport(path, etag, send)); } };
     }
     const ownPorts = await this.options.ownPorts?.().catch(() => []) ?? [];
-    return { identity, fetch: async (path, etag) => {
+    return { identity, fetch: async (path, etag, send) => {
       blocked();
-      const outcome = await performHttp({ method: 'GET', url: `${GITHUB_API}${path}`, secretOrigin: GITHUB_API, secretHeaders: { authorization },
-        headers: { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', ...(etag ? { 'if-none-match': etag } : {}) },
-        timeoutMs: 30_000, maxBytes: 5_000_000, beforeSend: () => this.spend() }, { privateHosts: [], ownPorts }, this.options.resolve);
-      if (!outcome.ok) throw new GitHubError(outcome.error);
+      const outcome = await performHttp({ method: send?.method ?? 'GET', url: `${GITHUB_API}${path}`, secretOrigin: GITHUB_API, secretHeaders: { authorization },
+        headers: { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', ...(etag ? { 'if-none-match': etag } : {}), ...(send ? { 'content-type': 'application/json' } : {}) },
+        // A write is never followed through a redirect: whatever answered it, the POST arrived and is not repeated.
+        ...(send ? { body: JSON.stringify(send.body), noRedirects: true } : {}), timeoutMs: 30_000, maxBytes: 5_000_000, beforeSend: () => this.spend() }, { privateHosts: [], ownPorts }, this.options.resolve);
+      if (!outcome.ok) throw Object.assign(new GitHubError(outcome.error), { uncertain: outcome.uncertain });
       let body: unknown;
       try { body = outcome.status === 304 ? undefined : JSON.parse(outcome.body); } catch { body = undefined; }
       const number = (value: string | undefined) => value !== undefined && /^\d+$/.test(value) ? Number(value) : undefined;
@@ -686,6 +700,21 @@ export class TriggerService extends EventEmitter {
       return guard({ status: outcome.status, body, truncated: outcome.truncated, ...(tag ? { etag: tag } : {}),
         ...(remaining !== undefined ? { remaining } : {}), ...(reset !== undefined ? { reset } : {}) });
     } };
+  }
+
+  /**
+   * GitHub access for a trigger's coordinator conversation: the trigger's own credentials (also after it is
+   * deleted, while it can be restored), and only while they still act as the trigger's account.
+   */
+  async githubClient(triggerId: string, fresh = false): Promise<GitHubFetch> {
+    const trigger = this.state.triggers.find(item => item.id === triggerId) ?? [...this.state.tombstones].reverse().find(item => item.id === triggerId);
+    if (!trigger || trigger.source.kind !== 'github') throw new GitHubError('This GitHub trigger no longer exists.');
+    // For a write, the credential and its account are read again: what is checked is what posts.
+    if (fresh && trigger.source.auth.type === 'gh') this.ghToken = undefined;
+    const { fetch, identity } = await this.githubFetch(trigger.source.auth, trigger.id);
+    const login = await this.githubLogin(fetch, identity, fresh);
+    if (login.toLowerCase() !== trigger.source.account.toLowerCase()) throw new GitHubError(`GitHub is signed in as ${login}, not ${trigger.source.account}; nothing was sent.`);
+    return fetch;
   }
 
   /** The account a credential acts as, looked up again every ten minutes and whenever the credential changes. */
@@ -784,10 +813,16 @@ export class TriggerService extends EventEmitter {
     state.fired[key] = iso;
     state.recentFires = [...state.recentFires.filter(item => item.at > now - 60 * 60 * 1000), { at: now, triggerId: trigger.id }];
     const handler = trigger.handler;
+    const untrustedInput = carriesOutsideContent(trigger.source);
+    // What runs is frozen with the event: a task's instructions and target, or a coordinator's rules.
+    const input: TriggerEvent['input'] = handler.kind === 'task'
+      ? { instructions: handler.instructions, provider: handler.provider, ...(handler.model ? { model: handler.model } : {}), ...(handler.effort ? { effort: handler.effort } : {}),
+        approvals: handler.approvals, target: handler.target, untrustedInput, overlap: trigger.policy.overlap }
+      : { instructions: '', provider: handler.rules[0].provider, approvals: handler.approvals, target: { node: 'local', mode: 'auto' }, untrustedInput, overlap: trigger.policy.overlap,
+        handler: 'coordinator', rules: structuredClone(handler.rules) };
     const event: TriggerEvent = { id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name, triggerRevision: trigger.revision, kind, dedupKey,
       occurredAt: new Date(at).toISOString(), receivedAt: iso, updatedAt: iso, status: 'queued', requestId: triggerRequestId(trigger.id, dedupKey),
-      input: { instructions: handler.instructions, provider: handler.provider, ...(handler.model ? { model: handler.model } : {}), ...(handler.effort ? { effort: handler.effort } : {}),
-        approvals: handler.approvals, target: handler.target, untrustedInput: carriesOutsideContent(trigger.source), overlap: trigger.policy.overlap },
+      input,
       summary: kind === 'manual' ? 'Run now' : `Scheduled for ${new Date(at).toISOString()}` };
     // The firing just recorded counts too, so the limit is the number that may run in any hour.
     const recent = state.recentFires.slice(0, -1);
@@ -847,6 +882,11 @@ export class TriggerService extends EventEmitter {
 
   private async submit(event: TriggerEvent): Promise<Partial<TriggerEvent>> {
     const executor = this.options.executor;
+    if (event.input.handler === 'coordinator') {
+      if (!executor.coordinate) return { status: 'error', error: 'Coordinator conversations are unavailable in this worker.' };
+      const { workflowId } = await executor.coordinate(event);
+      return { status: 'running', dispatch: { workflowId } };
+    }
     const origin: RunOrigin = { kind: 'trigger', triggerId: event.triggerId, eventId: event.id };
     const input = event.input;
     const unattended = input.approvals === 'auto';
@@ -889,6 +929,19 @@ export class TriggerService extends EventEmitter {
     const updates = new Map<string, Partial<TriggerEvent>>();
     for (const event of this.state.events) {
       if (event.status !== 'running') continue;
+      if (event.dispatch?.workflowId) {
+        // A coordinator event follows its conversation: done when the coordinator's turn is.
+        const conversation = this.options.executor.coordination?.(event.dispatch.workflowId);
+        const patch: Partial<TriggerEvent> = {};
+        if (conversation?.sessionId && event.dispatch.sessionId !== conversation.sessionId) {
+          patch.dispatch = { ...event.dispatch, sessionId: conversation.sessionId, createdSessionId: conversation.sessionId, ...(conversation.runId ? { runId: conversation.runId } : {}) };
+        }
+        if (!conversation) Object.assign(patch, { status: 'uncertain', error: 'The coordinator conversation record is no longer available.' });
+        else if (conversation.status === 'completed') patch.status = 'completed';
+        else if (conversation.status === 'error') Object.assign(patch, { status: 'error', ...(conversation.error ? { error: conversation.error.slice(0, 1500) } : {}) });
+        if (Object.keys(patch).length) updates.set(event.id, patch);
+        continue;
+      }
       const job = event.input.target.mode === 'auto' ? this.options.executor.getAutoPrompt(event.requestId) : undefined;
       const run = runs.find(item => item.id === (event.dispatch?.runId ?? job?.runId)) ?? runs.find(item => item.autoPromptId === event.requestId);
       const patch: Partial<TriggerEvent> = {};
@@ -948,6 +1001,22 @@ export class TriggerService extends EventEmitter {
       state.secretGrants[secret.id] = [...granted, trigger.id];
     }
   }
+  /**
+   * A rule's automatic reply is the owner's standing permission to post (D1). An agent can keep one the owner
+   * set, on an unchanged rule, but never turn one on: creating or changing it is refused, and bringing back an
+   * earlier revision or a deleted trigger turns such replies off, noted in the audit log.
+   */
+  private guardAutoReply(next: Trigger, before: Trigger | undefined, actor: TriggerActor, mode: 'refuse' | 'strip'): string | undefined {
+    if (actor.kind === 'owner' || next.handler.kind !== 'coordinator') return undefined;
+    const kept = (rule: CoordinatorRule) => before?.handler.kind === 'coordinator' && before.handler.rules.some(item => item.id === rule.id && item.autoReply === true
+      && JSON.stringify({ ...item, enabled: undefined }) === JSON.stringify({ ...rule, enabled: undefined }));
+    const added = next.handler.rules.filter(rule => rule.autoReply && !kept(rule));
+    if (!added.length) return undefined;
+    if (mode === 'refuse') throw failure('Only the owner can turn on automatic replies for a coordinator rule, or change a rule that has them. Ask the owner to make this change in Tower.', 403);
+    for (const rule of added) delete rule.autoReply;
+    return ` (automatic replies turned off for ${added.map(rule => `"${rule.name}"`).join(', ')}: only the owner can turn them on)`;
+  }
+
   /** A GitHub token is the owner's to give; an agent may keep a token-based source only exactly as accepted. */
   private grantGitHub(state: EngineState, trigger: Trigger, actor: TriggerActor): void {
     if (trigger.source.kind !== 'github' || trigger.source.auth.type !== 'token') return;
@@ -970,6 +1039,8 @@ export class TriggerService extends EventEmitter {
     const runs = this.options.executor.runs();
     for (const event of state.events) {
       if (event.status !== 'claimed' || !include(event)) continue;
+      // Handing an event to its coordinator is idempotent, so an unfinished hand-over is simply done again.
+      if (event.input.handler === 'coordinator') { Object.assign(event, { status: 'queued', claimedAt: undefined }); continue; }
       const job = this.options.executor.getAutoPrompt(event.requestId);
       const run = runs.find(item => item.autoPromptId === event.requestId);
       if (job || run) Object.assign(event, { status: 'running', dispatch: { ...(run ? { runId: run.id, sessionId: run.sessionId } : {}) } });
@@ -984,6 +1055,12 @@ export class TriggerService extends EventEmitter {
     if (!parsed.success) throw failure(`Invalid trigger: ${parsed.error.issues.map(issue => `${issue.path.join('.') || 'trigger'}: ${issue.message}`).join('; ')}`);
     const input = parsed.data;
     validateSchedule(input.source.schedule);
+    if (input.handler.kind === 'coordinator') {
+      if (input.source.kind !== 'github') throw failure('A coordinator answers where the event came from; it is available for GitHub triggers.');
+      if (new Set(input.handler.rules.map(rule => rule.id)).size !== input.handler.rules.length) throw failure('Each coordinator rule needs its own id.');
+      for (const rule of input.handler.rules) requestedModel(rule.model);
+      return input;
+    }
     requestedModel(input.handler.model);
     requestedEffort(input.handler.effort, input.handler.provider);
     const target = input.handler.target;
@@ -1036,6 +1113,7 @@ export class TriggerService extends EventEmitter {
       ...(trigger.source.kind === 'github' && previous?.blockedUntil !== undefined && previous.blockedUntil > now ? { blockedUntil: previous.blockedUntil } : {}) };
   }
   private trust(state: EngineState, trigger: Trigger, actor: TriggerActor): void {
+    if (trigger.handler.kind !== 'task') return;
     const target = trigger.handler.target;
     if (actor.kind === 'owner' && target.mode === 'folder' && !state.trustedFolders.includes(target.cwd)) state.trustedFolders = [...state.trustedFolders, target.cwd].slice(-200);
   }
