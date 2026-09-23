@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.10.1] - 2026-09-23
+
+### Fixed
+- Recognize Codex review sessions launched by Claude agents from matching execution records, keeping their worktrees in the parent session family instead of separate canvas projects.
+- Include proven cross-provider descendants in completed Slack task cleanup while preserving active work and native history.
+
 ## [1.10.0] - 2026-09-23
 
 ### Changed

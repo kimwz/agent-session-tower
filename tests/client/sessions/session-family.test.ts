@@ -44,6 +44,18 @@ test('missing parents preserve an accessible orphan root and its descendants', (
   assert.deepEqual(getSessionFamily(sessions, 'missing'), { members: [] });
 });
 
+test('a proven Claude to Codex review stays in its parent family instead of creating a worktree project card', () => {
+  const root = session('claude:project', { provider: 'claude', cwd: '/verse8-orchestrator' });
+  const reviewer = session('claude:reviewer', { provider: 'claude', parentId: root.id, isSubagent: true });
+  const cli = session('codex:review', { parentId: reviewer.id, parentLink: 'exec', isSubagent: true, cwd: '/onestore.wt-review-169' });
+  const nested = session('codex:nested', { parentId: cli.id, isSubagent: true, cwd: cli.cwd });
+  const manual = session('codex:manual', { cwd: cli.cwd });
+  const sessions = [cli, nested, reviewer, root, manual];
+  assert.deepEqual(getMainSessions(sessions), [root, manual]);
+  assert.equal(getMainSessionId(sessions, nested.id), root.id);
+  assert.deepEqual(getSessionFamily(sessions, cli.id).members, [root, reviewer, cli, nested]);
+});
+
 test('cyclic parent metadata chooses the same accessible representative for every input order', () => {
   const a = session('a', { isSubagent: true, parentId: 'b' });
   const b = session('b', { isSubagent: true, parentId: 'c' });

@@ -12,10 +12,12 @@ export function finishedSlackDelegatedSessionIds(workflows: SlackWorkflow[], ses
   const parents = new Map<string, string>();
   for (const session of sessions) {
     if (!session.isSubagent || !session.parentId) continue;
-    const parent = sessions.find(parent => parent.provider === session.provider && (aliases(parent).includes(session.parentId!) || parent.nativeId === session.parentId));
+    const parent = sessions.find(parent => session.parentLink === 'exec'
+      ? aliases(parent).includes(session.parentId!)
+      : parent.provider === session.provider && (aliases(parent).includes(session.parentId!) || parent.nativeId === session.parentId));
     if (parent) parents.set(session.id, parent.id);
   }
-  // parentId is a provider-native ID; only resolve within the same provider.
+  // Native parent IDs stay provider-scoped. Proven CLI launches carry a qualified cross-provider link.
   for (let changed = true; changed;) {
     changed = false;
     for (const session of sessions) {

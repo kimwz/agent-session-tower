@@ -19,3 +19,16 @@ test('provider-prefixed parent aliases protect the whole ancestor chain during d
   sessions[2].status = 'idle';
   assert.deepEqual([...finishedSlackDelegatedSessionIds(workflows, sessions, [])], sessions.map(session => session.id));
 });
+
+test('proven cross-provider CLI descendants disappear with Slack work while active children remain protected', () => {
+  const workflows = [{ delegatedTasks: [{ createdSessionId: 'claude:delegate', delegatedFinished: true }] }] as SlackWorkflow[];
+  const sessions = [session('claude:delegate', { provider: 'claude', nativeId: 'delegate' }),
+    session('claude:reviewer', { provider: 'claude', nativeId: 'reviewer', parentId: 'claude:delegate', isSubagent: true }),
+    session('codex:exec', { nativeId: 'exec', parentId: 'claude:reviewer', parentLink: 'exec', isSubagent: true, cwd: '/repo.wt-review-169' }),
+    session('codex:child', { nativeId: 'child', parentId: 'codex:exec', isSubagent: true }),
+    session('unrelated', { cwd: '/repo.wt-review-169' }),
+    session('unproven', { parentId: 'claude:reviewer', isSubagent: true })];
+  assert.deepEqual([...finishedSlackDelegatedSessionIds(workflows, sessions, [])], sessions.slice(0, 4).map(session => session.id));
+  sessions[3].activeProcess = true;
+  assert.equal(finishedSlackDelegatedSessionIds(workflows, sessions, []).size, 0);
+});

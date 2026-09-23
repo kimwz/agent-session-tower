@@ -1,0 +1,68 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { SessionService } from '../../../server/sessions/service.js';
+import { parseExecLaunch, promptDigest } from '../../../server/sessions/exec-lineage.js';
+
+const lines = (...rows: unknown[]) => rows.map(row => JSON.stringify(row)).join('\n') + '\n';
+const at = (second: number) => `2026-09-23T01:50:${String(second).padStart(2, '0')}.000Z`;
+const command = 'cd /work/review && timeout 580 codex exec -s read-only "Review this exact diff." 2>&1 | tail -60';
+const launch = { type: 'assistant', sessionId: 'parent', cwd: '/work/main', timestamp: at(18), message: { content: [{ type: 'tool_use', name: 'Bash', id: 'call', input: { command } }] } };
+const result = { type: 'user', timestamp: at(40), message: { content: [{ type: 'tool_result', tool_use_id: 'call', content: 'done' }] } };
+const child = (id: string, prompt = 'Review this exact diff.', second = 21) => lines(
+  { type: 'session_meta', timestamp: at(second), payload: { id, timestamp: at(second), cwd: '/work/review', source: 'exec', thread_source: 'user' } },
+  { type: 'response_item', timestamp: at(second), payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: prompt }] } },
+);
+
+test('literal exec parsing rejects resume, echoed commands, substitutions, and ambiguous shell flow', () => {
+  assert.equal(parseExecLaunch(command, '/work/main')?.cwd, '/work/review');
+  assert.equal(parseExecLaunch(String.raw`codex exec "literal \q"`, '/work')?.prompt, promptDigest(String.raw`literal \q`));
+  for (const bad of ['echo "codex exec test"', 'codex exec resume abc test', 'codex exec "$(cat prompt)"', 'codex exec test; echo done', 'codex exec test && other', 'codex exec review', 'codex exec\n"Review this exact diff."', 'codex exec #review']) {
+    assert.equal(parseExecLaunch(bad, '/work'), undefined, bad);
+  }
+});
+
+test('cross-provider lineage is unique, projected in detail, survives restart, and clears after truncation', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-exec-lineage-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const codexHome = join(dir, 'codex'), claudeHome = join(dir, 'claude');
+  const cp = join(codexHome, 'sessions'), cl = join(claudeHome, 'projects', 'main');
+  await Promise.all([mkdir(cp, { recursive: true }), mkdir(cl, { recursive: true })]);
+  const parentPath = join(cl, 'parent.jsonl');
+  await Promise.all([writeFile(parentPath, lines(launch)), writeFile(join(cp, 'one.jsonl'), child('one')), writeFile(join(cp, 'unrelated.jsonl'), child('unrelated', 'Other task'))]);
+  const options = { codexHome, claudeHome, inspectProcesses: async () => ({ claude: new Map(), codex: new Set<string>(), providerRunning: { claude: false, codex: false } }) };
+  const service = new SessionService(options);
+  await service.refresh();
+  assert.equal(service.get('codex:one')?.parentId, 'claude:parent');
+  assert.equal(service.get('codex:one')?.parentLink, 'exec');
+  assert.equal(service.get('codex:unrelated')?.isSubagent, false);
+  assert.equal((await service.detail('codex:one'))?.session.parentId, 'claude:parent');
+  await appendFile(parentPath, lines(result));
+  await service.refresh();
+  assert.equal(service.get('codex:one')?.isSubagent, true);
+  const restarted = new SessionService(options); await restarted.refresh();
+  assert.equal(restarted.get('codex:one')?.parentId, 'claude:parent');
+  await writeFile(join(cp, 'two.jsonl'), child('two'));
+  await service.refresh();
+  assert.equal(service.get('codex:one')?.parentId, undefined, 'ambiguous launch must not attach either candidate');
+  assert.equal(service.get('codex:two')?.parentId, undefined);
+  await rm(join(cp, 'two.jsonl')); await service.refresh();
+  assert.equal(service.get('codex:one')?.parentId, 'claude:parent');
+  await writeFile(join(cl, 'other.jsonl'), lines({ ...launch, sessionId: 'other' })); await service.refresh();
+  assert.equal(service.get('codex:one')?.parentId, undefined, 'two identical launches are ambiguous');
+  await rm(join(cl, 'other.jsonl'));
+  await writeFile(join(cp, 'late.jsonl'), child('late', 'Review this exact diff.', 45));
+  await writeFile(join(cp, 'native.jsonl'), child('native').replace('"source":"exec"', '"source":"exec","parent_thread_id":"native-parent"'));
+  await writeFile(join(cp, 'manual.jsonl'), child('manual').replace('"source":"exec"', '"source":"cli"'));
+  await service.refresh();
+  assert.equal(service.get('codex:one')?.parentId, 'claude:parent');
+  assert.equal(service.get('codex:late')?.parentId, undefined, 'completed call bounds launch timing');
+  assert.equal(service.get('codex:native')?.parentId, 'codex:native-parent');
+  assert.equal(service.get('codex:manual')?.parentId, undefined);
+  await writeFile(parentPath, lines({ type: 'user', sessionId: 'parent', timestamp: at(10), message: { content: 'unrelated' } }));
+  await service.refresh();
+  assert.equal(service.get('codex:one')?.parentId, undefined);
+  assert.equal(service.get('codex:one')?.isSubagent, false);
+});

@@ -14,6 +14,8 @@ export interface Session {
   cwd: string;
   project: string;
   parentId?: string;
+  /** Correlated shell-launched child; native parent metadata remains authoritative. */
+  parentLink?: 'exec';
   agentName?: string;
   model?: string;
   contextUsage?: SessionContextUsage;

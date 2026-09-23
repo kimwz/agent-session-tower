@@ -1,3 +1,4 @@
+import { resolveExecLineage } from './exec-lineage.js';
 import { EventEmitter } from 'node:events';
 import { open, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
@@ -95,6 +96,7 @@ export class SessionService extends EventEmitter {
         const duplicate = this.index.get(state.session.id);
         if (!duplicate || (duplicate.archived && !state.archived) || (duplicate.archived === state.archived && state.session.updatedAt > duplicate.session.updatedAt)) this.index.set(state.session.id, state);
       }
+      if (resolveExecLineage(this.index.values())) changed = true;
       this.scanning = false;
       if (changed) this.emit('change', this.list());
     } finally { this.scanning = false; }

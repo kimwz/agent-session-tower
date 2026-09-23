@@ -1,3 +1,4 @@
+import { parseExecLaunch, promptDigest, type ExecLaunch } from './exec-lineage.js';
 import { open, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { ChatMessage, Provider, Session } from '../../shared/types.js';
@@ -13,6 +14,9 @@ type Json = Record<string, any>;
 type Activity = 'working' | 'completed' | 'error';
 export interface RecordState {
   session: Session;
+  execLaunches?: ExecLaunch[];
+  execOrigin?: boolean;
+  firstPrompt?: string;
   offset: number;
   size: number;
   mtimeMs: number;
@@ -213,6 +217,8 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
   if (s.provider === 'codex' && row.type === 'session_meta' && !state.metadataSeen) {
     const value = row.payload ?? {};
     state.metadataSeen = true;
+    state.execOrigin = value.source === 'exec' && value.thread_source !== 'subagent' &&
+      Boolean(validTime(value.timestamp ?? row.timestamp)) && validCwd(value.cwd);
     // Codex's permission assessor is runtime machinery, not a user coding agent.
     // Keep legitimate code-reviewer children; only exclude its exact native source.
     state.internal = value.thread_source === 'guardian_review' || value.source?.subagent?.other === 'guardian';
@@ -260,6 +266,24 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
   s.project = s.cwd ? basename(s.cwd) || s.cwd : 'Unknown project';
 
   const messages = parseMessages(s.provider, row, offset, timestamp);
+  if (s.provider === 'codex' && state.execOrigin && !state.firstPrompt) {
+    const first = messages.find(message => message.role === 'user');
+    // Never correlate a truncated prompt.
+    if (first) state.firstPrompt = first.text.length < MAX_TEXT ? promptDigest(first.text) : 'oversized';
+  }
+  if (s.provider === 'claude' && Array.isArray(row.message?.content) && validTime(row.timestamp)) {
+    for (const part of row.message.content) {
+      if (row.type === 'assistant' && part.type === 'tool_use' && part.name === 'Bash' && typeof part.id === 'string') {
+        const launch = parseExecLaunch(part.input?.command, s.cwd);
+        if (launch && (state.execLaunches?.length ?? 0) < 128 && !state.execLaunches?.some(item => item.toolId === part.id)) {
+          (state.execLaunches ??= []).push({ ...launch, toolId: part.id, startedAt: at });
+        }
+      } else if (row.type === 'user' && part.type === 'tool_result') {
+        const launch = state.execLaunches?.find(item => item.toolId === part.tool_use_id);
+        if (launch) launch.endedAt = at;
+      }
+    }
+  }
   for (const message of messages) {
     s.messageCount++;
     if (message.role === 'user' && !state.titleSet) {
