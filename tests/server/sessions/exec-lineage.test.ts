@@ -66,3 +66,45 @@ test('cross-provider lineage is unique, projected in detail, survives restart, a
   assert.equal(service.get('codex:one')?.parentId, undefined);
   assert.equal(service.get('codex:one')?.isSubagent, false);
 });
+
+const backgroundCommand = 'cd /Users/planetariumhq/Workspace/g2-sync.wt-review-833 && codex exec -s read-only "Review this exact diff." > /tmp/codex-833.txt 2>&1; echo exit=$? >> /tmp/codex-833.txt';
+
+test('literal output redirects and exact status append preserve the prompt without accepting shell programs', () => {
+  assert.deepEqual(parseExecLaunch(backgroundCommand, '/work/main'), {
+    cwd: '/Users/planetariumhq/Workspace/g2-sync.wt-review-833', prompt: promptDigest('Review this exact diff.'),
+  });
+  assert.equal(parseExecLaunch('codex exec "Review" > /tmp/review.txt', '/work')?.prompt, promptDigest('Review'));
+  for (const bad of [
+    backgroundCommand.replace('echo exit=$?', 'echo exit=$(whoami)'),
+    backgroundCommand.replace('echo exit=$?', 'echo exit=$STATUS'),
+    backgroundCommand.replace('>> /tmp/codex-833.txt', '>> /tmp/other.txt'),
+    backgroundCommand + '; other',
+    backgroundCommand.replace('> /tmp/codex-833.txt 2>&1', '> /tmp/$(whoami) 2>&1'),
+    backgroundCommand.replace('> /tmp/codex-833.txt 2>&1', '> /tmp/result && other'),
+    'codex exec Review; echo exit=$? >> /tmp/result',
+    'codex exec Review > /tmp/result | other',
+    'codex exec resume abc Review > /tmp/result',
+  ]) assert.equal(parseExecLaunch(bad, '/work'), undefined, bad);
+});
+
+test('background acknowledgment before child creation does not end the bounded launch window', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-background-lineage-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const codexHome = join(dir, 'codex'), claudeHome = join(dir, 'claude');
+  const cp = join(codexHome, 'sessions'), cl = join(claudeHome, 'projects', 'main');
+  await Promise.all([mkdir(cp, { recursive: true }), mkdir(cl, { recursive: true })]);
+  const backgroundLaunch = { ...launch, message: { content: [{ type: 'tool_use', name: 'Bash', id: 'call', input: { command: backgroundCommand, run_in_background: true } }] } };
+  const ack = { ...result, timestamp: at(19), message: { content: [{ type: 'tool_result', tool_use_id: 'call', content: 'Command running in background with ID: task. You will be notified when it completes.' }] } };
+  const childRows = child('one').replace('/work/review', '/Users/planetariumhq/Workspace/g2-sync.wt-review-833');
+  await Promise.all([
+    writeFile(join(cl, 'parent.jsonl'), lines(backgroundLaunch, ack)),
+    writeFile(join(cp, 'one.jsonl'), childRows),
+    writeFile(join(cp, 'late.jsonl'), childRows.replaceAll('"one"', '"late"').replaceAll('01:50:21', '02:21:21')),
+  ]);
+  const options = { codexHome, claudeHome, inspectProcesses: async () => ({ claude: new Map(), codex: new Set<string>(), providerRunning: { claude: false, codex: false } }) };
+  for (let restart = 0; restart < 2; restart++) {
+    const service = new SessionService(options); await service.refresh();
+    assert.equal(service.get('codex:one')?.parentId, 'claude:parent');
+    assert.equal(service.get('codex:late')?.parentId, undefined, 'background launches retain the 30 minute bound');
+  }
+});

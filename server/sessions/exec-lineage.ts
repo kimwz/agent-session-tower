@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { isAbsolute, normalize } from 'node:path';
 import type { RecordState } from './parser.js';
 
-export interface ExecLaunch { toolId: string; cwd: string; prompt: string; startedAt: number; endedAt?: number }
+export interface ExecLaunch { toolId: string; cwd: string; prompt: string; startedAt: number; endedAt?: number; background?: boolean }
 export const promptDigest = (value: string): string => createHash('sha256').update(value).digest('hex');
 
 /** A deliberately small literal shell grammar. Never evaluates shell text. */
@@ -35,7 +35,10 @@ function words(command: string): string[] | undefined {
 
 export function parseExecLaunch(command: unknown, originalCwd: string): { cwd: string; prompt: string } | undefined {
   if (typeof command !== 'string' || command.length > 200_000) return;
-  const tokens = words(command);
+  // Accept only the observed status append, to the same literal output file.
+  // All other expansions and command suffixes remain outside this grammar.
+  const statusAppend = /;\s*echo exit=\$\? >> (\/[A-Za-z0-9_./-]+)\s*$/.exec(command);
+  const tokens = words(statusAppend ? command.slice(0, statusAppend.index) : command);
   if (!tokens) return;
   let cwd = originalCwd;
   if (tokens[0] === 'cd') {
@@ -45,18 +48,25 @@ export function parseExecLaunch(command: unknown, originalCwd: string): { cwd: s
   if (tokens[0] === 'timeout' && /^\d+(?:[smh])?$/.test(tokens[1] ?? '')) tokens.splice(0, 2);
   if (tokens.shift() !== 'codex' || tokens.shift() !== 'exec') return;
   let prompt: string | undefined;
+  let outputPath: string | undefined;
   while (tokens.length) {
     const token = tokens.shift()!;
     if (token === '-C' || token === '--cd') { const path = tokens.shift(); if (!path || !isAbsolute(path)) return; cwd = path; }
     else if (['-m', '--model', '-c', '--config', '-s', '--sandbox', '-o', '--output-last-message'].includes(token)) { if (!tokens.shift()) return; }
     else if (['--full-auto', '--dangerously-bypass-approvals-and-sandbox', '--skip-git-repo-check', '--json', '--ephemeral'].includes(token)) continue;
     else if (token === '2' && tokens[0] === '>&' && tokens[1] === '1') tokens.splice(0, 2);
+    else if (token === '>' && prompt !== undefined && outputPath === undefined && /^\/[A-Za-z0-9_./-]+$/.test(tokens[0] ?? '')) {
+      outputPath = tokens.shift();
+      if (tokens.join(' ') === '2 >& 1') tokens.length = 0;
+      else if (tokens.length) return;
+    }
     else if (token === '|' && tokens.join(' ').match(/^tail (?:-\d+|-n \d+)$/)) { tokens.length = 0; }
     else if (token === '--' && prompt === undefined && tokens.length === 1) prompt = tokens.shift();
     else if (!token.startsWith('-') && !['resume', 'review', '|', ';', '&&', '>', '<'].includes(token) && prompt === undefined) prompt = token;
     else return;
   }
   if (!prompt || !isAbsolute(cwd)) return;
+  if (statusAppend && outputPath !== statusAppend[1]) return;
   return { cwd: normalize(cwd), prompt: promptDigest(prompt) };
 }
 

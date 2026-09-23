@@ -276,11 +276,12 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
       if (row.type === 'assistant' && part.type === 'tool_use' && part.name === 'Bash' && typeof part.id === 'string') {
         const launch = parseExecLaunch(part.input?.command, s.cwd);
         if (launch && (state.execLaunches?.length ?? 0) < 128 && !state.execLaunches?.some(item => item.toolId === part.id)) {
-          (state.execLaunches ??= []).push({ ...launch, toolId: part.id, startedAt: at });
+          (state.execLaunches ??= []).push({ ...launch, toolId: part.id, startedAt: at, background: part.input?.run_in_background === true });
         }
       } else if (row.type === 'user' && part.type === 'tool_result') {
         const launch = state.execLaunches?.find(item => item.toolId === part.tool_use_id);
-        if (launch) launch.endedAt = at;
+        // Background Bash results acknowledge scheduling, not process completion.
+        if (launch && !launch.background) launch.endedAt = at;
       }
     }
   }

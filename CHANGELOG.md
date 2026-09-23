@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.10.2] - 2026-09-23
+
+### Fixed
+- Recover parent relationships for background Codex reviews that redirect output to a file and append an exit-status marker.
+- Treat background tool acknowledgements as launch receipts rather than execution completion, allowing existing review sessions to join their parent family and cleanup.
+
 ## [1.10.1] - 2026-09-23
 
 ### Fixed
