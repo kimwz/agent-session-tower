@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.14.0] - 2026-09-24
+
+### Added
+- Deploying a new version now updates the execution worker by itself. When the web server starts next to a worker from an older build, it asks that worker to hand over. The worker keeps serving, including Slack, until a moment when nothing is running, then starts the new worker and exits. Running turns, approval requests and shells are never interrupted; the header shows **Worker update pending** until the switch. A request that arrives during the switch is refused with a message and can be sent again. The first switch from a worker older than this release still needs the old worker to finish and be replaced manually.
+
+### Changed
+- Terminal shells now run in their own background process instead of the execution worker, so updating the worker never closes them. Shells opened before this release keep working until you close them.
+
 ## [1.13.4] - 2026-09-23
 
 ### Changed
