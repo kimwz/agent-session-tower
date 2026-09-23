@@ -92,6 +92,7 @@ export function resolveExecLineage(records: Iterable<RecordState>, launchers: Re
     const { session } = child;
     if (session.parentId || session.isSubagent || !(child.execOrigin || (session.provider === 'claude' && child.programmatic))) continue;
     // The ancestor process may hold its own subagents' files too; only its root is the launcher.
+    // A parent linked earlier in this loop (a chain of agent runs) is still a valid launcher.
     const parents = [...new Set(launchers.get(session.id) ?? [])].map(id => byId.get(id))
       .filter((parent): parent is RecordState => Boolean(parent && parent !== child && (!parent.session.isSubagent || parent.session.parentLink === 'exec')));
     if (parents.length !== 1) continue;
