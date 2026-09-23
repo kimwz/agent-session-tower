@@ -106,6 +106,20 @@ test('while the stream is disconnected, provisional state is not replaced by an 
   assert.equal(title(view.get()), 'Fetched during outage');
 });
 
+test('after the page stops listening, a late snapshot response is discarded and nothing is scheduled', () => {
+  const clock = new Clock();
+  const shown: string[] = [];
+  const store = new SnapshotStore(update => { if (typeof update !== 'function') shown.push(update.sessions[0].title); }, clock);
+  store.setConnected(true);
+  store.complete(1, snapshot('Live'));
+  const pending = store.beginRequest();
+  store.dispose();
+  store.response(pending, snapshot('Late response'));
+  store.provisional(snapshot('Late edit'));
+  clock.advance(RECONCILE_MS * 2);
+  assert.deepEqual(shown, ['Live', 'Late edit'], 'no reconcile timer brings back the stream snapshot');
+});
+
 class FakeSource implements SnapshotEventSource {
   static opened: FakeSource[] = [];
   onopen: ((event: Event) => void) | null = null;

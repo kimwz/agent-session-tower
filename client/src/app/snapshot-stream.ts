@@ -76,7 +76,15 @@ export class SnapshotStore {
     }, RECONCILE_MS);
   }
 
-  dispose(): void { this.stopReconcile(); }
+  /**
+   * The page stopped listening. Requests in flight and a late provisional write can no longer
+   * start a timer; a new connection makes the store live again.
+   */
+  dispose(): void {
+    this.connected = false;
+    this.requests++;
+    this.stopReconcile();
+  }
 
   private frame(): void {
     this.frames++;
