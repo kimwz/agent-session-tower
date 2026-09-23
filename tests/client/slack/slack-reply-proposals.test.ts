@@ -11,6 +11,8 @@ const render = (replies: SlackWorkflow['replies']) => renderToStaticMarkup(creat
 test('reply candidates are numbered and each requires explicit approval of visible escaped text', () => {
   const html = render(['First <script>', 'Second', 'Third'].map((text, index) => ({ requestKey: String(index), text, status: 'proposed' })));
   assert.match(html, /<ol>/);
+  assert.match(html, /<details class="slack-reply-proposals" open="">/);
+  assert.match(html, /<summary>Slack 답변 제안 <span class="slack-reply-count">\(3\)<\/span><\/summary>/);
   assert.equal((html.match(/<li>/g) || []).length, 3);
   assert.equal((html.match(/이 내용으로 Slack에 전송/g) || []).length, 3);
   assert.match(html, /First &lt;script&gt;/);

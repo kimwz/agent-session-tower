@@ -10,6 +10,7 @@ export function SlackReplyProposals({ workflow, token = '' }: { workflow?: Slack
   const locked = useRef(new Set<string>());
   const [local, setLocal] = useState<Partial<Record<string, 'sending' | 'sent' | 'uncertain'>>>({});
   const [error, setError] = useState('');
+  const [expanded, setExpanded] = useState(true);
   if (!workflow?.replies?.length) return null;
   async function approve(requestKey: string, text: string) {
     if (!workflow || !token || locked.current.has(requestKey)) return;
@@ -26,8 +27,8 @@ export function SlackReplyProposals({ workflow, token = '' }: { workflow?: Slack
       window.dispatchEvent(new Event(SLACK_CHANGED_EVENT));
     }
   }
-  return <section className="slack-reply-proposals" aria-label={t('Slack 답변 제안')}>
-    <h3>{t('Slack 답변 제안')}</h3>
+  return <details className="slack-reply-proposals" open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}>
+    <summary>{t('Slack 답변 제안')} <span className="slack-reply-count">({workflow.replies.length})</span></summary>
     <p>{t(workflow.mode === 'conversation' ? '답변 텍스트를 클릭하면 Slack에 전송됩니다. 채팅에서 “3번 답변을 Slack에 보내주세요” 또는 수정을 요청할 수도 있습니다.' : '답변 텍스트를 클릭하면 Slack에 전송됩니다.')}</p>
     <ol>{workflow.replies.map(reply => {
       const status = reply.status === 'proposed' ? local[reply.requestKey] || reply.status : reply.status;
@@ -37,5 +38,5 @@ export function SlackReplyProposals({ workflow, token = '' }: { workflow?: Slack
       </li>;
     })}</ol>
     {error && <p role="alert">{translateMessage(error)}</p>}
-  </section>;
+  </details>;
 }

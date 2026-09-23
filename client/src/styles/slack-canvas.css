@@ -22,7 +22,11 @@
 .slack-monitor-status.connection-warning .slack-monitor-connection { color:#ecc17c; }
 
 .slack-reply-proposals { flex-shrink:0; max-height:40vh; overflow:auto; padding:12px 18px; border-bottom:1px solid #675077; background:#282036; font-size:12px; }
-.slack-reply-proposals h3 { margin:0 0 6px; font-size:13px; }
+.slack-reply-proposals > summary { cursor:pointer; font-size:13px; font-weight:600; border-radius:3px; }
+.slack-reply-proposals[open] > summary { margin-bottom:6px; }
+.slack-reply-proposals > summary:hover { color:#f0dcff; }
+.slack-reply-proposals > summary:focus-visible { outline:2px solid #dfb6fa; outline-offset:3px; }
+.slack-reply-proposals .slack-reply-count { color:#c4b3d3; font-weight:400; }
 .slack-reply-proposals > p { margin:0 0 6px; color:#c4b3d3; line-height:1.5; }
 .slack-reply-proposals ol { margin:0; padding-left:24px; }
 .slack-reply-proposals li { margin:4px 0; padding-left:4px; }
