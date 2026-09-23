@@ -83,6 +83,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
   });
   const heartbeat = setInterval(() => {
     for (const client of clients) client.heartbeat();
+    stream.resendToCompletePages(60_000);
   }, 15_000);
   heartbeat.unref();
 

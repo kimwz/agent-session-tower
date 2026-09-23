@@ -3,6 +3,7 @@ import { diffSnapshots, indexSnapshot, type SnapshotIndex, type SnapshotPatch } 
 import type { SseClient } from './sse-client.js';
 
 interface Published { sequence: number; snapshot: Snapshot; index: SnapshotIndex; frame?: string }
+interface Subscriber { patches: boolean; sentAt: number }
 
 /**
  * Numbers every published snapshot and sends each browser only real changes: nothing when the
@@ -13,9 +14,9 @@ interface Published { sequence: number; snapshot: Snapshot; index: SnapshotIndex
 export class SnapshotStream {
   private sequence = 0;
   private current?: Published;
-  private readonly subscribers = new Map<SseClient, { patches: boolean }>();
+  private readonly subscribers = new Map<SseClient, Subscriber>();
 
-  constructor(private readonly read: () => Snapshot) {}
+  constructor(private readonly read: () => Snapshot, private readonly now: () => number = Date.now) {}
 
   get size(): number { return this.subscribers.size; }
 
@@ -29,7 +30,27 @@ export class SnapshotStream {
     const current = this.current = { sequence: ++this.sequence, snapshot, index };
     const patch = changes && `id: ${current.sequence}\nevent: patch\ndata: ${JSON.stringify({ base: previous.sequence, ...changes } satisfies SnapshotPatch)}\n\n`;
     const complete = () => completeFrame(current);
-    for (const [client, subscriber] of this.subscribers) client.update(subscriber.patches ? patch : undefined, complete);
+    const sentAt = this.now();
+    for (const [client, subscriber] of this.subscribers) {
+      client.update(subscriber.patches ? patch : undefined, complete);
+      subscriber.sentAt = sentAt;
+    }
+  }
+
+  /**
+   * Pages that predate patches cannot correct an older HTTP snapshot that lands after a newer
+   * event. They once relied on frequent identical snapshots for that; now they receive the
+   * current snapshot again after `maxAgeMs` without any frame.
+   */
+  resendToCompletePages(maxAgeMs: number): void {
+    const current = this.current;
+    if (!current) return;
+    const now = this.now();
+    for (const [client, subscriber] of this.subscribers) {
+      if (subscriber.patches || now - subscriber.sentAt < maxAgeMs) continue;
+      client.update(undefined, () => completeFrame(current));
+      subscriber.sentAt = now;
+    }
   }
 
   /** Existing browsers receive pending changes first, so they share the new browser's base. */
@@ -39,7 +60,7 @@ export class SnapshotStream {
       const snapshot = this.read();
       this.current = { sequence: ++this.sequence, snapshot, index: indexSnapshot(snapshot) };
     }
-    this.subscribers.set(client, { patches });
+    this.subscribers.set(client, { patches, sentAt: this.now() });
     client.snapshot(`${prefix}${completeFrame(this.current)}`);
   }
 

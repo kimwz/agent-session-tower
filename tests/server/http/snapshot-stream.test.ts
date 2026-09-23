@@ -120,3 +120,24 @@ test('publishing without any page reads nothing, and the last page leaving drops
   stream.publish();
   assert.equal(reads, 1);
 });
+
+test('pages without patch support receive the current snapshot again after a quiet minute, patch pages do not', () => {
+  let now = 0;
+  const state: Snapshot = { sessions: [session('s1')], runs: [], providers: [], scanning: false, hostname: 'h', version: 'v', updatedAt: at };
+  const stream = new SnapshotStream(() => state, () => now);
+  const pages = [true, false].map(patches => {
+    const response = new Response();
+    const client = new SseClient(response, () => stream.detach(client));
+    stream.attach(client, patches);
+    return response;
+  });
+  const [patchPage, fullPage] = pages;
+  now = 59_999; stream.resendToCompletePages(60_000);
+  assert.equal(fullPage.frames.length, 1);
+  now = 60_000; stream.resendToCompletePages(60_000);
+  assert.equal(patchPage.frames.length, 1, 'patch pages correct themselves from the stream');
+  assert.equal(fullPage.frames.length, 2);
+  assert.deepEqual(events(fullPage).map(event => [event.event, event.id]), [['snapshot', 1], ['snapshot', 1]], 'the resent snapshot keeps its sequence');
+  now = 90_000; stream.resendToCompletePages(60_000);
+  assert.equal(fullPage.frames.length, 2, 'the minute restarts after each frame');
+});
