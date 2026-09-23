@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.13.4] - 2026-09-23
+
+### Changed
+- Tower now records who started each task: you in Tower, Slack automation, or (in coming releases) triggers and agents. Conversations that Slack content entered stay marked, including sessions created before this release when Slack records still link them. This prepares the upcoming triggers; it does not change how you work.
+- A queued instruction can be inserted into a running turn only when both were started the same way. For example, an automatic Slack result can no longer be inserted into a turn you started.
+
+### Fixed
+- Slack send approval in Tower chat is now granted only by a message you send yourself. It no longer depends on an internal request ID, so work Tower or an agent submits can never count as your approval. With an execution worker older than this release, Tower refuses such work instead of passing it on as yours.
+
 ## [1.13.3] - 2026-09-23
 
 ### Fixed
