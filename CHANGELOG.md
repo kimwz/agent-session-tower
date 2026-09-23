@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.16.0] - 2026-09-24
+
+### Added
+- **Agents can manage triggers.** When you send a message from Tower, the agent gets Tower tools for that turn: it can list sessions, runs and project folders, hand work to Auto Prompt, and create, change, run, turn off, delete or restore triggers. Changes apply immediately, appear in trigger history with the session and turn that made them, and can be undone. A retried call never applies the same change twice.
+- The tools are not given to turns forwarded to the open Codex app, to conversations that contain Slack or other outside content, or to work that triggers, Slack or agents started. The chat says so under a turn that runs without them. Trigger limits stay yours to change.
+
+### Changed
+- Slack conversation tools now use a credential that belongs to that conversation instead of the execution worker's own.
+
 ## [1.15.0] - 2026-09-24
 
 ### Added
