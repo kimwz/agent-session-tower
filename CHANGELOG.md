@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.18.0] - 2026-09-24
+
+### Changed
+- **Trigger monitor.** The Slack monitor on the canvas is now the trigger monitor: one lane with Slack mentions and trigger runs together, newest first. It appears once Slack is connected or any trigger exists, and stays where you left the Slack monitor. A run card shows whether it is waiting, working, done or failed; finished runs you have not opened are marked unread, while runs that finished before this update start out read.
+- Opening a run shows when and why it ran, the instructions it was given, the response an HTTP trigger saw, any error, and the latest messages of the session that did the work. It stays open and current even after newer runs push it down or its trigger is deleted. The lane header opens a list of recent runs next to the Slack overview, and older runs load as you ask for more.
+
 ## [1.17.0] - 2026-09-24
 
 ### Added
