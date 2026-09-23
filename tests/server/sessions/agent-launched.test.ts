@@ -105,6 +105,12 @@ test('without proof an agent-launched run stays unlinked but marked, and interac
   assert.equal(f.service.get(`codex:${DESKTOP}`)?.launchedByAgent, undefined);
   assert.equal(f.service.get(`claude:${HELPER}`)?.parentId, undefined, 'an interactive Claude window is never a child');
   assert.equal(f.service.get(`claude:${PROGRAMMATIC}`)?.parentId, `claude:${CLAUDE}`, 'claude -p started inside a turn joins it');
+  const SCHEDULED = '90000000-0000-4000-8000-000000000009';
+  await writeFile(join(f.claudeDir, `${SCHEDULED}.jsonl`), claude(SCHEDULED, 'sdk-cli'));
+  await f.service.refresh(true);
+  const scheduled = f.service.get(`claude:${SCHEDULED}`);
+  assert.equal(scheduled?.parentId, undefined, 'claude -p started by a scheduler or script stays a visible session');
+  assert.equal(scheduled?.launchedByAgent, undefined);
 });
 
 test('process ancestry names the nearest agent session and stops at the monitor worker', () => {

@@ -115,6 +115,7 @@ export class SessionService extends EventEmitter {
   private async inspect(): Promise<void> {
     this.processes = await this.readProcesses();
     this.lastProcesses = Date.now();
+    // The first observation is the proof: it is taken while the run is young and its launcher alive.
     for (const [id, parents] of this.processes.launchers ?? []) if (!this.launchers.has(id)) this.launchers.set(id, parents);
   }
 
