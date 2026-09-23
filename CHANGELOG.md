@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.20.0] - 2026-09-24
+
+### Added
+- **GitHub coordinator.** A GitHub trigger can hand each new issue to a coordinator instead of a single task. Like Slack's, it reads the issue and its comments, follows the first of your rules that applies, hands the work to a project agent, and proposes comments. Nothing is posted until you approve: click a proposal above the conversation, or say so in the chat (for example “send reply 2 to GitHub”, or ask it to post the result when the work is done). A rule with **automatic reply** posts one result comment by itself, as you set it up.
+- Proposals appear above the coordinator's conversation, reached from the trigger monitor. Before posting, Tower checks again that GitHub still acts as the trigger's account. A comment that surely did not go out can be approved again; one that may have arrived is never posted twice.
+
+### Changed
+- Agents can keep a rule's automatic reply as you set it, but cannot turn one on or change a rule that has one. When an agent restores an earlier revision or a deleted trigger, automatic replies you had turned off stay off, and the history says so.
+- With **approve myself**, the coordinator's delegated work waits for your approval in Tower; the setting a conversation began with is kept even if the trigger changes later.
+
 ## [1.19.1] - 2026-09-24
 
 ### Changed
