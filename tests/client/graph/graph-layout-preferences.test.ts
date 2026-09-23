@@ -63,12 +63,11 @@ test('moving a card outward grows the project and moving back shrinks it without
   const originalB = absolute(initial, 'b');
   const originalBounds = tightBounds(initial, projectId);
   const moved = moveManualGraphNodes(initial, [{ id: 'a', position: { x: 1503, y: 1009 } }]);
-  assert.deepEqual(moved.projects[projectId].position, initial.projects[projectId].position);
-  assert.equal(moved.agents.b, initial.agents.b);
   assert.deepEqual(absolute(moved, 'b'), originalB);
   const grownBounds = tightBounds(moved, projectId);
   assert.ok(grownBounds.width > originalBounds.width);
   assert.ok(grownBounds.height > originalBounds.height);
+  assert.deepEqual(moved.projects[projectId].position, grownBounds.position);
   const returned = moveManualGraphNodes(moved, [{ id: 'a', position: originalA }]);
   assert.deepEqual(tightBounds(returned, projectId), originalBounds);
   assert.deepEqual(absolute(returned, 'b'), originalB);
@@ -96,7 +95,6 @@ test('authoritative removal prunes only vanished sessions and empty projects; pa
   const removed = reconcileManualGraph(initial, [b]);
   assert.deepEqual(Object.keys(removed.agents), ['b']);
   assert.deepEqual(Object.keys(removed.projects), [graphProjectId('/work')]);
-  assert.equal(removed.agents.b, initial.agents.b);
   assert.deepEqual(absolute(removed, 'b'), absolute(initial, 'b'));
   const bounds = tightBounds(removed, graphProjectId('/work'));
   assert.equal(bounds.width, 282);
@@ -118,16 +116,18 @@ test('unseen history does not inflate visible project bounds; visited placements
 
   const placed = moveManualGraphNodes(visible, [{ id: 'recent-a', position: { x: 417, y: 608 } }]);
   const visitHistory = reconcileManualGraph(placed, all, true, [history[0], history[99]]);
-  assert.equal(visitHistory.agents['recent-a'], placed.agents['recent-a']);
-  assert.equal(visitHistory.agents['recent-b'], placed.agents['recent-b']);
+  assert.deepEqual(absolute(visitHistory, 'recent-a'), absolute(placed, 'recent-a'));
+  assert.deepEqual(absolute(visitHistory, 'recent-b'), absolute(placed, 'recent-b'));
   assert.equal(Object.keys(visitHistory.agents).length, 4);
   assert.equal(reconcileManualGraph(visitHistory, all, true, []), visitHistory);
-  assert.equal(reconcileManualGraph(visitHistory, all, true, recent), visitHistory);
+  const revisited = reconcileManualGraph(visitHistory, all, true, recent);
+  assert.deepEqual(Object.keys(revisited.agents).sort(), Object.keys(visitHistory.agents).sort());
+  for (const id of Object.keys(visitHistory.agents)) assert.deepEqual(absolute(revisited, id), absolute(visitHistory, id));
 
   const closed = reconcileManualGraph(visitHistory, all.filter(item => item.id !== 'recent-a'), true, [history[99]]);
   assert.equal(Object.hasOwn(closed.agents, 'recent-a'), false);
-  assert.equal(closed.agents['recent-b'], visitHistory.agents['recent-b']);
-  assert.equal(closed.agents[history[0].id], visitHistory.agents[history[0].id]);
+  assert.deepEqual(absolute(closed, 'recent-b'), absolute(visitHistory, 'recent-b'));
+  assert.deepEqual(absolute(closed, history[0].id), absolute(visitHistory, history[0].id));
 });
 
 test('new sessions fill vacant positions without colliding with manually placed cards or moving existing nodes', () => {
@@ -180,10 +180,9 @@ test('moving cards left and above the logical origin preserves world targets and
   const moved = moveManualGraphNodes(initial, [{ id: 'a', position: { x: -480, y: -249 } }]);
   assert.deepEqual(absolute(moved, 'a'), { x: -480, y: -249 });
   assert.deepEqual(absolute(moved, 'b'), sibling);
-  assert.ok(moved.agents.a.position.x < 0);
-  assert.ok(moved.agents.a.position.y < 0);
   const bounds = tightBounds(moved, projectId);
   assert.deepEqual(bounds.position, { x: -500, y: -355 });
+  assert.deepEqual(moved.projects[projectId].position, bounds.position);
   assert.equal(moveManualGraphNodes(moved, [{ id: 'a', position: absolute(moved, 'a') }]), moved, 'replayed drag-stop position is a no-op');
   assert.deepEqual(parseGraphPreferences(JSON.stringify({ version: 1, mode: 'manual', layout: moved })).layout, moved);
 });
@@ -198,7 +197,7 @@ test('the enclosing origin follows all cards away from its old left and top with
   assert.deepEqual(after.position, { x: before.position.x + 700, y: before.position.y + 500 });
   assert.equal(after.width, before.width);
   assert.equal(after.height, before.height);
-  assert.deepEqual(moved.projects[projectId].position, initial.projects[projectId].position);
+  assert.deepEqual(moved.projects[projectId].position, after.position);
   for (const target of targets) assert.deepEqual(absolute(moved, target.id), target.position);
 });
 
@@ -251,13 +250,12 @@ test('dragging a filtered visual folder translates all stored members through re
     assert.deepEqual(absolute(layout, 'a'), { x: before.a.x + delta.x, y: before.a.y + delta.y });
     assert.deepEqual(absolute(layout, 'hidden'), { x: before.hidden.x + delta.x, y: before.hidden.y + delta.y });
     assert.deepEqual(absolute(layout, 'other'), before.other);
-    assert.equal(layout.agents, shifted.agents);
     assert.equal(layout.host, shifted.host);
     assert.equal(moveManualGraphNodes(layout, [{ id: projectId, position: target }], visible), layout);
   }
 });
 
-test('old oversized saved boxes normalize to content without changing stored or world positions', () => {
+test('old oversized saved boxes normalize to content without changing world positions', () => {
   const projectId = graphProjectId('/work');
   const stored = { version: 1, mode: 'manual', layout: {
     projects: { [projectId]: { position: { x: -100, y: 400 }, width: 9999, height: 7777 } },
@@ -265,12 +263,11 @@ test('old oversized saved boxes normalize to content without changing stored or 
     host: { x: 128, y: 0 },
   } };
   const parsed = parseGraphPreferences(JSON.stringify(stored));
-  assert.deepEqual(parsed.layout.agents, stored.layout.agents);
-  assert.deepEqual(parsed.layout.projects[projectId].position, stored.layout.projects[projectId].position);
   assert.deepEqual(absolute(parsed.layout, 'a'), { x: 620, y: 1300 });
   assert.deepEqual(absolute(parsed.layout, 'b'), { x: 890, y: 1800 });
   const bounds = tightBounds(parsed.layout, projectId);
   assert.deepEqual(bounds, { position: { x: 600, y: 1194 }, width: 552, height: 828 });
+  assert.deepEqual(parsed.layout.projects[projectId].position, bounds.position);
   assert.equal(parsed.layout.projects[projectId].width, bounds.width);
   assert.equal(parsed.layout.projects[projectId].height, bounds.height);
   assert.deepEqual(parseGraphPreferences(JSON.stringify(parsed)), parsed);
@@ -499,6 +496,48 @@ test('no-op moves preserve identity and moving the host is independent from all 
   assert.deepEqual(moved.host, { x: -900, y: 12 });
 });
 
+test('a folder whose cards age out of the view stays where it was dragged and new sessions stack from its top', () => {
+  const projectId = graphProjectId('/work');
+  const [a, b] = [session('a'), session('b')];
+  let layout = reconcileManualGraph(defaultGraphPreferences().layout, [a, b]);
+  layout = moveManualGraphNodes(layout, [{ id: projectId, position: { x: 900, y: 400 } }], new Set([a.id, b.id]));
+  layout = reconcileManualGraph(layout, [a, b], true, [a]);
+  assert.deepEqual(manualProjectBounds(layout, projectId, new Set([a.id]))!.position, { x: 900, y: 400 });
+  layout = reconcileManualGraph(layout, [a, b], true, []);
+  assert.deepEqual(manualProjectBounds(layout, projectId, new Set())!.position, { x: 900, y: 400 });
+  const moved = moveManualGraphNodes(layout, [{ id: projectId, position: { x: -300, y: 1200 } }], new Set());
+  assert.deepEqual(manualProjectBounds(moved, projectId, new Set())!.position, { x: -300, y: 1200 });
+  assert.deepEqual(manualProjectBounds(reconcileManualGraph(moved, [b], true, []), projectId, new Set())!.position, { x: -300, y: 1200 });
+
+  const fresh = session('fresh', { lastRequestAt: '2026-09-16T00:00:00.000Z' });
+  const next = session('next', { lastRequestAt: '2026-09-16T01:00:00.000Z' });
+  const first = reconcileManualGraph(moved, [a, b, fresh], true, [fresh]);
+  assert.deepEqual(absolute(first, fresh.id), { x: -280, y: 1306 });
+  assert.deepEqual(manualProjectBounds(first, projectId, new Set([fresh.id]))!.position, { x: -300, y: 1200 });
+  assert.equal(Object.hasOwn(first.agents, a.id), false, 'the aged-out card gives its slot to the newer session');
+  const second = reconcileManualGraph(first, [a, b, fresh, next], true, [fresh, next]);
+  assert.deepEqual(absolute(second, next.id), { x: -280, y: 1534 });
+  assert.deepEqual(absolute(second, fresh.id), absolute(first, fresh.id));
+  const returned = reconcileManualGraph(second, [a, b, fresh, next], true, [a, b, fresh, next]);
+  for (const id of [a.id, b.id]) assert.ok(absolute(returned, id).y > absolute(second, next.id).y, 'returning cards are placed below the folder');
+});
+
+test('older saves keep folders without visible cards where they were drawn and migrate only once', () => {
+  const projectId = graphProjectId('/work');
+  const stored = { version: 1, mode: 'manual', layout: {
+    projects: { [projectId]: { position: { x: 50, y: 60 }, width: 282, height: 328 } },
+    agents: { a: { projectId, position: { x: 700, y: 900 } }, b: { projectId, position: { x: 400, y: 1300 } } },
+    host: { x: 128, y: 0 },
+  } };
+  const parsed = parseGraphPreferences(JSON.stringify(stored));
+  assert.deepEqual(manualProjectBounds(parsed.layout, projectId, new Set())!.position, { x: 430, y: 854 });
+  assert.deepEqual(absolute(parsed.layout, 'a'), { x: 750, y: 960 });
+  assert.deepEqual(absolute(parsed.layout, 'b'), { x: 450, y: 1360 });
+  const narrowed = reconcileManualGraph(parsed.layout, [session('a'), session('b')], true, [session('a')]);
+  const reparsed = parseGraphPreferences(JSON.stringify({ ...parsed, layout: narrowed }));
+  assert.deepEqual(reparsed.layout, narrowed);
+});
+
 const workPin: ProjectGroup = { cwd: '/work', title: '진행할 작업', pinned: true };
 
 test('a pin seeds a finite empty frame and keeps its dragged position after reload and layout mode changes', () => {
@@ -516,12 +555,12 @@ test('a pin seeds a finite empty frame and keeps its dragged position after relo
   assert.equal(reconcileManualGraph(restored.layout, [], true, [], [{ ...workPin, title: '새 이름' }]), restored.layout);
 });
 
-test('closing the final moved card preserves the pin frame instead of jumping to its old logical origin', () => {
+test('closing the final moved card preserves the pin frame because the origin follows the visible frame', () => {
   const projectId = graphProjectId(workPin.cwd);
   const initial = reconcileManualGraph(defaultGraphPreferences().layout, [session('a')], true, [session('a')], [workPin]);
   const moved = moveManualGraphNodes(initial, [{ id: 'a', position: { x: -834, y: -572 } }]);
   const before = manualProjectBounds(moved, projectId)!;
-  assert.notDeepEqual(before.position, moved.projects[projectId].position);
+  assert.deepEqual(before.position, moved.projects[projectId].position);
   const closed = reconcileManualGraph(moved, [], true, [], [workPin]);
   assert.deepEqual(closed.agents, {});
   assert.deepEqual(manualProjectBounds(closed, projectId), before);

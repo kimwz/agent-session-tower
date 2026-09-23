@@ -1,6 +1,7 @@
 import type { ProjectGroup, Session } from '../../../shared/types';
 import { graphProjectId, graphProjectKey, graphSessionGroups } from './graph-layout';
 import { includePinnedProjectGroups } from '../project-groups/project-groups';
+import { sessionActivityAt } from '../../../shared/session-activity';
 
 // Storage keys keep the project's first name so saved user state survives the rename (shared/app-identity.ts LEGACY_APP_NAME).
 export const GRAPH_PREFERENCES_KEY = 'agent-monitor:graph-layout:v1';
@@ -18,6 +19,8 @@ export type ManualGraphLayout = {
   projects: Record<string, ManualProject>;
   agents: Record<string, ManualAgent>;
   host: GraphPosition;
+  /** Logical origins sit on the last visible frame; older saves are migrated once on load. */
+  anchoredFrames?: true;
 };
 export type GraphPreferences = { version: 1; mode: GraphLayoutMode; layout: ManualGraphLayout };
 export type ManualGraphOptions = {
@@ -46,7 +49,7 @@ function projectBounds(projectId: string, project: ManualProject, agents: Record
     right = Math.max(right, agent.position.x + AGENT_WIDTH);
     bottom = Math.max(bottom, agent.position.y + AGENT_HEIGHT);
   }
-  if (left === Infinity) return { position: visibleIds ? projectBounds(projectId, project, agents).position : project.position, width: Math.max(AGENT_WIDTH + INSET * 2, minimumWidth), height: FIRST_ROW + AGENT_HEIGHT + INSET };
+  if (left === Infinity) return { position: project.position, width: Math.max(AGENT_WIDTH + INSET * 2, minimumWidth), height: FIRST_ROW + AGENT_HEIGHT + INSET };
   return {
     position: { x: project.position.x + left - INSET, y: project.position.y + top - FIRST_ROW },
     width: Math.max(right - left + INSET * 2, minimumWidth),
@@ -58,6 +61,35 @@ function projectBounds(projectId: string, project: ManualProject, agents: Record
 export function manualProjectBounds(layout: ManualGraphLayout, projectId: string, visibleIds?: ReadonlySet<string>, minimumProjectWidths?: ReadonlyMap<string, number>): ManualProject | undefined {
   if (!Object.hasOwn(layout.projects, projectId)) return undefined;
   return projectBounds(projectId, layout.projects[projectId], layout.agents, visibleIds, minimumProjectWidths?.get(projectId));
+}
+
+/**
+ * Move each logical origin onto its visible frame without moving any card, so
+ * a folder whose cards all leave the view stays where it was last seen.
+ */
+function anchorVisibleFrames(layout: ManualGraphLayout, visibleIds?: ReadonlySet<string>): ManualGraphLayout {
+  const corners = new Map<string, GraphPosition>();
+  for (const [id, agent] of Object.entries(layout.agents)) {
+    if (visibleIds && !visibleIds.has(id)) continue;
+    const corner = corners.get(agent.projectId);
+    corners.set(agent.projectId, corner ? { x: Math.min(corner.x, agent.position.x), y: Math.min(corner.y, agent.position.y) } : agent.position);
+  }
+  const shifts = new Map<string, GraphPosition>();
+  let projects = layout.projects;
+  for (const [id, corner] of corners) {
+    const shift = { x: corner.x - INSET, y: corner.y - FIRST_ROW };
+    // Sub-pixel remainders from float drags are invisible; ignoring them keeps reconciliation idempotent.
+    if (Math.abs(shift.x) < 0.01 && Math.abs(shift.y) < 0.01) continue;
+    shifts.set(id, shift);
+    const project = projects[id];
+    projects = { ...projects, [id]: { ...project, position: { x: project.position.x + shift.x, y: project.position.y + shift.y } } };
+  }
+  if (!shifts.size) return layout;
+  const agents = Object.fromEntries(Object.entries(layout.agents).map(([id, agent]) => {
+    const shift = shifts.get(agent.projectId);
+    return [id, shift ? { ...agent, position: { x: agent.position.x - shift.x, y: agent.position.y - shift.y } } : agent];
+  }));
+  return { ...layout, projects, agents };
 }
 
 function normalizeProjectSizes(layout: ManualGraphLayout): ManualGraphLayout {
@@ -72,7 +104,7 @@ function normalizeProjectSizes(layout: ManualGraphLayout): ManualGraphLayout {
 }
 
 export function defaultGraphPreferences(): GraphPreferences {
-  return { version: 1, mode: 'auto', layout: { projects: {}, agents: {}, host: { x: 128, y: 0 } } };
+  return { version: 1, mode: 'auto', layout: { projects: {}, agents: {}, host: { x: 128, y: 0 }, anchoredFrames: true } };
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -114,7 +146,11 @@ export function parseGraphPreferences(value: string | null): GraphPreferences {
       if (!record(item) || typeof item.projectId !== 'string' || !Object.hasOwn(projectMap, item.projectId) || !position(item.position)) continue;
       agents.push([id, { projectId: item.projectId, position: { ...item.position } }]);
     }
-    return { version: 1, mode: parsed.mode === 'manual' ? 'manual' : 'auto', layout: normalizeProjectSizes({ projects: projectMap, agents: Object.fromEntries(agents), host: position(layout.host) ? { ...layout.host } : fallback.layout.host }) };
+    let restored: ManualGraphLayout = { projects: projectMap, agents: Object.fromEntries(agents), host: position(layout.host) ? { ...layout.host } : fallback.layout.host, anchoredFrames: true };
+    // Older saves drew a folder without visible cards around all of its stored
+    // cards. Anchor those origins there once so the upgrade moves nothing.
+    if (layout.anchoredFrames !== true) restored = anchorVisibleFrames(restored);
+    return { version: 1, mode: parsed.mode === 'manual' ? 'manual' : 'auto', layout: normalizeProjectSizes(restored) };
   } catch { return fallback; }
 }
 
@@ -191,14 +227,14 @@ function reconcileHeaderWidths(projects: Record<string, ManualProject>, agents: 
   return next;
 }
 
-function vacantAgentPosition(projectId: string, projects: Record<string, ManualProject>, agents: Record<string, ManualAgent>, preferred: GraphPosition): GraphPosition {
+function absoluteAgent(projects: Record<string, ManualProject>, agent: ManualAgent): GraphPosition {
+  return { x: projects[agent.projectId].position.x + agent.position.x, y: projects[agent.projectId].position.y + agent.position.y };
+}
+
+function vacantAgentPosition(projectId: string, projects: Record<string, ManualProject>, agents: Record<string, ManualAgent>, preferred: GraphPosition, yields: (id: string) => boolean): GraphPosition {
   const project = projects[projectId];
-  const occupied = Object.values(agents).map(agent => ({
-    x: projects[agent.projectId].position.x + agent.position.x,
-    y: projects[agent.projectId].position.y + agent.position.y,
-  }));
-  // Expand around the visible insertion point instead of walking through old
-  // rows. Hidden cards still block collisions without pulling the origin away.
+  const occupied = Object.entries(agents).filter(([id]) => !yields(id)).map(([, agent]) => absoluteAgent(projects, agent));
+  // Expand around the visible insertion point instead of walking through old rows.
   for (let distance = 0; ; distance++) {
     for (let row = distance; row >= 0; row--) {
       const column = distance - row;
@@ -216,6 +252,7 @@ export function reconcileManualGraph(layout: ManualGraphLayout, allSessions: Ses
   let projects = layout.projects;
   let agents = layout.agents;
   const liveAgents = new Set(allSessions.map(session => session.id));
+  const activity = new Map(allSessions.map(session => [session.id, sessionActivityAt(session)]));
   const liveProjects = new Set([...allSessions.map(session => graphProjectId(graphProjectKey(session))), ...pinnedGroups.map(group => graphProjectId(group.cwd))]);
   if (prune && Object.keys(agents).some(id => !liveAgents.has(id))) agents = Object.fromEntries(Object.entries(agents).filter(([id]) => liveAgents.has(id)));
   if (prune && Object.keys(projects).some(id => !liveProjects.has(id))) {
@@ -235,16 +272,6 @@ export function reconcileManualGraph(layout: ManualGraphLayout, allSessions: Ses
     const prior = Object.hasOwn(agents, session.id) ? agents[session.id] : undefined;
     if (prior && prior.projectId !== graphProjectId(graphProjectKey(session))) {
       agents = Object.fromEntries(Object.entries(agents).filter(([id]) => id !== session.id));
-    }
-  }
-  // When the last card disappears, carry its former frame origin into the
-  // empty pin. No surviving relative positions need to be reanchored.
-  if (prune) for (const group of pinnedGroups) {
-    const id = graphProjectId(group.cwd);
-    if (!Object.hasOwn(projects, id) || Object.values(agents).some(agent => agent.projectId === id)) continue;
-    const previous = projectBounds(id, projects[id], layout.agents).position;
-    if (previous.x !== projects[id].position.x || previous.y !== projects[id].position.y) {
-      projects = { ...projects, [id]: { ...projects[id], position: previous } };
     }
   }
   const groups = includePinnedProjectGroups(graphSessionGroups(seedSessions.filter(session => liveAgents.has(session.id)), Infinity, null), pinnedGroups);
@@ -296,8 +323,18 @@ export function reconcileManualGraph(layout: ManualGraphLayout, allSessions: Ses
     let added = 0;
     for (const session of members) {
       if (Object.hasOwn(agents, session.id)) continue;
+      // Cards that left the view for being older than the new session, such as
+      // those past the recent-activity cutoff, give up their slot instead of
+      // pushing it away from the folder. They are placed again below their
+      // folder when they return. Newer hidden cards keep blocking.
+      const since = Date.parse(sessionActivityAt(session));
+      const yields = (id: string) => !visibleIds.has(id) && Date.parse(activity.get(id) || '') < since;
       const preferred = { x: origin.x + added % columns * COLUMN_STEP, y: origin.y + Math.floor(added / columns) * ROW_STEP };
-      const agentPosition = vacantAgentPosition(projectId, projects, agents, preferred);
+      const agentPosition = vacantAgentPosition(projectId, projects, agents, preferred, yields);
+      const placed = { x: project.position.x + agentPosition.x, y: project.position.y + agentPosition.y };
+      if (Object.entries(agents).some(([id, agent]) => yields(id) && overlaps(placed, absoluteAgent(projects, agent)))) {
+        agents = Object.fromEntries(Object.entries(agents).filter(([id, agent]) => !yields(id) || !overlaps(placed, absoluteAgent(projects, agent))));
+      }
       agents = { ...agents, [session.id]: { projectId, position: agentPosition } };
       added++;
     }
@@ -306,7 +343,7 @@ export function reconcileManualGraph(layout: ManualGraphLayout, allSessions: Ses
       projects = { ...projects, [projectId]: { ...projects[projectId], appliedHeaderWidth } };
     }
   }
-  return normalizeProjectSizes(projects === layout.projects && agents === layout.agents ? layout : { ...layout, projects, agents });
+  return normalizeProjectSizes(anchorVisibleFrames(projects === layout.projects && agents === layout.agents ? layout : { ...layout, projects, agents }, visibleIds));
 }
 
 /** React Flow moves use world coordinates, including the visible folder origin. */
@@ -345,7 +382,7 @@ export function moveManualGraphNodes(layout: ManualGraphLayout, changes: { id: s
       projects = { ...projects, [id]: { ...projects[id], appliedHeaderWidth: width } };
     }
   }
-  return normalizeProjectSizes(projects === layout.projects && agents === layout.agents && host === layout.host ? layout : { ...layout, projects, agents, host });
+  return normalizeProjectSizes(anchorVisibleFrames(projects === layout.projects && agents === layout.agents && host === layout.host ? layout : { ...layout, projects, agents, host }, visibleIds));
 }
 
 export function manualSessionGroups(sessions: Session[]): [string, Session[]][] {

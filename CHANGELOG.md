@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.13.3] - 2026-09-23
+
+### Fixed
+- In manual layout, a folder stays where you dragged it even when none of its sessions are shown. Previously, once its cards left the view (for example past the 24-hour cutoff), the folder was drawn around those hidden cards and moved whenever one of them was removed. It now stays where it was last shown, and existing saved layouts keep their current positions.
+- New sessions in a manually arranged folder now appear one below another, starting at the top of an empty folder. Hidden cards from older sessions used to take those slots and pushed new cards far away. An older hidden card now gives up its slot and is placed below its folder when it is shown again. Hidden cards of newer sessions, such as recent sessions hidden by a search, still keep their slots.
+
 ## [1.13.2] - 2026-09-23
 
 ### Fixed
