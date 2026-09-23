@@ -3,7 +3,7 @@ import { open, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { ChatMessage, Provider, Session } from '../../shared/types.js';
 import type { ProcessSnapshot } from './processes.js';
-import { claudeContextUsage, claudeInputTokens, contextCapacity as contextWindow, contextTokens as tokenCount } from './context.js';
+import { claudeContextUsage, claudeInputTokens, contextCapacity as contextWindow, contextTokens as tokenCount, modelContextWindow } from './context.js';
 
 // Reading a session means replaying an append-only JSONL rollout written by
 // someone else's CLI: every record is untrusted, partial and format-specific.
@@ -196,7 +196,7 @@ function consumeContext(session: Session, row: Json, timestamp: string): void {
     session.contextUsage = claudeContextUsage(session.model, usedTokens, timestamp, session.contextUsage);
   }
   if (row.type === 'result' && session.model && session.contextUsage) {
-    const capacity = row.modelUsage?.[session.model]?.contextWindow;
+    const capacity = modelContextWindow(row.modelUsage, session.model);
     if (contextWindow(capacity)) {
       const { capacitySource: _estimated, ...usage } = session.contextUsage;
       session.contextUsage = { ...usage, contextWindow: capacity,

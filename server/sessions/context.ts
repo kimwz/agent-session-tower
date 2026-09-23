@@ -13,7 +13,20 @@ const CLAUDE_DEFAULT_WINDOWS: Readonly<Record<string, number>> = {
   'claude-opus-5': 1_000_000,
   'claude-fable-5': 1_000_000,
   'claude-fable-5-1': 1_000_000,
+  // Observed in native result modelUsage for sessions launched with `--model opus`.
+  'claude-opus-5-5': 1_000_000,
 };
+
+/**
+ * Native results key usage by the configured model, which can carry a context
+ * variant such as `claude-opus-5-5[1m]`, while messages report the bare model.
+ */
+export function modelContextWindow(modelUsage: unknown, model: string): unknown {
+  if (!object(modelUsage)) return;
+  if (Object.hasOwn(modelUsage, model)) return modelUsage[model]?.contextWindow;
+  const variants = Object.keys(modelUsage).filter(key => key.startsWith(`${model}[`) && key.endsWith(']'));
+  return variants.length === 1 ? modelUsage[variants[0]]?.contextWindow : undefined;
+}
 
 export function claudeInputTokens(usage: unknown): number | undefined {
   if (!object(usage) || !contextTokens(usage.input_tokens)) return;

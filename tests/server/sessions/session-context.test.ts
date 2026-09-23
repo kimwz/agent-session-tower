@@ -98,6 +98,14 @@ test('copied Codex parent usage does not become a child context observation', as
   assert.equal(f.service.get(`codex:${child}`)?.contextUsage?.usedTokens, 100);
 });
 
+test('native Claude result capacity reported under a [1m] variant key applies to the bare message model', async t => {
+  const f = await fixture(t);
+  await writeFile(f.claude, lines(claudeUsage(10, 20, 30), { type: 'result', timestamp, modelUsage: { 'claude-opus-5[1m]': { contextWindow: 1_000_000 } } }));
+  await f.service.refresh();
+  assert.equal(f.service.get(`claude:${id}`)?.contextUsage?.usedPercent, 0.006);
+  assert.equal(f.service.get(`claude:${id}`)?.contextUsage?.capacitySource, undefined);
+});
+
 test('explicit native Claude result capacity is model-specific and is invalidated when the model changes', async t => {
   const f = await fixture(t);
   await writeFile(f.claude, lines(claudeUsage(10, 20, 30), { type: 'result', timestamp, modelUsage: { 'claude-opus-5': { contextWindow: 1_000_000 } } }));
@@ -115,7 +123,7 @@ test('explicit native Claude result capacity is model-specific and is invalidate
 
 test('only exact verified Claude model IDs receive default estimates, including observed zero', async t => {
   const f = await fixture(t);
-  for (const model of ['claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-5', 'claude-fable-5', 'claude-fable-5-1']) {
+  for (const model of ['claude-sonnet-5', 'claude-opus-4-8', 'claude-opus-5', 'claude-fable-5', 'claude-fable-5-1', 'claude-opus-5-5']) {
     await writeFile(f.claude, lines(claudeUsage(0, 0, 0, model)));
     await f.service.refresh();
     assert.deepEqual(f.service.get(`claude:${id}`)?.contextUsage, {

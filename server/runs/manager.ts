@@ -14,7 +14,7 @@ import { requestedApprovalsReviewer } from '../providers/approvals.js';
 import { SteeringError } from './steering.js';
 import { ClaudeControl } from './claude-control.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioRun } from './codex-stdio.js';
-import { claudeInputTokens, contextCapacity, nativeContextObservation, withNativeContext } from '../sessions/context.js';
+import { claudeInputTokens, contextCapacity, modelContextWindow, nativeContextObservation, withNativeContext } from '../sessions/context.js';
 import { defaultStateDir } from '../state-dir.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { findExecutable, providerDirectories, PROVIDERS } from '../providers/discovery.js';
@@ -748,7 +748,7 @@ export class RunManager extends EventEmitter {
         }
         messageHasPartial = false;
       } else if (event.type === 'result') {
-        const capacity = contextInput && mainContext ? event.modelUsage?.[contextInput.model]?.contextWindow : undefined;
+        const capacity = contextInput && mainContext ? modelContextWindow(event.modelUsage, contextInput.model) : undefined;
         if (contextInput && contextCapacity(capacity) && sawSessionId && !streamError) {
           run.contextUsage = { ...contextInput, contextWindow: capacity, usedPercent: contextInput.usedTokens / capacity * 100,
             updatedAt: new Date().toISOString() };

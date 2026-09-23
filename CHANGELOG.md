@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.12.3] - 2026-09-23
+
+### Fixed
+- Show the context usage ring for Claude sessions on 1M-context model variants such as `opus[1m]`. Claude Code reports their capacity under a key like `claude-opus-5-5[1m]`, which Tower did not match to the model in the transcript, so those sessions showed an empty ring.
+- Estimate context usage for `claude-opus-5-5` from its 1,000,000-token default while a turn is still running.
+
 ## [1.12.2] - 2026-09-23
 
 ### Fixed

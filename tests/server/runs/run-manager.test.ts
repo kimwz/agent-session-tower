@@ -267,6 +267,14 @@ test('Claude retains exact root context, persists it, and enriches only the matc
   }
 });
 
+test('Claude reads capacity reported under a context-variant model key such as [1m]', async t => {
+  const variant = { ...contextResult, modelUsage: { 'claude-opus-5[1m]': { contextWindow: 1_000_000 }, 'claude-haiku-other': { contextWindow: 100_000 } } };
+  const f = await fixture({ provider: 'claude', contextFrames: [contextAssistant, variant] }); t.after(f.cleanup);
+  const result = await finished(f.manager, (await f.manager.enqueue(f.session.id, 'Variant key')).id);
+  assert.equal(result.contextUsage?.model, 'claude-opus-5');
+  assert.equal(result.contextUsage?.contextWindow, 1_000_000);
+});
+
 test('Claude does not persist subagent, unconfirmed, compacted, mismatched-model or invalid-capacity context', async t => {
   const cases = [
     { mode: 'mismatch', frames: [contextAssistant, contextResult] },
@@ -279,6 +287,8 @@ test('Claude does not persist subagent, unconfirmed, compacted, mismatched-model
     { frames: [contextAssistant, { ...contextAssistant, message: { model: 'claude-fable-5', content: [] } }, contextResult] },
     { frames: [contextAssistant, { ...contextAssistant, message: { content: [], usage: { input_tokens: 99 } } }, contextResult] },
     { frames: [contextAssistant, { ...contextResult, modelUsage: { 'claude-other': { contextWindow: 200_000 } } }] },
+    { frames: [contextAssistant, { ...contextResult, modelUsage: { 'claude-opus-5[1m]': { contextWindow: 1_000_000 }, 'claude-opus-5[200k]': { contextWindow: 200_000 } } }] },
+    { frames: [contextAssistant, { ...contextResult, modelUsage: { 'claude-opus-5-5[1m]': { contextWindow: 1_000_000 } } }] },
     { frames: [contextAssistant, { ...contextResult, modelUsage: { 'claude-opus-5': { contextWindow: '200000' } } }] },
     { frames: [contextAssistant, { ...contextResult, parent_tool_use_id: 'child-tool' }] },
   ];
