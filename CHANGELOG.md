@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.17.0] - 2026-09-24
+
+### Added
+- **HTTP triggers.** A trigger can now check a URL on a schedule with GET or POST (headers, body and a timeout) and start a run when the response changes, when a condition becomes true (a value picked with a JSON Pointer equals, contains, exceeds, and so on), or on every successful response. The first response only sets the starting point. The run starts in a new session and gets the response as reference material, never as instructions; Tower tools are not attached. **Test request** in the editor shows the response and whether the condition holds, without recording anything.
+- **Header secrets.** API keys and similar header values are saved in the trigger panel's settings for one address (origin). They are sent only to that address, only by triggers you gave them to, and a response that echoes one back has it removed. Agents never see the values, cannot give a secret to a trigger, and cannot change a request that sends one.
+- HTTP triggers can call this computer or a private network only at addresses you list in settings, and never Tower itself or cloud metadata addresses. Redirects are checked again, and requests ignore proxy settings in the environment.
+
+### Changed
+- A POST that may have reached the server is never sent again for the same time, even after a restart, and an agent's retry of a manual run does not resend it. Failing requests wait longer each time, up to half an hour, and the trigger shows the error. All HTTP triggers together send at most 60 requests a minute.
+
 ## [1.16.0] - 2026-09-24
 
 ### Added
