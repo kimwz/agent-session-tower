@@ -728,3 +728,44 @@ test('rules without autoReply never grant sending, and owner cancellation revoke
   await assert.rejects(g.manager.tool(id, 'slack_react', { name: 'eyes', action: 'add' }), /No reply authorization/);
   await assert.rejects(g.manager.setRules([{ ...rule, autoReply: 'yes' as unknown as boolean }]), /올바르지/);
 });
+test('while the worker hands off, new mentions are saved but only the successor starts them', async t => {
+  const f = await fixture(t);
+  f.manager.hold();
+  await f.manager.ingest(mention);
+  await f.manager.tick();
+  assert.equal(f.manager.list()[0].status, 'received');
+  assert.equal(f.manager.inFlight(), false, 'an unstarted held mention does not keep the old worker busy');
+  assert.equal(f.manager.hasPending(), true, 'it is still accepted work');
+  assert.deepEqual(f.counts(), { sends: 0, submissions: 0, fetches: 0 });
+  await f.manager.flush();
+  const successor = new SlackAutomationManager(f.options); await successor.start(); await successor.tick();
+  assert.equal(successor.list()[0].status, 'running');
+  assert.equal(f.counts().submissions, 1);
+});
+test('holding intake never abandons a mention whose thread is already being read', async t => {
+  const f = await fixture(t);
+  let release!: () => void;
+  let started = false;
+  const reading = new Promise<void>(resolve => { release = resolve; });
+  const fetch = f.options.fetchThread;
+  f.options.fetchThread = async mention => { started = true; await reading; return fetch(mention); };
+  await f.manager.ingest(mention);
+  const tick = f.manager.tick();
+  while (!started) await new Promise(resolve => setImmediate(resolve));
+  f.manager.hold();
+  assert.equal(f.manager.inFlight(), true, 'the started read keeps the worker from handing off');
+  release();
+  await tick;
+  assert.equal(f.manager.list()[0].status, 'running');
+  assert.equal(f.counts().submissions, 1);
+});
+test('a handoff flush reports a state file that cannot be saved instead of hiding it', async t => {
+  const f = await fixture(t);
+  await f.manager.ingest(mention);
+  await rm(join(f.directory, 'slack-automation.json'), { force: true });
+  await mkdir(join(f.directory, 'slack-automation.json'));
+  await assert.rejects(f.manager.flush());
+  await rm(join(f.directory, 'slack-automation.json'), { recursive: true, force: true });
+  await f.manager.flush();
+  assert.equal(JSON.parse(await readFile(join(f.directory, 'slack-automation.json'), 'utf8')).workflows.length, 1);
+});

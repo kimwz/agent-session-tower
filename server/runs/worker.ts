@@ -20,6 +20,7 @@ import { openCodexBridgeRun } from './codex-bridge.js';
 import { RunManager, type RunAdmission } from './manager.js';
 import { parseRunOrigin } from './origin.js';
 import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
+import { parseSuccessor, spawnSuccessor, writeHandoff, type SuccessorCommand } from './handoff.js';
 import { MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
 const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory']);
@@ -35,7 +36,23 @@ export interface RunnerHostOptions {
   onIdle?: () => void | Promise<void>;
   /** Startup owns this lock before loading any engine state. */
   releaseStateLock?: () => Promise<void>;
+  /** Work accepted outside runs, such as a Slack mention being processed, that must finish before a handoff. */
+  inFlight?: () => boolean;
+  /** Stops automatic intake from starting new work when a handoff has waited too long for a quiet moment. */
+  holdIntake?: () => void;
+  /** Pauses automatic intake and saves pending writes at a quiet moment. Nothing is cancelled or closed. */
+  quiesce?: () => Promise<void>;
+  /** Undoes quiesce when the handoff cannot be recorded, so the worker stays fully in service. */
+  resume?: () => void;
+  startSuccessor?: (command: SuccessorCommand, nonce: string) => void;
+  onHandedOff?: () => void;
+  handoffHoldMs?: number;
+  /** The proof a predecessor gave this worker when it started it. */
+  handoffNonce?: string;
 }
+
+/** Only these read state; every other request is refused while the worker hands off, never half-accepted. */
+const READS_DURING_HANDOFF = new Set(['snapshot', 'sessionHistory', 'attachment', 'slackOverview']);
 
 /** Hosts an already-started engine, including one adopted during an in-place upgrade. */
 export async function startRunnerHost(options: RunnerHostOptions) {
@@ -52,18 +69,28 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   let lastRequest = Date.now();
   let pending = 0;
   let closing = false;
+  let handoff: { successor: SuccessorCommand; requestedAt: number; held?: boolean; retryAt?: number } | undefined;
+  let draining = false;
   const changed = () => { revision++; };
   const snapshot = (): RunnerSnapshot => {
     const sessions = options.runs.sessionList(options.sessions.list());
     return { instance, revision: ++revision, runs: options.runs.list(), sessions,
       nativeIds: Object.fromEntries(sessions.map(session => [session.id, options.runs.nativeSessionId(session.id)])),
       settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [], version: APP_VERSION,
-      capabilities: [...RUNNER_CAPABILITIES] };
+      capabilities: [...RUNNER_CAPABILITIES], ...(options.handoffNonce ? { handoff: options.handoffNonce } : {}) };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
+    if (draining && !READS_DURING_HANDOFF.has(method)) {
+      throw Object.assign(new Error('Tower is replacing its execution worker right now. Nothing was submitted; retry in a few seconds.'), { statusCode: 503, disposition: 'handoff' });
+    }
     switch (method) {
       case 'snapshot': return undefined;
+      case 'requestHandoff': {
+        // The latest web build wins; the worker leaves only at a moment when nothing is running.
+        handoff = { successor: parseSuccessor(args[0], paths.stateDir), requestedAt: handoff?.requestedAt ?? Date.now(), held: handoff?.held, retryAt: handoff?.retryAt };
+        return { accepted: true };
+      }
       case 'create': return options.runs.create(args[0] as CreateSessionRequest, admission(args[1]));
       case 'enqueue': {
         const admitted = admission(args[3]);
@@ -137,14 +164,55 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   options.sessions.on('change', changed);
   options.autoPrompts?.on('change', changed);
   let idleTimer: ReturnType<typeof setInterval> | undefined;
+  let handoffTimer: ReturnType<typeof setInterval> | undefined;
+  // Status alone is not enough: a cancelled turn may still be closing its provider process.
+  const quiet = () => !pending && !options.runs.busy() && !options.autoPrompts?.busy()
+    && !options.runs.list().some(run => run.status === 'running' || run.status === 'queued')
+    && !options.autoPrompts?.list().some(job => !['completed', 'error', 'cancelled'].includes(job.status))
+    && !options.terminals?.hasActive()
+    && !options.inFlight?.();
+  const handOff = async () => {
+    if (!handoff || closing || draining || (handoff.retryAt && Date.now() < handoff.retryAt)) return;
+    if (!handoff.held && Date.now() - handoff.requestedAt >= (options.handoffHoldMs ?? 6 * 60 * 60 * 1000)) { handoff.held = true; options.holdIntake?.(); }
+    if (!quiet()) return;
+    // Refuse new admissions first, then confirm nothing slipped in before this synchronous point.
+    draining = true;
+    if (!quiet()) { draining = false; return; }
+    const successor = handoff.successor;
+    const nonce = randomBytes(16).toString('hex');
+    let quiesced = false;
+    try {
+      // Mark first: a quiesce that fails halfway has still paused something and must be undone.
+      quiesced = true;
+      await options.quiesce?.();
+      // Work that slipped in while writes were saved keeps this worker in service.
+      if (!quiet()) throw new Error('Work started while the worker was pausing.');
+      await writeHandoff(paths.runtime, { previous: instance, successor: nonce, version: APP_VERSION, clean: true, at: new Date().toISOString() });
+    } catch (error) {
+      if (quiesced) options.resume?.();
+      draining = false;
+      if (!(error instanceof Error && error.message.startsWith('Work started'))) {
+        // A handoff that cannot be recorded is retried later, not every second, so intake is not paused repeatedly.
+        handoff.retryAt = Date.now() + 60_000;
+        console.error('Execution worker handoff failed; staying in service:', error);
+      }
+      return;
+    }
+    // Socket and credential are removed while this worker still holds the lock, so a successor's are never touched.
+    await close();
+    (options.startSuccessor ?? spawnSuccessor)(successor, nonce);
+    options.onHandedOff?.();
+  };
   const close = async (idle = false) => {
     if (closing) return;
     closing = true;
     if (idleTimer) clearInterval(idleTimer);
+    if (handoffTimer) clearInterval(handoffTimer);
     options.runs.off('change', changed); options.sessions.off('change', changed); options.autoPrompts?.off('change', changed);
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
     await unlink(paths.socket).catch(() => {});
+    await unlink(paths.token).catch(() => {});
     try { if (idle) await options.onIdle?.(); } finally { await release(); }
   };
   try {
@@ -153,6 +221,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     await writeFile(paths.token, token, { flag: 'wx', mode: 0o600 });
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(paths.socket, () => { server.off('error', reject); resolve(); }); });
     await chmod(paths.socket, 0o600);
+    handoffTimer = setInterval(() => { void handOff(); }, 1000);
+    handoffTimer.unref();
     if (options.onIdle) {
       idleTimer = setInterval(() => {
         if (closing || pending || Date.now() - lastRequest < (options.idleMs ?? 30_000)) return;
@@ -241,8 +311,16 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // Sessions created before provenance existed are classified once from surviving ledger links.
     runs.setExternalLinkResolver(ids => { const linked = slack.linkedSessions().sessionIds; return ids.some(id => linked.has(id)); });
     runs.backfillSessionOrigins(slack.linkedSessions());
-    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, releaseStateLock: release,
-      onIdle: async () => { slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); } });
+    // Read once: children of this worker must not inherit the proof.
+    const handoffNonce = process.env.TOWER_HANDOFF && /^[a-f\d]{32}$/.test(process.env.TOWER_HANDOFF) ? process.env.TOWER_HANDOFF : undefined;
+    delete process.env.TOWER_HANDOFF;
+    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, releaseStateLock: release, handoffNonce,
+      onIdle: async () => { slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      inFlight: () => slack.hasInFlight(), holdIntake: () => slack.holdNewWork(),
+      quiesce: async () => { slack.pause(); await Promise.all([slack.flush(), runs.flushState(), autoPrompts.flush()]); },
+      resume: () => slack.resume(),
+      // Nothing is running, so nothing is cancelled; the successor owns the state from here.
+      onHandedOff: () => { slack.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});

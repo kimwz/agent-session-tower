@@ -9,7 +9,7 @@
 # Execution lifetime
 
 - Tower is a monitoring and task-submission interface. Stopping or restarting its web server must not cancel agent turns, kill Claude/Codex processes, or close active terminal shells.
-- Provider transports, approvals, Auto Prompt routing, and terminal shells belong to the independent execution worker. Web shutdown only disconnects its client; a new web process reattaches to the same worker.
+- Provider transports, approvals, and Auto Prompt routing belong to the independent execution worker; terminal shells belong to the separate terminal host. Web shutdown only disconnects its client; a new web process reattaches to the same worker, and a worker from an older build hands off to the new one only when nothing is running.
 - Send cancellation or termination only for an explicit user stop/close action. Never infer cancellation from lost UI connections.
 - Verify lifecycle changes with isolated fake-provider processes, including web-process termination and reconnect. Do not create native test conversations in personal homes.
 

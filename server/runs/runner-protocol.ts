@@ -9,7 +9,7 @@ export const MAX_RPC_BYTES = 40 * 1024 * 1024;
  * Optional operations this worker build serves. A web process checks the attached worker's list
  * before calling one, because an older worker keeps running until it is idle.
  */
-export const RUNNER_CAPABILITIES = ['sessionHistory', 'origins'] as const;
+export const RUNNER_CAPABILITIES = ['sessionHistory', 'origins', 'handoff'] as const;
 export type RunnerCapability = typeof RUNNER_CAPABILITIES[number];
 /** One page of a native conversation, read by the worker that already indexes native history. */
 export type SessionHistoryPage = Pick<SessionDetail, 'messages' | 'hasMore' | 'nextBefore'>;
@@ -25,6 +25,8 @@ export interface RunnerSnapshot {
   version?: string;
   /** Absent from workers that predate optional operations. */
   capabilities?: string[];
+  /** Present only on a worker started by a predecessor's handoff; it matches that predecessor's record. */
+  handoff?: string;
 }
 export interface RunnerReply {
   protocol: number;

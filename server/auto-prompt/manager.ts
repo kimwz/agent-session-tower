@@ -410,6 +410,10 @@ export class AutoPromptManager extends EventEmitter {
       if (TERMINAL.has(entry.job.status) && !entry.staged.length) this.entries.delete(id);
     }
   }
+  /** Saves the current routing state again and reports failure, without cancelling anything. */
+  async flush(): Promise<void> { await this.persist(); }
+  /** True while an admission or routing pass is underway, including its cleanup. */
+  busy(): boolean { return this.admissions.size > 0 || this.controllers.size > 0 || Boolean(this.processing); }
   private persist(): Promise<void> {
     const data = JSON.stringify([...this.entries.values()]);
     const write = this.writes.then(async () => {

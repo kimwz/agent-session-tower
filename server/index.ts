@@ -10,6 +10,8 @@ import { ClosedSessionStore } from './stores/closed-sessions.js';
 import { ProjectGroupStore } from './stores/project-groups.js';
 import { DurableRunManager } from './runs/durable-runner.js';
 import { runRunnerWorker } from './runs/worker.js';
+import { runTerminalHost } from './terminals/host.js';
+import { TerminalHostClient } from './terminals/client.js';
 import { startSlackMcp } from './slack/mcp-bridge.js';
 import { getProviderHealth } from './providers/discovery.js';
 import { createMonitorServer } from './http/server.js';
@@ -57,6 +59,11 @@ async function main() {
   if (args[0] === '--runner-worker') {
     if (args.length !== 2 || !args[1]) throw new Error('Runner worker requires a state directory.');
     await runRunnerWorker(resolve(args[1]));
+    return;
+  }
+  if (args[0] === '--terminal-host') {
+    if (args.length !== 2 || !args[1]) throw new Error('Terminal host requires a state directory.');
+    await runTerminalHost(resolve(args[1]));
     return;
   }
   if (args.includes('--help') || args.includes('-h')) { console.log(HELP); return; }
@@ -138,7 +145,7 @@ async function main() {
     return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
   };
   const { server, dispose } = createMonitorServer({ port, clientDir,
-    auth, workspaceTerminals: runs.terminals, remote: access.remote ? { origins: access.origins } : undefined, backend: {
+    auth, workspaceTerminals: new TerminalHostClient({ stateDir, legacy: runs.terminals }), remote: access.remote ? { origins: access.origins } : undefined, backend: {
     snapshot, detail,
     setTitle: async (id, title) => {
       const session = runs.getSession(id);

@@ -104,11 +104,18 @@ export class SlackService extends EventEmitter {
     await this.tone.load(this.settings.account ? `${this.settings.account.teamId}:${this.settings.account.userId}` : '');
     await this.automation.start();
     this.restartSocket();
+    this.startTicking();
+  }
+  private startTicking() {
+    if (this.timer) clearInterval(this.timer);
     this.timer = setInterval(() => {
       if (this.settings.userToken) void this.automation.tick().catch(() => { this.error = 'Slack 작업 상태를 확인하지 못했습니다.'; this.emit('change'); });
     }, 1000);
     this.timer.unref();
   }
+  /** Stops receiving and advancing mentions without discarding anything, for a worker handoff. */
+  pause() { this.socket?.stop(); this.socket = undefined; if (this.timer) clearInterval(this.timer); this.timer = undefined; }
+  resume() { this.restartSocket(); this.startTicking(); }
   overview() {
     return { tone: this.tone.overview(), language: this.settings.language ?? 'ko', connected: Boolean(this.settings.userToken), enabled: this.settings.enabled, allowSelfMentions: this.settings.allowSelfMentions === true, status: this.status,
       ...(this.error ? { error: this.error } : {}), ...(this.settings.account ? { account: { ...this.settings.account } } : {}),
@@ -144,6 +151,11 @@ export class SlackService extends EventEmitter {
   tool(workflowId: string, name: string, args: Record<string, unknown>) { return this.automation.tool(workflowId, name, args); }
   ownerChat(sessionId: string, message: string) { return this.automation.ownerChat(sessionId, message); }
   hasActive() { return this.settings.enabled || this.tone.overview().status === 'collecting' || this.automation.hasPending(); }
+  /** Work already accepted and underway. Monitoring alone does not count; unstarted held mentions do not either. */
+  hasInFlight() { return this.tone.overview().status === 'collecting' || this.automation.inFlight(); }
+  /** New mentions are still received and saved, but only a successor worker starts them. */
+  holdNewWork() { this.automation.hold(); }
+  flush() { return this.automation.flush(); }
   private client(teamId: string) {
     if (!this.settings.userToken || this.settings.account?.teamId !== teamId) throw new Error('Slack 계정 연결이 필요합니다.');
     return this.makeClient(this.settings.userToken);

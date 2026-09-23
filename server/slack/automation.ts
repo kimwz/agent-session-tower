@@ -73,6 +73,7 @@ export class SlackAutomationManager extends EventEmitter {
   private processing?: Promise<void>;
   private toolOperations = new Map<string, Promise<unknown>>();
   private started = false;
+  private held = false;
   private readonly path: string;
   constructor(private readonly options: SlackAutomationOptions) { super(); this.path = join(options.stateDir, 'slack-automation.json'); }
   async start(): Promise<void> {
@@ -138,6 +139,16 @@ export class SlackAutomationManager extends EventEmitter {
     }));
   }
   hasPending(): boolean { return this.list().some(item => !terminal.has(item.status)); }
+  /** Anything already underway: a tick advancing an item, an admission, a tool call, or an unfinished workflow. */
+  inFlight(): boolean {
+    return Boolean(this.processing) || this.admissions.size > 0 || this.toolOperations.size > 0
+      || this.list().some(item => !terminal.has(item.status) && !this.waiting(item));
+  }
+  /** During a worker handoff, newly received mentions wait for the successor instead of starting here. */
+  hold(): void { this.held = true; }
+  /** Saves the current state again and reports failure, so a handoff never leaves an older file behind. */
+  flush(): Promise<void> { return this.persist(); }
+  private waiting(item: SlackWorkflow): boolean { return this.held && item.status === 'received' && !item.conversationClaimed; }
   async setRules(rules: SlackRule[]): Promise<void> {
     validateSlackRules(rules);
     const previous = this.configured; this.configured = structuredClone(rules);
@@ -183,6 +194,7 @@ export class SlackAutomationManager extends EventEmitter {
       this.toolOperations.set(item.id, check);
       try { await check; } finally { if (this.toolOperations.get(item.id) === check) this.toolOperations.delete(item.id); }
       if ((terminal.has(item.status) && !(item.mode === 'conversation' && item.delegatedTasks?.some(task => !task.notifiedRunId && !task.notificationError && !task.submissionError))) || this.admissions.has(item.id)) continue;
+      if (this.waiting(item)) continue;
       try { await this.advance(item); }
       catch (error) {
         this.update(item, { status: item.status === 'sending' ? 'reply-uncertain' : 'error', error: (error instanceof Error ? error.message : 'Slack automation failed.').slice(0, 1500) });

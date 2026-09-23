@@ -10,13 +10,21 @@ import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest
 import type { RunAdmission } from './manager.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerCapability, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
+import { readHandoff } from './handoff.js';
+import { APP_VERSION } from '../../shared/app-identity.js';
 
-interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number }
+interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number; version?: string;
+  /** How long a handed-off worker's successor may stay silent before this web starts a worker itself. */
+  successorTimeoutMs?: number;
+  spawn?: (command: { execPath: string; args: string[] }) => void }
 
 /** A disposable UI connection. Only the independent worker owns provider lifetimes. */
 export class DurableRunManager extends EventEmitter {
   private paths?: Awaited<ReturnType<typeof runnerPaths>>;
   private snapshot?: RunnerSnapshot;
+  private unreachableSince?: number;
+  /** Set once a proven handoff's successor stayed silent; retried with backoff until a worker answers. */
+  private recovery?: { nextAt: number; delay: number };
   private timer?: ReturnType<typeof setInterval>;
   private polling = false;
   private closed = false;
@@ -37,28 +45,76 @@ export class DurableRunManager extends EventEmitter {
     catch (error) {
       // A responding but incompatible worker must never be replaced underneath tasks.
       if ((error as { incompatible?: boolean }).incompatible) throw error;
-      const entry = this.options.workerEntry ?? fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../index.ts' : '../index.js', import.meta.url));
-      const args = isSea() ? ['--runner-worker', this.paths.stateDir] : [...process.execArgv.filter(arg => !/^--inspect(?:-brk|-port|-publish-uid)?(?:=|$)/.test(arg)), entry, '--runner-worker', this.paths.stateDir];
-      const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore', env: process.env });
-      let spawnError: Error | undefined;
-      child.on('error', error => { spawnError = error; });
-      child.unref();
-      const deadline = Date.now() + (this.options.startupTimeoutMs ?? 60_000);
-      for (;;) {
-        if (spawnError) throw spawnError;
-        try { await this.call('snapshot'); break; }
-        catch (retryError) {
-          if ((retryError as { incompatible?: boolean }).incompatible || Date.now() >= deadline) throw retryError;
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-      }
+      await this.spawnWorker();
     }
     this.timer = setInterval(() => {
       if (this.polling || this.closed) return;
       this.polling = true;
-      void this.call('snapshot').catch(() => {}).finally(() => { this.polling = false; });
+      void this.poll().finally(() => { this.polling = false; });
     }, this.options.pollMs ?? 1000);
     this.timer.unref();
+    await this.requestHandoff().catch(() => {});
+  }
+
+  /** The command for this build's worker; an outdated worker starts it itself when it hands off. */
+  private workerCommand() {
+    const entry = this.options.workerEntry ?? fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../index.ts' : '../index.js', import.meta.url));
+    const args = isSea() ? ['--runner-worker', this.paths!.stateDir] : [...process.execArgv.filter(arg => !/^--inspect(?:-brk|-port|-publish-uid)?(?:=|$)/.test(arg)), entry, '--runner-worker', this.paths!.stateDir];
+    return { execPath: process.execPath, args };
+  }
+
+  private async spawnWorker(): Promise<void> {
+    const command = this.workerCommand();
+    let spawnError: Error | undefined;
+    if (this.options.spawn) this.options.spawn(command);
+    else {
+      const child = spawn(command.execPath, command.args, { detached: true, stdio: 'ignore', env: process.env });
+      child.on('error', error => { spawnError = error; });
+      child.unref();
+    }
+    const deadline = Date.now() + (this.options.startupTimeoutMs ?? 60_000);
+    for (;;) {
+      if (spawnError) throw spawnError;
+      try { await this.call('snapshot'); break; }
+      catch (retryError) {
+        if ((retryError as { incompatible?: boolean }).incompatible || Date.now() >= deadline) throw retryError;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+  }
+
+  /**
+   * Asks an outdated worker to start this build's worker at its next quiet moment. Running turns,
+   * approvals and shells are never interrupted; the worker waits for them to finish on its own.
+   */
+  async requestHandoff(force = false): Promise<boolean> {
+    if (!this.snapshot || !this.supports('handoff') || (!force && this.snapshot.version === (this.options.version ?? APP_VERSION))) return false;
+    await this.call('requestHandoff', [this.workerCommand()]);
+    return true;
+  }
+
+  private async poll(): Promise<void> {
+    try { await this.call('snapshot'); this.unreachableSince = undefined; this.recovery = undefined; return; }
+    catch (error) {
+      if ((error as { incompatible?: boolean }).incompatible || (error as { statusCode?: number }).statusCode !== 503) return;
+    }
+    if (!this.recovery) {
+      // A worker that handed off started its successor. If that successor never answers, start one here.
+      this.unreachableSince ??= Date.now();
+      if (Date.now() - this.unreachableSince < (this.options.successorTimeoutMs ?? 20_000) || !this.snapshot || !(await this.handoffFrom(this.snapshot.instance))) return;
+      // From here it is exactly a web restart: start a worker, then attach to whichever worker holds the lock.
+      this.recovery = { nextAt: 0, delay: 1000 };
+      this.snapshot = undefined;
+    }
+    const recovery = this.recovery;
+    if (Date.now() < recovery.nextAt) return;
+    try { await this.spawnWorker(); this.recovery = undefined; this.unreachableSince = undefined; }
+    catch { recovery.nextAt = Date.now() + recovery.delay; recovery.delay = Math.min(recovery.delay * 2, 60_000); }
+  }
+
+  private async handoffFrom(instance: string) {
+    const record = await readHandoff(this.paths!.runtime);
+    return record?.previous === instance ? record : undefined;
   }
 
   async close(): Promise<void> { this.closed = true; if (this.timer) clearInterval(this.timer); this.terminals.dispose(); }
@@ -66,7 +122,7 @@ export class DurableRunManager extends EventEmitter {
   /** The attached worker keeps its own code until it is idle, so it can lag behind the web version. */
   runnerVersion(): string | undefined { return this.snapshot ? this.snapshot.version ?? 'legacy' : undefined; }
   settledRunIds(): ReadonlySet<string> { return new Set(this.snapshot?.settled ?? []); }
-  /** The attached worker stays the same for this connection's lifetime, so the answer is stable after start(). */
+  /** Answers for the attached worker; after a proven handoff that is its successor. */
   supports(capability: RunnerCapability): boolean { return this.snapshot?.capabilities?.includes(capability) ?? false; }
   sessionList(): Session[] { return structuredClone(this.snapshot?.sessions ?? []); }
   getSession(id: string): Session | undefined {
@@ -117,7 +173,12 @@ export class DurableRunManager extends EventEmitter {
 
   private async credential(): Promise<string> {
     if (this.closed || !this.paths) throw Object.assign(new Error('Runner connection is closed.'), { statusCode: 503 });
-    const file = await open(this.paths.token, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let file;
+    try { file = await open(this.paths.token, constants.O_RDONLY | constants.O_NOFOLLOW); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw Object.assign(new Error('The execution worker is not running.'), { statusCode: 503 });
+      throw error;
+    }
     let token: string;
     try {
       const info = await file.stat();
@@ -165,13 +226,22 @@ export class DurableRunManager extends EventEmitter {
       req.on('error', error => reject(Object.assign(error, { statusCode: 503 })));
       req.end(body);
     });
-    if (reply.protocol !== RUNNER_PROTOCOL || reply.stateDir !== this.paths!.stateDir || (this.snapshot && reply.instance !== this.snapshot.instance)) {
-      throw Object.assign(new Error('Runner identity changed or is incompatible. Restart Tower to reconnect; requests were not retried.'), { incompatible: true, statusCode: 503 });
+    const incompatible = () => Object.assign(new Error('Runner identity changed or is incompatible. Restart Tower to reconnect; requests were not retried.'), { incompatible: true, statusCode: 503 });
+    if (reply.protocol !== RUNNER_PROTOCOL || reply.stateDir !== this.paths!.stateDir) throw incompatible();
+    let adopted = false;
+    if (this.snapshot && reply.instance !== this.snapshot.instance) {
+      // Only the successor that the attached worker recorded and started may replace it.
+      const record = await this.handoffFrom(this.snapshot.instance);
+      if (!record || !reply.snapshot || reply.snapshot.instance !== reply.instance || reply.snapshot.handoff !== record.successor) throw incompatible();
+      this.snapshot = undefined;
+      adopted = true;
     }
     if (reply.snapshot && (!this.snapshot || reply.snapshot.revision >= this.snapshot.revision)) {
       this.snapshot = reply.snapshot;
       this.emit('change');
     }
+    // The successor refused a request addressed to its predecessor; it never ran.
+    if (adopted && reply.error?.statusCode === 409) throw Object.assign(new Error('Tower just updated its execution worker. The request was not submitted; send it again.'), { statusCode: 503 });
     if (reply.error) throw Object.assign(new Error(reply.error.message), { statusCode: reply.error.statusCode, ...(reply.error.disposition ? { disposition: reply.error.disposition } : {}) });
     return reply.result;
   }

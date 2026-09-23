@@ -392,3 +392,182 @@ test('a web Auto Prompt is admitted as the owner’s request but never read as S
   assert.deepEqual(submitted, [{ origin: { kind: 'owner' } }]);
   assert.deepEqual(ownerMessages, []);
 });
+
+test('an outdated worker hands off only when nothing is running, and the web follows its successor', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  const successors: Array<{ execPath: string; args: string[] }> = [];
+  let successor: Awaited<ReturnType<typeof startRunnerHost>> | undefined;
+  let handoffs = 0;
+  let credentialAtSpawn: boolean | undefined;
+  const first = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs,
+    quiesce: async () => { handoffs++; },
+    startSuccessor: (command, nonce) => {
+      successors.push(command);
+      credentialAtSpawn = existsSync(f.paths.token);
+      void startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, handoffNonce: nonce }).then(host => { successor = host; });
+    } });
+  t.after(async () => { await first.close(); await successor?.close(); });
+  const client = await f.connect();
+  const run = await client.enqueue(f.session.id, 'Keep working through the deploy');
+  await until(() => f.starts() === 1);
+  assert.equal(await client.requestHandoff(true), true);
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.equal(handoffs, 0, 'a running turn keeps the old worker in service');
+  assert.equal(existsSync(join(f.stateDir, 'runner-runtime', 'handoff.json')), false);
+  f.finish();
+  await until(() => successors.length === 1 && successor);
+  assert.equal(handoffs, 1);
+  assert.equal(credentialAtSpawn, false, 'the old worker removed its own credential before the successor could write one');
+  assert.deepEqual(successors[0].args.slice(-2), ['--runner-worker', f.paths.stateDir]);
+  await until(() => client.list().some(item => item.id === run.id) && client.supports('handoff') && (client as unknown as { snapshot: { instance: string } }).snapshot.instance === successor!.instance);
+  const after = await client.enqueue(f.session.id, 'Sent after the handoff');
+  assert.equal(after.origin?.kind, 'owner');
+});
+
+test('requests that arrive while the worker hands off are refused, never half-accepted', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  let entered = false;
+  let handedOff = false;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs,
+    quiesce: async () => { entered = true; await gate; }, startSuccessor: () => { handedOff = true; } });
+  t.after(() => host.close());
+  const client = await f.connect();
+  await client.requestHandoff(true);
+  await until(() => entered);
+  await assert.rejects(client.enqueue(f.session.id, 'Arrives mid-handoff'), { statusCode: 503, disposition: 'handoff' });
+  const token = await readFile(f.paths.token, 'utf8');
+  const tool = JSON.parse((await rpc(f.paths.socket, token, { protocol: RUNNER_PROTOCOL, method: 'slackTool', args: ['workflow', 'slack_send', { text: 'hi' }] })).body);
+  assert.equal(tool.error.disposition, 'handoff', 'coordinator tool calls are refused too');
+  assert.equal(f.runs.list().length, 0);
+  release();
+  await until(() => handedOff);
+});
+
+test('a stale handoff record never lets some other worker take over', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let other: Awaited<ReturnType<typeof startRunnerHost>> | undefined;
+  const first = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => {},
+    // A different worker starts instead of the one this worker recorded.
+    startSuccessor: () => { void startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, handoffNonce: 'f'.repeat(32) }).then(host => { other = host; }); } });
+  t.after(async () => { await first.close(); await other?.close(); });
+  const client = await f.connect();
+  await client.requestHandoff(true);
+  await until(() => other);
+  await assert.rejects(client.enqueue(f.session.id, 'To an unproven worker'), { incompatible: true });
+  assert.equal(f.runs.list().length, 0);
+});
+
+test('a handoff that cannot be recorded leaves the worker fully in service', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  await mkdir(join(f.paths.runtime, 'handoff.json'), { recursive: true });
+  let quiesced = 0, resumed = 0, started = 0;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs,
+    quiesce: async () => { quiesced++; }, resume: () => { resumed++; }, startSuccessor: () => { started++; } });
+  t.after(() => host.close());
+  const client = await f.connect();
+  await client.requestHandoff(true);
+  await until(() => resumed >= 1);
+  assert.equal(started, 0);
+  assert.ok(quiesced >= 1);
+  const run = await client.enqueue(f.session.id, 'Still accepted');
+  assert.equal(run.status, 'queued');
+});
+
+test('the web starts a worker itself when a handed-off successor never answers', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let replacement: Awaited<ReturnType<typeof startRunnerHost>> | undefined;
+  const first = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => {}, startSuccessor: () => {} });
+  t.after(async () => { await first.close(); await replacement?.close(); });
+  const spawned: string[][] = [];
+  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 20, successorTimeoutMs: 200,
+    spawn: command => { spawned.push(command.args); void startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs }).then(host => { replacement = host; }); } });
+  t.after(() => client.close());
+  await client.start();
+  await client.requestHandoff(true);
+  await until(() => replacement && (client as unknown as { snapshot?: { instance: string } }).snapshot?.instance === replacement.instance, 10_000);
+  assert.equal(spawned.length, 1);
+  assert.deepEqual(spawned[0].slice(-2), ['--runner-worker', f.paths.stateDir]);
+});
+
+test('a worker change without a recorded handoff still requires a restart', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = await f.connect();
+  await f.host.close();
+  const replacement = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs });
+  t.after(() => replacement.close());
+  await assert.rejects(client.enqueue(f.session.id, 'Unexplained worker'), { incompatible: true });
+  assert.equal(f.runs.list().length, 0);
+});
+
+test('a handoff that waits too long only holds new automatic work; running turns continue', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let holds = 0;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, handoffHoldMs: 0,
+    holdIntake: () => { holds++; }, quiesce: async () => {}, startSuccessor: () => { handedOff = true; } });
+  let handedOff = false;
+  t.after(() => host.close());
+  const client = await f.connect();
+  await client.enqueue(f.session.id, 'Long turn');
+  await until(() => f.starts() === 1);
+  await client.requestHandoff(true);
+  await until(() => holds === 1);
+  assert.equal(f.runs.list()[0].status, 'running');
+  assert.equal(f.cancels(), 0);
+  f.finish();
+  await until(() => handedOff);
+});
+
+test('a turn that is still closing its provider keeps the old worker, whatever its status says', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let closing = true;
+  const busy = f.runs.busy.bind(f.runs);
+  f.runs.busy = () => closing || busy();
+  let started = 0;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => {}, startSuccessor: () => { started++; } });
+  t.after(() => host.close());
+  const client = await f.connect();
+  await client.requestHandoff(true);
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.equal(started, 0);
+  closing = false;
+  await until(() => started === 1);
+});
+
+test('a pause that fails halfway is undone and the worker stays in service', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let resumed = 0, started = 0;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs,
+    quiesce: async () => { throw new Error('flush failed after intake paused'); }, resume: () => { resumed++; }, startSuccessor: () => { started++; } });
+  t.after(() => host.close());
+  const client = await f.connect();
+  await client.requestHandoff(true);
+  await until(() => resumed === 1);
+  assert.equal(started, 0);
+  assert.equal((await client.enqueue(f.session.id, 'Accepted after the failed pause')).status, 'queued');
+});
+
+test('the web keeps trying to start a worker until one answers after a silent successor', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let replacement: Awaited<ReturnType<typeof startRunnerHost>> | undefined;
+  const first = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => {}, startSuccessor: () => {} });
+  t.after(async () => { await first.close(); await replacement?.close(); });
+  let attempts = 0;
+  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 20, successorTimeoutMs: 100, startupTimeoutMs: 200,
+    spawn: () => { attempts++; if (attempts === 2) void startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs }).then(host => { replacement = host; }); } });
+  t.after(() => client.close());
+  await client.start();
+  await client.requestHandoff(true);
+  await until(() => replacement && (client as unknown as { snapshot?: { instance: string } }).snapshot?.instance === replacement.instance, 15_000);
+  assert.equal(attempts, 2, 'the first failed start was retried after a pause');
+});

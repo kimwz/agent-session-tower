@@ -493,3 +493,15 @@ test('a retried request saved before origins existed still matches after an upgr
     assert.equal(restarted.get(saved.id)?.origin, undefined);
   } finally { await restarted.close(); }
 });
+
+test('a handoff flush saves routing state again and reports a failed save', async t => {
+  const f = await fixture(t);
+  await f.finished((await f.manager.submit(request(f.cwd), { origin: { kind: 'owner' } })).id);
+  const path = join(f.directory, 'auto-prompts.json');
+  await rm(path, { force: true });
+  await mkdir(path);
+  await assert.rejects(f.manager.flush());
+  await rm(path, { recursive: true, force: true });
+  await f.manager.flush();
+  assert.equal(JSON.parse(await readFile(path, 'utf8')).length, 1);
+});
