@@ -64,9 +64,13 @@ export class TowerApi {
     try { await this.save(); }
     catch (error) { requests.delete(key); throw error; }
     let result: unknown;
-    // Operations fail before changing anything (validation, a refused save), so a failure frees the key.
+    // Operations fail before changing anything (validation, a refused save), so a failure frees the key, unless
+    // the failure says something may already have happened outside Tower (a sent POST): then the key stays taken.
     try { result = await this.perform(name, parsed.data as Record<string, any>, actor); }
-    catch (error) { requests.delete(key); await this.save().catch(() => {}); throw error; }
+    catch (error) {
+      if (!(error as { uncertain?: boolean }).uncertain) { requests.delete(key); await this.save().catch(() => {}); }
+      throw error;
+    }
     // A large result is not kept whole; a retry then learns the request succeeded and reads the details again.
     const kept = Buffer.byteLength(JSON.stringify(result) ?? '') <= MAX_RESULT_BYTES ? result : { done: true, note: 'This request already succeeded. Read the current state for details.' };
     requests.set(key, { at: Date.now(), fingerprint, status: 'done', result: kept });
@@ -127,6 +131,10 @@ export class TowerApi {
       case 'triggers.run': return { event: await triggers.run(value.id, actor) };
       case 'triggers.settings': return { settings: triggers.settings() };
       case 'triggers.updateSettings': return { settings: await triggers.updateSettings(value.settings, actor) };
+      case 'triggers.testHttp': return { result: await triggers.testHttp(value.request, value.condition, actor) };
+      case 'secrets.list': return { secrets: triggers.secretList() };
+      case 'secrets.create': return { secret: await triggers.createSecret(value.secret, actor) };
+      case 'secrets.delete': await triggers.deleteSecret(value.id, actor); return { deleted: true };
     }
   }
 

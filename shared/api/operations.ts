@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ScheduleSchema, TriggerInputSchema, TriggerSettingsSchema } from '../triggers.js';
+import { HttpConditionSchema, HttpRequestSchema, ScheduleSchema, SecretInputSchema, TriggerInputSchema, TriggerSettingsSchema } from '../triggers.js';
 
 const id = z.string().min(1).max(200);
 const uuid = z.string().regex(/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i, 'A UUID is required.');
@@ -39,7 +39,12 @@ export const OPERATIONS = {
   'triggers.revert': { input: z.object({ id, expectedRevision: revision, revision }).strict(), write: true, agent: true, summary: 'Restore an earlier revision as a new revision.' },
   'triggers.run': { input: z.object({ id }).strict(), write: true, agent: true, summary: 'Run a trigger once now.' },
   'triggers.settings': { input: z.object({}).strict(), write: false, agent: true, summary: 'Read trigger limits.' },
-  'triggers.updateSettings': { input: z.object({ settings: TriggerSettingsSchema }).strict(), write: true, ownerOnly: true, summary: 'Change trigger limits.' },
+  'triggers.updateSettings': { input: z.object({ settings: TriggerSettingsSchema }).strict(), write: true, ownerOnly: true, summary: 'Change trigger limits and the private hosts HTTP triggers may call.' },
+  'triggers.testHttp': { input: z.object({ request: HttpRequestSchema, condition: HttpConditionSchema.optional() }).strict(), write: true, ownerOnly: true,
+    summary: 'Send an HTTP trigger’s request once and show the response, without recording or running anything.' },
+  'secrets.list': { input: z.object({}).strict(), write: false, agent: true, summary: 'List saved header secrets by name and origin. Values are never shown.' },
+  'secrets.create': { input: z.object({ secret: SecretInputSchema }).strict(), write: true, ownerOnly: true, summary: 'Save a header value that is sent only to one origin.' },
+  'secrets.delete': { input: z.object({ id: uuid }).strict(), write: true, ownerOnly: true, summary: 'Delete a saved header secret.' },
 } as const;
 
 export type OperationName = keyof typeof OPERATIONS;

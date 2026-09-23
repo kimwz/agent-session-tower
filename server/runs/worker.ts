@@ -7,7 +7,7 @@ import type { AutoPromptRequest, CreateSessionRequest, MessageAttachments, RunAp
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { AutoPromptManager } from '../auto-prompt/manager.js';
 import { SlackService } from '../slack/service.js';
-import { acquireStateLock, MonitorAlreadyRunning } from '../instance/state-lock.js';
+import { acquireStateLock, lockedPorts, MonitorAlreadyRunning } from '../instance/state-lock.js';
 import { getProviderHealth } from '../providers/discovery.js';
 import { trustWorkspace } from '../providers/workspace-trust.js';
 import { SessionService } from '../sessions/service.js';
@@ -264,7 +264,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (options.autoPrompts?.list().some(job => !['completed', 'error', 'cancelled'].includes(job.status))) return;
         if (options.terminals?.hasActive()) return;
         if (options.slack?.hasActive()) return;
-        if (options.triggers?.hasActive()) return;
+        if (options.triggers?.hasActive() || options.triggers?.inFlight()) return;
         // Stop accepting requests and finish writes before releasing the worker lock.
         void close(true).catch(error => { console.error('Runner idle cleanup failed:', error); });
       }, 1000);
@@ -348,7 +348,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // Read once: children of this worker must not inherit the proof.
     const handoffNonce = process.env.TOWER_HANDOFF && /^[a-f\d]{32}$/.test(process.env.TOWER_HANDOFF) ? process.env.TOWER_HANDOFF : undefined;
     delete process.env.TOWER_HANDOFF;
-    const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), executor: {
+    // Ports seen once stay blocked, so a web restart never opens a moment when Tower can call itself.
+    const towerPorts = new Set<number>();
+    const ownPorts = async () => { for (const port of await lockedPorts(stateDir)) towerPorts.add(port); return [...towerPorts]; };
+    const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), ownPorts, executor: {
       submitAutoPrompt: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); },
       getAutoPrompt: id => autoPrompts.get(id),
       create: (input, internal) => runs.create(input, internal),
@@ -376,7 +379,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       sessions: { list: () => visible.snapshot().sessions, read: async (id, limit) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), undefined, limit))?.messages ?? [] : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
     await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, triggers, api, capabilities, releaseStateLock: release, handoffNonce,
-      onIdle: async () => { triggers.close(); slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      onIdle: async () => { triggers.close(); await triggers.settle(); slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => slack.hasInFlight() || triggers.inFlight(), holdIntake: () => { slack.holdNewWork(); triggers.hold(); },
       quiesce: async () => { slack.pause(); triggers.pause(); await Promise.all([slack.flush(), triggers.flush(), runs.flushState(), autoPrompts.flush()]); },
       resume: () => { slack.resume(); triggers.resume(); },

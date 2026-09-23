@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { CalendarClock, History, Pencil, Play, Plus, RotateCcw, Settings2, Slack, Trash2, X, Zap } from 'lucide-react';
+import { CalendarClock, Globe, History, KeyRound, Pencil, Play, Plus, RotateCcw, Settings2, Slack, Trash2, X, Zap } from 'lucide-react';
 import type { ProviderHealth, Session } from '../../../shared/types';
-import type { Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOverview, TriggerSettings, TriggerSummary } from '../../../shared/triggers';
+import type { HttpCondition, HttpTestResult, Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOverview, TriggerSecret, TriggerSettings, TriggerSummary } from '../../../shared/triggers';
 import { EffortPicker, ModelPicker } from '../chat/ModelPicker';
 import { authPost } from '../auth/AuthGate';
 import { absoluteTime, relativeTime, sessionTitle } from '../common/lib';
@@ -10,6 +10,8 @@ import { translateMessage, useI18n } from '../i18n/i18n';
 import { SlackPanel } from '../slack/SlackPanel';
 
 type Tab = 'triggers' | 'history' | 'settings';
+type Source = TriggerInput['source'];
+type HttpSource = Extract<Source, { kind: 'http' }>;
 interface Context { token: string; providers: ProviderHealth[]; projects: [string, string][]; sessions: Session[] }
 
 /** Calls a Tower operation (shared/api/operations.ts) as the owner. */
@@ -75,8 +77,8 @@ export function TriggerPanel({ token, overview, providers, projects, sessions, o
               else await towerOperation(token, 'triggers.update', { id: editing.id, expectedRevision: editing.revision, trigger: input });
             }).then(ok => { if (ok) setEditing(null); })} />
           : <section className="trigger-list">
-            <div className="slack-rules-intro"><p>{t('예약 실행은 정한 시간마다 지시를 프로젝트 에이전트에게 보냅니다. 에이전트가 트리거를 바꾸면 기록에 남고 되돌릴 수 있습니다.')}</p>
-              <div className="slack-actions"><button type="button" className="secondary-button" onClick={() => setEditing('new')}><Plus size={14} />{t('예약 실행 추가')}</button></div></div>
+            <div className="slack-rules-intro"><p>{t('정한 시간마다, 또는 HTTP 응답이 조건에 맞을 때 지시를 프로젝트 에이전트에게 보냅니다. 에이전트가 트리거를 바꾸면 기록에 남고 되돌릴 수 있습니다.')}</p>
+              <div className="slack-actions"><button type="button" className="secondary-button" onClick={() => setEditing('new')}><Plus size={14} />{t('트리거 추가')}</button></div></div>
             <ol className="slack-rule-list">
               {slack && <SlackRow summary={slack} onOpen={onOpenSlack} />}
               {!slack && <li className="slack-rule disabled"><div className="slack-rule-row"><Slack size={16} /><span className="slack-rule-text"><strong>Slack</strong><small>{t('연결되지 않음')}</small></span><button type="button" className="secondary-button" onClick={onOpenSlack}>{t('Slack 연결')}</button></div></li>}
@@ -86,10 +88,10 @@ export function TriggerPanel({ token, overview, providers, projects, sessions, o
                 onEdit={() => setEditing(trigger)}
                 onDelete={() => void run(() => towerOperation(token, 'triggers.delete', { id: trigger.id, expectedRevision: trigger.revision }))} />)}
             </ol>
-            {triggers && !triggers.length && <p className="slack-empty">{t('아직 예약 실행이 없습니다.')}</p>}
+            {triggers && !triggers.length && <p className="slack-empty">{t('아직 만든 트리거가 없습니다.')}</p>}
           </section>)
         : tab === 'history' ? <TriggerHistory token={token} overview={overview!} onChanged={refresh} />
-        : <TriggerLimits token={token} />}
+        : <><TriggerLimits token={token} /><TriggerSecrets token={token} /></>}
     </div>
   </div></dialog>, document.body);
 }
@@ -106,8 +108,12 @@ function SlackRow({ summary, onOpen }: { summary: TriggerSummary; onOpen: () => 
 
 export function scheduleLabel(trigger: Pick<Trigger, 'source'>, t: (key: string, values?: Record<string, string | number>) => string): string {
   const schedule = trigger.source.schedule;
-  if (schedule.type === 'interval') return schedule.everySeconds % 3600 === 0 ? t('{0}시간마다', { 0: schedule.everySeconds / 3600 }) : t('{0}분마다', { 0: Math.round(schedule.everySeconds / 60) });
-  return `${schedule.expression} · ${schedule.timezone}`;
+  const when = schedule.type === 'interval' ? schedule.everySeconds % 3600 === 0 ? t('{0}시간마다', { 0: schedule.everySeconds / 3600 }) : t('{0}분마다', { 0: Math.round(schedule.everySeconds / 60) })
+    : `${schedule.expression} · ${schedule.timezone}`;
+  if (trigger.source.kind !== 'http') return when;
+  let host = trigger.source.request.url;
+  try { host = new URL(host).host; } catch { /* shown as written */ }
+  return `${trigger.source.request.method} ${host} · ${when}`;
 }
 
 function TriggerRow({ trigger, summary, busy, onToggle, onRun, onEdit, onDelete }: { trigger: Trigger; summary?: TriggerSummary; busy: boolean; onToggle: (enabled: boolean) => void; onRun: () => void; onEdit: () => void; onDelete: () => void }) {
@@ -118,12 +124,13 @@ function TriggerRow({ trigger, summary, busy, onToggle, onRun, onEdit, onDelete 
   return <li className={`slack-rule ${trigger.enabled ? '' : 'disabled'}`}><div className="slack-rule-row">
     <label className="slack-switch" title={t('활성')}><input type="checkbox" aria-label={t('활성')} checked={trigger.enabled} disabled={busy} onChange={event => onToggle(event.target.checked)} /><span /></label>
     <button type="button" className="slack-rule-summary" onClick={onEdit}>
-      <CalendarClock size={16} />
+      {trigger.source.kind === 'http' ? <Globe size={16} /> : <CalendarClock size={16} />}
       <span className="slack-rule-text"><strong>{trigger.name}</strong><small>{scheduleLabel(trigger, t)}{summary?.nextRunAt ? ` · ${t('다음 실행')} ${absoluteTime(summary.nextRunAt)}` : ''}</small></span>
       <span className="slack-badges">
         <span>{trigger.handler.provider === 'claude' ? 'Claude' : 'Codex'}</span>
         {trigger.updatedBy.kind === 'agent' && <span className="accent" title={trigger.updatedBy.sessionId}>{t('에이전트가 변경')}</span>}
         {status && <span className={summary?.paused || last?.status === 'error' || last?.status === 'uncertain' ? 'warn' : ''} title={summary?.paused?.reason ?? last?.error ?? last?.reason}>{status}</span>}
+        {summary?.error && <span className="warn" title={summary.error}>{t('요청 실패')}</span>}
       </span>
     </button>
     <div className="slack-rule-tools">
@@ -141,6 +148,9 @@ export function eventStatusLabel(status: TriggerEvent['status'], t: (key: string
 }
 
 const browserZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; } };
+export function blankHttpSource(schedule: Source['schedule'] = { type: 'interval', everySeconds: 300 }): HttpSource {
+  return { kind: 'http', schedule, request: { method: 'GET', url: '', headers: [], timeoutSeconds: 30 }, condition: { type: 'changed' } };
+}
 export function blankTrigger(): TriggerInput {
   return { name: '', enabled: true, source: { kind: 'schedule', schedule: { type: 'cron', expression: '0 9 * * 1-5', timezone: browserZone() }, catchUp: 'latest' },
     handler: { kind: 'task', instructions: '', provider: 'codex', approvals: 'auto', target: { node: 'local', mode: 'auto' } }, policy: { overlap: 'skip', maxEventsPerHour: 20 } };
@@ -153,6 +163,13 @@ function TriggerEditor({ trigger, token, providers, projects, sessions, busy, on
   const schedule = input.source.schedule;
   const handler = input.handler;
   const setSchedule = (next: typeof schedule) => setInput({ ...input, source: { ...input.source, schedule: next } });
+  const http = input.source.kind === 'http';
+  const setKind = (kind: Source['kind']) => {
+    if (kind === input.source.kind) return;
+    // Outside content never continues an existing session.
+    const target = kind === 'http' && handler.target.mode === 'session' ? { node: 'local' as const, mode: 'auto' as const } : handler.target;
+    setInput({ ...input, source: kind === 'http' ? blankHttpSource(schedule.type === 'interval' ? schedule : undefined) : { kind: 'schedule', schedule, catchUp: 'latest' }, handler: { ...handler, target } });
+  };
   const setHandler = (patch: Partial<typeof handler>) => setInput({ ...input, handler: { ...handler, ...patch } });
   const provider = providers.find(item => item.provider === handler.provider);
   const candidates = sessions.filter(session => session.provider === handler.provider && !session.isSubagent && session.resumable).slice(0, 80);
@@ -162,20 +179,24 @@ function TriggerEditor({ trigger, token, providers, projects, sessions, busy, on
   };
   return <form className="slack-rule-editor trigger-editor" onSubmit={event => { event.preventDefault(); onSave(input); }}><fieldset disabled={busy} className="slack-rules">
     <label>{t('이름')}<input required maxLength={120} value={input.name} onChange={event => setInput({ ...input, name: event.target.value })} /></label>
-    <fieldset className="slack-group"><legend>{t('일정')}</legend><div className="slack-rule-options">
+    <label>{t('시작 조건')}<select value={input.source.kind} onChange={event => setKind(event.target.value as Source['kind'])}>
+      <option value="schedule">{t('정한 시간 (예약 실행)')}</option><option value="http">{t('HTTP 응답 확인')}</option></select></label>
+    {input.source.kind === 'http' && <HttpFields token={token} source={input.source} onChange={source => setInput({ ...input, source })} />}
+    <fieldset className="slack-group"><legend>{http ? t('확인 주기') : t('일정')}</legend><div className="slack-rule-options">
       <label>{t('방식')}<select value={schedule.type} onChange={event => setSchedule(event.target.value === 'interval' ? { type: 'interval', everySeconds: 3600 } : { type: 'cron', expression: '0 9 * * 1-5', timezone: browserZone() })}>
         <option value="cron">{t('크론')}</option><option value="interval">{t('일정 간격')}</option></select></label>
       {schedule.type === 'cron' ? <>
         <label>{t('크론 표현식')}<small>{t('분 시 일 월 요일 (예: 0 9 * * 1-5 = 평일 9시)')}</small><input required value={schedule.expression} onChange={event => setSchedule({ ...schedule, expression: event.target.value })} /></label>
         <label className="wide">{t('시간대')}<input required value={schedule.timezone} onChange={event => setSchedule({ ...schedule, timezone: event.target.value })} /></label>
       </> : <label>{t('간격 (분)')}<input type="number" required min={1} max={44640} value={Math.round(schedule.everySeconds / 60)} onChange={event => setSchedule({ type: 'interval', everySeconds: Math.max(1, Number(event.target.value) || 1) * 60 })} /></label>}
-      <label className="wide">{t('놓친 실행')}<small>{t('컴퓨터가 잠자기 상태였거나 Tower가 꺼져 있던 동안의 실행')}</small><select value={input.source.catchUp} onChange={event => setInput({ ...input, source: { ...input.source, catchUp: event.target.value as 'latest' | 'skip' } })}>
+      {input.source.kind === 'schedule' ? <label className="wide">{t('놓친 실행')}<small>{t('컴퓨터가 잠자기 상태였거나 Tower가 꺼져 있던 동안의 실행')}</small><select value={input.source.catchUp} onChange={event => setInput({ ...input, source: { ...input.source, catchUp: event.target.value as 'latest' | 'skip' } as Source })}>
         <option value="latest">{t('하루 안에 놓친 가장 최근 시간을 한 번 실행')}</option><option value="skip">{t('건너뛰기')}</option></select></label>
+        : <p className="wide trigger-note">{t('잠자기나 종료로 확인을 놓쳤다면 다시 켜진 뒤 한 번만 확인합니다.')}</p>}
     </div>
     <div className="trigger-preview"><button type="button" className="secondary-button" onClick={() => void showPreview()}>{t('다음 실행 시간 보기')}</button>
       {typeof preview === 'string' ? preview && <p className="slack-error">{translateMessage(preview)}</p> : <ol>{preview.map(time => <li key={time}>{absoluteTime(time)}</li>)}</ol>}</div>
     </fieldset>
-    <label>{t('지시')}<small>{t('실행될 때마다 에이전트에게 보내는 내용입니다.')}</small><textarea required rows={5} maxLength={8000} value={handler.instructions} onChange={event => setHandler({ instructions: event.target.value })} /></label>
+    <label>{t('지시')}<small>{http ? t('실행될 때마다 에이전트에게 보내는 내용입니다. 받은 응답은 지시가 아닌 참고 자료로 함께 전달됩니다.') : t('실행될 때마다 에이전트에게 보내는 내용입니다.')}</small><textarea required rows={5} maxLength={8000} value={handler.instructions} onChange={event => setHandler({ instructions: event.target.value })} /></label>
     <fieldset className="slack-group"><legend>{t('실행')}</legend><div className="slack-rule-options">
       <label>{t('에이전트')}<select value={handler.provider} onChange={event => setHandler({ provider: event.target.value as 'claude' | 'codex', model: undefined, effort: undefined,
         target: handler.target.mode === 'session' ? { node: 'local', mode: 'auto' } : handler.target })}><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
@@ -186,7 +207,8 @@ function TriggerEditor({ trigger, token, providers, projects, sessions, busy, on
       <label>{t('보낼 곳')}<select value={handler.target.mode} onChange={event => {
         const mode = event.target.value;
         setHandler({ target: mode === 'folder' ? { node: 'local', mode: 'folder', cwd: projects[0]?.[0] ?? '' } : mode === 'session' ? { node: 'local', mode: 'session', sessionId: candidates[0]?.id ?? '' } : { node: 'local', mode: 'auto' } });
-      }}><option value="auto">{t('Auto (프로젝트와 세션 자동 선택)')}</option><option value="folder">{t('폴더의 새 세션')}</option><option value="session">{t('기존 세션에 이어서')}</option></select></label>
+      }}><option value="auto">{http ? t('Auto (프로젝트 자동 선택, 새 세션)') : t('Auto (프로젝트와 세션 자동 선택)')}</option><option value="folder">{t('폴더의 새 세션')}</option>
+        {!http && <option value="session">{t('기존 세션에 이어서')}</option>}</select></label>
       {handler.target.mode === 'folder' && <label className="wide">{t('폴더')}<select required value={handler.target.cwd} onChange={event => setHandler({ target: { node: 'local', mode: 'folder', cwd: event.target.value } })}>
         {projects.map(([cwd, title]) => <option key={cwd} value={cwd}>{title} — {cwd}</option>)}</select></label>}
       {handler.target.mode === 'session' && <label className="wide">{t('세션')}<select required value={handler.target.sessionId} onChange={event => setHandler({ target: { node: 'local', mode: 'session', sessionId: event.target.value } })}>
@@ -200,6 +222,79 @@ function TriggerEditor({ trigger, token, providers, projects, sessions, busy, on
     </div></fieldset>
     <div className="slack-actions"><button type="button" className="secondary-button" onClick={onCancel}>{t('취소')}</button><button className="primary-button">{trigger ? t('저장') : t('만들기')}</button></div>
   </fieldset></form>;
+}
+
+const CONDITIONS: Array<[HttpCondition['type'], string]> = [['changed', '값이 바뀌면 실행'], ['match', '조건을 만족하게 되면 실행'], ['every-success', '성공 응답마다 실행']];
+const OPERATORS: Array<[Extract<HttpCondition, { type: 'match' }>['operator'], string]> = [['equals', '같음'], ['not-equals', '다름'], ['contains', '포함'], ['exists', '값이 있음'], ['gt', '보다 큼'], ['lt', '보다 작음']];
+
+function HttpFields({ token, source, onChange }: { token: string; source: HttpSource; onChange: (source: HttpSource) => void }) {
+  const { t } = useI18n();
+  const [secrets, setSecrets] = useState<TriggerSecret[]>([]);
+  const [result, setResult] = useState<HttpTestResult | string>('');
+  const [testing, setTesting] = useState(false);
+  useEffect(() => { void towerOperation<{ secrets: TriggerSecret[] }>(token, 'secrets.list').then(value => setSecrets(value.secrets), () => setSecrets([])); }, [token]);
+  const request = source.request;
+  const condition = source.condition;
+  const setRequest = (patch: Partial<HttpSource['request']>) => onChange({ ...source, request: { ...request, ...patch } });
+  const setCondition = (next: HttpCondition) => onChange({ ...source, condition: next });
+  const setHeader = (index: number, header: HttpSource['request']['headers'][number]) => setRequest({ headers: request.headers.map((item, position) => position === index ? header : item) });
+  let origin = '';
+  try { origin = new URL(request.url).origin; } catch { /* not a URL yet */ }
+  const usable = secrets.filter(secret => secret.origin === origin);
+  const test = async () => {
+    setTesting(true); setResult('');
+    try { setResult((await towerOperation<{ result: HttpTestResult }>(token, 'triggers.testHttp', { request, condition })).result); }
+    catch (cause) { setResult(cause instanceof Error ? cause.message : String(cause)); }
+    finally { setTesting(false); }
+  };
+  return <>
+    <fieldset className="slack-group"><legend>{t('요청')}</legend><div className="slack-rule-options">
+      <label>{t('메서드')}<select value={request.method} onChange={event => setRequest({ method: event.target.value as 'GET' | 'POST', ...(event.target.value === 'GET' ? { body: undefined } : {}) })}>
+        <option value="GET">GET</option><option value="POST">POST</option></select></label>
+      <label>{t('제한 시간 (초)')}<input type="number" min={1} max={45} value={request.timeoutSeconds} onChange={event => setRequest({ timeoutSeconds: Math.min(45, Math.max(1, Number(event.target.value) || 1)) })} /></label>
+      <label className="wide">URL<small>{t('이 컴퓨터나 사설 네트워크 주소는 설정에서 허용한 곳만 부를 수 있습니다.')}</small><input required type="url" maxLength={4000} placeholder="https://api.example.com/status" value={request.url} onChange={event => setRequest({ url: event.target.value })} /></label>
+      <div className="wide trigger-headers"><span>{t('헤더')}</span>
+        {request.headers.map((header, index) => <div key={index} className="trigger-header-row">
+          <input aria-label={t('헤더 이름')} placeholder="Accept" required maxLength={100} value={header.name} onChange={event => setHeader(index, { ...header, name: event.target.value })} />
+          {'secretId' in header
+            ? <select aria-label={t('비밀 값')} required value={header.secretId} onChange={event => setHeader(index, { name: header.name, secretId: event.target.value })}>
+              <option value="">{t('비밀 값 선택')}</option>
+              {secrets.filter(secret => secret.origin === origin || secret.id === header.secretId).map(secret => <option key={secret.id} value={secret.id}>{secret.name} — {secret.origin}</option>)}</select>
+            : <input aria-label={t('헤더 값')} maxLength={4000} value={header.value} onChange={event => setHeader(index, { name: header.name, value: event.target.value })} />}
+          <button type="button" className="secondary-button" title={t('값과 저장된 비밀 사이 전환')} onClick={() => setHeader(index, 'secretId' in header ? { name: header.name, value: '' } : { name: header.name, secretId: usable[0]?.id ?? '' })}>
+            <KeyRound size={13} />{'secretId' in header ? t('값 직접 입력') : t('비밀 사용')}</button>
+          <button type="button" className="icon-button" aria-label={t('헤더 삭제')} onClick={() => setRequest({ headers: request.headers.filter((_item, position) => position !== index) })}><Trash2 size={14} /></button>
+        </div>)}
+        {request.headers.length < 20 && <button type="button" className="secondary-button" onClick={() => setRequest({ headers: [...request.headers, { name: '', value: '' }] })}><Plus size={13} />{t('헤더 추가')}</button>}
+        {request.headers.some(header => 'secretId' in header) && !usable.length && <small>{t('이 주소에 쓸 수 있는 비밀이 없습니다. 설정 탭에서 이 주소용 비밀을 먼저 저장하세요.')}</small>}
+      </div>
+      {request.method === 'POST' && <label className="wide">{t('본문')}<textarea rows={4} maxLength={64000} value={request.body ?? ''} onChange={event => setRequest({ body: event.target.value || undefined })} /></label>}
+    </div></fieldset>
+    <fieldset className="slack-group"><legend>{t('실행 조건')}</legend><div className="slack-rule-options">
+      <label className="wide">{t('언제 실행할까요')}<select value={condition.type} onChange={event => setCondition(event.target.value === 'match' ? { type: 'match', pointer: '', operator: 'equals', value: '' }
+        : event.target.value === 'changed' ? { type: 'changed' } : { type: 'every-success' })}>{CONDITIONS.map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}</select>
+        {condition.type !== 'every-success' && <small>{t('처음 받은 응답은 기준으로만 쓰고 실행하지 않습니다.')}</small>}</label>
+      {condition.type !== 'every-success' && <label className="wide">{t('볼 값 (JSON Pointer)')}<small>{t('예: /status, /items/0/id. 비우면 응답 전체')}</small>
+        <input maxLength={500} placeholder="/status" value={condition.pointer ?? ''} onChange={event => setCondition({ ...condition, pointer: event.target.value || undefined })} /></label>}
+      {condition.type === 'match' && <>
+        <label>{t('비교')}<select value={condition.operator} onChange={event => setCondition({ ...condition, operator: event.target.value as typeof condition.operator })}>
+          {OPERATORS.map(([value, label]) => <option key={value} value={value}>{t(label)}</option>)}</select></label>
+        {condition.operator !== 'exists' && <label>{t('값')}<input maxLength={1000} value={condition.value ?? ''} onChange={event => setCondition({ ...condition, value: event.target.value })} /></label>}
+      </>}
+    </div>
+    <div className="trigger-preview">
+      <button type="button" className="secondary-button" disabled={testing || !request.url} onClick={() => void test()}>{testing ? t('보내는 중') : t('요청 테스트')}</button>
+      {request.method === 'POST' && <small>{t('POST 요청은 테스트에서도 실제로 전송됩니다.')}</small>}
+      {typeof result === 'string' ? result && <p className="slack-error">{translateMessage(result)}</p>
+        : <div className="trigger-test-result">
+          {result.status !== undefined && <strong>HTTP {result.status}{result.contentType ? ` · ${result.contentType}` : ''}</strong>}
+          {result.error && <p className="slack-error">{translateMessage(result.error)}</p>}
+          {result.selected !== undefined && <p>{t('선택한 값')}: <code>{typeof result.selected === 'string' ? result.selected : JSON.stringify(result.selected)}</code></p>}
+          {result.matched !== undefined && <p>{result.matched ? t('지금 조건을 만족합니다.') : t('지금은 조건을 만족하지 않습니다.')}</p>}
+          {result.body && <pre>{result.body}{result.truncated ? '\n…' : ''}</pre>}
+        </div>}
+    </div></fieldset>
+  </>;
 }
 
 function TriggerHistory({ token, overview, onChanged }: { token: string; overview: TriggerOverview; onChanged: () => Promise<void> }) {
@@ -245,15 +340,49 @@ function TriggerHistory({ token, overview, onChanged }: { token: string; overvie
 function TriggerLimits({ token }: { token: string }) {
   const { t } = useI18n();
   const [settings, setSettings] = useState<TriggerSettings | null>(null);
+  const [hosts, setHosts] = useState('');
   const [status, setStatus] = useState('');
-  useEffect(() => { void towerOperation<{ settings: TriggerSettings }>(token, 'triggers.settings').then(result => setSettings(result.settings), cause => setStatus(String(cause))); }, [token]);
+  useEffect(() => { void towerOperation<{ settings: TriggerSettings }>(token, 'triggers.settings').then(result => { setSettings(result.settings); setHosts((result.settings.privateHosts ?? []).join('\n')); }, cause => setStatus(String(cause))); }, [token]);
   if (!settings) return <p role="status">{status || t('불러오는 중')}</p>;
-  const field = (key: keyof TriggerSettings, label: string, max: number) => <label>{label}<input type="number" min={1} max={max} value={settings[key]} onChange={event => setSettings({ ...settings, [key]: Math.min(max, Math.max(1, Number(event.target.value) || 1)) })} /></label>;
+  const field = (key: 'maxTriggers' | 'maxConcurrentRuns' | 'maxEventsPerHour', label: string, max: number) => <label>{label}<input type="number" min={1} max={max} value={settings[key]} onChange={event => setSettings({ ...settings, [key]: Math.min(max, Math.max(1, Number(event.target.value) || 1)) })} /></label>;
   return <form className="slack-settings" onSubmit={event => { event.preventDefault(); void towerOperation(token, 'triggers.updateSettings', { settings }).then(() => setStatus(t('저장했습니다.')), cause => setStatus(cause instanceof Error ? cause.message : String(cause))); }}>
     <p>{t('모든 트리거에 함께 적용되는 한도입니다. 에이전트는 바꿀 수 없습니다.')}</p>
     {field('maxTriggers', t('최대 트리거 수'), 200)}
     {field('maxConcurrentRuns', t('동시에 실행할 트리거 작업 수'), 10)}
     {field('maxEventsPerHour', t('모든 트리거의 시간당 최대 실행'), 600)}
+    {/* A worker from before HTTP triggers has no such setting; the list appears once it is updated. */}
+    {settings.privateHosts && <label>{t('HTTP 트리거가 부를 수 있는 내부 주소')}<small>{t('한 줄에 하나씩: 호스트 이름이나 CIDR (예: 127.0.0.1, 192.168.0.0/16). Tower 자신은 항상 제외됩니다.')}</small>
+      <textarea rows={3} value={hosts} onChange={event => { setHosts(event.target.value); setSettings({ ...settings, privateHosts: event.target.value.split('\n').map(line => line.trim()).filter(Boolean) }); }} /></label>}
     <div className="slack-actions"><button className="primary-button">{t('저장')}</button>{status && <span role="status">{translateMessage(status)}</span>}</div>
   </form>;
+}
+
+function TriggerSecrets({ token }: { token: string }) {
+  const { t } = useI18n();
+  const [secrets, setSecrets] = useState<TriggerSecret[] | null>(null);
+  const [draft, setDraft] = useState({ name: '', origin: '', value: '' });
+  const [status, setStatus] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const load = useCallback(() => towerOperation<{ secrets: TriggerSecret[] }>(token, 'secrets.list').then(result => setSecrets(result.secrets), cause => setStatus(String(cause))), [token]);
+  useEffect(() => { void load(); }, [load]);
+  const act = async (work: () => Promise<unknown>) => {
+    try { await work(); setStatus(''); await load(); return true; }
+    catch (cause) { setStatus(cause instanceof Error ? cause.message : String(cause)); return false; }
+  };
+  return <section className="slack-settings trigger-secrets">
+    <h3>{t('헤더 비밀')}</h3>
+    <p>{t('API 키 같은 헤더 값을 저장합니다. 정한 주소(origin)에만, 내가 고른 트리거에서만 보내며 에이전트는 값을 볼 수 없습니다.')}</p>
+    {secrets?.length ? <ol className="slack-activity">{secrets.map(secret => <li key={secret.id}>
+      <strong>{secret.name}</strong><span>{secret.origin} · {t('트리거 {0}개에서 사용', { 0: secret.triggerIds.length })}</span>
+      {confirm === secret.id ? <button type="button" className="slack-danger" onBlur={() => setConfirm('')} onClick={() => { setConfirm(''); void act(() => towerOperation(token, 'secrets.delete', { id: secret.id })); }}>{t('삭제 확인')}</button>
+        : <button type="button" className="secondary-button" onClick={() => setConfirm(secret.id)}><Trash2 size={13} />{t('삭제')}</button>}
+    </li>)}</ol> : secrets && <p className="slack-empty">{t('저장한 비밀이 없습니다.')}</p>}
+    <form className="trigger-secret-form" onSubmit={event => { event.preventDefault(); void act(() => towerOperation(token, 'secrets.create', { secret: draft })).then(ok => { if (ok) setDraft({ name: '', origin: '', value: '' }); }); }}>
+      <label>{t('이름')}<input required maxLength={100} value={draft.name} onChange={event => setDraft({ ...draft, name: event.target.value })} /></label>
+      <label>{t('보낼 주소 (origin)')}<input required type="url" placeholder="https://api.example.com" value={draft.origin} onChange={event => setDraft({ ...draft, origin: event.target.value })} /></label>
+      <label>{t('값')}<input required type="password" autoComplete="off" maxLength={4000} placeholder="Bearer …" value={draft.value} onChange={event => setDraft({ ...draft, value: event.target.value })} /></label>
+      <div className="slack-actions"><button className="primary-button"><KeyRound size={13} />{t('비밀 저장')}</button></div>
+    </form>
+    {status && <p role="alert" className="slack-error">{translateMessage(status)}</p>}
+  </section>;
 }
