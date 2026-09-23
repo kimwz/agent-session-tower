@@ -23,6 +23,10 @@ export class SessionService extends EventEmitter {
   private pendingRefresh?: Promise<void>;
   private lastProcesses = 0;
   private processes: ProcessSnapshot = { claude: new Map(), codex: new Set(), providerRunning: { claude: false, codex: false } };
+  /** Launching sessions seen while a child's process was alive. The proof outlives the process. */
+  private readonly launchers = new Map<string, string[]>();
+  /** Non-interactive sessions whose process was already looked at once after they appeared. */
+  private readonly checked = new Set<string>();
 
   constructor(options: SessionOptions = {}) {
     super();
@@ -56,10 +60,7 @@ export class SessionService extends EventEmitter {
       const [codex, archived, claude] = await Promise.all([
         walk(join(this.codexHome, 'sessions')), walk(join(this.codexHome, 'archived_sessions')), walk(join(this.claudeHome, 'projects')),
       ]);
-      if (Date.now() - this.lastProcesses > 8000) {
-        this.processes = await this.readProcesses();
-        this.lastProcesses = Date.now();
-      }
+      if (Date.now() - this.lastProcesses > 8000) await this.inspect();
       const files = [...codex.map((path) => ({ path, provider: 'codex' as const, archived: false })),
         ...archived.map((path) => ({ path, provider: 'codex' as const, archived: true })),
         ...claude.map((path) => ({ path, provider: 'claude' as const, archived: false }))];
@@ -89,6 +90,15 @@ export class SessionService extends EventEmitter {
         }
       }));
       for (const path of this.records.keys()) if (!existing.has(path)) { this.records.delete(path); changed = true; }
+      // A run started by another agent may finish within seconds. Look at its process as soon as
+      // its file appears instead of waiting for the regular process interval.
+      const unchecked = [...this.records.values()].filter(state => !state.session.parentId && !state.session.isSubagent
+        && (state.execOrigin || state.programmatic) && !this.checked.has(state.session.id));
+      if (unchecked.some(state => Date.now() - Date.parse(state.session.createdAt) < 120_000) && Date.now() - this.lastProcesses > 1000) await this.inspect();
+      for (const state of unchecked) this.checked.add(state.session.id);
+      const live = new Set([...this.records.values()].map(state => state.session.id));
+      for (const id of this.launchers.keys()) if (!live.has(id)) this.launchers.delete(id);
+      for (const id of this.checked) if (!live.has(id)) this.checked.delete(id);
       this.index.clear();
       for (const state of this.records.values()) {
         if (state.internal) continue;
@@ -96,10 +106,16 @@ export class SessionService extends EventEmitter {
         const duplicate = this.index.get(state.session.id);
         if (!duplicate || (duplicate.archived && !state.archived) || (duplicate.archived === state.archived && state.session.updatedAt > duplicate.session.updatedAt)) this.index.set(state.session.id, state);
       }
-      if (resolveExecLineage(this.index.values())) changed = true;
+      if (resolveExecLineage(this.index.values(), this.launchers)) changed = true;
       this.scanning = false;
       if (changed) this.emit('change', this.list());
     } finally { this.scanning = false; }
+  }
+
+  private async inspect(): Promise<void> {
+    this.processes = await this.readProcesses();
+    this.lastProcesses = Date.now();
+    for (const [id, parents] of this.processes.launchers ?? []) if (!this.launchers.has(id)) this.launchers.set(id, parents);
   }
 
   /** `before` is an opaque byte cursor, stable when new messages are appended. */

@@ -115,3 +115,14 @@ test('graph cutoff, project lanes, and node order ignore stream and status updat
   const requested = sessions.map(item => item.id === '0' ? { ...item, lastRequestAt: '2026-09-15T23:00:00.000Z' } : item);
   assert.deepEqual(layout(requested), [['/beta', ['0', '8', '6', '4']], ['/alpha', ['9', '7', '5', '3']]]);
 });
+
+test('work another agent launched is never a main session: linked runs join the launcher family, unlinked ones stay out of view', () => {
+  const user = session('user', { provider: 'claude' });
+  const linked = session('linked', { launchedByAgent: true, isSubagent: true, parentId: user.id, parentLink: 'exec' });
+  const linkedThread = session('linked-thread', { isSubagent: true, parentId: linked.id });
+  const unlinked = session('unlinked', { launchedByAgent: true });
+  const unlinkedThread = session('unlinked-thread', { isSubagent: true, parentId: unlinked.id });
+  const sessions = [user, linked, linkedThread, unlinked, unlinkedThread];
+  assert.deepEqual(getMainSessions(sessions).map(item => item.id), ['user']);
+  assert.deepEqual(getSessionFamily(sessions, user.id).members.map(item => item.id), ['user', 'linked', 'linked-thread']);
+});

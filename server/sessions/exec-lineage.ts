@@ -75,11 +75,28 @@ export function parseExecLaunch(command: unknown, originalCwd: string): { cwd: s
   return { cwd: normalize(cwd), prompt: promptDigest(prompt) };
 }
 
-export function resolveExecLineage(records: Iterable<RecordState>): boolean {
+/**
+ * Links sessions that another agent session started to that agent. Two kinds of proof count:
+ * the launching process was observed as an ancestor of the child's process (`launchers`), or the
+ * parent's transcript holds the exact literal `codex exec` call. Only non-interactive sessions are
+ * candidates, so an interactive window is never folded into another session.
+ */
+export function resolveExecLineage(records: Iterable<RecordState>, launchers: ReadonlyMap<string, readonly string[]> = new Map()): boolean {
   const states = [...records];
   const before = states.map(s => `${s.session.parentId}:${s.session.parentLink}`);
   for (const { session } of states) if (session.parentLink === 'exec') {
     delete session.parentId; delete session.parentLink; session.isSubagent = false;
+  }
+  const byId = new Map(states.map(state => [state.session.id, state]));
+  for (const child of states) {
+    const { session } = child;
+    if (session.parentId || session.isSubagent || !(child.execOrigin || (session.provider === 'claude' && child.programmatic))) continue;
+    // The ancestor process may hold its own subagents' files too; only its root is the launcher.
+    const parents = [...new Set(launchers.get(session.id) ?? [])].map(id => byId.get(id))
+      .filter((parent): parent is RecordState => Boolean(parent && parent !== child && (!parent.session.isSubagent || parent.session.parentLink === 'exec')));
+    if (parents.length !== 1) continue;
+    session.parentId = parents[0]!.session.id;
+    session.parentLink = 'exec'; session.isSubagent = true;
   }
   const launches = states.filter(parent => parent.session.provider === 'claude').flatMap(parent => (parent.execLaunches ?? []).map(launch => ({ parent, launch })));
   const candidates = states.filter(s => s.execOrigin && s.firstPrompt && !s.session.parentId && !s.session.isSubagent);

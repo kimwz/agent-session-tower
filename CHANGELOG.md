@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.13.1] - 2026-09-23
+
+### Fixed
+- Codex runs that another agent started (`codex exec`, `codex review`) no longer appear as your own sessions on the canvas, in the session list, or as Auto Prompt targets. This no longer depends on how the command was written: wrappers, scripts, and prompts read from files are all recognized.
+- When such a run starts inside an agent's turn, Tower now connects it to that agent from the running process tree, so it appears in that session's subagent view. This also applies to `claude -p` runs started inside a turn. A run that cannot be connected stays out of view.
+
 ## [1.13.0] - 2026-09-23
 
 ### Changed
