@@ -135,7 +135,10 @@ async function main() {
       groups: groups.list(),
       providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider).length })),
       runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning: history.indexing, hostname: hostname(), version: APP_VERSION,
-      ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}), updatedAt: new Date().toISOString(),
+      ...(runs.triggerOverview() ? { triggers: runs.triggerOverview() } : {}),
+      ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}),
+      ...(runs.runnerVersion() && runs.runnerVersion() !== APP_VERSION ? { runnerUpdate: runs.supports('handoff') ? 'automatic' as const : 'manual' as const } : {}),
+      updatedAt: new Date().toISOString(),
     };
   };
   const detail = async (id: string, before?: number, limit?: number) => {
@@ -166,6 +169,7 @@ async function main() {
     getAutoPrompt: id => runs.getAutoPrompt(id),
     cancelAutoPrompt: id => runs.cancelAutoPrompt(id),
     slackOverview: () => runs.slackOverview(),
+    api: (operation, input) => runs.api(operation, input),
     slackMutate: (action, body) => runs.slackMutate(action, body),
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
     enqueue: (id, prompt, attachments) => runs.enqueue(id, prompt, attachments, { origin: OWNER }),

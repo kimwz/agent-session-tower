@@ -1,12 +1,16 @@
 import type { SlackWorkflow } from './slack.js';
 import type { Run, Session } from './types.js';
 
-/** Display/routing cleanup only: no provider cancellation or native record deletion. */
-export function finishedSlackDelegatedSessionIds(workflows: SlackWorkflow[], sessions: Session[], runs: Run[]): Set<string> {
+/**
+ * Sessions automation created that have finished: Slack's delegated work and sessions a trigger started,
+ * with their finished subagents. Display and routing cleanup only; nothing is cancelled or deleted.
+ */
+export function finishedAutomationSessionIds(workflows: SlackWorkflow[], sessions: Session[], runs: Run[]): Set<string> {
   const coordinators = new Set(workflows.filter(item => item.mode === 'conversation').map(item => item.sessionId));
   const active = new Set(runs.filter(run => run.status === 'running' || run.status === 'queued').map(run => run.sessionId));
-  const roots = new Set(workflows.flatMap(item => (item.delegatedTasks ?? []).flatMap(task =>
-    task.createdSessionId && task.delegatedFinished ? [task.createdSessionId] : [])));
+  const roots = new Set([...workflows.flatMap(item => (item.delegatedTasks ?? []).flatMap(task =>
+    task.createdSessionId && task.delegatedFinished ? [task.createdSessionId] : [])),
+    ...sessions.flatMap(session => session.launchedBy?.kind === 'trigger' ? [session.id] : [])]);
   const aliases = (session: Session) => [session.id, `${session.provider}:${session.nativeId}`];
   const descendants = new Set(sessions.filter(session => aliases(session).some(id => roots.has(id))).map(session => session.id));
   const parents = new Map<string, string>();

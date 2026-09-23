@@ -22,7 +22,7 @@ function makeSession(cwd: string, overrides: Partial<Session> = {}): Session {
 }
 
 
-async function fixture(options: { mode?: string; provider?: 'codex' | 'claude'; busy?: boolean; maxConcurrent?: number; refreshError?: boolean; path?: string; shebang?: boolean; openCodexBridge?: OpenCodexBridge; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools']; contextFrames?: unknown[] } = {}) {
+async function fixture(options: { permissionMode?: string; mode?: string; provider?: 'codex' | 'claude'; busy?: boolean; maxConcurrent?: number; refreshError?: boolean; path?: string; shebang?: boolean; openCodexBridge?: OpenCodexBridge; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools']; contextFrames?: unknown[] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'agent-monitor-runner-'));
   const script = join(directory, 'provider.mjs');
   await writeFile(script, `#!/usr/bin/env node
@@ -52,7 +52,7 @@ function processPrompt() {
   if (mode === 'fail') { process.stderr.write('authentication expired'); process.exit(2); return; }
   if (mode === 'hold') { setTimeout(() => send({type:'item.completed',item:{type:'agent_message',text:'too late'}}), 20000); return; }
   if (provider === 'claude') {
-    send({type:'system',subtype:'init',session_id: mode === 'mismatch' ? '${ID2}' : id});
+    send({type:'system',subtype:'init',session_id: mode === 'mismatch' ? '${ID2}' : id, ...(process.env.FIXTURE_PERMISSION_MODE ? {permissionMode: process.env.FIXTURE_PERMISSION_MODE === 'none' ? undefined : process.env.FIXTURE_PERMISSION_MODE} : {permissionMode: 'default'})});
     if (process.env.FIXTURE_CONTEXT_FRAMES) { for (const frame of JSON.parse(process.env.FIXTURE_CONTEXT_FRAMES)) send(frame); return; }
     send({type:'stream_event',event:{type:'message_start'}});
     send({type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text:'Hello '}}});
@@ -74,7 +74,7 @@ function processPrompt() {
     getSession: (id) => sessions.get(id), refreshSessions: async () => { refreshes++; if(options.refreshError) throw new Error('activity unavailable'); }, stateDir,
     pollMs: 25, maxConcurrent: options.maxConcurrent, findExecutable: async (provider) => `/fixture/${provider}`,
     openCodexBridge: options.openCodexBridge, resolveRunTools: options.resolveRunTools,
-    env: { FIXTURE_MODE: options.mode ?? '', RECEIVED_PATH: join(directory, 'received.json'), CLAUDECODE: '1', ...(options.path !== undefined ? { PATH: options.path } : {}),
+    env: { FIXTURE_MODE: options.mode ?? '', RECEIVED_PATH: join(directory, 'received.json'), CLAUDECODE: '1', ...(options.permissionMode ? { FIXTURE_PERMISSION_MODE: options.permissionMode } : {}), ...(options.path !== undefined ? { PATH: options.path } : {}),
       ...(options.contextFrames ? { FIXTURE_CONTEXT_FRAMES: JSON.stringify(options.contextFrames) } : {}) },
     spawnProcess: (file, args, spawnOptions) => {
       launches.push({file,args,path:spawnOptions.env?.PATH});
@@ -840,4 +840,19 @@ test('optional tools still let a turn go to the open Codex app, and a lost ackno
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(starts.length, 1);
   assert.equal(f.launches.length, 0, 'optional tools never trigger a second writer after an uncertain desktop delivery');
+});
+
+test('an unattended Claude run continues only in automatic mode or a mode that asks the owner', async t => {
+  for (const [mode, expected] of [['auto', 'completed'], ['default', 'completed'], ['bypassPermissions', 'error'], ['acceptEdits', 'error'], ['none', 'error']] as const) await t.test(mode, async () => {
+    const f = await fixture({ provider: 'claude', permissionMode: mode });
+    try {
+      const run = await f.manager.enqueue(f.session.id, 'Scheduled check', {}, { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
+      const result = await finished(f.manager, run.id);
+      assert.equal(result.status, expected);
+      const args = f.launches[0].args;
+      assert.equal(args[args.indexOf('--permission-mode') + 1], 'auto');
+      if (mode === 'default') assert.match(result.output, /wait for you in Tower/);
+      if (expected === 'error') assert.match(result.error ?? '', /unexpected permission mode/);
+    } finally { await f.cleanup(); }
+  });
 });

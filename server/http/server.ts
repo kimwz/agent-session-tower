@@ -17,8 +17,11 @@ import type { AuthStore } from '../auth/store.js';
 import { requestIdentity, sessionCookie, setSessionCookie } from './auth.js';
 import type { AuthStatus } from '../../shared/auth.js';
 import type { SlackPublicStatus } from '../../shared/slack.js';
+import { OPERATIONS, isOperationName } from '../../shared/api/operations.js';
 
 export interface Backend {
+  /** Tower operations (see shared/api/operations.ts), run by the worker as the owner. */
+  api?(operation: string, input: unknown): Promise<unknown>;
   slackOverview?(): Promise<SlackPublicStatus>;
   slackMutate?(action: string, body: Record<string, unknown>): Promise<SlackPublicStatus>;
   snapshot(): Snapshot;
@@ -143,7 +146,10 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         }
         if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON 요청이 필요합니다.' });
         // Keystrokes and resize events have their own per-terminal byte/request budget.
-        if (!login && !/^\/api\/workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
+        // Reading Tower state is not a mutation; only changes count against the request budget.
+        const read = path.match(/^\/api\/v1\/([a-z]+\.[a-zA-Z]+)$/)?.[1];
+        const readOnly = read !== undefined && isOperationName(read) && !OPERATIONS[read].write;
+        if (!login && !readOnly && !/^\/api\/workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
           const key = req.socket.remoteAddress || 'local';
           const now = Date.now();
           const rate = rates.get(key);
@@ -152,6 +158,12 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         }
       }
       const secureOrigin = origins.has(`https://${req.headers.host}`) && !origins.has(`http://${req.headers.host}`);
+      const operation = path.match(/^\/api\/v1\/([a-z]+\.[a-zA-Z]+)$/);
+      if (operation && req.method === 'POST') {
+        if (!isOperationName(operation[1])) return json(res, 404, { error: 'Unknown Tower operation.' });
+        if (!backend.api) return json(res, 503, { error: 'Tower operations are unavailable.' });
+        return json(res, 200, { result: await backend.api(operation[1], await readJson(req, 1_000_000)) });
+      }
       if (path === '/api/slack' && req.method === 'GET') {
         if (!backend.slackOverview) return json(res, 503, { error: 'Slack 연동을 사용할 수 없습니다.' });
         return json(res, 200, await backend.slackOverview());

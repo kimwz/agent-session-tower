@@ -1,4 +1,4 @@
-import { finishedSlackDelegatedSessionIds } from '../../shared/slack-delegated-sessions.js';
+import { finishedAutomationSessionIds } from '../../shared/automation-sessions.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -21,6 +21,8 @@ import { RunManager, type RunAdmission } from './manager.js';
 import { parseRunOrigin } from './origin.js';
 import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { parseSuccessor, spawnSuccessor, writeHandoff, type SuccessorCommand } from './handoff.js';
+import { TriggerService } from '../triggers/service.js';
+import { TowerApi } from '../api/tower-api.js';
 import { MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
 const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory']);
@@ -31,6 +33,8 @@ export interface RunnerHostOptions {
   sessions: SessionService;
   autoPrompts?: AutoPromptManager;
   slack?: SlackService;
+  triggers?: TriggerService;
+  api?: TowerApi;
   terminals?: WorkspaceTerminals;
   idleMs?: number;
   onIdle?: () => void | Promise<void>;
@@ -77,7 +81,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     return { instance, revision: ++revision, runs: options.runs.list(), sessions,
       nativeIds: Object.fromEntries(sessions.map(session => [session.id, options.runs.nativeSessionId(session.id)])),
       settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [], version: APP_VERSION,
-      capabilities: [...RUNNER_CAPABILITIES], ...(options.handoffNonce ? { handoff: options.handoffNonce } : {}) };
+      capabilities: [...RUNNER_CAPABILITIES], ...(options.handoffNonce ? { handoff: options.handoffNonce } : {}),
+      ...(options.triggers ? { triggers: options.triggers.overview() } : {}) };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
@@ -114,7 +119,15 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'submitAutoPrompt': if (options.autoPrompts) { await context?.refresh(); return options.autoPrompts.submit(args[0] as AutoPromptRequest, { origin: admission(args[1]).origin }); } break;
       case 'cancelAutoPrompt': if (options.autoPrompts) return options.autoPrompts.cancel(args[0] as string); break;
       case 'slackOverview': if (options.slack) return options.slack.overview(); break;
-      case 'slackMutate': if (options.slack) return options.slack.mutate(args[0] as string, args[1] as Record<string, unknown>); break;
+      case 'slackMutate': if (options.slack) {
+        // Read before the change so a disconnect is still recorded under the account it removed.
+        const before = options.slack.projection();
+        const result = await options.slack.mutate(args[0] as string, args[1] as Record<string, unknown>);
+        const projection = options.slack.projection() ?? before;
+        if (projection && ['settings', 'rules', 'connect', 'disconnect'].includes(args[0] as string)) await options.triggers?.recordSlack({ kind: 'owner', via: 'ui' }, projection.id, `Slack ${args[0] as string} changed`);
+        return result;
+      } break;
+      case 'api': if (options.api) return options.api.call(args[0], args[1], { kind: 'owner', via: 'ui' }); break;
       case 'slackTool': if (options.slack) return options.slack.tool(args[0] as string, args[1] as string, args[2] as Record<string, unknown>); break;
     }
     throw Object.assign(new Error('Unknown runner operation.'), { statusCode: 400 });
@@ -163,6 +176,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   options.runs.on('change', changed);
   options.sessions.on('change', changed);
   options.autoPrompts?.on('change', changed);
+  options.triggers?.on('change', changed);
   let idleTimer: ReturnType<typeof setInterval> | undefined;
   let handoffTimer: ReturnType<typeof setInterval> | undefined;
   // Status alone is not enough: a cancelled turn may still be closing its provider process.
@@ -208,7 +222,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     closing = true;
     if (idleTimer) clearInterval(idleTimer);
     if (handoffTimer) clearInterval(handoffTimer);
-    options.runs.off('change', changed); options.sessions.off('change', changed); options.autoPrompts?.off('change', changed);
+    options.runs.off('change', changed); options.sessions.off('change', changed); options.autoPrompts?.off('change', changed); options.triggers?.off('change', changed);
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
     await unlink(paths.socket).catch(() => {});
@@ -230,6 +244,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (options.autoPrompts?.list().some(job => !['completed', 'error', 'cancelled'].includes(job.status))) return;
         if (options.terminals?.hasActive()) return;
         if (options.slack?.hasActive()) return;
+        if (options.triggers?.hasActive()) return;
         // Stop accepting requests and finish writes before releasing the worker lock.
         void close(true).catch(error => { console.error('Runner idle cleanup failed:', error); });
       }, 1000);
@@ -278,7 +293,7 @@ async function runnerContext({ stateDir, runs, sessions, slack }: Pick<RunnerHos
   const providers = await getProviderHealth();
   const visibleSessions = () => {
     const projected = projectSessionStates(runs.sessionList(sessions.list()), runs.list(), runs.settledRunIds());
-    const finished = finishedSlackDelegatedSessionIds(slack?.automation.list() ?? [], projected, runs.list());
+    const finished = finishedAutomationSessionIds(slack?.automation.list() ?? [], projected, runs.list());
     return projected.filter(session => !finished.has(session.id) && !slack?.coordinatorSessionIds().includes(session.id)).map(session => closed.apply(titles.apply(session)));
   };
   const snapshot = (): Snapshot => ({ sessions: visibleSessions(),
@@ -314,13 +329,29 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // Read once: children of this worker must not inherit the proof.
     const handoffNonce = process.env.TOWER_HANDOFF && /^[a-f\d]{32}$/.test(process.env.TOWER_HANDOFF) ? process.env.TOWER_HANDOFF : undefined;
     delete process.env.TOWER_HANDOFF;
-    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, releaseStateLock: release, handoffNonce,
-      onIdle: async () => { slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => slack.hasInFlight(), holdIntake: () => slack.holdNewWork(),
-      quiesce: async () => { slack.pause(); await Promise.all([slack.flush(), runs.flushState(), autoPrompts.flush()]); },
-      resume: () => slack.resume(),
+    const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), executor: {
+      submitAutoPrompt: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); },
+      getAutoPrompt: id => autoPrompts.get(id),
+      create: (input, internal) => runs.create(input, internal),
+      enqueue: (id, prompt, request, internal) => runs.enqueue(id, prompt, request, internal),
+      runs: () => runs.list(),
+      session: id => runs.getSession(id),
+    } });
+    await triggers.start();
+    // Slack and triggers share one limit on provider turns running at once.
+    runs.setAutomationLimit(triggers.settings().maxConcurrentRuns);
+    triggers.on('settings', (settings: { maxConcurrentRuns: number }) => runs.setAutomationLimit(settings.maxConcurrentRuns));
+    // A run still waiting when its trigger is turned off or deleted never starts.
+    runs.setLaunchGate(run => run.origin?.kind === 'trigger' && run.origin.triggerId && !triggers.launchAllowed(run.origin.triggerId, run.origin.eventId)
+      ? 'The trigger was turned off before this run started, so it did not run.' : undefined);
+    const api = new TowerApi({ triggers });
+    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, triggers, api, releaseStateLock: release, handoffNonce,
+      onIdle: async () => { triggers.close(); slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      inFlight: () => slack.hasInFlight() || triggers.inFlight(), holdIntake: () => { slack.holdNewWork(); triggers.hold(); },
+      quiesce: async () => { slack.pause(); triggers.pause(); await Promise.all([slack.flush(), triggers.flush(), runs.flushState(), autoPrompts.flush()]); },
+      resume: () => { slack.resume(); triggers.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { slack.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { triggers.close(); slack.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});

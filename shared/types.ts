@@ -1,3 +1,4 @@
+import type { TriggerOverview } from './triggers.js';
 export type Provider = 'claude' | 'codex';
 /** Who reviews Codex approval requests. Absent keeps Codex's own configured reviewer. */
 export type CodexApprovalsReviewer = 'user' | 'auto_review';
@@ -21,6 +22,8 @@ export interface Session {
    * It is that agent's work, not a user conversation: it never appears as its own canvas session.
    */
   launchedByAgent?: boolean;
+  /** Created by a trigger. Like agent-launched work, it leaves the canvas once its work is done. */
+  launchedBy?: { kind: 'trigger'; triggerId: string };
   agentName?: string;
   model?: string;
   contextUsage?: SessionContextUsage;
@@ -115,6 +118,8 @@ export interface Run {
   id: string;
   sessionId: string;
   origin?: RunOrigin;
+  /** Started with no one watching; the provider's automatic approval mode decides. */
+  unattended?: boolean;
   prompt: string;
   status: 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
   createdAt: string;
@@ -194,6 +199,7 @@ export interface AutoPromptDecision {
 }
 export interface AutoPromptJob {
   origin?: RunOrigin;
+  unattended?: boolean;
   /** The request carries external content, so it may only start a new session. */
   untrustedInput?: boolean;
   sessionMode?: 'new';
@@ -240,4 +246,8 @@ export interface Snapshot {
   runnerVersion?: string;
   groups?: ProjectGroup[];
   autoPrompts?: AutoPromptJob[];
+  /** Absent while the execution worker predates triggers. */
+  triggers?: TriggerOverview;
+  /** While the worker runs another build: whether it will hand over by itself. */
+  runnerUpdate?: 'automatic' | 'manual';
 }

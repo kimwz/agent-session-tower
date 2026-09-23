@@ -11,6 +11,7 @@ import type { AutoPromptManager } from '../auto-prompt/manager.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
 import type { RunManager } from '../runs/manager.js';
 import type { RunOrigin } from '../../shared/types.js';
+import type { SlackProjection } from '../triggers/service.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { SlackAutomationManager, validateSlackRules } from './automation.js';
 import { SlackClient } from './client.js';
@@ -34,6 +35,7 @@ export class SlackService extends EventEmitter {
   private status = 'disconnected';
   private error?: string;
   private operations: Promise<unknown> = Promise.resolve();
+  private changedAt = new Date().toISOString();
   readonly tone: SlackToneStore;
   readonly automation: SlackAutomationManager;
   constructor(private readonly options: { stateDir: string; runs: Pick<RunManager, 'list'> & Partial<Pick<RunManager, 'create' | 'enqueue' | 'getSession' | 'sessionList'>>; autoPrompts: Pick<AutoPromptManager, 'get' | 'submit'>; refresh: () => Promise<void> }, private readonly dependencies: Dependencies = {}) {
@@ -138,6 +140,13 @@ export class SlackService extends EventEmitter {
     for (const run of this.options.runs.list()) if (run.autoPromptId && requestIds.has(run.autoPromptId)) sessionIds.add(run.sessionId);
     return { sessionIds, requestIds };
   }
+  /** Slack appears among triggers; its settings and history stay in Slack's own files. */
+  projection(): SlackProjection | undefined {
+    const account = this.settings.account;
+    if (!this.settings.userToken || !account) return undefined;
+    return { id: `slack:${account.teamId}:${account.userId}`, name: `Slack · ${account.teamName ?? account.teamId}`, enabled: this.settings.enabled, updatedAt: this.changedAt,
+      ...(this.error ? { error: this.error } : {}) };
+  }
   coordinatorSessionIds(): string[] {
     const workflows = this.automation.list().filter(item => item.mode === 'conversation');
     return [...new Set(workflows.flatMap(item => item.sessionId ? [item.sessionId] : this.options.runs.list().filter(run => run.autoPromptId === item.id).map(run => run.sessionId)))];
@@ -229,6 +238,7 @@ export class SlackService extends EventEmitter {
       await this.tone.load('');
       this.restartSocket();
     } else throw invalid('지원하지 않는 Slack 설정입니다.');
+    this.changedAt = new Date().toISOString();
     this.emit('change');
     return this.overview();
   }

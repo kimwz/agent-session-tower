@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
+import { spawn as nodeSpawn } from 'node:child_process';
 import { RunManager } from '../../../server/runs/manager.js';
 import type { Run, Session } from '../../../shared/types.js';
 
@@ -157,4 +158,113 @@ test('a damaged origin record never reads back as owner work', async t => {
   assert.deepEqual(manager.sessionOrigin(a), { kind: 'unknown', untrustedInput: true });
   assert.deepEqual(manager.sessionOrigin(b), { kind: 'unknown', untrustedInput: true });
   assert.deepEqual(manager.list().find(run => run.id === runId)?.origin, { kind: 'unknown' }, 'the run itself is kept');
+});
+
+test('trigger sessions never create folders, pre-trust only chosen folders, and run Claude in auto mode when unattended', async t => {
+  const f = await fixture(t);
+  const launches: string[][] = [];
+  const trusted: string[] = [];
+  const manager = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000,
+    findExecutable: async provider => `/fixture/${provider}`, trustWorkspace: async (_provider, cwd) => { trusted.push(cwd); },
+    spawnProcess: (_file, args) => { launches.push(args); throw new Error('stop after recording arguments'); } });
+  await manager.start();
+  t.after(async () => { await manager.close().catch(() => {}); });
+  const origin = { kind: 'trigger' as const, triggerId: 'daily', eventId: 'slot' };
+  await assert.rejects(manager.create({ provider: 'claude', cwd: join(f.directory, 'missing'), prompt: 'x' }, { origin, createFolder: false }), /does not exist/);
+  const untrusted = await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Scheduled work' }, { origin, createFolder: false, trustWorkspace: false, unattended: true });
+  const chosen = await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Owner-chosen folder' }, { origin, createFolder: false, trustWorkspace: true });
+  assert.deepEqual(trusted, [f.directory]);
+  assert.equal(untrusted.run.unattended, true);
+  assert.equal(chosen.run.unattended, undefined);
+  assert.deepEqual(untrusted.session.launchedBy, { kind: 'trigger', triggerId: 'daily' });
+  const { until } = await import('../../helpers/until.ts');
+  await until(() => launches.length === 2);
+  const unattendedArgs = launches.find(args => args.includes('--permission-mode'))!;
+  assert.equal(unattendedArgs[unattendedArgs.indexOf('--permission-mode') + 1], 'auto');
+  assert.equal(launches.filter(args => args.includes('--permission-mode')).length, 1);
+  await manager.close();
+});
+
+test('a slow folder trust answer never lets the same request ID be admitted twice', async t => {
+  const f = await fixture(t);
+  let release!: () => void;
+  const trusting = new Promise<void>(resolve => { release = resolve; });
+  const manager = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000,
+    findExecutable: async provider => `/fixture/${provider}`, trustWorkspace: () => trusting,
+    spawnProcess: () => { throw new Error('never launched in this test'); } });
+  await manager.start();
+  try {
+    const autoPromptId = randomUUID();
+    const first = manager.create({ provider: 'claude', cwd: f.directory, prompt: 'One' }, { autoPromptId, origin: { kind: 'owner' } });
+    await new Promise(resolve => setTimeout(resolve, 20));
+    await assert.rejects(manager.create({ provider: 'claude', cwd: f.directory, prompt: 'One' }, { autoPromptId, origin: { kind: 'owner' } }), { statusCode: 409 });
+    release();
+    await first;
+    assert.equal(manager.list().filter(run => run.autoPromptId === autoPromptId).length, 1);
+  } finally { await manager.close(); }
+});
+
+test('Slack and trigger work share one limit on turns running at once; owner work is never held back', async t => {
+  const f = await fixture(t);
+  const launches: string[] = [];
+  const children: ReturnType<typeof spawnHold>[] = [];
+  const manager = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 20,
+    findExecutable: async provider => `/fixture/${provider}`,
+    spawnProcess: (_file, args) => { const id = args[args.indexOf('--session-id') + 1]; launches.push(id); const child = spawnHold(id); children.push(child); return child; } });
+  await manager.start();
+  try {
+    manager.setAutomationLimit(1);
+    const { until } = await import('../../helpers/until.ts');
+    const slack = await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Slack work' }, { origin: { kind: 'slack', workflowId: randomUUID() } });
+    await until(() => launches.length === 1);
+    const trigger = await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Trigger work' }, { origin: { kind: 'trigger', triggerId: 'daily' } });
+    const owner = await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'My work' }, { origin: { kind: 'owner' } });
+    await until(() => launches.length === 2);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual(launches, [slack.session.nativeId, owner.session.nativeId]);
+    assert.match(manager.list().find(run => run.id === trigger.run.id)?.output ?? '', /limit set in Triggers/);
+  } finally { for (const child of children) child.kill(); await manager.close().catch(() => {}); }
+});
+
+/** A Claude-like child that confirms its conversation and then keeps working, so the turn stays running. */
+function spawnHold(sessionId: string) {
+  const script = `const rl=require('node:readline').createInterface({input:process.stdin});const send=m=>process.stdout.write(JSON.stringify(m)+'\\n');
+rl.on('line',line=>{const m=JSON.parse(line);if(m.type==='control_request'&&m.request.subtype==='initialize')send({type:'control_response',response:{subtype:'success',request_id:m.request_id,response:{}}});
+else if(m.type==='user'){send({type:'system',subtype:'init',session_id:${JSON.stringify(sessionId)}});}});setInterval(()=>{},1000);`;
+  return nodeSpawn(process.execPath, ['-e', script], { stdio: 'pipe' });
+}
+
+test('a queued trigger run whose trigger was turned off never starts', async t => {
+  const f = await fixture(t);
+  let launches = 0;
+  const manager = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 20,
+    findExecutable: async provider => `/fixture/${provider}`, spawnProcess: () => { launches++; throw new Error('never'); } });
+  await manager.start();
+  try {
+    manager.setLaunchGate(run => run.origin?.kind === 'trigger' ? 'The trigger was turned off before this run started, so it did not run.' : undefined);
+    const { run } = await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Scheduled' }, { origin: { kind: 'trigger', triggerId: 'daily' } });
+    const { until } = await import('../../helpers/until.ts');
+    const ended = await until(() => manager.list().find(item => item.id === run.id && item.status === 'cancelled'));
+    assert.match(ended.error ?? '', /turned off/);
+    assert.equal(launches, 0);
+  } finally { await manager.close(); }
+});
+
+test('a trigger turned off while its run is being prepared stops it before the provider starts', async t => {
+  const f = await fixture(t);
+  let allowed = true;
+  let spawned = 0;
+  const manager = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 20,
+    // The owner turns the trigger off while Tower is still looking for the provider executable.
+    findExecutable: async provider => { await new Promise(resolve => setTimeout(resolve, 30)); if (spawned === 0 && !allowed) return `/fixture/${provider}`; allowed = false; return `/fixture/${provider}`; },
+    spawnProcess: () => { spawned++; throw new Error('never'); } });
+  await manager.start();
+  try {
+    manager.setLaunchGate(run => run.origin?.kind === 'trigger' && !allowed ? 'The trigger was turned off before this run started, so it did not run.' : undefined);
+    const { run } = await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Scheduled' }, { origin: { kind: 'trigger', triggerId: 'daily' } });
+    const { until } = await import('../../helpers/until.ts');
+    const ended = await until(() => manager.list().find(item => item.id === run.id && ['cancelled', 'error', 'running'].includes(item.status)));
+    assert.equal(ended.status, 'cancelled');
+    assert.equal(spawned, 0);
+  } finally { await manager.close(); }
 });

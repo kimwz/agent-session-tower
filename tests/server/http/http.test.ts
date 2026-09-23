@@ -292,3 +292,26 @@ test('request bodies cannot choose who a run belongs to', async t => {
   assert.deepEqual(received.map(call => call[0]), ['enqueue', 'create']);
   assert.doesNotMatch(JSON.stringify(received), /slack|untrustedInput|autoPromptId/, 'the backend never sees an origin claim from a request body');
 });
+
+test('Tower operations are posted by name with the page token and reach the worker unchanged', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'monitor-http-api-'));
+  const calls: unknown[][] = [];
+  const snapshot: Snapshot = { sessions: [], providers: [], runs: [], scanning: false, updatedAt: new Date().toISOString(), hostname: 'test', version: '0.1.0' };
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, backend: {
+    snapshot: () => snapshot, detail: async () => undefined, enqueue: async () => run, cancel: async () => {}, subscribe: () => () => {},
+    api: async (operation, input) => { calls.push([operation, input]); return { ok: operation }; },
+  } });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
+  const { token } = await (await fetch(`${base}/api/bootstrap`)).json();
+  const post = (path: string, body: unknown, headers: Record<string, string> = { 'X-Agent-Monitor-Token': token }) =>
+    fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+  const listed = await post('/api/v1/triggers.list', {});
+  assert.equal(listed.status, 200);
+  assert.deepEqual(await listed.json(), { result: { ok: 'triggers.list' } });
+  assert.equal((await post('/api/v1/triggers.list', {}, {})).status, 403, 'the page token is required');
+  assert.equal((await post('/api/v1/sessions.destroy', {})).status, 404);
+  assert.equal((await fetch(`${base}/api/v1/triggers.list`)).status, 404, 'operations are posted, never fetched');
+  assert.deepEqual(calls, [['triggers.list', {}]]);
+});

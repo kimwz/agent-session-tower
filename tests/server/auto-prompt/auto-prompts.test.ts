@@ -497,6 +497,9 @@ test('a retried request saved before origins existed still matches after an upgr
 test('a handoff flush saves routing state again and reports a failed save', async t => {
   const f = await fixture(t);
   await f.finished((await f.manager.submit(request(f.cwd), { origin: { kind: 'owner' } })).id);
+  // Routing finishes its own cleanup save after the job completes.
+  await until(() => !f.manager.busy());
+  await f.manager.flush();
   const path = join(f.directory, 'auto-prompts.json');
   await rm(path, { force: true });
   await mkdir(path);

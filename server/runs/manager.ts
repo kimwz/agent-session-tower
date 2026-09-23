@@ -63,6 +63,12 @@ export interface RunAdmission {
   origin?: RunOrigin;
   /** The prompt carries Slack, GitHub or HTTP content. Only a session Tower creates for it may receive it. */
   untrustedInput?: boolean;
+  /** No one is watching: Claude runs in its automatic permission mode (Codex uses its auto review reviewer). */
+  unattended?: boolean;
+  /** Triggers never create a missing folder. */
+  createFolder?: boolean;
+  /** Pre-answer the native folder trust prompt. Only for folders the owner chose. */
+  trustWorkspace?: boolean;
 }
 
 const MAX_OUTPUT = 64_000;
@@ -96,6 +102,8 @@ export class RunManager extends EventEmitter {
   /** The last content each file holds. Updated only inside the write queue, after a successful write. */
   private readonly saved: { runs?: string; created?: string } = {};
   private pumping = false;
+  private automationLimit = Infinity;
+  private launchGate?: (run: Run) => string | undefined;
   private started = false;
   private stopping = false;
   private writes: Promise<void> = Promise.resolve();
@@ -107,6 +115,22 @@ export class RunManager extends EventEmitter {
     this.stateFile = join(options.stateDir ?? defaultStateDir(), 'runs.json');
     this.createdFile = join(options.stateDir ?? defaultStateDir(), 'created-sessions.json');
     this.attachments = new AttachmentStore(options.stateDir ?? defaultStateDir());
+  }
+
+  /** Slack and trigger work together start at most this many provider turns at once; the rest wait in the queue. */
+  setAutomationLimit(limit: number): void { this.automationLimit = limit; void this.pump(); }
+
+  /** Asked right before a queued run starts. A reason means it never starts and ends as cancelled. */
+  setLaunchGate(gate: (run: Run) => string | undefined): void { this.launchGate = gate; }
+
+  /** Checked again at the last moment before a provider is started, after every asynchronous step. */
+  private refusedAtLaunch(run: Run, session: Session): boolean {
+    const reason = run.status === 'queued' ? this.launchGate?.(run) : undefined;
+    if (!reason) return false;
+    run.status = 'cancelled'; run.error = reason; run.finishedAt = new Date().toISOString();
+    this.reservedSessions.delete(session.id);
+    this.changed();
+    return true;
   }
 
   setRunToolResolver(resolver: NonNullable<RunnerOptions['resolveRunTools']>): void {
@@ -246,13 +270,15 @@ export class RunManager extends EventEmitter {
     const native = created.confirmed ? this.options.getSession(this.nativeSessionId(id)) : undefined;
     if (native && !created.seenNative) { created.seenNative = true; this.persist(); }
     const initialRun = this.runs.get(created.runId);
+    const launchedBy = created.origin?.kind === 'trigger' && created.origin.triggerId ? { launchedBy: { kind: 'trigger' as const, triggerId: created.origin.triggerId } } : {};
     // The folder explicitly chosen at creation remains the project's identity.
     // Native discovery may observe a later working directory or incomplete metadata.
-    if (native) return this.sessionWithContext({ ...native, id, cwd: created.session.cwd, project: created.session.project, ...(native.parentId ? { parentId: this.monitorSessionId(native.parentId) } : {}), ...(created.title ? { customTitle: created.title } : {}) });
+    if (native) return this.sessionWithContext({ ...native, id, cwd: created.session.cwd, project: created.session.project, ...(native.parentId ? { parentId: this.monitorSessionId(native.parentId) } : {}), ...(created.title ? { customTitle: created.title } : {}), ...launchedBy });
     if (created.seenNative && (!initialRun || FINISHED.has(initialRun.status))) return undefined;
     const live = initialRun?.status === 'queued' || initialRun?.status === 'running';
     return {
       ...created.session,
+      ...launchedBy,
       resumable: created.confirmed,
       creationPending: !created.confirmed && live,
       status: initialRun?.status === 'running' ? 'working' : initialRun?.status === 'queued' ? 'idle' : initialRun?.status === 'completed' ? 'completed' : 'error',
@@ -294,11 +320,13 @@ export class RunManager extends EventEmitter {
     input = { ...input, cwd };
     const title = input.title === undefined ? '' : normalizeSessionTitle(input.title);
     if (!(await this.executable(input.provider))) throw new RunError(`Install the ${input.provider} CLI and ensure it is in PATH before creating a session.`, 503);
-    // A folder that does not exist yet is created, like `mkdir -p` before starting the CLI there.
-    try { await mkdir(cwd, { recursive: true }); if (!(await stat(cwd)).isDirectory()) throw new Error(); }
-    catch { throw new RunError('작업 폴더를 만들 수 없습니다. 경로와 권한을 확인하세요.'); }
-    // Best effort: without it the CLI only asks its usual trust question.
-    await this.options.trustWorkspace?.(input.provider, cwd, { ...process.env, ...this.options.env }).catch(() => {});
+    if (internal.createFolder === false) {
+      if (!(await stat(cwd).then(info => info.isDirectory(), () => false))) throw new RunError('The working folder does not exist. It was not created.', 404);
+    } else {
+      // A folder that does not exist yet is created, like `mkdir -p` before starting the CLI there.
+      try { await mkdir(cwd, { recursive: true }); if (!(await stat(cwd)).isDirectory()) throw new Error(); }
+      catch { throw new RunError('작업 폴더를 만들 수 없습니다. 경로와 권한을 확인하세요.'); }
+    }
     const uuid = randomUUID();
     const id = `${input.provider}:${input.provider === 'codex' ? 'monitor-' : ''}${uuid}`;
     const prepared = await this.attachments.prepare(id, { attachments: input.attachments });
@@ -316,6 +344,7 @@ export class RunManager extends EventEmitter {
     };
     const origin = internal.origin ?? { kind: 'unknown' as const };
     const run: Run = { id: randomUUID(), sessionId: id, origin, prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+      ...(internal.unattended ? { unattended: true } : {}),
       ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
     // Provenance commits with the session identity, before any provider starts.
@@ -324,7 +353,12 @@ export class RunManager extends EventEmitter {
     this.admissions.add(run.id);
     this.prune();
     this.changed();
-    try { await this.flush(); }
+    try {
+      // The run is already registered, so a concurrent request with the same ID is refused while this waits.
+      // Only an admitted request answers the native trust prompt; a refused one leaves settings untouched.
+      if (internal.trustWorkspace !== false) await this.options.trustWorkspace?.(input.provider, cwd, { ...process.env, ...this.options.env }).catch(() => {});
+      await this.flush();
+    }
     catch (error) {
       // No provider starts until both records commit. Keep failure visible; never
       // leave an unacknowledged request queued for a later polling cycle.
@@ -376,6 +410,7 @@ export class RunManager extends EventEmitter {
       if (!created.origin?.untrustedInput) created.origin = { ...(created.origin ?? { kind: 'unknown' as const }), untrustedInput: true };
     }
     const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
+      ...(internal.unattended ? { unattended: true } : {}),
       ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
@@ -557,6 +592,16 @@ export class RunManager extends EventEmitter {
         // explicitly configure a worker limit impose a global queue.
         if (this.options.maxConcurrent !== undefined && this.owned.size + this.bridged.size + this.stdio.size >= this.options.maxConcurrent) break;
         if (run.status !== 'queued' || this.admissions.has(run.id)) continue;
+        const refused = this.launchGate?.(run);
+        if (refused) {
+          run.status = 'cancelled'; run.error = refused; run.finishedAt = new Date().toISOString(); this.changed();
+          continue;
+        }
+        if (automated(run) && [...this.runs.values()].filter(item => item.status === 'running' && automated(item)).length >= this.automationLimit) {
+          const reason = 'Waiting: Slack and trigger work is already running at the limit set in Triggers.';
+          if (run.output !== reason) { run.output = reason; this.changed(); }
+          continue;
+        }
         const session = this.getSession(run.sessionId);
         const creating = this.createdSessions.get(run.sessionId)?.runId === run.id;
         try {
@@ -623,7 +668,7 @@ export class RunManager extends EventEmitter {
       },
     });
     if (!bridge) return false;
-    if (run.status !== 'queued' || this.stopping) {
+    if (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session)) {
       bridge.close(); this.reservedSessions.delete(session.id); return true;
     }
     this.bridged.set(run.id, bridge);
@@ -708,7 +753,7 @@ export class RunManager extends EventEmitter {
     });
     // Opening an adapter does not spawn. Admission can be cancelled during discovery.
     const current = this.getSession(session.id);
-    if (run.status !== 'queued' || this.stopping || (current && (this.isWorking(current) || current.activeProcess))) {
+    if (run.status !== 'queued' || this.stopping || (current && (this.isWorking(current) || current.activeProcess)) || this.refusedAtLaunch(run, session)) {
       owned.close(); this.reservedSessions.delete(session.id); return;
     }
     registered = true;
@@ -728,6 +773,7 @@ export class RunManager extends EventEmitter {
     const args = creating ? buildCreateArgs(session, run.model, run.effort) : buildResumeArgs(session, run.model, run.effort);
     const mcpServers = this.runTools(run, session).servers;
     if (mcpServers) args.push('--mcp-config', JSON.stringify({ mcpServers }));
+    if (run.unattended) args.push('--permission-mode', 'auto');
     for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
     const prompt = attachmentPrompt(run.prompt, attachments);
     const input = {
@@ -739,7 +785,7 @@ export class RunManager extends EventEmitter {
     };
     // Recheck after asynchronous filesystem discovery, immediately before creating the writer.
     const latest = this.getSession(session.id);
-    if (run.status !== 'queued' || this.stopping || (latest && (this.isWorking(latest) || (latest.provider === 'codex' && latest.activeProcess)))) {
+    if (run.status !== 'queued' || this.stopping || (latest && (this.isWorking(latest) || (latest.provider === 'codex' && latest.activeProcess))) || this.refusedAtLaunch(run, session)) {
       this.reservedSessions.delete(session.id);
       return;
     }
@@ -809,6 +855,17 @@ export class RunManager extends EventEmitter {
         });
       }
       if (actualId === session.nativeId) sawSessionId = true;
+      // Claude reports the mode it actually runs in before doing anything. An unattended run continues only in
+      // automatic mode, or in a mode that asks the owner; any other or missing mode is stopped.
+      if (actualId && run.unattended && event.permissionMode !== 'auto') {
+        if (OWNER_APPROVAL_MODES.has(String(event.permissionMode))) {
+          this.append(run, `[Tower] Claude did not start in automatic permission mode (${String(event.permissionMode)}). Approval requests will wait for you in Tower.\n`);
+        } else {
+          streamError = `Claude started in an unexpected permission mode (${event.permissionMode === undefined ? 'not reported' : String(event.permissionMode)}). The unattended run was stopped before doing anything.`;
+          this.stopOwned(run.id, owned);
+          return;
+        }
+      }
       if (actualId && actualId !== session.nativeId) {
         streamError = creating ? 'The provider did not confirm the new conversation ID. The task was stopped.' : 'The provider opened a different conversation instead of resuming the requested session. The task was stopped.';
         this.stopOwned(run.id, owned);
@@ -991,3 +1048,7 @@ export class RunManager extends EventEmitter {
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+/** Work nobody typed into Tower: Slack coordination and delegation, and trigger runs. */
+function automated(run: Run): boolean { return run.origin?.kind === 'slack' || run.origin?.kind === 'trigger'; }
+/** Modes at least as careful as asking the owner. Anything else is not what an unattended run asked for. */
+const OWNER_APPROVAL_MODES = new Set(['default', 'manual', 'plan', 'dontAsk']);

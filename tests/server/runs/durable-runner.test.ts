@@ -571,3 +571,39 @@ test('the web keeps trying to start a worker until one answers after a silent su
   await until(() => replacement && (client as unknown as { snapshot?: { instance: string } }).snapshot?.instance === replacement.instance, 15_000);
   assert.equal(attempts, 2, 'the first failed start was retried after a pause');
 });
+
+test('trigger operations run in the worker as the owner and their state reaches the web snapshot', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  const { TriggerService } = await import('../../../server/triggers/service.js');
+  const { TowerApi } = await import('../../../server/api/tower-api.js');
+  const triggers = new TriggerService({ stateDir: f.stateDir, tickMs: 60_000, executor: {
+    submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
+    create: (input, internal) => f.runs.create(input, internal), enqueue: (id, prompt, request, internal) => f.runs.enqueue(id, prompt, request, internal),
+    runs: () => f.runs.list(), session: id => f.runs.getSession(id) } });
+  await triggers.start();
+  t.after(() => triggers.close());
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, triggers, api: new TowerApi({ triggers }) });
+  t.after(() => host.close());
+  const client = await f.connect();
+  const input = { name: 'Nightly', enabled: true, source: { kind: 'schedule', schedule: { type: 'interval', everySeconds: 3600 }, catchUp: 'skip' },
+    handler: { kind: 'task', instructions: 'Check the build', provider: 'codex', approvals: 'auto', target: { mode: 'folder', cwd: f.directory } }, policy: { overlap: 'skip', maxEventsPerHour: 5 } };
+  const { trigger } = await client.api('triggers.create', { trigger: input }) as { trigger: { id: string; createdBy: { kind: string } } };
+  assert.equal(trigger.createdBy.kind, 'owner');
+  await until(() => client.triggerOverview()?.triggers.some(item => item.id === trigger.id));
+  await assert.rejects(client.api('triggers.updateSettings', { settings: { maxTriggers: 0 } }), { statusCode: 400 });
+  await assert.rejects(client.api('sessions.destroyEverything', {}), { statusCode: 404 });
+  assert.equal(client.supports('triggers'), true);
+});
+
+test('with an outdated worker, trigger operations explain the pending update instead of failing oddly', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-triggers-'));
+  const stateDir = join(directory, 'state');
+  const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
+  const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
+  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  await client.start();
+  await assert.rejects(client.api('triggers.list', {}), { statusCode: 503, message: /not updated yet/ });
+  assert.equal(client.triggerOverview(), undefined);
+  assert.ok(!legacy.methods.includes('api'));
+});

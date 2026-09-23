@@ -1,0 +1,16 @@
+/* Triggers reuse the Slack automation dialog; only what differs is defined here. */
+.trigger-button { position: relative; }
+.trigger-button.attention::after { content: ''; position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
+.trigger-dialog .slack-tabs button svg { flex: none; }
+.trigger-editor { padding: 0; }
+.trigger-editor .slack-rules { display: grid; gap: 14px; }
+.trigger-model { display: flex; gap: 8px; flex-wrap: wrap; }
+.trigger-model select { flex: 1 1 140px; }
+.trigger-preview { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.trigger-preview ol { margin: 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
+.trigger-history h3 { margin: 18px 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
+.trigger-history h3:first-of-type { margin-top: 0; }
+.trigger-history .slack-activity button { display: inline-flex; align-items: center; gap: 6px; }
+.trigger-list .slack-rule-row > svg { flex: none; color: var(--muted); }
+.trigger-list .slack-rule-row > .slack-rule-text { flex: 1; }
+.trigger-editor .slack-rule-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
