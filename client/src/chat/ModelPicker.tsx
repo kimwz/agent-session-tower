@@ -9,12 +9,16 @@ export function modelChoices(provider?: ProviderHealth, observedModel?: string, 
   return [...choices.values()];
 }
 
-/** Efforts of the model a request would use. Claude session IDs such as `claude-opus-…` match their alias. */
+/** Efforts of the model a request would use. Claude session IDs such as `claude-opus-…` match their alias.
+ * The default is the native configured effort when the model supports it, otherwise the model's own default. */
 export function modelEfforts(provider?: ProviderHealth, model = provider?.defaultModel): { efforts: EffortOption[]; defaultEffort?: string } {
   const models = provider?.models || [];
   const option = models.find(item => item.id === model)
     || (provider?.provider === 'claude' && model ? models.find(item => model.includes(item.id)) : undefined);
-  return { efforts: option?.efforts ?? provider?.efforts ?? [], ...(option?.defaultEffort ? { defaultEffort: option.defaultEffort } : {}) };
+  const efforts = option?.efforts ?? provider?.efforts ?? [];
+  const configured = efforts.some(effort => effort.id === provider?.defaultEffort) ? provider?.defaultEffort : undefined;
+  const defaultEffort = configured ?? option?.defaultEffort;
+  return { efforts, ...(defaultEffort ? { defaultEffort } : {}) };
 }
 
 /** Keep an effort only while the chosen model still supports it. */
@@ -47,7 +51,7 @@ export function EffortPicker({ provider, model, value, disabled, onChange }: {
   const { t } = useI18n();
   const { efforts, defaultEffort } = modelEfforts(provider, model);
   if (!efforts.length) return null;
-  const defaultLabel = defaultEffort ? t('기본 ({0})', { 0: effortLabel(defaultEffort) }) : t('기본 추론');
+  const defaultLabel = defaultEffort ? t('기본 추론 ({0})', { 0: effortLabel(defaultEffort) }) : t('기본 추론');
   const selected = efforts.find(effort => effort.id === value);
   return <select className="model-picker effort-picker" value={selected ? selected.id : ''} disabled={disabled} onChange={event => onChange(event.target.value || undefined)} aria-label={t('추론 수준')} title={`${t('추론 수준')} · ${selected ? `${effortLabel(selected.id)} · ${t('다음 요청에 적용')}` : t('에이전트 기본값 (변경 없음)')}`}>
     <option value="">{defaultLabel}</option>

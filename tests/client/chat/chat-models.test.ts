@@ -68,6 +68,8 @@ const codex: ProviderHealth = { ...provider, models: [{ id: 'model-a', label: 'M
 test('effort choices follow the selected, observed or catalog model and drop levels the next model cannot use', () => {
   assert.deepEqual(modelEfforts(codex, 'model-a'), { efforts: [{ id: 'medium' }, { id: 'xhigh', description: 'Deepest' }], defaultEffort: 'medium' });
   assert.deepEqual(modelEfforts(codex, 'model-b').efforts, []);
+  assert.equal(modelEfforts({ ...codex, defaultEffort: 'xhigh' }, 'model-a').defaultEffort, 'xhigh', 'the native configured effort wins');
+  assert.equal(modelEfforts({ ...codex, defaultEffort: 'ultra' }, 'model-a').defaultEffort, 'medium', 'an unsupported configured effort falls back to the model default');
   assert.deepEqual(modelEfforts(claude, 'claude-opus-5-5').efforts.map(effort => effort.id), ['low', 'high', 'max']);
   assert.deepEqual(modelEfforts(claude, 'claude-haiku-4-5').efforts, []);
   assert.deepEqual(modelEfforts(claude, 'custom-model').efforts.map(effort => effort.id), ['low', 'max']);
@@ -81,7 +83,8 @@ test('the effort picker offers only supported levels with a no-override default 
   setLanguage('en');
   const html = renderToStaticMarkup(createElement(EffortPicker, { provider: codex, model: 'model-a', onChange() {} }));
   assert.match(html, /aria-label="Reasoning effort"/);
-  assert.match(html, /<option value="" selected="">Default \(Medium\)<\/option>/);
+  assert.match(html, /<option value="" selected="">Default effort \(Medium\)<\/option>/);
+  assert.match(renderToStaticMarkup(createElement(EffortPicker, { provider: { ...codex, defaultEffort: 'xhigh' }, model: 'model-a', onChange() {} })), /<option value="" selected="">Default effort \(Extra high\)<\/option>/);
   assert.match(html, /<option value="xhigh" title="Deepest">Extra high<\/option>/);
   assert.match(renderToStaticMarkup(createElement(EffortPicker, { provider: codex, model: 'model-a', value: 'xhigh', onChange() {} })), /<option value="xhigh" title="Deepest" selected="">/);
   assert.match(renderToStaticMarkup(createElement(EffortPicker, { provider: claude, model: 'opus', value: 'unsupported', onChange() {} })), /<option value="" selected="">Default effort<\/option>/);

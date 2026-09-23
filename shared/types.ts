@@ -66,6 +66,8 @@ export interface ProviderHealth {
   defaultModel?: string;
   /** Effort levels for models outside the catalog, such as a session's observed full model ID. */
   efforts?: EffortOption[];
+  /** The native configuration's effort, used whenever a request does not choose one. */
+  defaultEffort?: string;
 }
 export interface UsageWindow {
   id: string;

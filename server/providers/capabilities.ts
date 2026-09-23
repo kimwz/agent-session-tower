@@ -12,7 +12,7 @@ import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../../shared/app-identi
 const execute = promisify(execFile);
 const MAX_JSON = 2 * 1024 * 1024;
 type Json = Record<string, unknown>;
-export type Capabilities = Pick<ProviderHealth, 'usage' | 'models' | 'defaultModel' | 'efforts'>;
+export type Capabilities = Pick<ProviderHealth, 'usage' | 'models' | 'defaultModel' | 'efforts' | 'defaultEffort'>;
 type Reason = 'not_signed_in' | 'not_supported' | 'credentials_unavailable' | 'rate_limited' | 'unreachable' | 'no_data';
 const object = (value: unknown): Json | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
 const timestamp = (value: unknown): string | undefined => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined;
@@ -21,8 +21,11 @@ const unavailable = (reason: Reason): ProviderUsage => ({ status: reason === 'un
 // `claude --effort` levels. Claude Code silently lowers a level the resolved model cannot use.
 export const CLAUDE_EFFORTS: readonly EffortOption[] = CLAUDE_EFFORT_LEVELS.map(id => ({ id }));
 // Native aliases resolve through Claude Code's own defaults and environment remaps.
+// Default efforts are the catalog defaults of the models these aliases select in Claude Code 2.1.280.
 export const CLAUDE_MODELS: readonly ModelOption[] = [
-  { id: 'sonnet', label: 'Sonnet', efforts: [...CLAUDE_EFFORTS] }, { id: 'opus', label: 'Opus', efforts: [...CLAUDE_EFFORTS] }, { id: 'haiku', label: 'Haiku', efforts: [] },
+  { id: 'sonnet', label: 'Sonnet', efforts: [...CLAUDE_EFFORTS], defaultEffort: 'high' },
+  { id: 'opus', label: 'Opus', efforts: [...CLAUDE_EFFORTS], defaultEffort: 'medium' },
+  { id: 'haiku', label: 'Haiku', efforts: [] },
 ];
 const copyModel = (model: ModelOption): ModelOption => ({ ...model, ...(model.efforts ? { efforts: model.efforts.map(effort => ({ ...effort })) } : {}) });
 
@@ -146,6 +149,22 @@ export async function readClaudeCredential(options: CredentialReaderOptions): Pr
   return { token: oauth.accessToken };
 }
 
+/** The effort Claude Code applies without `--effort`: its environment override, then user settings. */
+export async function readClaudeDefaultEffort(env: NodeJS.ProcessEnv, readJson: (path: string) => Promise<unknown> = privateJson): Promise<string | undefined> {
+  const configured = env.CLAUDE_CODE_EFFORT_LEVEL;
+  if (configured !== undefined) return CLAUDE_EFFORT_LEVELS.includes(configured) ? configured : undefined;
+  const directory = (env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')).normalize('NFC');
+  const level = object(await readJson(join(directory, 'settings.json')).catch(() => undefined))?.effortLevel;
+  return typeof level === 'string' && CLAUDE_EFFORT_LEVELS.includes(level) ? level : undefined;
+}
+
+/** Copy only the configured model and effort; the rest of the native configuration stays private. */
+export function parseCodexConfig(value: unknown): Pick<Capabilities, 'defaultModel' | 'defaultEffort'> {
+  const config = object(object(value)?.config);
+  return { ...(validModelId(config?.model) ? { defaultModel: config.model } : {}),
+    ...(validEffort(config?.model_reasoning_effort) ? { defaultEffort: config.model_reasoning_effort } : {}) };
+}
+
 export async function readClaudeUsage(options: CredentialReaderOptions & { fetch?: typeof fetch }): Promise<ProviderUsage> {
   options = { ...options, signal: AbortSignal.any([options.signal, AbortSignal.timeout(5000)]) };
   const credentials = await readClaudeCredential(options);
@@ -245,7 +264,8 @@ export async function readCodexCapabilities(executable: string, env: NodeJS.Proc
         return parseCodexModels({ data });
       })().catch(() => ({})),
     ]);
-    return { usage, ...models };
+    const config = await request('config/read', {}).then(parseCodexConfig).catch(() => ({}));
+    return { usage, ...models, ...config };
   } catch (error) { return { usage: unavailable(rpcReason(error)) }; }
   finally {
     signal.removeEventListener('abort', aborted);
@@ -317,13 +337,18 @@ export class ProviderCapabilities {
           if (!provider.available || !provider.executable) capabilities = { usage: unavailable('not_supported') };
           else if (this.options.read) capabilities = await this.options.read(provider, signal);
           else if (provider.provider === 'codex') capabilities = await readCodexCapabilities(provider.executable, this.options.env || process.env, signal);
-          else capabilities = { usage: await readClaudeUsage({ env: this.options.env, signal }), models: CLAUDE_MODELS.map(copyModel), efforts: CLAUDE_EFFORTS.map(effort => ({ ...effort })) };
+          else {
+            const [usage, defaultEffort] = await Promise.all([readClaudeUsage({ env: this.options.env, signal }), readClaudeDefaultEffort(this.options.env || process.env)]);
+            capabilities = { usage, models: CLAUDE_MODELS.map(copyModel), efforts: CLAUDE_EFFORTS.map(effort => ({ ...effort })), ...(defaultEffort ? { defaultEffort } : {}) };
+          }
         } catch { capabilities = { usage: unavailable('unreachable') }; }
         const previous = this.providers.find(item => item.provider === provider.provider);
         if (capabilities.usage?.status !== 'available' && !capabilities.usage?.windows.length && previous?.usage?.windows.length) {
           capabilities.usage = { ...capabilities.usage!, windows: previous.usage.windows, updatedAt: previous.usage.updatedAt, stale: true };
         }
-        return { ...provider, ...(previous?.models ? { models: previous.models, defaultModel: previous.defaultModel, ...(previous.efforts ? { efforts: previous.efforts } : {}) } : {}), ...capabilities };
+        return { ...provider, ...(previous?.models ? { models: previous.models, defaultModel: previous.defaultModel, ...(previous.efforts ? { efforts: previous.efforts } : {}),
+          // A removed native setting must stop showing; keep the old value only when this read failed.
+          ...(previous.defaultEffort && !capabilities.models ? { defaultEffort: previous.defaultEffort } : {}) } : {}), ...capabilities };
       }));
       if (!this.stopped) {
         this.providers = results;

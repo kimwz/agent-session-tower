@@ -3,7 +3,7 @@ import test from 'node:test';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseClaudeUsage, parseCodexUsage, parseCodexModels, claudeStorage, readClaudeCredential, readClaudeUsage, readCodexCapabilities, ProviderCapabilities } from '../../../server/providers/capabilities.js';
+import { parseClaudeUsage, parseCodexUsage, parseCodexModels, parseCodexConfig, readClaudeDefaultEffort, claudeStorage, readClaudeCredential, readClaudeUsage, readCodexCapabilities, ProviderCapabilities } from '../../../server/providers/capabilities.js';
 import type { ProviderHealth } from '../../../shared/types.js';
 
 const now = Date.parse('2026-09-15T00:00:00Z');
@@ -93,6 +93,17 @@ test('Claude sends credentials only to official HTTPS endpoint and sanitizes HTT
   }
 });
 
+test('native default efforts come only from Claude Code\'s override or settings and Codex\'s effective config', async () => {
+  const settings = (value: unknown) => async () => value;
+  assert.equal(await readClaudeDefaultEffort({ CLAUDE_CONFIG_DIR: '/fixture' }, settings({ effortLevel: 'xhigh', apiKeyHelper: 'private' })), 'xhigh');
+  assert.equal(await readClaudeDefaultEffort({ CLAUDE_CODE_EFFORT_LEVEL: 'low' }, settings({ effortLevel: 'max' })), 'low');
+  assert.equal(await readClaudeDefaultEffort({ CLAUDE_CODE_EFFORT_LEVEL: 'auto' }, settings({ effortLevel: 'max' })), undefined);
+  assert.equal(await readClaudeDefaultEffort({}, settings({ effortLevel: '--flag' })), undefined);
+  assert.equal(await readClaudeDefaultEffort({}, async () => { throw new Error('missing'); }), undefined);
+  assert.deepEqual(parseCodexConfig({ config: { model: 'native-model', model_reasoning_effort: 'high', api_key: 'secret' } }), { defaultModel: 'native-model', defaultEffort: 'high' });
+  assert.deepEqual(parseCodexConfig({ config: { model: '--config', model_reasoning_effort: null } }), {});
+});
+
 test('read-only Codex app-server enumerates quota and paginated catalog, then exits without thread calls', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'tower-capabilities-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -104,7 +115,7 @@ import {appendFileSync} from 'node:fs';
 createInterface({input:process.stdin}).on('line', line => {
   const r=JSON.parse(line); appendFileSync(process.env.RECORDED, JSON.stringify({method:r.method,params:r.params})+'\\n');
   if(r.method==='initialized') return;
-  const result=r.method==='account/rateLimits/read'?{rateLimits:{primary:{usedPercent:19,windowDurationMins:10080}}}:r.method==='model/list'?{data:[{model:r.params.cursor?'second':'first',displayName:'Native',isDefault:!r.params.cursor}],nextCursor:r.params.cursor?null:'next'}:{};
+  const result=r.method==='account/rateLimits/read'?{rateLimits:{primary:{usedPercent:19,windowDurationMins:10080}}}:r.method==='config/read'?{config:{model:'second',model_reasoning_effort:'high',api_key:'private'}}:r.method==='model/list'?{data:[{model:r.params.cursor?'second':'first',displayName:'Native',isDefault:!r.params.cursor}],nextCursor:r.params.cursor?null:'next'}:{};
   process.stdout.write(JSON.stringify({id:r.id,result})+'\\n');
 });
 `);
@@ -112,9 +123,11 @@ createInterface({input:process.stdin}).on('line', line => {
   const capabilities = await readCodexCapabilities(executable, { ...process.env, RECORDED: recorded }, signal());
   assert.equal(capabilities.usage?.windows[0].windowMinutes, 10080);
   assert.deepEqual(capabilities.models?.map(model => model.id), ['first', 'second']);
-  assert.equal(capabilities.defaultModel, 'first');
+  assert.equal(capabilities.defaultModel, 'second', 'the configured model wins over the catalog default');
+  assert.equal(capabilities.defaultEffort, 'high');
+  assert.doesNotMatch(JSON.stringify(capabilities), /private/);
   const requests = (await readFile(recorded, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  assert.deepEqual(requests.map(request => request.method), ['initialize', 'initialized', 'account/rateLimits/read', 'model/list', 'model/list']);
+  assert.deepEqual(requests.map(request => request.method), ['initialize', 'initialized', 'account/rateLimits/read', 'model/list', 'model/list', 'config/read']);
 });
 
 test('aborting an unresponsive Codex reader force-kills its child even when SIGTERM is ignored', { timeout: 6000 }, async t => {

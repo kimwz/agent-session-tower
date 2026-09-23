@@ -834,7 +834,7 @@ export const english: Record<string, string> = {
   "모델 · 추론 수준": "Model · Reasoning effort",
   "추론 수준": "Reasoning effort",
   "기본 추론": "Default effort",
-  "기본 ({0})": "Default ({0})",
+  "기본 추론 ({0})": "Default effort ({0})",
   "없음": "None",
   "최소": "Minimal",
   "낮음": "Low",

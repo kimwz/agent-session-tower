@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.11.1] - 2026-09-23
+
+### Changed
+- Show the effective default reasoning effort, such as “Default effort (Medium)”, from Claude Code’s effort setting or Codex’s configured effort, falling back to the model’s own default. Codex’s configured model is shown as its default model.
+
+### Fixed
+- Stop reconnected workspace terminals from typing replies such as `1;2c` into the shell when replayed output contains an old terminal query.
+
 ## [1.11.0] - 2026-09-23
 
 ### Added

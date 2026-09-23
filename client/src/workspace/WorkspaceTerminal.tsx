@@ -2,7 +2,7 @@ import { useEffect, useImperativeHandle, useRef, useState, type Ref } from 'reac
 import { Terminal } from '@xterm/xterm';
 import { Maximize2, Minimize2, Plus, X } from 'lucide-react';
 import { FitAddon } from '@xterm/addon-fit';
-import { terminalInputChunks } from './terminal-input';
+import { isTerminalReport, terminalInputChunks } from './terminal-input';
 import { workspaceTerminalSession, forgetWorkspaceTerminal, MAX_TERMINAL_TABS, nextTerminalTab, readTerminalTabs, saveTerminalTabs, terminalSlot, type TerminalTab } from './terminal-session';
 import { api, ApiError } from '../common/lib';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
@@ -95,6 +95,11 @@ function TerminalPane({ cwd, tab, token, active, onState, ref }: { cwd: string; 
     let pending = '';
     let timer: ReturnType<typeof setTimeout> | undefined;
     let queue = Promise.resolve();
+    // Replayed output can contain queries a program sent long ago. Answering them again
+    // would type the replies (such as `1;2c`) into whatever now owns the shell.
+    let created = false;
+    let replayUntil = 0;
+    let replaying = 0;
     const terminal = new Terminal({ cursorBlink: true, fontSize: 13, fontFamily: 'ui-monospace, monospace', theme: { background: '#0c1420', foreground: '#dce6f3' } });
     const fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(host.current); fit.fit();
     terminalRef.current = { terminal, fit };
@@ -115,7 +120,7 @@ function TerminalPane({ cwd, tab, token, active, onState, ref }: { cwd: string; 
     const post = (action: string, body: object) => postPath(`/api/workspace/terminals/${encodeURIComponent(id)}/${action}`, body);
     const fail = (value: unknown) => { if (!disposed) setError(value instanceof Error ? value.message : t('터미널 연결에 실패했습니다.')); };
     const flush = () => { timer = undefined; if (!pending || !id || disposed || closed) return; const data = pending; pending = ''; queue = queue.then(async () => { for (const chunk of terminalInputChunks(data)) { if (disposed || closed) break; await post('input', { data: chunk }); } }).catch(fail); };
-    const input = terminal.onData(data => { if (closed) return; pending += data; if (!timer) timer = setTimeout(flush, 15); });
+    const input = terminal.onData(data => { if (closed || (replaying && isTerminalReport(data))) return; pending += data; if (!timer) timer = setTimeout(flush, 15); });
     const resize = terminal.onResize(({ cols, rows }) => { if (id) queue = queue.then(async () => { if (!disposed && !closed) await post('resize', { cols, rows }); }).catch(fail); });
     const observer = new ResizeObserver(() => { if (!disposed && host.current?.clientWidth && host.current.clientHeight) fit.fit(); }); observer.observe(host.current);
     const finish = () => { forgetWorkspaceTerminal(slot, id); closed = true; terminal.options.disableStdin = true; stream?.close(); setExited(true); };
@@ -124,16 +129,23 @@ function TerminalPane({ cwd, tab, token, active, onState, ref }: { cwd: string; 
       finish(); };
     void workspaceTerminalSession(slot,
       saved => postPath(`/api/workspace/terminals/${encodeURIComponent(saved)}/resize`, { cols: terminal.cols, rows: terminal.rows }),
-      async () => (await postPath<{ id: string }>('/api/workspace/terminals', { cwd, cols: terminal.cols, rows: terminal.rows })).id,
+      async () => { created = true; return (await postPath<{ id: string }>('/api/workspace/terminals', { cwd, cols: terminal.cols, rows: terminal.rows })).id; },
     ).then(result => {
       id = result;
       if (disposed) return;
       setStarting(false);
       stream = new EventSource(`/api/workspace/terminals/${encodeURIComponent(id)}/events`);
-      stream.addEventListener('output', event => { terminal.write(JSON.parse((event as MessageEvent).data).data); });
+      stream.addEventListener('output', event => {
+        const data = JSON.parse((event as MessageEvent).data).data;
+        if (Date.now() >= replayUntil) { terminal.write(data); return; }
+        replaying++; terminal.write(data, () => { replaying--; });
+      });
       stream.addEventListener('exit', event => { const result = JSON.parse((event as MessageEvent).data); terminal.writeln(`\r\n${t('터미널 종료 (코드 {0})', { 0: result.exitCode })}`); finish(); });
       stream.onerror = () => { if (!disposed) setError(t('터미널 연결이 끊겼습니다. 다시 연결하는 중입니다.')); };
-      stream.onopen = () => { void api<{ token: string }>('/api/bootstrap').then(fresh => { requestToken = fresh.token; if (!disposed) { setError(''); flush(); if (visible.current) terminal.focus(); } }).catch(fail); };
+      stream.onopen = () => {
+        // A new shell has no history on its first connection; every reconnect replays some.
+        if (created) created = false; else replayUntil = Date.now() + 500;
+        void api<{ token: string }>('/api/bootstrap').then(fresh => { requestToken = fresh.token; if (!disposed) { setError(''); flush(); if (visible.current) terminal.focus(); } }).catch(fail); };
     }).catch(value => { closed = true; terminal.options.disableStdin = true; fail(value); if (!disposed) { setStarting(false); setExited(true); } });
     return () => { disposed = true; clearTimeout(timer); input.dispose(); resize.dispose(); observer.disconnect(); stream?.close(); terminal.dispose(); if (terminalRef.current?.terminal === terminal) terminalRef.current = undefined; };
   }, [cwd, slot, token, generation]);
