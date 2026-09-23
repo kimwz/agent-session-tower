@@ -11,7 +11,8 @@ export interface SseResponse {
 export class SseClient {
   private blocked = false;
   private closed = false;
-  private pending?: string;
+  /** A complete snapshot, rendered when the socket drains. */
+  private pending?: string | (() => string);
 
   constructor(private readonly response: SseResponse, private readonly onClose: () => void) {
     response.on('drain', this.drain);
@@ -19,9 +20,18 @@ export class SseClient {
   }
 
   snapshot(frame: string): void {
+    this.update(undefined, () => frame);
+  }
+
+  /**
+   * A patch only continues a stream that received every earlier frame. While the socket is
+   * blocked, the newest complete snapshot replaces anything pending, so a skipped patch never
+   * leaves the browser on a stale base.
+   */
+  update(patch: string | undefined, snapshot: () => string): void {
     if (this.closed) return;
-    if (this.blocked) this.pending = frame;
-    else this.write(frame);
+    if (this.blocked) this.pending = snapshot;
+    else this.write(patch ?? snapshot());
   }
 
   heartbeat(): void {
@@ -43,7 +53,7 @@ export class SseClient {
     this.blocked = false;
     const frame = this.pending;
     this.pending = undefined;
-    if (frame !== undefined) this.write(frame);
+    if (frame !== undefined) this.write(typeof frame === 'function' ? frame() : frame);
   };
 
   private readonly close = (): void => {

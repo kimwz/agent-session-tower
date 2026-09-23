@@ -9,7 +9,7 @@ import type { SlackPublicStatus } from '../../shared/slack.js';
 import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunApprovalResponse, Session } from '../../shared/types.js';
 import type { RunAdmission } from './manager.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
-import { MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot } from './runner-protocol.js';
+import { MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerCapability, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
 interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number }
 
@@ -66,7 +66,9 @@ export class DurableRunManager extends EventEmitter {
   /** The attached worker keeps its own code until it is idle, so it can lag behind the web version. */
   runnerVersion(): string | undefined { return this.snapshot ? this.snapshot.version ?? 'legacy' : undefined; }
   settledRunIds(): ReadonlySet<string> { return new Set(this.snapshot?.settled ?? []); }
-  sessionList(_nativeSessions: readonly Session[]): Session[] { return structuredClone(this.snapshot?.sessions ?? []); }
+  /** The attached worker stays the same for this connection's lifetime, so the answer is stable after start(). */
+  supports(capability: RunnerCapability): boolean { return this.snapshot?.capabilities?.includes(capability) ?? false; }
+  sessionList(): Session[] { return structuredClone(this.snapshot?.sessions ?? []); }
   getSession(id: string): Session | undefined {
     const found = this.snapshot?.sessions.find(session => session.id === id || this.snapshot?.nativeIds[session.id] === id);
     return found && structuredClone(found);
@@ -91,6 +93,9 @@ export class DurableRunManager extends EventEmitter {
   getAutoPrompt(id: string): AutoPromptJob | undefined { return this.autoPromptList().find(job => job.id === id.toLowerCase()); }
   async submitAutoPrompt(input: AutoPromptRequest): Promise<AutoPromptJob> { return this.call('submitAutoPrompt', [input]) as Promise<AutoPromptJob>; }
   async cancelAutoPrompt(id: string): Promise<AutoPromptJob> { return this.call('cancelAutoPrompt', [id]) as Promise<AutoPromptJob>; }
+  async sessionHistory(nativeId: string, before?: number, limit?: number): Promise<SessionHistoryPage | undefined> {
+    return await this.call('sessionHistory', [nativeId, before, limit]) as SessionHistoryPage | undefined;
+  }
   async attachment(id: string): Promise<{ metadata: Attachment; content: Buffer }> {
     const result = await this.call('attachment', [id]) as { metadata: Attachment; content: string };
     return { metadata: result.metadata, content: Buffer.from(result.content, 'base64') };

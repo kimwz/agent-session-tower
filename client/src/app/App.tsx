@@ -27,6 +27,7 @@ import { SidebarFilters } from '../sessions/SidebarFilters';
 import { SessionRow } from '../sessions/SessionRow';
 import { reconcileApprovalDecisions } from '../chat/chat-approvals';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
+import { connectSnapshotStream, SnapshotStore } from './snapshot-stream';
 
 type StatusFilter = 'all' | SessionStatus;
 const readSelection = () => new URLSearchParams(window.location.search).get('session');
@@ -47,6 +48,7 @@ export function App() {
 function TowerApp() {
   const { language } = useI18n();
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
+  const [snapshots] = useState(() => new SnapshotStore(setSnapshot));
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   const [requestedSlackId, setSelectedSlackId] = useState<string | null | undefined>(undefined);
   const [loadError, setLoadError] = useState('');
@@ -104,23 +106,24 @@ function TowerApp() {
 
   const refresh = useCallback(() => {
     setRefreshing(true);
-    void api<Snapshot>('/api/snapshot').then(value => { setSnapshot(value); setLoadError(''); }).catch(error => setLoadError(error instanceof Error ? error.message : t("서버에 연결하지 못했습니다."))).finally(() => setRefreshing(false));
+    const request = snapshots.beginRequest();
+    void api<Snapshot>('/api/snapshot').then(value => { snapshots.response(request, value); setLoadError(''); }).catch(error => setLoadError(error instanceof Error ? error.message : t("서버에 연결하지 못했습니다."))).finally(() => setRefreshing(false));
     void api<{ token: string }>('/api/bootstrap').then(value => setToken(value.token)).catch(() => {});
-  }, []);
+  }, [snapshots]);
 
   useEffect(() => {
     refresh();
-    const events = new EventSource('/api/events');
-    events.addEventListener('snapshot', event => {
-      try { setSnapshot(JSON.parse((event as MessageEvent<string>).data) as Snapshot); setConnection('connected'); setLoadError(''); } catch { setLoadError(t("세션 업데이트를 읽지 못했습니다. 새로고침해 주세요.")); }
+    const disconnect = connectSnapshotStream(snapshots, {
+      onFrame: () => { setConnection('connected'); setLoadError(''); },
+      onUnreadable: () => setLoadError(t("세션 업데이트를 읽지 못했습니다. 새로고침해 주세요.")),
+      onOpen: () => { setConnection('connected'); void api<{ token: string }>('/api/bootstrap').then(value => setToken(value.token)).catch(() => {}); },
+      onError: () => setConnection('offline'),
     });
-    events.onopen = () => { setConnection('connected'); void api<{ token: string }>('/api/bootstrap').then(value => setToken(value.token)).catch(() => {}); };
-    events.onerror = () => setConnection('offline');
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     const onPop = () => { setSelectedId(readSelection()); setSelectedSlackId(undefined); };
     window.addEventListener('popstate', onPop);
-    return () => { events.close(); window.clearInterval(timer); window.removeEventListener('popstate', onPop); };
-  }, [refresh]);
+    return () => { disconnect(); window.clearInterval(timer); window.removeEventListener('popstate', onPop); };
+  }, [refresh, snapshots]);
 
   const selectSession = useCallback((id: string | null) => {
     const url = new URL(window.location.href);
@@ -150,8 +153,8 @@ function TowerApp() {
     return () => window.removeEventListener('keydown', handler);
   }, [closeChat, selectedId, selectedSlackId, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar]);
   const onSessionUpdate = useCallback((updated: Session) => {
-    setSnapshot(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === updated.id ? { ...session, customTitle: updated.customTitle } : session) } : previous);
-  }, []);
+    snapshots.provisional(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === updated.id ? { ...session, customTitle: updated.customTitle } : session) } : previous);
+  }, [snapshots]);
   const openNewSession = useCallback((cwd?: string) => { setNewSessionCwd(cwd); setShowNewSession(true); }, []);
   const closeNewSession = useCallback(() => { setShowNewSession(false); setNewSessionCwd(undefined); }, []);
   const openAutoPrompt = useCallback((cwd?: string) => { setAutoPromptCwd(cwd); setShowAutoPrompt(true); }, []);
@@ -189,7 +192,7 @@ function TowerApp() {
     setGroupErrors(previous => ({ ...previous, [patch.cwd]: '' }));
     try {
       const { group } = await api<{ group: ProjectGroup }>('/api/groups', { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(patch) });
-      setSnapshot(previous => previous ? { ...previous, groups: [...(previous.groups || []).filter(item => item.cwd !== group.cwd), group] } : previous);
+      snapshots.provisional(previous => previous ? { ...previous, groups: [...(previous.groups || []).filter(item => item.cwd !== group.cwd), group] } : previous);
       return true;
     } catch (error) {
       setGroupErrors(previous => ({ ...previous, [patch.cwd]: error instanceof Error ? error.message : t("그룹을 저장하지 못했습니다. 다시 시도해 주세요.") }));
@@ -198,7 +201,7 @@ function TowerApp() {
       groupInFlight.current.delete(patch.cwd);
       setGroupSaving(new Set(groupInFlight.current));
     }
-  }, [connection, token]);
+  }, [connection, snapshots, token]);
   const sessions = snapshot?.sessions || [];
   const groups = snapshot?.groups || emptyProjectGroups;
   const groupTitles = useMemo(() => new Map(groups.map(group => [group.cwd, group.title])), [groups]);
@@ -240,18 +243,18 @@ function TowerApp() {
     setChangingClosed(true);
     try {
       await api(`/api/sessions/${encodeURIComponent(selectedMainSession.id)}/${closing ? 'close' : 'reopen'}`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' });
-      setSnapshot(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === selectedMainSession.id ? { ...session, closed: closing } : session) } : previous);
+      snapshots.provisional(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === selectedMainSession.id ? { ...session, closed: closing } : session) } : previous);
       if (closing) closeChat();
       else setShowClosed(false);
       refresh();
     } finally { setChangingClosed(false); }
-  }, [changingClosed, closeChat, connection, refresh, selectedMainSession, token]);
+  }, [changingClosed, closeChat, connection, refresh, selectedMainSession, snapshots, token]);
   const sessionCreated = useCallback((session: Session, run: Run) => {
-    setSnapshot(previous => previous ? { ...previous, sessions: previous.sessions.some(item => item.id === session.id) ? previous.sessions : [...previous.sessions, session], runs: previous.runs.some(item => item.id === run.id) ? previous.runs : [...previous.runs, run] } : previous);
+    snapshots.provisional(previous => previous ? { ...previous, sessions: previous.sessions.some(item => item.id === session.id) ? previous.sessions : [...previous.sessions, session], runs: previous.runs.some(item => item.id === run.id) ? previous.runs : [...previous.runs, run] } : previous);
     setShowClosed(false); setProvider('all'); setStatus('all'); setProject('all'); setQuery(''); setPeriod('1');
     selectSession(session.id);
     refresh();
-  }, [refresh, selectSession]);
+  }, [refresh, selectSession, snapshots]);
 
   const hasCanvasHistory = canvasVisibleSessions(mainSessions.filter(session => !finishedSlackIds.has(session.id)), [], true).length > 0;
   const canvasEmptyState = !canvasSessions.length && !visiblePins.length && <div className="graph-empty canvas-empty">

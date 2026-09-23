@@ -38,6 +38,8 @@ interface RunnerOptions {
   openCodexStdio?: (options: CodexStdioOptions) => Promise<CodexStdioRun>;
   /** Pre-accepts the native folder trust prompt for a newly created session. */
   trustWorkspace?: (provider: Provider, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
+  /** Streamed output alone is saved at most this often; state changes are saved at once. */
+  outputPersistMs?: number;
 }
 interface OwnedProcess {
   child: ChildProcessWithoutNullStreams;
@@ -79,6 +81,9 @@ export class RunManager extends EventEmitter {
   private readonly settledRuns = new Set<string>();
   private pollTimer?: ReturnType<typeof setInterval>;
   private notifyTimer?: ReturnType<typeof setTimeout>;
+  private outputPersistTimer?: ReturnType<typeof setTimeout>;
+  /** The last content each file holds. Updated only inside the write queue, after a successful write. */
+  private readonly saved: { runs?: string; created?: string } = {};
   private pumping = false;
   private started = false;
   private stopping = false;
@@ -105,7 +110,12 @@ export class RunManager extends EventEmitter {
       const saved = await readPrivateJson(this.createdFile);
       if (!Array.isArray(saved) || saved.some(value => !isCreatedSession(value))) throw new Error('Saved created sessions are invalid.');
       for (const value of saved) this.createdSessions.set(value.session.id, value);
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      this.saved.created = JSON.stringify([...this.createdSessions.values()]);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      // Without any created session, the identities file is never created.
+      this.saved.created = '[]';
+    }
     try {
       if ((await stat(this.stateFile)).size > 12_000_000) throw new Error('Saved run history is too large.');
       const saved: unknown = JSON.parse(await readFile(this.stateFile, 'utf8'));
@@ -406,6 +416,7 @@ export class RunManager extends EventEmitter {
     this.stopping = true;
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.notifyTimer) { clearTimeout(this.notifyTimer); this.notifyTimer = undefined; }
+    this.cancelOutputPersist();
     for (const run of this.runs.values()) {
       if ((run.status === 'queued' || run.status === 'running') && !this.bridged.has(run.id) && !this.stdio.has(run.id)) {
         run.status = 'cancelled';
@@ -833,9 +844,25 @@ export class RunManager extends EventEmitter {
   private append(run: Run, value: string): void {
     run.output = (run.output + value).slice(-MAX_OUTPUT);
     if (!this.notifyTimer) {
-      this.notifyTimer = setTimeout(() => { this.notifyTimer = undefined; this.changed(); }, 200);
+      this.notifyTimer = setTimeout(() => { this.notifyTimer = undefined; this.outputChanged(); }, 200);
       this.notifyTimer.unref();
     }
+  }
+
+  /**
+   * Output is shown at once but saved on a slower cadence: a restored in-progress run is marked
+   * interrupted anyway, and every state change saves the latest output with it.
+   */
+  private outputChanged(): void {
+    this.emit('change');
+    if (this.outputPersistTimer || this.stopping) return;
+    this.outputPersistTimer = setTimeout(() => { this.outputPersistTimer = undefined; this.persist(); }, this.options.outputPersistMs ?? 2000);
+    this.outputPersistTimer.unref();
+  }
+
+  private cancelOutputPersist(): void {
+    if (this.outputPersistTimer) clearTimeout(this.outputPersistTimer);
+    this.outputPersistTimer = undefined;
   }
 
   private changed(): void {
@@ -858,13 +885,16 @@ export class RunManager extends EventEmitter {
   }
 
   private persist(): void {
+    // This save includes any streamed output that was waiting for its slower cadence.
+    this.cancelOutputPersist();
     const data = JSON.stringify(this.list().map(({ approvals: _liveApprovals, canSteer: _liveSteering, ...run }) => run));
     const created = JSON.stringify([...this.createdSessions.values()]);
     this.writes = this.writes.then(async () => {
+      // Compare inside the queue: an earlier queued write may still change what a file holds.
       // Write identities first. A crash between commits may leave an orphaned
       // placeholder, which recovery displays as failed and never submits again.
-      if (created !== '[]') await writePrivateJson(this.createdFile, created);
-      await writePrivateJson(this.stateFile, data);
+      if (created !== this.saved.created) { await writePrivateJson(this.createdFile, created); this.saved.created = created; }
+      if (data !== this.saved.runs) { await writePrivateJson(this.stateFile, data); this.saved.runs = data; }
       this.persistenceError = undefined;
     }).catch((error: Error) => { this.persistenceError = error; });
   }

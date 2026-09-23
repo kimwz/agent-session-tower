@@ -18,9 +18,9 @@ import { WorkspaceTerminals } from '../workspace-terminals.js';
 import { SessionTitleStore } from '../stores/session-titles.js';
 import { openCodexBridgeRun } from './codex-bridge.js';
 import { RunManager, type RunAdmission } from './manager.js';
-import { MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot } from './runner-protocol.js';
+import { MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
-const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment']);
+const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory']);
 
 export interface RunnerHostOptions {
   stateDir: string;
@@ -55,7 +55,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     const sessions = options.runs.sessionList(options.sessions.list());
     return { instance, revision: ++revision, runs: options.runs.list(), sessions,
       nativeIds: Object.fromEntries(sessions.map(session => [session.id, options.runs.nativeSessionId(session.id)])),
-      settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [], version: APP_VERSION };
+      settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [], version: APP_VERSION,
+      capabilities: [...RUNNER_CAPABILITIES] };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
@@ -71,6 +72,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'steer': return options.runs.steer(args[0] as string);
       case 'cancel': return options.runs.cancel(args[0] as string);
       case 'respondToApproval': return options.runs.respondToApproval(args[0] as string, args[1] as string, args[2] as RunApprovalResponse);
+      case 'sessionHistory': return sessionHistory(options.sessions, args);
       case 'attachment': {
         const attachment = await options.runs.attachment(args[0] as string);
         return { metadata: attachment.metadata, content: attachment.content.toString('base64') };
@@ -162,6 +164,15 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     }
     return { instance, socketPath: paths.socket, close };
   } catch (error) { await close(); throw error; }
+}
+
+/** Only the page fields leave the worker; the native file path stays private. */
+async function sessionHistory(sessions: SessionService, [nativeId, before, limit]: unknown[]): Promise<SessionHistoryPage | undefined> {
+  if (typeof nativeId !== 'string' || !nativeId || nativeId.length > 512) throw Object.assign(new Error('Invalid session history request.'), { statusCode: 400 });
+  const page = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+  const history = await sessions.detail(nativeId, page(before), page(limit));
+  if (!history) return undefined;
+  return { messages: history.messages, hasMore: history.hasMore, ...(history.nextBefore !== undefined ? { nextBefore: history.nextBefore } : {}) };
 }
 
 function admission(value: unknown): RunAdmission {
