@@ -1,5 +1,5 @@
 /** Release version. tests/app-identity.test.ts keeps it equal to package.json. */
-export const APP_VERSION = '1.16.0';
+export const APP_VERSION = '1.17.0';
 export const APP_TITLE = 'Agent Session Tower';
 export const APP_NAME = 'agent-session-tower';
 
