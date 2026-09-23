@@ -440,3 +440,56 @@ test('owner routing instructions reach directory selection without leaking into 
   assert.equal(f.calls.length, 1);
   assert.equal(f.dispatches[0].input.prompt, input.prompt);
 });
+
+test('Auto Prompt hands the request origin to both new and continued sessions', async t => {
+  const f = await fixture(t);
+  const owner = { kind: 'owner' as const };
+  const resumed = await f.finished((await f.manager.submit(request(f.cwd), { origin: owner })).id);
+  assert.equal(resumed.decision?.action, 'resume');
+  assert.deepEqual(resumed.origin, owner);
+  f.respond(async () => create());
+  const created = await f.finished((await f.manager.submit(request(f.cwd, { prompt: 'Start the export feature' }), { origin: owner })).id);
+  assert.equal(created.decision?.action, 'create');
+  assert.deepEqual(f.dispatches.map(dispatch => [dispatch.action, dispatch.internal?.origin]), [['resume', owner], ['create', owner]]);
+  const unmarked = await f.finished((await f.manager.submit(request(f.cwd, { prompt: 'Internal caller without an origin' }))).id);
+  assert.deepEqual(unmarked.origin, { kind: 'unknown' }, 'a caller that names no origin never becomes the owner');
+});
+
+test('one request ID cannot be replayed under a different origin', async t => {
+  const f = await fixture(t);
+  const input = request(f.cwd);
+  const workflowId = randomUUID();
+  const job = await f.manager.submit(input, { origin: { kind: 'owner' } });
+  assert.equal((await f.manager.submit(input, { origin: { kind: 'owner' } })).id, job.id);
+  await assert.rejects(f.manager.submit(input, { origin: { kind: 'slack', workflowId } }), /다른 지시문이나 출처/);
+  await assert.rejects(f.manager.submit(input, { origin: { kind: 'owner' }, untrustedInput: true }), /새 세션에서만/);
+});
+
+test('external content only starts new sessions and marks the admission it causes', async t => {
+  const f = await fixture(t);
+  const workflowId = randomUUID();
+  await assert.rejects(f.manager.submit(request(f.cwd), { origin: { kind: 'slack', workflowId }, untrustedInput: true }), /새 세션에서만/);
+  const job = await f.finished((await f.manager.submit(request(f.cwd, { sessionMode: 'new' }), { origin: { kind: 'slack', workflowId }, untrustedInput: true })).id);
+  assert.equal(job.decision?.action, 'create');
+  assert.equal(f.dispatches.at(-1)?.internal?.untrustedInput, true);
+  assert.deepEqual(f.dispatches.at(-1)?.internal?.origin, { kind: 'slack', workflowId });
+});
+
+test('a retried request saved before origins existed still matches after an upgrade', async t => {
+  const f = await fixture(t);
+  const input = request(f.cwd, { prompt: 'Saved by an older worker' });
+  const saved = await f.finished((await f.manager.submit(input, { origin: { kind: 'owner' } })).id);
+  await f.manager.close();
+  const path = join(f.directory, 'auto-prompts.json');
+  const entries = JSON.parse(await readFile(path, 'utf8')) as Array<{ fingerprint: string; job: Record<string, unknown> }>;
+  const legacy = { provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: [] };
+  entries[0].fingerprint = createHash('sha256').update(JSON.stringify(legacy)).digest('hex');
+  delete entries[0].job.origin;
+  await writeFile(path, JSON.stringify(entries));
+  const restarted = new AutoPromptManager(f.options);
+  await restarted.start();
+  try {
+    assert.equal((await restarted.submit(input, { origin: { kind: 'owner' } })).id, saved.id);
+    assert.equal(restarted.get(saved.id)?.origin, undefined);
+  } finally { await restarted.close(); }
+});

@@ -99,9 +99,22 @@ export interface EffortOption {
   id: string;
   description?: string;
 }
+/**
+ * Who started a run. Tower decides tools, owner-chat approval and steering from this record,
+ * never from request fields. Records written before origins existed have none.
+ */
+export interface RunOrigin {
+  kind: 'owner' | 'agent' | 'trigger' | 'slack' | 'unknown';
+  workflowId?: string;
+  triggerId?: string;
+  eventId?: string;
+  /** For an agent origin: the owner run whose tool call started this work. */
+  runId?: string;
+}
 export interface Run {
   id: string;
   sessionId: string;
+  origin?: RunOrigin;
   prompt: string;
   status: 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
   createdAt: string;
@@ -180,6 +193,9 @@ export interface AutoPromptDecision {
   reason: string;
 }
 export interface AutoPromptJob {
+  origin?: RunOrigin;
+  /** The request carries external content, so it may only start a new session. */
+  untrustedInput?: boolean;
   sessionMode?: 'new';
   routingContext?: string;
   model?: string;

@@ -21,7 +21,8 @@ export interface SlackAutomationOptions {
   getSessionRuns?(sessionId: string): Run[];
   fetchThread(mention: SlackMention): Promise<SlackMessage[]>;
   match(input: SlackMatchInput): Promise<unknown>;
-  submitAutoPrompt(input: AutoPromptRequest): Promise<AutoPromptJob>;
+  /** `workflowId` records the Slack origin; every submission starts a new session. */
+  submitAutoPrompt(input: AutoPromptRequest, workflowId: string): Promise<AutoPromptJob>;
   getAutoPrompt(id: string): AutoPromptJob | undefined;
   getRun(id: string): Run | undefined;
   composeReply(input: SlackReplyInput): Promise<unknown>;
@@ -207,7 +208,7 @@ export class SlackAutomationManager extends EventEmitter {
       if (!item.rule || !item.prompt || !item.autoPromptId) throw new Error('Slack dispatch state is incomplete.');
       const job = this.options.getAutoPrompt(item.autoPromptId) ?? await this.options.submitAutoPrompt({ requestId: item.autoPromptId, provider: item.rule.provider, model: item.rule.model, sessionMode: 'new', routingContext: item.rule.instructions,
         ...(item.rule.provider === 'codex' ? { codexApprovalsReviewer: 'auto_review' as const } : {}),
-        ...(item.rule.cwd ? { cwd: item.rule.cwd } : {}), prompt: item.prompt });
+        ...(item.rule.cwd ? { cwd: item.rule.cwd } : {}), prompt: item.prompt }, item.id);
       if (job.status === 'error' || job.status === 'cancelled') throw new Error(job.error || 'Auto Prompt routing failed.');
       if (job.status !== 'completed') return;
       if (!job.runId || !job.sessionId) throw new Error('Auto Prompt did not return an execution task.');
@@ -382,7 +383,7 @@ export class SlackAutomationManager extends EventEmitter {
       try {
         if (!job && task.submitted) throw new Error('Confirmed task record is unavailable; refusing to submit it twice.');
         job ??= await this.options.submitAutoPrompt({ requestId: task.requestId, provider: task.provider, model: task.model, prompt: task.prompt, sessionMode: 'new', routingContext: selectedRule?.instructions,
-          ...(task.cwd ? { cwd: task.cwd } : {}), ...(task.provider === 'codex' ? { codexApprovalsReviewer: 'auto_review' as const } : {}) });
+          ...(task.cwd ? { cwd: task.cwd } : {}), ...(task.provider === 'codex' ? { codexApprovalsReviewer: 'auto_review' as const } : {}) }, item.id);
         task.submitted = true; delete task.submissionError;
         if (job.runId) task.delegatedRunId = job.runId;
         await this.save(item, {});

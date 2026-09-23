@@ -24,6 +24,9 @@ import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
 
+/** Every request this web server admits comes from the owner's browser session. */
+const OWNER = { kind: 'owner' } as const;
+
 const HELP = `${APP_TITLE} ${APP_VERSION}
 
 Usage: agent-session-tower [run] [options]
@@ -151,14 +154,14 @@ async function main() {
       changed();
       return titles.apply(updated);
     },
-    createSession: input => runs.create(input),
-    startAutoPrompt: input => runs.submitAutoPrompt(input),
+    createSession: input => runs.create(input, { origin: OWNER }),
+    startAutoPrompt: input => runs.submitAutoPrompt(input, { origin: OWNER }),
     getAutoPrompt: id => runs.getAutoPrompt(id),
     cancelAutoPrompt: id => runs.cancelAutoPrompt(id),
     slackOverview: () => runs.slackOverview(),
     slackMutate: (action, body) => runs.slackMutate(action, body),
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
-    enqueue: (id, prompt, attachments) => runs.enqueue(id, prompt, attachments),
+    enqueue: (id, prompt, attachments) => runs.enqueue(id, prompt, attachments, { origin: OWNER }),
     attachment: id => runs.attachment(id), cancel: id => runs.cancel(id), steerRun: id => runs.steer(id),
     respondToApproval: (runId, approvalId, decision) => runs.respondToApproval(runId, approvalId, decision),
     dismiss: async id => {

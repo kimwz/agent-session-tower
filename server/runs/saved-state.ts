@@ -3,6 +3,7 @@ import type { Run, Session } from '../../shared/types.js';
 import { attachmentMetadata } from '../stores/attachments.js';
 import { validEffort, validModelId } from '../providers/models.js';
 import { PROVIDERS } from '../providers/discovery.js';
+import type { SessionOrigin } from './origin.js';
 
 /** Nothing restored from disk is trusted: these guards decide what may re-enter the queue. */
 export const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
@@ -13,6 +14,8 @@ export interface CreatedSession {
   confirmed: boolean;
   seenNative?: boolean;
   title?: string;
+  /** Absent in records written before provenance existed; the worker fills it once at startup. */
+  origin?: SessionOrigin;
 }
 
 export function isSavedRun(value: unknown): value is Run {

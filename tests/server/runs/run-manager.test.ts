@@ -22,7 +22,7 @@ function makeSession(cwd: string, overrides: Partial<Session> = {}): Session {
 }
 
 
-async function fixture(options: { mode?: string; provider?: 'codex' | 'claude'; busy?: boolean; maxConcurrent?: number; refreshError?: boolean; path?: string; shebang?: boolean; openCodexBridge?: OpenCodexBridge; getSessionMcp?: ConstructorParameters<typeof RunManager>[0]['getSessionMcp']; contextFrames?: unknown[] } = {}) {
+async function fixture(options: { mode?: string; provider?: 'codex' | 'claude'; busy?: boolean; maxConcurrent?: number; refreshError?: boolean; path?: string; shebang?: boolean; openCodexBridge?: OpenCodexBridge; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools']; contextFrames?: unknown[] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'agent-monitor-runner-'));
   const script = join(directory, 'provider.mjs');
   await writeFile(script, `#!/usr/bin/env node
@@ -73,7 +73,7 @@ function processPrompt() {
   const manager = new RunManager({
     getSession: (id) => sessions.get(id), refreshSessions: async () => { refreshes++; if(options.refreshError) throw new Error('activity unavailable'); }, stateDir,
     pollMs: 25, maxConcurrent: options.maxConcurrent, findExecutable: async (provider) => `/fixture/${provider}`,
-    openCodexBridge: options.openCodexBridge, getSessionMcp: options.getSessionMcp,
+    openCodexBridge: options.openCodexBridge, resolveRunTools: options.resolveRunTools,
     env: { FIXTURE_MODE: options.mode ?? '', RECEIVED_PATH: join(directory, 'received.json'), CLAUDECODE: '1', ...(options.path !== undefined ? { PATH: options.path } : {}),
       ...(options.contextFrames ? { FIXTURE_CONTEXT_FRAMES: JSON.stringify(options.contextFrames) } : {}) },
     spawnProcess: (file, args, spawnOptions) => {
@@ -798,7 +798,7 @@ test('session-scoped tools bypass the desktop writer and resolve again for follo
   const resolved: string[] = [];
   let bridgeCalls = 0;
   const f = await fixture({
-    getSessionMcp: id => { resolved.push(id); return { tower_slack: { command: '/fixture/node', args: ['bridge.mjs', id] } }; },
+    resolveRunTools: (_origin, session) => { resolved.push(session.id); return { servers: { tower_slack: { command: '/fixture/node', args: ['bridge.mjs', session.id] } }, required: true }; },
     openCodexBridge: async () => { bridgeCalls++; return undefined; },
   });
   t.after(f.cleanup);
@@ -816,10 +816,28 @@ test('session-scoped tools bypass the desktop writer and resolve again for follo
 
 test('Claude receives only the session-bound MCP configuration as a single argument', async t => {
   const mcpServers = { tower_slack: { command: '/fixture/node', args: ['a path/bridge.mjs', 'workflow-id'] } };
-  const f = await fixture({ provider: 'claude', getSessionMcp: () => mcpServers });
+  const f = await fixture({ provider: 'claude', resolveRunTools: () => ({ servers: mcpServers, required: true }) });
   t.after(f.cleanup);
   const run = await f.manager.enqueue(f.session.id, 'Reply to this mention');
   assert.equal((await finished(f.manager, run.id)).status, 'completed');
   const args = f.launches[0].args;
   assert.deepEqual(JSON.parse(args[args.indexOf('--mcp-config') + 1]), { mcpServers });
+});
+
+test('optional tools still let a turn go to the open Codex app, and a lost acknowledgement is never replayed', async t => {
+  const starts: CodexBridgeOptions[] = [];
+  const f = await fixture({
+    resolveRunTools: () => ({ servers: { tower: { command: '/fixture/tower', args: [] } }, required: false }),
+    openCodexBridge: async options => ({ done: Promise.resolve(),
+      start: async () => { starts.push(options); options.onStarted('turn'); throw new Error('Desktop acknowledgement lost after possible delivery'); },
+      cancel: async () => {}, close: () => {} }),
+  });
+  t.after(f.cleanup);
+  f.sessions.set(f.session.id, { ...f.session, status: 'idle', activeProcess: true });
+  const run = await f.manager.enqueue(f.session.id, 'Forward to the desktop app');
+  assert.equal((await finished(f.manager, run.id)).status, 'error');
+  f.sessions.set(f.session.id, { ...f.session, status: 'idle', activeProcess: false });
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(starts.length, 1);
+  assert.equal(f.launches.length, 0, 'optional tools never trigger a second writer after an uncertain desktop delivery');
 });

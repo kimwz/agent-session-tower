@@ -74,13 +74,24 @@ export class DurableRunManager extends EventEmitter {
     return found && structuredClone(found);
   }
   nativeSessionId(id: string): string { return this.snapshot?.nativeIds[id] ?? id; }
+  /**
+   * A worker that predates origins drops them and treats every message as the owner's, so
+   * work on anyone else's behalf is refused there instead of being admitted as owner work.
+   */
+  private requireOrigins(internal: Pick<RunAdmission, 'origin'>): void {
+    if (internal.origin && internal.origin.kind !== 'owner' && !this.supports('origins')) {
+      throw Object.assign(new Error('The execution worker is outdated and cannot keep who started this work. It was not submitted; retry after the worker updates.'), { statusCode: 409 });
+    }
+  }
   async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
     internal.validate?.();
-    return this.call('create', [input, { autoPromptId: internal.autoPromptId }]) as Promise<{ session: Session; run: Run }>;
+    this.requireOrigins(internal);
+    return this.call('create', [input, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}) }]) as Promise<{ session: Session; run: Run }>;
   }
   async enqueue(id: string, prompt: string, attachments: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
     internal.validate?.();
-    return this.call('enqueue', [id, prompt, attachments, { autoPromptId: internal.autoPromptId }]) as Promise<Run>;
+    this.requireOrigins(internal);
+    return this.call('enqueue', [id, prompt, attachments, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}) }]) as Promise<Run>;
   }
   async steer(id: string): Promise<Run> { return this.call('steer', [id]) as Promise<Run>; }
   async cancel(id: string): Promise<void> { await this.call('cancel', [id]); }
@@ -91,7 +102,10 @@ export class DurableRunManager extends EventEmitter {
   async slackOverview(): Promise<SlackPublicStatus> { return this.call('slackOverview', []) as Promise<SlackPublicStatus>; }
   async slackMutate(action: string, body: Record<string, unknown>): Promise<SlackPublicStatus> { return this.call('slackMutate', [action, body]) as Promise<SlackPublicStatus>; }
   getAutoPrompt(id: string): AutoPromptJob | undefined { return this.autoPromptList().find(job => job.id === id.toLowerCase()); }
-  async submitAutoPrompt(input: AutoPromptRequest): Promise<AutoPromptJob> { return this.call('submitAutoPrompt', [input]) as Promise<AutoPromptJob>; }
+  async submitAutoPrompt(input: AutoPromptRequest, internal: Pick<RunAdmission, 'origin'> = {}): Promise<AutoPromptJob> {
+    this.requireOrigins(internal);
+    return this.call('submitAutoPrompt', [input, ...(internal.origin ? [{ origin: internal.origin }] : [])]) as Promise<AutoPromptJob>;
+  }
   async cancelAutoPrompt(id: string): Promise<AutoPromptJob> { return this.call('cancelAutoPrompt', [id]) as Promise<AutoPromptJob>; }
   async sessionHistory(nativeId: string, before?: number, limit?: number): Promise<SessionHistoryPage | undefined> {
     return await this.call('sessionHistory', [nativeId, before, limit]) as SessionHistoryPage | undefined;

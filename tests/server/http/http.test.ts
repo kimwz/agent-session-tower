@@ -269,3 +269,26 @@ test('steering requires authentication and preserves queued content and backend 
   assert.deepEqual(calls, ['queued-request']);
   assert.equal((await fetch(`${base}/api/runs/stale/steer`, { method: 'POST', headers, body: '{}' })).status, 409);
 });
+
+test('request bodies cannot choose who a run belongs to', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'monitor-http-origin-'));
+  const received: unknown[][] = [];
+  const snapshot: Snapshot = { sessions: [session], providers: [], runs: [], scanning: false, updatedAt: new Date().toISOString(), hostname: 'test', version: '0.1.0' };
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, backend: {
+    snapshot: () => snapshot, detail: async () => undefined, cancel: async () => {}, subscribe: () => () => {},
+    enqueue: async (...args) => { received.push(['enqueue', ...args]); return run; },
+    createSession: async (...args) => { received.push(['create', ...args]); return { session, run }; },
+    startAutoPrompt: async (...args) => { received.push(['autoPrompt', ...args]); throw new Error('unreachable'); },
+  } });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
+  const { token } = await (await fetch(`${base}/api/bootstrap`)).json();
+  const post = (path: string, body: unknown) => fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: JSON.stringify(body) });
+  const claim = { origin: { kind: 'slack', workflowId: '12345678-1234-4234-8234-123456789abc' }, untrustedInput: true, autoPromptId: '12345678-1234-4234-8234-123456789abd' };
+  assert.equal((await post(`/api/sessions/${encodeURIComponent(session.id)}/messages`, { prompt: 'Hello', ...claim })).status, 202);
+  assert.equal((await post('/api/sessions', { provider: 'codex', cwd: '/tmp/project', prompt: 'Hello', ...claim })).status, 202);
+  assert.equal((await post('/api/auto-prompts', { requestId: '12345678-1234-4234-8234-123456789abe', provider: 'codex', prompt: 'Hello', ...claim })).status, 400);
+  assert.deepEqual(received.map(call => call[0]), ['enqueue', 'create']);
+  assert.doesNotMatch(JSON.stringify(received), /slack|untrustedInput|autoPromptId/, 'the backend never sees an origin claim from a request body');
+});

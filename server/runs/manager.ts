@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
-import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, Session } from '../../shared/types.js';
+import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, RunOrigin, Session } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { attachmentMetadata, attachmentPrompt, AttachmentStore } from '../stores/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
@@ -20,12 +20,19 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { findExecutable, providerDirectories, PROVIDERS } from '../providers/discovery.js';
 import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
-import type { SessionMcpServers } from './session-mcp.js';
+import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
+import { parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
-  /** Resolve trusted, session-bound tools again on every resumed turn. */
-  getSessionMcp?: (sessionId: string) => SessionMcpServers | undefined;
+  /**
+   * Resolve trusted tools again for every turn. The answer may depend only on the run's recorded
+   * origin and its session, so two runs with the same origin in one session always get the same tools.
+   * It must not read this manager's run list: that list computes steering from the same origins.
+   */
+  resolveRunTools?: (origin: RunOrigin | undefined, session: Session) => RunTools;
+  /** True when a ledger outside the run registry links any of these IDs of one session to external content. */
+  isExternallyLinked?: (sessionIds: readonly string[]) => boolean;
   getSession: (id: string) => Session | undefined;
   refreshSessions: () => Promise<void>;
   stateDir?: string;
@@ -52,6 +59,10 @@ interface OwnedProcess {
 export interface RunAdmission {
   autoPromptId?: string;
   validate?: () => void;
+  /** Recorded on the run; absent means unknown, which never gains owner privileges. */
+  origin?: RunOrigin;
+  /** The prompt carries Slack, GitHub or HTTP content. Only a session Tower creates for it may receive it. */
+  untrustedInput?: boolean;
 }
 
 const MAX_OUTPUT = 64_000;
@@ -98,8 +109,53 @@ export class RunManager extends EventEmitter {
     this.attachments = new AttachmentStore(options.stateDir ?? defaultStateDir());
   }
 
-  setSessionMcpResolver(resolver: NonNullable<RunnerOptions['getSessionMcp']>): void {
-    this.options.getSessionMcp = resolver;
+  setRunToolResolver(resolver: NonNullable<RunnerOptions['resolveRunTools']>): void {
+    this.options.resolveRunTools = resolver;
+  }
+
+  setExternalLinkResolver(resolver: NonNullable<RunnerOptions['isExternallyLinked']>): void {
+    this.options.isExternallyLinked = resolver;
+  }
+
+  private runTools(run: Run, session: Session): RunTools {
+    return this.options.resolveRunTools?.(run.origin, session) ?? NO_RUN_TOOLS;
+  }
+
+  /**
+   * Provenance of a session Tower created. Native sessions the owner opened elsewhere return undefined.
+   * A ledger link to external content always wins over the stored record.
+   */
+  sessionOrigin(id: string): SessionOrigin | undefined {
+    id = this.monitorSessionId(id);
+    const created = this.createdSessions.get(id);
+    const linked = this.options.isExternallyLinked?.([id, this.nativeSessionId(id)]) === true;
+    if (!created) return linked ? { kind: 'unknown', untrustedInput: true } : undefined;
+    if (linked && !created.origin?.untrustedInput) {
+      // The mark is permanent: record it so a later ledger cleanup cannot clear it.
+      created.origin = { ...(created.origin ?? { kind: 'unknown' as const }), untrustedInput: true };
+      this.persist();
+    }
+    return { ...(created.origin ?? { kind: 'unknown' as const, untrustedInput: true }) };
+  }
+
+  /**
+   * Fills provenance for sessions created before it was recorded. Only evidence that survives in the
+   * run registry or in external ledgers is used; anything undecidable stays unknown and untrusted.
+   */
+  backfillSessionOrigins(links: { sessionIds: ReadonlySet<string>; requestIds: ReadonlySet<string> }): number {
+    let changed = 0;
+    for (const [id, created] of this.createdSessions) {
+      if (created.origin) continue;
+      const initial = this.runs.get(created.runId);
+      const aliases = [id, this.nativeSessionId(id)];
+      if (aliases.some(alias => links.sessionIds.has(alias)) || (initial?.autoPromptId && links.requestIds.has(initial.autoPromptId))) {
+        created.origin = { kind: 'slack', untrustedInput: true };
+      } else if (initial) created.origin = { kind: 'owner', untrustedInput: false };
+      else created.origin = { kind: 'unknown', untrustedInput: true };
+      changed++;
+    }
+    if (changed) this.persist();
+    return changed;
   }
 
   async start(): Promise<void> {
@@ -109,7 +165,11 @@ export class RunManager extends EventEmitter {
     try {
       const saved = await readPrivateJson(this.createdFile);
       if (!Array.isArray(saved) || saved.some(value => !isCreatedSession(value))) throw new Error('Saved created sessions are invalid.');
-      for (const value of saved) this.createdSessions.set(value.session.id, value);
+      for (const value of saved) {
+        const origin = restoredSessionOrigin((value as { origin?: unknown }).origin);
+        if (origin) value.origin = origin; else delete value.origin;
+        this.createdSessions.set(value.session.id, value);
+      }
       this.saved.created = JSON.stringify([...this.createdSessions.values()]);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
@@ -124,6 +184,8 @@ export class RunManager extends EventEmitter {
         if (!isSavedRun(value)) continue;
         const run: Run = { ...value, prompt: value.prompt.slice(0, MAX_PROMPT), output: value.output.slice(-MAX_OUTPUT),
           ...(value.attachments ? { attachments: value.attachments.map(item => attachmentMetadata(item)!) } : {}) };
+        // A malformed origin never reads back as owner work.
+        if (value.origin !== undefined) run.origin = parseRunOrigin(value.origin) ?? { kind: 'unknown' };
         // A permission request belongs to a live process, never a restored run.
         delete run.approvals;
         delete run.canSteer;
@@ -252,10 +314,12 @@ export class RunManager extends EventEmitter {
       status: 'idle', statusReason: '새 세션을 생성하고 있습니다.', createdAt, updatedAt: createdAt,
       lastRequestAt: createdAt, lastMessage: input.prompt.trim().slice(0, 512), messageCount: 0, isSubagent: false, resumable: false, creationPending: true,
     };
-    const run: Run = { id: randomUUID(), sessionId: id, prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
+    const origin = internal.origin ?? { kind: 'unknown' as const };
+    const run: Run = { id: randomUUID(), sessionId: id, origin, prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
-    this.createdSessions.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}) });
+    // Provenance commits with the session identity, before any provider starts.
+    this.createdSessions.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}), origin: sessionOriginOf(origin, internal.untrustedInput === true) });
     this.runs.set(run.id, run);
     this.admissions.add(run.id);
     this.prune();
@@ -280,6 +344,11 @@ export class RunManager extends EventEmitter {
     if ([...this.runs.values()].filter((run) => run.status === 'queued').length >= MAX_QUEUED) throw new RunError('The task queue is full. Wait for a task to finish.', 429);
   }
 
+  /** External content only enters conversations Tower created and can keep marked. */
+  private admitUntrusted(sessionId: string): void {
+    if (!this.createdSessions.has(sessionId)) throw new RunError('External trigger content can only continue a conversation Tower created for it.', 409);
+  }
+
   private validateCorrelation(id: string | undefined): void {
     if (id === undefined) return;
     if (!UUID.test(id)) throw new RunError('Invalid Auto Prompt request ID.');
@@ -293,6 +362,7 @@ export class RunManager extends EventEmitter {
     this.validateAdmission(prompt, hasAttachments);
     const session = this.getSession(sessionId);
     this.validateSession(session);
+    if (internal.untrustedInput) this.admitUntrusted(sessionId);
     const model = requestedModel(request.model);
     const effort = requestedEffort(request.effort, session.provider);
     if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 503);
@@ -300,7 +370,12 @@ export class RunManager extends EventEmitter {
     // File writes yield; recheck admission immediately before inserting the run.
     try { this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
     catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
-    const run: Run = { id: randomUUID(), sessionId, prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
+    if (internal.untrustedInput) {
+      // Recorded before the run exists: once external content is queued, the session stays marked.
+      const created = this.createdSessions.get(sessionId)!;
+      if (!created.origin?.untrustedInput) created.origin = { ...(created.origin ?? { kind: 'unknown' as const }), untrustedInput: true };
+    }
+    const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
       ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
@@ -319,6 +394,9 @@ export class RunManager extends EventEmitter {
     if (this.stopping || run.status !== 'queued' || run.steering || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
     const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering);
     if (!target || (run.model && run.model !== (target.model ?? this.getSession(run.sessionId)?.model)) || (run.effort && run.effort !== target.effort)) return undefined;
+    // An inserted instruction runs with the active turn's tools and approvals. Tools follow origin and
+    // session alone, so the same origin in the same session is exactly the same authority.
+    if (!sameOrigin(run.origin, target.origin)) return undefined;
     const adapter = this.stdio.get(target.id) ?? this.bridged.get(target.id) ?? this.owned.get(target.id)?.claude;
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : undefined;
   }
@@ -513,7 +591,8 @@ export class RunManager extends EventEmitter {
   }
 
   private async launchBridge(run: Run, session: Session): Promise<boolean> {
-    if (this.options.getSessionMcp?.(session.id)) return false;
+    // The desktop app owns its tools; only turns that can do without Tower's tools are forwarded.
+    if (this.runTools(run, session).required) return false;
     if (!this.options.openCodexBridge) return false;
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     let started = false;
@@ -579,7 +658,7 @@ export class RunManager extends EventEmitter {
     delete env.CLAUDE_CODE_SESSION_ID;
     let started = false;
     let registered = false;
-    const mcpServers = this.options.getSessionMcp?.(session.id);
+    const mcpServers = this.runTools(run, session).servers;
     const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
       executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
       mcpServers,
@@ -647,7 +726,7 @@ export class RunManager extends EventEmitter {
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     const images = attachments.filter(item => isImageAttachment(item.metadata.mimeType));
     const args = creating ? buildCreateArgs(session, run.model, run.effort) : buildResumeArgs(session, run.model, run.effort);
-    const mcpServers = this.options.getSessionMcp?.(session.id);
+    const mcpServers = this.runTools(run, session).servers;
     if (mcpServers) args.push('--mcp-config', JSON.stringify({ mcpServers }));
     for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
     const prompt = attachmentPrompt(run.prompt, attachments);

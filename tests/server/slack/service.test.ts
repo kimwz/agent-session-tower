@@ -200,3 +200,44 @@ test('owner reply intent uses the configured ephemeral classifier with only owne
   await service.ownerChat('chat', 'LGTM 달고 슬랙에도 알려주세요'); assert.equal(calls, 1);
   assert.equal(service.overview().events[0].ownerConditionalReply?.mode, 'composed');
 });
+
+test('Slack conversations, their delegated work and result resumes all run as Slack external input', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-origin-'));
+  type Run = import('../../../shared/types.js').Run;
+  type Admission = import('../../../server/runs/manager.js').RunAdmission;
+  const runs: Run[] = [{ id: 'delegated', sessionId: 'work', prompt: '', status: 'completed', createdAt: '', output: 'Done' }];
+  const admissions: Array<[string, Admission | undefined]> = [];
+  const service = new SlackService({ stateDir, runs: {
+    list: () => runs,
+    create: async (input, internal) => {
+      admissions.push(['create', internal]);
+      const run: Run = { id: 'coordinator', sessionId: 'chat', prompt: '', status: 'completed', createdAt: '', output: '', autoPromptId: internal?.autoPromptId };
+      runs.push(run);
+      return { run, session: { id: 'chat', nativeId: 'chat', provider: input.provider, cwd: input.cwd, project: 'Slack', title: 'Slack', status: 'completed', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true } };
+    },
+    enqueue: async (_id, _prompt, _options, internal) => { admissions.push(['resume', internal]); return { ...runs[1], id: 'resumed', status: 'queued' }; },
+  }, autoPrompts: { get: id => id === delegatedRequest ? { id, provider: 'codex', prompt: '', routerModel: 'gpt', status: 'completed', createdAt: '', updatedAt: '', runId: 'delegated', sessionId: 'work' } : undefined,
+    submit: async (input, internal) => { delegatedRequest = input.requestId; admissions.push(['delegate', internal as Admission]); assert.equal(input.sessionMode, 'new');
+      return { id: input.requestId, provider: input.provider, prompt: input.prompt, routerModel: 'gpt', status: 'completed', createdAt: '', updatedAt: '', runId: 'delegated', sessionId: 'work' }; } },
+  refresh: async () => {} }, {
+    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [{ user: 'U2', text: 'Review', ts: '1' }], reply: async () => { throw new Error('Must not send'); } }),
+  });
+  let delegatedRequest = '';
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  await service.start(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await service.mutate('rules', { rules: [{ id: 'r', name: 'Review', enabled: true, condition: 'PR', instructions: 'Review', replyInstructions: 'Propose', provider: 'codex' }] });
+  await service.automation.ingest({ id: 'event', teamId: 'T1', channel: 'G1', user: 'U2', ts: '1', threadTs: '1', text: 'Review' });
+  await service.automation.tick();
+  const workflowId = service.overview().events[0].id;
+  await service.tool(workflowId, 'tower_auto_prompt', { requestKey: 'work', ruleId: 'r', prompt: 'Review' });
+  runs.find(run => run.id === 'delegated')!.autoPromptId = delegatedRequest;
+  await service.automation.tick();
+  assert.deepEqual(admissions.map(([step]) => step), ['create', 'delegate', 'resume']);
+  for (const [, internal] of admissions) {
+    assert.deepEqual(internal?.origin, { kind: 'slack', workflowId });
+    assert.equal(internal?.untrustedInput, true);
+  }
+  const linked = service.linkedSessions();
+  assert.ok(linked.sessionIds.has('chat') && linked.sessionIds.has('work'), 'both the coordinator and the delegated session hold Slack content');
+  assert.ok(linked.requestIds.has(workflowId) && linked.requestIds.has(delegatedRequest));
+});

@@ -10,6 +10,7 @@ import type { SessionMcpServers } from '../runs/session-mcp.js';
 import type { AutoPromptManager } from '../auto-prompt/manager.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
 import type { RunManager } from '../runs/manager.js';
+import type { RunOrigin } from '../../shared/types.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { SlackAutomationManager, validateSlackRules } from './automation.js';
 import { SlackClient } from './client.js';
@@ -23,6 +24,7 @@ interface Dependencies {
   model?: typeof runAutoPromptModel;
 }
 const invalid = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
+const slackOrigin = (workflowId: string): RunOrigin => ({ kind: 'slack', workflowId });
 
 /** Credentials and event processing belong to the execution worker, never the web process. */
 export class SlackService extends EventEmitter {
@@ -45,11 +47,11 @@ export class SlackService extends EventEmitter {
         const provider = workflow.rules[0]?.provider ?? 'codex';
         const created = await options.runs.create!({ provider, model: workflow.rules[0]?.model, cwd: join(options.stateDir, 'slack-sessions', workflow.id), prompt,
           title: `Slack: ${workflow.mention.text.replace(/\s+/g, ' ').slice(0, 100)}`,
-          ...(provider === 'codex' ? { codexApprovalsReviewer: 'auto_review' as const } : {}) }, { autoPromptId: workflow.id });
+          ...(provider === 'codex' ? { codexApprovalsReviewer: 'auto_review' as const } : {}) }, { autoPromptId: workflow.id, origin: slackOrigin(workflow.id), untrustedInput: true });
         return { sessionId: created.session.id, runId: created.run.id };
       } } : {}),
       ...(options.runs.enqueue ? { resumeConversation: async (workflow, prompt, correlationId) => {
-        const run = await options.runs.enqueue!(workflow.sessionId!, prompt, { model: workflow.rules[0]?.model }, { autoPromptId: correlationId });
+        const run = await options.runs.enqueue!(workflow.sessionId!, prompt, { model: workflow.rules[0]?.model }, { autoPromptId: correlationId, origin: slackOrigin(workflow.id), untrustedInput: true });
         return { runId: run.id };
       } } : {}),
       findConversation: id => { const run = options.runs.list().find(run => run.autoPromptId === id); return run ? { sessionId: run.sessionId, runId: run.id } : undefined; },
@@ -71,7 +73,7 @@ export class SlackService extends EventEmitter {
           schema: OWNER_REPLY_INTENT_SCHEMA, signal: AbortSignal.timeout(30_000),
         }, { stateDir: options.stateDir });
       },
-      submitAutoPrompt: async request => { await options.refresh(); return options.autoPrompts.submit(request); },
+      submitAutoPrompt: async (request, workflowId) => { await options.refresh(); return options.autoPrompts.submit(request, { origin: slackOrigin(workflowId), untrustedInput: true }); },
       getAutoPrompt: id => options.autoPrompts.get(id),
       getRun: id => options.runs.list().find(run => run.id === id),
       composeReply: async input => {
@@ -111,6 +113,23 @@ export class SlackService extends EventEmitter {
     return { tone: this.tone.overview(), language: this.settings.language ?? 'ko', connected: Boolean(this.settings.userToken), enabled: this.settings.enabled, allowSelfMentions: this.settings.allowSelfMentions === true, status: this.status,
       ...(this.error ? { error: this.error } : {}), ...(this.settings.account ? { account: { ...this.settings.account } } : {}),
       rules: this.automation.rules(), events: this.automation.list() };
+  }
+  /** Every session and request ID Slack work touched. Those conversations contain Slack content. */
+  linkedSessions(): { sessionIds: Set<string>; requestIds: Set<string> } {
+    const requestIds = new Set<string>();
+    const sessionIds = new Set<string>();
+    const job = (id: string) => this.options.autoPrompts.get(id)?.sessionId;
+    for (const item of this.automation.list()) {
+      requestIds.add(item.id);
+      for (const id of [item.sessionId, item.autoPromptId && job(item.autoPromptId)]) if (id) sessionIds.add(id);
+      if (item.autoPromptId) requestIds.add(item.autoPromptId);
+      for (const task of item.delegatedTasks ?? []) {
+        requestIds.add(task.requestId);
+        for (const id of [task.createdSessionId, job(task.requestId)]) if (id) sessionIds.add(id);
+      }
+    }
+    for (const run of this.options.runs.list()) if (run.autoPromptId && requestIds.has(run.autoPromptId)) sessionIds.add(run.sessionId);
+    return { sessionIds, requestIds };
   }
   coordinatorSessionIds(): string[] {
     const workflows = this.automation.list().filter(item => item.mode === 'conversation');

@@ -4,10 +4,11 @@ import { constants } from 'node:fs';
 import { mkdir, open, rename, stat, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, isAbsolute, join } from 'node:path';
-import type { Attachment, AttachmentInput, AutoPromptDecision, AutoPromptJob, AutoPromptRequest, Run, Session, SessionDetail, Snapshot } from '../../shared/types.js';
+import type { Attachment, AttachmentInput, AutoPromptDecision, AutoPromptJob, AutoPromptRequest, Run, RunOrigin, Session, SessionDetail, Snapshot } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { AttachmentStore, attachmentMetadata, type StoredAttachment } from '../stores/attachments.js';
-import { RunError, type RunManager } from '../runs/manager.js';
+import { RunError, type RunAdmission, type RunManager } from '../runs/manager.js';
+import { parseRunOrigin } from '../runs/origin.js';
 import { runAutoPromptModel } from './native.js';
 
 interface AutoPromptOptions {
@@ -133,6 +134,9 @@ export class AutoPromptManager extends EventEmitter {
         await file.chmod(0o600);
         for (const entry of saved as Entry[]) {
           if (this.entries.has(entry.job.id)) throw new Error('Saved Auto Prompt IDs are duplicated.');
+          // A malformed origin never reads back as owner work; a missing one stays missing.
+          if (entry.job.origin !== undefined) entry.job.origin = parseRunOrigin(entry.job.origin) ?? { kind: 'unknown' };
+          if (entry.job.untrustedInput !== undefined && entry.job.untrustedInput !== true) entry.job.untrustedInput = true;
           this.entries.set(entry.job.id, entry);
         }
       } finally { await file.close(); }
@@ -152,8 +156,14 @@ export class AutoPromptManager extends EventEmitter {
   list(): AutoPromptJob[] { return [...this.entries.values()].map(entry => copy(entry.job)); }
   get(id: string): AutoPromptJob | undefined { const job = this.entries.get(id.toLowerCase())?.job; return job ? copy(job) : undefined; }
 
-  async submit(input: AutoPromptRequest): Promise<AutoPromptJob> {
+  /** `internal` comes from Tower itself (web owner, Slack, triggers); request fields cannot set it. */
+  async submit(input: AutoPromptRequest, internal: Pick<RunAdmission, 'origin' | 'untrustedInput'> = {}): Promise<AutoPromptJob> {
     if (!this.started || this.stopping) throw new RunError('Auto Prompt가 요청을 받지 않고 있습니다.', 503);
+    const origin = internal.origin === undefined ? { kind: 'unknown' as const } : parseRunOrigin(internal.origin);
+    if (!origin) throw new RunError('Auto Prompt 요청 출처가 올바르지 않습니다.');
+    const untrustedInput = internal.untrustedInput === true;
+    // External content never continues an existing conversation.
+    if (untrustedInput && input?.sessionMode !== 'new') throw new RunError('외부 입력 요청은 새 세션에서만 실행할 수 있습니다.');
     if (!input || typeof input.requestId !== 'string' || !UUID.test(input.requestId) || !['claude', 'codex'].includes(input.provider)) throw new RunError('올바른 요청 ID와 Claude 또는 Codex가 필요합니다.');
     if (typeof input.prompt !== 'string' || input.prompt.length > 32_000 || (!input.prompt.trim() && !input.attachments?.length)) throw new RunError('지시문 또는 첨부 파일이 필요하며 지시문은 32,000자 이하여야 합니다.');
     if (input.cwd !== undefined && (typeof input.cwd !== 'string' || !isAbsolute(input.cwd) || input.cwd.includes('\0') || input.cwd.length > 4096)) throw new RunError('목록에 있는 작업 폴더를 선택하세요.');
@@ -164,24 +174,28 @@ export class AutoPromptManager extends EventEmitter {
     requestedEffort(input.effort, input.provider);
     input = copy(input);
     input.requestId = input.requestId.toLowerCase();
-    const fingerprint = createHash('sha256').update(JSON.stringify({ provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: input.attachments ?? [],
+    const request = { provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: input.attachments ?? [],
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
       ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
       ...(input.model ? { model: input.model } : {}),
       ...(input.effort ? { effort: input.effort } : {}),
-      ...(input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}) })).digest('hex');
+      ...(input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}) };
+    const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const fingerprint = hash({ ...request, origin, ...(untrustedInput ? { untrustedInput } : {}) });
     const previous = this.entries.get(input.requestId);
     const admitting = this.admissions.get(input.requestId);
-    if ((previous && previous.fingerprint !== fingerprint) || (admitting && admitting.fingerprint !== fingerprint)) throw new RunError('같은 요청 ID에 다른 지시문을 사용할 수 없습니다.', 409);
+    // Jobs saved before origins existed were fingerprinted without one; a retry of the same request still matches.
+    const matches = (entry: { fingerprint: string }, legacy: boolean) => entry.fingerprint === fingerprint || (legacy && entry.fingerprint === hash(request));
+    if ((previous && !matches(previous, previous.job.origin === undefined)) || (admitting && admitting.fingerprint !== fingerprint)) throw new RunError('같은 요청 ID에 다른 지시문이나 출처를 사용할 수 없습니다.', 409);
     if (admitting) return admitting.promise;
     if (previous) return copy(previous.job);
     if (this.admissions.size + [...this.entries.values()].filter(entry => !TERMINAL.has(entry.job.status)).length >= MAX_PENDING) throw new RunError('Auto Prompt 대기열이 가득 찼습니다. 진행 중인 라우팅을 기다려 주세요.', 429);
-    const promise = this.admit(input, fingerprint).finally(() => { this.admissions.delete(input.requestId); this.pump(); });
+    const promise = this.admit(input, fingerprint, origin, untrustedInput).finally(() => { this.admissions.delete(input.requestId); this.pump(); });
     this.admissions.set(input.requestId, { fingerprint, promise });
     return promise;
   }
 
-  private async admit(input: AutoPromptRequest, fingerprint: string): Promise<AutoPromptJob> {
+  private async admit(input: AutoPromptRequest, fingerprint: string, origin: RunOrigin, untrustedInput: boolean): Promise<AutoPromptJob> {
     const snapshot = this.options.snapshot();
     providerReady(snapshot, input.provider);
     const inventory = directories(snapshot);
@@ -190,7 +204,7 @@ export class AutoPromptManager extends EventEmitter {
     const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments });
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, staged: prepared.attachments, job: {
-      id: input.requestId, provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
+      id: input.requestId, origin, ...(untrustedInput ? { untrustedInput } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
       ...(input.provider === 'codex' && input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}),
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
       ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
@@ -370,7 +384,7 @@ export class AutoPromptManager extends EventEmitter {
     this.update(job, { status: 'dispatching', decision });
     await this.persist(); this.emit('change');
     const attachments: AttachmentInput[] = staged.map(({ metadata, content }) => ({ name: metadata.name, mimeType: metadata.mimeType, data: content.toString('base64') }));
-    const internal = { autoPromptId: job.id, validate };
+    const internal: RunAdmission = { autoPromptId: job.id, validate, origin: job.origin ?? { kind: 'unknown' }, ...(job.untrustedInput ? { untrustedInput: true } : {}) };
     const run = decision.action === 'resume'
       ? await this.options.runs.enqueue(decision.sessionId!, job.prompt, { attachments, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}) }, internal)
       : (await this.options.runs.create({ provider: job.provider, cwd, prompt: job.prompt, attachments, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}),

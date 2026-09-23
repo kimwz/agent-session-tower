@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test, { type TestContext } from 'node:test';
-import { RunManager } from '../../../server/runs/manager.js';
+import { RunManager, type RunAdmission } from '../../../server/runs/manager.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { SteeringError, type SteeringInput } from '../../../server/runs/steering.js';
 import type { CodexStdioResult } from '../../../server/runs/codex-stdio.js';
@@ -13,7 +13,7 @@ import { until } from '../../helpers/until.ts';
 
 const ID = '10000000-0000-4000-8000-000000000001';
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; }
-async function fixture(t: TestContext, options: { external?: boolean; onSteer?: (input: SteeringInput) => Promise<void> } = {}) {
+async function fixture(t: TestContext, options: { external?: boolean; onSteer?: (input: SteeringInput) => Promise<void>; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools'] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-runner-steering-'));
   const stateDir = join(directory, 'state');
   const session: Session = { id: `codex:${ID}`, nativeId: ID, provider: 'codex', title: 'Steering fixture', cwd: directory,
@@ -22,7 +22,7 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
   const inputs: SteeringInput[] = [];
   const controls: { finish(result?: CodexStdioResult): void }[] = [];
   const manager = new RunManager({ stateDir, getSession: id => id === session.id ? session : undefined,
-    refreshSessions: async () => {}, pollMs: 10000, findExecutable: async () => '/fixture/codex',
+    refreshSessions: async () => {}, pollMs: 10000, findExecutable: async () => '/fixture/codex', resolveRunTools: options.resolveRunTools,
     spawnProcess: () => { throw new Error('Native providers must never launch in steering fixtures'); },
     openCodexStdio: async config => {
       let active = false; let ended = false;
@@ -47,7 +47,12 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
     await until(() => Boolean(read(second.id).canSteer));
     return { first, second };
   };
-  return { manager, session, controls, inputs, read, pair, stateDir };
+  const running = async (origin?: RunAdmission['origin']) => {
+    const first = await manager.enqueue(session.id, 'Original instruction', {}, { origin });
+    await until(() => controls.length === 1 && read(first.id).status === 'running');
+    return first;
+  };
+  return { manager, session, controls, inputs, read, pair, running, stateDir };
 }
 
 test('queued same-session instruction is persisted before delivery and follows original completion', async t => {
@@ -154,4 +159,43 @@ test('restart recovers an unacknowledged sending instruction as uncertain withou
     assert.equal(recovered.canSteer, false);
     await restored.steer(second.id);
   } finally { await restored.close(); }
+});
+
+test('an owner message is inserted into the owner’s active turn', async t => {
+  const f = await fixture(t);
+  const first = await f.running({ kind: 'owner' });
+  const second = await f.manager.enqueue(f.session.id, 'Also check the tests', {}, { origin: { kind: 'owner' } });
+  await until(() => Boolean(f.read(second.id).canSteer));
+  const delivered = await f.manager.steer(second.id);
+  assert.equal(delivered.steering?.targetRunId, first.id);
+  assert.deepEqual(delivered.origin, { kind: 'owner' });
+});
+
+test('work from another origin is never inserted into an active turn and keeps waiting', async t => {
+  const f = await fixture(t);
+  const first = await f.running({ kind: 'owner' });
+  const agent = await f.manager.enqueue(f.session.id, 'Agent follow-up', {}, { origin: { kind: 'agent', runId: first.id } });
+  const scheduled = await f.manager.enqueue(f.session.id, 'Scheduled check', {}, { origin: { kind: 'trigger', triggerId: 'daily', eventId: 'slot-1' } });
+  for (const run of [agent, scheduled]) {
+    assert.equal(f.read(run.id).canSteer, false);
+    await assert.rejects(f.manager.steer(run.id), /cannot be inserted/);
+    assert.equal(f.read(run.id).status, 'queued');
+    assert.equal(f.read(run.id).origin?.kind, run.origin?.kind, 'the insert attempt does not relabel the run');
+  }
+  assert.equal(f.inputs.length, 0);
+});
+
+
+test('listing runs never re-enters tool resolution, even when the resolver reads the run list itself', async t => {
+  let manager: RunManager | undefined;
+  let resolutions = 0;
+  // Slack's resolver reads the run list to find its conversation, as the real SlackService does.
+  const f = await fixture(t, { resolveRunTools: () => { resolutions++; manager?.list(); return { required: false }; } });
+  manager = f.manager;
+  await f.running({ kind: 'owner' });
+  const second = await f.manager.enqueue(f.session.id, 'Queued follow-up', {}, { origin: { kind: 'owner' } });
+  await until(() => Boolean(f.read(second.id).canSteer));
+  const before = resolutions;
+  for (let index = 0; index < 5; index++) assert.equal(f.manager.list().find(run => run.id === second.id)?.canSteer, true);
+  assert.equal(resolutions, before, 'computing steering does not resolve tools');
 });

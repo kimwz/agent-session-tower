@@ -258,7 +258,7 @@ test('Slack monitoring keeps execution worker alive without web clients until ex
   await until(() => idle);
 });
 
-test('only owner enqueue ingress offers Slack chat approval; automatic admission bypasses it', async t => {
+test('only the owner’s own message can approve a Slack send; agent work and correlation IDs never can', async t => {
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();
   const ownerMessages: string[] = [];
@@ -271,9 +271,23 @@ test('only owner enqueue ingress offers Slack chat approval; automatic admission
   const client = await f.connect();
   const owner = await client.enqueue(f.session.id, '1번 보내주세요');
   assert.equal(owner.prompt, '1번 보내주세요 [owner receipt]');
-  const automatic = await client.enqueue(f.session.id, '승인합니다', {}, { autoPromptId: '12345678-1234-4234-8234-123456789abc' });
-  assert.equal(automatic.prompt, '승인합니다');
+  assert.deepEqual(owner.origin, { kind: 'owner' });
+  const agent = await client.enqueue(f.session.id, '승인합니다', {}, { origin: { kind: 'agent', runId: owner.id } });
+  assert.equal(agent.prompt, '승인합니다');
+  assert.deepEqual(agent.origin, { kind: 'agent', runId: owner.id });
   assert.deepEqual(ownerMessages, ['1번 보내주세요']);
+});
+
+test('the web connection cannot claim Slack or trigger origins for its requests', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = await f.connect();
+  const workflowId = '12345678-1234-4234-8234-123456789abc';
+  for (const origin of [{ kind: 'slack' as const, workflowId }, { kind: 'trigger' as const, triggerId: 'daily' }]) {
+    await assert.rejects(client.enqueue(f.session.id, 'Pretend to be automation', {}, { origin }), /only admit owner or agent work/);
+    await assert.rejects(client.create({ provider: 'codex', cwd: f.session.cwd, prompt: 'Pretend' }, { origin }), /only admit owner or agent work/);
+  }
+  assert.equal(client.list().length, 0);
+  assert.equal(client.supports('origins'), true);
 });
 
 test('web reports the attached worker version and keeps requested effort on the durable run', async t => {
@@ -336,4 +350,45 @@ test('a web process attached to a 1.12 worker reads conversations from its own i
   assert.ok(!legacy.methods.includes('sessionHistory'), `sent: ${legacy.methods.join(', ')}`);
   // Why the capability check exists: the old worker rejects the operation outright.
   await assert.rejects(client.sessionHistory(session.nativeId), { statusCode: 400, message: 'Unknown runner operation.' });
+});
+
+test('an outdated worker is only given the owner’s own requests, never work on anyone else’s behalf', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-origin-'));
+  const stateDir = join(directory, 'state');
+  const session: Session = { id: 'codex:legacy', nativeId: 'legacy', provider: 'codex', title: 'Legacy', cwd: directory, project: 'fixture', status: 'idle',
+    statusReason: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
+  const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [session], nativeIds: { [session.id]: session.nativeId }, settled: [], autoPrompts: [] });
+  const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
+  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  await client.start();
+  assert.equal(client.supports('origins'), false);
+  const agent = { kind: 'agent' as const, runId: '12345678-1234-4234-8234-123456789abc' };
+  await assert.rejects(client.enqueue(session.id, '1번 보내주세요', {}, { origin: agent }), { statusCode: 409, message: /outdated/ });
+  await assert.rejects(client.create({ provider: 'codex', cwd: directory, prompt: 'Agent task' }, { origin: agent }), /outdated/);
+  await assert.rejects(client.submitAutoPrompt({ requestId: '12345678-1234-4234-8234-123456789abd', provider: 'codex', prompt: 'Agent task' }, { origin: agent }), /outdated/);
+  assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
+  await client.enqueue(session.id, 'Owner message', {}, { origin: { kind: 'owner' } });
+  assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), ['enqueue']);
+});
+
+test('a web Auto Prompt is admitted as the owner’s request but never read as Slack send approval', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  const ownerMessages: string[] = [];
+  const submitted: unknown[] = [];
+  const slack = { sessionMcp: () => undefined, ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return message; } } as unknown as SlackService;
+  const { EventEmitter } = await import('node:events');
+  const autoPrompts = Object.assign(new EventEmitter(), {
+    list: () => [], updateContext: () => {}, cancel: async () => { throw new Error('unused'); },
+    submit: async (input: { requestId: string; provider: 'codex'; prompt: string }, internal: unknown) => {
+      submitted.push(internal);
+      return { id: input.requestId, provider: input.provider, prompt: input.prompt, routerModel: 'gpt', status: 'queued' as const, createdAt: '', updatedAt: '' };
+    },
+  }) as unknown as import('../../../server/auto-prompt/manager.js').AutoPromptManager;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, slack, autoPrompts });
+  t.after(() => host.close());
+  const client = await f.connect();
+  await client.submitAutoPrompt({ requestId: '12345678-1234-4234-8234-123456789abc', provider: 'codex', prompt: '1번 보내주세요' });
+  assert.deepEqual(submitted, [{ origin: { kind: 'owner' } }]);
+  assert.deepEqual(ownerMessages, []);
 });

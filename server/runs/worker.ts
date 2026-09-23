@@ -18,6 +18,8 @@ import { WorkspaceTerminals } from '../workspace-terminals.js';
 import { SessionTitleStore } from '../stores/session-titles.js';
 import { openCodexBridgeRun } from './codex-bridge.js';
 import { RunManager, type RunAdmission } from './manager.js';
+import { parseRunOrigin } from './origin.js';
+import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
 const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory']);
@@ -37,7 +39,7 @@ export interface RunnerHostOptions {
 
 /** Hosts an already-started engine, including one adopted during an in-place upgrade. */
 export async function startRunnerHost(options: RunnerHostOptions) {
-  options.runs.setSessionMcpResolver(id => options.slack?.sessionMcp(id));
+  options.runs.setRunToolResolver((_origin, session) => slackTools(options.slack, session.id));
   const paths = await runnerPaths(options.stateDir);
   const release = options.releaseStateLock ?? await acquireStateLock(paths.runtime, 0);
   let context: Awaited<ReturnType<typeof runnerContext>> | undefined;
@@ -65,7 +67,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'create': return options.runs.create(args[0] as CreateSessionRequest, admission(args[1]));
       case 'enqueue': {
         const admitted = admission(args[3]);
-        const prompt = options.slack && !admitted.autoPromptId
+        // Only the owner's own message may carry Slack send approval; the origin decides, never a correlation ID.
+        const prompt = options.slack && admitted.origin?.kind === 'owner'
           ? await options.slack.ownerChat(args[0] as string, args[1] as string) : args[1] as string;
         return options.runs.enqueue(args[0] as string, prompt, args[2] as MessageAttachments, admitted);
       }
@@ -81,7 +84,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'terminalInput': if (options.terminals) return options.terminals.input(args[0] as string, args[1]); break;
       case 'terminalResize': if (options.terminals) return options.terminals.resize(args[0] as string, args[1], args[2]); break;
       case 'terminalClose': if (options.terminals) return options.terminals.close(args[0] as string); break;
-      case 'submitAutoPrompt': if (options.autoPrompts) { await context?.refresh(); return options.autoPrompts.submit(args[0] as AutoPromptRequest); } break;
+      case 'submitAutoPrompt': if (options.autoPrompts) { await context?.refresh(); return options.autoPrompts.submit(args[0] as AutoPromptRequest, { origin: admission(args[1]).origin }); } break;
       case 'cancelAutoPrompt': if (options.autoPrompts) return options.autoPrompts.cancel(args[0] as string); break;
       case 'slackOverview': if (options.slack) return options.slack.overview(); break;
       case 'slackMutate': if (options.slack) return options.slack.mutate(args[0] as string, args[1] as Record<string, unknown>); break;
@@ -175,9 +178,21 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
   return { messages: history.messages, hasMore: history.hasMore, ...(history.nextBefore !== undefined ? { nextBefore: history.nextBefore } : {}) };
 }
 
+/**
+ * The web connection is the only RPC caller. It admits the owner's own requests, or work an owner
+ * turn's agent asked for. Trigger and Slack origins are assigned inside the worker, never over RPC.
+ */
 function admission(value: unknown): RunAdmission {
-  if (!value || typeof value !== 'object') return {};
-  return { autoPromptId: (value as { autoPromptId?: string }).autoPromptId };
+  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown } : {};
+  const origin = input.origin === undefined ? { kind: 'owner' as const } : parseRunOrigin(input.origin);
+  if (!origin || (origin.kind !== 'owner' && origin.kind !== 'agent')) throw Object.assign(new Error('The web connection can only admit owner or agent work.'), { statusCode: 400 });
+  return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin };
+}
+
+/** Slack coordinator tools must reach every turn of their conversation. */
+function slackTools(slack: SlackService | undefined, sessionId: string): RunTools {
+  const servers = slack?.sessionMcp(sessionId);
+  return servers ? { servers, required: true } : NO_RUN_TOOLS;
 }
 
 async function runnerContext({ stateDir, runs, sessions, slack }: Pick<RunnerHostOptions, 'stateDir' | 'runs' | 'sessions' | 'slack'>) {
@@ -220,9 +235,12 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const autoPrompts = new AutoPromptManager({ stateDir, runs, ...context });
     await autoPrompts.start();
     const slack = new SlackService({ stateDir, runs, autoPrompts, refresh: context.refresh });
-    runs.setSessionMcpResolver(id => slack.sessionMcp(id));
+    runs.setRunToolResolver((_origin, session) => slackTools(slack, session.id));
     autoPrompts.updateContext(await runnerContext({ stateDir, runs, sessions, slack }));
     await slack.start();
+    // Sessions created before provenance existed are classified once from surviving ledger links.
+    runs.setExternalLinkResolver(ids => { const linked = slack.linkedSessions().sessionIds; return ids.some(id => linked.has(id)); });
+    runs.backfillSessionOrigins(slack.linkedSessions());
     await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, releaseStateLock: release,
       onIdle: async () => { slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); } });
     // A parent terminal or Tower shutdown must not interrupt provider work.
