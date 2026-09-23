@@ -19,7 +19,7 @@ const child = (id: string, prompt = 'Review this exact diff.', second = 21) => l
 test('literal exec parsing rejects resume, echoed commands, substitutions, and ambiguous shell flow', () => {
   assert.equal(parseExecLaunch(command, '/work/main')?.cwd, '/work/review');
   assert.equal(parseExecLaunch(String.raw`codex exec "literal \q"`, '/work')?.prompt, promptDigest(String.raw`literal \q`));
-  for (const bad of ['echo "codex exec test"', 'codex exec resume abc test', 'codex exec "$(cat prompt)"', 'codex exec test; echo done', 'codex exec test && other', 'codex exec review', 'codex exec\n"Review this exact diff."', 'codex exec #review']) {
+  for (const bad of ['echo "codex exec test"', 'codex exec resume abc test', 'codex exec "$(cat prompt)"', 'codex exec review', 'codex exec\n"Review this exact diff."', 'codex exec #review']) {
     assert.equal(parseExecLaunch(bad, '/work'), undefined, bad);
   }
 });
@@ -69,21 +69,35 @@ test('cross-provider lineage is unique, projected in detail, survives restart, a
 
 const backgroundCommand = 'cd /Users/planetariumhq/Workspace/g2-sync.wt-review-833 && codex exec -s read-only "Review this exact diff." > /tmp/codex-833.txt 2>&1; echo exit=$? >> /tmp/codex-833.txt';
 
-test('literal output redirects and exact status append preserve the prompt without accepting shell programs', () => {
+test('first invocation preserves provenance independently of later status and cleanup commands', () => {
   assert.deepEqual(parseExecLaunch(backgroundCommand, '/work/main'), {
     cwd: '/Users/planetariumhq/Workspace/g2-sync.wt-review-833', prompt: promptDigest('Review this exact diff.'),
   });
   assert.equal(parseExecLaunch('codex exec "Review" > /tmp/review.txt', '/work')?.prompt, promptDigest('Review'));
   for (const bad of [
-    backgroundCommand.replace('echo exit=$?', 'echo exit=$(whoami)'),
-    backgroundCommand.replace('echo exit=$?', 'echo exit=$STATUS'),
-    backgroundCommand.replace('>> /tmp/codex-833.txt', '>> /tmp/other.txt'),
-    backgroundCommand + '; other',
     backgroundCommand.replace('> /tmp/codex-833.txt 2>&1', '> /tmp/$(whoami) 2>&1'),
-    backgroundCommand.replace('> /tmp/codex-833.txt 2>&1', '> /tmp/result && other'),
-    'codex exec Review; echo exit=$? >> /tmp/result',
     'codex exec Review > /tmp/result | other',
     'codex exec resume abc Review > /tmp/result',
+  ]) assert.equal(parseExecLaunch(bad, '/work'), undefined, bad);
+});
+
+test('absolute executables and quoted multiline prompts survive arbitrary post-command reporting', () => {
+  const prompt = 'Review this diff.\nKeep "quotes", ; separators, && and | literal.';
+  const quoted = JSON.stringify(prompt).replaceAll('\\n', '\n');
+  const first = `/Users/example/.local/bin/codex exec --sandbox read-only -C /work/review ${quoted} > /tmp/review.log 2>&1`;
+  for (const suffix of ['\necho "EXIT:$?"', '; echo exit=$(whoami)', ' && cleanup', ' || report_failure', '\n# status\necho done']) {
+    assert.deepEqual(parseExecLaunch(first + suffix, '/work'), { cwd: '/work/review', prompt: promptDigest(prompt) });
+  }
+  for (const bad of [
+    'echo ignored; codex exec Review',
+    'if true; then codex exec Review; fi',
+    '(codex exec Review)',
+    'false && codex exec Review',
+    'cd /work; codex exec Review',
+    'codex exec "$(echo Review)"; echo done',
+    '/opt/not-codex exec Review',
+    './codex exec Review',
+    'codex exec "unterminated; echo done',
   ]) assert.equal(parseExecLaunch(bad, '/work'), undefined, bad);
 });
 
@@ -102,7 +116,9 @@ test('background acknowledgment before child creation does not end the bounded l
     writeFile(join(cp, 'late.jsonl'), childRows.replaceAll('"one"', '"late"').replaceAll('01:50:21', '02:21:21')),
   ]);
   const options = { codexHome, claudeHome, inspectProcesses: async () => ({ claude: new Map(), codex: new Set<string>(), providerRunning: { claude: false, codex: false } }) };
-  for (let restart = 0; restart < 2; restart++) {
+  for (const launchCommand of [backgroundCommand, '/Users/example/.local/bin/codex exec --sandbox read-only -C /Users/planetariumhq/Workspace/g2-sync.wt-review-833 "Review this exact diff." > /tmp/codex-833.log 2>&1\necho "EXIT:$?"']) {
+    backgroundLaunch.message.content[0]!.input.command = launchCommand;
+    await writeFile(join(cl, 'parent.jsonl'), lines(backgroundLaunch, ack));
     const service = new SessionService(options); await service.refresh();
     assert.equal(service.get('codex:one')?.parentId, 'claude:parent');
     assert.equal(service.get('codex:late')?.parentId, undefined, 'background launches retain the 30 minute bound');

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isAbsolute, normalize } from 'node:path';
+import { basename, isAbsolute, normalize } from 'node:path';
 import type { RecordState } from './parser.js';
 
 export interface ExecLaunch { toolId: string; cwd: string; prompt: string; startedAt: number; endedAt?: number; background?: boolean }
@@ -17,7 +17,15 @@ function words(command: string): string[] | undefined {
       if (next !== '\n') word += next; active = true; continue; }
     if (quote === '"') { if (c === '"') quote = ''; else word += c; continue; }
     if (c === "'" || c === '"') { quote = c; active = true; continue; }
-    if (c === '\n' || c === '\r' || c === '#') return;
+    // Only the first invocation supplies provenance. Later status reporting or
+    // cleanup may contain arbitrary shell syntax; it is never interpreted.
+    if (c === ';' || c === '\n' || c === '\r' ||
+        ((c === '&' || c === '|') && command[i + 1] === c &&
+         !(c === '&' && result[0] === 'cd' && result.length + Number(active) === 2))) {
+      if (active) result.push(word);
+      return result;
+    }
+    if (c === '#') return;
     if (/\s/.test(c)) { if (active) { result.push(word); word = ''; active = false; } continue; }
     if (';&|<>'.includes(c)) {
       if (active) { result.push(word); word = ''; active = false; }
@@ -35,10 +43,7 @@ function words(command: string): string[] | undefined {
 
 export function parseExecLaunch(command: unknown, originalCwd: string): { cwd: string; prompt: string } | undefined {
   if (typeof command !== 'string' || command.length > 200_000) return;
-  // Accept only the observed status append, to the same literal output file.
-  // All other expansions and command suffixes remain outside this grammar.
-  const statusAppend = /;\s*echo exit=\$\? >> (\/[A-Za-z0-9_./-]+)\s*$/.exec(command);
-  const tokens = words(statusAppend ? command.slice(0, statusAppend.index) : command);
+  const tokens = words(command);
   if (!tokens) return;
   let cwd = originalCwd;
   if (tokens[0] === 'cd') {
@@ -46,7 +51,8 @@ export function parseExecLaunch(command: unknown, originalCwd: string): { cwd: s
     cwd = tokens[1]; tokens.splice(0, 3);
   }
   if (tokens[0] === 'timeout' && /^\d+(?:[smh])?$/.test(tokens[1] ?? '')) tokens.splice(0, 2);
-  if (tokens.shift() !== 'codex' || tokens.shift() !== 'exec') return;
+  const executable = tokens.shift();
+  if (!(executable === 'codex' || (executable && isAbsolute(executable) && basename(executable) === 'codex')) || tokens.shift() !== 'exec') return;
   let prompt: string | undefined;
   let outputPath: string | undefined;
   while (tokens.length) {
@@ -66,7 +72,6 @@ export function parseExecLaunch(command: unknown, originalCwd: string): { cwd: s
     else return;
   }
   if (!prompt || !isAbsolute(cwd)) return;
-  if (statusAppend && outputPath !== statusAppend[1]) return;
   return { cwd: normalize(cwd), prompt: promptDigest(prompt) };
 }
 
