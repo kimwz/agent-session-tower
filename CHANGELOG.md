@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.12.1] - 2026-09-23
+
+### Changed
+- Reorganize Slack automation settings into **Rules**, **Connection**, and **Activity** tabs. Rules appear as compact rows with an on/off switch, agent and model, and auto-reply badges; one rule opens for editing at a time. Only the content scrolls, and a save bar with Discard stays visible while you have unsaved changes. Instruction fields grow with their text, activity shows the newest 20 first, and deleting a rule asks for confirmation.
+
 ## [1.12.0] - 2026-09-23
 
 ### Added

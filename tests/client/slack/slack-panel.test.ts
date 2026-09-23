@@ -31,3 +31,30 @@ test('Slack rules use provider model choices and preserve the saved selection', 
   assert.match(html, /value="opus" selected=""/);
   assert.match(html, /Sonnet/);
 });
+
+test('rule list stays collapsed to one-line summaries and opens only the selected editor', () => {
+  const rules = [
+    { id: 'a', name: 'Deploy', enabled: true, condition: 'Redeploy request', instructions: 'Redeploy develop', replyInstructions: 'Report', provider: 'claude' as const, model: 'opus', autoReply: true },
+    { id: 'b', name: '', enabled: false, condition: 'Question', instructions: 'Research', replyInstructions: '', provider: 'codex' as const },
+  ];
+  const collapsed = renderToStaticMarkup(createElement(SlackRules, { rules, expanded: null, onExpand() {}, onChange() {} }));
+  assert.match(collapsed, /Redeploy request/);
+  assert.doesNotMatch(collapsed, /<textarea/);
+  assert.match(collapsed, /Claude · opus/);
+  assert.match(collapsed, /자동 답변/);
+  assert.match(collapsed, /이름 없는 지침/);
+  assert.match(collapsed, /입력 필요/);
+  assert.equal((collapsed.match(/aria-expanded="false"/g) ?? []).length, 2);
+  const open = renderToStaticMarkup(createElement(SlackRules, { rules, expanded: 'a', onExpand() {}, onChange() {} }));
+  assert.equal((open.match(/<textarea/g) ?? []).length, 3);
+  assert.match(open, /Redeploy develop/);
+  assert.doesNotMatch(open, /Research/);
+});
+
+test('activity lists newest first and pages long histories', () => {
+  const events: SlackWorkflow[] = Array.from({ length: 25 }, (_, i) => ({ id: `e${i}`, status: 'completed', createdAt: '', updatedAt: '', rules: [], reason: `reason-${i}`, mention: { id: `m${i}`, teamId: 'T1', channel: 'C1', ts: `${i}`, threadTs: `${i}`, user: 'U1', text: '' } }));
+  const html = renderToStaticMarkup(createElement(SlackActivity, { events }));
+  assert.ok(html.indexOf('reason-24') < html.indexOf('reason-23'));
+  assert.doesNotMatch(html, /reason-4</);
+  assert.match(html, /더 보기/);
+});
