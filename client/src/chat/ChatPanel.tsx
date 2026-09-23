@@ -15,7 +15,7 @@ import { RunControl } from './RunControl';
 import { DraftAttachments } from './ChatAttachments';
 import { addDraftFiles, formatAttachmentSize, prepareDraftAttachments } from './chat-attachments';
 import { MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../../shared/attachments';
-import { draftFromRun, finishComposerSend, getComposerState, markComposerSending, setComposerDraft, setComposerError, startComposerSend, subscribeComposer, type ChatDraft } from './chat-drafts';
+import { draftFromRun, finishComposerSend, restoreComposerEffort, getComposerState, markComposerSending, setComposerDraft, setComposerError, startComposerSend, subscribeComposer, type ChatDraft } from './chat-drafts';
 import { matchChatRuns } from './chat-runs';
 import { EffortPicker, ModelPicker, supportedEffort } from './ModelPicker';
 import { useChatAppearance } from './chat-appearance';
@@ -102,6 +102,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
 
   const current = session || detail?.session;
   const currentRuns = useMemo(() => runs.filter(run => run.sessionId === sessionId), [runs, sessionId]);
+  useEffect(() => { restoreComposerEffort(sessionId, currentRuns, effort => supportedEffort(provider, current?.model || provider?.defaultModel, effort)); }, [sessionId, currentRuns, provider, current?.model]);
   const controlRuns = useMemo(() => currentRuns.filter(run => run.status === 'running' || run.status === 'queued' || run.status === 'error').sort((a, b) => Number(!!b.approvals?.length) - Number(!!a.approvals?.length)), [currentRuns]);
   const approvalKey = controlRuns.flatMap(run => run.status === 'error' ? [] : run.approvals?.map(approval => `${run.id}:${approval.id}`) || []).join('|');
   useLayoutEffect(() => { if (approvalKey && runControls.current) runControls.current.scrollTop = 0; }, [approvalKey]);

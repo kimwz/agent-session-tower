@@ -104,3 +104,21 @@ test('the chosen effort survives a successful send and retry restores the origin
   setComposerDraft(id, draftFromRun(run()));
   assert.equal(Object.hasOwn(getComposerState(id).draft, 'effort'), false);
 });
+
+test('a fresh composer restores the effort of the session\'s latest request, and a worker older than the page is flagged', async () => {
+  const { getComposerState, restoreComposerEffort, setComposerDraft } = await import('../../../client/src/chat/chat-drafts.js');
+  const { outdatedRunner } = await import('../../../client/src/common/lib.js');
+  const run = (id: string, createdAt: string, effort?: string) => ({ id, sessionId: 's1', prompt: '', status: 'completed' as const, createdAt, output: '', ...(effort ? { effort } : {}) });
+  restoreComposerEffort('s1', [run('a', '2026-09-23T01:00:00Z', 'max'), run('b', '2026-09-23T02:00:00Z', 'high')], effort => effort);
+  assert.equal(getComposerState('s1').draft.effort, 'high');
+  setComposerDraft('s1', { prompt: 'typing', attachments: [], effort: 'low' });
+  restoreComposerEffort('s1', [run('c', '2026-09-23T03:00:00Z', 'max')], effort => effort);
+  assert.equal(getComposerState('s1').draft.effort, 'low', 'an existing composer is never overwritten');
+  restoreComposerEffort('s2', [{ ...run('d', '2026-09-23T01:00:00Z', 'max'), sessionId: 's2' }], () => undefined);
+  assert.equal(getComposerState('s2').draft.effort, undefined, 'levels the current model cannot use are dropped');
+  restoreComposerEffort('s3', [{ ...run('e', '2026-09-23T01:00:00Z', 'max'), sessionId: 's3' }, { ...run('f', '2026-09-23T02:00:00Z'), sessionId: 's3' }], effort => effort);
+  assert.equal(getComposerState('s3').draft.effort, undefined, 'a later default request wins');
+  assert.equal(outdatedRunner({ version: '1.12.2', runnerVersion: 'legacy' }), 'legacy');
+  assert.equal(outdatedRunner({ version: '1.12.2', runnerVersion: '1.12.2' }), undefined);
+  assert.equal(outdatedRunner({ version: '1.12.2' }), undefined);
+});

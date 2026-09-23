@@ -13,6 +13,8 @@ export interface RunnerSnapshot {
   nativeIds: Record<string, string>;
   settled: string[];
   autoPrompts: AutoPromptJob[];
+  /** Absent from workers that predate version reporting. */
+  version?: string;
 }
 export interface RunnerReply {
   protocol: number;

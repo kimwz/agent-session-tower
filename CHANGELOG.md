@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.12.2] - 2026-09-23
+
+### Fixed
+- The chat composer keeps the session's last requested reasoning effort after a page reload instead of showing the default. The next message is sent with that effort again.
+
+### Added
+- The header shows **Worker update pending** while requests run on an older execution worker than the page. Features added since that worker started, such as reasoning effort and Slack auto-replies, do not apply until it is replaced; the tooltip explains how.
+
 ## [1.12.1] - 2026-09-23
 
 ### Changed

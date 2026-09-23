@@ -125,7 +125,8 @@ async function main() {
       sessions: projectSessionStates(all, managed, runs.settledRunIds()).map(session => closedSessions.apply(titles.apply(session))),
       groups: groups.list(),
       providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider).length })),
-      runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning, hostname: hostname(), version: APP_VERSION, updatedAt: new Date().toISOString(),
+      runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning, hostname: hostname(), version: APP_VERSION,
+      ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}), updatedAt: new Date().toISOString(),
     };
   };
   const detail = async (id: string, before?: number, limit?: number) => {

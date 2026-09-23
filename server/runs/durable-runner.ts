@@ -63,6 +63,8 @@ export class DurableRunManager extends EventEmitter {
 
   async close(): Promise<void> { this.closed = true; if (this.timer) clearInterval(this.timer); this.terminals.dispose(); }
   list(): Run[] { return structuredClone(this.snapshot?.runs ?? []); }
+  /** The attached worker keeps its own code until it is idle, so it can lag behind the web version. */
+  runnerVersion(): string | undefined { return this.snapshot ? this.snapshot.version ?? 'legacy' : undefined; }
   settledRunIds(): ReadonlySet<string> { return new Set(this.snapshot?.settled ?? []); }
   sessionList(_nativeSessions: readonly Session[]): Session[] { return structuredClone(this.snapshot?.sessions ?? []); }
   getSession(id: string): Session | undefined {

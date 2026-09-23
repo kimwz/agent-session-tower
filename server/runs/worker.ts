@@ -55,7 +55,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     const sessions = options.runs.sessionList(options.sessions.list());
     return { instance, revision: ++revision, runs: options.runs.list(), sessions,
       nativeIds: Object.fromEntries(sessions.map(session => [session.id, options.runs.nativeSessionId(session.id)])),
-      settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [] };
+      settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [], version: APP_VERSION };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {

@@ -18,6 +18,13 @@ export function subscribeComposer(id: string, listener: () => void) {
   subscribers.add(listener); listeners.set(id, subscribers);
   return () => { subscribers.delete(listener); if (!subscribers.size) listeners.delete(id); };
 }
+/** Effort is a per-request flag, so a fresh composer continues with the session's last requested effort instead of the default. */
+export function restoreComposerEffort(id: string, runs: Run[], supported: (effort: string) => string | undefined) {
+  if (states.has(id)) return;
+  const latest = runs.filter(run => run.sessionId === id).reduce<Run | undefined>((last, run) => !last || run.createdAt > last.createdAt ? run : last, undefined);
+  const effort = latest?.effort && supported(latest.effort);
+  if (effort) update(id, { draft: emptyDraft(undefined, effort), error: '' });
+}
 export function setComposerDraft(id: string, draft: ChatDraft) { update(id, { ...getComposerState(id), draft }); }
 export function setComposerError(id: string, error: string) { update(id, { ...getComposerState(id), error }); }
 

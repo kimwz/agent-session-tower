@@ -273,3 +273,13 @@ test('only owner enqueue ingress offers Slack chat approval; automatic admission
   assert.equal(automatic.prompt, '승인합니다');
   assert.deepEqual(ownerMessages, ['1번 보내주세요']);
 });
+
+test('web reports the attached worker version and keeps requested effort on the durable run', async t => {
+  const { APP_VERSION } = await import('../../../shared/app-identity.js');
+  const f = await fixture(); t.after(f.cleanup);
+  const client = await f.connect();
+  assert.equal(client.runnerVersion(), APP_VERSION);
+  const run = await client.enqueue(f.session.id, 'Think harder', { effort: 'high' });
+  await until(() => client.list().some(item => item.id === run.id));
+  assert.equal(client.list().find(item => item.id === run.id)?.effort, 'high');
+});

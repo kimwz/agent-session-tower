@@ -215,6 +215,8 @@ export interface Snapshot {
   updatedAt: string;
   hostname: string;
   version: string;
+  /** Version of the execution worker that runs requests; 'legacy' for workers too old to report it. */
+  runnerVersion?: string;
   groups?: ProjectGroup[];
   autoPrompts?: AutoPromptJob[];
 }

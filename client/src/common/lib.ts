@@ -1,5 +1,5 @@
 import { translate as t, locale } from '../i18n/i18n';
-import type { Session, SessionStatus } from '../../../shared/types';
+import type { Session, SessionStatus, Snapshot } from '../../../shared/types';
 export { sessionActivityAt, sortSessions } from '../../../shared/session-activity';
 
 export const statusLabels: Record<SessionStatus, string> = {
@@ -57,4 +57,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(message, response.status);
   }
   return response.json() as Promise<T>;
+}
+
+/** The execution worker keeps its code until it idles, so requests can run on an older build than this page. */
+export function outdatedRunner(snapshot: Pick<Snapshot, 'version' | 'runnerVersion'> | null | undefined): string | undefined {
+  return snapshot?.runnerVersion && snapshot.runnerVersion !== snapshot.version ? snapshot.runnerVersion : undefined;
 }
