@@ -15,6 +15,8 @@
 
 # Deployment and release completion
 
+- Deploy automatically after every completed code change: once the change is verified, run the full release and deployment below without asking for a separate request.
+
 - A requested deployment includes the version bump, changelog, commit, release tag, and push to the configured remote branch. Local server changes alone do not complete a deployment. Do not require a second request to publish the already authorized release.
 - Follow `docs/development.md`: choose the appropriate semantic version, write release notes dated today, run the required checks, use the release scripts to synchronize package and application versions, and push the commit and annotated version tag without force-pushing.
 - Review the release contents before committing. Preserve unrelated work and exclude credentials, personal state, test-session data, and generated build output.

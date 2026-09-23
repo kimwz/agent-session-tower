@@ -82,7 +82,7 @@ Project editor/terminal controls open a resizable workspace overlay on the same 
 ## Releasing
 
 1. Write the `## [x.y.z] - YYYY-MM-DD` section in `CHANGELOG.md`, dated the day you release.
-2. Run `npm version x.y.z`. It runs `npm run check`, refuses to continue without that changelog section dated today, syncs the version the app reports, commits, and tags `vx.y.z`.
+2. Run `npm version x.y.z`. It runs `npm run check`, refuses to continue without that changelog section dated today, syncs the version the app reports, commits `Release x.y.z` (see `.npmrc`), tags `vx.y.z`, and rebuilds so the built app reports the new version.
 3. `git push --follow-tags`. The Release workflow publishes the changelog section as the GitHub release notes.
 
 A specific release can be run with `npx --yes github:kimwz/agent-session-tower#vx.y.z`.

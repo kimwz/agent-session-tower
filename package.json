@@ -48,6 +48,7 @@
     "check": "npm run typecheck && npm test && npm run build",
     "preversion": "npm run check",
     "version": "node scripts/release.mjs prepare && node --import tsx --test tests/shared/app-identity.test.ts && git add shared/app-identity.ts",
+    "postversion": "npm run build",
     "prepare": "npm run build"
   },
   "devDependencies": {
