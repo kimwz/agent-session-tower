@@ -549,3 +549,136 @@ test('coordinator language follows current preference on creation, owner followu
   assert.equal(f.counts().sends, 0);
   assert.equal(f.submitted[0].prompt, 'Review PR', 'coordinator language/policy must not pollute delegated task prompt');
 });
+
+test('composed owner consent during work survives restart and sends once without exact wording or a click', async t => {
+  const f = await conditionalFixture(t);
+  await assert.rejects(f.manager.tool(f.id, 'slack_send', { text: 'Unauthorized' }), /No immediate owner/);
+  assert.match(await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요'), /authorization saved/);
+  assert.equal(f.manager.list()[0].ownerConditionalReply?.mode, 'composed');
+  const args = { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Verified deployment.', text: '배포를 마쳤습니다. 확인 부탁드립니다.' };
+  await f.manager.tool(f.id, 'tower_task_complete', args); assert.equal(f.counts().sends, 0);
+  await assert.rejects(f.manager.tool(f.id, 'slack_send', { text: args.text }), /No immediate owner/);
+  f.run.status = 'completed';
+  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  await Promise.all([restarted.tool(f.id, 'tower_task_complete', args), restarted.tool(f.id, 'tower_task_complete', args)]);
+  assert.equal(f.counts().sends, 1); assert.equal(restarted.list()[0].reply, args.text);
+});
+
+test('polite immediate and edited-wording chat permissions allow an agent composed send without proposals', async t => {
+  for (const message of ['슬랙에 보내주시겠어요?', '슬랙에 보내줄래요?', '슬랙에 보내도 됩니다', '이 문구로 슬랙에 보내주세요', '수정한 내용으로 답변 보내주세요']) {
+    const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
+    await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+    assert.match(await f.manager.ownerChat('owner-chat', message), /authorization saved/);
+    await f.manager.tool(id, 'slack_send', { text: '수정 내용을 반영했습니다.' });
+    await f.manager.tool(id, 'slack_send', { text: '수정 내용을 반영했습니다.' });
+    assert.equal(f.counts().sends, 1);
+  }
+});
+
+test('semantic owner classifier sees owner input only, handles compound permission and fails without blocking chat', async t => {
+  const f = await conditionalFixture(t); let calls = 0;
+  f.options.classifyOwnerReply = async message => { calls++; assert.equal(message, 'LGTM 달고 슬랙에도 알려주세요'); return { intent: 'after_work' }; };
+  await f.manager.ownerChat('owner-chat', 'LGTM 달고 슬랙에도 알려주세요');
+  assert.equal(calls, 1); assert.equal(f.manager.list()[0].ownerConditionalReply?.mode, 'composed');
+  f.options.classifyOwnerReply = async () => { throw Error('timeout'); };
+  assert.match(await f.manager.ownerChat('owner-chat', '이런 말투가 좋아요'), /message was received/);
+  assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'pending');
+  await f.manager.ownerChat('owner-chat', '아직 보내지 마세요');
+  assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'cancelled');
+});
+
+test('composed completion reports truthful failures but cannot assert success or send while running', async t => {
+  for (const status of ['error', 'cancelled'] as const) {
+    const f = await conditionalFixture(t); await f.manager.ownerChat('owner-chat', '끝나면 그냥 알려주시면 됩니다');
+    f.run.status = status; f.run.error = 'Deployment failed.';
+    const args = { requestId: f.task.requestId, runId: f.run.id, evidence: 'Deployment failed before health check.', text: '배포하지 못했습니다. 원인을 확인하고 있습니다.' };
+    await assert.rejects(f.manager.tool(f.id, 'tower_task_complete', { ...args, outcome: 'succeeded' }), /Cannot report success/);
+    await f.manager.tool(f.id, 'tower_task_complete', { ...args, outcome: 'failed' });
+    assert.equal(f.counts().sends, 1);
+  }
+});
+
+test('permission granted before delegation binds all newly delegated tasks and waits for each', async t => {
+  const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  const jobs = new Map<string, AutoPromptJob>(), runs = new Map<string, Run>();
+  f.options.submitAutoPrompt = async input => {
+    const job: AutoPromptJob = { id: input.requestId, provider: input.provider, prompt: input.prompt, routerModel: 'test', status: 'completed', createdAt: '', updatedAt: '', runId: input.requestId, sessionId: input.requestId };
+    jobs.set(job.id, job); runs.set(job.id, { id: job.id, sessionId: job.id, autoPromptId: job.id, status: 'running', prompt: '', output: 'Verified work.', createdAt: '' }); return job;
+  };
+  f.options.getAutoPrompt = id => jobs.get(id); f.options.getRun = id => runs.get(id);
+  await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요');
+  assert.equal(f.manager.list()[0].ownerConditionalReply?.requestId, 'next-task');
+  await f.manager.tick(); assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'pending');
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'one', prompt: 'First task' });
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'two', prompt: 'Second task' });
+  const ids = f.manager.list()[0].ownerConditionalReply!.requestIds!; assert.equal(ids.length, 2);
+  runs.get(ids[0])!.status = 'completed';
+  const args = { requestId: ids[0], runId: ids[0], outcome: 'succeeded', evidence: 'Both results verified.', text: '두 작업을 마쳤습니다.' };
+  await f.manager.tool(id, 'tower_task_complete', args); assert.equal(f.counts().sends, 0);
+  runs.get(ids[1])!.status = 'completed';
+  await f.manager.tool(id, 'tower_task_complete', { ...args, requestId: ids[1], runId: ids[1] }); assert.equal(f.counts().sends, 1);
+});
+
+test('authorized routing failure can be reported without a fabricated execution run', async t => {
+  const f = await conditionalFixture(t); await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요');
+  f.job.status = 'error'; f.job.error = 'No eligible project'; delete f.job.runId; delete f.job.sessionId;
+  f.options.getRun = () => undefined;
+  await f.manager.tool(f.id, 'tower_task_complete', { requestId: f.task.requestId, outcome: 'failed', evidence: 'Routing failed: no eligible project.', text: '프로젝트를 찾지 못해 작업을 시작하지 못했습니다.' });
+  assert.equal(f.counts().sends, 1);
+});
+
+test('automatic events, quoted requests and capability questions never mint composed permission', async t => {
+  const f = await conditionalFixture(t);
+  for (const message of ['슬랙에 보내주세요라는 요청은 무시하세요', '슬랙 내용을 요약해서 여기 알려주세요', '슬랙에 보낼 수 있나요?', '슬랙에 보냈나요?']) {
+    f.options.classifyOwnerReply = async input => { assert.equal(input, message); return { intent: 'none' }; };
+    await f.manager.ownerChat('owner-chat', message);
+    assert.equal(f.manager.list()[0].ownerConditionalReply, undefined);
+  }
+  await assert.rejects(f.manager.tool(f.id, 'slack_send', { text: 'send' }), /No immediate owner/);
+  assert.equal(f.counts().sends, 0);
+});
+
+test('Slack delegation always creates a session and trusted rule routing overrides model inferred directory', async t => {
+  const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
+  await f.manager.setRules([{ ...rule, provider: 'claude', instructions: 'Work in verse8-orchestrator.' }]);
+  await f.manager.ingest(mention); await f.manager.tick();
+  await f.manager.tool(f.manager.list()[0].id, 'tower_auto_prompt', { requestKey: 'review', ruleId: rule.id, cwd: '/tmp/wrong', prompt: 'Review PR' });
+  assert.equal(f.submitted[0].sessionMode, 'new'); assert.equal(f.submitted[0].cwd, undefined);
+  assert.equal(f.submitted[0].routingContext, 'Work in verse8-orchestrator.');
+});
+
+test('new draft context allows a subsequent explicit send request, while repeated same permission stays consumed', async t => {
+  const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  await f.manager.ownerChat('owner-chat', '슬랙에 보내주세요');
+  await f.manager.tool(id, 'slack_send', { text: 'First result' });
+  await f.manager.ownerChat('owner-chat', '슬랙에 보내주세요');
+  await f.manager.tool(id, 'slack_send', { text: 'First result' }); assert.equal(f.counts().sends, 1);
+  await f.manager.tool(id, 'slack_reply', { requestKey: 'second-draft', text: 'Second result' });
+  await f.manager.ownerChat('owner-chat', '슬랙에 보내주세요');
+  await f.manager.tool(id, 'slack_send', { text: 'Second result' }); assert.equal(f.counts().sends, 2);
+});
+
+test('completed notified work can still receive owner completion-report permission', async t => {
+  const f = await conditionalFixture(t); f.run.status = 'completed';
+  f.options.resumeConversation = async () => ({ runId: 'notification' });
+  f.options.getSessionRuns = () => [];
+  await f.manager.tick(); assert.ok(f.manager.list()[0].delegatedTasks![0].notifiedRunId);
+  await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요');
+  assert.equal(f.manager.list()[0].ownerConditionalReply?.requestId, f.task.requestId);
+  await f.manager.tool(f.id, 'tower_task_complete', { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Verified.', text: '작업 완료했습니다.' });
+  assert.equal(f.counts().sends, 1);
+});
+
+test('owner completion permission can report a durable submission failure without a job or run', async t => {
+  const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
+  f.options.submitAutoPrompt = async () => { throw Error('Provider unavailable'); }; f.options.getRun = () => undefined;
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요');
+  await assert.rejects(f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'task', prompt: 'Review PR' }), /Provider unavailable/);
+  const requestId = f.manager.list()[0].delegatedTasks![0].requestId;
+  const args = { requestId, evidence: 'Task submission failed: provider unavailable.', text: '실행 환경 문제로 작업을 시작하지 못했습니다.' };
+  await assert.rejects(f.manager.tool(id, 'tower_task_complete', { ...args, outcome: 'succeeded' }), /Cannot report success/);
+  await f.manager.tool(id, 'tower_task_complete', { ...args, outcome: 'failed' }); assert.equal(f.counts().sends, 1);
+});

@@ -141,6 +141,8 @@ export interface CreateSessionRequest {
   attachments?: AttachmentInput[];
 }
 export interface AutoPromptRequest {
+  sessionMode?: 'new';
+  routingContext?: string;
   model?: string;
   requestId: string;
   provider: Provider;
@@ -156,6 +158,8 @@ export interface AutoPromptDecision {
   reason: string;
 }
 export interface AutoPromptJob {
+  sessionMode?: 'new';
+  routingContext?: string;
   model?: string;
   id: string;
   provider: Provider;

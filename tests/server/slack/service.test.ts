@@ -172,3 +172,29 @@ test('Slack language persists independently of connection and validates authenti
   await restarted.mutate('settings', { language: 'ko' });
   assert.equal(JSON.parse(await readFile(join(stateDir, 'slack-connection.json'), 'utf8')).language, 'ko');
 });
+
+test('owner reply intent uses the configured ephemeral classifier with only owner text and task metadata', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-consent-'));
+  const run: import('../../../shared/types.js').Run = { id: 'coordinator', sessionId: 'chat', prompt: '', status: 'completed', createdAt: '', output: '' };
+  let calls = 0;
+  const service = new SlackService({ stateDir, runs: {
+    list: () => [run],
+    create: async input => ({ run, session: { id: 'chat', nativeId: 'chat', provider: input.provider, cwd: input.cwd, project: 'Slack', title: 'Slack', status: 'completed', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true } }),
+  }, autoPrompts: { get: () => undefined, submit: async () => { throw Error('unexpected delegation'); } }, refresh: async () => {} }, {
+    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [{ user: 'U2', text: 'untrusted channel data', ts: '1' }], reply: async () => { throw Error('unexpected send'); } }),
+    model: async (input, dependencies) => {
+      calls++; assert.equal(input.provider, 'claude'); assert.equal(input.model, 'opus');
+      assert.deepEqual(JSON.parse(input.prompt), { ownerMessage: 'LGTM 달고 슬랙에도 알려주세요', tasks: [] });
+      assert.match(input.systemPrompt, /tool-free intent classifier/); assert.match(input.systemPrompt, /quoted/);
+      assert.equal(input.prompt.includes('untrusted channel data'), false); assert.equal(dependencies?.stateDir, stateDir);
+      return { intent: 'after_work' };
+    },
+  });
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  await service.start(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await service.mutate('rules', { rules: [{ id: 'r', name: 'Review', enabled: true, condition: 'PR', instructions: 'Review', replyInstructions: 'Propose', provider: 'claude', model: 'opus' }] });
+  await service.automation.ingest({ id: 'event', teamId: 'T1', channel: 'G1', user: 'U2', ts: '1', threadTs: '1', text: '<@U1> hello' });
+  await service.automation.tick(); assert.equal(calls, 0);
+  await service.ownerChat('chat', 'LGTM 달고 슬랙에도 알려주세요'); assert.equal(calls, 1);
+  assert.equal(service.overview().events[0].ownerConditionalReply?.mode, 'composed');
+});

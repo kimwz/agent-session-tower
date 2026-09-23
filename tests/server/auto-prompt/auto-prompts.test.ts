@@ -383,3 +383,48 @@ test('execution models reach new and resumed runs without changing the fixed rou
     await assert.rejects(f.manager.submit(request(f.cwd, { model: '--bad model' })), /Invalid model/);
   }
 });
+
+for (const provider of ['claude', 'codex'] as const) {
+  test(`${provider} new-session delegation bypasses session routing and persists its policy`, async t => {
+    const f = await fixture(t);
+    f.current.sessions[0].provider = provider;
+    f.current.sessions[0].status = 'working';
+    f.options.detail = async () => { throw new Error('Must not inspect unrelated conversations'); };
+    f.respond(async () => { throw new Error('Explicit directory and new session need no router'); });
+    const input = request(f.cwd, { provider, sessionMode: 'new', routingContext: 'Owner project requirement' });
+    const accepted = await f.manager.submit(input);
+    const job = await f.finished(accepted.id);
+    assert.equal(job.status, 'completed');
+    assert.equal(job.decision?.action, 'create');
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.dispatches[0].action, 'create');
+    assert.equal(f.dispatches[0].input.prompt, input.prompt);
+    await assert.rejects(f.manager.submit({ ...input, sessionMode: undefined }), /같은 요청 ID/);
+    await f.manager.close();
+    const restored = new AutoPromptManager(f.options);
+    try {
+      await restored.start();
+      assert.equal(restored.get(input.requestId)?.sessionMode, 'new');
+      assert.equal(restored.get(input.requestId)?.routingContext, input.routingContext);
+    } finally { await restored.close(); }
+  });
+}
+
+test('owner routing instructions reach directory selection without leaking into delegated execution', async t => {
+  const f = await fixture(t);
+  const routingContext = '리뷰 요청은 Other project 프로젝트 기반으로 실행하면 됩니다.';
+  f.respond(async input => {
+    assert.match(input.prompt, /ownerRoutingInstructions/);
+    assert.ok(input.prompt.includes(routingContext));
+    assert.match(input.systemPrompt, /instead of substituting another project/);
+    const parsed = JSON.parse(input.prompt.slice(input.prompt.indexOf('{')));
+    return { directoryId: parsed.directories.find((item: { cwd: string }) => item.cwd === f.other).id, reason: 'Owner specified Other project.' };
+  });
+  const input = request(undefined, { sessionMode: 'new', routingContext });
+  const accepted = await f.manager.submit(input);
+  const job = await f.finished(accepted.id);
+  assert.equal(job.status, 'completed', job.error);
+  assert.equal(job.cwd, f.other);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.dispatches[0].input.prompt, input.prompt);
+});

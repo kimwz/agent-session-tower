@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.10.0] - 2026-09-23
+
+### Changed
+- Honor owner chat requests to compose and send Slack replies without requiring a proposal click or exact wording, including requests made while delegated work is running.
+- Persist one-time completion-report permission while keeping initial event processing, rules, and task results unable to authorize sending by themselves.
+
+### Fixed
+- Always create fresh sessions for Slack-delegated work and preserve the matched rule’s project instructions when choosing its working folder.
+
 ## [1.9.2] - 2026-09-23
 
 ### Added

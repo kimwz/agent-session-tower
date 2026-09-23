@@ -158,10 +158,14 @@ export class AutoPromptManager extends EventEmitter {
     if (typeof input.prompt !== 'string' || input.prompt.length > 32_000 || (!input.prompt.trim() && !input.attachments?.length)) throw new RunError('지시문 또는 첨부 파일이 필요하며 지시문은 32,000자 이하여야 합니다.');
     if (input.cwd !== undefined && (typeof input.cwd !== 'string' || !isAbsolute(input.cwd) || input.cwd.includes('\0') || input.cwd.length > 4096)) throw new RunError('목록에 있는 작업 폴더를 선택하세요.');
     if (input.codexApprovalsReviewer !== undefined && !['user', 'auto_review'].includes(input.codexApprovalsReviewer)) throw new RunError('승인 검토는 자동 검토 또는 직접 확인만 선택할 수 있습니다.');
+    if (input.sessionMode !== undefined && input.sessionMode !== 'new') throw new RunError('올바른 세션 생성 모드를 선택하세요.');
+    if (input.routingContext !== undefined && (typeof input.routingContext !== 'string' || input.routingContext.length > 32_000)) throw new RunError('라우팅 지침은 32,000자 이하여야 합니다.');
     requestedModel(input.model);
     input = copy(input);
     input.requestId = input.requestId.toLowerCase();
     const fingerprint = createHash('sha256').update(JSON.stringify({ provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: input.attachments ?? [],
+      ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
+      ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
       ...(input.model ? { model: input.model } : {}),
       ...(input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}) })).digest('hex');
     const previous = this.entries.get(input.requestId);
@@ -186,6 +190,8 @@ export class AutoPromptManager extends EventEmitter {
     const entry: Entry = { fingerprint, staged: prepared.attachments, job: {
       id: input.requestId, provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
       ...(input.provider === 'codex' && input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}),
+      ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
+      ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
       ...(input.model ? { model: input.model } : {}),
       routerModel: MODELS[input.provider], status: 'queued', createdAt: now, updatedAt: now,
       ...(prepared.attachments.length ? { attachments: prepared.attachments.map(({ name, mimeType, size }) => ({ name, mimeType, size })) } : {}),
@@ -283,11 +289,11 @@ export class AutoPromptManager extends EventEmitter {
     let cwd = job.cwd;
     if (!cwd) {
       if (!inventory.length) throw new RunError('선택할 프로젝트 폴더가 없습니다.');
-      const answer = object(await invoke(modelInput({ request, directories: inventory.map(directory => ({
+      const answer = object(await invoke(modelInput({ request, ...(job.routingContext ? { ownerRoutingInstructions: job.routingContext } : {}), directories: inventory.map(directory => ({
         id: directory.id, cwd: directory.cwd, title: directory.title, sessionCount: directory.sessions.length,
         recentSessions: [...directory.sessions].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 3)
           .map(session => ({ title: session.customTitle || session.title, provider: session.provider, closed: !!session.closed, lastMessage: session.lastMessage.slice(0, 300) })),
-      })) }), DIRECTORY_SCHEMA, 'First select the directory. Return directoryId from the provided directory IDs, or null when the project cannot be determined.'));
+      })) }), DIRECTORY_SCHEMA, 'First select the directory. Honor the project specified in ownerRoutingInstructions when provided; if it cannot be resolved unambiguously to an inventory directory, return null instead of substituting another project. Return directoryId from the provided directory IDs, or null when the project cannot be determined.'));
       active();
       if (!answer || (typeof answer.directoryId !== 'string' && answer.directoryId !== null)) throw new RunError('라우터가 올바른 폴더 선택을 반환하지 않았습니다.', 502);
       reason(answer.reason);
@@ -301,43 +307,48 @@ export class AutoPromptManager extends EventEmitter {
     await this.options.refresh(); active();
     snapshot = this.options.snapshot();
     await this.checkDirectory(cwd, directories(snapshot)); active();
-    const candidates = snapshot.sessions.filter(session => eligible(session, job, cwd!));
-    const excerpts = new Map<string, unknown[]>();
-    const recent = [...candidates].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 12);
-    await Promise.all(recent.map(async session => {
-      const detail = await this.options.detail(session.id); active();
-      excerpts.set(session.id, (detail?.messages || []).filter(message => message.role === 'user' || message.role === 'assistant').slice(-6)
-        .map(message => ({ role: message.role, text: message.text.slice(0, 1000), timestamp: message.timestamp })));
-    }));
-    active();
-    const answer = object(await invoke(modelInput({ request, cwd, candidates: candidates.map(session => ({
-      id: session.id, title: (session.customTitle || session.title).slice(0, 200), lastMessage: session.lastMessage.slice(0, 400),
-      status: session.status, updatedAt: session.updatedAt, contextUsage: session.contextUsage ?? null,
-      pendingTasks: pending(snapshot, session.id).map(run => ({ status: run.status, prompt: run.prompt.slice(0, 1000) })),
-      ...(excerpts.has(session.id) ? { recentConversation: excerpts.get(session.id) } : { recentConversationOmitted: true }),
-    })) }), SESSION_SCHEMA, 'The directory is fixed. Select an existing candidate session ID or create a new session. For create, sessionId must be null.'));
-    active();
-    if (!answer || (answer.action !== 'resume' && answer.action !== 'create') || typeof answer.relation !== 'string' || !['continuation', 'adjacent', 'new'].includes(answer.relation)) throw new RunError('라우터가 올바른 세션 선택을 반환하지 않았습니다.', 502);
-    const explanation = reason(answer.reason);
-    const relation = answer.relation as Relation;
     let decision: AutoPromptDecision;
     let expectedNativeId: string | undefined;
-    if (answer.action === 'create') {
-      if (answer.sessionId !== null) throw new RunError('새 세션 선택에 기존 세션 ID가 포함되어 있습니다.', 502);
-      decision = { action: 'create', cwd, reason: explanation };
+    let relation: Relation = 'new';
+    if (job.sessionMode === 'new') {
+      decision = { action: 'create', cwd, reason: '요청에 따라 독립된 새 세션을 생성합니다.' };
     } else {
-      const selected = candidates.find(session => session.id === answer.sessionId);
-      if (!selected) throw new RunError('라우터가 선택할 수 없는 세션을 반환했습니다. 실행하지 않았습니다.', 502);
-      expectedNativeId = selected.nativeId;
-      if (relation === 'new') throw new RunError('라우터가 새 작업을 기존 세션 재사용으로 선택했습니다. 선택이 명확하지 않아 실행하지 않았습니다.', 502);
-      if (relation === 'adjacent' && !adjacentAllowed(selected, snapshot)) throw new RunError('선택한 세션은 인접 작업에 재사용할 수 없습니다. 컨텍스트 사용률이 확인된 30% 이하의 대기 세션이 필요합니다.');
-      decision = { action: 'resume', cwd, sessionId: selected.id, reason: explanation };
+      const candidates = snapshot.sessions.filter(session => eligible(session, job, cwd!));
+      const excerpts = new Map<string, unknown[]>();
+      const recent = [...candidates].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 12);
+      await Promise.all(recent.map(async session => {
+        const detail = await this.options.detail(session.id); active();
+        excerpts.set(session.id, (detail?.messages || []).filter(message => message.role === 'user' || message.role === 'assistant').slice(-6)
+          .map(message => ({ role: message.role, text: message.text.slice(0, 1000), timestamp: message.timestamp })));
+      }));
+      active();
+      const answer = object(await invoke(modelInput({ request, cwd, candidates: candidates.map(session => ({
+        id: session.id, title: (session.customTitle || session.title).slice(0, 200), lastMessage: session.lastMessage.slice(0, 400),
+        status: session.status, updatedAt: session.updatedAt, contextUsage: session.contextUsage ?? null,
+        pendingTasks: pending(snapshot, session.id).map(run => ({ status: run.status, prompt: run.prompt.slice(0, 1000) })),
+        ...(excerpts.has(session.id) ? { recentConversation: excerpts.get(session.id) } : { recentConversationOmitted: true }),
+      })) }), SESSION_SCHEMA, 'The directory is fixed. Select an existing candidate session ID or create a new session. For create, sessionId must be null.'));
+      active();
+      if (!answer || (answer.action !== 'resume' && answer.action !== 'create') || typeof answer.relation !== 'string' || !['continuation', 'adjacent', 'new'].includes(answer.relation)) throw new RunError('라우터가 올바른 세션 선택을 반환하지 않았습니다.', 502);
+      const explanation = reason(answer.reason);
+      relation = answer.relation as Relation;
+      if (answer.action === 'create') {
+        if (answer.sessionId !== null) throw new RunError('새 세션 선택에 기존 세션 ID가 포함되어 있습니다.', 502);
+        decision = { action: 'create', cwd, reason: explanation };
+      } else {
+        const selected = candidates.find(session => session.id === answer.sessionId);
+        if (!selected) throw new RunError('라우터가 선택할 수 없는 세션을 반환했습니다. 실행하지 않았습니다.', 502);
+        expectedNativeId = selected.nativeId;
+        if (relation === 'new') throw new RunError('라우터가 새 작업을 기존 세션 재사용으로 선택했습니다. 선택이 명확하지 않아 실행하지 않았습니다.', 502);
+        if (relation === 'adjacent' && !adjacentAllowed(selected, snapshot)) throw new RunError('선택한 세션은 인접 작업에 재사용할 수 없습니다. 컨텍스트 사용률이 확인된 30% 이하의 대기 세션이 필요합니다.');
+        decision = { action: 'resume', cwd, sessionId: selected.id, reason: explanation };
+      }
     }
     // The native resume path preserves the thread's reviewer, which Tower cannot
     // verify from session metadata. An explicit reviewer therefore needs a new
     // thread so that a routing choice cannot silently discard the requested policy.
     if (decision.action === 'resume' && job.provider === 'codex' && job.codexApprovalsReviewer) {
-      decision = { action: 'create', cwd, reason: `${explanation} 요청한 승인 검토 설정을 적용하기 위해 새 세션을 생성합니다.` };
+      decision = { action: 'create', cwd, reason: `${decision.reason} 요청한 승인 검토 설정을 적용하기 위해 새 세션을 생성합니다.` };
     }
     await this.options.refresh(); active();
     await this.checkDirectory(cwd, directories(this.options.snapshot())); active();
@@ -403,6 +414,8 @@ function validEntry(value: unknown): value is Entry {
   return !!job && typeof entry?.fingerprint === 'string' && /^[a-f\d]{64}$/.test(entry.fingerprint)
     && Array.isArray(entry.staged) && entry.staged.length <= 10 && entry.staged.every(item => attachmentMetadata(item))
     && typeof job.id === 'string' && UUID.test(job.id) && ['claude', 'codex'].includes(String(job.provider))
+    && (job.sessionMode === undefined || job.sessionMode === 'new')
+    && (job.routingContext === undefined || typeof job.routingContext === 'string' && job.routingContext.length <= 32_000)
     && (job.model === undefined || validModelId(job.model))
     && typeof job.prompt === 'string' && job.prompt.length <= 32_000 && typeof job.routerModel === 'string'
     && typeof job.createdAt === 'string' && typeof job.updatedAt === 'string'
