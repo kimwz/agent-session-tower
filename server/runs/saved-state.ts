@@ -1,7 +1,7 @@
 import { isAbsolute } from 'node:path';
 import type { Run, Session } from '../../shared/types.js';
 import { attachmentMetadata } from '../stores/attachments.js';
-import { validModelId } from '../providers/models.js';
+import { validEffort, validModelId } from '../providers/models.js';
 import { PROVIDERS } from '../providers/discovery.js';
 
 /** Nothing restored from disk is trusted: these guards decide what may re-enter the queue. */
@@ -21,6 +21,7 @@ export function isSavedRun(value: unknown): value is Run {
   return typeof run.id === 'string' && typeof run.sessionId === 'string' && typeof run.prompt === 'string'
     && typeof run.createdAt === 'string' && typeof run.output === 'string'
     && (run.model === undefined || validModelId(run.model))
+    && (run.effort === undefined || validEffort(run.effort))
     && (run.codexApprovalsReviewer === undefined || ['user', 'auto_review'].includes(run.codexApprovalsReviewer))
     && (run.autoPromptId === undefined || UUID.test(run.autoPromptId))
     && (run.steering === undefined || isSavedSteering(run.steering, run))

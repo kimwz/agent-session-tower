@@ -27,7 +27,7 @@ export function startCodexFixture({ defaultId, otherId, created = false }) {
       const actual = mode === 'invalid-id' ? 'bad-id' : mode === 'mismatch' ? otherId : threadId;
       send({ id: request.id, result: { thread: { id: actual, status: { type: 'idle' } }, approvalsReviewer: request.params.approvalsReviewer || 'user' } });
     } else if (request.method === 'turn/start') {
-      received = { prompt: request.params.input[0].text, args: process.argv.slice(2), cwd: process.cwd(), nested: process.env.CLAUDECODE, threadMethod, threadParams, input: request.params.input };
+      received = { prompt: request.params.input[0].text, args: process.argv.slice(2), cwd: process.cwd(), nested: process.env.CLAUDECODE, threadMethod, threadParams, input: request.params.input, turnEffort: request.params.effort };
       writeFileSync(process.env.RECEIVED_PATH, JSON.stringify(received));
       if (mode === 'unconfirmed-turn') { send({ id: request.id, result: { turn: {} } }); return; }
       send({ id: request.id, result: { turn: { id: turnId, status: 'inProgress' } } });

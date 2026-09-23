@@ -5,23 +5,26 @@ import { open } from 'node:fs/promises';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { ModelOption, Provider, ProviderHealth, ProviderUsage, UsageWindow } from '../../shared/types.js';
-import { validModelId } from './models.js';
+import type { EffortOption, ModelOption, Provider, ProviderHealth, ProviderUsage, UsageWindow } from '../../shared/types.js';
+import { CLAUDE_EFFORT_LEVELS, validEffort, validModelId } from './models.js';
 import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../../shared/app-identity.js';
 
 const execute = promisify(execFile);
 const MAX_JSON = 2 * 1024 * 1024;
 type Json = Record<string, unknown>;
-export type Capabilities = Pick<ProviderHealth, 'usage' | 'models' | 'defaultModel'>;
+export type Capabilities = Pick<ProviderHealth, 'usage' | 'models' | 'defaultModel' | 'efforts'>;
 type Reason = 'not_signed_in' | 'not_supported' | 'credentials_unavailable' | 'rate_limited' | 'unreachable' | 'no_data';
 const object = (value: unknown): Json | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined;
 const timestamp = (value: unknown): string | undefined => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined;
 const percentage = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100;
 const unavailable = (reason: Reason): ProviderUsage => ({ status: reason === 'unreachable' || reason === 'rate_limited' ? 'error' : 'unavailable', windows: [], reason });
+// `claude --effort` levels. Claude Code silently lowers a level the resolved model cannot use.
+export const CLAUDE_EFFORTS: readonly EffortOption[] = CLAUDE_EFFORT_LEVELS.map(id => ({ id }));
 // Native aliases resolve through Claude Code's own defaults and environment remaps.
 export const CLAUDE_MODELS: readonly ModelOption[] = [
-  { id: 'sonnet', label: 'Sonnet' }, { id: 'opus', label: 'Opus' }, { id: 'haiku', label: 'Haiku' },
+  { id: 'sonnet', label: 'Sonnet', efforts: [...CLAUDE_EFFORTS] }, { id: 'opus', label: 'Opus', efforts: [...CLAUDE_EFFORTS] }, { id: 'haiku', label: 'Haiku', efforts: [] },
 ];
+const copyModel = (model: ModelOption): ModelOption => ({ ...model, ...(model.efforts ? { efforts: model.efforts.map(effort => ({ ...effort })) } : {}) });
 
 /** Copy only quota windows; account identity, credit balances and tokens stay private. */
 export function parseCodexUsage(value: unknown, now = Date.now()): ProviderUsage {
@@ -71,8 +74,13 @@ export function parseCodexModels(value: unknown): Pick<Capabilities, 'models' | 
     const item = object(entry);
     if (!item || item.hidden === true || !validModelId(item.model)) continue;
     const id = item.model;
+    const efforts = Array.isArray(item.supportedReasoningEfforts) ? item.supportedReasoningEfforts.map(object)
+      .filter((option): option is Json => !!option && validEffort(option.reasoningEffort)).slice(0, 12)
+      .map(option => ({ id: option.reasoningEffort as string, ...(typeof option.description === 'string' ? { description: option.description.slice(0, 300) } : {}) })) : undefined;
+    const defaultEffort = efforts?.some(effort => effort.id === item.defaultReasoningEffort) ? item.defaultReasoningEffort as string : undefined;
     models.set(id, { id, label: typeof item.displayName === 'string' ? item.displayName.slice(0, 160) : id,
-      ...(typeof item.description === 'string' ? { description: item.description.slice(0, 300) } : {}) });
+      ...(typeof item.description === 'string' ? { description: item.description.slice(0, 300) } : {}),
+      ...(efforts ? { efforts } : {}), ...(defaultEffort ? { defaultEffort } : {}) });
     if (item.isDefault === true) defaultModel = id;
   }
   return { models: [...models.values()], ...(defaultModel ? { defaultModel } : {}) };
@@ -274,7 +282,8 @@ export class ProviderCapabilities {
     return this.providers.map(provider => {
       const usage = provider.usage;
       const expired = usage?.windows.some(window => window.resetsAt && Date.parse(window.resetsAt) <= now);
-      return { ...provider, ...(provider.models ? { models: provider.models.map(model => ({ ...model })) } : {}),
+      return { ...provider, ...(provider.models ? { models: provider.models.map(copyModel) } : {}),
+        ...(provider.efforts ? { efforts: provider.efforts.map(effort => ({ ...effort })) } : {}),
         ...(usage ? { usage: { ...usage, windows: usage.windows.map(window => ({ ...window })), ...(expired ? { status: 'unavailable' as const, stale: true, reason: 'no_data' } : {}) } } : {}) };
     });
   }
@@ -308,13 +317,13 @@ export class ProviderCapabilities {
           if (!provider.available || !provider.executable) capabilities = { usage: unavailable('not_supported') };
           else if (this.options.read) capabilities = await this.options.read(provider, signal);
           else if (provider.provider === 'codex') capabilities = await readCodexCapabilities(provider.executable, this.options.env || process.env, signal);
-          else capabilities = { usage: await readClaudeUsage({ env: this.options.env, signal }), models: CLAUDE_MODELS.map(model => ({ ...model })) };
+          else capabilities = { usage: await readClaudeUsage({ env: this.options.env, signal }), models: CLAUDE_MODELS.map(copyModel), efforts: CLAUDE_EFFORTS.map(effort => ({ ...effort })) };
         } catch { capabilities = { usage: unavailable('unreachable') }; }
         const previous = this.providers.find(item => item.provider === provider.provider);
         if (capabilities.usage?.status !== 'available' && !capabilities.usage?.windows.length && previous?.usage?.windows.length) {
           capabilities.usage = { ...capabilities.usage!, windows: previous.usage.windows, updatedAt: previous.usage.updatedAt, stale: true };
         }
-        return { ...provider, ...(previous?.models ? { models: previous.models, defaultModel: previous.defaultModel } : {}), ...capabilities };
+        return { ...provider, ...(previous?.models ? { models: previous.models, defaultModel: previous.defaultModel, ...(previous.efforts ? { efforts: previous.efforts } : {}) } : {}), ...capabilities };
       }));
       if (!this.stopped) {
         this.providers = results;

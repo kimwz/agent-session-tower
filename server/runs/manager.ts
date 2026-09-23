@@ -9,7 +9,7 @@ import { isImageAttachment } from '../../shared/attachments.js';
 import { attachmentMetadata, attachmentPrompt, AttachmentStore } from '../stores/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
 import type { CodexBridgeRun, CodexBridgeOptions } from './codex-bridge.js';
-import { requestedModel, validModelId } from '../providers/models.js';
+import { requestedEffort, requestedModel, validModelId } from '../providers/models.js';
 import { requestedApprovalsReviewer } from '../providers/approvals.js';
 import { SteeringError } from './steering.js';
 import { ClaudeControl } from './claude-control.js';
@@ -213,6 +213,7 @@ export class RunManager extends EventEmitter {
     this.validateAdmission(input.prompt, Boolean(input.attachments?.length));
     if (!PROVIDERS.includes(input.provider)) throw new RunError('Claude 또는 Codex를 선택하세요.');
     const model = requestedModel(input.model);
+    const effort = requestedEffort(input.effort, input.provider);
     // Only a Codex thread has an approvals reviewer; Claude keeps its own permission flow.
     const approvalsReviewer = input.provider === 'codex' ? requestedApprovalsReviewer(input.codexApprovalsReviewer) : undefined;
     if (typeof input.cwd !== 'string' || input.cwd.includes('\0') || input.cwd.length > 4096) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
@@ -241,7 +242,7 @@ export class RunManager extends EventEmitter {
       status: 'idle', statusReason: '새 세션을 생성하고 있습니다.', createdAt, updatedAt: createdAt,
       lastRequestAt: createdAt, lastMessage: input.prompt.trim().slice(0, 512), messageCount: 0, isSubagent: false, resumable: false, creationPending: true,
     };
-    const run: Run = { id: randomUUID(), sessionId: id, prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}),
+    const run: Run = { id: randomUUID(), sessionId: id, prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
     this.createdSessions.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}) });
@@ -283,13 +284,14 @@ export class RunManager extends EventEmitter {
     const session = this.getSession(sessionId);
     this.validateSession(session);
     const model = requestedModel(request.model);
+    const effort = requestedEffort(request.effort, session.provider);
     if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 503);
     const prepared = await this.attachments.prepare(sessionId, request);
     // File writes yield; recheck admission immediately before inserting the run.
     try { this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
     catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
     const run: Run = { id: randomUUID(), sessionId, prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
-      ...(model ? { model } : {}),
+      ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
     this.admissions.add(run.id);
@@ -306,7 +308,7 @@ export class RunManager extends EventEmitter {
   private steeringTarget(run: Run) {
     if (this.stopping || run.status !== 'queued' || run.steering || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
     const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering);
-    if (!target || (run.model && run.model !== (target.model ?? this.getSession(run.sessionId)?.model))) return undefined;
+    if (!target || (run.model && run.model !== (target.model ?? this.getSession(run.sessionId)?.model)) || (run.effort && run.effort !== target.effort)) return undefined;
     const adapter = this.stdio.get(target.id) ?? this.bridged.get(target.id) ?? this.owned.get(target.id)?.claude;
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : undefined;
   }
@@ -506,7 +508,7 @@ export class RunManager extends EventEmitter {
     let started = false;
     const bridge = await this.options.openCodexBridge({
       threadId: session.nativeId, runId: run.id, prompt: attachmentPrompt(run.prompt, attachments),
-      ...(run.model ? { model: run.model } : {}),
+      ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
       ...(attachments.length ? { imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) } : {}),
       onStarted: () => {
         if (FINISHED.has(run.status)) return;
@@ -572,7 +574,7 @@ export class RunManager extends EventEmitter {
       mcpServers,
       ...(!creating ? { threadId: session.nativeId } : { ...(run.codexApprovalsReviewer ? { approvalsReviewer: run.codexApprovalsReviewer } : {}) }),
       ...(mcpServers?.tower_slack ? { approvalsReviewer: 'auto_review' as const } : {}),
-      ...(run.model ? { model: run.model } : {}),
+      ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
       prompt: attachmentPrompt(run.prompt, attachments),
       imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path),
       onSession: async id => {
@@ -633,7 +635,7 @@ export class RunManager extends EventEmitter {
     if (!(await stat(session.cwd)).isDirectory()) throw new Error('The session working directory no longer exists.');
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     const images = attachments.filter(item => isImageAttachment(item.metadata.mimeType));
-    const args = creating ? buildCreateArgs(session, run.model) : buildResumeArgs(session, run.model);
+    const args = creating ? buildCreateArgs(session, run.model, run.effort) : buildResumeArgs(session, run.model, run.effort);
     const mcpServers = this.options.getSessionMcp?.(session.id);
     if (mcpServers) args.push('--mcp-config', JSON.stringify({ mcpServers }));
     for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);

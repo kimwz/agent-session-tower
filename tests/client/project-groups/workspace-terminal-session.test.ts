@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { workspaceTerminalSession, forgetWorkspaceTerminal } from '../../../client/src/workspace/terminal-session.js';
+import { workspaceTerminalSession, forgetWorkspaceTerminal, MAX_TERMINAL_TABS, nextTerminalTab, readTerminalTabs, saveTerminalTabs, terminalSlot } from '../../../client/src/workspace/terminal-session.js';
 
 const firstId = '10000000-0000-4000-8000-000000000001';
 const secondId = '10000000-0000-4000-8000-000000000002';
@@ -50,4 +50,40 @@ test('a connection failure never creates a replacement for a possibly running sh
   assert.equal(await workspaceTerminalSession(cwd, async () => { throw Object.assign(new Error('gone'), { status: 404 }); }, create), secondId);
   assert.equal(creations, 1);
   forgetWorkspaceTerminal(cwd, secondId);
+});
+
+test('terminal tabs persist per folder, keep the first tab on the pre-tab slot and give later tabs their own shells', async t => {
+  const values = new Map<string, string>();
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { sessionStorage: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+    removeItem: (key: string) => { values.delete(key); },
+  } } });
+  t.after(() => { if (previous) Object.defineProperty(globalThis, 'window', previous); else Reflect.deleteProperty(globalThis, 'window'); });
+  const cwd = '/fixture/tabs';
+  const [main] = readTerminalTabs(cwd);
+  assert.deepEqual(main, { key: 'main', number: 1 });
+  assert.equal(terminalSlot(cwd, main), cwd);
+  const second = nextTerminalTab([main]);
+  assert.equal(second.number, 2);
+  assert.notEqual(terminalSlot(cwd, second), cwd);
+  saveTerminalTabs(cwd, [second]);
+  assert.deepEqual(readTerminalTabs(cwd), [second]);
+  assert.deepEqual(readTerminalTabs('/fixture/other'), [{ key: 'main', number: 1 }]);
+  assert.equal(nextTerminalTab([second]).number, 3);
+  saveTerminalTabs(cwd, []);
+  assert.deepEqual(readTerminalTabs(cwd), [], 'closing every tab is remembered');
+  for (const invalid of ['not json', JSON.stringify([{ key: 'Bad Key', number: 1 }]), JSON.stringify([main, main]),
+    JSON.stringify(Array.from({ length: MAX_TERMINAL_TABS + 1 }, (_, index) => ({ key: `t${index}`, number: index + 1 })))]) {
+    values.set(`agent-monitor.workspace-terminal-tabs:${cwd}`, invalid);
+    assert.deepEqual(readTerminalTabs(cwd), [{ key: 'main', number: 1 }]);
+  }
+  let created = 0;
+  const create = async () => [firstId, secondId][created++];
+  assert.equal(await workspaceTerminalSession(terminalSlot(cwd, main), async () => {}, create), firstId);
+  assert.equal(await workspaceTerminalSession(terminalSlot(cwd, second), async () => {}, create), secondId);
+  assert.equal(created, 2);
+  forgetWorkspaceTerminal(terminalSlot(cwd, main), firstId);
+  forgetWorkspaceTerminal(terminalSlot(cwd, second), secondId);
 });

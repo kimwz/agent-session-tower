@@ -31,3 +31,29 @@ export function forgetWorkspaceTerminal(cwd: string, id: string): void {
   if (ids.get(cwd) === id) ids.delete(cwd);
   try { if (storage()?.getItem(prefix + cwd) === id) storage()?.removeItem(prefix + cwd); } catch { /* Storage may be disabled. */ }
 }
+
+export interface TerminalTab { key: string; number: number }
+export const MAX_TERMINAL_TABS = 8;
+const tabsPrefix = 'agent-monitor.workspace-terminal-tabs:';
+const validTab = (value: unknown): value is TerminalTab => !!value && typeof value === 'object'
+  && typeof (value as TerminalTab).key === 'string' && /^[a-z0-9-]{1,40}$/.test((value as TerminalTab).key)
+  && Number.isInteger((value as TerminalTab).number) && (value as TerminalTab).number >= 1 && (value as TerminalTab).number <= 999;
+
+/** The first tab keeps the pre-tab storage slot, so a shell opened before an upgrade reconnects. */
+export function terminalSlot(cwd: string, tab: TerminalTab): string { return tab.key === 'main' ? cwd : `${cwd}\u0000${tab.key}`; }
+
+export function readTerminalTabs(cwd: string): TerminalTab[] {
+  try {
+    const saved: unknown = JSON.parse(storage()?.getItem(tabsPrefix + cwd) ?? 'null');
+    if (Array.isArray(saved) && saved.length <= MAX_TERMINAL_TABS && saved.every(validTab) && new Set(saved.map(tab => tab.key)).size === saved.length) return saved;
+  } catch { /* Fall back to one tab. */ }
+  return [{ key: 'main', number: 1 }];
+}
+
+export function saveTerminalTabs(cwd: string, tabs: readonly TerminalTab[]): void {
+  try { storage()?.setItem(tabsPrefix + cwd, JSON.stringify(tabs)); } catch { /* Tabs then last only for this page. */ }
+}
+
+export function nextTerminalTab(tabs: readonly TerminalTab[]): TerminalTab {
+  return { key: crypto.randomUUID().slice(0, 8), number: Math.max(0, ...tabs.map(tab => tab.number)) + 1 };
+}

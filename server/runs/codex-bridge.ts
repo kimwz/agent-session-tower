@@ -1,7 +1,7 @@
 import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import WebSocket from 'ws';
-import { requestedModel } from '../providers/models.js';
+import { requestedEffort, requestedModel } from '../providers/models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
 import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../../shared/app-identity.js';
 
@@ -18,6 +18,7 @@ export interface CodexBridgeOptions {
   prompt: string;
   imagePaths?: readonly string[];
   model?: string;
+  effort?: string;
   onStarted(turnId: string): void;
   onOutput(text: string): void;
   onFinished(result: Result): void;
@@ -113,6 +114,7 @@ async function loaded(rpc: Rpc, threadId: string): Promise<boolean> {
 /** Attach only to a thread already loaded by the existing desktop daemon. */
 export async function openCodexBridgeRun(options: CodexBridgeOptions): Promise<CodexBridgeRun | undefined> {
   requestedModel(options.model);
+  requestedEffort(options.effort);
   const path = join(options.codexHome, 'app-server-control', 'app-server-control.sock');
   try { if (!(await stat(path)).isSocket()) throw new Error('Codex control socket 경로가 소켓이 아닙니다.'); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
@@ -204,10 +206,12 @@ class BridgeRun implements CodexBridgeRun {
     this.previousTurnIds = new Set(previous.data.map(turn => turn.id));
     if (this.cancelRequested || this.settled) { this.finish({ status: 'cancelled' }); return; }
     // An explicit override must be acknowledged before queue admission. Native
-    // defaults stay untouched when the request omits a model.
-    if (this.options.model) {
-      try { await this.rpc.request('thread/settings/update', { threadId: this.options.threadId, model: this.options.model }); }
-      catch { throw new Error('Codex could not apply the selected model. No message was submitted.'); }
+    // defaults stay untouched when the request omits a model or effort.
+    if (this.options.model || this.options.effort) {
+      try {
+        await this.rpc.request('thread/settings/update', { threadId: this.options.threadId,
+          ...(this.options.model ? { model: this.options.model } : {}), ...(this.options.effort ? { effort: this.options.effort } : {}) });
+      } catch { throw new Error('Codex could not apply the selected model or reasoning effort. No message was submitted.'); }
       if (this.cancelRequested || this.settled) { this.finish({ status: 'cancelled' }); return; }
     }
     this.submitted = true;

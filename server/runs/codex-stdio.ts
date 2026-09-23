@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { validateApprovalResponse } from '../../shared/approval-interactions.js';
 import type { CodexApprovalsReviewer, RunApproval, RunApprovalResponse } from '../../shared/types.js';
-import { requestedModel } from '../providers/models.js';
+import { requestedEffort, requestedModel } from '../providers/models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
 import { APP_NAME, APP_TITLE, APP_VERSION } from '../../shared/app-identity.js';
 import type { SessionMcpServers } from './session-mcp.js';
@@ -20,6 +20,7 @@ export interface CodexStdioOptions {
   env?: NodeJS.ProcessEnv;
   threadId?: string;
   model?: string;
+  effort?: string;
   /** Explicit requirements are confirmed before submitting either a new or resumed turn. */
   approvalsReviewer?: CodexApprovalsReviewer;
   prompt: string;
@@ -53,6 +54,7 @@ const approvalError = () => Object.assign(new Error('This approval is no longer 
 /** A dedicated stdio process owns only this run. Never connect it to the desktop daemon. */
 export async function openCodexStdioRun(options: CodexStdioOptions): Promise<CodexStdioRun> {
   requestedModel(options.model);
+  requestedEffort(options.effort);
   if (!isAbsolute(options.cwd)) throw new Error('Codex requires an absolute working directory.');
   if (options.threadId !== undefined && !UUID.test(options.threadId)) throw new Error('The native session ID is invalid.');
   return new StdioRun(options);
@@ -189,6 +191,7 @@ class StdioRun implements CodexStdioRun {
     const started = await this.request('turn/start', {
       threadId: id,
       input: [{ type: 'text', text: this.options.prompt, text_elements: [] }, ...(this.options.imagePaths || []).map(path => ({ type: 'localImage', path }))],
+      ...(this.options.effort ? { effort: this.options.effort } : {}),
     });
     if (this.result) return;
     if (typeof started?.turn?.id !== 'string' || !started.turn.id) throw new Error('Codex did not confirm the submitted turn ID. The request was not resent.');

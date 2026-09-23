@@ -49,7 +49,8 @@
   border: 0;
 }
 .new-session-provider-field legend,
-.new-session-field > label {
+.new-session-field > label,
+.new-session-field > .new-session-label {
   display: block;
   padding: 0;
   margin-bottom: 9px;
@@ -119,6 +120,12 @@
 .new-session-field {
   margin-top: 19px;
 }
+.new-session-model-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 10px;
+}
+.new-session-model-row select:only-child { grid-column: 1 / -1; }
 .new-session-field > label > span {
   margin-left: 5px;
   color: #7c8da7;

@@ -8,6 +8,7 @@ import { api, providerLabels } from '../common/lib';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { codexApprovalsRequest, readCodexApprovalsChoice, type CodexApprovalsChoice } from './codex-approvals-preference';
 import { CodexApprovalsSelect } from './CodexApprovalsSelect';
+import { EffortPicker, ModelPicker, supportedEffort } from '../chat/ModelPicker';
 
 interface NewSessionDialogProps {
   providers: ProviderHealth[];
@@ -30,11 +31,14 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
   const [cwd, setCwd] = useState(initialCwd || projects[0]?.[0] || '');
   const [title, setTitle] = useState('');
   const [prompt, setPrompt] = useState('');
+  const [model, setModel] = useState<string>();
+  const [effort, setEffort] = useState<string>();
   const [approvals, setApprovals] = useState<CodexApprovalsChoice>(readCodexApprovalsChoice);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [folderError, setFolderError] = useState('');
   const providerAvailable = providers.some(item => item.provider === provider && item.available);
+  const providerHealth = providers.find(item => item.provider === provider);
   const unavailable = !connected || !token || !providerAvailable;
   const uniqueProjects = [...new Map(projects).entries()];
 
@@ -67,7 +71,8 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
       const result = await api<{ session: Session; run: Run }>('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token },
-        body: JSON.stringify({ provider, cwd: cwd.trim(), prompt: prompt.trim(), ...(title.trim() ? { title: title.trim() } : {}), ...codexApprovalsRequest(provider, approvals) }),
+        body: JSON.stringify({ provider, cwd: cwd.trim(), prompt: prompt.trim(), ...(title.trim() ? { title: title.trim() } : {}),
+          ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...codexApprovalsRequest(provider, approvals) }),
       });
       onCreated(result.session, result.run);
       onClose();
@@ -128,7 +133,7 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
             return <label key={value} className={`new-session-provider ${provider === value ? 'selected' : ''} ${!available ? 'unavailable' : ''}`}>
               <ProviderIcon provider={value} size={21} />
               <span><strong>{providerLabels[value]}</strong><small>{available ? t("사용 가능") : t("사용할 수 없음")}</small></span>
-              <input type="radio" name={`${id}-provider`} value={value} checked={provider === value} disabled={!available} onChange={() => setProvider(value)} />
+              <input type="radio" name={`${id}-provider`} value={value} checked={provider === value} disabled={!available} onChange={() => { setProvider(value); setModel(undefined); setEffort(undefined); }} />
             </label>;
           })}
         </div>
@@ -143,6 +148,14 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
         <datalist id={`${id}-projects`}>{uniqueProjects.map(([path, label]) => <option key={path} value={path}>{label}</option>)}</datalist>
         <p id={`${id}-folder-help`} className="new-session-help">{t("이 Mac의 폴더 경로. 없는 폴더는 새로 만듭니다.")}</p>
         {folderError && <p id={`${id}-folder-error`} className="new-session-error" role="alert">{translateMessage(folderError)}</p>}
+      </div>
+
+      <div className="new-session-field">
+        <span className="new-session-label" id={`${id}-model`}>{t("모델 · 추론 수준")}</span>
+        <div className="new-session-model-row" role="group" aria-labelledby={`${id}-model`}>
+          <ModelPicker provider={providerHealth} value={model} disabled={submitting} onChange={next => { setModel(next); setEffort(value => supportedEffort(providerHealth, next || providerHealth?.defaultModel, value)); }} />
+          <EffortPicker provider={providerHealth} model={model || providerHealth?.defaultModel} value={effort} disabled={submitting} onChange={setEffort} />
+        </div>
       </div>
 
       {provider === 'codex' && <div className="new-session-field">

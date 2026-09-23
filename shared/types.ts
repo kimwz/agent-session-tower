@@ -64,6 +64,8 @@ export interface ProviderHealth {
   usage?: ProviderUsage;
   models?: ModelOption[];
   defaultModel?: string;
+  /** Effort levels for models outside the catalog, such as a session's observed full model ID. */
+  efforts?: EffortOption[];
 }
 export interface UsageWindow {
   id: string;
@@ -82,6 +84,13 @@ export interface ModelOption {
   id: string;
   label: string;
   description?: string;
+  /** Reasoning effort levels the model accepts. An empty list means the model has no effort control. */
+  efforts?: EffortOption[];
+  defaultEffort?: string;
+}
+export interface EffortOption {
+  id: string;
+  description?: string;
 }
 export interface Run {
   id: string;
@@ -95,6 +104,7 @@ export interface Run {
   error?: string;
   attachments?: Attachment[];
   model?: string;
+  effort?: string;
   codexApprovalsReviewer?: CodexApprovalsReviewer;
   autoPromptId?: string;
   contextUsage?: SessionContextUsage & { model: string; updatedAt: string };
@@ -132,6 +142,7 @@ export interface MessageAttachments {
   attachments?: AttachmentInput[];
   attachmentIds?: string[];
   model?: string;
+  effort?: string;
 }
 export interface CreateSessionRequest {
   provider: Provider;
@@ -139,6 +150,7 @@ export interface CreateSessionRequest {
   prompt: string;
   title?: string;
   model?: string;
+  effort?: string;
   codexApprovalsReviewer?: CodexApprovalsReviewer;
   attachments?: AttachmentInput[];
 }
@@ -146,6 +158,7 @@ export interface AutoPromptRequest {
   sessionMode?: 'new';
   routingContext?: string;
   model?: string;
+  effort?: string;
   requestId: string;
   provider: Provider;
   cwd?: string;
@@ -163,6 +176,7 @@ export interface AutoPromptJob {
   sessionMode?: 'new';
   routingContext?: string;
   model?: string;
+  effort?: string;
   id: string;
   provider: Provider;
   cwd?: string;

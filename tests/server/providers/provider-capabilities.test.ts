@@ -32,6 +32,17 @@ test('unknown, invalid and expired quota is never fabricated as zero', () => {
   assert.equal(parseClaudeUsage({ five_hour: { utilization: 0, resets_at: reset } }, now).status, 'available');
 });
 
+test('Codex catalog keeps each model\'s advertised reasoning efforts and a default only when it is listed', () => {
+  assert.deepEqual(parseCodexModels({ data: [
+    { model: 'native-model', displayName: 'Native', defaultReasoningEffort: 'medium', supportedReasoningEfforts: [
+      { reasoningEffort: 'low', description: 'Fast' }, { reasoningEffort: 'medium', description: 'Balanced' }, { reasoningEffort: '--config' }, 'high'] },
+    { model: 'unlisted-default', displayName: 'Other', defaultReasoningEffort: 'xhigh', supportedReasoningEfforts: [{ reasoningEffort: 'high' }] },
+  ] }), { models: [
+    { id: 'native-model', label: 'Native', efforts: [{ id: 'low', description: 'Fast' }, { id: 'medium', description: 'Balanced' }], defaultEffort: 'medium' },
+    { id: 'unlisted-default', label: 'Other', efforts: [{ id: 'high' }] },
+  ] });
+});
+
 test('Codex catalog uses callable model slug and strips hidden models and private fields', () => {
   assert.deepEqual(parseCodexModels({ data: [{ id: 'opaque-id', model: 'native-model', displayName: 'Native Model', isDefault: true, accountId: 'secret' },
     { model: 'hidden', hidden: true }, { model: '--config' }, { model: 42 }] }), { models: [{ id: 'native-model', label: 'Native Model' }], defaultModel: 'native-model' });

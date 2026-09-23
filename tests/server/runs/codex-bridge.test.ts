@@ -99,11 +99,11 @@ class Fake {
   }
 }
 
-async function open(fake: Fake, runId = 'monitor-run', imagePaths?: string[], model?: string) {
+async function open(fake: Fake, runId = 'monitor-run', imagePaths?: string[], model?: string, effort?: string) {
   const started: string[] = [];
   const output: string[] = [];
   const finished: Parameters<CodexBridgeOptions['onFinished']>[0][] = [];
-  const bridge = await openCodexBridgeRun({ codexHome: fake.codexHome, threadId: 'thread', runId, prompt: 'Exact prompt: $(never execute)\n새 요청', imagePaths, model, onStarted: id => { started.push(id); }, onOutput: text => { output.push(text); }, onFinished: result => { finished.push(result); } });
+  const bridge = await openCodexBridgeRun({ codexHome: fake.codexHome, threadId: 'thread', runId, prompt: 'Exact prompt: $(never execute)\n새 요청', imagePaths, model, effort, onStarted: id => { started.push(id); }, onOutput: text => { output.push(text); }, onFinished: result => { finished.push(result); } });
   assert.ok(bridge);
   return { bridge, started, output, finished };
 }
@@ -120,6 +120,19 @@ test('explicit model is acknowledged before queue admission and omission preserv
   assert.ok(methods.indexOf('thread/settings/update') < methods.indexOf('thread/queue/add'));
   assert.deepEqual(fake.requests.find(request => request.method === 'thread/settings/update')?.params, { threadId: 'thread', model: 'native-model' });
   fake.complete(fake.turns[0], 'used explicit model'); await run.bridge.done;
+});
+
+test('explicit effort is applied with the thread settings before queue admission', async t => {
+  const fake = await fixture(t, (request, fake) => {
+    if (request.method === 'thread/settings/update') { fake.reply(request, {}); return true; }
+  });
+  const run = await open(fake, 'effort-override', undefined, undefined, 'high');
+  t.after(() => run.bridge.close());
+  await run.bridge.start();
+  const methods = fake.requests.map(request => request.method);
+  assert.ok(methods.indexOf('thread/settings/update') < methods.indexOf('thread/queue/add'));
+  assert.deepEqual(fake.requests.find(request => request.method === 'thread/settings/update')?.params, { threadId: 'thread', effort: 'high' });
+  fake.complete(fake.turns[0], 'used explicit effort'); await run.bridge.done;
 });
 
 test('model update rejection or connection loss never admits the prompt', async t => {

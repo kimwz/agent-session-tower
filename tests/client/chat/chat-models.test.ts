@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { draftFromRun, finishComposerSend, getComposerState, setComposerDraft, startComposerSend } from '../../../client/src/chat/chat-drafts.js';
-import { modelChoices, ModelPicker } from '../../../client/src/chat/ModelPicker.js';
+import { EffortPicker, modelChoices, modelEfforts, ModelPicker, supportedEffort } from '../../../client/src/chat/ModelPicker.js';
 import { setLanguage } from '../../../client/src/i18n/i18n.js';
 import type { ProviderHealth, Run } from '../../../shared/types.js';
 
@@ -59,4 +59,45 @@ test('retry restores the original run model even after a different selection, in
   setComposerDraft(id, draftFromRun(run()));
   assert.equal(getComposerState(id).draft.model, undefined);
   assert.equal(Object.hasOwn(getComposerState(id).draft, 'model'), false);
+});
+
+const claude: ProviderHealth = { provider: 'claude', available: true, sessionCount: 1, efforts: [{ id: 'low' }, { id: 'max' }],
+  models: [{ id: 'opus', label: 'Opus', efforts: [{ id: 'low' }, { id: 'high' }, { id: 'max' }] }, { id: 'haiku', label: 'Haiku', efforts: [] }] };
+const codex: ProviderHealth = { ...provider, models: [{ id: 'model-a', label: 'Model A', defaultEffort: 'medium', efforts: [{ id: 'medium' }, { id: 'xhigh', description: 'Deepest' }] }, { id: 'model-b', label: 'Model B' }] };
+
+test('effort choices follow the selected, observed or catalog model and drop levels the next model cannot use', () => {
+  assert.deepEqual(modelEfforts(codex, 'model-a'), { efforts: [{ id: 'medium' }, { id: 'xhigh', description: 'Deepest' }], defaultEffort: 'medium' });
+  assert.deepEqual(modelEfforts(codex, 'model-b').efforts, []);
+  assert.deepEqual(modelEfforts(claude, 'claude-opus-5-5').efforts.map(effort => effort.id), ['low', 'high', 'max']);
+  assert.deepEqual(modelEfforts(claude, 'claude-haiku-4-5').efforts, []);
+  assert.deepEqual(modelEfforts(claude, 'custom-model').efforts.map(effort => effort.id), ['low', 'max']);
+  assert.equal(supportedEffort(codex, 'model-a', 'xhigh'), 'xhigh');
+  assert.equal(supportedEffort(codex, 'model-b', 'xhigh'), undefined);
+  assert.equal(supportedEffort(claude, 'haiku', 'high'), undefined);
+  assert.equal(supportedEffort(claude, 'opus', undefined), undefined);
+});
+
+test('the effort picker offers only supported levels with a no-override default and hides for models without effort control', () => {
+  setLanguage('en');
+  const html = renderToStaticMarkup(createElement(EffortPicker, { provider: codex, model: 'model-a', onChange() {} }));
+  assert.match(html, /aria-label="Reasoning effort"/);
+  assert.match(html, /<option value="" selected="">Default \(Medium\)<\/option>/);
+  assert.match(html, /<option value="xhigh" title="Deepest">Extra high<\/option>/);
+  assert.match(renderToStaticMarkup(createElement(EffortPicker, { provider: codex, model: 'model-a', value: 'xhigh', onChange() {} })), /<option value="xhigh" title="Deepest" selected="">/);
+  assert.match(renderToStaticMarkup(createElement(EffortPicker, { provider: claude, model: 'opus', value: 'unsupported', onChange() {} })), /<option value="" selected="">Default effort<\/option>/);
+  assert.equal(renderToStaticMarkup(createElement(EffortPicker, { provider: claude, model: 'haiku', onChange() {} })), '');
+  assert.equal(renderToStaticMarkup(createElement(EffortPicker, { onChange() {} })), '');
+  setLanguage('ko');
+});
+
+test('the chosen effort survives a successful send and retry restores the original effort', () => {
+  const id = `effort-${crypto.randomUUID()}`;
+  setComposerDraft(id, { prompt: 'think', attachments: [], model: 'model-a', effort: 'xhigh' });
+  const submitted = startComposerSend(id)!;
+  finishComposerSend(id, submitted);
+  assert.deepEqual(getComposerState(id).draft, { prompt: '', attachments: [], model: 'model-a', effort: 'xhigh' });
+  setComposerDraft(id, draftFromRun({ ...run('model-b'), effort: 'low' }));
+  assert.equal(getComposerState(id).draft.effort, 'low');
+  setComposerDraft(id, draftFromRun(run()));
+  assert.equal(Object.hasOwn(getComposerState(id).draft, 'effort'), false);
 });

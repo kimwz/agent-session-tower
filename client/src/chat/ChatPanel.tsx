@@ -17,7 +17,7 @@ import { addDraftFiles, formatAttachmentSize, prepareDraftAttachments } from './
 import { MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../../shared/attachments';
 import { draftFromRun, finishComposerSend, getComposerState, markComposerSending, setComposerDraft, setComposerError, startComposerSend, subscribeComposer, type ChatDraft } from './chat-drafts';
 import { matchChatRuns } from './chat-runs';
-import { ModelPicker } from './ModelPicker';
+import { EffortPicker, ModelPicker, supportedEffort } from './ModelPicker';
 import { useChatAppearance } from './chat-appearance';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 
@@ -148,7 +148,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
     try {
       const prepared = await prepareDraftAttachments(submitted.attachments);
       markComposerSending(id);
-      await api<{ run: Run }>(`/api/sessions/${encodeURIComponent(id)}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify({ prompt: message, ...prepared, ...(submitted.model ? { model: submitted.model } : {}) }) });
+      await api<{ run: Run }>(`/api/sessions/${encodeURIComponent(id)}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify({ prompt: message, ...prepared, ...(submitted.model ? { model: submitted.model } : {}), ...(submitted.effort ? { effort: submitted.effort } : {}) }) });
       finishComposerSend(id, submitted);
       if (mounted.current && sessionRef.current === id) { followRef.current = true; setFollowing(true); }
       onSnapshotRefresh();
@@ -256,7 +256,11 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
         <div className="composer-bottom">
           <button className="attach-button" type="button" aria-label={t("파일 첨부")} title={t("파일 첨부 · 최대 {0}개, 합계 {1} · 이미지 붙여넣기 가능", { 0: MAX_ATTACHMENTS, 1: formatAttachmentSize(MAX_TOTAL_ATTACHMENT_BYTES) })} disabled={disabled || sending} onClick={() => fileInput.current?.click()}><Paperclip size={16} aria-hidden="true" /></button>
           <span className="composer-hint">{sending ? <span role="status">{sendingLabel}…</span> : prompt.length > 24000 ? t("{0} / 32,000자", { 0: prompt.length.toLocaleString() }) : composerHint}</span>
-          <ModelPicker provider={provider} observedModel={current?.model} value={draft.model} disabled={disabled || sending} onChange={model => updateDraft({ ...getComposerState(sessionId).draft, model })} />
+          <ModelPicker provider={provider} observedModel={current?.model} value={draft.model} disabled={disabled || sending} onChange={model => {
+            const latest = getComposerState(sessionId).draft;
+            updateDraft({ ...latest, model, effort: supportedEffort(provider, model || current?.model || provider?.defaultModel, latest.effort) });
+          }} />
+          <EffortPicker provider={provider} model={draft.model || current?.model || provider?.defaultModel} value={draft.effort} disabled={disabled || sending} onChange={effort => updateDraft({ ...getComposerState(sessionId).draft, effort })} />
           <button className="send-button" type="submit" disabled={disabled || (!prompt.trim() && !attachments.length) || sending} aria-label={sending ? t("요청 보내는 중") : t("요청 보내기")}>{sending ? <LoaderCircle className="spin" size={14} /> : <Send size={14} />}<span>{sending ? sendingLabel : t("보내기")}</span></button>
         </div>
       </form>

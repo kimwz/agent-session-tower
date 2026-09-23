@@ -5,7 +5,7 @@ import { normalizeSessionTitle } from '../stores/session-titles.js';
 import { normalizeProjectGroupPatch } from '../stores/project-groups.js';
 import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
 import { isImageAttachment, MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
-import { requestedModel } from '../providers/models.js';
+import { requestedEffort, requestedModel } from '../providers/models.js';
 import { requestedApprovalsReviewer } from '../providers/approvals.js';
 import { SseClient } from './sse-client.js';
 import { publicSnapshot } from './public-snapshot.js';
@@ -243,7 +243,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       }
       if (req.method === 'POST' && path === '/api/auto-prompts') {
         const body = await readJson(req, Math.ceil(MAX_TOTAL_ATTACHMENT_BYTES / 3) * 4 + 256 * 1024);
-        if (Object.keys(body).some(key => !['requestId', 'provider', 'cwd', 'prompt', 'attachments', 'codexApprovalsReviewer', 'model'].includes(key))) {
+        if (Object.keys(body).some(key => !['requestId', 'provider', 'cwd', 'prompt', 'attachments', 'codexApprovalsReviewer', 'model', 'effort'].includes(key))) {
           return json(res, 400, { error: 'Auto Prompt 요청에는 폴더, 도구, 프롬프트와 첨부 파일만 지정할 수 있습니다.' });
         }
         if (typeof body.requestId !== 'string' || !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(body.requestId)) {
@@ -262,7 +262,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         const reviewer = requestedApprovalsReviewer(body.codexApprovalsReviewer);
         if (!backend.startAutoPrompt) return json(res, 503, { error: 'Auto Prompt를 현재 사용할 수 없습니다.' });
         const model = requestedModel(body.model);
-        const job = await backend.startAutoPrompt({ ...(model ? { model } : {}), requestId: body.requestId, provider: body.provider, prompt: body.prompt,
+        const effort = requestedEffort(body.effort, body.provider);
+        const job = await backend.startAutoPrompt({ ...(model ? { model } : {}), ...(effort ? { effort } : {}), requestId: body.requestId, provider: body.provider, prompt: body.prompt,
           ...(body.cwd !== undefined ? { cwd: body.cwd as string } : {}), ...(attachments ? { attachments } : {}),
           ...(reviewer && body.provider === 'codex' ? { codexApprovalsReviewer: reviewer } : {}) });
         return json(res, 202, { job });
@@ -314,9 +315,10 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         const title = body.title === undefined ? undefined : normalizeSessionTitle(body.title);
         if (!backend.createSession) return json(res, 503, { error: '새 세션을 생성할 수 없습니다.' });
         const model = requestedModel(body.model);
+        const effort = requestedEffort(body.effort, body.provider);
         // Like the model override, an unusable value fails before admission; only a Codex thread has a reviewer.
         const reviewer = requestedApprovalsReviewer(body.codexApprovalsReviewer);
-        const result = await backend.createSession({ provider: body.provider, cwd: body.cwd, prompt: body.prompt.trim(), ...(title ? { title } : {}), ...(model ? { model } : {}),
+        const result = await backend.createSession({ provider: body.provider, cwd: body.cwd, prompt: body.prompt.trim(), ...(title ? { title } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}),
           ...(reviewer && body.provider === 'codex' ? { codexApprovalsReviewer: reviewer } : {}) });
         return json(res, 202, { ...result, session: publicSession(result.session) });
       }
@@ -358,7 +360,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (count > MAX_ATTACHMENTS) return json(res, 413, { error: `첨부 파일은 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.` });
         if (typeof body.prompt !== 'string' || (!body.prompt.trim() && !count) || body.prompt.length > 32_000) return json(res, 400, { error: '메시지나 첨부 파일을 추가하세요. 메시지는 32,000자 이하여야 합니다.' });
         const model = requestedModel(body.model);
-        const run = await backend.enqueue(messageMatch[1], body.prompt.trim(), { attachments, attachmentIds, ...(model ? { model } : {}) });
+        const effort = requestedEffort(body.effort);
+        const run = await backend.enqueue(messageMatch[1], body.prompt.trim(), { attachments, attachmentIds, ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
         return json(res, 202, { run });
       }
       // Provider request IDs are opaque and may contain an encoded slash.

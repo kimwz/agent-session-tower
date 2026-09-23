@@ -1,4 +1,4 @@
-import { requestedModel, validModelId } from '../providers/models.js';
+import { requestedEffort, requestedModel, validEffort, validModelId } from '../providers/models.js';
 import { EventEmitter } from 'node:events';
 import { constants } from 'node:fs';
 import { mkdir, open, rename, stat, unlink } from 'node:fs/promises';
@@ -161,12 +161,14 @@ export class AutoPromptManager extends EventEmitter {
     if (input.sessionMode !== undefined && input.sessionMode !== 'new') throw new RunError('올바른 세션 생성 모드를 선택하세요.');
     if (input.routingContext !== undefined && (typeof input.routingContext !== 'string' || input.routingContext.length > 32_000)) throw new RunError('라우팅 지침은 32,000자 이하여야 합니다.');
     requestedModel(input.model);
+    requestedEffort(input.effort, input.provider);
     input = copy(input);
     input.requestId = input.requestId.toLowerCase();
     const fingerprint = createHash('sha256').update(JSON.stringify({ provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: input.attachments ?? [],
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
       ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
       ...(input.model ? { model: input.model } : {}),
+      ...(input.effort ? { effort: input.effort } : {}),
       ...(input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}) })).digest('hex');
     const previous = this.entries.get(input.requestId);
     const admitting = this.admissions.get(input.requestId);
@@ -193,6 +195,7 @@ export class AutoPromptManager extends EventEmitter {
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
       ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
       ...(input.model ? { model: input.model } : {}),
+      ...(input.effort ? { effort: input.effort } : {}),
       routerModel: MODELS[input.provider], status: 'queued', createdAt: now, updatedAt: now,
       ...(prepared.attachments.length ? { attachments: prepared.attachments.map(({ name, mimeType, size }) => ({ name, mimeType, size })) } : {}),
     } };
@@ -369,8 +372,8 @@ export class AutoPromptManager extends EventEmitter {
     const attachments: AttachmentInput[] = staged.map(({ metadata, content }) => ({ name: metadata.name, mimeType: metadata.mimeType, data: content.toString('base64') }));
     const internal = { autoPromptId: job.id, validate };
     const run = decision.action === 'resume'
-      ? await this.options.runs.enqueue(decision.sessionId!, job.prompt, { attachments, ...(job.model ? { model: job.model } : {}) }, internal)
-      : (await this.options.runs.create({ provider: job.provider, cwd, prompt: job.prompt, attachments, ...(job.model ? { model: job.model } : {}),
+      ? await this.options.runs.enqueue(decision.sessionId!, job.prompt, { attachments, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}) }, internal)
+      : (await this.options.runs.create({ provider: job.provider, cwd, prompt: job.prompt, attachments, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}),
         ...(job.codexApprovalsReviewer ? { codexApprovalsReviewer: job.codexApprovalsReviewer } : {}) }, internal)).run;
     this.complete(entry, run);
     await this.persist(); this.emit('change');
@@ -417,6 +420,7 @@ function validEntry(value: unknown): value is Entry {
     && (job.sessionMode === undefined || job.sessionMode === 'new')
     && (job.routingContext === undefined || typeof job.routingContext === 'string' && job.routingContext.length <= 32_000)
     && (job.model === undefined || validModelId(job.model))
+    && (job.effort === undefined || validEffort(job.effort))
     && typeof job.prompt === 'string' && job.prompt.length <= 32_000 && typeof job.routerModel === 'string'
     && typeof job.createdAt === 'string' && typeof job.updatedAt === 'string'
     && ['queued', 'routing', 'dispatching', 'completed', 'error', 'cancelled'].includes(String(job.status))

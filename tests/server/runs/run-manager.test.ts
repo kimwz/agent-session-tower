@@ -104,6 +104,33 @@ test('Claude CLI model overrides are explicit; Codex uses its app-server protoco
   }
 });
 
+test('Claude effort overrides are explicit native levels; Codex takes effort over its app-server protocol', () => {
+  for (const build of [buildCreateArgs, buildResumeArgs]) {
+    const claude = makeSession('/tmp', { provider: 'claude' });
+    assert.equal(build(claude).includes('--effort'), false);
+    const args = build(claude, 'opus', 'xhigh');
+    assert.deepEqual(args.slice(-4), ['--model', 'opus', '--effort', 'xhigh']);
+    assert.throws(() => build(claude, undefined, 'minimal'), /Invalid reasoning effort/);
+    assert.throws(() => build(claude, undefined, '--config'), /Invalid reasoning effort/);
+    const codex = makeSession('/tmp', { provider: 'codex' });
+    assert.deepEqual(build(codex, undefined, 'minimal'), ['app-server', '--stdio']);
+    assert.throws(() => build(codex, undefined, 'High Effort'), /Invalid reasoning effort/);
+  }
+});
+
+test('effort request is persisted and passed to the native Codex turn', async t => {
+  const f = await fixture({ busy: true }); t.after(f.cleanup);
+  const accepted = await f.manager.enqueue(f.session.id, 'Think harder', { effort: 'xhigh' });
+  assert.equal(accepted.effort, 'xhigh');
+  assert.equal(JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'))[0].effort, 'xhigh');
+  f.sessions.set(f.session.id, { ...f.session, status: 'completed' });
+  assert.equal((await finished(f.manager, accepted.id)).status, 'completed');
+  const received = JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8'));
+  assert.equal(received.turnEffort, 'xhigh');
+  assert.equal(received.threadParams.effort, undefined);
+  await assert.rejects(f.manager.enqueue(f.session.id, 'test', { effort: 'Not A Level' }), /Invalid reasoning effort/);
+});
+
 test('model request is snapshotted, persisted and passed to the native thread', async t => {
   const f = await fixture({ busy: true }); t.after(f.cleanup);
   const request = { model: 'native-chosen' };

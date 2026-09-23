@@ -84,6 +84,18 @@ test('explicit directory routes a busy continuation and preserves the original i
   assert.match(f.calls[0].systemPrompt, /untrusted data/);
 });
 
+test('the chosen execution model and effort reach the routed session, and a changed effort is a different request', async t => {
+  const f = await fixture(t);
+  const input = request(f.cwd, { model: 'native-model', effort: 'xhigh' });
+  const job = await f.finished((await f.manager.submit(input)).id);
+  assert.equal(job.status, 'completed'); assert.equal(job.effort, 'xhigh');
+  assert.equal(f.calls[0].model, 'gpt-5.6-sol');
+  assert.equal(f.dispatches[0].input.model, 'native-model');
+  assert.equal(f.dispatches[0].input.effort, 'xhigh');
+  await assert.rejects(f.manager.submit({ ...input, effort: 'low' }), /다른 지시문/);
+  await assert.rejects(f.manager.submit(request(f.cwd, { provider: 'claude', effort: 'minimal' })), /Invalid reasoning effort/);
+});
+
 test('Auto selects among every directory including closed sessions and empty pins, then restricts candidates to its provider', async t => {
   const f = await fixture(t);
   f.session.closed = true;

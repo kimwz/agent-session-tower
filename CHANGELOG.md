@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.11.0] - 2026-09-23
+
+### Added
+- Choose the reasoning effort next to the model in chat. Claude Code offers low through max; Codex lists the levels and default each model advertises, and the choice is hidden for models without effort control.
+- Choose the model and reasoning effort when starting a new session or sending an Auto Prompt.
+- Open several terminals per workspace as tabs. Tabs survive page reloads and reconnect to their shells; closing a tab stops only that shell.
+
 ## [1.10.2] - 2026-09-23
 
 ### Fixed
