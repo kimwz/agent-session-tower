@@ -3,7 +3,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { isSea } from 'node:sea';
-import { SessionService } from './sessions/service.js';
+import { nativeHistory } from './sessions/native-history.js';
 import { SessionTitleStore } from './stores/session-titles.js';
 import { DismissedRunStore } from './stores/dismissed-runs.js';
 import { ClosedSessionStore } from './stores/closed-sessions.js';
@@ -104,7 +104,6 @@ async function main() {
     auth.close(); await releaseLock();
     throw new Error('Configure an account first: start with --host 127.0.0.1 or --host 0.0.0.0, then open local Account management.');
   }
-  const sessions = new SessionService();
   const titles = new SessionTitleStore(stateDir);
   const dismissedRuns = new DismissedRunStore(stateDir);
   const closedSessions = new ClosedSessionStore(stateDir);
@@ -112,28 +111,28 @@ async function main() {
   const runs = new DurableRunManager({ stateDir });
   // Load persisted history before shutdown or an HTTP request can touch the runner.
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
-  let scanning = true;
+  // The worker has indexed native sessions before it answers, so the session list is complete here.
+  const history = nativeHistory(runs);
   const listeners = new Set<() => void>();
   const changed = () => { for (const listener of listeners) listener(); };
   const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed });
-  sessions.on('change', changed);
   runs.on('change', changed);
   const snapshot = (): Snapshot => {
-    const all = runs.sessionList(sessions.list());
+    const all = runs.sessionList();
     const managed = runs.list();
     return {
       sessions: projectSessionStates(all, managed, runs.settledRunIds()).map(session => closedSessions.apply(titles.apply(session))),
       groups: groups.list(),
       providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider).length })),
-      runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning, hostname: hostname(), version: APP_VERSION,
+      runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning: history.indexing, hostname: hostname(), version: APP_VERSION,
       ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}), updatedAt: new Date().toISOString(),
     };
   };
   const detail = async (id: string, before?: number, limit?: number) => {
     const session = runs.getSession(id);
     if (!session) return undefined;
-    const history = await sessions.detail(runs.nativeSessionId(id), before, limit);
-    return { ...(history || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
+    const page = await history.read(runs.nativeSessionId(id), before, limit);
+    return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
   };
   const { server, dispose } = createMonitorServer({ port, clientDir,
     auth, workspaceTerminals: runs.terminals, remote: access.remote ? { origins: access.origins } : undefined, backend: {
@@ -189,7 +188,7 @@ async function main() {
     if (closing) return;
     closing = true;
     const stoppingCapabilities = capabilities.stop();
-    sessions.stop();
+    history.stop();
     auth.close();
     dispose();
     server.closeAllConnections();
@@ -200,11 +199,10 @@ async function main() {
   process.once('SIGINT', onSignal);
   process.once('SIGTERM', onSignal);
   try {
-    await sessions.start();
-    if (closing) { sessions.stop(); return; }
-    scanning = false;
+    await history.start();
+    if (closing) { history.stop(); return; }
     changed();
-    console.log(`  Ready: ${sessions.list().length} sessions discovered.\n`);
+    console.log(`  Ready: ${runs.sessionList().length} sessions discovered.\n`);
   } catch (error) { await shutdown(); throw error; }
 }
 

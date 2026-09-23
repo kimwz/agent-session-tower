@@ -1,10 +1,18 @@
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import type { AutoPromptJob, Run, Session } from '../../shared/types.js';
+import type { AutoPromptJob, Run, Session, SessionDetail } from '../../shared/types.js';
 
 export const RUNNER_PROTOCOL = 1;
 export const MAX_RPC_BYTES = 40 * 1024 * 1024;
+/**
+ * Optional operations this worker build serves. A web process checks the attached worker's list
+ * before calling one, because an older worker keeps running until it is idle.
+ */
+export const RUNNER_CAPABILITIES = ['sessionHistory'] as const;
+export type RunnerCapability = typeof RUNNER_CAPABILITIES[number];
+/** One page of a native conversation, read by the worker that already indexes native history. */
+export type SessionHistoryPage = Pick<SessionDetail, 'messages' | 'hasMore' | 'nextBefore'>;
 export interface RunnerSnapshot {
   instance: string;
   revision: number;
@@ -15,6 +23,8 @@ export interface RunnerSnapshot {
   autoPrompts: AutoPromptJob[];
   /** Absent from workers that predate version reporting. */
   version?: string;
+  /** Absent from workers that predate optional operations. */
+  capabilities?: string[];
 }
 export interface RunnerReply {
   protocol: number;

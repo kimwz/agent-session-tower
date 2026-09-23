@@ -16,6 +16,8 @@ import { RUNNER_PROTOCOL, runnerPaths } from '../../../server/runs/runner-protoc
 import type { CodexBridgeOptions } from '../../../server/runs/codex-bridge.js';
 import type { Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
+import { nativeHistory } from '../../../server/sessions/native-history.js';
+import { startLegacyRunner } from './fixtures/legacy-runner.ts';
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'tower-durable-fixture-'));
@@ -282,4 +284,56 @@ test('web reports the attached worker version and keeps requested effort on the 
   const run = await client.enqueue(f.session.id, 'Think harder', { effort: 'high' });
   await until(() => client.list().some(item => item.id === run.id));
   assert.equal(client.list().find(item => item.id === run.id)?.effort, 'high');
+});
+
+test('the worker serves native conversation pages without the native file path or an attached snapshot', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const calls: unknown[][] = [];
+  const messages = [{ id: 'm1', role: 'assistant' as const, text: 'From the native file', timestamp: new Date().toISOString() }];
+  f.sessions.detail = async (id, before, limit) => {
+    calls.push([id, before, limit]);
+    return { session: { ...f.session, filePath: '/private/native.jsonl' }, messages, hasMore: true, nextBefore: 42 };
+  };
+  const client = await f.connect();
+  assert.equal(client.supports('sessionHistory'), true);
+  const history = nativeHistory(client, () => { throw new Error('A current worker must not need a web-side index.'); });
+  assert.equal(history.indexing, false);
+  assert.deepEqual(await history.read(f.session.nativeId, 100, 50), { messages, hasMore: true, nextBefore: 42 });
+  assert.deepEqual(calls, [[f.session.nativeId, 100, 50]]);
+  await assert.rejects(client.sessionHistory(''), { statusCode: 400 });
+  const token = await readFile(f.paths.token, 'utf8');
+  const { instance } = JSON.parse((await rpc(f.host.socketPath, token, { protocol: RUNNER_PROTOCOL, method: 'snapshot', args: [] })).body) as { instance: string };
+  const reply = JSON.parse((await rpc(f.host.socketPath, token, { protocol: RUNNER_PROTOCOL, method: 'sessionHistory', args: [f.session.nativeId, -1, 1.5], instance })).body);
+  assert.equal(reply.snapshot, undefined, 'reading history does not resend engine state');
+  assert.doesNotMatch(JSON.stringify(reply), /private\/native/);
+  assert.deepEqual(calls.at(-1), [f.session.nativeId, undefined, undefined], 'invalid page values fall back to defaults');
+});
+
+test('a web process attached to a 1.12 worker reads conversations from its own index and never sends the missing operation', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-worker-'));
+  const stateDir = join(directory, 'state');
+  const session: Session = { id: 'codex:legacy', nativeId: 'legacy', provider: 'codex', title: 'Legacy', cwd: directory, project: 'fixture', status: 'idle',
+    statusReason: '', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
+  const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [session], nativeIds: { [session.id]: session.nativeId }, settled: [], autoPrompts: [] });
+  const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
+  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  await client.start();
+  assert.equal(client.runnerVersion(), '1.12.3');
+  assert.equal(client.supports('sessionHistory'), false);
+  const messages = [{ id: 'm1', role: 'user' as const, text: 'Indexed by the web process', timestamp: new Date().toISOString() }];
+  let indexes = 0, started = 0, stopped = 0;
+  const index = { detail: async () => ({ session: { ...session, filePath: '/private/legacy.jsonl' }, messages, hasMore: false }),
+    start: async () => { started++; }, stop: () => { stopped++; } } as unknown as SessionService;
+  const history = nativeHistory(client, () => { indexes++; return index; });
+  assert.equal(indexes, 1);
+  assert.equal(history.indexing, true);
+  await history.start();
+  assert.equal(started, 1);
+  assert.equal(history.indexing, false);
+  assert.deepEqual(await history.read(session.nativeId, undefined, 60), { messages, hasMore: false });
+  history.stop();
+  assert.equal(stopped, 1);
+  assert.ok(!legacy.methods.includes('sessionHistory'), `sent: ${legacy.methods.join(', ')}`);
+  // Why the capability check exists: the old worker rejects the operation outright.
+  await assert.rejects(client.sessionHistory(session.nativeId), { statusCode: 400, message: 'Unknown runner operation.' });
 });

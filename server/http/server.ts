@@ -9,6 +9,7 @@ import { requestedEffort, requestedModel } from '../providers/models.js';
 import { requestedApprovalsReviewer } from '../providers/approvals.js';
 import { SseClient } from './sse-client.js';
 import { publicSnapshot } from './public-snapshot.js';
+import { SnapshotStream } from './snapshot-stream.js';
 import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
 import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
 import { WorkspaceTerminals, type WorkspaceTerminalBackend } from '../workspace-terminals.js';
@@ -68,24 +69,17 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
     streams.set(id, active);
     res.once('close', () => { active.delete(close); if (!active.size) streams.delete(id); });
   };
-  const clients = new Set<SseClient>();
   const rates = new Map<string, { count: number; at: number }>();
-  let sequence = 0;
   let scheduled: ReturnType<typeof setTimeout> | undefined;
   const json = (res: ServerResponse, status: number, body: unknown) => {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(body));
   };
   const snapshot = () => publicSnapshot(backend.snapshot());
-  const frame = () => `id: ${++sequence}\nevent: snapshot\ndata: ${JSON.stringify(snapshot())}\n\n`;
-  const broadcast = () => {
-    scheduled = undefined;
-    if (!clients.size) return;
-    const data = frame();
-    for (const client of clients) client.snapshot(data);
-  };
+  const stream = new SnapshotStream(snapshot);
+  const clients = new Set<SseClient>();
   const unsubscribe = backend.subscribe(() => {
-    if (!scheduled) scheduled = setTimeout(broadcast, 200);
+    if (!scheduled) scheduled = setTimeout(() => { scheduled = undefined; stream.publish(); }, 200);
   });
   const heartbeat = setInterval(() => {
     for (const client of clients) client.heartbeat();
@@ -301,10 +295,11 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (req.method === 'GET' && path === '/api/events') {
         if (clients.size >= 40) return json(res, 503, { error: '열린 모니터 연결이 너무 많습니다.' });
         res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
-        const client = new SseClient(res, () => clients.delete(client));
+        const client = new SseClient(res, () => { clients.delete(client); stream.detach(client); });
         clients.add(client);
         if (!identity.local) trackStream(sessionId, res, () => client.end());
-        client.snapshot(`retry: 2000\n\n${frame()}`);
+        // Pages that predate patches omit the parameter and keep receiving complete snapshots.
+        stream.attach(client, url.searchParams.get('patch') === '1', 'retry: 2000\n\n');
         return;
       }
       if (req.method === 'POST' && path === '/api/sessions') {
@@ -420,6 +415,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
     unsubscribe();
     clearInterval(heartbeat);
     if (scheduled) clearTimeout(scheduled);
+    stream.close();
     for (const client of clients) client.end();
     clients.clear();
   };
