@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
-import { SlackAutomationManager, type SlackAutomationOptions } from '../../../server/slack/automation.js';
+import { SlackAutomationManager, type CoordinatorChannel, type SlackAutomationOptions } from '../../../server/slack/automation.js';
 import type { SlackMention, SlackRule } from '../../../shared/slack.js';
 import type { AutoPromptJob, AutoPromptRequest, Run } from '../../../shared/types.js';
 
@@ -769,3 +769,53 @@ test('a handoff flush reports a state file that cannot be saved instead of hidin
   await f.manager.flush();
   assert.equal(JSON.parse(await readFile(join(f.directory, 'slack-automation.json'), 'utf8')).workflows.length, 1);
 });
+
+test('the same coordinator serves another channel under its own name, tools and state file', async t => {
+  const f = await fixture(t);
+  const channel: CoordinatorChannel = { label: 'GitHub', tools: 'github', file: 'github-automation.json', validReaction: name => ['+1', 'eyes', 'rocket', '👍'].includes(name),
+    aliases: ['깃허브', 'GitHub'], mentionGuide: 'To mention someone, write @login.' };
+  let prompt = '';
+  const reacted: string[] = [];
+  const options: SlackAutomationOptions = { ...f.options, channel, startConversation: async (_workflow, text) => { prompt = text; return { sessionId: 'gh-session', runId: 'run' }; },
+    react: async (_mention, name) => { reacted.push(name); } };
+  const github = new SlackAutomationManager(options);
+  await github.start();
+  // Rules and issue text are passed exactly as written, even where they name Slack.
+  await github.setRules([{ ...rule, id: 'slack_review', instructions: 'Fix slack_send in Slack' }]);
+  await github.ingest({ ...mention, id: 'issue-event', teamId: 'github', channel: 'octo/app', text: 'Slack is down' });
+  await github.tick();
+  assert.match(prompt, /GitHub conversation coordinator/);
+  assert.match(prompt, /github_reply/);
+  assert.match(prompt, /@login/);
+  assert.doesNotMatch(prompt, /<@USER_ID>/);
+  assert.match(prompt, /"id":"slack_review"[\s\S]*Fix slack_send in Slack[\s\S]*Slack is down/);
+  assert.doesNotMatch(prompt.split('Owner configured rules')[0], /Slack|slack_/);
+  const id = github.list()[0].id;
+  await assert.rejects(github.tool(id, 'slack_reply', { requestKey: 'r', text: 'Done' }), /Unknown GitHub conversation tool/);
+  assert.equal((await github.tool(id, 'github_reply', { requestKey: 'r', text: 'Done' }) as { proposalNumber: number }).proposalNumber, 1);
+  // A command naming another channel creates no permission here; this channel's own name works.
+  await github.ownerChat('gh-session', 'send reply 1 to Slack');
+  assert.equal(f.counts().sends, 0);
+  const receipt = await github.ownerChat('gh-session', 'send reply 1 to GitHub');
+  assert.match(receipt, /GitHub/);
+  assert.doesNotMatch(receipt, /Slack/);
+  assert.equal(f.counts().sends, 1, 'the owner-approved proposal is sent through the channel');
+  // Reactions follow the channel's own names.
+  (github as unknown as { items: Array<{ ownerConditionalReply?: unknown }> }).items[0].ownerConditionalReply = { mode: 'composed', requestId: 'immediate', requestKey: 'k', text: 'x', status: 'sent', authorizedAt: new Date().toISOString() };
+  await assert.rejects(github.tool(id, 'github_react', { name: 'hourglass', action: 'add' }), /Provide an emoji name/);
+  await github.tool(id, 'github_react', { name: 'eyes', action: 'add' });
+  await github.tool(id, 'github_react', { name: '👍', action: 'add' });
+  assert.deepEqual(reacted, ['eyes', '👍']);
+  // Each channel keeps its own state and restarts from it, reactions included.
+  const again = new SlackAutomationManager(options);
+  await again.start();
+  assert.equal(again.list()[0].mention.channel, 'octo/app');
+  assert.equal(again.rules()[0].id, 'slack_review');
+  await f.manager.ingest(mention);
+  const slack = new SlackAutomationManager(f.options);
+  await slack.start();
+  assert.equal(slack.rules()[0].id, 'review');
+  assert.deepEqual(slack.list().map(item => item.mention.channel), ['C1'], 'Slack restarts with only its own workflow');
+  assert.deepEqual(again.list().map(item => item.mention.channel), ['octo/app']);
+});
+
