@@ -229,6 +229,9 @@ export interface TriggerSummary {
 }
 export interface TriggerOverview {
   triggers: TriggerSummary[];
+  /** The latest runs, newest first. */
   recent: TriggerEvent[];
+  /** Older runs that are still working or just changed, so what the monitor shows stays current. */
+  updated?: TriggerEvent[];
   storageError?: string;
 }

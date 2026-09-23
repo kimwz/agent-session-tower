@@ -431,3 +431,43 @@ test('deleting and restoring a trigger never lets runs fired before the deletion
   trigger = await service.setEnabled(trigger.id, true, trigger.revision, OWNER);
   assert.equal(service.launchAllowed(trigger.id, before.id), false);
 });
+
+test('run history pages by position, so runs recorded at the same moment are never skipped, and one run reads after its trigger is gone', async t => {
+  const f = await fixture(t);
+  const service = await f.open();
+  const trigger = await service.create({ ...hourly(f.project), policy: { overlap: 'parallel', maxEventsPerHour: 60 } }, OWNER);
+  for (let index = 0; index < 5; index++) await service.run(trigger.id, OWNER);
+  const all = service.events({ limit: 200 });
+  assert.equal(all.length, 5);
+  assert.ok(all.every(event => event.receivedAt === all[0].receivedAt), 'the clock did not move, so every run shares one time');
+  const first = service.events({ limit: 2 });
+  const second = service.events({ limit: 2, beforeId: first.at(-1)!.id });
+  const third = service.events({ limit: 2, beforeId: second.at(-1)!.id });
+  assert.deepEqual([...first, ...second, ...third].map(event => event.id), all.map(event => event.id));
+  assert.deepEqual(service.events({ limit: 2, before: all[0].receivedAt }), [], 'a time cursor alone would skip them');
+  await service.remove(trigger.id, trigger.revision, OWNER);
+  assert.equal(service.event(all[0].id).triggerName, trigger.name);
+  assert.throws(() => service.event('missing'), /no longer in trigger history/);
+});
+
+test('the live overview also carries older runs that are still working or just finished', async t => {
+  const f = await fixture(t);
+  const service = await f.open();
+  const trigger = await service.create({ ...hourly(f.project), policy: { overlap: 'parallel', maxEventsPerHour: 60 } }, OWNER);
+  const first = await service.run(trigger.id, OWNER);
+  for (let wait = 0; service.events({ limit: 1 })[0]?.status !== 'running' && wait < 100; wait++) await new Promise(resolve => setTimeout(resolve, 10));
+  for (let index = 0; index < 25; index++) { f.clock.now += 1000; await service.run(trigger.id, OWNER); }
+  let overview = service.overview();
+  assert.equal(overview.recent.length, 20);
+  assert.ok(!overview.recent.some(event => event.id === first.id));
+  assert.equal(overview.updated?.find(event => event.id === first.id)?.status, 'running', 'still working, so still live');
+  assert.equal(overview.updated?.find(event => event.id === first.id)?.input.instructions, '');
+  f.finish();
+  f.clock.now += 1000;
+  // The tick a manual run started may still be finishing; the next one sees the finished run.
+  await service.tick();
+  await service.tick();
+  overview = service.overview();
+  assert.equal(overview.updated?.find(event => event.id === first.id)?.status, 'completed', 'its finish reaches the monitor too');
+});
+

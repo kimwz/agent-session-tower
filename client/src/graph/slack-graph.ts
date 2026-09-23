@@ -1,5 +1,5 @@
 import type { SlackWorkflow } from '../../../shared/slack';
-export const SLACK_MONITOR_ID = 'slack:monitor';
+/** Where the Slack monitor was left before it became the trigger monitor; read once to carry it over. */
 export const SLACK_POSITION_KEY = 'tower.slack-monitor.position.v1';
 export const SLACK_PAGE_SIZE = 5;
 export function slackMentionLayout(count: number, hasMore: boolean) {

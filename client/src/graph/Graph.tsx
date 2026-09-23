@@ -5,17 +5,24 @@ import { Maximize, Minus, Plus, Scan } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../../shared/types';
 import { nodeTypes, type ProjectData } from './GraphNodes';
 import type { SlackPublicStatus } from '../../../shared/slack';
-import { SlackMonitorNode, SlackMentionNode } from './SlackGraphNodes';
-import { SLACK_MONITOR_ID, SLACK_POSITION_KEY, SLACK_PAGE_SIZE, parseSlackPosition, visibleSlackMentions, slackMentionLayout } from './slack-graph';
+import type { TriggerEvent, TriggerOverview } from '../../../shared/triggers';
+import { SlackMentionNode } from './SlackGraphNodes';
+import { TriggerEventNode, TriggerMonitorNode } from './TriggerGraphNodes';
+import { SLACK_PAGE_SIZE, slackMentionLayout } from './slack-graph';
 import { slackWorkflowWorking } from '../slack/slack-monitor';
-const canvasNodeTypes = { ...nodeTypes, slackMonitor: SlackMonitorNode, slackMention: SlackMentionNode };
+import { monitorItems, monitorVisible, readMonitorPosition, TRIGGER_MONITOR_ID, TRIGGER_POSITION_KEY, triggerEventWorking } from '../triggers/trigger-monitor';
+const canvasNodeTypes = { ...nodeTypes, triggerMonitor: TriggerMonitorNode, slackMention: SlackMentionNode, triggerEvent: TriggerEventNode };
 import { graphProjectId, graphProjectKey, graphSessionGroups, clearHostPosition, HOST_HEIGHT } from './graph-layout';
 import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualProjectBounds, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, reconcileManualGraph, setGraphLayoutMode, type GraphLayoutMode, type GraphPreferences } from './graph-layout-preferences';
 import { includePinnedProjectGroups, projectGroupLabel } from '../project-groups/project-groups';
 import { CanvasSettings } from './CanvasSettings';
 import { projectGroupMinimumWidth, projectGroupTitleMeasurer } from '../project-groups/project-group-title';
 
-type GraphProps = { slackUnreadIds?: ReadonlySet<string>; slack?: SlackPublicStatus | null; selectedSlackId?: string | null; onSelectSlack?: (id: string | null) => void; token?: string; providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
+type GraphProps = { slackUnreadIds?: ReadonlySet<string>; slack?: SlackPublicStatus | null; selectedSlackId?: string | null; onSelectSlack?: (id: string | null) => void;
+  triggerOverview?: TriggerOverview; triggerEvents?: TriggerEvent[]; triggerUnreadIds?: ReadonlySet<string>; selectedTriggerEventId?: string | null; onSelectTriggerEvent?: (id: string) => void; triggerHasMore?: boolean; onMoreTriggers?: () => void;
+  token?: string; providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
+
+const noEvents: TriggerEvent[] = [];
 
 function readPreferences(): GraphPreferences {
   try { return parseGraphPreferences(window.localStorage.getItem(GRAPH_PREFERENCES_KEY)); }
@@ -26,7 +33,7 @@ function viewportTransitionDuration() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 280;
 }
 
-function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, token = '', providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
+function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
   const { language } = useI18n();
   const { fitView, zoomIn, zoomOut, getViewport, setViewport } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
@@ -69,8 +76,11 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, token =
   const [zoom, setZoom] = useState(100);
   const [graphLimit, setGraphLimit] = useState(8);
   const [slackLimit, setSlackLimit] = useState(SLACK_PAGE_SIZE);
-  const [slackPosition, setSlackPosition] = useState(() => { try { return parseSlackPosition(window.localStorage.getItem(SLACK_POSITION_KEY)); } catch { return null; } });
-  const showMoreSlack = useCallback(() => setSlackLimit(value => value + SLACK_PAGE_SIZE), []);
+  const [slackPosition, setSlackPosition] = useState(() => { try { return readMonitorPosition(window.localStorage); } catch { return null; } });
+  const monitorTotal = (slack?.connected ? slack.events.length : 0) + triggerEvents.length;
+  // Older trigger runs load from history once everything already here is shown.
+  const showMoreSlack = useCallback(() => { setSlackLimit(value => value + SLACK_PAGE_SIZE); if (slackLimit + SLACK_PAGE_SIZE > monitorTotal) onMoreTriggers?.(); }, [slackLimit, monitorTotal, onMoreTriggers]);
+  const showMonitor = monitorVisible(!!slack?.connected, triggerOverview);
   const [preferences, setPreferences] = useState(readPreferences);
   const [manualFitRequest, setManualFitRequest] = useState(0);
   const manual = preferences.mode === 'manual';
@@ -137,22 +147,28 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, token =
       });
       x += width + 36;
     });
-    if (slack?.connected) {
-      const mentions = visibleSlackMentions(slack.events, slackLimit, selectedSlackId);
+    if (showMonitor) {
+      const slackEvents = slack?.connected ? slack.events : [];
+      const items = monitorItems(slackEvents, triggerEvents, slackLimit, selectedTriggerEventId ?? selectedSlackId);
       const right = ns.filter(node => node.type === 'projectGroup').reduce((max, node) => Math.max(max, node.position.x + Number(node.style?.width || 0) + 36), 0);
-      const remaining = slack.events.length - mentions.length;
-      const layout = slackMentionLayout(mentions.length, remaining > 0);
-      ns.push({ id: SLACK_MONITOR_ID, type: 'slackMonitor', position: slackPosition || { x: right, y: 185 }, style: { width: layout.width, height: layout.height }, zIndex: 1, draggable: true, dragHandle: '.slack-monitor-drag-handle', selectable: false, focusable: false, data: { name: slack.account?.teamName || 'Slack', enabled: slack.enabled, status: slack.status, error: slack.error, count: slack.events.length, active: slack.events.filter(slackWorkflowWorking).length, remaining, onMore: showMoreSlack, onSelect: onSelectSlack } });
-      mentions.forEach((event, index) => ns.push({ id: `slack:mention:${event.id}`, type: 'slackMention', parentId: SLACK_MONITOR_ID, extent: 'parent', style: { pointerEvents: 'all' }, position: layout.positions[index], zIndex: 3, draggable: false, selectable: false, focusable: false, data: { event, unread: slackUnreadIds?.has(event.id) || false, selected: event.id === selectedSlackId, onSelect: onSelectSlack } }));
-      es.push({ id: 'host-slack', source: 'host', target: SLACK_MONITOR_ID, type: 'smoothstep', animated: motion && slack.events.some(slackWorkflowWorking), style: { stroke: '#675077', strokeWidth: 1.2 } });
+      const remaining = monitorTotal - items.length;
+      const layout = slackMentionLayout(items.length, remaining > 0 || triggerHasMore);
+      const active = slackEvents.filter(slackWorkflowWorking).length + triggerEvents.filter(triggerEventWorking).length;
+      ns.push({ id: TRIGGER_MONITOR_ID, type: 'triggerMonitor', position: slackPosition || { x: right, y: 185 }, style: { width: layout.width, height: layout.height }, zIndex: 1, draggable: true, dragHandle: '.slack-monitor-drag-handle', selectable: false, focusable: false,
+        data: { ...(slack?.connected ? { slack: { name: slack.account?.teamName || 'Slack', enabled: slack.enabled, status: slack.status, error: slack.error } } : {}),
+          enabledTriggers: triggerOverview?.triggers.filter(item => item.kind !== 'slack' && item.enabled).length ?? 0, count: monitorTotal, active, remaining, more: triggerHasMore, onMore: showMoreSlack, onSelect: () => onSelectSlack?.(null) } });
+      items.forEach((item, index) => ns.push(item.kind === 'slack'
+        ? { id: `slack:mention:${item.id}`, type: 'slackMention', parentId: TRIGGER_MONITOR_ID, extent: 'parent', style: { pointerEvents: 'all' }, position: layout.positions[index], zIndex: 3, draggable: false, selectable: false, focusable: false, data: { event: item.event, unread: slackUnreadIds?.has(item.id) || false, selected: item.id === selectedSlackId, onSelect: onSelectSlack } }
+        : { id: `trigger:event:${item.id}`, type: 'triggerEvent', parentId: TRIGGER_MONITOR_ID, extent: 'parent', style: { pointerEvents: 'all' }, position: layout.positions[index], zIndex: 3, draggable: false, selectable: false, focusable: false, data: { event: item.event, unread: triggerUnreadIds?.has(item.id) || false, selected: item.id === selectedTriggerEventId, onSelect: onSelectTriggerEvent } }));
+      es.push({ id: 'host-monitor', source: 'host', target: TRIGGER_MONITOR_ID, type: 'smoothstep', animated: motion && active > 0, style: { stroke: '#675077', strokeWidth: 1.2 } });
     }
     const hostPosition = manual ? clearHostPosition(manualLayout.host, ns.filter(node => node.type === 'projectGroup').map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }))) : { x: Math.max(0, (x - 36) / 2 - 128), y: 0 };
     ns.push({ id: 'host', type: 'host', position: hostPosition, data: { name: hostname, active: sessions.filter(s => s.status === 'working').length, providers, disabled: groupActionsDisabled, onAutoPrompt }, style: { width: 256, height: HOST_HEIGHT, pointerEvents: 'all' }, zIndex: 20, draggable: manual, dragHandle: '.host-node', selectable: false, focusable: false });
     return { modelNodes: ns, edges: es, shown: grouped.reduce((total, [, members]) => total + members.length, 0) };
-  }, [slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, token, sessions, selectedId, onSelect, hostname, providers, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt]);
+  }, [slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, showMonitor, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, hostname, providers, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt]);
 
   const [nodes, setNodes] = useState(modelNodes);
-  const visibleProjectKey = modelNodes.filter(node => node.type === 'projectGroup' || node.type === 'slackMonitor').map(node => node.id).join('|');
+  const visibleProjectKey = modelNodes.filter(node => node.type === 'projectGroup' || node.type === 'triggerMonitor').map(node => node.id).join('|');
   useLayoutEffect(() => {
     setNodes(current => {
       const prior = new Map(current.map(node => [node.id, node]));
@@ -163,14 +179,14 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, token =
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     setNodes(current => applyNodeChanges(changes, current));
     for (const change of changes) {
-      if (change.type === 'position' && change.id === SLACK_MONITOR_ID && change.position) {
+      if (change.type === 'position' && change.id === TRIGGER_MONITOR_ID && change.position) {
         const position = { ...change.position };
         setSlackPosition(position);
-        try { window.localStorage.setItem(SLACK_POSITION_KEY, JSON.stringify(position)); } catch { /* Dragging remains usable without storage. */ }
+        try { window.localStorage.setItem(TRIGGER_POSITION_KEY, JSON.stringify(position)); } catch { /* Dragging remains usable without storage. */ }
       }
     }
     if (!manual) return;
-    const moves = changes.flatMap(change => change.type === 'position' && change.id !== SLACK_MONITOR_ID && !change.id.startsWith('slack:mention:') && change.position ? [{ id: change.id, position: change.position }] : []);
+    const moves = changes.flatMap(change => change.type === 'position' && change.id !== TRIGGER_MONITOR_ID && !change.id.startsWith('slack:mention:') && !change.id.startsWith('trigger:event:') && change.position ? [{ id: change.id, position: change.position }] : []);
     if (!moves.length) return;
     setPreferences(current => {
       const reconciled = reconcileManualGraph(current.layout, allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions);
@@ -204,7 +220,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, token =
     <ReactFlow onPaneClick={onCanvasClick} onDoubleClick={onCanvasDoubleClick} zoomOnDoubleClick={false} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={canvasNodeTypes} fitView fitViewOptions={{ padding: 0.1, minZoom: 0.15, maxZoom: 0.95, duration: 0 }} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(_, viewport) => setZoom(Math.round(viewport.zoom * 100))} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
       <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#283343" />
     </ReactFlow>
-    {!slack?.connected && emptyState}
+    {!showMonitor && emptyState}
     <div className="canvas-quick-controls" aria-label={t("캔버스 보기 도구")}>
       <div className="canvas-zoom-controls" role="group" aria-label={t("그래프 보기 조절")}><button onClick={() => { void zoomOut({ duration: 0 }); }} aria-label={t("그래프 축소")} title={t("축소")}><Minus size={15} /></button><span>{zoom}%</span><button onClick={() => { void zoomIn({ duration: 0 }); }} aria-label={t("그래프 확대")} title={t("확대")}><Plus size={15} /></button><i /><button onClick={() => fitVisibleGraph({ padding: 0.13, maxZoom: 0.95 })} aria-label={t("전체 그래프 맞춤")} title={t("전체 맞춤")}><Maximize size={15} /></button>{selectedId && nodes.some(n => n.id === selectedId) && <button className="canvas-find-session" onClick={() => fitVisibleGraph({ nodes: [{ id: selectedId }], maxZoom: 1.1, padding: 0.7 })} aria-label={t("선택한 세션 위치로 이동")} title={t("선택한 세션 찾기")}><Scan size={15} /></button>}</div>
       <CanvasSettings manual={manual} onLayoutChange={changeMode} motion={motion} onMotionChange={setMotion} showHidden={showHidden} onShowHiddenChange={onShowHiddenChange} suspended={settingsSuspended} />

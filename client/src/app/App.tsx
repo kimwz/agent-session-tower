@@ -2,7 +2,9 @@ import { useSlackReadState } from '../slack/use-slack-read-state';
 import { WorkspaceOverlayProvider } from '../workspace/WorkspaceOverlay';
 import { AuthGate } from '../auth/AuthGate';
 import { AccountButton } from '../auth/AccountPanel';
-import { SlackMonitorPanel } from '../slack/SlackMonitorPanel';
+import { TriggerMonitorPanel } from '../triggers/TriggerMonitorPanel';
+import { useTriggerEvents, useTriggerReadState } from '../triggers/use-trigger-monitor';
+import { monitorVisible } from '../triggers/trigger-monitor';
 import { SlackReplyProposals } from '../slack/SlackReplyProposals';
 import { SlackConversationAlert } from '../slack/SlackConversationAlert';
 import { useSlackMonitor } from '../slack/use-slack-monitor';
@@ -56,6 +58,9 @@ function TowerApp() {
   const { slack, error: slackError } = useSlackMonitor(connection === 'connected', token);
   const [selectedId, setSelectedId] = useState<string | null>(readSelection);
   const { mentionId: selectedSlackId, chatId: activeChatId } = slackChatSelection(slack?.events || [], requestedSlackId, selectedId);
+  const [triggerEventId, setTriggerEventId] = useState<string | null>(null);
+  /** The trigger monitor panel is open: its overview, a Slack mention, or a trigger run. */
+  const monitorOpen = selectedSlackId !== undefined || triggerEventId !== null;
   const [provider, setProvider] = useState<'all' | Provider>('all');
   const [status, setStatus] = useState<StatusFilter>('all');
   const [project, setProject] = useState('all');
@@ -88,7 +93,7 @@ function TowerApp() {
   const sidebarToggleRef = useRef<HTMLButtonElement>(null);
   const mobileViewport = useMediaQuery('(max-width: 680px)');
   const narrowViewport = useMediaQuery('(max-width: 900px)');
-  const sidebarIsDrawer = mobileViewport || (narrowViewport && (!!selectedId || selectedSlackId !== undefined));
+  const sidebarIsDrawer = mobileViewport || (narrowViewport && (!!selectedId || monitorOpen));
   const sidebarOpen = sidebarIsDrawer ? showSidebar : !sidebarCollapsed;
 
   useEffect(() => { document.documentElement.lang = language; }, [language]);
@@ -120,7 +125,7 @@ function TowerApp() {
       onError: () => setConnection('offline'),
     });
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
-    const onPop = () => { setSelectedId(readSelection()); setSelectedSlackId(undefined); };
+    const onPop = () => { setSelectedId(readSelection()); setSelectedSlackId(undefined); setTriggerEventId(null); };
     window.addEventListener('popstate', onPop);
     return () => { disconnect(); window.clearInterval(timer); window.removeEventListener('popstate', onPop); };
   }, [refresh, snapshots]);
@@ -129,9 +134,10 @@ function TowerApp() {
     const url = new URL(window.location.href);
     if (id) url.searchParams.set('session', id); else url.searchParams.delete('session');
     window.history.pushState({}, '', `${url.pathname}${url.search}`);
-    setSelectedId(id); setSelectedSlackId(undefined); setShowSidebar(false);
+    setSelectedId(id); setSelectedSlackId(undefined); setTriggerEventId(null); setShowSidebar(false);
   }, []);
   const selectSlack = useCallback((id: string | null) => { selectSession(null); setSelectedSlackId(id); }, [selectSession]);
+  const selectTriggerEvent = useCallback((id: string) => { selectSession(null); setTriggerEventId(id); }, [selectSession]);
   const onSelect = useCallback((id: string) => selectSession(id), [selectSession]);
   const closeChat = useCallback(() => selectSession(null), [selectSession]);
   useEffect(() => {
@@ -143,7 +149,7 @@ function TowerApp() {
       if (showNewSession || showAutoPrompt || document.querySelector('dialog[open], [aria-modal="true"]')) return;
       if (showHelp) { event.preventDefault(); setShowHelp(false); return; }
       if (sidebarIsDrawer && showSidebar) { event.preventDefault(); setShowSidebar(false); sidebarToggleRef.current?.focus(); return; }
-      if (selectedId || selectedSlackId !== undefined) {
+      if (selectedId || monitorOpen) {
         event.preventDefault();
         closeChat();
         requestAnimationFrame(() => canvasRef.current?.focus({ preventScroll: true }));
@@ -151,7 +157,7 @@ function TowerApp() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [closeChat, selectedId, selectedSlackId, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar]);
+  }, [closeChat, selectedId, monitorOpen, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar]);
   const onSessionUpdate = useCallback((updated: Session) => {
     snapshots.provisional(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === updated.id ? { ...session, customTitle: updated.customTitle } : session) } : previous);
   }, [snapshots]);
@@ -209,7 +215,10 @@ function TowerApp() {
   const allMainSessions = useMemo(() => getMainSessions(sessions).filter(session => !coordinatorIds.has(session.id)), [sessions, coordinatorIds]);
   const mainSessions = useMemo(() => allMainSessions.filter(session => !session.closed), [allMainSessions]);
   const closedSessions = useMemo(() => allMainSessions.filter(session => session.closed).sort(sortSessions), [allMainSessions]);
-  const { unreadIds: slackUnreadIds, acknowledge: acknowledgeSlack } = useSlackReadState(slack?.events || [], selectedSlackId, !showHelp && !showNewSession && !showAutoPrompt && !(sidebarIsDrawer && sidebarOpen));
+  const panelVisible = !showHelp && !showNewSession && !showAutoPrompt && !(sidebarIsDrawer && sidebarOpen);
+  const { unreadIds: slackUnreadIds, acknowledge: acknowledgeSlack } = useSlackReadState(slack?.events || [], selectedSlackId, panelVisible);
+  const { events: triggerEvents, hasMore: triggerHasMore, loadMore: loadMoreTriggers, update: updateTriggerEvent } = useTriggerEvents(snapshot?.triggers, token);
+  const { unreadIds: triggerUnreadIds, acknowledge: acknowledgeTrigger } = useTriggerReadState(triggerEvents, !!snapshot?.triggers, panelVisible);
   const onConversationRead = useCallback((id: string, revision: string) => { onRead(id, revision); if (id === activeChatId) acknowledgeSlack(); }, [onRead, activeChatId, acknowledgeSlack]);
   const selectedMainId = useMemo(() => getMainSessionId(sessions, activeChatId), [sessions, activeChatId]);
   const selectedSession = sessions.find(session => session.id === activeChatId);
@@ -263,7 +272,7 @@ function TowerApp() {
     {hasHiddenMatches ? <button className="secondary-button" onClick={() => setShowHidden(true)}>{t("전체보기 켜기")}</button> : hasCanvasHistory ? <button className="secondary-button" onClick={clearFilters}><RefreshCw size={13} />{t("전체 기록 보기")}</button> : <button className="secondary-button" onClick={() => openNewSession()} disabled={!token || connection !== 'connected'}><Plus size={13} />{t("새 세션")}</button>}
   </div>;
 
-  return <div className={`app ${selectedId || selectedSlackId !== undefined ? 'has-chat' : ''} ${sidebarOpen ? '' : 'canvas-only'}`} onPointerDownCapture={event => {
+  return <div className={`app ${selectedId || monitorOpen ? 'has-chat' : ''} ${sidebarOpen ? '' : 'canvas-only'}`} onPointerDownCapture={event => {
     // Clicking ordinary sidebar/chat text can leave body focused. Preserve the
     // interaction scope so that fallback does not turn a canvas key into a global one.
     // Portalled dialogs bubble through React; keep their opener's scope intact.
@@ -288,11 +297,13 @@ function TowerApp() {
       }}>
         <button className="new-session-button canvas-new-session" onClick={() => openNewSession()} disabled={!token || connection !== 'connected'} aria-label={t("새 세션")} title={`${t("새 세션")} (Shift+N)`} aria-keyshortcuts="Shift+N"><Plus size={15} /><span>{t("새 세션")}</span></button>
         {loadError && <div className="main-error canvas-error" role="alert"><TriangleAlert size={15} /><span>{translateMessage(loadError)}</span><button onClick={refresh}>{t("다시 시도")}</button></div>}
-        {!snapshot || (snapshot.scanning && sessions.length === 0 && !visiblePins.length && !slack?.connected) ? <>
+        {!snapshot || (snapshot.scanning && sessions.length === 0 && !visiblePins.length && !monitorVisible(!!slack?.connected, snapshot.triggers)) ? <>
           <div className="graph-loading"><div className="loading-constellation"><span /><span /><span /><Monitor size={25} /></div><h3>{t("이 Mac의 에이전트를 찾고 있습니다")}</h3><p>{t("Claude Code와 Codex의 실제 세션 기록을 연결합니다.")}</p></div>
-        </> : <Graph slackUnreadIds={slackUnreadIds} slack={slack || undefined} selectedSlackId={selectedSlackId} onSelectSlack={selectSlack} token={token} providers={snapshot.providers} sessions={canvasSessions} allSessions={mainSessions} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} onCanvasClick={closeChat} filterKey={`${filterKey}:${showHidden}`} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} onAutoPrompt={openAutoPrompt} showHidden={showHidden} onShowHiddenChange={setShowHidden} settingsSuspended={showHelp || showNewSession || showAutoPrompt || (sidebarIsDrawer && showSidebar) || (mobileViewport && (!!selectedId || selectedSlackId !== undefined))} emptyState={canvasEmptyState} />}
+        </> : <Graph slackUnreadIds={slackUnreadIds} slack={slack || undefined} selectedSlackId={selectedSlackId} onSelectSlack={selectSlack}
+          triggerOverview={snapshot.triggers} triggerEvents={triggerEvents} triggerUnreadIds={triggerUnreadIds} selectedTriggerEventId={triggerEventId} onSelectTriggerEvent={selectTriggerEvent} triggerHasMore={triggerHasMore} onMoreTriggers={loadMoreTriggers} token={token} providers={snapshot.providers} sessions={canvasSessions} allSessions={mainSessions} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} onCanvasClick={closeChat} filterKey={`${filterKey}:${showHidden}`} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} onAutoPrompt={openAutoPrompt} showHidden={showHidden} onShowHiddenChange={setShowHidden} settingsSuspended={showHelp || showNewSession || showAutoPrompt || (sidebarIsDrawer && showSidebar) || (mobileViewport && (!!selectedId || monitorOpen))} emptyState={canvasEmptyState} />}
       </main>
-      {selectedSlackId !== undefined && !activeChatId && <SlackMonitorPanel onRead={acknowledgeSlack} unreadIds={slackUnreadIds} token={token} slack={slack} error={slackError} mentionId={selectedSlackId} jobs={snapshot?.autoPrompts || []} onClose={closeChat} onSelectMention={selectSlack} onNavigate={onSelect} />}
+      {monitorOpen && !activeChatId && <TriggerMonitorPanel token={token} slack={slack} slackError={slackError} mentionId={selectedSlackId} jobs={snapshot?.autoPrompts || []} slackUnreadIds={slackUnreadIds} onSlackRead={acknowledgeSlack}
+        events={triggerEvents} eventId={triggerEventId} triggerUnreadIds={triggerUnreadIds} onTriggerRead={acknowledgeTrigger} hasMore={triggerHasMore} onMore={() => void loadMoreTriggers()} onEventUpdate={updateTriggerEvent} onClose={closeChat} onSelectMention={selectSlack} onSelectEvent={selectTriggerEvent} onNavigate={onSelect} />}
       {activeChatId && <Suspense fallback={<aside className="chat-panel"><div className="chat-loading"><LoaderCircle className="spin" size={20} /><span>{t("대화를 여는 중")}</span></div></aside>}><ChatPanel contextBanner={<><SlackConversationAlert workflow={slack?.events.find(event => event.id === selectedSlackId)} /><SlackReplyProposals token={token} key={selectedSlackId} workflow={slack?.events.find(event => event.id === selectedSlackId)} /></>} key={activeChatId} sessionId={activeChatId} session={selectedSession} allSessions={sessions} provider={snapshot?.providers.find(item => item.provider === (selectedSession?.provider || (activeChatId.startsWith('claude') ? 'claude' : 'codex')))} runs={currentRuns} token={token} connected={connection === 'connected'} onClose={closeChat} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate} onSessionClose={changeSessionClosed} sessionClosed={!!selectedMainSession?.closed} changingClosed={changingClosed} readRevision={showNewSession || showAutoPrompt || (sidebarIsDrawer && sidebarOpen) ? '' : revisions.get(activeChatId)} onRead={onConversationRead} /></Suspense>}
     </div>
     <AutoPromptDialog visible={showAutoPrompt} initialCwd={autoPromptCwd} providers={snapshot?.providers || []} projects={projects} sessions={sessions} jobs={snapshot?.autoPrompts || []} token={token} connected={connection === 'connected'} onClose={closeAutoPrompt} onNavigate={openAutoPromptSession} onRefresh={refresh} />

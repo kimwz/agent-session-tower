@@ -49,3 +49,9 @@
 .slack-tone-panel .secondary-button:hover:not(:disabled) { border-color: var(--accent, #bd98ef); }
 .slack-tone-panel .secondary-button:disabled { opacity: .5; cursor: default; }
 .slack-tone-panel :focus-visible { outline: 2px solid var(--accent, #bd98ef); outline-offset: 2px; }
+
+/* The trigger monitor keeps the Slack lane's shape; trigger runs read as their own cards. */
+.trigger-event-card.agent-card { border-color:#4d5a74; background:#1f2533; }
+.trigger-event-card .slack-mention-top { color:#b9c6e4; }
+.trigger-event-card.agent-card.selected { border-color:#9fb6ea; background:#2a3348; box-shadow:0 0 0 3px #9fb6ea2b; }
+.trigger-event-card.agent-card.failed { border-color:#e0a55c; box-shadow:0 0 0 1px #e0a55c33; }

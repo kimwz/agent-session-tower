@@ -172,10 +172,23 @@ export class TriggerService extends EventEmitter {
     const trigger = this.trigger(id);
     return structuredClone({ trigger, revisions: this.state.revisions[id] ?? [], events: this.state.events.filter(event => event.triggerId === id).slice(-50).reverse() });
   }
-  events(query: { triggerId?: string; before?: string; limit?: number } = {}): TriggerEvent[] {
+  /**
+   * Runs newest first. `beforeId` pages by position in history, so runs recorded at the same moment are never
+   * skipped; `before` is a time and applies when that run is no longer kept.
+   */
+  events(query: { triggerId?: string; before?: string; beforeId?: string; limit?: number } = {}): TriggerEvent[] {
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
-    return structuredClone(this.state.events.filter(event => (!query.triggerId || event.triggerId === query.triggerId) && (!query.before || event.receivedAt < query.before))
-      .slice(-limit).reverse());
+    const position = query.beforeId ? this.state.events.findIndex(event => event.id === query.beforeId) : -1;
+    // A cursor run no longer kept falls back to its time, including runs recorded at that same moment.
+    const older = position >= 0 ? this.state.events.slice(0, position)
+      : this.state.events.filter(event => !query.before || (query.beforeId ? event.receivedAt <= query.before : event.receivedAt < query.before));
+    return structuredClone(older.filter(event => !query.triggerId || event.triggerId === query.triggerId).slice(-limit).reverse());
+  }
+  /** One run, whether or not its trigger still exists. */
+  event(id: string): TriggerEvent {
+    const event = this.state.events.find(item => item.id === id);
+    if (!event) throw failure('This run is no longer in trigger history.', 404);
+    return structuredClone(event);
   }
   audit(query: { before?: string; limit?: number } = {}): TriggerAuditEntry[] {
     const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
@@ -198,10 +211,19 @@ export class TriggerService extends EventEmitter {
         ...(last ? { lastEvent: { id: last.id, status: last.status, occurredAt: last.occurredAt, ...(last.error ? { error: last.error } : {}), ...(last.reason ? { reason: last.reason } : {}) } } : {}) });
     }
     // The live snapshot carries what the header and monitor show; instructions stay in the history API.
-    const recent = this.state.events.slice(-20).reverse().map(({ payload: _payload, ...event }) => ({ ...event, input: { ...event.input, instructions: '' } }));
+    const brief = ({ payload: _payload, ...event }: TriggerEvent) => ({ ...event, input: { ...event.input, instructions: '' } });
+    const latest = this.state.events.slice(-20);
+    const shown = new Set(latest.map(event => event.id));
+    // Older runs still working, or just finished, keep the monitor current after newer runs push them out.
+    const lately = [...this.state.events].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 20);
+    const updated: ReturnType<typeof brief>[] = [];
+    for (const event of [...this.state.events.filter(item => UNFINISHED.has(item.status)), ...lately]) {
+      if (!shown.has(event.id)) { shown.add(event.id); updated.push(brief(event)); }
+    }
+    const recent = latest.reverse().map(brief);
     const full = this.stateBytes > this.acceptBytes ? 'Trigger history is full; scheduled times pass without running until old history expires or triggers are deleted.' : undefined;
     const problem = this.storageError ?? full ?? this.capacityError;
-    return structuredClone({ triggers: summaries, recent, ...(problem ? { storageError: problem } : {}) });
+    return structuredClone({ triggers: summaries, recent, ...(updated.length ? { updated } : {}), ...(problem ? { storageError: problem } : {}) });
   }
 
   /**

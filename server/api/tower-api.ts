@@ -119,6 +119,7 @@ export class TowerApi {
       case 'triggers.list': return { triggers: triggers.list(), overview: triggers.overview() };
       case 'triggers.get': return triggers.get(value.id);
       case 'triggers.events': return { events: triggers.events(value) };
+      case 'triggers.event': return { event: triggers.event(value.id) };
       case 'triggers.audit': return { audit: triggers.audit(value) };
       case 'triggers.deleted': return { triggers: triggers.deleted() };
       case 'triggers.preview': return { runs: triggers.preview(value.schedule) };
