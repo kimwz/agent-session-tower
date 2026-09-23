@@ -10,6 +10,8 @@ export interface SlackRule {
   provider: Provider;
   model?: string;
   cwd?: string;
+  /** Owner pre-authorization: delegating with this rule permits one truthful result reply and progress reactions on the request. */
+  autoReply?: boolean;
 }
 export interface SlackMessage { user: string; text: string; ts: string }
 export interface SlackMention {
@@ -28,8 +30,9 @@ export interface SlackWorkflow {
   conversationClaimed?: boolean;
   delegatedTasks?: Array<{ requestKey: string; requestId: string; prompt: string; provider: Provider; model?: string; cwd?: string; submitted?: boolean; submissionError?: string; delegatedRunId?: string; createdSessionId?: string; delegatedFinished?: boolean; notificationClaimed?: boolean; notifiedRunId?: string; notificationError?: string }>;
   replies?: Array<{ requestKey: string; text: string; status: 'proposed' | 'sending' | 'sent' | 'uncertain'; approvedAt?: string; ts?: string }>;
-  ownerConditionalReply?: { mode?: 'composed'; requestIds?: string[]; instruction?: string; requestId: string; requestKey: string; text: string; status: 'pending' | 'sent' | 'blocked' | 'cancelled' | 'uncertain'; authorizedAt: string; evidence?: string };
+  ownerConditionalReply?: { mode?: 'composed'; ruleId?: string; requestIds?: string[]; instruction?: string; requestId: string; requestKey: string; text: string; status: 'pending' | 'sent' | 'blocked' | 'cancelled' | 'uncertain'; authorizedAt: string; evidence?: string };
   ownerReplySelection?: { requestKey: string; text: string };
+  reactions?: Array<{ name: string; action: 'add' | 'remove'; at: string }>;
   mention: SlackMention;
   status: SlackWorkflowState;
   createdAt: string;

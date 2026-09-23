@@ -28,6 +28,16 @@ test('Slack reads retry rate limits; replies never retry and escape mentions', a
   await assert.rejects(writer.reply('C','1','hello <@U> & <!channel>'), /ratelimited/);
   assert.equal(sent!.get('text'),'hello &lt;@U&gt; &amp; &lt;!channel&gt;');
   assert.equal(sent!.get('reply_broadcast'),'false');
+  await assert.rejects(writer.reply('C','1','<@U2> <@U3> <!channel> <@U2|x>', ['U2']), /ratelimited/);
+  assert.equal(sent!.get('text'),'<@U2> &lt;@U3&gt; &lt;!channel&gt; &lt;@U2|x&gt;');
+});
+test('Slack reactions treat existing and already removed reactions as done', async () => {
+  const calls: string[] = [];
+  const client = new SlackClient('secret', {fetch:(async (url: string, init) => { calls.push(`${url.split('/').pop()}:${(init!.body as URLSearchParams).get('name')}`); return new Response(JSON.stringify({ok:false,error:url.endsWith('add')?'already_reacted':'no_reaction'})); }) as typeof fetch});
+  await client.react('C','1','eyes','add'); await client.react('C','1','eyes','remove');
+  assert.deepEqual(calls,['reactions.add:eyes','reactions.remove:eyes']);
+  const denied = new SlackClient('secret', {fetch:(async () => new Response(JSON.stringify({ok:false,error:'missing_scope'}))) as typeof fetch});
+  await assert.rejects(denied.react('C','1','eyes','add'), /missing_scope/);
 });
 test('Slack errors never expose token-bearing server or network messages', async () => {
   for (const fetcher of [async()=>{throw new Error('secret');}, async()=>new Response(JSON.stringify({ok:false,error:'secret'}))]) {

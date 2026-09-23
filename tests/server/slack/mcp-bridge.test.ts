@@ -17,7 +17,7 @@ test('bound Slack MCP exposes only conversation tools and preserves request IDs'
   const replies = text.trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(replies.map(reply => reply.id), [1,2,3,4]);
   assert.equal(replies[0].result.protocolVersion, '2025-03-26');
-  assert.deepEqual(replies[1].result.tools.map((tool: {name:string}) => tool.name), ['tower_auto_prompt','tower_task_status','tower_task_complete','slack_send','slack_thread','slack_reply']);
+  assert.deepEqual(replies[1].result.tools.map((tool: {name:string}) => tool.name), ['tower_auto_prompt','tower_task_status','tower_task_complete','slack_send','slack_react','slack_thread','slack_reply']);
   assert.deepEqual(calls, [{ name:'slack_reply', args:{ requestKey:'reply1',text:'Done' } }]);
   assert.equal(replies[3].result.isError,true);
 });

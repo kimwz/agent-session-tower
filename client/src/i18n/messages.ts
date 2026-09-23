@@ -8,6 +8,8 @@ export const english: Record<string, string> = {
   "이 내용으로 Slack에 전송": "Approve and send this to Slack",
   "Slack에 전송됨": "Sent to Slack",
   "답변 제안 가이드": "Reply proposal guidance",
+  "승인 없이 결과 자동 답변": "Auto-reply with the result without approval",
+  "이 지침으로 위임한 작업이 끝나면 답변 가이드대로 결과를 한 번 전송하고, 요청 메시지에 진행 이모지를 달 수 있습니다. 채팅에서 “보내지 마세요”로 취소할 수 있습니다.": "When work delegated under this rule finishes, one result reply is sent following the reply guidance, and progress emoji may be added to the request message. Say “do not send” in chat to cancel.",
   "답변 후보를 작성할 때 참고합니다. Slack 전송에는 채팅에서 사용자의 승인이 필요합니다.": "Used to draft reply proposals. Sending to Slack requires the user's approval in chat.",
   "멘션 더 보기": "Show more mentions",
   "Slack 연결 오류": "Slack connection error",

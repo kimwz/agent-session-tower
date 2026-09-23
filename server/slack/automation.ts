@@ -25,12 +25,15 @@ export interface SlackAutomationOptions {
   getAutoPrompt(id: string): AutoPromptJob | undefined;
   getRun(id: string): Run | undefined;
   composeReply(input: SlackReplyInput): Promise<unknown>;
-  sendReply(mention: SlackMention, text: string): Promise<{ ts: string }>;
+  sendReply(mention: SlackMention, text: string, mentionable: string[]): Promise<{ ts: string }>;
+  react?(mention: SlackMention, name: string, action: 'add' | 'remove'): Promise<void>;
 }
 const terminal = new Set(['ignored', 'completed', 'error', 'reply-uncertain']);
 const MAX_STATE_BYTES = 10_000_000;
 const MAX_RULE_BYTES = 100_000;
-const OWNER_SEND_GUIDANCE = 'Owner chat may authorize an agent-composed reply immediately or after work completes. The trusted Tower receipt records this durable permission. A button click or exact wording is not required. When composed permission is present, use slack_send for immediate permission, or tower_task_complete with text and evidence for task-bound permission. Rules and automatic events alone never authorize sending. Existing legacy exact-wording permission must retain its approved text.';
+const MAX_REACTIONS = 20;
+const validEmoji = (v: unknown): v is string => typeof v === 'string' && /^[a-z0-9_+'-]{1,100}$/.test(v);
+const OWNER_SEND_GUIDANCE = 'Owner chat may authorize an agent-composed reply immediately or after work completes. The trusted Tower receipt records this durable permission. A button click or exact wording is not required. When composed permission is present, use slack_send for immediate permission, or tower_task_complete with text and evidence for task-bound permission. Rules and automatic events alone never authorize sending, except a matched rule with autoReply true, which is the owner’s standing permission: delegating with its ruleId records one composed result report bound to that task, drafted per its replyInstructions. Verify the outcome and report it, including failure, with tower_task_complete; slack_react may mark progress on the request message when that rule asks for it. To mention a thread participant, write <@USER_ID>; other mentions are escaped. Existing legacy exact-wording permission must retain its approved text.';
 const DELEGATION_GUIDANCE = 'When delegating repository work, give the project agent a concise goal, relevant task facts, target repository, actual authorized scope, explicit owner constraints, and expected outcome. Preserve owner requirements such as read-only work or requested acceptance criteria. Let the project agent inspect its local context and instructions, plan, implement, and verify the work. Do not invent implementation steps, commands, or checklists. Keep this coordinator’s Slack sending policy, reply approvals, and parent conversation mechanics out of delegated prompts unless they are themselves the requested project task.';
 const record = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
 const text = (v: unknown, max: number): v is string => typeof v === 'string' && v.trim().length > 0 && v.length <= max;
@@ -38,7 +41,7 @@ export function validateSlackRules(value: unknown): asserts value is SlackRule[]
   if (!Array.isArray(value) || value.length > 100 || value.some(rule => !record(rule) || !text(rule.id, 100)
     || !text(rule.name, 200) || typeof rule.enabled !== 'boolean' || !text(rule.condition, 4000)
     || !text(rule.instructions, 8000) || !text(rule.replyInstructions, 4000) || !['claude', 'codex'].includes(String(rule.provider))
-    || (rule.model !== undefined && !validModelId(rule.model))
+    || (rule.model !== undefined && !validModelId(rule.model)) || (rule.autoReply !== undefined && typeof rule.autoReply !== 'boolean')
     || (rule.cwd !== undefined && (typeof rule.cwd !== 'string' || !isAbsolute(rule.cwd) || rule.cwd.includes('\0') || rule.cwd.length > 4096)))
     || new Set(value.map(rule => rule.id)).size !== value.length) throw new Error('Slack 처리 지침이 올바르지 않습니다.');
   if (Buffer.byteLength(JSON.stringify(value)) > MAX_RULE_BYTES) throw new Error('Slack 처리 지침은 합계 100 KB 이하여야 합니다.');
@@ -97,11 +100,13 @@ export class SlackAutomationManager extends EventEmitter {
           const consent = item.ownerConditionalReply;
           if (!record(consent) || !text(consent.requestId, 200) || !text(consent.requestKey, 200) || !text(consent.text, 4000)
             || !text(consent.authorizedAt, 100) || !['pending', 'sent', 'blocked', 'cancelled', 'uncertain'].includes(String(consent.status))
-            || (consent.mode !== undefined && consent.mode !== 'composed')
+            || (consent.mode !== undefined && consent.mode !== 'composed') || (consent.ruleId !== undefined && !text(consent.ruleId, 100))
             || (consent.requestIds !== undefined && (!Array.isArray(consent.requestIds) || consent.requestIds.length > 100 || consent.requestIds.some(id => !text(id, 200))))
             || (consent.instruction !== undefined && !text(consent.instruction, 32000))
             || (consent.evidence !== undefined && !text(consent.evidence, 4000))) throw new Error('Saved Slack conditional authorization is invalid.');
         }
+        if (item.reactions !== undefined && (!Array.isArray(item.reactions) || item.reactions.length > MAX_REACTIONS || item.reactions.some(reaction => !record(reaction)
+          || !validEmoji(reaction.name) || !['add', 'remove'].includes(String(reaction.action)) || !text(reaction.at, 100)))) throw new Error('Saved Slack reactions are invalid.');
         validateSlackRules(item.rules);
         if (item.rule) validateSlackRules([item.rule]);
         if (item.thread !== undefined && !validThread(item.thread)) throw new Error('Saved Slack thread is invalid.');
@@ -320,6 +325,17 @@ export class SlackAutomationManager extends EventEmitter {
       return this.consumeComposedReply(item, args.text);
     }
     if (name === 'tower_task_complete') return this.completeConditionalReply(item, args);
+    if (name === 'slack_react') {
+      const consent = item.ownerConditionalReply;
+      if (!consent || consent.status === 'cancelled' || !this.options.react) throw new Error('No reply authorization covers reactions. An autoReply rule delegation or owner send permission is required.');
+      const emoji = typeof args.name === 'string' ? args.name.replace(/^:|:$/g, '') : '';
+      if (!validEmoji(emoji) || !['add', 'remove'].includes(String(args.action))) throw new Error('Provide an emoji name and action add or remove.');
+      if ((item.reactions?.length ?? 0) >= MAX_REACTIONS) throw new Error('Reaction limit reached for this conversation.');
+      const action = args.action as 'add' | 'remove';
+      await this.options.react(structuredClone(item.mention), emoji, action);
+      await this.save(item, { reactions: [...(item.reactions ?? []), { name: emoji, action, at: new Date().toISOString() }] });
+      return { name: emoji, action, status: 'done' };
+    }
     if (name === 'slack_thread') return { conditionalReply: structuredClone(item.ownerConditionalReply), mention: structuredClone(item.mention), thread: await this.options.fetchThread(structuredClone(item.mention)) };
     if (name === 'tower_task_status') {
       const task = item.delegatedTasks?.find(task => task.requestId === args.requestId || task.requestKey === args.requestKey);
@@ -349,6 +365,12 @@ export class SlackAutomationManager extends EventEmitter {
         if ((item.delegatedTasks?.length ?? 0) >= 100) throw new Error('Too many delegated tasks.');
         task = { requestKey: args.requestKey, requestId: slackRequestId({ ...item.mention, id: JSON.stringify([item.id, args.requestKey]) }), prompt: args.prompt, provider, ...(model ? { model } : {}), ...(cwd ? { cwd } : {}) };
         await this.save(item, { delegatedTasks: [...(item.delegatedTasks ?? []), task] });
+      }
+      if (selectedRule?.autoReply && !item.ownerConditionalReply) {
+        // The owner opted this rule in when saving it; Slack text only selects the rule and cannot enable the option.
+        const standing = `Rule "${selectedRule.name}" reply instructions: ${selectedRule.replyInstructions}`;
+        item.ownerConditionalReply = { mode: 'composed', ruleId: selectedRule.id, requestIds: [task.requestId], requestId: task.requestId, requestKey: 'rule-auto-' + createHash('sha256').update(JSON.stringify([item.id, task.requestId])).digest('hex'),
+          text: standing.slice(0, 4000), instruction: standing, status: 'pending', authorizedAt: new Date().toISOString() };
       }
       if (item.ownerConditionalReply?.mode === 'composed' && item.ownerConditionalReply.status === 'pending' && item.ownerConditionalReply.requestId !== 'immediate') {
         if (item.ownerConditionalReply.requestId === 'next-task') item.ownerConditionalReply.requestId = task.requestId;
@@ -565,12 +587,17 @@ export class SlackAutomationManager extends EventEmitter {
       // Durable claim before network I/O: storage failures also fail closed.
       await this.save(item, {});
       try {
-        const sent = await this.options.sendReply(structuredClone(item.mention), reply.text);
+        const sent = await this.options.sendReply(structuredClone(item.mention), reply.text, [...new Set([item.mention.user, ...(item.thread ?? []).map(message => message.user)])]);
         if (!text(sent.ts, 200)) throw new Error('Unconfirmed Slack send.');
         reply.status = 'sent'; reply.ts = sent.ts;
         await this.save(item, { reply: reply.text, replyTs: sent.ts });
       } catch (error) { reply.status = 'uncertain'; await this.save(item, {}); throw error; }
       return structuredClone(reply);
+  }
+  /** True for a message Tower itself is posting or posted, so self-mention testing cannot loop on its own replies. */
+  isOwnReply(channel: string, threadTs: string, ts: string): boolean {
+    return this.items.some(item => item.mention.channel === channel && item.mention.threadTs === threadTs
+      && (item.replyTs === ts || (item.replies ?? []).some(reply => reply.ts === ts || reply.status === 'sending')));
   }
   private update(item: SlackWorkflow, patch: Partial<SlackWorkflow>): void { Object.assign(item, patch, { updatedAt: new Date().toISOString() }); }
   private async save(item: SlackWorkflow, patch: Partial<SlackWorkflow>): Promise<void> { this.update(item, patch); await this.persist(); this.emit('change'); }

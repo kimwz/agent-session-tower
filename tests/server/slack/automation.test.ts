@@ -682,3 +682,49 @@ test('owner completion permission can report a durable submission failure withou
   await assert.rejects(f.manager.tool(id, 'tower_task_complete', { ...args, outcome: 'succeeded' }), /Cannot report success/);
   await f.manager.tool(id, 'tower_task_complete', { ...args, outcome: 'failed' }); assert.equal(f.counts().sends, 1);
 });
+
+test('autoReply rule delegation grants one truthful report, reactions and participant mentions without owner approval', async t => {
+  const f = await fixture(t);
+  await f.manager.setRules([{ ...rule, autoReply: true }]);
+  const reactions: string[] = []; const mentionables: string[][] = [];
+  f.options.react = async (target, name, action) => { assert.equal(target.ts, mention.ts); reactions.push(`${action}:${name}`); };
+  f.options.sendReply = async (_mention, _text, mentionable) => { mentionables.push(mentionable); return { ts: '2.0' }; };
+  f.options.startConversation = async (_workflow, prompt) => { assert.match(prompt, /autoReply true/); return { sessionId: 'owner-chat', runId: 'coordinator' }; };
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  await assert.rejects(f.manager.tool(id, 'slack_react', { name: 'hourglass_flowing_sand', action: 'add' }), /No reply authorization/);
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', ruleId: 'review', prompt: 'Deploy the fix' });
+  const consent = f.manager.list()[0].ownerConditionalReply!;
+  assert.equal(consent.ruleId, 'review'); assert.equal(consent.mode, 'composed'); assert.match(consent.instruction!, /Confirm only a finished review/);
+  await f.manager.tool(id, 'slack_react', { name: ':hourglass_flowing_sand:', action: 'add' });
+  await assert.rejects(f.manager.tool(id, 'slack_react', { name: 'bad name', action: 'add' }), /emoji name/);
+  const task = f.manager.list()[0].delegatedTasks![0]; const job = f.options.getAutoPrompt(task.requestId)!;
+  const run: Run = { id: job.runId!, sessionId: job.sessionId!, autoPromptId: task.requestId, status: 'running', prompt: '', output: 'Review finished.', createdAt: '' };
+  f.options.getRun = () => run;
+  const args = { requestId: task.requestId, runId: run.id, outcome: 'succeeded', evidence: 'Review completed.', text: '<@U2> 확인 했습니다.' };
+  assert.equal((await f.manager.tool(id, 'tower_task_complete', args) as { status: string }).status, 'blocked');
+  run.status = 'completed';
+  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  await Promise.all([restarted.tool(id, 'tower_task_complete', args), restarted.tool(id, 'tower_task_complete', args)]);
+  assert.equal(mentionables.length, 1);
+  assert.deepEqual(mentionables[0], ['U2']);
+  await restarted.tool(id, 'slack_react', { name: 'hourglass_flowing_sand', action: 'remove' });
+  await restarted.tool(id, 'slack_react', { name: 'white_check_mark', action: 'add' });
+  assert.deepEqual(reactions, ['add:hourglass_flowing_sand', 'remove:hourglass_flowing_sand', 'add:white_check_mark']);
+  assert.equal(restarted.list()[0].reactions?.length, 3);
+  assert.equal(restarted.isOwnReply(mention.channel, mention.threadTs, '2.0'), true);
+  assert.equal(restarted.isOwnReply(mention.channel, mention.threadTs, '3.0'), false);
+});
+
+test('rules without autoReply never grant sending, and owner cancellation revokes a rule grant', async t => {
+  const f = await conditionalFixture(t);
+  assert.equal(f.manager.list()[0].ownerConditionalReply, undefined);
+  await assert.rejects(f.manager.tool(f.id, 'tower_task_complete', { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Done.', text: 'Done' }), /No owner authorization/);
+  const g = await fixture(t); await g.manager.setRules([{ ...rule, autoReply: true }]);
+  g.options.react = async () => {}; g.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
+  await g.manager.ingest(mention); await g.manager.tick(); const id = g.manager.list()[0].id;
+  await g.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', prompt: 'Deploy the fix' });
+  await g.manager.ownerChat('owner-chat', '아직 보내지 마세요');
+  assert.equal(g.manager.list()[0].ownerConditionalReply?.status, 'cancelled');
+  await assert.rejects(g.manager.tool(id, 'slack_react', { name: 'eyes', action: 'add' }), /No reply authorization/);
+  await assert.rejects(g.manager.setRules([{ ...rule, autoReply: 'yes' as unknown as boolean }]), /올바르지/);
+});

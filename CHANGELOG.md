@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.12.0] - 2026-09-23
+
+### Added
+- Slack rules can opt in to **Auto-reply with the result without approval**. When the coordinator delegates work under such a rule, Tower lets it send one truthful result reply, including failures, following the rule's reply guidance. Saying “do not send” in Tower chat still cancels it.
+- The Slack coordinator can add and remove emoji on the original request, for example ⏳ while working and ✅ after replying, while reply permission exists. This needs the `reactions:write` user scope.
+
+### Changed
+- Slack replies can mention people who wrote in the thread, including you, with `<@USER_ID>`. Other mentions and broadcasts stay escaped, and Tower ignores its own replies so self-mention testing cannot loop.
+
 ## [1.11.2] - 2026-09-23
 
 ### Fixed

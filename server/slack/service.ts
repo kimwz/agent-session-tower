@@ -18,7 +18,7 @@ import { SlackSocket, type SlackSocketOptions } from './socket.js';
 type Account = { teamId: string; userId: string; teamName?: string; userName?: string };
 type Settings = { enabled: boolean; allowSelfMentions?: boolean; language?: 'ko' | 'en'; appToken?: string; userToken?: string; account?: Account };
 interface Dependencies {
-  client?: (token: string) => Pick<SlackClient, 'auth' | 'thread' | 'reply'> & Partial<Pick<SlackClient, 'searchOwnMessages'>>;
+  client?: (token: string) => Pick<SlackClient, 'auth' | 'thread' | 'reply'> & Partial<Pick<SlackClient, 'searchOwnMessages' | 'react'>>;
   socket?: (options: SlackSocketOptions) => Pick<SlackSocket, 'start' | 'stop'>;
   model?: typeof runAutoPromptModel;
 }
@@ -82,7 +82,12 @@ export class SlackService extends EventEmitter {
           signal: AbortSignal.timeout(180_000),
         }, { stateDir: options.stateDir });
       },
-      sendReply: (mention, text) => this.client(mention.teamId).reply(mention.channel, mention.threadTs, text),
+      sendReply: (mention, text, mentionable) => this.client(mention.teamId).reply(mention.channel, mention.threadTs, text, mentionable),
+      react: async (mention, name, action) => {
+        const client = this.client(mention.teamId);
+        if (!client.react) throw new Error('Slack reactions are unavailable.');
+        await client.react(mention.channel, mention.ts, name, action);
+      },
     });
     this.automation.on('change', () => this.emit('change'));
   }
@@ -210,6 +215,7 @@ export class SlackService extends EventEmitter {
           || (event.subtype && !['file_share', 'thread_broadcast'].includes(String(event.subtype)))
           || typeof event.text !== 'string' || !event.text.includes(`<@${account.userId}>`)
           || typeof event.user !== 'string' || typeof event.channel !== 'string' || typeof event.ts !== 'string' || typeof payload.event_id !== 'string') return;
+        if (event.user === account.userId && typeof event.thread_ts === 'string' && this.automation.isOwnReply(event.channel, event.thread_ts, event.ts)) return;
         await this.automation.ingest({ id: payload.event_id, teamId: account.teamId, channel: event.channel, user: event.user, ts: event.ts,
           threadTs: typeof event.thread_ts === 'string' ? event.thread_ts : event.ts, text: event.text });
       },

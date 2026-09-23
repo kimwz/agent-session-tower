@@ -13,7 +13,7 @@ export class SlackApiError extends Error {
   }
 }
 
-const safeErrors = new Set(['invalid_auth', 'not_authed', 'token_revoked', 'account_inactive', 'missing_scope', 'not_in_channel', 'channel_not_found', 'thread_not_found', 'ratelimited', 'is_archived', 'restricted_action']);
+const safeErrors = new Set(['invalid_auth', 'not_authed', 'token_revoked', 'account_inactive', 'missing_scope', 'not_in_channel', 'channel_not_found', 'thread_not_found', 'ratelimited', 'is_archived', 'restricted_action', 'invalid_name', 'too_many_reactions', 'message_not_found', 'already_reacted', 'no_reaction']);
 
 export class SlackClient {
   private readonly fetcher: typeof fetch;
@@ -117,14 +117,23 @@ export class SlackClient {
     return texts;
   }
 
-  async reply(channel: string, threadTs: string, text: string): Promise<{ ts: string }> {
+  /** Only explicit user mentions of the given IDs stay live; everything else, including broadcasts, is escaped. */
+  async reply(channel: string, threadTs: string, text: string, mentionable: string[] = []): Promise<{ ts: string }> {
     if (!text.trim() || text.length > 12_000) throw new SlackApiError('invalid_reply');
+    const escaped = text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+      .replace(/&lt;@([UW][A-Z0-9]+)&gt;/g, (match, id: string) => mentionable.includes(id) ? `<@${id}>` : match);
     const data = await this.call('chat.postMessage', {
-      channel, thread_ts: threadTs, text: text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;'),
+      channel, thread_ts: threadTs, text: escaped,
       mrkdwn: 'false', parse: 'none', link_names: 'false', reply_broadcast: 'false', unfurl_links: 'false', unfurl_media: 'false',
     }, false);
     if (typeof data.ts !== 'string') throw new SlackApiError('invalid_response');
     return { ts: data.ts };
+  }
+
+  /** Idempotent: an existing or already-removed reaction counts as done. */
+  async react(channel: string, ts: string, name: string, action: 'add' | 'remove'): Promise<void> {
+    try { await this.call(action === 'add' ? 'reactions.add' : 'reactions.remove', { channel, timestamp: ts, name }, false); }
+    catch (error) { if (!(error instanceof SlackApiError && error.code === (action === 'add' ? 'already_reacted' : 'no_reaction'))) throw error; }
   }
 
   async openSocketUrl(appToken: string): Promise<string> {

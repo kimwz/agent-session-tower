@@ -89,7 +89,9 @@ test('self-mention testing is opt-in, persists, and keeps bot, edit, and escaped
     ['bot', { bot_id: 'B1' }], ['edit', { subtype: 'message_changed' }],
     ['hidden', { hidden: true }], ['escaped-reply', { text: '&lt;@U1&gt; review complete' }],
   ] as const) await send(id, patch);
-  assert.equal(service.overview().events.length, 2);
+  service.automation.isOwnReply = (channel, threadTs, ts) => channel === 'GPRIVATE' && threadTs === '100.001' && ts === '100.002';
+  await send('own-live-mention-reply', { ts: '100.002', thread_ts: '100.001', text: '<@U1> 배포 완료 됐습니다.' });
+  assert.equal(service.overview().events.length, 2, 'Tower-posted replies that mention the owner never start a new workflow');
   await service.mutate('settings', { allowSelfMentions: false });
   await send('disabled-again');
   assert.equal(service.overview().events.length, 2);
