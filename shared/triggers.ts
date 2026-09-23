@@ -57,7 +57,43 @@ export const HttpSourceSchema = z.object({
   condition: HttpConditionSchema,
 }).strict();
 
-export const TriggerSourceSchema = z.discriminatedUnion('kind', [ScheduleSourceSchema, HttpSourceSchema]);
+/** The only address GitHub credentials are ever sent to. */
+export const GITHUB_API = 'https://api.github.com';
+export const GitHubAuthSchema = z.discriminatedUnion('type', [
+  /** The GitHub CLI's login on this computer. */
+  z.object({ type: z.literal('gh') }).strict(),
+  /** A token saved as a secret for https://api.github.com. */
+  z.object({ type: z.literal('token'), secretId: z.string().uuid() }).strict(),
+]);
+export type GitHubAuth = z.infer<typeof GitHubAuthSchema>;
+const repository = z.string().trim().max(140).regex(/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/, 'Use owner/name, for example octo-org/website.');
+export const GITHUB_ASSOCIATIONS = ['OWNER', 'MEMBER', 'COLLABORATOR', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'NONE'] as const;
+export const GitHubWatchSchema = z.discriminatedUnion('type', [
+  /** Issues opened in these repositories from now on. */
+  z.object({
+    type: z.literal('issue-opened'),
+    repos: z.array(repository).min(1).max(20),
+    /** Only issues with at least one of these labels. */
+    labels: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
+    /** Only issues opened by these accounts. */
+    authors: z.array(z.string().trim().min(1).max(39)).max(50).optional(),
+    /** Only authors with this relationship to the repository; by default its owners, members and collaborators. */
+    authorAssociation: z.union([z.literal('any'), z.array(z.enum(GITHUB_ASSOCIATIONS)).min(1)]).default(['OWNER', 'MEMBER', 'COLLABORATOR']),
+  }).strict(),
+  /** Open issues newly assigned to the connected account. */
+  z.object({ type: z.literal('assigned-to-me'), repos: z.array(repository).max(20).optional(), includePullRequests: z.boolean().default(false) }).strict(),
+]);
+export type GitHubWatch = z.infer<typeof GitHubWatchSchema>;
+export const GitHubSourceSchema = z.object({
+  kind: z.literal('github'),
+  schedule: ScheduleSchema,
+  auth: GitHubAuthSchema,
+  /** The account this trigger was set up with; checking stops if the login becomes another account. */
+  account: z.string().trim().regex(/^[A-Za-z0-9-]{1,39}$/, 'Check the connection to fill in the GitHub account.'),
+  watch: GitHubWatchSchema,
+}).strict();
+
+export const TriggerSourceSchema = z.discriminatedUnion('kind', [ScheduleSourceSchema, HttpSourceSchema, GitHubSourceSchema]);
 export type TriggerSource = z.infer<typeof TriggerSourceSchema>;
 /** Sources whose events carry content from outside; their runs always start new, tool-less sessions. */
 export const carriesOutsideContent = (source: TriggerSource) => source.kind !== 'schedule';
@@ -200,6 +236,8 @@ export const SecretInputSchema = z.object({
     .refine(value => value.length >= 8 && (/^\S+ (\S.*)$/.exec(value)?.[1].length ?? 8) >= 4, 'A secret must be at least 8 characters, with at least 4 after a scheme such as Bearer.'),
 }).strict();
 export type SecretInput = z.infer<typeof SecretInputSchema>;
+/** What checking a GitHub connection shows: the account it acts as. */
+export interface GitHubCheck { ok: boolean; login?: string; error?: string; rateRemaining?: number }
 /** What a request test shows the owner; nothing is recorded and no run starts. */
 export interface HttpTestResult {
   ok: boolean;

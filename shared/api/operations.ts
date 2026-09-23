@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { HttpConditionSchema, HttpRequestSchema, ScheduleSchema, SecretInputSchema, TriggerInputSchema, TriggerSettingsSchema } from '../triggers.js';
+import { GitHubAuthSchema, HttpConditionSchema, HttpRequestSchema, ScheduleSchema, SecretInputSchema, TriggerInputSchema, TriggerSettingsSchema } from '../triggers.js';
 
 const id = z.string().min(1).max(200);
 const uuid = z.string().regex(/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i, 'A UUID is required.');
@@ -44,6 +44,8 @@ export const OPERATIONS = {
   'triggers.updateSettings': { input: z.object({ settings: TriggerSettingsSchema }).strict(), write: true, ownerOnly: true, summary: 'Change trigger limits and the private hosts HTTP triggers may call.' },
   'triggers.testHttp': { input: z.object({ request: HttpRequestSchema, condition: HttpConditionSchema.optional() }).strict(), write: true, ownerOnly: true,
     summary: 'Send an HTTP trigger’s request once and show the response, without recording or running anything.' },
+  'triggers.checkGitHub': { input: z.object({ auth: GitHubAuthSchema }).strict(), write: false, ownerOnly: true,
+    summary: 'Check a GitHub connection and show the account it acts as.' },
   'secrets.list': { input: z.object({}).strict(), write: false, agent: true, summary: 'List saved header secrets by name and origin. Values are never shown.' },
   'secrets.create': { input: z.object({ secret: SecretInputSchema }).strict(), write: true, ownerOnly: true, summary: 'Save a header value that is sent only to one origin.' },
   'secrets.delete': { input: z.object({ id: uuid }).strict(), write: true, ownerOnly: true, summary: 'Delete a saved header secret.' },

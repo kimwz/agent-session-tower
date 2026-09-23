@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { ArrowLeft, CalendarClock, Globe, Play, X, Zap } from 'lucide-react';
+import { ArrowLeft, CalendarClock, CircleDot, ExternalLink, Globe, Play, X, Zap } from 'lucide-react';
 import type { SlackPublicStatus } from '../../../shared/slack';
 import type { TriggerEvent } from '../../../shared/triggers';
 import type { AutoPromptJob } from '../../../shared/types';
@@ -51,7 +51,7 @@ export function TriggerMonitorPanel({ token, slack, slackError, mentionId, jobs,
 }
 
 const PANEL_PAGE = 50;
-const KIND_LABELS: Record<TriggerEvent['kind'], string> = { schedule: '예약 실행', http: 'HTTP 응답', manual: '지금 실행' };
+const KIND_LABELS: Record<TriggerEvent['kind'], string> = { schedule: '예약 실행', http: 'HTTP 응답', github: 'GitHub 이슈', manual: '지금 실행' };
 
 /**
  * One trigger run: when and why it ran, what it saw, and the conversation that did the work. The run itself
@@ -89,7 +89,8 @@ export function TriggerEventDetail({ eventId, initial, token, onRead, onUpdate, 
   const current = full && (!initial || full.updatedAt >= initial.updatedAt) ? full : initial;
   useEffect(() => { if (current) onRead?.(current); }, [current?.status, current?.updatedAt, onRead]);
   if (!current) return loadError ? <><p role="alert">{unsupported ? t('실행 워커가 새 버전으로 교체되면 볼 수 있습니다.') : translateMessage(loadError)}</p>{retry}</> : <p>{t('불러오는 중')}</p>;
-  const Icon = current.kind === 'http' ? Globe : current.kind === 'manual' ? Play : CalendarClock;
+  const Icon = current.kind === 'http' ? Globe : current.kind === 'github' ? CircleDot : current.kind === 'manual' ? Play : CalendarClock;
+  const link = current.payload && typeof current.payload === 'object' && typeof (current.payload as { url?: unknown }).url === 'string' && /^https:\/\/github\.com\//.test((current.payload as { url: string }).url) ? (current.payload as { url: string }).url : undefined;
   const sessionId = current.dispatch?.sessionId;
   const instructions = full?.input.instructions || initial?.input.instructions;
   const payload = full?.payload ?? initial?.payload;
@@ -99,10 +100,11 @@ export function TriggerEventDetail({ eventId, initial, token, onRead, onUpdate, 
     <section><h3><Icon size={13} /> {current.triggerName}</h3>
       <p className="slack-monitor-muted">{t(KIND_LABELS[current.kind])} · {absoluteTime(current.occurredAt)}</p>
       <p className="slack-monitor-text">{current.summary}</p>
+      {link && <a className="slack-monitor-back" href={link} target="_blank" rel="noreferrer noopener"><ExternalLink size={14} />{t('GitHub에서 보기')}</a>}
       {current.reason && <p className="slack-monitor-text">{translateMessage(current.reason)}</p>}
       {current.error && <p role="alert">{translateMessage(current.error)}</p>}
       {instructions && <details><summary>{t('전달한 지시')}</summary><p className="slack-monitor-text">{instructions}</p></details>}
-      {payload !== undefined && <details><summary>{t('받은 응답')}</summary><pre className="slack-monitor-text">{JSON.stringify(payload, null, 2)}</pre></details>}
+      {payload !== undefined && <details><summary>{link ? t('받은 이슈') : t('받은 응답')}</summary><pre className="slack-monitor-text">{JSON.stringify(payload, null, 2)}</pre></details>}
     </section>
     {sessionId ? <SessionTail sessionId={sessionId} selection={current.id} onNavigate={onNavigate} />
       : triggerEventWorking(current) && <p>{t('아직 실행 세션이 생성되지 않았습니다.')}</p>}

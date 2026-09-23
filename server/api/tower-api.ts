@@ -133,6 +133,7 @@ export class TowerApi {
       case 'triggers.settings': return { settings: triggers.settings() };
       case 'triggers.updateSettings': return { settings: await triggers.updateSettings(value.settings, actor) };
       case 'triggers.testHttp': return { result: await triggers.testHttp(value.request, value.condition, actor) };
+      case 'triggers.checkGitHub': return { result: await triggers.checkGitHub(value.auth, actor) };
       case 'secrets.list': return { secrets: triggers.secretList() };
       case 'secrets.create': return { secret: await triggers.createSecret(value.secret, actor) };
       case 'secrets.delete': await triggers.deleteSecret(value.id, actor); return { deleted: true };

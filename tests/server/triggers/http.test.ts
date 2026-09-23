@@ -419,6 +419,12 @@ test('private host settings accept host names, addresses and ranges, and refuse 
   assert.deepEqual(TriggerSettingsSchema.parse({ maxTriggers: 10 }).privateHosts, [], 'a settings object without the list keeps it empty, and the panel always sends the list');
 });
 
+test('a secret echoed in a response header is removed too', async t => {
+  const server = await endpoint(t, (request, _body, response) => { response.setHeader('etag', `"${request.headers.authorization}"`); response.end('{}'); });
+  const outcome = await performHttp({ method: 'GET', url: `${server.origin}/`, headers: {}, secretHeaders: { authorization: 'Bearer h3ader-token' }, secretOrigin: server.origin, timeoutMs: 2000 }, OPEN);
+  assert.equal(outcome.ok && outcome.headers.etag, '"[secret removed]"');
+});
+
 test('secrets too short to remove reliably are refused, and escaped echoes are removed too', async t => {
   const { SecretInputSchema } = await import('../../../shared/triggers.js');
   for (const value of ['abc', 'Bearer abc', 'short', '  Bearer    x1  ', ' 1234567 ']) assert.equal(SecretInputSchema.safeParse({ name: 'x', origin: 'https://a.example', value }).success, false, value);

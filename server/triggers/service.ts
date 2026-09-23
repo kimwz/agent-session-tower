@@ -4,7 +4,7 @@ import { mkdir, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunOrigin, Session } from '../../shared/types.js';
 import {
-  TriggerInputSchema, TriggerSettingsSchema, carriesOutsideContent, type HttpCondition, type HttpRequest, type HttpTestResult, type SecretInput, type Trigger, type TriggerActor,
+  GITHUB_API, TriggerInputSchema, TriggerSettingsSchema, carriesOutsideContent, type GitHubAuth, type GitHubCheck, type HttpCondition, type HttpRequest, type HttpTestResult, type SecretInput, type Trigger, type TriggerActor,
   type TriggerAuditEntry, type TriggerEvent, type TriggerInput, type TriggerOverview, type TriggerSecret, type TriggerSettings, type TriggerSummary, type Schedule,
 } from '../../shared/triggers.js';
 import { requestedEffort, requestedModel } from '../providers/models.js';
@@ -13,6 +13,9 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { CATCH_UP_WINDOW_MS, LATE_AFTER_MS, latestSlot, nextSlot, previewSlots, validateSchedule } from './schedule.js';
 import { evaluate, performHttp, type ConditionState, type HttpOutcome } from './http.js';
 import { SecretStore, type StoredSecret } from './secrets.js';
+import { checkGitHub, GitHubError, refused, type GitHubCursor, type GitHubFetch, type GitHubIssue, type GitHubResponse } from './github.js';
+import { findExecutable } from '../providers/discovery.js';
+import { execFile } from 'node:child_process';
 
 /** How a trigger reaches project agents on this machine. A future remote node implements the same calls. */
 export interface TriggerExecutor {
@@ -35,6 +38,10 @@ interface Cursor {
   polling?: { slot: number; revision: number; method: 'GET' | 'POST' };
   failures?: number;
   lastError?: string;
+  /** GitHub: what the last complete check saw. */
+  github?: GitHubCursor;
+  /** GitHub's rate limit allows no request before this time, manual checks included. */
+  blockedUntil?: number;
 }
 interface EngineState {
   version: 1;
@@ -111,6 +118,11 @@ export class TriggerService extends EventEmitter {
   private readonly submitting = new Set<string>();
   private readonly polling = new Map<string, Promise<void>>();
   private requestTimes: number[] = [];
+  /** Tokens from the gh CLI, read again every few minutes; logins per token, so a changed account is noticed. */
+  private ghToken?: { value: string; at: number };
+  private readonly logins = new Map<string, { login: string; at: number }>();
+  /** Per credential: GitHub's rate limit allows no request before this time. */
+  private readonly githubBlocked = new Map<string, number>();
   private readonly secrets: SecretStore;
   private stateBytes = 0;
   private capacityError?: string;
@@ -124,6 +136,10 @@ export class TriggerService extends EventEmitter {
     limits?: { acceptBytes?: number; maxBytes?: number; requestsPerMinute?: number };
     /** Ports this Tower listens on; HTTP triggers may never call them. */
     ownPorts?: () => Promise<number[]>;
+    /** Reads the gh CLI's token; replaceable in tests. */
+    ghToken?: () => Promise<string>;
+    /** Sends GitHub API requests with this Authorization value; replaceable in tests. */
+    githubTransport?: (authorization: string) => GitHubFetch;
     resolve?: Parameters<typeof performHttp>[2] }) {
     super();
     this.path = join(options.stateDir, 'trigger-engine.json');
@@ -383,6 +399,22 @@ export class TriggerService extends EventEmitter {
   async run(id: string, actor: TriggerActor): Promise<TriggerEvent> {
     const trigger = this.trigger(id);
     if (this.stateBytes > this.acceptBytes) throw failure('Trigger history is full. Delete old triggers or wait for finished runs to expire.', 507);
+    if (trigger.source.kind === 'github') {
+      if (!trigger.enabled) throw failure('Turn the trigger on before checking it.', 409);
+      const blocked = this.state.cursors[id]?.blockedUntil;
+      if (blocked && blocked > this.now()) throw failure(`GitHub's rate limit allows the next check at ${new Date(blocked).toISOString()}.`, 429);
+      const unlock = this.lock(id);
+      if (!unlock) throw failure('This trigger is checking GitHub right now. Try again in a moment.', 409);
+      let fired: TriggerEvent[];
+      try {
+        await this.commit(state => { const position = state.cursors[id]; if (position) position.polling = { slot: this.now(), revision: trigger.revision, method: 'GET' }; }, 'settle');
+        fired = await this.pollGitHub(trigger, this.now(), actor);
+      } finally { unlock(); }
+      const problem = this.state.cursors[id]?.lastError;
+      if (!fired.length) throw failure(problem ? `GitHub could not be checked: ${problem}` : 'Checked GitHub: nothing new since the last check.', problem ? 502 : 409);
+      void this.tick().catch(() => {});
+      return structuredClone(fired[0]);
+    }
     const event = trigger.source.kind === 'http' ? await this.runHttp(trigger, actor) : await this.commit(state => {
       const current = state.triggers.find(item => item.id === id);
       if (!current) throw failure('Trigger not found.', 404);
@@ -483,11 +515,13 @@ export class TriggerService extends EventEmitter {
         if (!trigger.enabled) continue;
         const cursor = this.state.cursors[trigger.id];
         if (!cursor || cursor.paused || cursor.nextAt === undefined || cursor.nextAt > now || this.polling.has(trigger.id)) continue;
+        if (trigger.source.kind === 'github' && cursor.blockedUntil !== undefined && cursor.blockedUntil > now) continue;
         // All HTTP triggers together send at most this many requests a minute; the rest wait for the next tick.
-        if (trigger.source.kind === 'http' && this.requestTimes.filter(at => at > now - 60_000).length >= this.requestLimit) continue;
+        const polled = trigger.source.kind !== 'schedule';
+        if (polled && this.requestTimes.filter(at => at > now - 60_000).length >= this.requestLimit) continue;
         // Taken before the claim is saved, so a manual run cannot start a second request in between.
-        const unlock = trigger.source.kind === 'http' ? this.lock(trigger.id) : undefined;
-        if (trigger.source.kind === 'http' && !unlock) continue;
+        const unlock = polled ? this.lock(trigger.id) : undefined;
+        if (polled && !unlock) continue;
         const full = this.stateBytes > this.acceptBytes;
         let poll: { slot: number; revision: number } | undefined;
         await this.commit(state => {
@@ -510,7 +544,7 @@ export class TriggerService extends EventEmitter {
           position.lastSlot = slot;
           if (current.source.kind === 'schedule') { this.fire(state, current, new Date(slot).toISOString(), slot, 'schedule'); return; }
           // Claimed before the request goes out, so a POST cut off by a stop is never sent again for this time.
-          position.polling = { slot, revision: current.revision, method: current.source.request.method };
+          position.polling = { slot, revision: current.revision, method: current.source.kind === 'http' ? current.source.request.method : 'GET' };
           poll = { slot, revision: current.revision };
         }, full ? 'settle' : 'grow').then(() => { if (poll && unlock) this.startPoll(trigger.id, poll.slot, poll.revision, unlock); else unlock?.(); }).catch(async error => {
           unlock?.();
@@ -536,6 +570,7 @@ export class TriggerService extends EventEmitter {
 
   private async poll(triggerId: string, slot: number, revision: number): Promise<void> {
     const trigger = this.state.triggers.find(item => item.id === triggerId);
+    if (trigger?.source.kind === 'github' && trigger.revision === revision) { await this.pollGitHub(trigger, slot); return; }
     if (!trigger || trigger.source.kind !== 'http' || trigger.revision !== revision) return;
     const outcome = await this.request(trigger);
     await this.commit(state => {
@@ -561,11 +596,133 @@ export class TriggerService extends EventEmitter {
   }
 
   /** Repeated failures back off, up to half an hour, instead of hammering a broken endpoint. */
-  private pollFailed(position: Cursor, trigger: Trigger, error: string): void {
+  private pollFailed(position: Cursor, trigger: Trigger, error: string, notBefore?: number): void {
     position.failures = (position.failures ?? 0) + 1;
     position.lastError = error.slice(0, 500);
-    const retry = this.now() + Math.min(30 * 60_000, 60_000 * 2 ** Math.min(position.failures - 1, 5));
+    const retry = Math.max(this.now() + Math.min(30 * 60_000, 60_000 * 2 ** Math.min(position.failures - 1, 5)), notBefore ?? 0);
     if (position.nextAt !== undefined && position.nextAt < retry) position.nextAt = nextSlot(trigger.source.schedule, retry, position.anchorAt);
+  }
+
+  // ---- GitHub ---------------------------------------------------------------------------------------
+
+  /**
+   * Checks GitHub once and records what is new. The first check only remembers what is there. A check that
+   * does not finish changes nothing, so the next one looks at the same range again.
+   */
+  private async pollGitHub(trigger: Trigger, slot: number, manual?: TriggerActor): Promise<TriggerEvent[]> {
+    if (trigger.source.kind !== 'github') return [];
+    const source = trigger.source;
+    let result: { issues: GitHubIssue[]; cursor: GitHubCursor } | undefined;
+    let problem: { message: string; retryAt?: number } | undefined;
+    try {
+      const { fetch, identity } = await this.githubFetch(source.auth, trigger.id);
+      const login = await this.githubLogin(fetch, identity);
+      if (login.toLowerCase() !== source.account.toLowerCase()) throw new GitHubError(`GitHub is signed in as ${login}, not ${source.account}; this trigger stopped checking until the account is set again.`);
+      result = await checkGitHub(source.watch, this.state.cursors[trigger.id]?.github ?? {}, fetch);
+    } catch (error) { problem = { message: error instanceof Error ? error.message : String(error), ...((error as GitHubError).retryAt ? { retryAt: (error as GitHubError).retryAt } : {}) }; }
+    return this.commit(state => {
+      const current = state.triggers.find(item => item.id === trigger.id);
+      const position = state.cursors[trigger.id];
+      if (!position) return [];
+      delete position.polling;
+      if (!current || current.revision !== trigger.revision || current.source.kind !== 'github') return [];
+      if (!result) {
+        this.pollFailed(position, current, problem?.message ?? 'GitHub could not be checked.', problem?.retryAt);
+        if (problem?.retryAt) position.blockedUntil = problem.retryAt;
+        return [];
+      }
+      const baseline = !position.github;
+      position.github = result.cursor;
+      position.failures = 0; delete position.lastError; delete position.blockedUntil;
+      const fired: TriggerEvent[] = [];
+      for (const issue of result.issues) {
+        const key = source.watch.type === 'issue-opened' ? `issue:${issue.repository}#${issue.number}` : `assigned:${issue.repository}#${issue.number}:${slot}`;
+        const event = this.fire(state, current, manual ? `manual:${randomUUID()}:${key}` : key, slot, manual ? 'manual' : 'github');
+        if (!event) continue;
+        event.payload = issue;
+        event.summary = `${issue.repository}#${issue.number} ${issue.title}`.slice(0, 200);
+        fired.push(event);
+      }
+      if (manual) this.log(state, manual, 'run', current, current.revision, current.revision, baseline ? 'Checked GitHub and noted the current issues' : `Checked GitHub now: ${fired.length} new`);
+      return structuredClone(fired);
+    }).catch(() => this.commit(state => { const position = state.cursors[trigger.id]; if (position?.polling?.slot === slot) delete position.polling; return []; }, 'settle').catch(() => []));
+  }
+
+  /**
+   * Requests to GitHub carry the credentials only to api.github.com, within the shared request budget.
+   * `identity` names the credential itself, so a changed gh login is never taken for the account checked before.
+   */
+  private async githubFetch(auth: GitHubAuth, triggerId?: string): Promise<{ fetch: GitHubFetch; identity: string }> {
+    const token = await this.githubToken(auth, triggerId);
+    const authorization = /^\S+\s/.test(token) ? token : `Bearer ${token}`;
+    const identity = createHash('sha256').update(authorization).digest('hex');
+    // A used-up rate limit holds every trigger using this credential until it resets.
+    const guard = (response: GitHubResponse): GitHubResponse => {
+      if ((response.status === 403 || response.status === 429) && response.remaining === 0 && response.reset) this.githubBlocked.set(identity, response.reset * 1000);
+      return response;
+    };
+    const blocked = () => {
+      const until = this.githubBlocked.get(identity);
+      if (until !== undefined && until > this.now()) throw new GitHubError(`GitHub's rate limit is used up until ${new Date(until).toISOString()}; checking resumes then.`, until);
+    };
+    if (this.options.githubTransport) {
+      const transport = this.options.githubTransport(authorization);
+      return { identity, fetch: async (path, etag) => { blocked(); const over = this.spend(); if (over) throw new GitHubError(over); return guard(await transport(path, etag)); } };
+    }
+    const ownPorts = await this.options.ownPorts?.().catch(() => []) ?? [];
+    return { identity, fetch: async (path, etag) => {
+      blocked();
+      const outcome = await performHttp({ method: 'GET', url: `${GITHUB_API}${path}`, secretOrigin: GITHUB_API, secretHeaders: { authorization },
+        headers: { accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', ...(etag ? { 'if-none-match': etag } : {}) },
+        timeoutMs: 30_000, maxBytes: 5_000_000, beforeSend: () => this.spend() }, { privateHosts: [], ownPorts }, this.options.resolve);
+      if (!outcome.ok) throw new GitHubError(outcome.error);
+      let body: unknown;
+      try { body = outcome.status === 304 ? undefined : JSON.parse(outcome.body); } catch { body = undefined; }
+      const number = (value: string | undefined) => value !== undefined && /^\d+$/.test(value) ? Number(value) : undefined;
+      const remaining = number(outcome.headers['x-ratelimit-remaining']);
+      const reset = number(outcome.headers['x-ratelimit-reset']);
+      // An ETag that echoed the credential is not kept.
+      const tag = outcome.headers.etag && !outcome.headers.etag.includes('[secret removed]') ? outcome.headers.etag : undefined;
+      return guard({ status: outcome.status, body, truncated: outcome.truncated, ...(tag ? { etag: tag } : {}),
+        ...(remaining !== undefined ? { remaining } : {}), ...(reset !== undefined ? { reset } : {}) });
+    } };
+  }
+
+  /** The account a credential acts as, looked up again every ten minutes and whenever the credential changes. */
+  private async githubLogin(fetch: GitHubFetch, identity: string, fresh = false): Promise<string> {
+    const known = this.logins.get(identity);
+    if (!fresh && known && Date.now() - known.at < 10 * 60_000) return known.login;
+    const response = await fetch('/user');
+    refused(response);
+    const login = response.status === 200 && response.body && typeof response.body === 'object' ? (response.body as { login?: unknown }).login : undefined;
+    if (typeof login !== 'string' || !login) throw new GitHubError(`GitHub did not say which account this is (HTTP ${response.status}).`);
+    if (this.logins.size > 20) this.logins.clear();
+    this.logins.set(identity, { login, at: Date.now() });
+    return login;
+  }
+
+  private async githubToken(auth: GitHubAuth, triggerId?: string): Promise<string> {
+    if (auth.type === 'token') {
+      const secret = this.secrets.get(auth.secretId);
+      if (!secret || secret.origin !== GITHUB_API) throw new GitHubError('The GitHub token secret is missing or is not saved for https://api.github.com.');
+      if (triggerId && !(this.state.secretGrants[secret.id] ?? []).includes(triggerId)) throw new GitHubError('The owner has not given this trigger the GitHub token secret.');
+      return secret.value;
+    }
+    if (this.ghToken && Date.now() - this.ghToken.at < 5 * 60_000) return this.ghToken.value;
+    const value = await (this.options.ghToken ?? readGhToken)();
+    this.ghToken = { value, at: Date.now() };
+    return value;
+  }
+
+  /** Shows the owner which account a connection acts as. Nothing is recorded. */
+  async checkGitHub(auth: GitHubAuth, actor: TriggerActor): Promise<GitHubCheck> {
+    if (actor.kind !== 'owner') throw failure('Only the owner can check GitHub connections.', 403);
+    try {
+      if (auth.type === 'gh') this.ghToken = undefined;
+      const { fetch, identity } = await this.githubFetch(auth);
+      const login = await this.githubLogin(fetch, identity, true);
+      return { ok: true, login };
+    } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
   }
 
   private payloadOf(trigger: Trigger, outcome: Extract<HttpOutcome, { ok: true }>, selected?: unknown): unknown {
@@ -769,6 +926,7 @@ export class TriggerService extends EventEmitter {
    * can keep only secrets the owner already gave this trigger, never add one.
    */
   private grantSecrets(state: EngineState, trigger: Trigger, actor: TriggerActor): void {
+    if (trigger.source.kind === 'github') { this.grantGitHub(state, trigger, actor); return; }
     if (trigger.source.kind !== 'http') return;
     const request = trigger.source.request;
     const origin = new URL(request.url).origin;
@@ -789,6 +947,21 @@ export class TriggerService extends EventEmitter {
       if (actor.kind !== 'owner') throw failure(`Only the owner can give the secret "${secret.name}" to a trigger. Ask the owner to choose it in Tower.`, 403);
       state.secretGrants[secret.id] = [...granted, trigger.id];
     }
+  }
+  /** A GitHub token is the owner's to give; an agent may keep a token-based source only exactly as accepted. */
+  private grantGitHub(state: EngineState, trigger: Trigger, actor: TriggerActor): void {
+    if (trigger.source.kind !== 'github' || trigger.source.auth.type !== 'token') return;
+    const secret = this.secrets.get(trigger.source.auth.secretId);
+    if (!secret) throw failure('The GitHub token secret no longer exists.');
+    if (secret.origin !== GITHUB_API) throw failure(`The secret "${secret.name}" is not saved for ${GITHUB_API}.`);
+    const granted = state.secretGrants[secret.id] ?? [];
+    if (actor.kind !== 'owner') {
+      const source = JSON.stringify(trigger.source);
+      const accepted = [...state.triggers, ...(state.revisions[trigger.id] ?? []), ...state.tombstones].some(item => item.id === trigger.id && JSON.stringify(item.source) === source);
+      if (!accepted || !granted.includes(trigger.id)) throw failure('Only the owner can set up or change a GitHub trigger that uses a saved token. Ask the owner to make this change in Tower.', 403);
+      return;
+    }
+    if (!granted.includes(trigger.id)) state.secretGrants[secret.id] = [...granted, trigger.id];
   }
   private note(state: EngineState, actor: TriggerActor, action: 'secret', summary: string): void {
     state.audit = [...state.audit, { id: randomUUID(), at: new Date(this.now()).toISOString(), actor, action, triggerId: '', triggerName: '', summary: summary.slice(0, 500) }].slice(-MAX_AUDIT);
@@ -843,7 +1016,11 @@ export class TriggerService extends EventEmitter {
     this.grantSecrets(state, next, actor);
     state.revisions[current.id] = [...(state.revisions[current.id] ?? []), current].slice(-MAX_REVISIONS);
     state.triggers = state.triggers.map(item => item.id === current.id ? next : item);
-    if (JSON.stringify(current.source) !== JSON.stringify(next.source) || (!current.enabled && next.enabled)) this.schedule(state, next);
+    if (JSON.stringify(current.source) !== JSON.stringify(next.source) || (!current.enabled && next.enabled)) {
+      const kept = current.enabled && next.enabled ? keptGitHub(current, next, state.cursors[current.id]) : undefined;
+      this.schedule(state, next);
+      if (kept) state.cursors[current.id].github = kept;
+    }
     // However a trigger is turned off (toggle, edit or revert), waiting runs do not start; running ones continue.
     if (current.enabled && !next.enabled) this.turnedOff(state, current.id);
     this.trust(state, next, actor);
@@ -854,7 +1031,9 @@ export class TriggerService extends EventEmitter {
     const now = this.now();
     const previous = state.cursors[trigger.id];
     state.cursors[trigger.id] = { anchorAt: now, nextAt: nextSlot(trigger.source.schedule, now, now), ...(previous?.lastSlot !== undefined ? { lastSlot: previous.lastSlot } : {}),
-      ...(previous?.paused ? { paused: previous.paused } : {}), ...(previous?.turnedOffAt !== undefined ? { turnedOffAt: previous.turnedOffAt } : {}) };
+      ...(previous?.paused ? { paused: previous.paused } : {}), ...(previous?.turnedOffAt !== undefined ? { turnedOffAt: previous.turnedOffAt } : {}),
+      // A rate limit belongs to GitHub, not to the definition: editing or turning a GitHub trigger on does not lift it.
+      ...(trigger.source.kind === 'github' && previous?.blockedUntil !== undefined && previous.blockedUntil > now ? { blockedUntil: previous.blockedUntil } : {}) };
   }
   private trust(state: EngineState, trigger: Trigger, actor: TriggerActor): void {
     const target = trigger.handler.target;
@@ -875,7 +1054,8 @@ export class TriggerService extends EventEmitter {
   private describe(trigger: Trigger): string {
     const schedule = trigger.source.schedule;
     const when = schedule.type === 'cron' ? `${schedule.expression} ${schedule.timezone}` : `every ${schedule.everySeconds}s`;
-    const request = trigger.source.kind === 'http' ? `${trigger.source.request.method} ${new URL(trigger.source.request.url).origin}, ` : '';
+    const request = trigger.source.kind === 'http' ? `${trigger.source.request.method} ${new URL(trigger.source.request.url).origin}, `
+      : trigger.source.kind === 'github' ? `GitHub ${trigger.source.watch.type}${trigger.source.watch.repos?.length ? ` ${trigger.source.watch.repos.join(' ')}` : ''} as ${trigger.source.account}, ` : '';
     return `"${trigger.name}" (${request}${when})`;
   }
   private changes(before: Trigger, after: Trigger): string {
@@ -980,3 +1160,31 @@ export class TriggerService extends EventEmitter {
     await rename(this.path, `${this.path}.unreadable-${Date.now()}`).catch(() => {});
   }
 }
+
+/** The GitHub CLI's token for github.com. Nothing is cached on disk by Tower. */
+async function readGhToken(): Promise<string> {
+  const gh = await findExecutable('gh');
+  if (!gh) throw new GitHubError('The GitHub CLI (gh) was not found. Install it and run gh auth login, or use a saved token.');
+  return new Promise((resolve, reject) => execFile(gh, ['auth', 'token', '--hostname', 'github.com'], { timeout: 10_000, maxBuffer: 64 * 1024 }, (error, stdout) => {
+    const token = String(stdout).trim();
+    if (error || !token) reject(new GitHubError('gh is not signed in to github.com. Run gh auth login on this computer.'));
+    else resolve(token);
+  }));
+}
+
+/**
+ * What a GitHub trigger keeps when its definition changes while on: with the same connection and kind of
+ * watch, repositories still watched keep what was seen (new ones start from their first check), so an edit
+ * never loses issues opened meanwhile. Assignments are kept only when the same set is watched.
+ */
+function keptGitHub(before: Trigger, after: Trigger, cursor: Cursor | undefined): GitHubCursor | undefined {
+  if (before.source.kind !== 'github' || after.source.kind !== 'github' || !cursor?.github) return undefined;
+  const [a, b] = [before.source, after.source];
+  if (JSON.stringify(a.auth) !== JSON.stringify(b.auth) || a.account.toLowerCase() !== b.account.toLowerCase() || a.watch.type !== b.watch.type) return undefined;
+  if (b.watch.type === 'issue-opened') {
+    const repos = Object.fromEntries(Object.entries(cursor.github.repos ?? {}).filter(([repo]) => b.watch.type === 'issue-opened' && b.watch.repos.includes(repo)));
+    return { repos };
+  }
+  return JSON.stringify(a.watch) === JSON.stringify(b.watch) ? cursor.github : undefined;
+}
+

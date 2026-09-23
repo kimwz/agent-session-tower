@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { CalendarClock, Globe, History, KeyRound, Pencil, Play, Plus, RotateCcw, Settings2, Slack, Trash2, X, Zap } from 'lucide-react';
+import { CalendarClock, CircleDot, Globe, History, KeyRound, Pencil, Play, Plus, RotateCcw, Settings2, Slack, Trash2, X, Zap } from 'lucide-react';
 import type { ProviderHealth, Session } from '../../../shared/types';
-import type { HttpCondition, HttpTestResult, Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOverview, TriggerSecret, TriggerSettings, TriggerSummary } from '../../../shared/triggers';
+import { GITHUB_API, type GitHubCheck, type HttpCondition, type HttpTestResult, type Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOverview, TriggerSecret, TriggerSettings, TriggerSummary } from '../../../shared/triggers';
 import { EffortPicker, ModelPicker } from '../chat/ModelPicker';
 import { authPost } from '../auth/AuthGate';
 import { absoluteTime, relativeTime, sessionTitle } from '../common/lib';
@@ -12,6 +12,7 @@ import { SlackPanel } from '../slack/SlackPanel';
 type Tab = 'triggers' | 'history' | 'settings';
 type Source = TriggerInput['source'];
 type HttpSource = Extract<Source, { kind: 'http' }>;
+type GitHubSource = Extract<Source, { kind: 'github' }>;
 interface Context { token: string; providers: ProviderHealth[]; projects: [string, string][]; sessions: Session[] }
 
 /** Calls a Tower operation (shared/api/operations.ts) as the owner. */
@@ -110,6 +111,11 @@ export function scheduleLabel(trigger: Pick<Trigger, 'source'>, t: (key: string,
   const schedule = trigger.source.schedule;
   const when = schedule.type === 'interval' ? schedule.everySeconds % 3600 === 0 ? t('{0}시간마다', { 0: schedule.everySeconds / 3600 }) : t('{0}분마다', { 0: Math.round(schedule.everySeconds / 60) })
     : `${schedule.expression} · ${schedule.timezone}`;
+  if (trigger.source.kind === 'github') {
+    const watch = trigger.source.watch;
+    const repos = watch.repos?.length ? ` · ${watch.repos[0]}${watch.repos.length > 1 ? ` +${watch.repos.length - 1}` : ''}` : '';
+    return `GitHub · ${watch.type === 'issue-opened' ? t('새 이슈') : t('나에게 할당')}${repos} · ${when}`;
+  }
   if (trigger.source.kind !== 'http') return when;
   let host = trigger.source.request.url;
   try { host = new URL(host).host; } catch { /* shown as written */ }
@@ -124,7 +130,7 @@ function TriggerRow({ trigger, summary, busy, onToggle, onRun, onEdit, onDelete 
   return <li className={`slack-rule ${trigger.enabled ? '' : 'disabled'}`}><div className="slack-rule-row">
     <label className="slack-switch" title={t('활성')}><input type="checkbox" aria-label={t('활성')} checked={trigger.enabled} disabled={busy} onChange={event => onToggle(event.target.checked)} /><span /></label>
     <button type="button" className="slack-rule-summary" onClick={onEdit}>
-      {trigger.source.kind === 'http' ? <Globe size={16} /> : <CalendarClock size={16} />}
+      {trigger.source.kind === 'http' ? <Globe size={16} /> : trigger.source.kind === 'github' ? <CircleDot size={16} /> : <CalendarClock size={16} />}
       <span className="slack-rule-text"><strong>{trigger.name}</strong><small>{scheduleLabel(trigger, t)}{summary?.nextRunAt ? ` · ${t('다음 실행')} ${absoluteTime(summary.nextRunAt)}` : ''}</small></span>
       <span className="slack-badges">
         <span>{trigger.handler.provider === 'claude' ? 'Claude' : 'Codex'}</span>
@@ -151,6 +157,9 @@ const browserZone = () => { try { return Intl.DateTimeFormat().resolvedOptions()
 export function blankHttpSource(schedule: Source['schedule'] = { type: 'interval', everySeconds: 300 }): HttpSource {
   return { kind: 'http', schedule, request: { method: 'GET', url: '', headers: [], timeoutSeconds: 30 }, condition: { type: 'changed' } };
 }
+export function blankGitHubSource(schedule: Source['schedule'] = { type: 'interval', everySeconds: 300 }): GitHubSource {
+  return { kind: 'github', schedule, auth: { type: 'gh' }, account: '', watch: { type: 'issue-opened', repos: [], authorAssociation: ['OWNER', 'MEMBER', 'COLLABORATOR'] } };
+}
 export function blankTrigger(): TriggerInput {
   return { name: '', enabled: true, source: { kind: 'schedule', schedule: { type: 'cron', expression: '0 9 * * 1-5', timezone: browserZone() }, catchUp: 'latest' },
     handler: { kind: 'task', instructions: '', provider: 'codex', approvals: 'auto', target: { node: 'local', mode: 'auto' } }, policy: { overlap: 'skip', maxEventsPerHour: 20 } };
@@ -163,12 +172,13 @@ function TriggerEditor({ trigger, token, providers, projects, sessions, busy, on
   const schedule = input.source.schedule;
   const handler = input.handler;
   const setSchedule = (next: typeof schedule) => setInput({ ...input, source: { ...input.source, schedule: next } });
-  const http = input.source.kind === 'http';
+  const http = input.source.kind !== 'schedule';
   const setKind = (kind: Source['kind']) => {
     if (kind === input.source.kind) return;
     // Outside content never continues an existing session.
-    const target = kind === 'http' && handler.target.mode === 'session' ? { node: 'local' as const, mode: 'auto' as const } : handler.target;
-    setInput({ ...input, source: kind === 'http' ? blankHttpSource(schedule.type === 'interval' ? schedule : undefined) : { kind: 'schedule', schedule, catchUp: 'latest' }, handler: { ...handler, target } });
+    const target = kind !== 'schedule' && handler.target.mode === 'session' ? { node: 'local' as const, mode: 'auto' as const } : handler.target;
+    const interval = schedule.type === 'interval' ? schedule : undefined;
+    setInput({ ...input, source: kind === 'http' ? blankHttpSource(interval) : kind === 'github' ? blankGitHubSource(interval) : { kind: 'schedule', schedule, catchUp: 'latest' }, handler: { ...handler, target } });
   };
   const setHandler = (patch: Partial<typeof handler>) => setInput({ ...input, handler: { ...handler, ...patch } });
   const provider = providers.find(item => item.provider === handler.provider);
@@ -180,8 +190,10 @@ function TriggerEditor({ trigger, token, providers, projects, sessions, busy, on
   return <form className="slack-rule-editor trigger-editor" onSubmit={event => { event.preventDefault(); onSave(input); }}><fieldset disabled={busy} className="slack-rules">
     <label>{t('이름')}<input required maxLength={120} value={input.name} onChange={event => setInput({ ...input, name: event.target.value })} /></label>
     <label>{t('시작 조건')}<select value={input.source.kind} onChange={event => setKind(event.target.value as Source['kind'])}>
-      <option value="schedule">{t('정한 시간 (예약 실행)')}</option><option value="http">{t('HTTP 응답 확인')}</option></select></label>
+      <option value="schedule">{t('정한 시간 (예약 실행)')}</option><option value="http">{t('HTTP 응답 확인')}</option><option value="github">{t('GitHub 이슈')}</option></select></label>
     {input.source.kind === 'http' && <HttpFields token={token} source={input.source} onChange={source => setInput({ ...input, source })} />}
+    {input.source.kind === 'github' && <GitHubFields token={token} source={input.source} onChange={source => setInput({ ...input, source })}
+      onAccount={(login, auth) => setInput(previous => previous.source.kind === 'github' && JSON.stringify(previous.source.auth) === JSON.stringify(auth) ? { ...previous, source: { ...previous.source, account: login } } : previous)} />}
     <fieldset className="slack-group"><legend>{http ? t('확인 주기') : t('일정')}</legend><div className="slack-rule-options">
       <label>{t('방식')}<select value={schedule.type} onChange={event => setSchedule(event.target.value === 'interval' ? { type: 'interval', everySeconds: 3600 } : { type: 'cron', expression: '0 9 * * 1-5', timezone: browserZone() })}>
         <option value="cron">{t('크론')}</option><option value="interval">{t('일정 간격')}</option></select></label>
@@ -191,12 +203,12 @@ function TriggerEditor({ trigger, token, providers, projects, sessions, busy, on
       </> : <label>{t('간격 (분)')}<input type="number" required min={1} max={44640} value={Math.round(schedule.everySeconds / 60)} onChange={event => setSchedule({ type: 'interval', everySeconds: Math.max(1, Number(event.target.value) || 1) * 60 })} /></label>}
       {input.source.kind === 'schedule' ? <label className="wide">{t('놓친 실행')}<small>{t('컴퓨터가 잠자기 상태였거나 Tower가 꺼져 있던 동안의 실행')}</small><select value={input.source.catchUp} onChange={event => setInput({ ...input, source: { ...input.source, catchUp: event.target.value as 'latest' | 'skip' } as Source })}>
         <option value="latest">{t('하루 안에 놓친 가장 최근 시간을 한 번 실행')}</option><option value="skip">{t('건너뛰기')}</option></select></label>
-        : <p className="wide trigger-note">{t('잠자기나 종료로 확인을 놓쳤다면 다시 켜진 뒤 한 번만 확인합니다.')}</p>}
+        : <p className="wide trigger-note">{input.source.kind === 'github' ? t('놓친 사이에 생긴 이슈도 다음 확인에서 찾습니다.') : t('잠자기나 종료로 확인을 놓쳤다면 다시 켜진 뒤 한 번만 확인합니다.')}</p>}
     </div>
     <div className="trigger-preview"><button type="button" className="secondary-button" onClick={() => void showPreview()}>{t('다음 실행 시간 보기')}</button>
       {typeof preview === 'string' ? preview && <p className="slack-error">{translateMessage(preview)}</p> : <ol>{preview.map(time => <li key={time}>{absoluteTime(time)}</li>)}</ol>}</div>
     </fieldset>
-    <label>{t('지시')}<small>{http ? t('실행될 때마다 에이전트에게 보내는 내용입니다. 받은 응답은 지시가 아닌 참고 자료로 함께 전달됩니다.') : t('실행될 때마다 에이전트에게 보내는 내용입니다.')}</small><textarea required rows={5} maxLength={8000} value={handler.instructions} onChange={event => setHandler({ instructions: event.target.value })} /></label>
+    <label>{t('지시')}<small>{input.source.kind === 'github' ? t('이슈마다 에이전트에게 보내는 내용입니다. 이슈 내용은 지시가 아닌 참고 자료로 함께 전달됩니다.') : http ? t('실행될 때마다 에이전트에게 보내는 내용입니다. 받은 응답은 지시가 아닌 참고 자료로 함께 전달됩니다.') : t('실행될 때마다 에이전트에게 보내는 내용입니다.')}</small><textarea required rows={5} maxLength={8000} value={handler.instructions} onChange={event => setHandler({ instructions: event.target.value })} /></label>
     <fieldset className="slack-group"><legend>{t('실행')}</legend><div className="slack-rule-options">
       <label>{t('에이전트')}<select value={handler.provider} onChange={event => setHandler({ provider: event.target.value as 'claude' | 'codex', model: undefined, effort: undefined,
         target: handler.target.mode === 'session' ? { node: 'local', mode: 'auto' } : handler.target })}><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
@@ -293,6 +305,75 @@ function HttpFields({ token, source, onChange }: { token: string; source: HttpSo
           {result.matched !== undefined && <p>{result.matched ? t('지금 조건을 만족합니다.') : t('지금은 조건을 만족하지 않습니다.')}</p>}
           {result.body && <pre>{result.body}{result.truncated ? '\n…' : ''}</pre>}
         </div>}
+    </div></fieldset>
+  </>;
+}
+
+const MEMBERS = ['OWNER', 'MEMBER', 'COLLABORATOR'] as const;
+const list = (value: string) => value.split(/[\n,]/).map(item => item.trim()).filter(Boolean);
+
+function GitHubFields({ token, source, onChange, onAccount }: { token: string; source: GitHubSource; onChange: (source: GitHubSource) => void;
+  /** Sets the checked account, only if the sign-in it was checked with is still the one chosen. */
+  onAccount: (login: string, auth: GitHubSource['auth']) => void }) {
+  const { t } = useI18n();
+  const [secrets, setSecrets] = useState<TriggerSecret[]>([]);
+  const [check, setCheck] = useState<GitHubCheck | string>('');
+  const [checking, setChecking] = useState(false);
+  const checks = useRef(0);
+  const reset = () => { checks.current++; setCheck(''); setChecking(false); };
+  // Typed text is kept as written, so a trailing comma or line does not vanish while typing.
+  const [repos, setRepos] = useState(source.watch.repos?.join('\n') ?? '');
+  const [labels, setLabels] = useState(source.watch.type === 'issue-opened' ? source.watch.labels?.join(', ') ?? '' : '');
+  const [authors, setAuthors] = useState(source.watch.type === 'issue-opened' ? source.watch.authors?.join(', ') ?? '' : '');
+  useEffect(() => { void towerOperation<{ secrets: TriggerSecret[] }>(token, 'secrets.list').then(value => setSecrets(value.secrets.filter(secret => secret.origin === GITHUB_API)), () => setSecrets([])); }, [token]);
+  const watch = source.watch;
+  const setWatch = (next: GitHubSource['watch']) => onChange({ ...source, watch: next });
+  const association = watch.type !== 'issue-opened' ? 'members' : watch.authorAssociation === 'any' ? 'any'
+    : [...watch.authorAssociation].sort().join() === [...MEMBERS].sort().join() ? 'members' : 'custom';
+  const verify = async () => {
+    setChecking(true); setCheck('');
+    const auth = source.auth;
+    const asked = ++checks.current;
+    try {
+      const result = (await towerOperation<{ result: GitHubCheck }>(token, 'triggers.checkGitHub', { auth })).result;
+      // A reply to a check started before the sign-in changed is not shown.
+      if (asked !== checks.current) return;
+      setCheck(result);
+      if (result.ok && result.login) onAccount(result.login, auth);
+    } catch (cause) { if (asked === checks.current) setCheck(cause instanceof Error ? cause.message : String(cause)); }
+    finally { if (asked === checks.current) setChecking(false); }
+  };
+  return <>
+    <fieldset className="slack-group"><legend>{t('GitHub 연결')}</legend><div className="slack-rule-options">
+      <label>{t('인증')}<select value={source.auth.type} onChange={event => { reset(); onChange({ ...source, account: '', auth: event.target.value === 'token' ? { type: 'token', secretId: secrets[0]?.id ?? '' } : { type: 'gh' } }); }}>
+        <option value="gh">{t('이 컴퓨터의 gh 로그인')}</option><option value="token">{t('저장한 토큰')}</option></select></label>
+      {source.auth.type === 'token' && <label>{t('토큰')}<select required value={source.auth.secretId} onChange={event => { reset(); onChange({ ...source, account: '', auth: { type: 'token', secretId: event.target.value } }); }}>
+        <option value="">{t('비밀 값 선택')}</option>{secrets.map(secret => <option key={secret.id} value={secret.id}>{secret.name}</option>)}</select>
+        {!secrets.length && <small>{t('설정 탭에서 https://api.github.com 용 비밀로 토큰을 먼저 저장하세요.')}</small>}</label>}
+      <div className="wide trigger-preview">
+        <button type="button" className="secondary-button" disabled={checking} onClick={() => void verify()}>{checking ? t('확인 중') : t('연결 확인')}</button>
+        {typeof check === 'string' ? check && <p className="slack-error">{translateMessage(check)}</p>
+          : check.ok ? <p>{t('{0} 계정으로 확인합니다.', { 0: check.login ?? '' })}</p> : <p className="slack-error">{translateMessage(check.error ?? '')}</p>}
+        {!source.account && <small>{t('저장하기 전에 연결을 확인해 계정을 정하세요.')}</small>}
+        {source.account && typeof check === 'string' && <small>{t('{0} 계정으로 확인합니다.', { 0: source.account })}</small>}
+      </div>
+    </div></fieldset>
+    <fieldset className="slack-group"><legend>{t('감시')}</legend><div className="slack-rule-options">
+      <label className="wide">{t('무엇을 볼까요')}<select value={watch.type} onChange={event => setWatch(event.target.value === 'assigned-to-me'
+        ? { type: 'assigned-to-me', ...(list(repos).length ? { repos: list(repos) } : {}), includePullRequests: false }
+        : { type: 'issue-opened', repos: list(repos), authorAssociation: [...MEMBERS], ...(list(labels).length ? { labels: list(labels) } : {}), ...(list(authors).length ? { authors: list(authors) } : {}) })}>
+        <option value="issue-opened">{t('저장소에 새로 열린 이슈')}</option><option value="assigned-to-me">{t('나에게 새로 할당된 이슈')}</option></select>
+        <small>{t('처음 확인할 때 이미 있던 이슈로는 실행하지 않습니다.')}</small></label>
+      <label className="wide">{t('저장소')}<small>{watch.type === 'issue-opened' ? t('한 줄에 하나씩 owner/name') : t('비우면 모든 저장소, 한 줄에 하나씩 owner/name')}</small>
+        <textarea rows={2} required={watch.type === 'issue-opened'} value={repos} onChange={event => { setRepos(event.target.value); const names = list(event.target.value);
+          setWatch(watch.type === 'issue-opened' ? { ...watch, repos: names } : { ...watch, ...(names.length ? { repos: names } : { repos: undefined }) }); }} /></label>
+      {watch.type === 'issue-opened' ? <>
+        <label>{t('라벨')}<small>{t('쉼표로 구분, 하나라도 있으면')}</small><input value={labels} onChange={event => { setLabels(event.target.value); const names = list(event.target.value); setWatch({ ...watch, labels: names.length ? names : undefined }); }} /></label>
+        <label>{t('작성자')}<small>{t('쉼표로 구분, 비우면 누구나')}</small><input value={authors} onChange={event => { setAuthors(event.target.value); const names = list(event.target.value); setWatch({ ...watch, authors: names.length ? names : undefined }); }} /></label>
+        <label className="wide">{t('작성자 범위')}<select value={association} onChange={event => { if (event.target.value !== 'custom') setWatch({ ...watch, authorAssociation: event.target.value === 'any' ? 'any' : [...MEMBERS] }); }}>
+          <option value="members">{t('저장소 소유자·멤버·협업자 (권장)')}</option><option value="any">{t('누구나 (공개 저장소라면 외부인도)')}</option>
+          {association === 'custom' && watch.authorAssociation !== 'any' && <option value="custom">{watch.authorAssociation.join(', ')}</option>}</select></label>
+      </> : <label className="trigger-checkbox"><input type="checkbox" checked={watch.includePullRequests} onChange={event => setWatch({ ...watch, includePullRequests: event.target.checked })} />{t('풀 리퀘스트도 포함')}</label>}
     </div></fieldset>
   </>;
 }

@@ -31,6 +31,7 @@
 .trigger-secret-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; align-items: end; }
 .trigger-secret-form .slack-actions { grid-column: 1 / -1; }
 .trigger-secret-form .primary-button { display: inline-flex; align-items: center; gap: 6px; }
+.trigger-checkbox { display: flex; align-items: center; gap: 8px; }
 @media (max-width: 640px) {
   .trigger-header-row { grid-template-columns: 1fr 1fr; }
   .trigger-secret-form { grid-template-columns: 1fr; }

@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { ArrowUpRight, CalendarClock, Globe, GripHorizontal, Play, Radio, Zap } from 'lucide-react';
+import { ArrowUpRight, CalendarClock, CircleDot, Globe, GripHorizontal, Play, Radio, Zap } from 'lucide-react';
 import type { TriggerEvent } from '../../../shared/triggers';
 import { translate as t, useI18n } from '../i18n/i18n';
 import { relativeTime } from '../common/lib';
@@ -50,11 +50,11 @@ export const TriggerEventNode = memo(function TriggerEventNode({ data }: NodePro
   const failed = event.status === 'error' || event.status === 'uncertain' || event.status === 'cancelled';
   const state = working ? 'working' : data.unread ? 'unread' : failed ? 'failed' : event.status === 'completed' ? 'replied' : '';
   const label = state === 'unread' ? t('읽지 않음') : eventStatusLabel(event.status, t);
-  const Icon = event.kind === 'http' ? Globe : event.kind === 'manual' ? Play : CalendarClock;
+  const Icon = event.kind === 'http' ? Globe : event.kind === 'github' ? CircleDot : event.kind === 'manual' ? Play : CalendarClock;
   return <button className={`agent-card slack-mention-card trigger-event-card ${state} ${data.selected ? 'selected' : ''}`} onClick={() => data.onSelect?.(event.id)}
     title={event.error || event.reason || event.summary} aria-label={`${event.triggerName}: ${label}`}>
     {working && <span className="agent-activity-border" aria-hidden="true" />}
     <div className="slack-mention-top"><Icon size={12} /><span>{label}</span><time dateTime={event.receivedAt}>{relativeTime(event.receivedAt)}</time><ArrowUpRight size={11} /></div>
-    <div className="agent-card-title" title={event.triggerName}>{event.triggerName}</div>
+    <div className="agent-card-title" title={event.summary}>{event.kind === 'github' ? event.summary : event.triggerName}</div>
   </button>;
 });

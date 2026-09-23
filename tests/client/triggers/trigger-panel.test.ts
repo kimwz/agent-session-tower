@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { blankHttpSource, blankTrigger, eventStatusLabel, scheduleLabel, TriggerButton } from '../../../client/src/triggers/TriggerPanel.js';
+import { blankGitHubSource, blankHttpSource, blankTrigger, eventStatusLabel, scheduleLabel, TriggerButton } from '../../../client/src/triggers/TriggerPanel.js';
 import { setLanguage, translate } from '../../../client/src/i18n/i18n.js';
 import { TriggerInputSchema } from '../../../shared/triggers.js';
 
@@ -40,3 +40,15 @@ test('the header trigger button marks runs that need attention', () => {
   assert.doesNotMatch(markup('completed'), /attention/);
   assert.match(markup('error'), /attention/);
 });
+
+test('a new GitHub trigger from the panel needs repositories and a checked account before the server accepts it', () => {
+  const base = { ...blankTrigger(), name: 'Issues', source: blankGitHubSource(), handler: { ...blankTrigger().handler, instructions: 'Triage it' } };
+  assert.equal(TriggerInputSchema.safeParse(base).success, false);
+  const source = blankGitHubSource();
+  const ready = { ...base, source: { ...source, account: 'octocat', watch: { ...source.watch, repos: ['octo/app', 'octo/lib'] } } };
+  const parsed = TriggerInputSchema.parse(ready);
+  assert.equal(parsed.source.kind === 'github' && parsed.source.watch.type === 'issue-opened' && JSON.stringify(parsed.source.watch.authorAssociation), '["OWNER","MEMBER","COLLABORATOR"]');
+  setLanguage('en');
+  assert.equal(scheduleLabel(parsed, (key, values) => translate(key, values)), 'GitHub · New issues · octo/app +1 · Every 5 min');
+});
+

@@ -37,9 +37,11 @@ export interface HttpCall {
   timeoutMs: number;
   /** Asked before each request goes out, redirects included; a message refuses it. */
   beforeSend?: () => string | undefined;
+  /** Largest response body kept; the rest is cut off and marked truncated. */
+  maxBytes?: number;
 }
 export type HttpOutcome =
-  | { ok: true; status: number; contentType?: string; body: string; truncated: boolean; url: string }
+  | { ok: true; status: number; contentType?: string; body: string; truncated: boolean; url: string; headers: Record<string, string> }
   | { ok: false; error: string; /** A POST may have reached the server; it is never sent again. */ uncertain: boolean };
 
 const family = (address: string): 'ipv4' | 'ipv6' => isIP(address) === 6 ? 'ipv6' : 'ipv4';
@@ -143,7 +145,8 @@ function redact(outcome: HttpOutcome, secrets: string[]): HttpOutcome {
       : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([key, item]) => [clean(key), deep(item)])) : value;
     body = JSON.stringify(deep(JSON.parse(body)));
   } catch { /* not JSON: the text form is already cleaned */ }
-  return { ...outcome, body, url: clean(outcome.url), ...(outcome.contentType ? { contentType: clean(outcome.contentType) } : {}) };
+  const headers = Object.fromEntries(Object.entries(outcome.headers).map(([name, value]) => [name, clean(value)]));
+  return { ...outcome, body, url: clean(outcome.url), headers, ...(outcome.contentType ? { contentType: clean(outcome.contentType) } : {}) };
 }
 
 /** Requests never go through an environment proxy: each connects straight to the address that was checked. */
@@ -170,7 +173,7 @@ async function perform(call: HttpCall, destination: Destination, resolve: typeof
     if (remaining <= 0) return stop(`No response within ${Math.round(call.timeoutMs / 1000)} seconds.`);
     const refused = call.beforeSend?.();
     if (refused) return stop(refused);
-    const outcome = await once(url, method, headers, method === 'POST' ? body : undefined, target, remaining);
+    const outcome = await once(url, method, headers, method === 'POST' ? body : undefined, target, remaining, call.maxBytes ?? MAX_RESPONSE_BYTES);
     if (!outcome.ok) return { ...outcome, uncertain: outcome.uncertain || delivered };
     if (!('redirect' in outcome)) return outcome;
     delivered ||= method === 'POST';
@@ -184,7 +187,10 @@ async function perform(call: HttpCall, destination: Destination, resolve: typeof
   }
 }
 
-function once(url: URL, method: string, headers: Record<string, string>, body: string | undefined, target: { address: string; family: 4 | 6 }, timeoutMs: number)
+/** Response headers callers may read: caching, paging and rate limits. */
+const KEPT_HEADERS = ['etag', 'link', 'retry-after', 'x-ratelimit-remaining', 'x-ratelimit-reset'];
+
+function once(url: URL, method: string, headers: Record<string, string>, body: string | undefined, target: { address: string; family: 4 | 6 }, timeoutMs: number, maxBytes: number)
   : Promise<HttpOutcome | { ok: true; redirect: string; status: number }> {
   return new Promise(resolve => {
     let sent = false;
@@ -206,11 +212,12 @@ function once(url: URL, method: string, headers: Record<string, string>, body: s
       if (status >= 300 && status < 400 && typeof location === 'string') { finish({ ok: true, redirect: location, status }); response.destroy(); req.destroy(); return; }
       const chunks: Buffer[] = []; let size = 0; let truncated = false;
       response.on('data', (chunk: Buffer) => {
-        if (size >= MAX_RESPONSE_BYTES) { truncated = true; response.destroy(); return; }
-        chunks.push(chunk.subarray(0, MAX_RESPONSE_BYTES - size)); size += chunk.length;
-        if (size > MAX_RESPONSE_BYTES) { truncated = true; response.destroy(); }
+        if (size >= maxBytes) { truncated = true; response.destroy(); return; }
+        chunks.push(chunk.subarray(0, maxBytes - size)); size += chunk.length;
+        if (size > maxBytes) { truncated = true; response.destroy(); }
       });
-      const done = () => finish({ ok: true, status, ...(response.headers['content-type'] ? { contentType: String(response.headers['content-type']) } : {}),
+      const kept = Object.fromEntries(KEPT_HEADERS.flatMap(name => typeof response.headers[name] === 'string' ? [[name, response.headers[name] as string]] : []));
+      const done = () => finish({ ok: true, status, headers: kept, ...(response.headers['content-type'] ? { contentType: String(response.headers['content-type']) } : {}),
         body: Buffer.concat(chunks).toString('utf8'), truncated, url: url.toString() });
       response.on('end', done);
       response.on('close', done);
