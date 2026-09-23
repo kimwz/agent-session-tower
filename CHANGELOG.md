@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.13.0] - 2026-09-23
+
+### Changed
+- Pages receive only what changed. Tower no longer resends the session list when nothing changed, and an open page now receives just the sessions, runs, or settings that changed instead of the whole snapshot. With about 1,100 sessions that snapshot is about 1.5 MB, and it used to be resent every few seconds even while idle. Pages opened before this release keep working and receive complete snapshots, now only when something changes.
+- The web server no longer scans Claude Code and Codex histories itself. The execution worker already scans them and now also serves conversation history. While an older worker is still attached, the web server keeps its own scan until that worker is replaced.
+- The execution worker saves streamed output to its task history every 2 seconds instead of up to five times a second, and no longer rewrites state files that did not change. Status changes are still saved immediately.
+
 ## [1.12.3] - 2026-09-23
 
 ### Fixed
