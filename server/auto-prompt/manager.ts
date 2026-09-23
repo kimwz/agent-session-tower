@@ -56,12 +56,12 @@ function directories(snapshot: Snapshot): Directory[] {
     if (!value) { value = { id: '', cwd, title: titles.get(cwd) || basename(cwd) || cwd, sessions: [] }; values.set(cwd, value); }
     return value;
   };
-  for (const session of snapshot.sessions) if (!session.isSubagent && session.cwd) add(session.cwd)?.sessions.push(session);
+  for (const session of snapshot.sessions) if (!session.isSubagent && !session.launchedByAgent && session.cwd) add(session.cwd)?.sessions.push(session);
   for (const group of snapshot.groups || []) if (group.pinned || group.hidden) add(group.cwd);
   return [...values.values()].sort((a, b) => a.cwd.localeCompare(b.cwd)).map((value, index) => ({ ...value, id: `d${index + 1}` }));
 }
 function eligible(session: Session, job: AutoPromptJob, cwd: string): boolean {
-  return session.provider === job.provider && session.cwd === cwd && !session.isSubagent && !session.closed
+  return session.provider === job.provider && session.cwd === cwd && !session.isSubagent && !session.launchedByAgent && !session.closed
     && !session.creationPending && session.resumable && UUID.test(session.nativeId);
 }
 function pending(snapshot: Snapshot, sessionId: string): Run[] {

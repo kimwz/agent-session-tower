@@ -16,6 +16,11 @@ export interface Session {
   parentId?: string;
   /** Correlated shell-launched child; native parent metadata remains authoritative. */
   parentLink?: 'exec';
+  /**
+   * A non-interactive run (`codex exec`, `codex review`) that another agent or script started.
+   * It is that agent's work, not a user conversation: it never appears as its own canvas session.
+   */
+  launchedByAgent?: boolean;
   agentName?: string;
   model?: string;
   contextUsage?: SessionContextUsage;

@@ -28,9 +28,13 @@ function familyIndex(sessions: Session[]) {
   return { byId, roots };
 }
 
+/**
+ * The user's own conversations. Work another agent launched is never one of them: when its
+ * launcher is known it sits in that session's family, otherwise it stays out of view.
+ */
 export function getMainSessions(sessions: Session[]): Session[] {
   const { roots } = familyIndex(sessions);
-  return sessions.filter(session => roots.get(session.id) === session.id);
+  return sessions.filter(session => roots.get(session.id) === session.id && !session.launchedByAgent);
 }
 
 export function getMainSessionId(sessions: Session[], selectedId: string | null): string | null {

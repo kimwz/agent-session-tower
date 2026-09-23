@@ -16,6 +16,8 @@ export interface RecordState {
   session: Session;
   execLaunches?: ExecLaunch[];
   execOrigin?: boolean;
+  /** Started by `claude -p` or an SDK rather than an interactive Claude Code window. */
+  programmatic?: boolean;
   firstPrompt?: string;
   offset: number;
   size: number;
@@ -219,6 +221,7 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
     state.metadataSeen = true;
     state.execOrigin = value.source === 'exec' && value.thread_source !== 'subagent' &&
       Boolean(validTime(value.timestamp ?? row.timestamp)) && validCwd(value.cwd);
+    if (value.source === 'exec' && value.thread_source !== 'subagent') s.launchedByAgent = true;
     // Codex's permission assessor is runtime machinery, not a user coding agent.
     // Keep legitimate code-reviewer children; only exclude its exact native source.
     state.internal = value.thread_source === 'guardian_review' || value.source?.subagent?.other === 'guardian';
@@ -247,6 +250,7 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
   if (!ownHistory(state, row, offset)) return;
   const previousModel = s.model;
   if (s.provider === 'claude') {
+    if (state.programmatic === undefined && typeof row.entrypoint === 'string') state.programmatic = row.entrypoint.startsWith('sdk');
     if (!state.metadataSeen && row.sessionId) {
       state.metadataSeen = true;
       if (!s.isSubagent) { s.nativeId = row.sessionId; s.id = `claude:${s.nativeId}`; }
