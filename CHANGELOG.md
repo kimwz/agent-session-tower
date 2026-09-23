@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.19.1] - 2026-09-24
+
+### Changed
+- The Slack conversation coordinator (rules, delegated work, reply proposals and your send approvals) no longer assumes Slack, so the next release can use it for GitHub issues. Slack conversations work exactly as before.
+
 ## [1.19.0] - 2026-09-24
 
 ### Added
