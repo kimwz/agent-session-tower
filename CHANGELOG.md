@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.19.0] - 2026-09-24
+
+### Added
+- **GitHub triggers.** A trigger can watch GitHub for issues newly opened in chosen repositories, or for open issues newly assigned to you, and start a run for each one in a new session. The issue goes to the agent as reference material, never as instructions; Tower tools are not attached. Issues that already exist when a trigger is set up do not start runs, and issues opened while Tower was off are found at the next check.
+- Sign in with the GitHub CLI login on this computer (`gh auth login`) or a token saved as a secret for `https://api.github.com`. **Check connection** shows the account; the trigger keeps to it and stops checking with a visible error if the login becomes another account. By default only issues from the repository's owners, members and collaborators count; labels and authors narrow it further.
+- **Run now** on a GitHub trigger checks GitHub at once and runs what is new.
+
+### Changed
+- GitHub's rate limit is respected: when it is used up, every trigger using that sign-in waits until it resets. A check that cannot read everything since the last one changes nothing and is tried again later; if more than 300 issues arrived in between, the trigger says so and asks to be turned off and on rather than skip some quietly.
+
 ## [1.18.0] - 2026-09-24
 
 ### Changed
