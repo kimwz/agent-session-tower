@@ -120,6 +120,8 @@ export interface Run {
   origin?: RunOrigin;
   /** Started with no one watching; the provider's automatic approval mode decides. */
   unattended?: boolean;
+  /** For a turn the owner started: whether Tower's tools reached it, and if not, why. */
+  towerTools?: 'attached' | 'desktop-app' | 'external-input' | 'not-owner-session';
   prompt: string;
   status: 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
   createdAt: string;

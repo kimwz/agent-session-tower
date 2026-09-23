@@ -28,3 +28,23 @@ test('MCP reports uncertain tool failures without automatic retry', async () => 
   await startSlackMcp('/tmp/fixture','aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',Readable.from([JSON.stringify(frame)+'\n']),new Writable({write(chunk,_enc,done){text+=chunk;done();}}),async()=>{calls++;throw Error('Delivery uncertain');});
   assert.equal(calls,1);assert.equal(JSON.parse(text).result.isError,true);assert.match(text,/Delivery uncertain/);
 });
+
+test('a Slack tool server started without a capability serves only a worker from before capabilities', async t => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { startLegacyRunner } = await import('../runs/fixtures/legacy-runner.ts');
+  const directory = await mkdtemp(join(tmpdir(), 'tower-slack-legacy-'));
+  const stateDir = join(directory, 'state');
+  const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
+  t.after(async () => { await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  const previous = process.env.TOWER_MCP_CAPABILITY;
+  delete process.env.TOWER_MCP_CAPABILITY;
+  let text = '';
+  try {
+    const frame = { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'slack_thread', arguments: {} } };
+    await startSlackMcp(stateDir, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', Readable.from([JSON.stringify(frame) + '\n']), new Writable({ write(chunk, _encoding, done) { text += chunk; done(); } }));
+  } finally { if (previous !== undefined) process.env.TOWER_MCP_CAPABILITY = previous; }
+  assert.equal(JSON.parse(text).result.isError, undefined);
+  assert.deepEqual(legacy.methods, ['snapshot', 'slackTool']);
+});

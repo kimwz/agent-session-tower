@@ -583,7 +583,7 @@ test('trigger operations run in the worker as the owner and their state reaches 
     runs: () => f.runs.list(), session: id => f.runs.getSession(id) } });
   await triggers.start();
   t.after(() => triggers.close());
-  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, triggers, api: new TowerApi({ triggers }) });
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, triggers, api: new TowerApi({ stateDir: f.stateDir, triggers }) });
   t.after(() => host.close());
   const client = await f.connect();
   const input = { name: 'Nightly', enabled: true, source: { kind: 'schedule', schedule: { type: 'interval', everySeconds: 3600 }, catchUp: 'skip' },

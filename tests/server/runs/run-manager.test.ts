@@ -798,7 +798,7 @@ test('session-scoped tools bypass the desktop writer and resolve again for follo
   const resolved: string[] = [];
   let bridgeCalls = 0;
   const f = await fixture({
-    resolveRunTools: (_origin, session) => { resolved.push(session.id); return { servers: { tower_slack: { command: '/fixture/node', args: ['bridge.mjs', session.id] } }, required: true }; },
+    resolveRunTools: (_run, session) => { resolved.push(session.id); return { servers: { tower_slack: { command: '/fixture/node', args: ['bridge.mjs', session.id] } }, required: true }; },
     openCodexBridge: async () => { bridgeCalls++; return undefined; },
   });
   t.after(f.cleanup);
@@ -855,4 +855,32 @@ test('an unattended Claude run continues only in automatic mode or a mode that a
       if (expected === 'error') assert.match(result.error ?? '', /unexpected permission mode/);
     } finally { await f.cleanup(); }
   });
+});
+
+test('a tool capability reaches Claude through a private file that is gone when the turn ends, never through argv', async t => {
+  const mcpServers = { tower: { command: '/fixture/node', args: ['index.js', '--tower-mcp', '/state'], env: { TOWER_MCP_CAPABILITY: 'a'.repeat(64) } } };
+  let seen: { mode: number; content: string } | undefined;
+  const f = await fixture({ provider: 'claude', resolveRunTools: () => ({ servers: mcpServers, required: false, towerTools: 'attached' }) });
+  t.after(f.cleanup);
+  const run = await f.manager.enqueue(f.session.id, 'Set up a trigger', {}, { origin: { kind: 'owner' } });
+  await until(() => f.launches.length === 1);
+  const args = f.launches[0].args;
+  const path = args[args.indexOf('--mcp-config') + 1];
+  assert.equal(args.join(' ').includes('a'.repeat(64)), false);
+  try { seen = { mode: (await stat(path)).mode & 0o777, content: await readFile(path, 'utf8') }; } catch { /* The turn may already be over. */ }
+  const result = await finished(f.manager, run.id);
+  assert.equal(result.towerTools, 'attached');
+  if (seen) { assert.equal(seen.mode, 0o600); assert.deepEqual(JSON.parse(seen.content), { mcpServers }); }
+  await until(() => stat(path).then(() => false, () => true));
+});
+
+test('a turn forwarded to the open Codex app is marked as having no Tower tools', async t => {
+  const f = await fixture({
+    resolveRunTools: () => ({ servers: { tower: { command: '/fixture/node', args: [], env: { TOWER_MCP_CAPABILITY: 'b'.repeat(64) } } }, required: false, towerTools: 'attached' }),
+    openCodexBridge: async options => ({ done: Promise.resolve(), start: async () => { options.onStarted('turn'); options.onFinished({ status: 'completed' }); }, cancel: async () => {}, close: () => {} }),
+  });
+  t.after(f.cleanup);
+  f.sessions.set(f.session.id, { ...f.session, status: 'idle', activeProcess: true });
+  const run = await f.manager.enqueue(f.session.id, 'Forward to the desktop app', {}, { origin: { kind: 'owner' } });
+  assert.equal((await finished(f.manager, run.id)).towerTools, 'desktop-app');
 });

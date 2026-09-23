@@ -12,7 +12,7 @@ import { DurableRunManager } from './runs/durable-runner.js';
 import { runRunnerWorker } from './runs/worker.js';
 import { runTerminalHost } from './terminals/host.js';
 import { TerminalHostClient } from './terminals/client.js';
-import { startSlackMcp } from './slack/mcp-bridge.js';
+import { startSlackMcp, startTowerMcp } from './slack/mcp-bridge.js';
 import { getProviderHealth } from './providers/discovery.js';
 import { createMonitorServer } from './http/server.js';
 import { acquireStateLock, MonitorAlreadyRunning } from './instance/state-lock.js';
@@ -54,6 +54,11 @@ async function main() {
   if (args[0] === '--slack-mcp') {
     if (args.length !== 3) throw new Error('Slack MCP requires a state directory and workflow ID.');
     await startSlackMcp(resolve(args[1]), args[2]);
+    return;
+  }
+  if (args[0] === '--tower-mcp') {
+    if (args.length !== 2) throw new Error('Tower MCP requires a state directory.');
+    await startTowerMcp(resolve(args[1]));
     return;
   }
   if (args[0] === '--runner-worker') {

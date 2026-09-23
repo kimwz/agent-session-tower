@@ -19,10 +19,11 @@ import { SessionTitleStore } from '../stores/session-titles.js';
 import { openCodexBridgeRun } from './codex-bridge.js';
 import { RunManager, type RunAdmission } from './manager.js';
 import { parseRunOrigin } from './origin.js';
-import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { parseSuccessor, spawnSuccessor, writeHandoff, type SuccessorCommand } from './handoff.js';
 import { TriggerService } from '../triggers/service.js';
 import { TowerApi } from '../api/tower-api.js';
+import { CapabilityRegistry, handleMcpRequest } from '../api/mcp.js';
+import { runToolResolver } from '../api/run-tools.js';
 import { MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
 const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory']);
@@ -53,6 +54,7 @@ export interface RunnerHostOptions {
   handoffHoldMs?: number;
   /** The proof a predecessor gave this worker when it started it. */
   handoffNonce?: string;
+  capabilities?: CapabilityRegistry;
 }
 
 /** Only these read state; every other request is refused while the worker hands off, never half-accepted. */
@@ -60,7 +62,8 @@ const READS_DURING_HANDOFF = new Set(['snapshot', 'sessionHistory', 'attachment'
 
 /** Hosts an already-started engine, including one adopted during an in-place upgrade. */
 export async function startRunnerHost(options: RunnerHostOptions) {
-  options.runs.setRunToolResolver((_origin, session) => slackTools(options.slack, session.id));
+  const capabilities = options.capabilities ?? new CapabilityRegistry();
+  options.runs.setRunToolResolver(runToolResolver({ stateDir: options.stateDir, runs: options.runs, slack: options.slack, capabilities }));
   const paths = await runnerPaths(options.stateDir);
   const release = options.releaseStateLock ?? await acquireStateLock(paths.runtime, 0);
   let context: Awaited<ReturnType<typeof runnerContext>> | undefined;
@@ -132,7 +135,24 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     }
     throw Object.assign(new Error('Unknown runner operation.'), { statusCode: 400 });
   };
+  const mcp = { api: options.api, capabilities, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
+    run: (runId: string) => options.runs.list().find(run => run.id === runId) };
   const server = createServer(async (req, res) => {
+    // Tool servers attached to provider turns hold a capability, not the worker credential; it opens only /mcp.
+    const capability = req.headers.authorization?.match(/^Capability ([a-f\d]{64})$/)?.[1];
+    if (capability) {
+      if (closing || draining || req.method !== 'POST' || req.url !== '/mcp') { res.writeHead(closing || draining ? 503 : 404); res.end(); return; }
+      pending++; lastRequest = Date.now();
+      let reply: { result?: unknown; error?: { message: string } };
+      try {
+        const chunks: Buffer[] = []; let bytes = 0;
+        for await (const chunk of req) { bytes += chunk.length; if (bytes > 1_000_000) throw new Error('Tool request too large.'); chunks.push(chunk); }
+        reply = { result: await handleMcpRequest(mcp, capability, JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')) ?? null };
+      } catch (error) { reply = { error: { message: error instanceof Error ? error.message : 'Tool failed.' } }; }
+      finally { pending--; }
+      if (!res.destroyed) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(reply)); }
+      return;
+    }
     const supplied = Buffer.from(req.headers.authorization ?? '');
     const expected = Buffer.from(`Bearer ${token}`);
     if (closing || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
@@ -274,11 +294,7 @@ function admission(value: unknown): RunAdmission {
   return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin };
 }
 
-/** Slack coordinator tools must reach every turn of their conversation. */
-function slackTools(slack: SlackService | undefined, sessionId: string): RunTools {
-  const servers = slack?.sessionMcp(sessionId);
-  return servers ? { servers, required: true } : NO_RUN_TOOLS;
-}
+
 
 async function runnerContext({ stateDir, runs, sessions, slack }: Pick<RunnerHostOptions, 'stateDir' | 'runs' | 'sessions' | 'slack'>) {
   let titles = new SessionTitleStore(stateDir);
@@ -320,8 +336,11 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const autoPrompts = new AutoPromptManager({ stateDir, runs, ...context });
     await autoPrompts.start();
     const slack = new SlackService({ stateDir, runs, autoPrompts, refresh: context.refresh });
-    runs.setRunToolResolver((_origin, session) => slackTools(slack, session.id));
-    autoPrompts.updateContext(await runnerContext({ stateDir, runs, sessions, slack }));
+    const capabilities = new CapabilityRegistry(capability => capability.kind === 'slack-workflow'
+      || runs.list().some(run => run.id === capability.runId && (run.status === 'running' || run.status === 'queued')));
+    runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, capabilities }));
+    const visible = await runnerContext({ stateDir, runs, sessions, slack });
+    autoPrompts.updateContext(visible);
     await slack.start();
     // Sessions created before provenance existed are classified once from surviving ledger links.
     runs.setExternalLinkResolver(ids => { const linked = slack.linkedSessions().sessionIds; return ids.some(id => linked.has(id)); });
@@ -344,8 +363,19 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // A run still waiting when its trigger is turned off or deleted never starts.
     runs.setLaunchGate(run => run.origin?.kind === 'trigger' && run.origin.triggerId && !triggers.launchAllowed(run.origin.triggerId, run.origin.eventId)
       ? 'The trigger was turned off before this run started, so it did not run.' : undefined);
-    const api = new TowerApi({ triggers });
-    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, triggers, api, releaseStateLock: release, handoffNonce,
+    const api = new TowerApi({ stateDir, triggers, runs,
+      projects: () => {
+        const snapshot = visible.snapshot();
+        const titles = new Map((snapshot.groups ?? []).map(group => [group.cwd, group]));
+        const counts = new Map<string, number>();
+        for (const session of snapshot.sessions) if (!session.isSubagent && !session.launchedByAgent && session.cwd) counts.set(session.cwd, (counts.get(session.cwd) ?? 0) + 1);
+        for (const group of snapshot.groups ?? []) if (group.pinned && !counts.has(group.cwd)) counts.set(group.cwd, 0);
+        return [...counts].map(([cwd, sessions]) => ({ cwd, title: titles.get(cwd)?.title || cwd.split('/').filter(Boolean).at(-1) || cwd, sessions, pinned: titles.get(cwd)?.pinned === true }))
+          .sort((a, b) => b.sessions - a.sessions);
+      },
+      sessions: { list: () => visible.snapshot().sessions, read: async (id, limit) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), undefined, limit))?.messages ?? [] : undefined },
+      autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
+    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, triggers, api, capabilities, releaseStateLock: release, handoffNonce,
       onIdle: async () => { triggers.close(); slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => slack.hasInFlight() || triggers.inFlight(), holdIntake: () => { slack.holdNewWork(); triggers.hold(); },
       quiesce: async () => { slack.pause(); triggers.pause(); await Promise.all([slack.flush(), triggers.flush(), runs.flushState(), autoPrompts.flush()]); },

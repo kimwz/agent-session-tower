@@ -22,7 +22,15 @@ export const RunControl = memo(function RunControl({ run, onCancel, onRetry, can
         {run.status === 'error' && <>{!run.steering && <button type="button" aria-label={t("요청 다시 작성")} disabled={disabled || retryDisabled} onClick={() => onRetry(run)}><RefreshCw size={11} aria-hidden="true" />{t("다시 작성")}</button>}{onDismiss && <button type="button" aria-label={t("실패 내역 지우기")} disabled={disabled || dismissing} onClick={() => onDismiss(run.id)}>{dismissing ? <LoaderCircle className="spin" size={11} aria-hidden="true" /> : <Trash2 size={11} aria-hidden="true" />}{t("지우기")}</button>}</>}
       </div>
     </div>
+    {active && run.origin?.kind === 'owner' && run.towerTools && run.towerTools !== 'attached' && <p className="run-control-note">{towerToolsNote(run.towerTools)}</p>}
     {run.status === 'error' && run.error && <p className="run-control-error">{translateMessage(run.error)}</p>}
     {approvals.map(approval => <RunApprovalCard key={approval.id} runId={run.id} approval={approval} token={token} disabled={disabled || cancelling || !onSnapshotRefresh} onSnapshotRefresh={onSnapshotRefresh || (() => {})} />)}
   </div>;
 });
+
+/** Why an owner turn has no Tower tools. Agents can manage triggers only in turns that have them. */
+export function towerToolsNote(reason: NonNullable<Run['towerTools']>): string {
+  return reason === 'desktop-app' ? t('이 턴은 열려 있는 Codex 앱에서 실행되어 Tower 도구가 없습니다.')
+    : reason === 'external-input' ? t('외부 내용이 들어온 대화라 Tower 도구를 연결하지 않았습니다.')
+    : t('자동화가 만든 대화라 Tower 도구를 연결하지 않았습니다.');
+}

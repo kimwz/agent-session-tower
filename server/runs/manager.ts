@@ -1,8 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
-import { mkdir, readFile, stat } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
 import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, RunOrigin, Session } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
@@ -26,11 +26,10 @@ import { parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, typ
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
   /**
-   * Resolve trusted tools again for every turn. The answer may depend only on the run's recorded
-   * origin and its session, so two runs with the same origin in one session always get the same tools.
-   * It must not read this manager's run list: that list computes steering from the same origins.
+   * Resolve trusted tools for the turn a run starts. Tools follow the run's recorded origin and its session;
+   * a credential inside them may be bound to the run itself.
    */
-  resolveRunTools?: (origin: RunOrigin | undefined, session: Session) => RunTools;
+  resolveRunTools?: (run: Run, session: Session) => RunTools;
   /** True when a ledger outside the run registry links any of these IDs of one session to external content. */
   isExternallyLinked?: (sessionIds: readonly string[]) => boolean;
   getSession: (id: string) => Session | undefined;
@@ -142,7 +141,7 @@ export class RunManager extends EventEmitter {
   }
 
   private runTools(run: Run, session: Session): RunTools {
-    return this.options.resolveRunTools?.(run.origin, session) ?? NO_RUN_TOOLS;
+    return this.options.resolveRunTools?.(run, session) ?? NO_RUN_TOOLS;
   }
 
   /**
@@ -637,7 +636,8 @@ export class RunManager extends EventEmitter {
 
   private async launchBridge(run: Run, session: Session): Promise<boolean> {
     // The desktop app owns its tools; only turns that can do without Tower's tools are forwarded.
-    if (this.runTools(run, session).required) return false;
+    const tools = this.runTools(run, session);
+    if (tools.required) return false;
     if (!this.options.openCodexBridge) return false;
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     let started = false;
@@ -672,6 +672,8 @@ export class RunManager extends EventEmitter {
       bridge.close(); this.reservedSessions.delete(session.id); return true;
     }
     this.bridged.set(run.id, bridge);
+    // The desktop app runs the turn with its own tools; Tower's cannot be attached there.
+    if (tools.towerTools) run.towerTools = tools.servers ? 'desktop-app' : tools.towerTools;
     run.output = '열려 있는 Codex 앱의 기존 세션으로 요청을 전달하고 있습니다.';
     this.changed();
     try { await bridge.start(); }
@@ -703,7 +705,9 @@ export class RunManager extends EventEmitter {
     delete env.CLAUDE_CODE_SESSION_ID;
     let started = false;
     let registered = false;
-    const mcpServers = this.runTools(run, session).servers;
+    const tools = this.runTools(run, session);
+    const mcpServers = tools.servers;
+    if (tools.towerTools) run.towerTools = tools.towerTools;
     const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
       executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
       mcpServers,
@@ -771,8 +775,11 @@ export class RunManager extends EventEmitter {
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     const images = attachments.filter(item => isImageAttachment(item.metadata.mimeType));
     const args = creating ? buildCreateArgs(session, run.model, run.effort) : buildResumeArgs(session, run.model, run.effort);
-    const mcpServers = this.runTools(run, session).servers;
-    if (mcpServers) args.push('--mcp-config', JSON.stringify({ mcpServers }));
+    const tools = this.runTools(run, session);
+    const mcpServers = tools.servers;
+    if (tools.towerTools) run.towerTools = tools.towerTools;
+    // A capability in a tool server's environment would be visible in the process list as an argument,
+    // so such a configuration goes to a private file that lives only as long as the turn.
     if (run.unattended) args.push('--permission-mode', 'auto');
     for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
     const prompt = attachmentPrompt(run.prompt, attachments);
@@ -796,9 +803,19 @@ export class RunManager extends EventEmitter {
     // The web server may itself have been started from inside Claude Code.
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_SESSION_ID;
-    const child = (this.options.spawnProcess ?? spawn)(executable, args, {
-      cwd: session.cwd, env, detached: true, stdio: 'pipe', shell: false,
-    });
+    const privateConfig = mcpServers && Object.values(mcpServers).some(server => server.env) ? await privateMcpConfig(mcpServers) : undefined;
+    // Writing the file yielded; nothing may have stopped the run in the meantime.
+    if (privateConfig && (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session))) {
+      privateConfig.remove(); this.reservedSessions.delete(session.id); return;
+    }
+    if (mcpServers) args.push('--mcp-config', privateConfig?.path ?? JSON.stringify({ mcpServers }));
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = (this.options.spawnProcess ?? spawn)(executable, args, {
+        cwd: session.cwd, env, detached: true, stdio: 'pipe', shell: false,
+      });
+    } catch (error) { privateConfig?.remove(); throw error; }
+    if (privateConfig) child.once('close', privateConfig.remove);
     run.status = 'running';
     run.startedAt = new Date().toISOString();
     run.output = '';
@@ -1048,6 +1065,16 @@ export class RunManager extends EventEmitter {
 }
 
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+async function privateMcpConfig(mcpServers: NonNullable<RunTools['servers']>): Promise<{ path: string; remove: () => void }> {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-mcp-'));
+  const remove = () => { void rm(directory, { recursive: true, force: true }).catch(() => {}); };
+  try {
+    await chmod(directory, 0o700);
+    const path = join(directory, 'config.json');
+    await writeFile(path, JSON.stringify({ mcpServers }), { mode: 0o600, flag: 'wx' });
+    return { path, remove };
+  } catch (error) { remove(); throw error; }
+}
 /** Work nobody typed into Tower: Slack coordination and delegation, and trigger runs. */
 function automated(run: Run): boolean { return run.origin?.kind === 'slack' || run.origin?.kind === 'trigger'; }
 /** Modes at least as careful as asking the owner. Anything else is not what an unattended run asked for. */

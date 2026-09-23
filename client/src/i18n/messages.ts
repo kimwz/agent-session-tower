@@ -949,4 +949,7 @@ export const english: Record<string, string> = {
   "합쳐짐": "Merged",
   "확인 불가": "Uncertain",
   "요청은 이전 버전({0}) 실행 워커에서 처리되어 최근 기능이 적용되지 않습니다. 진행 중인 작업이 모두 끝나는 순간 새 버전으로 자동 교체됩니다.": "Requests run on an older ({0}) execution worker, so recent features do not apply yet. It switches to the new version by itself as soon as no work is running.",
+  "이 턴은 열려 있는 Codex 앱에서 실행되어 Tower 도구가 없습니다.": "This turn runs in the open Codex app, so it has no Tower tools.",
+  "외부 내용이 들어온 대화라 Tower 도구를 연결하지 않았습니다.": "This conversation contains outside content, so Tower tools were not attached.",
+  "자동화가 만든 대화라 Tower 도구를 연결하지 않았습니다.": "Automation started this conversation, so Tower tools were not attached.",
 };
