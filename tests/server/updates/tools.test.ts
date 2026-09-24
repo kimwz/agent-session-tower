@@ -4,7 +4,8 @@ import { mkdtemp, mkdir, readdir, realpath, rm, symlink, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Provider } from '../../../shared/types.js';
-import { classifyInstall, readToolUpdates, ToolUpdates, toolUpdatePaths, unlessUpdating, type ToolCommands } from '../../../server/updates/tools.js';
+import { classifyInstall, nativeCommands, publicToolUpdates, readToolUpdates, ToolUpdates, toolUpdatePaths, unlessUpdating, type ToolCommands } from '../../../server/updates/tools.js';
+import { until } from '../../helpers/until.ts';
 
 const HOUR = 60 * 60_000;
 
@@ -36,15 +37,20 @@ async function fixture(t: TestContext, options: { claude?: 'native' | 'npm' | 'o
   const versions: Record<Provider, string | undefined> = { claude: '2.1.280', codex: '0.155.1' };
   const latest: Record<Provider, string> = { claude: '2.1.281', codex: '0.156.1' };
   const calls: string[][] = [];
+  /** Every CLI asked its version: as root, none that another account could change may be. */
+  const asked: string[] = [];
+  /** While set, an update command runs until it is let go. */
+  let gate: Promise<void> | undefined;
   let behaviour: (provider: Provider, args: string[]) => { code: number; version?: string | null } = (provider, args) => ({ code: 0, version: latest[provider] });
   let held = new Set<Provider>();
   let busy = new Set<Provider>();
   let clock = Date.parse('2026-09-24T00:00:00Z');
   const provider = (file: string): Provider => file.includes('claude') ? 'claude' : 'codex';
   const commands: ToolCommands = {
-    version: async executable => versions[provider(executable)],
+    version: async executable => { asked.push(executable); return versions[provider(executable)]; },
     update: async (file, args) => {
       calls.push([file, ...args]);
+      await gate;
       const which = args.some(arg => arg.includes('codex')) || file.includes('codex') ? 'codex' : 'claude';
       const result = behaviour(which, args);
       if (result.version !== undefined) versions[which] = result.version ?? undefined;
@@ -60,12 +66,14 @@ async function fixture(t: TestContext, options: { claude?: 'native' | 'npm' | 'o
       return () => { held.delete(name); };
     } });
   return {
-    root, stateDir, updates, calls, versions, latest, executables,
+    root, stateDir, updates, calls, asked, versions, latest, executables,
     status: () => readToolUpdates(stateDir),
     held: () => held,
     busy: (names: Provider[]) => { busy = new Set(names); },
     behave: (next: typeof behaviour) => { behaviour = next; },
     advance: (ms: number) => { clock += ms; },
+    /** Holds update commands until the returned function lets them finish. */
+    block: () => { let open!: () => void; gate = new Promise(resolve => { open = () => { gate = undefined; resolve(); }; }); return open; },
   };
 }
 
@@ -131,19 +139,45 @@ test('a global npm install that no longer starts is put back to its version; one
   let status = await repaired.status();
   assert.deepEqual([status.codex?.state, status.codex?.reason, status.codex?.version], ['failed', 'command-failed', '0.155.1']);
   assert.deepEqual([status.claude?.state, status.claude?.reason], ['unsupported', 'install-method'], 'an install Tower does not know is left alone');
-  const broken = await fixture(t, { claude: 'other' });
+  const broken = await fixture(t);
   broken.behave(() => ({ code: 1, version: null }));
   await broken.updates.check();
   status = await broken.status();
-  assert.deepEqual([status.codex?.state, status.codex?.nextAt], ['broken', '2026-09-24T01:00:00.000Z']);
+  assert.deepEqual([status.codex?.state, status.codex?.nextAt, status.codex?.fix], ['broken', '2026-09-24T01:00:00.000Z', `npm install -g --prefix '${join(broken.root, 'prefix')}' @openai/codex@0.156.1`]);
+  assert.deepEqual([status.claude?.state, status.claude?.fix], ['broken', 'curl -fsSL https://claude.ai/install.sh | bash'], 'Claude Code’s own installer puts it back by hand');
+  // Still not starting when its retry is due, it stays broken, with its fix, and nothing more is run.
+  broken.advance(2 * HOUR);
+  await broken.updates.check();
+  status = await broken.status();
+  assert.deepEqual([status.codex?.state, status.codex?.nextAt, status.codex?.retry?.attempts, status.codex?.checkedAt], ['broken', '2026-09-24T01:00:00.000Z', 1, '2026-09-24T02:00:00.000Z']);
+  assert.ok(status.codex?.fix);
+  assert.equal(broken.calls.length, 3);
+  // Its command gone altogether, it is still broken, not uninstalled.
+  delete broken.executables.codex;
+  await broken.updates.check();
+  assert.equal((await broken.status()).codex?.state, 'broken');
+  // The fix names folders on this computer: only its own page gets it.
+  status = await broken.status();
+  assert.equal(publicToolUpdates(status).codex?.fix, undefined);
+  assert.equal(publicToolUpdates(status, true).codex?.fix, status.codex?.fix);
+  assert.equal('retry' in publicToolUpdates(status, true).codex!, false, 'retry bookkeeping stays in the status file');
+  // Put back by hand, it is read again and kept current as usual.
+  broken.executables.codex = join(broken.root, 'prefix/bin/codex');
+  broken.versions.codex = '0.156.1';
+  await broken.updates.check();
+  status = await broken.status();
+  assert.deepEqual([status.codex?.state, status.codex?.version, status.codex?.fix], ['current', '0.156.1', undefined]);
 });
 
-test('as root, a CLI, Node or npm another account could change is never run to update', async t => {
+test('as root, a CLI, Node or npm another account could change is never run, not even to ask its version', async t => {
   const f = await fixture(t, { uid: 0 });
   await f.updates.check();
-  assert.deepEqual(f.calls, []);
+  assert.deepEqual(f.asked, [], 'no version asked');
+  assert.deepEqual(f.calls, [], 'no update run');
   const status = await f.status();
-  assert.deepEqual([status.claude?.state, status.claude?.reason, status.codex?.reason], ['unsupported', 'not-root-only', 'not-root-only']);
+  assert.deepEqual([status.claude?.state, status.claude?.reason, status.claude?.version, status.codex?.state, status.codex?.reason, status.codex?.version],
+    ['unsupported', 'not-root-only', undefined, 'unsupported', 'not-root-only', undefined]);
+  assert.equal(status.codex?.target, '0.156.1');
 });
 
 test('a capability probe and an update never run the same CLI at once', async t => {
@@ -163,6 +197,57 @@ test('a capability probe and an update never run the same CLI at once', async t 
   await writeFile(join(flags, 'codex.update'), '999999999');
   assert.equal(await unlessUpdating(f.stateDir, 'codex', async () => 'read'), 'read');
   assert.deepEqual((await readdir(flags)).filter(name => name.includes('.probe-')), []);
+});
+
+test('a probe and an update started together never run the same CLI at once', async t => {
+  const f = await fixture(t, { claude: 'other' });
+  // An update holds its claim while it runs: a probe then reads nothing.
+  const open = f.block();
+  const updating = f.updates.check();
+  await until(() => f.calls.length === 1);
+  let read = 0;
+  assert.equal(await unlessUpdating(f.stateDir, 'codex', async () => { read++; return 'read'; }), undefined);
+  assert.equal(read, 0);
+  open();
+  await updating;
+  assert.equal(await unlessUpdating(f.stateDir, 'codex', async () => { read++; return 'read'; }), 'read', 'once it is done, probes read again');
+  // Started at the same moment, whichever claims first goes ahead and the other stands aside or waits.
+  let running = 0;
+  let overlapped = false;
+  const using = async <T>(value: T) => { running++; overlapped ||= running > 1; await new Promise(resolve => setTimeout(resolve, 30)); running--; return value; };
+  f.behave(() => ({ code: 0, version: f.latest.codex }));
+  for (let round = 0; round < 4; round++) {
+    f.versions.codex = '0.155.1';
+    const open = f.block();
+    const [, probe] = await Promise.all([
+      f.updates.check(),
+      unlessUpdating(f.stateDir, 'codex', () => using('read')),
+      (async () => { await until(() => f.calls.length === 2 + round); await using('update'); open(); })(),
+    ]);
+    assert.ok(probe === 'read' || probe === undefined);
+  }
+  assert.equal(overlapped, false, 'the CLI is never probed while it is being updated');
+  assert.equal(f.calls.length, 5, 'every round updated it once');
+});
+
+test('an update command runs in its own process group: a stuck npm is only reported, a stuck installer is stopped with everything it started', async t => {
+  const script = (lines: string) => [process.execPath, ['-e', lines]] as const;
+  // Left running past its limit, it is reported and then finishes by itself.
+  let stuck = 0;
+  const started = Date.now();
+  const [node, args] = script('setTimeout(() => { console.log("done"); process.exit(0); }, 500);');
+  const finished = await nativeCommands.update(node, [...args], process.env, { ms: 100, kill: false, stuck: () => { stuck++; } });
+  assert.equal(stuck, 1);
+  assert.deepEqual([finished.code, finished.output.trim()], [0, 'done'], 'never stopped');
+  assert.ok(Date.now() - started >= 450);
+  // Stopped: the child it started goes too.
+  const [parent, parentArgs] = script('const child = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); console.log(child.pid); setInterval(() => {}, 1000);');
+  const stopped = await nativeCommands.update(parent, [...parentArgs], process.env, { ms: 300, kill: true });
+  const child = Number(stopped.output.trim());
+  t.after(() => { try { process.kill(child, 'SIGKILL'); } catch { /* Already gone. */ } });
+  assert.equal(stopped.code, null, 'ended by a signal');
+  assert.ok(child > 0);
+  await until(() => { try { process.kill(child, 0); return false; } catch { return true; } }, 3000);
 });
 
 test('a CLI that is not installed has no status', async t => {

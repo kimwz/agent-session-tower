@@ -5,7 +5,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { renderServicePlist, renderServiceUnit, rootOnly, runtimePaths, serviceLabel, serviceUnit, currentVersion, useVersion, installVersion, versionDirectory, entryPoint } from '../../../server/link/service.js';
-import { runLinkCommand } from '../../../server/link/cli.js';
+import { runLinkCommand, takeOver, type TakeOverSteps, type WebState } from '../../../server/link/cli.js';
 import { encodeJoinCode, joinCommand, releasePackage } from '../../../server/link/join-code.js';
 import { linkId } from '../../../server/link/identity.js';
 import { defaultStateDir } from '../../../server/state-dir.js';
@@ -176,6 +176,63 @@ test('join hands the code to the Tower running here and waits until the other co
   assert.deepEqual(received, [{ token: 'a'.repeat(64), body: { code } }]);
   assert.ok(lines.some(line => line.startsWith('Connected. computer-a[2J can now see')), lines.join('\n'));
   assert.ok(lines.every(line => !line.includes('\u001b')), 'the pasted name cannot drive the terminal');
+});
+
+/**
+ * A Tower web started by hand (pid 100) on port 8000, replaced by a service that answers as `service` once started. A web
+ * started again by hand answers as pid 300, running `restores`, unless that is false.
+ */
+function switching(service: WebState | undefined, options: { restores?: string | false; refuses?: boolean } = {}) {
+  let clock = 0;
+  let running = true;
+  let answering: WebState | undefined = { pid: 100, version: '1.31.0', service: false, worker: '1.31.0' };
+  const done: string[] = [];
+  const started: unknown[] = [];
+  const steps: TakeOverSteps = {
+    read: async port => port === 8000 ? answering : undefined,
+    stop: pid => { done.push(`stop ${pid}`); running = false; answering = undefined; },
+    alive: pid => pid === 100 && running,
+    startService: async () => { done.push('start service'); if (options.refuses) throw new Error('Bootstrap failed: 5: Input/output error\nmore'); answering = service; },
+    stopService: async () => { done.push('stop service'); answering = undefined; },
+    start: async command => { done.push('start by hand'); started.push(command); if (options.restores !== false) answering = { pid: 300, version: options.restores ?? '1.31.0', service: false }; },
+    sleep: async ms => { clock += ms; },
+    now: () => clock,
+    log: () => {},
+  };
+  return { steps, done, started, waited: () => clock };
+}
+
+test('a Tower started by hand is replaced by the service only once the service answers as the new version and has the worker', async () => {
+  const f = switching({ pid: 200, version: '1.32.0', service: true, worker: '1.31.0' });
+  await takeOver('/state', { pid: 100, port: 8000 }, '1.32.0', f.steps);
+  assert.deepEqual(f.done, ['stop 100', 'start service']);
+});
+
+test('a service that does not take over is stopped, and the Tower started by hand is started again exactly as it was', async () => {
+  const command = { execPath: '/opt/node/bin/node', argv: ['--import', 'tsx', '/src/tower/server/index.ts', 'run', '--no-open'], cwd: '/src/tower' };
+  // The service answers, but its web never reaches the worker.
+  const f = switching({ pid: 200, version: '1.32.0', service: true });
+  await assert.rejects(takeOver('/state', { pid: 100, port: 8000, command }, '1.32.0', f.steps),
+    /did not take over: its web did not reach the execution worker within 2 minutes\. It was stopped, and the Tower you started was started again the same way; Tower 1\.31\.0 answers on port 8000 again \(pid 300\)/);
+  assert.deepEqual(f.done, ['stop 100', 'start service', 'stop service', 'start by hand']);
+  assert.deepEqual(f.started, [command]);
+  assert.ok(f.waited() >= 120_000, 'the service is given its two minutes');
+  // The started one does not come up either: that is said, too.
+  const silent = switching(undefined, { restores: false });
+  await assert.rejects(takeOver('/state', { pid: 100, port: 8000, command }, '1.32.0', silent.steps),
+    /nothing answered on port 8000 within 2 minutes\. It was stopped, and the Tower you started was started again the same way, but nothing answers on port 8000 after a minute\. See .*tower\.log, and start Tower yourself/);
+});
+
+test('a Tower too old to say how it was started gets the installed version started by hand in its place', async () => {
+  const f = switching(undefined, { refuses: true, restores: '1.32.0' });
+  const stateDir = '/state';
+  await assert.rejects(takeOver(stateDir, { pid: 100, port: 8000 }, '1.32.0', f.steps),
+    /did not take over: it did not start \(Bootstrap failed: 5: Input\/output error\)\. It was stopped, and Tower 1\.32\.0 was started by hand in its place .*; Tower 1\.32\.0 answers on port 8000 again \(pid 300\)/);
+  assert.deepEqual(f.started, [{ execPath: process.execPath, argv: [entryPoint(versionDirectory(stateDir, '1.32.0')), 'run', '--no-open', '--port', '8000', '--state-dir', stateDir], cwd: process.cwd() }]);
+  assert.equal(f.waited(), 0, 'a service that did not start is not waited for');
+  // One answering as another version does not count as the switch.
+  const older = switching({ pid: 200, version: '1.31.0', service: true, worker: '1.31.0' });
+  await assert.rejects(takeOver(stateDir, { pid: 100, port: 8000 }, '1.32.0', older.steps), /it answered as Tower 1\.31\.0, not 1\.32\.0/);
 });
 
 test('a root service keeps a folder in its PATH only when root alone controls every folder and link on the way to it', async () => {

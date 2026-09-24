@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { APP_VERSION, HEALTH_APPLICATION_ID } from '../../shared/app-identity.js';
 import type { LinkOverview } from '../../shared/link.js';
-import { lockOwners } from '../instance/state-lock.js';
+import { lockOwners, type OwnerCommand } from '../instance/state-lock.js';
 import { defaultStateDir } from '../state-dir.js';
 import { decodeJoinCode } from './join-code.js';
 import { displayFingerprint, linkId } from './identity.js';
@@ -116,10 +116,12 @@ async function runService(action: string | undefined, stateDir: string, port: nu
     // What the service will start has to start before anything running now is stopped.
     const { stdout } = await promisify(execFile)(process.execPath, [entryPoint(versionDirectory(stateDir, version)), '--version'], { timeout: 60_000 });
     if (stdout.trim() !== version) throw new Error(`The installed Tower ${version} does not start (it reports ${stdout.trim().slice(0, 40) || 'nothing'}). Nothing was changed.`);
+    // A Tower started by hand keeps serving until the service is set up to take its place. Otherwise the service starts
+    // now; one already running is started again with what was just installed, its worker and terminals going on.
     const replacing = running && !running.service ? running : undefined;
-    const manager = await installService(stateDir, { port: running?.port ?? port, start: !running });
+    const manager = await installService(stateDir, { port: running?.port ?? port, start: !replacing });
     if (replacing) await takeOver(stateDir, replacing, version);
-    console.log(running && !replacing ? `The background service is set up; the service running now keeps serving.` : `Tower ${version} now starts in the background ${EVERY_START[manager]}, and keeps itself, Claude Code and Codex up to date.`);
+    console.log(`${running?.service ? `The background service was started again with Tower ${version}; running agents and terminals go on. It` : `Tower ${version} now`} starts in the background ${EVERY_START[manager]}, and keeps itself, Claude Code and Codex up to date.`);
   } else if (action === 'uninstall') {
     await uninstallService(stateDir);
     console.log('The background service was removed. Running work continues; start Tower yourself to use it again.');
@@ -130,12 +132,14 @@ async function runService(action: string | undefined, stateDir: string, port: nu
 }
 
 /** The Tower that holds this state folder, confirmed by its process: another Tower on the same port is never used. */
-async function runningTower(stateDir: string): Promise<{ base: string; port: number; version: string; pid: number; service: boolean } | undefined> {
+async function runningTower(stateDir: string): Promise<{ base: string; port: number; version: string; pid: number; service: boolean; command?: OwnerCommand } | undefined> {
   for (const owner of await lockOwners(stateDir)) {
     const base = `http://127.0.0.1:${owner.port}`;
     const health = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(1500) })
       .then(response => response.json() as Promise<{ ok?: boolean; application?: string; pid?: number; version?: string; service?: boolean }>).catch(() => undefined);
-    if (health?.ok && health.application === HEALTH_APPLICATION_ID && health.pid === owner.pid && health.version) return { base, port: owner.port, version: health.version, pid: owner.pid, service: health.service === true };
+    if (health?.ok && health.application === HEALTH_APPLICATION_ID && health.pid === owner.pid && health.version) {
+      return { base, port: owner.port, version: health.version, pid: owner.pid, service: health.service === true, ...(owner.command ? { command: owner.command } : {}) };
+    }
   }
   return undefined;
 }
@@ -144,26 +148,90 @@ function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
 }
 
+/** What the Tower web of a state folder says about itself; `worker` is its execution worker's version, once it has one. */
+export interface WebState { pid: number; version: string; service: boolean; worker?: string }
+
+/** What switching to the service does on this computer; tests bring their own. */
+export interface TakeOverSteps {
+  /** The Tower web of this state folder answering on the port, if one does. */
+  read(port: number): Promise<WebState | undefined>;
+  /** Asks a web to stop; its worker, agents and terminals go on. */
+  stop(pid: number): void;
+  alive(pid: number): boolean;
+  startService(): Promise<void>;
+  stopService(): Promise<void>;
+  /** Starts a web by hand, on its own and writing to the Tower log; settles once it runs or could not be started. */
+  start(command: OwnerCommand): Promise<void>;
+  sleep(ms: number): Promise<void>;
+  now(): number;
+  log(line: string): void;
+}
+
+function takeOverSteps(stateDir: string): TakeOverSteps {
+  return {
+    read: async port => {
+      const web = await runningTower(stateDir);
+      if (!web || web.port !== port) return undefined;
+      // Local requests are the owner's own, so the page's snapshot tells whether the web reached the worker.
+      const snapshot = await fetch(`${web.base}/api/snapshot`, { signal: AbortSignal.timeout(5000) })
+        .then(response => response.ok ? response.json() as Promise<{ runnerVersion?: unknown }> : undefined).catch(() => undefined);
+      return { pid: web.pid, version: web.version, service: web.service, ...(typeof snapshot?.runnerVersion === 'string' ? { worker: snapshot.runnerVersion } : {}) };
+    },
+    stop: pid => { try { process.kill(pid, 'SIGTERM'); } catch { /* Already gone. */ } },
+    alive,
+    startService: () => startService(stateDir),
+    stopService: () => stopService(stateDir),
+    start: async command => {
+      const { logs } = runtimePaths(stateDir);
+      mkdirSync(logs, { recursive: true, mode: 0o700 });
+      const output = openSync(resolve(logs, 'tower.log'), 'a', 0o600);
+      try {
+        const child = spawn(command.execPath, command.argv, { cwd: command.cwd, env: process.env, detached: true, stdio: ['ignore', output, output] });
+        child.unref();
+        return new Promise((accept, reject) => { child.once('spawn', accept); child.once('error', reject); });
+      } finally { closeSync(output); }
+    },
+    sleep: ms => delay(ms),
+    now: () => Date.now(),
+    log: line => console.log(line),
+  };
+}
+
 /**
  * Replaces a Tower started by hand with the service. Only its web stops: its worker, agents and terminals go on, and
- * the service's web takes them over. The service must answer as a new process; if it does not, the installed version is
- * started by hand on the same port, so a Tower keeps serving either way.
+ * the service's web takes them over. The switch holds only once the service answers as a new process of the installed
+ * version and has reached the worker. Otherwise the service is stopped and the previous web is started again the way it
+ * was started (a Tower too old to have kept that gets the installed version), so a Tower keeps serving either way, and
+ * the error says which of these happened.
  */
-async function takeOver(stateDir: string, running: { pid: number; port: number }, version: string): Promise<void> {
-  console.log(`Stopping the Tower web you started (pid ${running.pid}) so the service takes its place. Running agents and terminals go on.`);
-  process.kill(running.pid, 'SIGTERM');
-  if (!await waitFor(async () => alive(running.pid) ? undefined : true, 30_000)) throw new Error(`The Tower web (pid ${running.pid}) did not stop, so the service was not started. Stop it, then run this command again.`);
-  await startService(stateDir).catch(error => console.error(`The service did not start: ${(error as Error).message.split('\n')[0]}`));
-  const up = await waitFor(async () => { const now = await runningTower(stateDir); return now && now.pid !== running.pid && now.service ? now : undefined; }, 120_000);
-  if (up) return;
-  await stopService(stateDir);
-  const { logs } = runtimePaths(stateDir);
-  mkdirSync(logs, { recursive: true, mode: 0o700 });
-  const output = openSync(resolve(logs, 'tower.log'), 'a', 0o600);
-  try {
-    spawn(process.execPath, [entryPoint(versionDirectory(stateDir, version)), 'run', '--no-open', '--port', String(running.port), '--state-dir', stateDir], { detached: true, stdio: ['ignore', output, output] }).unref();
-  } finally { closeSync(output); }
-  throw new Error(`The background service did not start, so Tower ${version} was started again the usual way on port ${running.port}. See ${resolve(logs, 'tower.log')}.`);
+export async function takeOver(stateDir: string, running: { pid: number; port: number; command?: OwnerCommand }, version: string, steps: TakeOverSteps = takeOverSteps(stateDir)): Promise<void> {
+  const log = resolve(runtimePaths(stateDir).logs, 'tower.log');
+  const until = async <T>(read: () => Promise<T | undefined>, ms: number): Promise<T | undefined> => {
+    for (const deadline = steps.now() + ms; ;) {
+      const value = await read();
+      if (value !== undefined || steps.now() >= deadline) return value;
+      await steps.sleep(1000);
+    }
+  };
+  steps.log(`Stopping the Tower web you started (pid ${running.pid}) so the service takes its place. Running agents and terminals go on.`);
+  steps.stop(running.pid);
+  if (!await until(async () => steps.alive(running.pid) ? undefined : true, 30_000)) throw new Error(`The Tower web (pid ${running.pid}) did not stop, so the service was not started. Stop it, then run this command again.`);
+  let last: WebState | undefined;
+  const failure = await steps.startService().then(async () => {
+    const up = await until(async () => { last = await steps.read(running.port); return last && last.pid !== running.pid && last.service && last.version === version && last.worker ? last : undefined; }, 120_000);
+    return up ? undefined : !last ? `nothing answered on port ${running.port} within 2 minutes`
+      : !last.service ? `a Tower that is not the service answered on port ${running.port}`
+      : last.version !== version ? `it answered as Tower ${last.version}, not ${version}`
+      : 'its web did not reach the execution worker within 2 minutes';
+  }, (error: Error) => `it did not start (${error.message.split('\n')[0]})`);
+  if (!failure) return;
+  await steps.stopService();
+  const how = running.command ? 'the Tower you started was started again the same way' : `Tower ${version} was started by hand in its place (the Tower you started is too old to say how it was started)`;
+  const command = running.command ?? { execPath: process.execPath, argv: [entryPoint(versionDirectory(stateDir, version)), 'run', '--no-open', '--port', String(running.port), '--state-dir', stateDir], cwd: process.cwd() };
+  const refused = await steps.start(command).then(() => undefined, (error: Error) => error.message);
+  const back = refused === undefined ? await until(async () => { const web = await steps.read(running.port); return web && web.pid !== running.pid ? web : undefined; }, 60_000) : undefined;
+  if (back) throw new Error(`The background service did not take over: ${failure}. It was stopped, and ${how}; Tower ${back.version} answers on port ${running.port} again (pid ${back.pid}). See ${log}.`);
+  throw new Error(`The background service did not take over: ${failure}. It was stopped, and ${how}, but ${refused !== undefined ? `that could not be started (${refused})` : `nothing answers on port ${running.port} after a minute`}. See ${log}, and start Tower yourself if it does not come up.`);
 }
 function portFree(port: number): Promise<boolean> {
   return new Promise(resolve => {

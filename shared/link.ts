@@ -25,6 +25,8 @@ export type ToolUpdateReason = 'not-updated' | 'command-failed' | 'stuck' | 'ins
 export interface ToolUpdate {
   method: ToolUpdateMethod; state: ToolUpdateState; checkedAt: string;
   version?: string; target?: string; updatedAt?: string; nextAt?: string; reason?: ToolUpdateReason;
+  /** Only in this computer's own page, for a `broken` CLI: the exact command that installs it again by hand. */
+  fix?: string;
 }
 /**
  * How this Tower keeps itself, Claude Code and Codex current. A background service replaces itself with the latest

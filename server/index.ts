@@ -203,15 +203,16 @@ async function main() {
   const towerUpdates = new TowerAutoUpdate({ stateDir, version: APP_VERSION, enabled: autoUpdateEnabled(), updates, controllers: () => pairedControllers(), latest: () => latestReleases.latest(), onChange: changed });
   let toolUpdates: AutoUpdateStatus['tools'] = {};
   const readTools = async () => {
-    const next = publicToolUpdates(await readToolUpdates(stateDir));
+    const next = publicToolUpdates(await readToolUpdates(stateDir), true);
     if (JSON.stringify(next) !== JSON.stringify(toolUpdates)) { toolUpdates = next; changed(); }
   };
-  // This computer's own page also gets the command that makes a Tower run by hand keep itself current; controllers do not.
+  // This computer's own page also gets the commands that make a Tower run by hand keep itself current and that
+  // reinstall a broken CLI; controllers do not.
   const autoUpdate = (local = false): AutoUpdateStatus => {
     const tower = towerUpdates.status();
     const serviceCommand = local && tower.kind === 'unmanaged' && tower.latest && newerVersion(tower.latest, APP_VERSION)
       ? `npx --yes ${releasePackage(tower.latest)} service install --port ${port}${stateDir === defaultStateDir() ? '' : ` --state-dir '${stateDir.replace(/'/g, `'\\''`)}'`}` : undefined;
-    return { enabled: autoUpdateEnabled(), tower: { ...tower, ...(serviceCommand ? { serviceCommand } : {}) }, tools: toolUpdates };
+    return { enabled: autoUpdateEnabled(), tower: { ...tower, ...(serviceCommand ? { serviceCommand } : {}) }, tools: local ? toolUpdates : publicToolUpdates(toolUpdates) };
   };
   runs.on('change', changed);
   const repositories = new RepositoryMonitor({

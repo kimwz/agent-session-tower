@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireStateLock } from '../../../server/instance/state-lock.js';
+import { acquireStateLock, lockOwners } from '../../../server/instance/state-lock.js';
 
 async function fixture(t: { after: (fn: () => unknown) => void }) {
   const stateDir = await mkdtemp(join(tmpdir(), 'agent-monitor-lock-'));
@@ -59,4 +59,21 @@ test('unknown lock contents are preserved instead of deleting an unverifiable ow
   await writeFile(join(lock, 'unexpected-file'), 'preserve me');
   await assert.rejects(acquireStateLock(stateDir, 8000), /Cannot verify/);
   assert.equal(await readFile(join(lock, 'unexpected-file'), 'utf8'), 'preserve me');
+});
+
+test('an owner records how it was started, so it can be started again the same way; older records still read', async (t) => {
+  const stateDir = await fixture(t);
+  const release = await acquireStateLock(stateDir, 8000);
+  const [owner] = await lockOwners(stateDir);
+  assert.equal(owner?.pid, process.pid);
+  assert.equal(owner?.command?.execPath, process.execPath);
+  assert.equal(owner?.command?.cwd, process.cwd());
+  assert.deepEqual(owner?.command?.argv.slice(-process.argv.length + 1), process.argv.slice(1), 'its own arguments come last, after Node’s own options');
+  await release();
+  const lock = join(stateDir, '.instance-lock');
+  await mkdir(lock);
+  await writeFile(join(lock, 'owner-11111111-1111-4111-8111-111111111111.json'), JSON.stringify({ pid: process.pid, port: 8001 }));
+  assert.deepEqual(await lockOwners(stateDir), [{ pid: process.pid, port: 8001 }]);
+  await writeFile(join(lock, 'owner-11111111-1111-4111-8111-111111111111.json'), JSON.stringify({ pid: process.pid, port: 8001, command: { execPath: '/bin/node', argv: [1], cwd: '/' } }));
+  assert.deepEqual(await lockOwners(stateDir), [{ pid: process.pid, port: 8001 }], 'a command that is not one is left out');
 });

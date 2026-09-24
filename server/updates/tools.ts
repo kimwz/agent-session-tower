@@ -35,7 +35,7 @@ export function toolUpdatePaths(stateDir: string) {
   return { status: join(root, 'tool-updates.json'), flags: join(root, 'tool-updates'), log: join(logs, 'tool-update.log') };
 }
 
-/** What this computer keeps about each CLI; the retry record stays here. */
+/** What this computer keeps about each CLI; the retry record stays here, and the fix is shown only on its own page. */
 export interface SavedToolUpdate extends ToolUpdate { retry?: RetryRecord }
 export type SavedToolUpdates = Partial<Record<Provider, SavedToolUpdate>>;
 
@@ -52,7 +52,8 @@ export function parseToolUpdate(value: unknown): SavedToolUpdate | undefined {
   return { method: item.method!, state: item.state!, checkedAt: item.checkedAt!,
     ...(release(item.version) ? { version: item.version } : {}), ...(release(item.target) ? { target: item.target } : {}),
     ...(time(item.updatedAt) ? { updatedAt: item.updatedAt } : {}), ...(time(item.nextAt) ? { nextAt: item.nextAt } : {}),
-    ...(REASONS.has(item.reason as string) ? { reason: item.reason } : {}), ...(retry ? { retry } : {}) };
+    ...(REASONS.has(item.reason as string) ? { reason: item.reason } : {}), ...(retry ? { retry } : {}),
+    ...(typeof item.fix === 'string' && item.fix.length <= 2000 ? { fix: item.fix } : {}) };
 }
 
 export async function readToolUpdates(stateDir: string): Promise<SavedToolUpdates> {
@@ -62,10 +63,10 @@ export async function readToolUpdates(stateDir: string): Promise<SavedToolUpdate
   return saved;
 }
 
-/** The part another computer or the page is told: no retry bookkeeping. */
-export function publicToolUpdates(saved: SavedToolUpdates): Partial<Record<Provider, ToolUpdate>> {
+/** The part the page is told: no retry bookkeeping. The command that fixes a CLI by hand (a path) stays on this computer. */
+export function publicToolUpdates(saved: SavedToolUpdates, local = false): Partial<Record<Provider, ToolUpdate>> {
   const shown: Partial<Record<Provider, ToolUpdate>> = {};
-  for (const provider of PROVIDERS) { const item = saved[provider]; if (item) { const { retry: _, ...rest } = item; shown[provider] = rest; } }
+  for (const provider of PROVIDERS) { const item = saved[provider]; if (item) { const { retry: _, fix, ...rest } = item; shown[provider] = local && fix ? { ...rest, fix } : rest; } }
   return shown;
 }
 
@@ -246,19 +247,27 @@ export class ToolUpdates {
   private async one(provider: Provider, previous: SavedToolUpdate | undefined, progress: (status: SavedToolUpdate) => Promise<void>): Promise<{ status?: SavedToolUpdate; againMs?: number }> {
     const env = this.options.env;
     const executable = await (this.options.find ?? findExecutable)(provider, env);
-    // Not installed here: nothing is installed for it.
-    if (!executable) return {};
     const now = this.now();
+    // A CLI an update left broken stays reported, with its fix, until it starts again: gone or silent, it is not fixed.
+    const broken = previous?.state === 'broken' ? { status: { ...previous, checkedAt: new Date(now).toISOString() } } : undefined;
+    // Not installed here: nothing is installed for it.
+    if (!executable) return broken ?? {};
     const real = await realpath(executable).catch(() => executable);
     const install = classifyInstall(provider, real);
     const node = this.options.node ?? process.execPath;
     const root = (this.options.uid ?? process.getuid?.()) === 0;
+    const npm = install.method === 'npm' ? await npmCli(node, providerDirectories(env)) : undefined;
+    const target = await this.commands.latest(PACKAGES[provider]).catch(() => undefined) ?? previous?.target;
+    // A process running as root runs nothing another account could have changed, not even to ask its version.
+    if (root && !(await rootSafe(executable) && await rootSafe(node) && (!npm || await rootSafe(npm)))) {
+      return { status: { method: install.method, state: 'unsupported', reason: 'not-root-only', checkedAt: new Date(now).toISOString(), ...(target ? { target } : {}) } };
+    }
     // The update and version commands find the Node that runs Tower first: npm and the npm CLIs start with `env node`.
     const folders = [dirname(node), ...providerDirectories(env)];
     const path = root ? (await Promise.all(folders.map(async folder => await rootOnly(folder) ? folder : undefined))).filter(Boolean) as string[] : folders;
     const run = { ...env, PATH: [...new Set(path)].join(delimiter), CI: '1', npm_config_update_notifier: 'false' };
     const version = await this.commands.version(executable, run);
-    const target = await this.commands.latest(PACKAGES[provider]).catch(() => undefined) ?? previous?.target;
+    if (!version && broken) return broken;
     const base: SavedToolUpdate = { method: install.method, state: 'current', checkedAt: new Date(now).toISOString(),
       ...(version ? { version } : {}), ...(target ? { target } : {}), ...(previous?.updatedAt ? { updatedAt: previous.updatedAt } : {}) };
     const retrying = previous?.retry && target && previous.retry.version === target ? previous.retry : undefined;
@@ -267,13 +276,7 @@ export class ToolUpdates {
     if (install.method === 'unsupported') return refuse('install-method');
     if (!version) return { status: { ...base, state: 'failed', reason: 'unreadable-version' } };
     if (!retryDue(retrying, target, now)) return { status: { ...base, state: 'failed', ...(previous?.reason ? { reason: previous.reason } : {}), nextAt: retrying!.nextAt, retry: retrying }, againMs: Date.parse(retrying!.nextAt) - now };
-    let npm: string | undefined;
-    if (install.method === 'npm') {
-      npm = await npmCli(node, providerDirectories(env));
-      if (!npm) return refuse('no-npm');
-    }
-    // A process running as root runs nothing another account could have changed.
-    if (root && !(await rootSafe(executable) && await rootSafe(node) && (!npm || await rootSafe(npm)))) return refuse('not-root-only');
+    if (install.method === 'npm' && !npm) return refuse('no-npm');
     const waiting = { status: { ...base, state: 'waiting' as const, ...(retrying ? { retry: retrying } : {}) }, againMs: BUSY_MS };
     const releaseHold = this.options.hold(provider);
     if (!releaseHold) return waiting;
@@ -303,13 +306,20 @@ export class ToolUpdates {
         after = await this.commands.version(executable, run);
       }
       const retry = failedAgain(retrying, target, done);
-      if (!after) return { status: { ...base, state: 'broken', reason: 'command-failed', retry, nextAt: retry.nextAt }, againMs: Date.parse(retry.nextAt) - done };
+      const fix = fixCommand(provider, install, target);
+      if (!after) return { status: { ...base, state: 'broken', reason: 'command-failed', retry, nextAt: retry.nextAt, ...(fix ? { fix } : {}) }, againMs: Date.parse(retry.nextAt) - done };
       return { status: { ...base, version: after, state: 'failed', reason: result.code === 0 ? 'not-updated' : 'command-failed', retry, nextAt: retry.nextAt }, againMs: Date.parse(retry.nextAt) - done };
     } finally {
       await releaseClaim?.();
       releaseHold();
     }
   }
+}
+
+/** What the owner runs by hand when Tower could not put a CLI back: its installer, or npm for the same folder. */
+function fixCommand(provider: Provider, install: Install, version: string): string | undefined {
+  if (install.method === 'npm') return `npm install -g --prefix '${install.prefix.replace(/'/g, `'\\''`)}' ${PACKAGES[provider]}@${version}`;
+  return install.method === 'native' ? 'curl -fsSL https://claude.ai/install.sh | bash' : undefined;
 }
 
 /** npm's own script, run by Tower's Node: the one beside that Node first, else the first on the path. */

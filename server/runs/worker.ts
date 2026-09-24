@@ -319,6 +319,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (options.slack?.hasActive()) return;
         if (options.github?.hasPending() || options.github?.inFlight()) return;
         if (options.triggers?.hasActive() || options.triggers?.inFlight()) return;
+        // A Claude Code or Codex update keeps the worker: closing would hold its lock until npm ends, keeping a new web out.
+        if (options.inFlight?.()) return;
         // Stop accepting requests and finish writes before releasing the worker lock.
         void close(true).catch(error => { console.error('Runner idle cleanup failed:', error); });
       }, 1000);

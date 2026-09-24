@@ -48,6 +48,8 @@ interface NodeRecord {
    */
   retry?: RetryRecord;
   counted?: string;
+  /** The update the owner asked for last, by when it started: its failure does not move the schedule. */
+  manual?: string;
 }
 interface InviteRecord { id: string; secret: string; expiresAt: number; claimedBy?: string }
 interface State { version: 1; settings: HubSettings; nodes: NodeRecord[]; removed: Array<{ pin: string; at: string }>; invites: InviteRecord[] }
@@ -168,10 +170,11 @@ export class ControllerLinks extends EventEmitter {
     const live = this.connected.get(id);
     if (!live) throw Object.assign(new Error('그 컴퓨터가 연결되어 있지 않습니다. 연결되면 다시 시도하세요.'), { statusCode: 409 });
     if (!live.hello.features.includes('update')) throw Object.assign(new Error('그 컴퓨터는 Tower를 백그라운드 서비스로 실행하지 않아 여기서 업데이트할 수 없습니다.'), { statusCode: 409 });
-    const code = await this.askUpdate(id, live);
-    // Forgotten only once asked, so following the computer meanwhile does not ask a second time.
+    const { code, update } = await this.askUpdate(id, live);
     if (code === 'busy') throw Object.assign(new Error('그 컴퓨터가 다른 버전으로 업데이트하는 중입니다. 끝난 뒤 다시 시도하세요.'), { statusCode: 409 });
     if (code) throw Object.assign(new Error('그 컴퓨터가 업데이트 요청을 받지 않았습니다.'), { statusCode: 502 });
+    // The owner tries at once, whatever the schedule says, and a failure of that try leaves the schedule as it is.
+    if (update && updateActive(update)) await this.retries(id, node => node.manual === update.startedAt ? undefined : { manual: update.startedAt });
     this.watch(id, live);
   }
 
@@ -394,9 +397,11 @@ export class ControllerLinks extends EventEmitter {
     this.report(id, report);
     const update = report.update;
     // Every failure of this Tower's version, one cut short included, is counted once and pushes the next attempt out on
-    // the schedule. Another controller's version failing there is that controller's to try again.
+    // the schedule; one the owner asked for is only marked seen. Another controller's version failing there is that
+    // controller's to try again.
     if (update?.stage === 'failed' && update.version === this.options.version) await this.retries(id, node => node.counted === update.startedAt ? undefined
-      : { retry: failedAgain(retryOf(node, update.version), update.version, Date.parse(update.updatedAt) || this.now()), counted: update.startedAt });
+      : node.manual === update.startedAt ? { counted: update.startedAt }
+      : { retry: failedAgain(retryOf(node, update.version), update.version, Date.parse(update.updatedAt) || this.now()), counted: update.startedAt, failedUpdates: undefined });
     const behind = newerVersion(this.options.version, report.versions.web);
     // Moved on (by the owner, or to a newer version): what was scheduled for an older one no longer applies.
     if (!behind) await this.retries(id, node => node.retry || node.failedUpdates ? { retry: undefined, failedUpdates: undefined } : undefined);
@@ -410,7 +415,7 @@ export class ControllerLinks extends EventEmitter {
     const node = this.state.nodes.find(item => item.id === id);
     const patch = node && change(node);
     if (!patch) return;
-    await this.save({ ...this.state, nodes: this.state.nodes.map(item => item.id === id ? { ...item, ...patch, failedUpdates: undefined } : item) }).catch(() => {});
+    await this.save({ ...this.state, nodes: this.state.nodes.map(item => item.id === id ? { ...item, ...patch } : item) }).catch(() => {});
   }
 
   private watch(id: string, live: Connected): void {
@@ -418,15 +423,15 @@ export class ControllerLinks extends EventEmitter {
     if (this.connected.get(id) === live && updateActive(this.reports.get(id)?.update)) live.watch = setTimeout(() => { void this.follow(id, live); }, this.options.updatePollMs ?? UPDATE_POLL_MS);
   }
 
-  /** Asks for this Tower's version; resolves to the refusal's code, if it was refused. */
-  private async askUpdate(id: string, live: Connected): Promise<string | undefined> {
+  /** Asks for this Tower's version; resolves to the refusal's code, if it was refused, and the update under way. */
+  private async askUpdate(id: string, live: Connected): Promise<{ code?: string; update?: UpdateStatus }> {
     const answer = await linkRequest(live.session, 'POST', '/link/update', { version: this.options.version }, HELLO_MS).catch(() => undefined);
     const body = answer?.json as { update?: unknown; code?: unknown } | undefined;
     const update = parseUpdate(body?.update);
     const known = this.reports.get(id);
     if (update && known) this.report(id, { ...known, update });
-    if (!answer) return 'unanswered';
-    return answer.status >= 400 ? typeof body?.code === 'string' ? body.code : 'refused' : undefined;
+    if (!answer) return { code: 'unanswered' };
+    return answer.status >= 400 ? { code: typeof body?.code === 'string' ? body.code : 'refused' } : { ...(update ? { update } : {}) };
   }
 
   private report(id: string, report: NodeReport): void {

@@ -258,6 +258,20 @@ test('Slack monitoring keeps execution worker alive without web clients until ex
   await until(() => idle);
 });
 
+test('a Claude Code or Codex update in flight keeps the execution worker alive without web clients', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let updating = true;
+  let idle = false;
+  let checks = 0;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, idleMs: 0, inFlight: () => { checks++; return updating; }, onIdle: () => { idle = true; } });
+  t.after(() => host.close());
+  await until(() => checks >= 2);
+  assert.equal(idle, false, 'the worker keeps its lock, and a new web its way back in, until the update ends');
+  updating = false;
+  await until(() => idle);
+});
+
 test('only the owner’s own message can approve a Slack send; agent work and correlation IDs never can', async t => {
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();

@@ -100,7 +100,8 @@ test('a controller asks a joined computer on an older version to move to its own
   const at = new Date(clock).toISOString();
   const a = await computer(t, 'computer-a', { version: '1.25.0', refreshMs: 50, updatePollMs: 20, now: () => clock });
   const b = await computer(t, 'computer-b', { version: '1.24.0', features: ['work', 'status', 'update'], update: {
-    request: async version => { asked.push(version); update = { version: String(version), previous: '1.24.0', stage: 'installing', startedAt: at, updatedAt: at }; return { status: 202, body: { update } }; },
+    // Each request starts an update of its own, told apart by when it started.
+    request: async version => { asked.push(version); const started = new Date(clock + asked.length * 1000).toISOString(); update = { version: String(version), previous: '1.24.0', stage: 'installing', startedAt: started, updatedAt: started }; return { status: 202, body: { update } }; },
     report: async () => ({ versions: { web: '1.24.0', worker: '1.23.0' }, service: true, ...(update ? { update } : {}), diskFree: 5e9 }),
   } });
   await a.listen();
@@ -109,7 +110,7 @@ test('a controller asks a joined computer on an older version to move to its own
   await until(() => a.controller.list()[0]?.report?.update?.stage === 'installing', 5000);
   assert.deepEqual(asked, ['1.25.0']);
   assert.deepEqual(a.controller.list()[0].report?.versions, { web: '1.24.0', worker: '1.23.0' });
-  update = { ...update!, stage: 'failed', code: 'start-failed', failedStage: 'verifying' };
+  update = { ...update!, stage: 'failed', code: 'start-failed', failedStage: 'verifying', updatedAt: at };
   await until(() => a.controller.list()[0]?.retryAt, 5000);
   assert.equal(a.controller.list()[0].retryAt, new Date(clock + 60 * 60_000).toISOString(), 'the first retry is an hour after the failure');
   await new Promise(resolve => setTimeout(resolve, 300));
@@ -120,11 +121,14 @@ test('a controller asks a joined computer on an older version to move to its own
   assert.deepEqual(asked, ['1.25.0'], 'another controller’s failure does not make this one forget its own');
   await a.controller.update(joined.id);
   assert.deepEqual(asked, ['1.25.0', '1.25.0'], 'the owner asks again at once');
-  update = { ...update, version: '1.25.0', stage: 'failed', code: 'start-failed', startedAt: new Date(clock + 2).toISOString(), updatedAt: new Date(clock + 2).toISOString() };
-  await until(() => a.controller.list()[0]?.retryAt === new Date(clock + 2 + 2 * 60 * 60_000).toISOString(), 5000);
-  clock += 2 * 60 * 60_000 + 10;
+  update = { ...update!, stage: 'failed', code: 'start-failed', failedStage: 'verifying' };
+  await until(() => a.controller.list()[0]?.report?.update?.stage === 'failed' && a.controller.list()[0].report?.update?.version === '1.25.0', 5000);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(a.controller.list()[0].retryAt, new Date(clock + 60 * 60_000).toISOString(), 'the owner’s own attempt failing leaves the schedule as it was: only attempts made by the schedule count');
+  assert.deepEqual(asked, ['1.25.0', '1.25.0'], 'and nothing is asked for by itself before its time');
+  clock += 60 * 60_000 + 10;
   await until(() => asked.length === 3, 5000);
-  assert.deepEqual(asked, ['1.25.0', '1.25.0', '1.25.0'], 'asked again by itself once the retry is due');
+  assert.deepEqual(asked, ['1.25.0', '1.25.0', '1.25.0'], 'asked again by itself once the retry is due, as if the owner had not tried');
 });
 
 test('a computer away in the middle of an update shows it as updating, until nothing has been heard for a long time', async t => {
@@ -616,7 +620,7 @@ test('what a joined computer reports about keeping itself current reaches the co
       enabled: true, tower: { kind: 'service', latest: '1.25.0', checkedAt, followsController: true, serviceCommand: 'npx never-shown' },
       tools: {
         claude: { method: 'native', state: 'current', version: '2.1.281', target: '2.1.281', checkedAt, path: '/root/.local/bin/claude' },
-        codex: { method: 'npm', state: 'failed', reason: 'command-failed', version: '0.155.1', target: '0.156.1', checkedAt, nextAt: checkedAt, output: 'npm ERR! secret' },
+        codex: { method: 'npm', state: 'failed', reason: 'command-failed', version: '0.155.1', target: '0.156.1', checkedAt, nextAt: checkedAt, output: 'npm ERR! secret', fix: "npm install -g --prefix '/home/me/.npm-global' @openai/codex@0.156.1" },
         gemini: { method: 'npm', state: 'current', checkedAt },
       } } }),
   } });

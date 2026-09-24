@@ -39,12 +39,12 @@ Install Tower as the background service to keep it current by itself:
 agent-session-tower service install --port 8000
 ```
 
-The service starts at login on macOS, and at boot with systemd on Linux. Joining another computer's Tower installs it the same way. If you already started Tower yourself, `service install` stops only that web server, and the service takes over: running agents and terminals go on.
+The service starts at login on macOS, and at boot with systemd on Linux. Joining another computer's Tower installs it the same way. If you already started Tower yourself, `service install` stops only that web server, and the service takes over: running agents and terminals go on. If the service does not come up as the new version with the running agents, it is stopped and the Tower you started is started again the same way.
 
-- **Tower.** The service checks for the latest release every 30 minutes. It installs the release beside the running version, checks that it starts, and switches only the web server to it. It keeps the new version only once it answers again and has reconnected to any controlling computer; otherwise the previous version runs again. A version that failed is tried again after 1, 2, 4, 8 and 16 hours, then once a day; a newer release is tried at once. A computer another Tower controls follows that Tower's version instead of moving ahead of it.
+- **Tower.** The service checks for the latest release every 30 minutes. It installs the release beside the running version, checks that it starts, and switches only the web server to it. It keeps the new version only once it answers again and has reconnected to any controlling computer; otherwise the previous version runs again. A version that failed is tried again after 1, 2, 4, 8 and 16 hours, then once a day; a newer release is tried at once. An update you ask for yourself is tried at once and does not move this schedule. A computer another Tower controls follows that Tower's version instead of moving ahead of it.
 - **Claude Code and Codex.** The Tower on the default state directory checks every three hours whether each CLI is behind its latest npm release. Only these installs are updated:
   - Claude Code's native install, with `claude update`. It keeps each version separately and switches between them atomically.
-  - A global npm install of Claude Code or Codex. npm reinstalls it in the same prefix and is never interrupted. If the CLI no longer starts afterwards, the previous version is put back.
+  - A global npm install of Claude Code or Codex. npm reinstalls it in the same prefix and is never interrupted. If the CLI no longer starts afterwards, the previous version is put back; if that fails too, the sidebar shows the command that reinstalls it.
 
   An update starts only while Tower has no run of that CLI starting or running. New runs wait until it finishes; running terminals outside Tower are not held. When Tower runs as root, it updates only a CLI, Node and npm that only root can change. Other installs, such as Homebrew or a manual download, are left alone and shown as not updated automatically.
 - **What you see.**

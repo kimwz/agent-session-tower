@@ -1,10 +1,27 @@
 import { mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { isSea } from 'node:sea';
 import { processStart } from './process-start.js';
 
-/** `started` tells the owner apart from a later process given the same pid, as after a restart. */
-interface Owner { pid: number; port: number; createdAt: string; started?: string }
+/** How a process was started, so it can be started again the same way. */
+export interface OwnerCommand { execPath: string; argv: string[]; cwd: string }
+/**
+ * `started` tells the owner apart from a later process given the same pid, as after a restart. `command` is missing in
+ * records of older versions.
+ */
+interface Owner { pid: number; port: number; createdAt: string; started?: string; command?: OwnerCommand }
+
+/** This process's own command: Node's options (a loader such as tsx) first; a single executable is its own entry. */
+function ownCommand(): OwnerCommand {
+  const argv = isSea() ? process.argv.slice(2) : [...process.execArgv.filter(arg => !/^--inspect(?:-brk|-port|-publish-uid)?(?:=|$)/.test(arg)), ...process.argv.slice(1)];
+  return { execPath: process.execPath, argv, cwd: process.cwd() };
+}
+const parseCommand = (value: unknown): OwnerCommand | undefined => {
+  const command = value as Partial<OwnerCommand> | undefined;
+  return command && typeof command === 'object' && typeof command.execPath === 'string' && command.execPath && typeof command.cwd === 'string' && command.cwd
+    && Array.isArray(command.argv) && command.argv.every(arg => typeof arg === 'string') ? { execPath: command.execPath, argv: [...command.argv], cwd: command.cwd } : undefined;
+};
 
 export class MonitorAlreadyRunning extends Error {
   constructor(public readonly owner: Owner, stateDir: string) {
@@ -37,7 +54,7 @@ export async function acquireStateLock(stateDir: string, port: number): Promise<
   const prepared = join(stateDir, `.instance-lock-${process.pid}-${nonce}`);
   await mkdir(prepared, { mode: 0o700 });
   const started = await processStart(process.pid);
-  await writeFile(join(prepared, marker), JSON.stringify({ pid: process.pid, port, createdAt: new Date().toISOString(), ...(started ? { started } : {}) } satisfies Owner), { mode: 0o600, flag: 'wx' });
+  await writeFile(join(prepared, marker), JSON.stringify({ pid: process.pid, port, createdAt: new Date().toISOString(), ...(started ? { started } : {}), command: ownCommand() } satisfies Owner), { mode: 0o600, flag: 'wx' });
   let acquired = false;
   try {
     for (let attempts = 0; attempts < 8; attempts++) {
@@ -101,14 +118,16 @@ export async function lockedPorts(stateDir: string): Promise<number[]> {
   return ports;
 }
 
-/** The live Tower web servers that hold this state directory: their process and port. */
-export async function lockOwners(stateDir: string): Promise<Array<{ pid: number; port: number }>> {
+/** The live Tower web servers that hold this state directory: their process, port, and how it was started if known. */
+export async function lockOwners(stateDir: string): Promise<Array<{ pid: number; port: number; command?: OwnerCommand }>> {
   const lock = join(stateDir, '.instance-lock');
   const names = await readdir(lock).catch(() => [] as string[]);
-  const owners: Array<{ pid: number; port: number }> = [];
+  const owners: Array<{ pid: number; port: number; command?: OwnerCommand }> = [];
   for (const name of names.filter(item => /^owner-[\da-f-]{36}\.json$/.test(item))) {
     const owner = await readFile(join(lock, name), 'utf8').then(text => JSON.parse(text) as Owner).catch(() => undefined);
-    if (owner && Number.isSafeInteger(owner.pid) && owner.pid > 0 && Number.isInteger(owner.port) && owner.port > 0 && await ownerRunning(owner)) owners.push({ pid: owner.pid, port: owner.port });
+    if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !Number.isInteger(owner.port) || owner.port <= 0 || !await ownerRunning(owner)) continue;
+    const command = parseCommand(owner.command);
+    owners.push({ pid: owner.pid, port: owner.port, ...(command ? { command } : {}) });
   }
   return owners;
 }

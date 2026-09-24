@@ -40,8 +40,10 @@ export function useToolLabel() {
       case 'updating': return { text: t('{0} → v{1} 업데이트 중', { 0: version, 1: tool.target ?? '' }), title: tool.reason === 'stuck' ? reasons.stuck : t('새 작업은 업데이트가 끝나면 시작됩니다.'), tone: 'busy' };
       case 'waiting': return { text: t('{0} → v{1} 대기', { 0: version, 1: tool.target ?? '' }), title: t('Tower에서 이 에이전트의 작업이 모두 끝나면 업데이트합니다.'), tone: 'busy' };
       case 'failed': return { text: t('{0} · 업데이트 실패', { 0: version }), title: [t('v{0}(으)로 업데이트하지 못했습니다.', { 0: tool.target ?? '' }), reason, next].filter(Boolean).join(' '), tone: 'warn' };
-      case 'broken': return { text: t('실행 안 됨'), title: [t('업데이트 뒤 실행되지 않고, 이전 버전으로도 되돌리지 못했습니다. 직접 다시 설치하세요(기록: logs/tool-update.log).'), next].filter(Boolean).join(' '), tone: 'warn' };
-      case 'unsupported': return { text: t('{0} · 자동 업데이트 안 됨', { 0: version }), title: [t('v{0}이(가) 나왔습니다.', { 0: tool.target ?? '' }), reason].filter(Boolean).join(' '), tone: 'warn' };
+      // Nothing is tried again while it does not start, so no retry time is shown; this computer's own page names the fix.
+      case 'broken': return { text: t('실행 안 됨'), title: [t('업데이트 뒤 실행되지 않고, 이전 버전으로도 되돌리지 못했습니다. 직접 다시 설치하세요(기록: logs/tool-update.log).'), tool.fix ? t('다시 설치하는 명령: {0}', { 0: tool.fix }) : ''].filter(Boolean).join(' '), tone: 'warn' };
+      // As root, a CLI others could change is not even asked its version.
+      case 'unsupported': return { text: version ? t('{0} · 자동 업데이트 안 됨', { 0: version }) : t('자동 업데이트 안 됨'), title: [tool.target ? t('v{0}이(가) 나왔습니다.', { 0: tool.target }) : '', reason].filter(Boolean).join(' '), tone: 'warn' };
     }
   };
 }

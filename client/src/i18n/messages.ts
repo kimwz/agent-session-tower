@@ -1432,6 +1432,8 @@ export const english: Record<string, string> = {
   "실행 안 됨": "Does not start",
   "업데이트 뒤 실행되지 않고, 이전 버전으로도 되돌리지 못했습니다. 직접 다시 설치하세요(기록: logs/tool-update.log).": "It does not start after the update, and the previous version could not be put back. Reinstall it (log: logs/tool-update.log).",
   "{0} · 자동 업데이트 안 됨": "{0} · not updated automatically",
+  "자동 업데이트 안 됨": "Not updated automatically",
+  "다시 설치하는 명령: {0}": "To reinstall it, run: {0}",
   "v{0}이(가) 나왔습니다.": "v{0} is out.",
   "Tower v{0}이(가) 나왔습니다. 이 Tower는 직접 실행한 것이라 스스로 업데이트하지 않습니다. 이 명령으로 백그라운드 서비스로 설치하면 Tower, Claude Code, Codex가 항상 최신으로 유지됩니다. 실행 중인 작업과 터미널은 계속됩니다: {1}": "Tower v{0} is out. This Tower was started by hand, so it does not update itself. Install it as the background service with this command, and Tower, Claude Code and Codex stay at their latest versions. Running work and terminals go on: {1}",
   "명령 복사됨": "Command copied",

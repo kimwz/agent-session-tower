@@ -59,6 +59,26 @@ test('a service moves to the latest release, and a failed version is tried again
   assert.deepEqual(f.requests.at(-1), '1.33.0', 'a newer release is tried at once');
 });
 
+test('the owner’s own attempt failing leaves the retry schedule as it was', async t => {
+  const f = await fixture(t);
+  await f.auto.check();
+  f.fail();
+  await f.auto.check();
+  const scheduled = { version: '1.32.0', attempts: 1, nextAt: '2026-09-24T01:00:00.000Z' };
+  f.advance(10 * 60_000);
+  assert.equal((await f.auto.updateNow()).status, 202);
+  f.fail();
+  await f.auto.check();
+  const saved = JSON.parse(await readFile(join(f.stateDir, 'runtime', 'auto-update.json'), 'utf8'));
+  assert.deepEqual(saved.retry, scheduled, 'only automatic attempts count; the owner can try as often as they like');
+  assert.equal(saved.counted, '2026-09-24T00:10:00.000Z', 'the owner’s failure is seen once and never counted later');
+  assert.equal(f.auto.status().nextAt, scheduled.nextAt);
+  assert.deepEqual(f.requests, ['1.32.0', '1.32.0'], 'nothing is tried by itself before its time');
+  f.advance(50 * 60_000);
+  await f.auto.check();
+  assert.deepEqual(f.requests, ['1.32.0', '1.32.0', '1.32.0'], 'the schedule goes on as if the owner had not tried');
+});
+
 test('a paired computer follows its controller, a disabled or unmanaged Tower only reports the latest, and the owner can update at once', async t => {
   const paired = await fixture(t, { controllers: 1 });
   await paired.auto.check();
