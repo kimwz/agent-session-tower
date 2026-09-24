@@ -14,7 +14,7 @@ const CONTROLLER = 'controllera1b2c3d4e5f6';
 const REQUEST_ID = '0199a2b3-c4d5-7123-8abc-0123456789ab';
 const now = new Date().toISOString();
 
-async function fixture(t: TestContext, options: { coordinators?: string[] | null } = {}) {
+async function fixture(t: TestContext, options: { coordinators?: string[] | null; beforeDetail?: () => Promise<void>; job?: (job: AutoPromptJob) => AutoPromptJob } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-router-')));
   const open = join(root, 'open'), secret = join(root, 'secret');
   await mkdir(join(secret, 'deep'), { recursive: true });
@@ -25,27 +25,34 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
   await exclusions.add(secret);
   const session = (id: string, cwd: string, extra: Partial<Session> = {}): Session => ({ id, nativeId: id.split(':')[1], provider: 'codex', title: id, cwd, project: 'p',
     status: 'idle', statusReason: '', createdAt: now, updatedAt: now, lastMessage: '', messageCount: 1, isSubagent: false, resumable: true, ...extra });
-  const sessions = [session('codex:open', open), session('codex:secret', secret), session('codex:deep', join(secret, 'deep')), session('codex:coordinator', open)];
+  // A conversation Tower created keeps its own ID; its native ID is an alias for it.
+  const sessions = [session('codex:open', open), { ...session('codex:monitor-7d1e0c2a-5b8f-4e31-9a6d-2f4c8b1e9a70', secret), nativeId: 'b3f1c9d2-8a47-4e6b-9c15-3d2e7f0a1b64' },
+    session('codex:deep', join(secret, 'deep')), session('codex:coordinator', open)];
+  let coordinatorIds = options.coordinators;
   const runs: Run[] = [{ id: 'run-open', sessionId: 'codex:open', prompt: 'p', status: 'running', createdAt: now, output: '' },
-    { id: 'run-secret', sessionId: 'codex:secret', prompt: 'p', status: 'running', createdAt: now, output: '' }];
+    { id: 'run-secret', sessionId: sessions[1].id, prompt: 'p', status: 'running', createdAt: now, output: '' }];
   const jobs: AutoPromptJob[] = [{ id: '0199a2b3-c4d5-7123-8abc-000000000001', provider: 'codex', prompt: 'x', routerModel: 'r', status: 'routing', createdAt: now, updatedAt: now,
     origin: { kind: 'owner', controllerId: 'controllerffffffffffff' } }];
   const calls: Array<{ method: string; args: unknown[] }> = [];
   const listeners = new Set<() => void>();
   const snapshot = (): Snapshot => ({ sessions, runs, providers: [], autoPrompts: jobs, groups: [{ cwd: open, title: 'Open', pinned: true }, { cwd: secret, title: 'Secret', pinned: true }],
     scanning: false, hostname: 'machine-b', version: 'test', updatedAt: now });
-  const lookup = (id: string) => sessions.find(item => item.id === id || item.nativeId === id);
+  const lookup = (id: string) => sessions.find(item => item.id === id || `${item.provider}:${item.nativeId}` === id);
   const backend: Backend = {
     snapshot, subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-    detail: async id => { const found = lookup(id); return found ? { session: found, messages: [{ id: 'm', role: 'user', text: `hello from ${found.cwd}`, timestamp: now }], hasMore: false } : undefined; },
+    detail: async id => { await options.beforeDetail?.(); const found = lookup(id); return found ? { session: found, messages: [{ id: 'm', role: 'user', text: `hello from ${found.cwd}`, timestamp: now }], hasMore: false } : undefined; },
     session: lookup,
-    coordinators: () => options.coordinators === null ? undefined : new Set(options.coordinators ?? ['codex:coordinator']),
+    coordinators: () => coordinatorIds === null ? undefined : new Set(coordinatorIds ?? ['codex:coordinator']),
     enqueue: async (id, prompt, attachments, context) => { calls.push({ method: 'enqueue', args: [id, prompt, attachments, context] }); return { ...runs[0], id: 'run-new', sessionId: id, prompt }; },
     createSession: async (input, context) => { calls.push({ method: 'createSession', args: [input, context] }); return { session: session('codex:new', input.cwd), run: { ...runs[0], id: 'run-created', sessionId: 'codex:new' } }; },
-    startAutoPrompt: async (input, context) => { calls.push({ method: 'startAutoPrompt', args: [input, context] }); return { ...jobs[0], id: input.requestId, origin: context?.origin }; },
+    startAutoPrompt: async (input, context) => {
+      calls.push({ method: 'startAutoPrompt', args: [input, context] });
+      const job: AutoPromptJob = { ...jobs[0], id: input.requestId, origin: context?.origin, ...(input.cwd ? { cwd: input.cwd } : {}) };
+      return options.job ? options.job(job) : job;
+    },
     getAutoPrompt: id => jobs.find(job => job.id === id),
     setGroup: async patch => { calls.push({ method: 'setGroup', args: [patch] }); return { cwd: patch.cwd, title: patch.title ?? '', pinned: true, hidden: true }; },
-    attachment: async id => ({ metadata: { id, name: 'shot.png', mimeType: 'image/png', size: 4 }, content: Buffer.from('png!'), sessionId: id === '11111111-1111-4111-8111-111111111111' ? 'codex:open' : 'codex:secret' }),
+    attachment: async id => ({ metadata: { id, name: 'shot.png', mimeType: 'image/png', size: 4 }, content: Buffer.from('png!'), sessionId: id === '11111111-1111-4111-8111-111111111111' ? 'codex:open' : sessions[1].id }),
     cancel: async id => { calls.push({ method: 'cancel', args: [id] }); },
   };
   const router = createRemoteRouter({ backend, exclusions });
@@ -60,7 +67,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
     return { status: response.status, json, text, headers: response.headers };
   };
-  return { root, open, secret, exclusions, calls, listeners, base, call };
+  return { root, open, secret, exclusions, calls, listeners, base, call, secretSession: sessions[1], setCoordinators: (value: string[] | null) => { coordinatorIds = value; } };
 }
 
 test('a remote controller reads sessions, conversations and attachments only outside excluded folders', async t => {
@@ -71,11 +78,11 @@ test('a remote controller reads sessions, conversations and attachments only out
   assert.deepEqual(view.json.runs.map((item: Run) => item.id), ['run-open']);
   assert.equal(view.text.includes(f.secret), false);
   assert.equal((await f.call('/api/sessions/codex:open')).status, 200);
-  const hidden = await f.call('/api/sessions/codex:secret');
+  const hidden = await f.call(`/api/sessions/${f.secretSession.id}`);
   const missing = await f.call('/api/sessions/codex:nothing');
   assert.equal(hidden.status, 404);
   assert.deepEqual(hidden.json, missing.json, 'an excluded session answers exactly like one that does not exist');
-  assert.equal((await f.call('/api/sessions/secret')).status, 404, 'the native ID alias is judged as the same session');
+  assert.equal((await f.call(`/api/sessions/codex:${f.secretSession.nativeId}`)).status, 404, 'the native ID alias is judged as the same session');
   assert.equal((await f.call('/api/sessions/codex:deep')).status, 404, 'subfolders are excluded too');
   assert.equal((await f.call('/api/sessions/codex:coordinator')).status, 404, 'coordinator conversations stay on this machine');
   const image = await f.call('/api/attachments/11111111-1111-4111-8111-111111111111');
@@ -89,7 +96,8 @@ test('a remote controller cannot start or continue work in an excluded folder', 
   const headers = { 'x-tower-request-id': REQUEST_ID };
   assert.equal((await f.call('/api/sessions', { body: { provider: 'codex', cwd: join(f.secret, 'deep'), prompt: 'go' }, headers })).status, 404);
   assert.equal((await f.call('/api/sessions', { body: { provider: 'codex', cwd: join(f.secret, 'new-folder'), prompt: 'go' }, headers })).status, 404);
-  assert.equal((await f.call('/api/sessions/codex:secret/messages', { body: { prompt: 'go' }, headers })).status, 404);
+  assert.equal((await f.call(`/api/sessions/${f.secretSession.id}/messages`, { body: { prompt: 'go' }, headers })).status, 404);
+  assert.equal((await f.call(`/api/sessions/codex:${f.secretSession.nativeId}/messages`, { body: { prompt: 'go' }, headers })).status, 404);
   assert.equal((await f.call('/api/sessions/codex:coordinator/messages', { body: { prompt: 'go' }, headers })).status, 404);
   assert.equal((await f.call('/api/auto-prompts', { body: { requestId: REQUEST_ID, provider: 'codex', cwd: f.secret, prompt: 'go' } })).status, 404);
   assert.equal((await f.call('/api/runs/run-secret/cancel', { body: {} })).status, 404);
@@ -131,6 +139,36 @@ test('a controller can rename a shared folder, but pins and screen hiding stay i
   assert.deepEqual(renamed.json.group, { cwd: f.open, title: 'Renamed', pinned: true });
 });
 
+test('an excluded folder and a folder Tower does not list look the same to a remote controller', async t => {
+  const f = await fixture(t);
+  const excluded = await f.call('/api/auto-prompts', { body: { requestId: REQUEST_ID, provider: 'codex', cwd: join(f.secret, 'deep'), prompt: 'go' } });
+  const unlisted = await f.call('/api/auto-prompts', { body: { requestId: REQUEST_ID, provider: 'codex', cwd: join(f.root, 'unlisted'), prompt: 'go' } });
+  assert.equal(excluded.status, 404);
+  assert.deepEqual(unlisted, { ...unlisted, status: 404, json: excluded.json });
+});
+
+test('a view that cannot be built safely ends the stream instead of stopping this Tower', async t => {
+  const f = await fixture(t);
+  const url = new URL(`${f.base}/api/events`);
+  const ended = new Promise<void>((resolve, reject) => {
+    const stream = request({ host: url.hostname, port: url.port, path: url.pathname });
+    stream.on('response', response => {
+      response.resume();
+      response.once('data', () => {
+        // The worker is being replaced and cannot name its coordinator conversations for a moment.
+        f.setCoordinators(null);
+        for (const listener of f.listeners) listener();
+      });
+      response.on('end', () => resolve());
+    });
+    stream.on('error', reject);
+    stream.end();
+  });
+  await ended;
+  f.setCoordinators(['codex:coordinator']);
+  assert.equal((await f.call('/api/snapshot')).status, 200, 'this Tower keeps serving');
+});
+
 test('a request still choosing its folder is visible only to the controller that asked for it', async t => {
   const f = await fixture(t);
   assert.equal((await f.call('/api/auto-prompts/0199a2b3-c4d5-7123-8abc-000000000001')).status, 404);
@@ -143,27 +181,44 @@ test('nothing is served while the worker cannot name its coordinator conversatio
   assert.equal(response.json.disposition, 'not-admitted');
 });
 
-test('the remote event stream drops a folder as soon as it is excluded', async t => {
+test('a folder excluded while a request waits is not in its answer, and a retry never reveals it', async t => {
+  let exclude: (() => Promise<void>) | undefined;
+  const f = await fixture(t, { beforeDetail: async () => { await exclude?.(); } });
+  exclude = async () => { await f.exclusions.add(f.open); };
+  assert.equal((await f.call('/api/sessions/codex:open')).status, 404, 'the conversation is not sent after its folder was excluded mid-request');
+});
+
+test('a retried Auto Prompt that ended up in a folder excluded since answers not found', async t => {
+  let secret = '';
+  const f = await fixture(t, { job: job => ({ ...job, status: 'completed', decision: { action: 'create', cwd: secret, reason: 'secret reason' } }) });
+  secret = join(f.secret, 'deep');
+  const response = await f.call('/api/auto-prompts', { body: { requestId: REQUEST_ID, provider: 'codex', prompt: 'go' } });
+  assert.equal(response.status, 404);
+  assert.equal(response.text.includes('secret reason'), false);
+});
+
+test('changing the exclusion list ends the remote event stream, and the next one starts without the folder', async t => {
   const f = await fixture(t);
-  const frames: string[] = [];
-  const url = new URL(`${f.base}/api/events?patch=1`);
-  const stream = request({ host: url.hostname, port: url.port, path: `${url.pathname}${url.search}` });
-  t.after(() => stream.destroy());
-  const first = new Promise<void>((resolve, reject) => {
+  const open = () => new Promise<{ frames: string[]; ended: Promise<void>; destroy: () => void }>((resolve, reject) => {
+    const url = new URL(`${f.base}/api/events?patch=1`);
+    const frames: string[] = [];
+    let resolved = false;
+    const stream = request({ host: url.hostname, port: url.port, path: `${url.pathname}${url.search}` });
     stream.on('response', response => {
       response.setEncoding('utf8');
-      response.on('data', (chunk: string) => { frames.push(chunk); if (frames.join('').includes('event: snapshot')) resolve(); });
+      const ended = new Promise<void>(done => response.on('end', () => done()));
+      response.on('data', (chunk: string) => { frames.push(chunk); if (!resolved && frames.join('').includes('event: snapshot')) { resolved = true; resolve({ frames, ended, destroy: () => stream.destroy() }); } });
     });
     stream.on('error', reject);
+    stream.end();
   });
-  stream.end();
-  await first;
-  assert.match(frames.join(''), /codex:open/);
+  const first = await open();
+  t.after(() => first.destroy());
+  assert.match(first.frames.join(''), /codex:open/);
   await f.exclusions.add(f.open);
-  await new Promise<void>((resolve, reject) => {
-    const deadline = setTimeout(() => reject(new Error('No frame after the exclusion.')), 3000);
-    const check = setInterval(() => { if (frames.join('').includes('event: patch')) { clearInterval(check); clearTimeout(deadline); resolve(); } }, 20);
-  });
-  const patch = frames.join('').split('event: patch')[1];
-  assert.match(patch, /"order":\[\]/, 'the open session left the stream');
+  await first.ended;
+  assert.equal(first.frames.join('').includes('event: patch'), false, 'no frame built from the old list went out');
+  const second = await open();
+  t.after(() => second.destroy());
+  assert.equal(second.frames.join('').includes('codex:open'), false);
 });

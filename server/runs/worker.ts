@@ -62,6 +62,8 @@ export interface RunnerHostOptions {
   capabilities?: CapabilityRegistry;
   /** Makes a remote controller's retried request run once. */
   ledger?: RemoteRequestLedger;
+  /** The remote-sharing exclusion list the web process saves; reloaded with every refresh. */
+  exclusions?: RemoteExclusionStore;
 }
 
 /** Only these read state; every other request is refused while the worker hands off, never half-accepted. */
@@ -339,7 +341,7 @@ function admission(value: unknown): RunAdmission {
 
 
 
-async function runnerContext({ stateDir, runs, sessions, slack, exclusions }: Pick<RunnerHostOptions, 'stateDir' | 'runs' | 'sessions' | 'slack'> & { exclusions?: RemoteExclusionStore }) {
+async function runnerContext({ stateDir, runs, sessions, slack, exclusions }: Pick<RunnerHostOptions, 'stateDir' | 'runs' | 'sessions' | 'slack' | 'exclusions'>) {
   let titles = new SessionTitleStore(stateDir);
   let closed = new ClosedSessionStore(stateDir);
   let groups = new ProjectGroupStore(stateDir);
@@ -381,13 +383,16 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const ledger = new RemoteRequestLedger(stateDir);
     await ledger.start();
     const context = await runnerContext({ stateDir, runs, sessions, exclusions });
-    const autoPrompts = new AutoPromptManager({ stateDir, runs, exclusions, ...context });
+    // Remote requests route without excluded folders and without any coordinator conversation, Slack or GitHub.
+    let coordinators = (): ReadonlySet<string> => new Set();
+    const autoPrompts = new AutoPromptManager({ stateDir, runs, remote: { prepare: paths => exclusions.prepare(paths), matcher: () => exclusions.matcher(), coordinators: () => coordinators() }, ...context });
     await autoPrompts.start();
     const slack = new SlackService({ stateDir, runs, autoPrompts, refresh: context.refresh });
     // GitHub coordinators use a trigger's credentials; the trigger engine starts right after.
     let triggerEngine: TriggerService | undefined;
     const github = new GitHubCoordinator({ stateDir, runs, autoPrompts, refresh: context.refresh, language: () => slack.language(),
       github: (triggerId, fresh) => { if (!triggerEngine) throw new Error('Triggers are still starting.'); return triggerEngine.githubClient(triggerId, fresh); } });
+    coordinators = () => new Set([...slack.coordinatorSessionIds(), ...github.coordinatorSessionIds()]);
     const capabilities = new CapabilityRegistry(capability => capability.kind === 'slack-workflow' || capability.kind === 'github-workflow'
       || runs.list().some(run => run.id === capability.runId && (run.status === 'running' || run.status === 'queued')));
     runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, github, capabilities }));
@@ -435,7 +440,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       },
       sessions: { list: () => visible.snapshot().sessions, read: async (id, limit) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), undefined, limit))?.messages ?? [] : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
-    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, api, capabilities, ledger, releaseStateLock: release, handoffNonce,
+    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
       onIdle: async () => { triggers.close(); await triggers.settle(); github.close(); slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight(), holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); },
       quiesce: async () => { slack.pause(); triggers.pause(); github.pause(); await Promise.all([slack.flush(), triggers.flush(), github.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush()]); },

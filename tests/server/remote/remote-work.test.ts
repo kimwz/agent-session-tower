@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DurableRunManager } from '../../../server/runs/durable-runner.js';
@@ -10,6 +10,8 @@ import { SessionService } from '../../../server/sessions/service.js';
 import { startRunnerHost } from '../../../server/runs/worker.js';
 import { runnerPaths } from '../../../server/runs/runner-protocol.js';
 import { RemoteRequestLedger } from '../../../server/remote/request-ledger.js';
+import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
+import { AutoPromptManager } from '../../../server/auto-prompt/manager.js';
 import { runToolResolver } from '../../../server/api/run-tools.js';
 import { CapabilityRegistry } from '../../../server/api/mcp.js';
 import type { SlackService } from '../../../server/slack/service.js';
@@ -109,3 +111,40 @@ test('remote work is not sent to a worker that cannot tell it apart from local w
 });
 
 
+
+test('a worker keeps following the exclusion list the web process saves after it started', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-remote-worker-exclusions-'));
+  const stateDir = join(directory, 'state');
+  const folder = join(directory, 'project'), other = join(directory, 'other');
+  await mkdir(folder, { recursive: true });
+  await mkdir(other, { recursive: true });
+  const sessions = new SessionService({ codexHome: join(directory, 'codex'), claudeHome: join(directory, 'claude'),
+    inspectProcesses: async () => ({ claude: new Map(), codex: new Set(), providerRunning: { claude: false, codex: false } }) });
+  const now = new Date().toISOString();
+  const native = (id: string, cwd: string) => ({ id: `codex:${id}`, nativeId: id, provider: 'codex' as const, title: 't', cwd, project: 'project',
+    status: 'idle' as const, statusReason: '', createdAt: now, updatedAt: now, lastMessage: '', messageCount: 1, isSubagent: false, resumable: true });
+  sessions.list = () => [native('10000000-0000-4000-8000-000000000009', folder), native('10000000-0000-4000-8000-000000000010', other)];
+  sessions.refresh = async () => {};
+  const runs = new RunManager({ stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => '/fixture/codex',
+    spawnProcess: () => { throw new Error('No provider starts in this fixture.'); }, openCodexStdio: async () => { throw new Error('No provider starts in this fixture.'); } });
+  await runs.start();
+  const exclusions = new RemoteExclusionStore(stateDir);
+  await exclusions.start();
+  const autoPrompts = new AutoPromptManager({ stateDir, runs, snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'x', version: 'x', updatedAt: now }),
+    detail: async () => undefined, refresh: async () => {}, model: async () => ({ directoryId: 'd1', reason: 'fits' }),
+    remote: { prepare: paths => exclusions.prepare(paths), matcher: () => exclusions.matcher(), coordinators: () => new Set() } });
+  await autoPrompts.start();
+  const ledger = new RemoteRequestLedger(stateDir);
+  await ledger.start();
+  const host = await startRunnerHost({ stateDir, sessions, runs, autoPrompts, ledger, exclusions });
+  const client = new DurableRunManager({ stateDir, pollMs: 10 });
+  await client.start();
+  const paths = await runnerPaths(stateDir);
+  t.after(async () => { await client.close(); await host.close(); sessions.stop(); await autoPrompts.close(); await runs.close(); await rm(directory, { recursive: true, force: true }); await rm(paths.directory, { recursive: true, force: true }); });
+  // The web process owns the list; the worker has its own copy.
+  const web = new RemoteExclusionStore(stateDir);
+  await web.start();
+  await web.add(folder);
+  await assert.rejects(client.submitAutoPrompt({ requestId: v7('000000000009'), provider: 'codex', prompt: 'go', cwd: folder }, { origin: remote, requestId: v7('000000000009') }),
+    /목록에 있는 작업 폴더/);
+});

@@ -1,4 +1,4 @@
-import type { AutoPromptJob, ProjectGroup, ProviderHealth, Run, Session, Snapshot } from '../../shared/types.js';
+import type { AutoPromptJob, ChatMessage, ProjectGroup, ProviderHealth, Run, Session, SessionDetail, Snapshot } from '../../shared/types.js';
 import type { RepositoryStatus } from '../../shared/repositories.js';
 import type { ExclusionMatcher } from './exclusions.js';
 
@@ -63,7 +63,7 @@ const pick = <T extends object, K extends keyof T>(value: T, keys: readonly K[])
 const SESSION_FIELDS = ['id', 'nativeId', 'provider', 'title', 'customTitle', 'closed', 'creationPending', 'cwd', 'project', 'parentId', 'parentLink',
   'launchedByAgent', 'launchedBy', 'agentName', 'model', 'contextUsage', 'status', 'statusReason', 'createdAt', 'updatedAt', 'lastRequestAt',
   'lastCompletedAt', 'lastMessage', 'messageCount', 'readRevision', 'isSubagent', 'resumable', 'activeProcess'] as const satisfies readonly (keyof Session)[];
-const RUN_FIELDS = ['id', 'sessionId', 'unattended', 'prompt', 'status', 'createdAt', 'startedAt', 'finishedAt', 'output', 'error', 'attachments', 'model',
+const RUN_FIELDS = ['id', 'sessionId', 'unattended', 'towerTools', 'prompt', 'status', 'createdAt', 'startedAt', 'finishedAt', 'output', 'error', 'attachments', 'model',
   'effort', 'codexApprovalsReviewer', 'autoPromptId', 'contextUsage', 'approvals', 'canSteer', 'steering'] as const satisfies readonly (keyof Run)[];
 const JOB_FIELDS = ['id', 'unattended', 'untrustedInput', 'sessionMode', 'model', 'effort', 'provider', 'cwd', 'prompt', 'codexApprovalsReviewer', 'routerModel',
   'status', 'stage', 'createdAt', 'updatedAt', 'attachments', 'sessionId', 'runId', 'error'] as const satisfies readonly (keyof AutoPromptJob)[];
@@ -87,15 +87,21 @@ export function remoteJob(job: AutoPromptJob, controllerId: string | undefined, 
 function remoteGroup(group: ProjectGroup): ProjectGroup { return { cwd: group.cwd, title: group.title, pinned: group.pinned }; }
 function remoteProvider(provider: ProviderHealth, sessionCount: number): ProviderHealth {
   return { provider: provider.provider, available: provider.available, sessionCount,
-    ...(provider.usage ? { usage: { status: provider.usage.status, windows: provider.usage.windows.map(window => ({ ...window })),
+    ...(provider.usage ? { usage: { status: provider.usage.status, windows: provider.usage.windows.map(window => pick(window, ['id', 'usedPercent', 'windowMinutes', 'resetsAt'] as const)),
       ...(provider.usage.updatedAt ? { updatedAt: provider.usage.updatedAt } : {}), ...(provider.usage.stale ? { stale: true } : {}) } } : {}),
     ...(provider.models ? { models: structuredClone(provider.models) } : {}), ...(provider.defaultModel ? { defaultModel: provider.defaultModel } : {}),
     ...(provider.efforts ? { efforts: structuredClone(provider.efforts) } : {}), ...(provider.defaultEffort ? { defaultEffort: provider.defaultEffort } : {}) };
 }
 /** Git errors can name other folders; a remote controller gets the branch state without the raw text. */
 function remoteRepository(status: RepositoryStatus): RepositoryStatus {
-  const { fetchError: _fetchError, lastAction, ...rest } = status;
-  return { ...rest, ...(lastAction ? { lastAction: { kind: lastAction.kind, ok: lastAction.ok, at: lastAction.at, ...(lastAction.commits !== undefined ? { commits: lastAction.commits } : {}) } } : {}) };
+  return { ...pick(status, ['cwd', 'root', 'branch', 'upstream', 'ahead', 'behind', 'changes', 'checkedAt', 'fetchedAt'] as const),
+    ...(status.lastAction ? { lastAction: pick(status.lastAction, ['kind', 'ok', 'commits', 'at'] as const) } : {}) };
+}
+const MESSAGE_FIELDS = ['id', 'role', 'text', 'timestamp', 'toolName', 'isError'] as const satisfies readonly (keyof ChatMessage)[];
+/** One page of a shared conversation. */
+export function remotePage(page: SessionDetail): SessionDetail {
+  return { session: remoteSession(page.session), messages: page.messages.map(message => pick(message, MESSAGE_FIELDS) as ChatMessage), hasMore: page.hasMore,
+    ...(page.nextBefore !== undefined ? { nextBefore: page.nextBefore } : {}) };
 }
 
 /**

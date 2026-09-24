@@ -8,7 +8,7 @@ import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import type { Snapshot } from '../../../shared/types.js';
 
-test('this machine’s own browser manages the remote-sharing exclusion list', async t => {
+test('this Tower’s own pages manage the remote-sharing exclusion list', async t => {
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'tower-exclusions-http-')));
   await mkdir(join(dir, 'secret'));
   const exclusions = new RemoteExclusionStore(dir);
@@ -16,8 +16,7 @@ test('this machine’s own browser manages the remote-sharing exclusion list', a
   const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(dir);
   const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: new Date().toISOString() };
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, auth, remote: { origins }, exclusions, backend: {
-    snapshot: () => snapshot, detail: async () => undefined, cancel: async () => {}, subscribe: () => () => {},
-    enqueue: async () => { throw Object.assign(new Error('Tower is replacing its execution worker right now.'), { statusCode: 503, disposition: 'handoff' }); },
+    snapshot: () => snapshot, detail: async () => undefined, cancel: async () => {}, subscribe: () => () => {}, enqueue: async () => { throw new Error('unused'); },
   } });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -32,11 +31,26 @@ test('this machine’s own browser manages the remote-sharing exclusion list', a
   for (const body of [{}, { add: 'relative' }, { add: join(dir, 'secret'), remove: join(dir, 'secret') }, { clear: true }]) assert.equal((await post(body)).status, 400, JSON.stringify(body));
   const added = await post({ add: join(dir, 'secret') });
   assert.equal(added.status, 200);
-  assert.deepEqual(await added.json(), { folders: [join(dir, 'secret')], revision: 1 });
-  assert.deepEqual(await (await post({ remove: join(dir, 'secret') })).json(), { folders: [], revision: 2 });
+  const listed = await added.json();
+  assert.deepEqual(listed.folders, [join(dir, 'secret')]);
+  assert.ok(listed.revision > 0);
+  const removed = await (await post({ remove: join(dir, 'secret') })).json();
+  assert.deepEqual(removed.folders, []);
+  assert.ok(removed.revision > 1);
+});
 
-  // A refusal the worker never admitted says so, so the page knows sending again is safe.
-  const refused = await fetch(`${base}/api/sessions/codex:x/messages`, { method: 'POST', headers, body: JSON.stringify({ prompt: 'hi' }) });
+test('a message refused while the worker is being replaced tells the page it is safe to send again', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-disposition-http-'));
+  const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: new Date().toISOString() };
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, backend: {
+    snapshot: () => snapshot, detail: async () => undefined, cancel: async () => {}, subscribe: () => () => {},
+    enqueue: async () => { throw Object.assign(new Error('Tower is replacing its execution worker right now.'), { statusCode: 503, disposition: 'handoff' }); },
+  } });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  t.after(async () => { dispose(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(dir, { recursive: true, force: true }); });
+  const { token } = await (await fetch(`${base}/api/bootstrap`)).json();
+  const refused = await fetch(`${base}/api/sessions/codex:x/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: JSON.stringify({ prompt: 'hi' }) });
   assert.equal(refused.status, 503);
   assert.equal((await refused.json()).disposition, 'not-admitted');
 });

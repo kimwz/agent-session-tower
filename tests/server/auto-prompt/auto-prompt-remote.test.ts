@@ -28,6 +28,7 @@ async function fixture(t: TestContext) {
     runs: managed, providers: [{ provider: 'codex', available: true, sessionCount: 2 }], scanning: false, updatedAt: '2026-01-02T00:00:00.000Z', hostname: 'b', version: 'test',
     groups: [{ cwd: secret, title: 'Secret project', pinned: true }] };
   const calls: AutoPromptModelRequest[] = [];
+  const coordinators = new Set<string>();
   const dispatches: Array<{ input: CreateSessionRequest; internal?: RunAdmission }> = [];
   let respond: (input: AutoPromptModelRequest) => Promise<unknown> = async () => ({ directoryId: 'd1', reason: 'fits' });
   const runs = {
@@ -42,11 +43,12 @@ async function fixture(t: TestContext) {
   };
   const manager = new AutoPromptManager({ stateDir: join(directory, 'state'), snapshot: () => structuredClone(current), refresh: async () => { await exclusions.reload(); }, runs,
     detail: async id => { const found = current.sessions.find(item => item.id === id); return found ? { session: found, hasMore: false, messages: [] } : undefined; },
-    model: async input => { calls.push(input); return respond(input); }, exclusions });
+    model: async input => { calls.push(input); return respond(input); },
+    remote: { prepare: paths => exclusions.prepare(paths), matcher: () => exclusions.matcher(), coordinators: () => coordinators } });
   await manager.start();
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
   const finished = (id: string) => until(() => { const job = manager.get(id); return job && ['completed', 'error', 'cancelled'].includes(job.status) ? job : undefined; });
-  return { directory, open, secret, exclusions, manager, calls, dispatches, finished, respond: (fn: typeof respond) => { respond = fn; } };
+  return { directory, open, secret, exclusions, manager, calls, dispatches, finished, coordinators, current, respond: (fn: typeof respond) => { respond = fn; } };
 }
 const submit = (manager: AutoPromptManager, origin: RunOrigin, values: { cwd?: string } = {}) =>
   manager.submit({ requestId: randomUUID(), provider: 'codex', prompt: 'Start the next task', sessionMode: 'new', ...values }, { origin });
@@ -76,4 +78,15 @@ test('a remote Auto Prompt cannot name an excluded folder, and one excluded whil
   const job = await f.finished((await submit(f.manager, REMOTE)).id);
   assert.equal(job.status, 'error');
   assert.deepEqual(f.dispatches, [], 'nothing was started in a folder that stopped being shared');
+});
+
+test('a remote Auto Prompt never offers or continues a coordinator conversation', async t => {
+  const f = await fixture(t);
+  const coordinator = { ...session('33333333-3333-4333-8333-333333333333', f.open), lastMessage: 'coordinator conversation about a GitHub issue' };
+  f.current.sessions.push(coordinator);
+  f.coordinators.add(coordinator.id);
+  f.respond(async input => input.prompt.includes('"directories"') ? { directoryId: 'd1', reason: 'fits' } : { action: 'create', sessionId: null, relation: 'new', reason: 'new task' });
+  const job = await f.finished((await f.manager.submit({ requestId: randomUUID(), provider: 'codex', prompt: 'Continue' }, { origin: REMOTE })).id);
+  assert.equal(job.status, 'completed');
+  assert.equal(f.calls.some(call => call.prompt.includes('coordinator conversation')), false);
 });

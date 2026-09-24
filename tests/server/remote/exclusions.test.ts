@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -60,32 +60,78 @@ test('a path whose real location is not known yet counts as excluded until it is
   assert.equal(store.matcher().excludes(open), false);
 });
 
-test('the list is kept across restarts, another reader follows its changes, and every change has a new revision', async t => {
+test('the list is kept across restarts, another reader follows its changes, and every change has a newer revision', async t => {
   const f = await fixture(t);
   const store = await f.open();
   const reader = await f.open();
   assert.equal(store.revision, 0);
   assert.deepEqual(await store.add(join(f.work, 'secret')), [join(f.work, 'secret')]);
-  assert.equal(store.revision, 1);
+  const first = store.revision;
+  assert.ok(first > 0);
   assert.deepEqual(await store.add(join(f.work, 'secret')), [join(f.work, 'secret')], 'adding the same folder again changes nothing');
-  assert.equal(store.revision, 1);
+  assert.equal(store.revision, first);
   await reader.reload();
   assert.deepEqual(reader.list(), [join(f.work, 'secret')]);
   assert.equal(await reader.excludesNow(join(f.work, 'secret', 'deep')), true);
   await store.remove(join(f.work, 'secret'));
-  assert.equal(store.revision, 2);
+  assert.ok(store.revision > first);
   await reader.reload();
   assert.equal(await reader.excludesNow(join(f.work, 'secret', 'deep')), false);
   const saved = JSON.parse(await readFile(join(f.stateDir, 'remote-exclusions.json'), 'utf8'));
-  assert.equal(saved.revision, 2);
+  assert.equal(saved.revision, store.revision);
   assert.equal((await stat(join(f.stateDir, 'remote-exclusions.json'))).mode & 0o777, 0o600);
   const restarted = await f.open();
-  assert.equal(restarted.revision, 2);
+  assert.equal(restarted.revision, store.revision);
   assert.deepEqual(restarted.list(), []);
+});
+
+test('a list that cannot be read hides every folder from remote controllers without stopping this computer', async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.stateDir, 'remote-exclusions.json'), '{ not json', { mode: 0o600 });
+  const store = await f.open();
+  assert.match(store.error ?? '', /읽지 못했습니다/);
+  assert.equal(await store.excludesNow(join(f.work, 'open')), true);
+  await assert.rejects(store.add(join(f.work, 'secret')), /읽지 못했습니다/);
+  assert.deepEqual(await store.reset(), []);
+  assert.equal(store.error, undefined);
+  assert.equal(await store.excludesNow(join(f.work, 'open')), false);
+  const reader = await f.open();
+  assert.equal(reader.error, undefined, 'the rebuilt list reads again');
 });
 
 test('only absolute folder paths can be excluded', async t => {
   const f = await fixture(t);
   const store = await f.open();
-  for (const value of ['relative/path', '', 42, null, '/with\0nul']) assert.throws(() => store.add(value), /absolute folder path/);
+  for (const value of ['relative/path', '', 42, null, '/with\0nul']) assert.throws(() => store.add(value), /절대 경로/);
+});
+
+test('a symlink pointed somewhere else is judged by its new target once it is checked again', async t => {
+  const f = await fixture(t);
+  const store = new RemoteExclusionStore(f.stateDir, { recheckMs: 20 });
+  await store.start();
+  await store.add(join(f.work, 'secret'));
+  const link = join(f.work, 'link');
+  await symlink(join(f.work, 'open'), link);
+  await store.prepare([link]);
+  assert.equal(store.matcher().excludes(link), false);
+  await rm(link);
+  await symlink(join(f.work, 'secret'), link);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  await store.prepare([link]);
+  assert.equal(store.matcher().excludes(link), true);
+});
+
+test('a path whose real location cannot be determined counts as excluded', async t => {
+  if (process.getuid?.() === 0) return;
+  const f = await fixture(t);
+  const store = await f.open();
+  await store.add(join(f.work, 'secret'));
+  const locked = join(f.work, 'locked');
+  await mkdir(join(locked, 'inside'), { recursive: true });
+  await chmod(locked, 0o000);
+  try {
+    assert.equal(await store.excludesNow(join(locked, 'inside')), true);
+    await store.prepare([join(locked, 'inside')]);
+    assert.equal(store.matcher().excludes(join(locked, 'inside')), true);
+  } finally { await chmod(locked, 0o700); }
 });

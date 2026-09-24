@@ -20,8 +20,8 @@ interface AutoPromptOptions {
   refresh(): Promise<void>;
   runs: Pick<RunManager, 'list' | 'create' | 'enqueue'>;
   model?: typeof runAutoPromptModel;
-  /** Folders excluded from remote sharing; remote requests never route into them. */
-  exclusions?: { prepare(paths: Iterable<string>): Promise<void>; matcher(): ExclusionMatcher };
+  /** What a remote controller's request may route into: never an excluded folder, never a coordinator conversation. */
+  remote?: { prepare(paths: Iterable<string>): Promise<void>; matcher(): ExclusionMatcher; coordinators(): ReadonlySet<string> };
 }
 interface Entry { job: AutoPromptJob; fingerprint: string; staged: Attachment[] }
 interface Directory { id: string; cwd: string; title: string; sessions: Session[] }
@@ -209,7 +209,7 @@ export class AutoPromptManager extends EventEmitter {
     const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments });
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, staged: prepared.attachments, job: {
-      id: input.requestId, origin, ...(origin.controllerId ? { exclusionRevision: this.options.exclusions!.matcher().revision } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
+      id: input.requestId, origin, ...(origin.controllerId ? { exclusionRevision: this.options.remote!.matcher().revision } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
       ...(input.provider === 'codex' && input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}),
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
       ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
@@ -299,7 +299,7 @@ export class AutoPromptManager extends EventEmitter {
     await this.persist(); this.emit('change');
     await this.options.refresh(); active();
     let snapshot = await this.snapshotFor(job.origin); active();
-    if (job.origin?.controllerId) this.update(job, { exclusionRevision: this.options.exclusions!.matcher().revision });
+    if (job.origin?.controllerId) this.update(job, { exclusionRevision: this.options.remote!.matcher().revision });
     providerReady(snapshot, job.provider);
     const inventory = directories(snapshot);
     const staged = await this.attachments.resolve(job.id, entry.staged); active();
@@ -405,17 +405,17 @@ export class AutoPromptManager extends EventEmitter {
    */
   private async snapshotFor(origin: RunOrigin | undefined): Promise<Snapshot> {
     if (origin?.controllerId) {
-      if (!this.options.exclusions) throw new RunError('원격 공유 제외 목록을 확인할 수 없어 실행하지 않았습니다.', 503);
+      if (!this.options.remote) throw new RunError('원격 공유 제외 목록을 확인할 수 없어 실행하지 않았습니다.', 503);
       const snapshot = this.options.snapshot();
-      await this.options.exclusions.prepare([...snapshot.sessions.map(session => session.cwd), ...(snapshot.groups ?? []).map(group => group.cwd)]);
+      await this.options.remote.prepare([...snapshot.sessions.map(session => session.cwd), ...(snapshot.groups ?? []).map(group => group.cwd)]);
     }
     return this.snapshotNow(origin);
   }
   private snapshotNow(origin: RunOrigin | undefined): Snapshot {
     const snapshot = this.options.snapshot();
     if (!origin?.controllerId) return snapshot;
-    if (!this.options.exclusions) throw new RunError('원격 공유 제외 목록을 확인할 수 없어 실행하지 않았습니다.', 503);
-    return remoteWorkingSnapshot(snapshot, { matcher: this.options.exclusions.matcher(), coordinators: new Set() });
+    if (!this.options.remote) throw new RunError('원격 공유 제외 목록을 확인할 수 없어 실행하지 않았습니다.', 503);
+    return remoteWorkingSnapshot(snapshot, { matcher: this.options.remote.matcher(), coordinators: this.options.remote.coordinators() });
   }
 
   private complete(entry: Entry, run: Run): void {

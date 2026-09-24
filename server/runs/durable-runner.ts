@@ -178,7 +178,6 @@ export class DurableRunManager extends EventEmitter {
     const admitted = { ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) };
     return this.call('submitAutoPrompt', [input, ...(Object.keys(admitted).length ? [admitted] : [])]) as Promise<AutoPromptJob>;
   }
-
   async cancelAutoPrompt(id: string): Promise<AutoPromptJob> { return this.call('cancelAutoPrompt', [id]) as Promise<AutoPromptJob>; }
   async sessionHistory(nativeId: string, before?: number, limit?: number): Promise<SessionHistoryPage | undefined> {
     return await this.call('sessionHistory', [nativeId, before, limit]) as SessionHistoryPage | undefined;
@@ -187,7 +186,6 @@ export class DurableRunManager extends EventEmitter {
     const result = await this.call('attachment', [id]) as { metadata: Attachment; content: string; sessionId?: unknown };
     return { metadata: result.metadata, content: Buffer.from(result.content, 'base64'), ...(typeof result.sessionId === 'string' ? { sessionId: result.sessionId } : {}) };
   }
-
 
   private async credential(): Promise<string> {
     if (this.closed || !this.paths) throw Object.assign(new Error('Runner connection is closed.'), { statusCode: 503 });
@@ -236,9 +234,11 @@ export class DurableRunManager extends EventEmitter {
     const reply = await new Promise<RunnerReply>((resolve, reject) => {
       const req = request({ socketPath: this.paths!.socket, method: 'POST', path: '/rpc', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, res => {
         const chunks: Buffer[] = []; let size = 0;
+        // The worker received the request, so a reply lost from here on leaves its outcome unknown.
+        const lost = (error: Error) => reject(Object.assign(error, { statusCode: 503, disposition: 'uncertain' }));
         res.on('data', (chunk: Buffer) => { size += chunk.length; if (size > MAX_RPC_BYTES) res.destroy(new Error('Runner reply is too large.')); else chunks.push(chunk); });
-        res.on('error', reject);
-        res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as RunnerReply); } catch { reject(new Error('Invalid runner response.')); } });
+        res.on('error', lost);
+        res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as RunnerReply); } catch { lost(new Error('Invalid runner response.')); } });
       });
       let sent = false;
       req.setTimeout(60_000, () => req.destroy(Object.assign(new Error('Runner response timed out. The request was not retried; check its state before resending.'), { disposition: 'uncertain' })));
@@ -262,7 +262,7 @@ export class DurableRunManager extends EventEmitter {
       this.emit('change');
     }
     // The successor refused a request addressed to its predecessor; it never ran.
-    if (adopted && reply.error?.statusCode === 409) throw Object.assign(new Error('Tower just updated its execution worker. The request was not submitted; send it again.'), { statusCode: 503 });
+    if (adopted && reply.error?.statusCode === 409) throw Object.assign(new Error('Tower just updated its execution worker. The request was not submitted; send it again.'), { statusCode: 503, disposition: 'not-admitted' });
     if (reply.error) throw Object.assign(new Error(reply.error.message), { statusCode: reply.error.statusCode, ...(reply.error.disposition ? { disposition: reply.error.disposition } : {}) });
     return reply.result;
   }

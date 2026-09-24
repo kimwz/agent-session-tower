@@ -281,16 +281,17 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (!backend.setGroup) return json(res, 503, { error: '폴더 그룹을 저장할 수 없습니다.' });
         return json(res, 200, { group: await backend.setGroup(patch) });
       }
-      // Only this machine's own browser decides what stays out of remote sharing; remote links never reach here.
+      // This Tower's own pages decide what stays out of remote sharing, whether opened here or after signing in.
+      // Requests from a remote controller come through its link, which has no route to this.
       if (path === '/api/remote/exclusions' && (req.method === 'GET' || req.method === 'POST')) {
         if (!exclusions) return json(res, 503, { error: '원격 공유 제외 목록을 사용할 수 없습니다.' });
         if (req.method === 'POST') {
           const body = await readJson(req, 16 * 1024);
           const keys = Object.keys(body);
-          if (keys.length !== 1 || !['add', 'remove'].includes(keys[0])) return json(res, 400, { error: '추가하거나 제거할 폴더 하나를 지정하세요.' });
-          if (keys[0] === 'add') await exclusions.add(body.add); else await exclusions.remove(body.remove);
+          if (keys.length !== 1 || !['add', 'remove', 'reset'].includes(keys[0]) || (keys[0] === 'reset' && body.reset !== true)) return json(res, 400, { error: '추가하거나 제거할 폴더 하나를 지정하세요.' });
+          if (keys[0] === 'add') await exclusions.add(body.add); else if (keys[0] === 'remove') await exclusions.remove(body.remove); else await exclusions.reset();
         }
-        return json(res, 200, { folders: exclusions.list(), revision: exclusions.revision });
+        return json(res, 200, { folders: exclusions.list(), revision: exclusions.revision, ...(exclusions.error ? { error: exclusions.error } : {}) });
       }
       if (req.method === 'POST' && path === '/api/repositories') {
         const body = await readJson(req, 8192);
