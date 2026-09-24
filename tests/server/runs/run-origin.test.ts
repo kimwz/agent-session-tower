@@ -268,3 +268,25 @@ test('a trigger turned off while its run is being prepared stops it before the p
     assert.equal(spawned, 0);
   } finally { await manager.close(); }
 });
+
+test('what the gate needs is looked at again after the last step before the provider starts', async t => {
+  const f = await fixture(t);
+  let spawned = 0;
+  let private_ = false;
+  const looked: string[] = [];
+  const manager = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 20,
+    findExecutable: async provider => `/fixture/${provider}`, spawnProcess: () => { spawned++; throw new Error('never'); } });
+  await manager.start();
+  try {
+    // The folder is kept from sharing only as the last look is taken; the gate answers from that look.
+    manager.setLaunchGate(run => run.origin?.controllerId && private_ ? 'kept out of sharing' : undefined,
+      async run => { looked.push(run.id); await new Promise(resolve => setTimeout(resolve, 10)); private_ = true; });
+    const { run } = await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Scheduled' }, { origin: { kind: 'trigger', triggerId: 'daily', controllerId: 'controllera1b2c3d4e5f6' } });
+    const { until } = await import('../../helpers/until.ts');
+    const ended = await until(() => manager.list().find(item => item.id === run.id && ['cancelled', 'error', 'running'].includes(item.status)));
+    assert.equal(ended.status, 'cancelled');
+    assert.equal(ended.error, 'kept out of sharing');
+    assert.equal(spawned, 0);
+    assert.ok(looked.includes(run.id));
+  } finally { await manager.close(); }
+});

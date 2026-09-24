@@ -443,7 +443,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       if (!(run.origin.workflowId && run.autoPromptId !== run.origin.workflowId) && !triggers.launchAllowed(run.origin.triggerId, run.origin.eventId)) return 'The trigger was turned off before this run started, so it did not run.';
       // Once more as the provider is about to start: a trigger set up remotely never works in a folder kept from sharing.
       return remoteLaunch.refused(run) ? REMOTE_FOLDER_REFUSED : undefined;
-    });
+    }, run => remoteLaunch.prepareRun(run));
     const api = new TowerApi({ stateDir, triggers, runs, github,
       remote: async paths => { await exclusions.reload(); await exclusions.prepare(paths, { fresh: true }); return { matcher: exclusions.matcher(), coordinators: coordinators() }; },
       projects: () => {

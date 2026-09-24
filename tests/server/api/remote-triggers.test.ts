@@ -290,6 +290,9 @@ test('where a folder really is, and the sharing list, are looked at again for ev
   await store.add(open);
   await launch.prepare();
   assert.equal(launch.refused(run), true, 'the list as saved now');
+  await store.remove(open);
+  await launch.prepareRun(run);
+  assert.equal(launch.refused(run), false, 'looked at again for the one run about to start');
   assert.equal(launch.refused({ ...run, origin: { kind: 'trigger', triggerId: 't', eventId: 'e' } }), false, 'only work set up from another computer');
 });
 

@@ -127,18 +127,20 @@ export function remoteSnapshot(snapshot: Snapshot, scope: RemoteScope, controlle
 
 /**
  * Work a trigger set up from a controlling computer starts never uses a folder kept out of sharing. Before waiting runs
- * start, `prepare` reads the list as saved now and looks again where their folders really are; `refused` then answers
- * at once as each one starts.
+ * are looked at, `prepare` reads the list as saved now and looks again where their folders really are; `prepareRun`
+ * does so for one run after the last asynchronous step before its provider starts. `refused` then answers at once.
  */
 export function remoteTriggerLaunch(exclusions: Pick<RemoteExclusionStore, 'reload' | 'prepare' | 'matcher'>, runs: { list(): Run[]; getSession(id: string): Session | undefined }) {
   const remote = (run: Run) => run.origin?.kind === 'trigger' && Boolean(run.origin.controllerId);
+  const look = async (list: Run[]) => {
+    const folders = list.filter(remote).flatMap(run => runs.getSession(run.sessionId)?.cwd ?? []);
+    if (!folders.length) return;
+    await exclusions.reload();
+    await exclusions.prepare(folders, { fresh: true });
+  };
   return {
-    async prepare(): Promise<void> {
-      const folders = runs.list().filter(run => run.status === 'queued' && remote(run)).flatMap(run => runs.getSession(run.sessionId)?.cwd ?? []);
-      if (!folders.length) return;
-      await exclusions.reload();
-      await exclusions.prepare(folders, { fresh: true });
-    },
+    async prepare(): Promise<void> { await look(runs.list().filter(run => run.status === 'queued')); },
+    async prepareRun(run: Run): Promise<void> { await look([run]); },
     refused(run: Run): boolean {
       if (!remote(run)) return false;
       const cwd = runs.getSession(run.sessionId)?.cwd;

@@ -53,19 +53,20 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
   const { projects, sessions } = node && targets ? targets(node) : { projects: ownProjects, sessions: ownSessions };
   const available = node ? !away : Boolean(ownOverview);
   const target = node || undefined;
-  // An answer for a computer no longer shown, or older than a later one, is dropped.
+  // An answer for a computer no longer shown, or older than a later one, is dropped; so is a change's outcome.
   const asked = useRef(0);
+  const shown = useRef(target);
   const refresh = useCallback(async () => {
-    if (!available) return;
+    if (!available || target !== shown.current) return;
     const mine = ++asked.current;
     try {
       const result = await towerOperation<{ triggers: Trigger[]; overview: TriggerOverview }>(token, 'triggers.list', {}, target);
-      if (mine !== asked.current) return;
+      if (mine !== asked.current || target !== shown.current) return;
       setTriggers(result.triggers);
       if (target) setRemoteOverview(result.overview);
       setError('');
     }
-    catch (cause) { if (mine === asked.current) setError(cause instanceof Error ? cause.message : String(cause)); }
+    catch (cause) { if (mine === asked.current && target === shown.current) setError(cause instanceof Error ? cause.message : String(cause)); }
   }, [available, token, target]);
   const revisions = ownOverview?.triggers.map(item => `${item.id}:${item.revision}`).join(',');
   useEffect(() => { void refresh(); }, [refresh, target ? '' : revisions]);
@@ -81,14 +82,15 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
     return () => { dialog.current?.close(); if (opener?.isConnected) opener.focus(); };
   }, []);
   const run = async (work: () => Promise<unknown>) => {
+    const from = target;
     setBusy(true); setError('');
     try { await work(); await refresh(); return true; }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); return false; }
+    catch (cause) { if (from === shown.current) setError(cause instanceof Error ? cause.message : String(cause)); return false; }
     finally { setBusy(false); }
   };
   const editing = view.page === 'edit';
   const leave = (next: () => void) => { if (!editing || window.confirm(t('저장하지 않은 트리거 변경 사항을 버릴까요?'))) next(); };
-  const choose = (next: string) => leave(() => { asked.current++; setNode(next); setTriggers(null); setRemoteOverview(undefined); setError(''); setView({ page: 'list' }); if (next && (tab === 'connections' || tab === 'limits')) setTab('triggers'); });
+  const choose = (next: string) => leave(() => { asked.current++; shown.current = next || undefined; setNode(next); setTriggers(null); setRemoteOverview(undefined); setError(''); setView({ page: 'list' }); if (next && (tab === 'connections' || tab === 'limits')) setTab('triggers'); });
   const name = computer?.name ?? t('연결된 컴퓨터');
   const coordinators = new Set(target ? (triggers ?? []).filter(item => item.handler.kind === 'coordinator').map(item => item.id) : []);
   const close = () => leave(onClose);

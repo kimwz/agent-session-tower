@@ -105,6 +105,7 @@ export class RunManager extends EventEmitter {
   private pumping = false;
   private automationLimit = Infinity;
   private launchGate?: (run: Run) => string | undefined;
+  private launchPrepare?: (run: Run) => Promise<void>;
   private started = false;
   private stopping = false;
   private writes: Promise<void> = Promise.resolve();
@@ -121,8 +122,15 @@ export class RunManager extends EventEmitter {
   /** Slack and trigger work together start at most this many provider turns at once; the rest wait in the queue. */
   setAutomationLimit(limit: number): void { this.automationLimit = limit; void this.pump(); }
 
-  /** Asked right before a queued run starts. A reason means it never starts and ends as cancelled. */
-  setLaunchGate(gate: (run: Run) => string | undefined): void { this.launchGate = gate; }
+  /**
+   * Asked right before a queued run starts. A reason means it never starts and ends as cancelled. `prepare` looks again
+   * at what the gate needs, after the last asynchronous step before a provider starts; the gate then answers at once.
+   */
+  setLaunchGate(gate: (run: Run) => string | undefined, prepare?: (run: Run) => Promise<void>): void { this.launchGate = gate; this.launchPrepare = prepare; }
+  private async prepareLaunch(run: Run): Promise<void> {
+    // A look that fails leaves the gate with what it knows; a folder it cannot tell about counts as private.
+    if (run.status === 'queued') await this.launchPrepare?.(run).catch(() => {});
+  }
 
   /** Checked again at the last moment before a provider is started, after every asynchronous step. */
   private refusedAtLaunch(run: Run, session: Session): boolean {
@@ -670,6 +678,7 @@ export class RunManager extends EventEmitter {
       },
     });
     if (!bridge) return false;
+    await this.prepareLaunch(run);
     if (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session)) {
       bridge.close(); this.reservedSessions.delete(session.id); return true;
     }
@@ -758,6 +767,7 @@ export class RunManager extends EventEmitter {
       },
     });
     // Opening an adapter does not spawn. Admission can be cancelled during discovery.
+    await this.prepareLaunch(run);
     const current = this.getSession(session.id);
     if (run.status !== 'queued' || this.stopping || (current && (this.isWorking(current) || current.activeProcess)) || this.refusedAtLaunch(run, session)) {
       owned.close(); this.reservedSessions.delete(session.id); return;
@@ -793,6 +803,7 @@ export class RunManager extends EventEmitter {
       ] },
     };
     // Recheck after asynchronous filesystem discovery, immediately before creating the writer.
+    await this.prepareLaunch(run);
     const latest = this.getSession(session.id);
     if (run.status !== 'queued' || this.stopping || (latest && (this.isWorking(latest) || (latest.provider === 'codex' && latest.activeProcess))) || this.refusedAtLaunch(run, session)) {
       this.reservedSessions.delete(session.id);
@@ -807,6 +818,7 @@ export class RunManager extends EventEmitter {
     delete env.CLAUDE_CODE_SESSION_ID;
     const privateConfig = mcpServers && Object.values(mcpServers).some(server => server.env) ? await privateMcpConfig(mcpServers) : undefined;
     // Writing the file yielded; nothing may have stopped the run in the meantime.
+    if (privateConfig) await this.prepareLaunch(run);
     if (privateConfig && (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session))) {
       privateConfig.remove(); this.reservedSessions.delete(session.id); return;
     }
