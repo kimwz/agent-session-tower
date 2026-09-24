@@ -244,9 +244,14 @@ export class ToolUpdates {
   private get commands(): ToolCommands { return this.options.commands ?? nativeCommands; }
   private now(): number { return this.options.now?.() ?? Date.now(); }
 
-  start(): void {
-    this.adopting = this.adopt().finally(() => { this.adopting = undefined; });
-    this.schedule(this.options.firstMs ?? FIRST_MS);
+  /**
+   * Holds what an installer left by a previous worker still replaces before anything of this worker runs, then, when
+   * `update` (automatic updates are on), keeps the CLIs current. Resolves once those holds are in place.
+   */
+  async start(update = true): Promise<void> {
+    const holds = await this.orphans();
+    this.adopting = this.adopt(holds).finally(() => { this.adopting = undefined; });
+    if (update) this.schedule(this.options.firstMs ?? FIRST_MS);
   }
   busy(): boolean { return this.running !== undefined || this.adopting !== undefined; }
 
@@ -254,13 +259,20 @@ export class ToolUpdates {
    * An installer a previous worker started can outlive it. Its CLI is held here too, so no turn starts on a half-replaced
    * install, until the installer is gone.
    */
-  private async adopt(): Promise<void> {
+  private async orphans(): Promise<Array<{ file: string; release: (() => void) | undefined }>> {
     const { flags } = toolUpdatePaths(this.options.stateDir);
-    await Promise.all(PROVIDERS.map(async provider => {
+    const found: Array<{ file: string; release: (() => void) | undefined }> = [];
+    for (const provider of PROVIDERS) {
       const file = join(flags, `${provider}.update`);
-      if (!await held(file)) return;
-      const release = this.options.hold(provider, false);
+      if (!await held(file)) continue;
       this.log(`${provider}: an update a previous worker started is still running; its turns wait for it`);
+      found.push({ file, release: this.options.hold(provider, false) });
+    }
+    return found;
+  }
+
+  private async adopt(holds: Array<{ file: string; release: (() => void) | undefined }>): Promise<void> {
+    await Promise.all(holds.map(async ({ file, release }) => {
       try { while (!this.stopped && await held(file)) await new Promise(resolve => setTimeout(resolve, this.options.adoptPollMs ?? 2000)); }
       finally { release?.(); }
     }));

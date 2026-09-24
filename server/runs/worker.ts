@@ -387,13 +387,15 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   const runs = new RunManager({ stateDir, getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true),
     openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }), trustWorkspace });
   // Only the Tower on the account's own state folder keeps its Claude Code and Codex current, so two never update one install.
-  const tools = resolve(stateDir) === resolve(defaultStateDir()) && autoUpdateEnabled() ? new ToolUpdates({ stateDir, env: process.env,
+  // It is there even with automatic updates off: an install a previous worker left running is still waited for.
+  const tools = resolve(stateDir) === resolve(defaultStateDir()) ? new ToolUpdates({ stateDir, env: process.env,
     // npm replaces files as it goes: then no session of that CLI may be working anywhere, in Tower's terminals included.
     hold: (provider, quiet) => quiet && sessions.list().some(session => session.provider === provider && session.status === 'working') ? undefined : runs.holdProvider(provider) }) : undefined;
   try {
     await sessions.start();
+    // Before any turn can start: a CLI still being replaced by an installer from before is held first.
+    await tools?.start(autoUpdateEnabled());
     await runs.start();
-    tools?.start();
     // The web process saves the remote-sharing exclusion list; this copy follows it on every refresh.
     const exclusions = new RemoteExclusionStore(stateDir);
     await exclusions.start();

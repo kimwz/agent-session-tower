@@ -316,9 +316,9 @@ test('an installer a previous worker left running still holds its CLI: its turns
   const updates = new ToolUpdates({ stateDir: f.stateDir, env: { PATH: '' }, firstMs: 10 ** 9, adoptPollMs: 20, find: async () => undefined,
     hold: (name, quiet) => { f.holds.push([name, quiet]); f.held().add(name); return () => { f.held().delete(name); }; } });
   t.after(() => updates.stop());
-  updates.start();
-  await new Promise(resolve => setTimeout(resolve, 100));
-  assert.deepEqual([...f.held()], ['codex']);
+  // With automatic updates off too, and before anything of the worker runs.
+  await updates.start(false);
+  assert.deepEqual([...f.held()], ['codex'], 'held as soon as start returns');
   assert.equal(updates.busy(), true, 'the worker does not hand off meanwhile');
   await rm(join(flags, 'codex.update'));
   await new Promise(resolve => setTimeout(resolve, 100));
