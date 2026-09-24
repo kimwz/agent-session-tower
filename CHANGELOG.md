@@ -4,6 +4,23 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.30.0] - 2026-09-24
+
+### Added
+- **Linux computers join with the same one command.** Run the command from **Remote computers → Add a computer** on a Linux computer that has Node.js 22.13 or later. It installs Tower, keeps it running with systemd, and connects to this Tower.
+  - Run as root, Tower starts when the computer starts, before anyone logs in. Run as another user, the user has to be allowed to keep services running while logged out; if not, the command prints the one line to run (`sudo loginctl enable-linger <user>`).
+  - Restarting or stopping the service stops only the web server. Running agents, approvals and terminals keep going, as on macOS.
+  - Joined Linux computers follow this Tower's version and go back to the previous version if the new one does not start, as macOS computers do.
+- Each release now includes its built package, and the join command installs it once it is published. The other computer then needs neither Git nor a compiler. Right after a release, until the package is published, the command builds Tower from source as before.
+
+### Changed
+- On Linux, opening a Tower page on the same computer skips sign-in only for the account Tower runs as. Other accounts on that computer sign in like anyone else. This matters most when Tower runs as root.
+- Joining as root warns when another account can change the Node.js that Tower runs, since Tower runs it as root.
+
+### Fixed
+- The join command could end with no message on Linux. Terminals needed a native module compiled on the spot, and without a compiler the install failed silently. Terminals now use prebuilt binaries when the module cannot be built.
+- After a computer restarted, Tower could fail to start, reporting that the execution worker was not running. This happened when a process from before the restart had left its lock and its process number now belonged to another program. Such a lock is now recognized as left over.
+
 ## [1.29.0] - 2026-09-24
 
 ### Added
