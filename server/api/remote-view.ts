@@ -1,6 +1,7 @@
 import type { Trigger, TriggerActor, TriggerAuditEntry, TriggerEvent, TriggerHandler, TriggerOverview, TriggerSecret, TriggerTarget } from '../../shared/triggers.js';
 import type { Session } from '../../shared/types.js';
 import { remoteSessionIds, type RemoteScope } from '../remote/visibility.js';
+import { MAX_REVISIONS, type TriggerScope } from '../triggers/service.js';
 
 /** Folders a trigger, or one of its revisions, points at. */
 export function handlerPaths(handler: TriggerHandler): string[] {
@@ -11,14 +12,14 @@ export function eventPaths(input: TriggerEvent['input']): string[] {
   return [...(input.target.mode === 'folder' ? [input.target.cwd] : []), ...(input.rules ?? []).flatMap(rule => rule.cwd ? [rule.cwd] : [])];
 }
 
-/** What this computer keeps of its triggers: current ones, deleted ones, and earlier revisions of current ones. */
+/** What this computer keeps of its triggers: current ones, deleted ones, and earlier revisions of both. */
 export interface KeptTriggers { triggers: readonly Trigger[]; deleted: readonly Trigger[]; revisions: Readonly<Record<string, readonly Trigger[]>> }
 
 /**
  * What a controlling computer may see of this computer's triggers and conversations: nothing that points into a
  * folder kept out of sharing, or at a conversation it cannot see. Slack and coordinator conversations stay here.
  */
-export class RemoteView {
+export class RemoteView implements TriggerScope {
   readonly sessions: ReadonlySet<string>;
   constructor(readonly scope: RemoteScope, sessions: readonly Session[], private readonly kept: KeptTriggers) {
     this.sessions = remoteSessionIds(sessions, scope);
@@ -34,12 +35,17 @@ export class RemoteView {
     return new Map(all.map(item => [item.revision, item]));
   }
   /**
-   * What a trigger was at a revision: the nearest copy kept at or after it. Every change to what it does keeps a copy
-   * of what came before, and turning it on or off changes nothing else, so that copy is the same definition.
+   * What a trigger was at a revision. Every change to what it does keeps a copy of what came before, and turning it on
+   * or off, or restoring it, changes nothing else; so without a copy of that revision, the next copy kept is the same
+   * definition. Earlier copies are dropped oldest first, and before the oldest one kept nothing is known.
    */
   private definition(id: string, revision: number): Trigger | undefined {
-    const copies = [...this.copies(id).values()].filter(copy => copy.revision >= revision).sort((a, b) => a.revision - b.revision);
-    return copies[0];
+    const copies = this.copies(id);
+    const exact = copies.get(revision);
+    if (exact) return exact;
+    const earlier = this.kept.revisions[id] ?? [];
+    if (earlier.length >= MAX_REVISIONS && revision < earlier[0].revision) return undefined;
+    return [...copies.values()].filter(copy => copy.revision > revision).sort((a, b) => a.revision - b.revision)[0];
   }
 
   /** A run it may see. A coordinator's runs stay here with the conversations that take them. */
@@ -68,7 +74,7 @@ export class RemoteView {
 
   /**
    * A change it may see: to limits and secrets, or to a trigger whose every revision the change names is one it can
-   * see. A change that names a revision this computer no longer keeps stays here; so do Slack's.
+   * see. A change that names a revision whose definition is no longer known stays here; so do Slack's.
    */
   audit(entry: TriggerAuditEntry): boolean {
     if (entry.action === 'slack') return false;

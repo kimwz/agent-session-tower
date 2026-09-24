@@ -4,7 +4,7 @@ import { isOperationName, OPERATIONS } from '../../../shared/api/operations';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { authPost } from '../auth/AuthGate';
 import { api } from '../common/lib';
-import { nodeHeaders, nodePath, settleRequest } from '../remote/scope';
+import { forgetRequest, nodeHeaders, nodePath, settleRequest } from '../remote/scope';
 
 export type Source = TriggerInput['source'];
 export type SourceKind = Source['kind'];
@@ -22,7 +22,9 @@ export const TriggerMachine = createContext<{ node?: string; name?: string }>({}
 
 /**
  * Calls a Tower operation (shared/api/operations.ts) as the owner, on this computer or on joined computer `node`.
- * A change on another computer carries a request ID, so sending it again after a lost answer makes it once.
+ * A change on another computer carries a request ID, so sending it again after a lost answer makes it once. Once that
+ * computer answers that it cannot tell whether an earlier send was carried out, the owner has been told to check
+ * first, and the next send is a new request.
  */
 export async function towerOperation<T>(token: string, operation: string, input: unknown = {}, node?: string): Promise<T> {
   if (!node) return authPost<{ result: T }>(`/api/v1/${operation}`, token, input).then(response => response.result);
@@ -34,7 +36,12 @@ export async function towerOperation<T>(token: string, operation: string, input:
     const { result } = await api<{ result: T }>(nodePath(node, `/api/v1/${operation}`), { method: 'POST', headers: write ? nodeHeaders(node, headers, key, body) : headers, body });
     if (write) settleRequest(node, key);
     return result;
-  } catch (error) { if (write) settleRequest(node, key, error); throw error; }
+  } catch (error) {
+    // That computer's own answer is a conflict; a lost connection on the way is not, and keeps the same request.
+    const { disposition, status } = error as { disposition?: string; status?: number };
+    if (write) { if (disposition === 'uncertain' && status === 409) forgetRequest(node, key); else settleRequest(node, key, error); }
+    throw error;
+  }
 }
 
 export function eventStatusLabel(status: TriggerEvent['status'], t: (key: string) => string): string {

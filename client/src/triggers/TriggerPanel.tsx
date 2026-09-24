@@ -139,7 +139,7 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
               </ol>
               {!slack && !target && <p className="trigger-note">{t('Slack 멘션도 트리거로 쓸 수 있습니다. 연결 탭에서 연결하세요.')}</p>}
             </section>
-        : tab === 'history' ? overview ? <TriggerHistory token={token} overview={overview} coordinators={coordinators} onChanged={refresh} /> : null
+        : tab === 'history' ? overview ? <TriggerHistory key={node || 'here'} token={token} overview={overview} coordinators={coordinators} onChanged={refresh} /> : null
         : target ? <p className="trigger-note">{tab === 'connections' ? t('{0}의 연결과 비밀 값은 그 컴퓨터의 Tower에서 설정합니다.', { 0: name }) : t('{0}의 트리거 한도는 그 컴퓨터의 Tower에서 설정합니다.', { 0: name })}</p>
         : tab === 'connections' ? <TriggerConnections token={token} slack={slack} onOpenSlack={onOpenSlack} />
         : <TriggerLimits token={token} />}
@@ -168,7 +168,9 @@ function TriggerRow({ trigger, summary, busy, remote, onToggle, onRun, onEdit, o
   const Icon = KIND_ICONS[trigger.source.kind];
   const polled = trigger.source.kind !== 'schedule';
   return <li className={`slack-rule ${trigger.enabled ? '' : 'disabled'}`}><div className="slack-rule-row">
-    <label className="slack-switch" title={trigger.enabled ? t('켜짐') : t('꺼짐')}><input type="checkbox" aria-label={t('활성')} checked={trigger.enabled} disabled={busy} onChange={event => onToggle(event.target.checked)} /><span /></label>
+    {/* A coordinator trigger on another computer can be turned off from here, and is turned on there. */}
+    <label className="slack-switch" title={remote && trigger.handler.kind === 'coordinator' && !trigger.enabled ? t('코디네이터 트리거는 {0}의 Tower에서 켭니다.', { 0: remote }) : trigger.enabled ? t('켜짐') : t('꺼짐')}>
+      <input type="checkbox" aria-label={t('활성')} checked={trigger.enabled} disabled={busy || (Boolean(remote) && trigger.handler.kind === 'coordinator' && !trigger.enabled)} onChange={event => onToggle(event.target.checked)} /><span /></label>
     <button type="button" className="slack-rule-summary" onClick={onEdit}>
       <span className="trigger-kind" title={kindLabel(trigger.source.kind, t)}><Icon size={16} /></span>
       <span className="slack-rule-text"><strong>{trigger.name}</strong><small>{scheduleLabel(trigger, t)}{trigger.enabled && summary?.nextRunAt ? ` · ${polled ? t('다음 확인') : t('다음 실행')} ${absoluteTime(summary.nextRunAt)}` : ''}</small></span>
@@ -203,12 +205,16 @@ function TriggerHistory({ token, overview, coordinators = new Set(), onChanged }
   const [events, setEvents] = useState<TriggerEvent[]>(overview.recent);
   const [deleted, setDeleted] = useState<Trigger[]>([]);
   const [error, setError] = useState('');
+  // An answer older than a later one is dropped.
+  const asked = useRef(0);
   const load = useCallback(async () => {
+    const mine = ++asked.current;
     try {
       const [log, runs, removed] = await Promise.all([towerOperation<{ audit: TriggerAuditEntry[] }>(token, 'triggers.audit', { limit: 100 }, node),
         towerOperation<{ events: TriggerEvent[] }>(token, 'triggers.events', { limit: 100 }, node), towerOperation<{ triggers: Trigger[] }>(token, 'triggers.deleted', {}, node)]);
+      if (mine !== asked.current) return;
       setAudit(log.audit); setEvents(runs.events); setDeleted(removed.triggers); setError('');
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    } catch (cause) { if (mine === asked.current) setError(cause instanceof Error ? cause.message : String(cause)); }
   }, [token, node]);
   useEffect(() => { void load(); }, [load, overview.recent[0]?.updatedAt]);
   const act = async (operation: string, input: unknown) => {

@@ -32,6 +32,16 @@ test('another computer’s triggers are reached through it, and a change there c
   assert.match(first, /^[0-9a-f-]{36}$/);
   assert.equal(again, first, 'the same change sent again after a lost answer is the same request');
   assert.notEqual(next, first, 'once answered, the next change is a new request');
+  // That computer answers that it cannot tell whether the earlier send ran: the owner is told to check, and the next
+  // send is new. A lost answer on the way keeps the same request.
+  const unknown = () => new Response(JSON.stringify({ error: 'It is not known whether this request was carried out', disposition: 'uncertain' }), { status: 409, headers: { 'content-type': 'application/json' } });
+  replies.push(lost, lost, unknown, ok({ event: { id: 'e' } }));
+  const run = { id: 't' };
+  for (let attempt = 0; attempt < 3; attempt++) await assert.rejects(towerOperation('token', 'triggers.run', run, NODE));
+  await towerOperation('token', 'triggers.run', run, NODE);
+  const runs = sent.slice(-4).map(item => item.headers['X-Tower-Request-Id']);
+  assert.deepEqual([runs[1], runs[2]], [runs[0], runs[0]]);
+  assert.notEqual(runs[3], runs[0]);
 });
 
 test('adding a trigger on another computer offers only the kinds that need nothing checked there', () => {

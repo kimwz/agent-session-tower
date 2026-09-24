@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunOrigin, Session } from '../../shared/types.js';
 import {
   GITHUB_API, TriggerInputSchema, type CoordinatorRule, TriggerSettingsSchema, carriesOutsideContent, type GitHubAuth, type GitHubCheck, type HttpCondition, type HttpRequest, type HttpTestResult, type SecretInput, type Trigger, type TriggerActor,
-  type TriggerAuditEntry, type TriggerEvent, type TriggerInput, type TriggerOverview, type TriggerSecret, type TriggerSettings, type TriggerSummary, type Schedule,
+  type TriggerAuditEntry, type TriggerEvent, type TriggerHandler, type TriggerInput, type TriggerOverview, type TriggerSecret, type TriggerSettings, type TriggerSummary, type TriggerTarget, type Schedule,
 } from '../../shared/triggers.js';
 import { requestedEffort, requestedModel } from '../providers/models.js';
 import type { RunAdmission } from '../runs/manager.js';
@@ -86,6 +86,7 @@ const MAX_REQUESTS_PER_MINUTE = 60;
 const UNFINISHED = new Set<TriggerEvent['status']>(['queued', 'claimed', 'running']);
 const ACTIVE = new Set<TriggerEvent['status']>(['claimed', 'running']);
 const failure = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
+export const REMOTE_FOLDER_REFUSED = 'This trigger was set up from another computer, and its folder is one this computer keeps out of sharing; it did not run.';
 const empty = (): EngineState => ({ version: 1, triggers: [], revisions: {}, tombstones: [], cursors: {}, events: [], fired: {}, audit: [], secretGrants: {},
   settings: TriggerSettingsSchema.parse({}), trustedFolders: [], recentFires: [] });
 
@@ -107,6 +108,21 @@ export function triggerRequestId(triggerId: string, dedupKey: string): string {
   const hex = createHash('sha256').update(JSON.stringify(['trigger', triggerId, dedupKey])).digest('hex');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
+
+/**
+ * How a controlling computer reaches this computer's triggers (server/api/remote-view.ts). What it may not see reads
+ * exactly as absent, refused at the same step as a trigger, revision or folder that is not there.
+ */
+export interface TriggerScope {
+  /** Whether it may see a trigger, or a revision of one, that does this. */
+  handler(handler: TriggerHandler): boolean;
+  /** Whether it may aim a trigger at this. */
+  target(target: TriggerTarget): boolean;
+}
+export const COORDINATOR_HERE = 'GitHub coordinator triggers are created, changed and run on that computer itself.';
+const seen = (trigger: Pick<Trigger, 'handler'>, scope?: TriggerScope) => !scope || scope.handler(trigger.handler);
+/** From a controlling computer a coordinator trigger is only turned off or deleted. */
+const hereOnly = (trigger: Pick<Trigger, 'handler'>, scope?: TriggerScope) => { if (scope && trigger.handler.kind === 'coordinator') throw failure(COORDINATOR_HERE, 403); };
 
 /** A change from a controlling computer marks the trigger as that computer's; a change made here clears it. */
 const remoteMark = (actor: TriggerActor): Pick<Trigger, 'remoteEdited'> => actor.controllerId ? { remoteEdited: { controllerId: actor.controllerId } } : {};
@@ -147,8 +163,11 @@ export class TriggerService extends EventEmitter {
     limits?: { acceptBytes?: number; maxBytes?: number; requestsPerMinute?: number };
     /** Ports this Tower listens on; HTTP triggers may never call them. */
     ownPorts?: () => Promise<number[]>;
-    /** Whether a folder is kept out of sharing with controlling computers right now. */
-    excludes?: (path: string) => Promise<boolean>;
+    /**
+     * Whether a folder is kept out of sharing with controlling computers: `check` reads the list and looks where the
+     * folder is again; `now` answers at once from that look, as the run is admitted.
+     */
+    sharing?: { check(path: string): Promise<boolean>; now(path: string): boolean };
     /** Reads the gh CLI's token; replaceable in tests. */
     ghToken?: () => Promise<string>;
     /** Sends GitHub API requests with this Authorization value; replaceable in tests. */
@@ -220,10 +239,14 @@ export class TriggerService extends EventEmitter {
     return structuredClone(event);
   }
   audit(query: { before?: string; limit?: number } = {}): TriggerAuditEntry[] {
-    const limit = Math.min(Math.max(query.limit ?? 50, 1), 200);
+    const limit = Math.min(Math.max(query.limit ?? 50, 1), MAX_AUDIT);
     return structuredClone(this.state.audit.filter(entry => !query.before || entry.at < query.before).slice(-limit).reverse());
   }
   deleted(): Trigger[] { return structuredClone([...this.state.tombstones].reverse()); }
+  /** Every copy kept, read at once: current triggers, deleted ones (newest first), and earlier revisions of both. */
+  kept(): { triggers: Trigger[]; deleted: Trigger[]; revisions: Record<string, Trigger[]> } {
+    return structuredClone({ triggers: this.state.triggers, deleted: [...this.state.tombstones].reverse(), revisions: this.state.revisions });
+  }
   settings(): TriggerSettings { return structuredClone(this.state.settings); }
   preview(schedule: Schedule): string[] { return previewSlots(schedule, this.now()); }
 
@@ -304,8 +327,9 @@ export class TriggerService extends EventEmitter {
 
   // ---- Changing definitions ---------------------------------------------------------------------
 
-  async create(value: unknown, actor: TriggerActor): Promise<Trigger> {
-    const input = await this.validate(value);
+  async create(value: unknown, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
+    const input = await this.validate(value, scope);
+    hereOnly(input, scope);
     return this.commit(state => {
       if (state.triggers.length >= state.settings.maxTriggers) throw failure(`At most ${state.settings.maxTriggers} triggers can exist. Delete one first.`, 409);
       const now = new Date(this.now()).toISOString();
@@ -320,10 +344,11 @@ export class TriggerService extends EventEmitter {
     });
   }
 
-  async update(id: string, value: unknown, expectedRevision: number, actor: TriggerActor): Promise<Trigger> {
-    const input = await this.validate(value);
+  async update(id: string, value: unknown, expectedRevision: number, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
+    const input = await this.validate(value, scope);
     return this.commit(state => {
-      const current = this.revisionOf(state, id, expectedRevision);
+      const current = this.revisionOf(state, id, expectedRevision, scope);
+      hereOnly(current, scope); hereOnly(input, scope);
       this.guardAutoReply({ ...current, ...structuredClone(input) }, current, actor, 'refuse');
       const next = this.replace(state, current, { ...input }, actor);
       this.log(state, actor, 'update', next, current.revision, next.revision, `Changed ${this.changes(current, next)}`);
@@ -331,10 +356,11 @@ export class TriggerService extends EventEmitter {
     });
   }
 
-  async setEnabled(id: string, enabled: boolean, expectedRevision: number, actor: TriggerActor): Promise<Trigger> {
+  async setEnabled(id: string, enabled: boolean, expectedRevision: number, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
     // Turning off must work even when history is full; it may use the space kept for settling.
     return this.commit(state => {
-      const current = this.revisionOf(state, id, expectedRevision);
+      const current = this.revisionOf(state, id, expectedRevision, scope);
+      if (enabled) hereOnly(current, scope);
       // A toggle keeps no copy of the definition in history, so it never runs out of space; the audit records it.
       // Turning it on or off is a change too: from a controlling computer it marks the trigger, from here it clears it.
       const next: Trigger = { ...unmarked(current), enabled, revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor, ...remoteMark(actor) };
@@ -348,9 +374,9 @@ export class TriggerService extends EventEmitter {
     }, enabled ? 'grow' : 'settle');
   }
 
-  async remove(id: string, expectedRevision: number, actor: TriggerActor): Promise<void> {
+  async remove(id: string, expectedRevision: number, actor: TriggerActor, scope?: TriggerScope): Promise<void> {
     await this.commit(state => {
-      const current = this.revisionOf(state, id, expectedRevision);
+      const current = this.revisionOf(state, id, expectedRevision, scope);
       state.triggers = state.triggers.filter(trigger => trigger.id !== id);
       state.tombstones = [...state.tombstones, current].slice(-MAX_TOMBSTONES);
       // The cursor keeps the moment of deletion, so a restored trigger never starts runs fired before it.
@@ -361,11 +387,13 @@ export class TriggerService extends EventEmitter {
   }
 
   /** A revert is a new revision that copies an earlier one; history is never rewritten. */
-  async revert(id: string, revision: number, expectedRevision: number, actor: TriggerActor): Promise<Trigger> {
+  async revert(id: string, revision: number, expectedRevision: number, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
     return this.commit(state => {
-      const current = this.revisionOf(state, id, expectedRevision);
+      const current = this.revisionOf(state, id, expectedRevision, scope);
+      hereOnly(current, scope);
       const earlier = (state.revisions[id] ?? []).find(item => item.revision === revision);
-      if (!earlier) throw failure(`Revision ${revision} is no longer kept. Only the last ${MAX_REVISIONS} revisions can be restored.`, 404);
+      if (!earlier || !seen(earlier, scope)) throw failure(`Revision ${revision} is no longer kept. Only the last ${MAX_REVISIONS} revisions can be restored.`, 404);
+      hereOnly(earlier, scope);
       const restored = structuredClone(this.inputOf(earlier));
       const note = this.guardAutoReply({ ...current, ...restored }, current, actor, 'strip') ?? '';
       const next = this.replace(state, current, restored, actor);
@@ -374,14 +402,15 @@ export class TriggerService extends EventEmitter {
     });
   }
 
-  async restore(id: string, actor: TriggerActor): Promise<Trigger> {
+  async restore(id: string, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
     return this.commit(state => {
       const deleted = [...state.tombstones].reverse().find(item => item.id === id);
-      if (!deleted) throw failure('This deleted trigger is no longer kept.', 404);
+      if (!deleted || !seen(deleted, scope)) throw failure('This deleted trigger is no longer kept.', 404);
+      hereOnly(deleted, scope);
       if (state.triggers.some(item => item.id === id)) throw failure('This trigger already exists.', 409);
       if (state.triggers.length >= state.settings.maxTriggers) throw failure(`At most ${state.settings.maxTriggers} triggers can exist. Delete one first.`, 409);
       const now = new Date(this.now()).toISOString();
-      // Restored from a controlling computer, it is that computer's to run; restored here, it keeps what it had.
+      // Restored from a controlling computer, it is that computer's to run; restored here, it is this computer's again.
       const trigger: Trigger = { ...unmarked(structuredClone(deleted)), revision: deleted.revision + 1, updatedAt: now, updatedBy: actor, enabled: false, ...remoteMark(actor) };
       const note = this.guardAutoReply(trigger, undefined, actor, 'strip') ?? '';
       this.grantSecrets(state, trigger, actor);
@@ -416,8 +445,10 @@ export class TriggerService extends EventEmitter {
    * Fires once now, under the trigger's usual overlap and hourly limits. An HTTP trigger sends its request
    * first and runs with that response whatever its condition says; what later polls compare against stays as it was.
    */
-  async run(id: string, actor: TriggerActor): Promise<TriggerEvent> {
+  async run(id: string, actor: TriggerActor, scope?: TriggerScope): Promise<TriggerEvent> {
     const trigger = this.trigger(id);
+    if (!seen(trigger, scope)) throw failure('Trigger not found.', 404);
+    hereOnly(trigger, scope);
     if (this.stateBytes > this.acceptBytes) throw failure('Trigger history is full. Delete old triggers or wait for finished runs to expire.', 507);
     if (trigger.source.kind === 'github') {
       if (!trigger.enabled) throw failure('Turn the trigger on before checking it.', 409);
@@ -437,7 +468,8 @@ export class TriggerService extends EventEmitter {
     }
     const event = trigger.source.kind === 'http' ? await this.runHttp(trigger, actor) : await this.commit(state => {
       const current = state.triggers.find(item => item.id === id);
-      if (!current) throw failure('Trigger not found.', 404);
+      if (!current || !seen(current, scope)) throw failure('Trigger not found.', 404);
+      hereOnly(current, scope);
       const created = this.fire(state, current, `manual:${randomUUID()}`, this.now(), 'manual', actor);
       this.log(state, actor, 'run', current, current.revision, current.revision, `Ran now: ${created?.status ?? 'skipped'}`);
       return created;
@@ -903,9 +935,11 @@ export class TriggerService extends EventEmitter {
     // Set up or started from a controlling computer: Auto Prompt then leaves out folders kept from sharing, and a
     // folder or session of its own must not be in one either.
     const origin: RunOrigin = { kind: 'trigger', triggerId: event.triggerId, eventId: event.id, ...(input.remote ? { controllerId: input.remote.controllerId } : {}) };
-    // Checked as the last step before a run is handed over, so a change to the sharing list meanwhile counts.
-    const withheld = async (cwd: string) => Boolean(input.remote) && (await this.options.excludes?.(cwd) ?? true);
-    const refused = { status: 'error' as const, error: 'This trigger was set up from another computer, and its folder is one this computer keeps out of sharing; it did not run.' };
+    // Checked as the last step before a run is handed over, so a change to the sharing list meanwhile counts, and once
+    // more as the run is admitted.
+    const withheld = async (cwd: string) => Boolean(input.remote) && (await this.options.sharing?.check(cwd) ?? true);
+    const refused = { status: 'error' as const, error: REMOTE_FOLDER_REFUSED };
+    const admitted = (cwd: () => string | undefined) => input.remote ? { validate: () => { const path = cwd(); if (path === undefined || (this.options.sharing?.now(path) ?? true)) throw failure(REMOTE_FOLDER_REFUSED, 409); } } : {};
     const unattended = input.approvals === 'auto';
     const prompt = this.prompt(event);
     const common = { ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}) };
@@ -921,7 +955,7 @@ export class TriggerService extends EventEmitter {
       if (!(await stat(cwd).then(info => info.isDirectory(), () => false))) return { status: 'error', error: `The folder ${cwd} no longer exists. Tower does not create folders for triggers.` };
       if (await withheld(cwd)) return refused;
       const { session, run } = await executor.create({ provider: input.provider, cwd, prompt, title: `${event.triggerName}`, ...common, ...reviewer },
-        { autoPromptId: event.requestId, origin, untrustedInput: input.untrustedInput, unattended, createFolder: false, trustWorkspace: this.state.trustedFolders.includes(cwd) });
+        { autoPromptId: event.requestId, origin, untrustedInput: input.untrustedInput, unattended, createFolder: false, trustWorkspace: this.state.trustedFolders.includes(cwd), ...admitted(() => cwd) });
       return { status: 'running', dispatch: { runId: run.id, sessionId: session.id, createdSessionId: session.id } };
     }
     if (input.untrustedInput) return { status: 'error', error: 'Outside content never continues an existing session.' };
@@ -929,7 +963,7 @@ export class TriggerService extends EventEmitter {
     if (!session) return { status: 'error', error: 'The chosen session no longer exists.' };
     if (session.provider !== input.provider) return { status: 'error', error: `The chosen session is a ${session.provider} session, not ${input.provider}.` };
     if (await withheld(session.cwd) || await withheld(executor.session(session.id)?.cwd ?? '')) return refused;
-    const run = await executor.enqueue(session.id, prompt, common, { autoPromptId: event.requestId, origin, unattended });
+    const run = await executor.enqueue(session.id, prompt, common, { autoPromptId: event.requestId, origin, unattended, ...admitted(() => executor.session(session.id)?.cwd) });
     return { status: 'running', dispatch: { runId: run.id, sessionId: run.sessionId } };
   }
 
@@ -1069,7 +1103,8 @@ export class TriggerService extends EventEmitter {
 
   // ---- Helpers ------------------------------------------------------------------------------------
 
-  private async validate(value: unknown): Promise<TriggerInput> {
+  /** Checks a definition; a target `scope` may not see reads exactly as one that is not there. */
+  private async validate(value: unknown, scope?: TriggerScope): Promise<TriggerInput> {
     const parsed = TriggerInputSchema.safeParse(value);
     if (!parsed.success) throw failure(`Invalid trigger: ${parsed.error.issues.map(issue => `${issue.path.join('.') || 'trigger'}: ${issue.message}`).join('; ')}`);
     const input = parsed.data;
@@ -1083,10 +1118,11 @@ export class TriggerService extends EventEmitter {
     requestedModel(input.handler.model);
     requestedEffort(input.handler.effort, input.handler.provider);
     const target = input.handler.target;
+    const shown = !scope || scope.target(target);
     if (carriesOutsideContent(input.source) && target.mode === 'session') throw failure('Triggers that bring outside content always start a new session. Choose a folder or Auto Prompt instead of an existing session.');
-    if (target.mode === 'folder' && !(await stat(target.cwd).then(info => info.isDirectory(), () => false))) throw failure(`The folder ${target.cwd} does not exist. Tower does not create folders for triggers.`);
+    if (target.mode === 'folder' && !(shown && await stat(target.cwd).then(info => info.isDirectory(), () => false))) throw failure(`The folder ${target.cwd} does not exist. Tower does not create folders for triggers.`);
     if (target.mode === 'session') {
-      const session = this.options.executor.session(target.sessionId);
+      const session = shown ? this.options.executor.session(target.sessionId) : undefined;
       if (!session) throw failure('The chosen session was not found.');
       if (session.provider !== input.handler.provider) throw failure(`The chosen session is a ${session.provider} session; choose ${session.provider} as the agent.`);
     }
@@ -1098,9 +1134,9 @@ export class TriggerService extends EventEmitter {
     if (!trigger) throw failure('Trigger not found.', 404);
     return trigger;
   }
-  private revisionOf(state: EngineState, id: string, expected: number): Trigger {
+  private revisionOf(state: EngineState, id: string, expected: number, scope?: TriggerScope): Trigger {
     const current = state.triggers.find(item => item.id === id);
-    if (!current) throw failure('Trigger not found.', 404);
+    if (!current || !seen(current, scope)) throw failure('Trigger not found.', 404);
     if (!Number.isInteger(expected) || current.revision !== expected) throw failure(`The trigger changed (now revision ${current.revision}). Reload it and try again.`, 409);
     return current;
   }

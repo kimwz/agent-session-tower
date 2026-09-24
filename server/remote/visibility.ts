@@ -1,6 +1,6 @@
 import type { AutoPromptJob, ChatMessage, ProjectGroup, ProviderHealth, Run, Session, SessionDetail, Snapshot } from '../../shared/types.js';
 import type { RepositoryStatus } from '../../shared/repositories.js';
-import type { ExclusionMatcher } from './exclusions.js';
+import type { ExclusionMatcher, RemoteExclusionStore } from './exclusions.js';
 
 /** What decides whether something on this machine can reach a remote controller. */
 export interface RemoteScope {
@@ -122,5 +122,27 @@ export function remoteSnapshot(snapshot: Snapshot, scope: RemoteScope, controlle
     ...(snapshot.runnerVersion ? { runnerVersion: snapshot.runnerVersion } : {}),
     ...(snapshot.runnerUpdate ? { runnerUpdate: snapshot.runnerUpdate } : {}),
     updatedAt: snapshot.updatedAt,
+  };
+}
+
+/**
+ * Work a trigger set up from a controlling computer starts never uses a folder kept out of sharing. Before waiting runs
+ * start, `prepare` reads the list as saved now and looks again where their folders really are; `refused` then answers
+ * at once as each one starts.
+ */
+export function remoteTriggerLaunch(exclusions: Pick<RemoteExclusionStore, 'reload' | 'prepare' | 'matcher'>, runs: { list(): Run[]; getSession(id: string): Session | undefined }) {
+  const remote = (run: Run) => run.origin?.kind === 'trigger' && Boolean(run.origin.controllerId);
+  return {
+    async prepare(): Promise<void> {
+      const folders = runs.list().filter(run => run.status === 'queued' && remote(run)).flatMap(run => runs.getSession(run.sessionId)?.cwd ?? []);
+      if (!folders.length) return;
+      await exclusions.reload();
+      await exclusions.prepare(folders, { fresh: true });
+    },
+    refused(run: Run): boolean {
+      if (!remote(run)) return false;
+      const cwd = runs.getSession(run.sessionId)?.cwd;
+      return cwd !== undefined && exclusions.matcher().excludes(cwd);
+    },
   };
 }

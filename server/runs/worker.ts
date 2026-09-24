@@ -20,12 +20,13 @@ import { openCodexBridgeRun } from './codex-bridge.js';
 import { RunManager, type RunAdmission } from './manager.js';
 import { parseRunOrigin } from './origin.js';
 import { parseSuccessor, spawnSuccessor, writeHandoff, type SuccessorCommand } from './handoff.js';
-import { TriggerService } from '../triggers/service.js';
+import { REMOTE_FOLDER_REFUSED, TriggerService } from '../triggers/service.js';
 import { GitHubCoordinator } from '../triggers/github-coordinator.js';
 import { TowerApi } from '../api/tower-api.js';
 import { CapabilityRegistry, handleMcpRequest } from '../api/mcp.js';
 import { runToolResolver } from '../api/run-tools.js';
 import { RemoteExclusionStore } from '../remote/exclusions.js';
+import { remoteTriggerLaunch } from '../remote/visibility.js';
 import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
 import { MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
@@ -377,7 +378,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   catch (error) { if (error instanceof MonitorAlreadyRunning) return; throw error; }
   const sessions = new SessionService();
   const terminals = new WorkspaceTerminals({ keepAliveOnDisconnect: true });
-  const runs = new RunManager({ stateDir, getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true),
+  // Before waiting runs start; set once the sharing list is read (see remoteTriggerLaunch).
+  let beforeLaunch = async (): Promise<void> => {};
+  const runs = new RunManager({ stateDir, getSession: id => sessions.get(id), refreshSessions: async () => { await sessions.refresh(true); await beforeLaunch(); },
     openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }), trustWorkspace });
   try {
     await sessions.start();
@@ -415,7 +418,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const ownPorts = async () => { for (const port of await lockedPorts(stateDir)) towerPorts.add(port); return [...towerPorts]; };
     const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), ownPorts,
       // A trigger set up from a controlling computer checks the sharing list as it is when it runs.
-      excludes: async path => { await exclusions.reload(); return exclusions.excludesNow(path); }, executor: {
+      sharing: { check: async path => { await exclusions.reload(); return exclusions.excludesNow(path); }, now: path => exclusions.matcher().excludes(path) }, executor: {
       submitAutoPrompt: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); },
       getAutoPrompt: id => autoPrompts.get(id),
       create: (input, internal) => runs.create(input, internal),
@@ -433,15 +436,16 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     triggers.on('settings', (settings: { maxConcurrentRuns: number }) => runs.setAutomationLimit(settings.maxConcurrentRuns));
     // A run still waiting when its trigger is turned off or deleted never starts.
     // A coordinator conversation already under way continues, like an accepted Slack conversation; only its first turn waits on the trigger.
+    const remoteLaunch = remoteTriggerLaunch(exclusions, runs);
+    beforeLaunch = () => remoteLaunch.prepare();
     runs.setLaunchGate(run => {
       if (run.origin?.kind !== 'trigger' || !run.origin.triggerId) return undefined;
       if (!(run.origin.workflowId && run.autoPromptId !== run.origin.workflowId) && !triggers.launchAllowed(run.origin.triggerId, run.origin.eventId)) return 'The trigger was turned off before this run started, so it did not run.';
       // Once more as the provider is about to start: a trigger set up remotely never works in a folder kept from sharing.
-      const cwd = run.origin.controllerId ? runs.getSession(run.sessionId)?.cwd : undefined;
-      return cwd !== undefined && exclusions.matcher().excludes(cwd) ? 'This trigger was set up from another computer, and its folder is one this computer keeps out of sharing; it did not run.' : undefined;
+      return remoteLaunch.refused(run) ? REMOTE_FOLDER_REFUSED : undefined;
     });
     const api = new TowerApi({ stateDir, triggers, runs, github,
-      remote: async (paths, fresh) => { await exclusions.reload(); await exclusions.prepare(paths, { fresh }); return { matcher: exclusions.matcher(), coordinators: coordinators() }; },
+      remote: async paths => { await exclusions.reload(); await exclusions.prepare(paths, { fresh: true }); return { matcher: exclusions.matcher(), coordinators: coordinators() }; },
       projects: () => {
         const snapshot = visible.snapshot();
         const titles = new Map((snapshot.groups ?? []).map(group => [group.cwd, group]));

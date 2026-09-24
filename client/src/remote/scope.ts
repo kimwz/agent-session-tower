@@ -70,6 +70,8 @@ export function settleRequest(node: string | undefined, key: string, error?: unk
   if (!refusedBeforeRunning(error)) { if (known) known.uncertain = true; return; }
   if (!known?.uncertain) attempts.delete(scoped);
 }
+/** Forgets a request's ID: the next send is a new request. */
+export function forgetRequest(node: string, key: string): void { attempts.delete(`${node}\u0000${key}`); }
 /** Whether an error says the request was not accepted, so a new one may be sent. */
 export function refusedBeforeRunning(error: unknown): boolean {
   const { disposition, status = 0 } = (error ?? {}) as { disposition?: string; status?: number };

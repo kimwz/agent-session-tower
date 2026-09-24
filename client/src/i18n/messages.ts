@@ -1377,4 +1377,5 @@ export const english: Record<string, string> = {
   "원격 제어": "Remote control",
   "{0}의 gh 로그인": "gh sign-in on {0}",
   "다른 컴퓨터에서 보낸 턴이라 이 코디네이터 대화의 도구를 연결하지 않았습니다.": "This turn came from another computer, so this coordinator conversation’s tools were not attached.",
+  "코디네이터 트리거는 {0}의 Tower에서 켭니다.": "Coordinator triggers are turned on in Tower on {0}.",
 };

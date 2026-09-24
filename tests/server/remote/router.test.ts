@@ -58,7 +58,12 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     setGroup: async patch => { calls.push({ method: 'setGroup', args: [patch] }); return { cwd: patch.cwd, title: patch.title ?? '', pinned: true, hidden: true }; },
     attachment: async id => ({ metadata: { id, name: 'shot.png', mimeType: 'image/png', size: 4 }, content: Buffer.from('png!'), sessionId: id === '11111111-1111-4111-8111-111111111111' ? 'codex:open' : sessions[1].id }),
     cancel: async id => { calls.push({ method: 'cancel', args: [id] }); },
-    api: async (operation, input, context) => { calls.push({ method: 'api', args: [operation, input, context] }); return { answered: operation }; },
+    api: async (operation, input, context) => {
+      calls.push({ method: 'api', args: [operation, input, context] });
+      if (operation === 'triggers.get') throw Object.assign(new Error(`Cannot read properties of undefined (reading '${(input as { id: string }).id}')`), { statusCode: 500 });
+      if (operation === 'triggers.run') throw Object.assign(new Error('GitHub coordinator triggers are created, changed and run on that computer itself.'), { statusCode: 403 });
+      return { answered: operation };
+    },
     ...(options.repositories ? { repositoryAction: async (cwd: string, action: string) => { calls.push({ method: 'repositoryAction', args: [cwd, action] }); return repository(cwd); } } : {}),
   };
   const router = createRemoteRouter({ backend, exclusions });
@@ -134,6 +139,10 @@ test('a controlling computer uses this computer’s trigger operations as itself
   const write = await f.call('/api/v1/triggers.create', { body: { trigger: {} }, headers: { 'x-tower-request-id': REQUEST_ID } });
   assert.equal(write.status, 200);
   assert.deepEqual(f.calls.at(-1)!.args[2], { origin: { kind: 'owner', controllerId: CONTROLLER }, requestId: REQUEST_ID });
+  const refused = await f.call('/api/v1/triggers.run', { body: { id: 't' }, headers: { 'x-tower-request-id': REQUEST_ID } });
+  assert.deepEqual([refused.status, refused.json], [409, { error: 'GitHub coordinator triggers are created, changed and run on that computer itself.' }], 'its refusal is told as such, not as a refused link');
+  const broken = await f.call('/api/v1/triggers.get', { body: { id: '/private/path' } });
+  assert.deepEqual([broken.status, broken.json], [500, { error: '요청을 처리하지 못했습니다.' }], 'an unexpected failure is not described');
 });
 
 test('local management and routes not listed for remote controllers do not exist for them', async t => {

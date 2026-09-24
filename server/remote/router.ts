@@ -279,10 +279,11 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       const write = isOperationName(operation) && OPERATIONS[operation].write;
       if (write) limit(principal);
       const body = await readJson(req, 1_000_000);
-      // Tower's operations answer in words meant for whoever asked. A refusal of something done only here is not a
-      // refused link (a controller reads 401 and 403 from here that way), so it is sent as a conflict.
+      // Tower's operations answer in words meant for whoever asked; an unexpected failure is not described. A refusal of
+      // something done only here is not a refused link (a controller reads 401 and 403 from here that way), so it is
+      // sent as a conflict.
       try { return json(res, 200, { result: await backend.api(operation, body, context(principal, write ? requestId(req) : undefined)) }); }
-      catch (error) { throw Object.assign(error as Error, errorStatus(error) === 403 ? { statusCode: 409 } : {}, { shown: true }); }
+      catch (error) { const status = errorStatus(error); throw Object.assign(error as Error, status === 403 ? { statusCode: 409 } : {}, { shown: status !== 500 }); }
     }
     // Keystrokes have their own per-shell budget.
     if (terminal?.[2] === 'input' || terminal?.[2] === 'resize') {
