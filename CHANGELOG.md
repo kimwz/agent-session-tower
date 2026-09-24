@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.20.1] - 2026-09-24
+
+### Changed
+- **Adding a trigger starts with what kind it is.** **Add trigger** first asks for the kind (scheduled run, GitHub issues, HTTP response or Slack mentions), each with a line on what it does, so GitHub triggers no longer hide behind a dropdown inside the form. With no triggers yet, the same choice is shown straight away.
+- The trigger editor is laid out in numbered steps: what to watch, how often to check (for GitHub and HTTP), and what to do. For GitHub, running a task per issue or handing issues to the coordinator is a visible choice. Approvals, overlap, the hourly limit and the other rarely changed options sit under **Advanced**, whose heading summarizes their current values.
+- The trigger window has **Connections** (Slack, the GitHub login check, API keys and tokens, and internal addresses HTTP triggers may call) and **Limits** tabs in place of one mixed settings tab. The list shows each trigger's kind as an icon, and **History** labels changes in your language without repeating what the name and label already say.
+
 ## [1.20.0] - 2026-09-24
 
 ### Added
