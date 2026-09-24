@@ -32,6 +32,6 @@ export const RunControl = memo(function RunControl({ run, onCancel, onRetry, can
 export function towerToolsNote(reason: NonNullable<Run['towerTools']>): string {
   return reason === 'desktop-app' ? t('이 턴은 열려 있는 Codex 앱에서 실행되어 Tower 도구가 없습니다.')
     : reason === 'external-input' ? t('외부 내용이 들어온 대화라 Tower 도구를 연결하지 않았습니다.')
-    : reason === 'remote' ? t('다른 컴퓨터에서 보낸 턴이라 Tower 도구를 연결하지 않았습니다.')
+    : reason === 'remote' ? t('다른 컴퓨터에서 보낸 턴이라 이 대화의 도구를 연결하지 않았습니다.')
     : t('자동화가 만든 대화라 Tower 도구를 연결하지 않았습니다.');
 }

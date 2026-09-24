@@ -16,21 +16,22 @@ function toolServer(stateDir: string, mode: '--tower-mcp' | '--slack-mcp', extra
 
 /**
  * Which tools a turn receives. Slack coordinator turns get their conversation tools. A turn the owner started
- * from Tower gets Tower's tools, unless its conversation holds outside content or its origin cannot be proven.
+ * from Tower, here or from a controlling computer, gets Tower's tools, unless its conversation holds outside content
+ * or its origin cannot be proven; a controlling computer's turn then sees only what that computer may see.
  * Trigger, Slack and agent-started turns never get Tower's tools.
  */
 export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry }) {
   return (run: Run, session: Session): RunTools => {
     const origin = run.origin;
-    // Checked first: remote work never receives Tower's or a coordinator's tools, whatever conversation it lands in.
-    if (origin?.controllerId) return { required: false, towerTools: 'remote' };
     const slack = options.slack?.sessionMcp(session.id)?.tower_slack;
+    const coordinated = options.github?.sessionWorkflow(session.id);
+    // Remote work never receives a coordinator's tools, whatever conversation it lands in.
+    if (origin?.controllerId && (slack || coordinated)) return { required: false, towerTools: 'remote' };
     if (slack) {
       const workflowId = slack.args.at(-1)!;
       return { servers: { tower_slack: toolServer(options.stateDir, '--slack-mcp', [workflowId], options.capabilities.issue({ kind: 'slack-workflow', workflowId })) }, required: true };
     }
     // A GitHub coordinator conversation gets its conversation tools, whoever started the turn.
-    const coordinated = options.github?.sessionWorkflow(session.id);
     if (coordinated) return { servers: { tower_github: toolServer(options.stateDir, '--tower-mcp', [], options.capabilities.issue({ kind: 'github-workflow', workflowId: coordinated })) }, required: true };
     if (origin?.kind !== 'owner') return NO_RUN_TOOLS;
     const provenance = options.runs.sessionOrigin(session.id);

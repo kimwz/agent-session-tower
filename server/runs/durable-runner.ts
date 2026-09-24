@@ -183,9 +183,12 @@ export class DurableRunManager extends EventEmitter {
   autoPromptList(): AutoPromptJob[] { return structuredClone(this.snapshot?.autoPrompts ?? []); }
   triggerOverview(): TriggerOverview | undefined { return this.snapshot?.triggers && structuredClone(this.snapshot.triggers); }
   /** Tower operations run in the worker; an outdated worker is told apart from a real error. */
-  async api(operation: string, input: unknown): Promise<unknown> {
+  async api(operation: string, input: unknown, internal?: Pick<RunAdmission, 'origin' | 'requestId'>): Promise<unknown> {
     if (!this.supports('triggers')) throw Object.assign(new Error('The execution worker has not updated yet. Triggers become available once it hands over to the new version.'), { statusCode: 503 });
-    return this.call('api', [operation, input]);
+    if (!internal?.origin?.controllerId) return this.call('api', [operation, input]);
+    // An older worker would answer a controlling computer as the owner here, folders kept from sharing included.
+    if (!this.supports('remoteTriggers')) throw Object.assign(new Error('The execution worker on this computer has not updated yet, so it cannot take remote requests for this. Nothing was done.'), { statusCode: 503, disposition: 'not-admitted' });
+    return this.call('api', [operation, input, { origin: internal.origin, ...(internal.requestId ? { requestId: internal.requestId } : {}) }]);
   }
   async slackOverview(): Promise<SlackPublicStatus> { return this.call('slackOverview', []) as Promise<SlackPublicStatus>; }
   async slackMutate(action: string, body: Record<string, unknown>): Promise<SlackPublicStatus> { return this.call('slackMutate', [action, body]) as Promise<SlackPublicStatus>; }

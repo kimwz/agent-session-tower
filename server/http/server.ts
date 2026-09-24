@@ -26,7 +26,8 @@ import type { RepositoryAction, RepositoryStatus } from '../../shared/repositori
 
 export interface Backend {
   /** Tower operations (see shared/api/operations.ts), run by the worker as the owner. */
-  api?(operation: string, input: unknown): Promise<unknown>;
+  /** `context` is a controlling computer's request: it sees and changes only what this computer shares. */
+  api?(operation: string, input: unknown, context?: RequestContext): Promise<unknown>;
   slackOverview?(): Promise<SlackPublicStatus>;
   slackMutate?(action: string, body: Record<string, unknown>): Promise<SlackPublicStatus>;
   snapshot(): Snapshot;
@@ -184,7 +185,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON 요청이 필요합니다.' });
         // Keystrokes and resize events have their own per-terminal byte/request budget.
         // Reading Tower state is not a mutation; only changes count against the request budget.
-        const read = path.match(/^\/api\/v1\/([a-z]+\.[a-zA-Z]+)$/)?.[1];
+        const read = path.match(/^\/api\/(?:nodes\/[a-f0-9]{32}\/)?v1\/([a-z]+\.[a-zA-Z]+)$/)?.[1];
         const readOnly = read !== undefined && isOperationName(read) && !OPERATIONS[read].write;
         if (!login && !readOnly && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
           const key = req.socket.remoteAddress || 'local';

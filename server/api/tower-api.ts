@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { OPERATIONS, isOperationName, type OperationName } from '../../shared/api/operations.js';
-import type { TriggerActor } from '../../shared/triggers.js';
+import type { Trigger, TriggerActor, TriggerInput } from '../../shared/triggers.js';
 import type { AutoPromptJob, AutoPromptRequest, ChatMessage, Run, RunOrigin, Session } from '../../shared/types.js';
 import type { SlackWorkflow } from '../../shared/slack.js';
 import type { RunAdmission } from '../runs/manager.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { TriggerService } from '../triggers/service.js';
+import { remoteJob, remoteJobVisible, type RemoteScope } from '../remote/visibility.js';
+import { eventPaths, handlerPaths, RemoteView } from './remote-view.js';
 
 const failure = (message: string, statusCode: number) => Object.assign(new Error(message), { statusCode });
 const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -21,7 +23,18 @@ export interface TowerServices {
   projects?: () => Array<{ cwd: string; title: string; sessions: number; pinned: boolean }>;
   autoPrompts?: { submit(request: AutoPromptRequest, internal: Pick<RunAdmission, 'origin'>): Promise<AutoPromptJob>; get(id: string): AutoPromptJob | undefined };
   github?: { workflow(sessionId: string): SlackWorkflow | undefined; approveReply(workflowId: string, requestKey: string, text: string): Promise<unknown> };
+  /** What this computer keeps from controlling computers, with these folders' real locations resolved now. */
+  remote?: (paths: string[]) => Promise<RemoteScope>;
 }
+
+/**
+ * Operations a controlling computer may use, for the owner there or an agent in a turn started there. Secrets,
+ * trigger limits, HTTP tests and GitHub replies stay with this computer's own Tower.
+ */
+const REMOTE_OPERATIONS = new Set<OperationName>(['sessions.list', 'sessions.read', 'projects.list', 'runs.list', 'autoPrompt.submit', 'autoPrompt.get',
+  'triggers.list', 'triggers.get', 'triggers.events', 'triggers.event', 'triggers.audit', 'triggers.deleted', 'triggers.preview', 'triggers.settings',
+  'triggers.create', 'triggers.update', 'triggers.setEnabled', 'triggers.delete', 'triggers.restore', 'triggers.revert', 'triggers.run', 'secrets.list']);
+const COORDINATOR_HERE = 'GitHub coordinator triggers are created, changed and run on that computer itself.';
 interface RequestRecord { at: number; fingerprint: string; status: 'pending' | 'done'; result?: unknown }
 
 /**
@@ -41,15 +54,18 @@ export class TowerApi {
     if (!isOperationName(name)) throw failure('Unknown Tower operation.', 404);
     const operation = OPERATIONS[name];
     if ('ownerOnly' in operation && operation.ownerOnly && actor.kind !== 'owner') throw failure('Only the owner can do this in Tower.', 403);
+    if (actor.controllerId && !REMOTE_OPERATIONS.has(name)) throw failure('This is done in Tower on that computer itself.', 403);
     if (actor.kind === 'agent' && !('agent' in operation && operation.agent)) throw failure('Agents cannot use this Tower operation.', 403);
     const parsed = operation.input.safeParse(input ?? {});
     if (!parsed.success) throw failure(`Invalid request: ${parsed.error.issues.map(issue => `${issue.path.join('.') || 'input'}: ${issue.message}`).join('; ')}`, 400);
-    if (actor.kind !== 'agent' || !operation.write) return this.perform(name, parsed.data as Record<string, any>, actor);
+    // Changes from agents, and from controlling computers, are made once per request.
+    if ((actor.kind !== 'agent' && !actor.controllerId) || !operation.write) return this.perform(name, parsed.data as Record<string, any>, actor);
     // An Auto Prompt request is known by its requestId everywhere; other changes by the calling run's requestKey.
     const keyField = 'keyField' in operation ? operation.keyField : undefined;
     const ownKey = keyField ? (parsed.data as Record<string, string>)[keyField] : requestKey;
     if (typeof ownKey !== 'string' || !/^[\w.:-]{1,100}$/.test(ownKey)) throw failure('This operation needs a requestKey (1–100 letters, digits, dot, colon, dash or underscore). Reuse the same key to retry the same request.', 400);
-    const key = keyField ? `${name}\n${ownKey.toLowerCase()}` : `${actor.runId ?? actor.sessionId ?? ''}\n${ownKey}`;
+    const caller = actor.kind === 'owner' && actor.controllerId ? `remote:${actor.controllerId}` : actor.runId ?? actor.sessionId ?? '';
+    const key = keyField ? `${name}\n${ownKey.toLowerCase()}` : `${caller}\n${ownKey}`;
     const fingerprint = createHash('sha256').update(JSON.stringify([name, parsed.data])).digest('hex');
     const requests = await this.ledger();
     const previous = requests.get(key);
@@ -80,7 +96,23 @@ export class TowerApi {
     return result;
   }
 
+  /** How a controlling computer sees this one, resolved now for every folder the answer may name. */
+  private async view(): Promise<RemoteView> {
+    const { triggers, sessions, remote } = this.services;
+    if (!remote) throw failure('Remote requests are unavailable.', 503);
+    const kept = { triggers: triggers.list(), deleted: triggers.deleted() };
+    const listed = sessions?.list() ?? [];
+    const revisions = kept.triggers.flatMap(trigger => triggers.get(trigger.id).revisions);
+    const paths = [...kept.triggers, ...kept.deleted, ...revisions].flatMap(trigger => handlerPaths(trigger.handler))
+      .concat(triggers.events({ limit: 200 }).flatMap(event => eventPaths(event.input)), listed.map(session => session.cwd));
+    return new RemoteView(await remote(paths), listed, kept);
+  }
+
   private async perform(name: OperationName, value: Record<string, any>, actor: TriggerActor): Promise<unknown> {
+    return actor.controllerId ? this.performRemote(name, value, actor, await this.view()) : this.performLocal(name, value, actor);
+  }
+
+  private async performLocal(name: OperationName, value: Record<string, any>, actor: TriggerActor): Promise<unknown> {
     const { triggers, sessions, runs, autoPrompts } = this.services;
     switch (name) {
       case 'sessions.list': {
@@ -109,7 +141,9 @@ export class TowerApi {
       case 'autoPrompt.submit': {
         if (!autoPrompts) throw failure('Auto Prompt is unavailable.', 503);
         // Work an agent starts is the agent's, never the owner's: it gets no Tower tools and no owner approval.
-        const origin: RunOrigin = actor.kind === 'agent' ? { kind: 'agent', ...(actor.runId ? { runId: actor.runId } : {}) } : { kind: 'owner' };
+        // Work started from a controlling computer, directly or by an agent there, keeps that computer.
+        const from = actor.controllerId ? { controllerId: actor.controllerId } : {};
+        const origin: RunOrigin = actor.kind === 'agent' ? { kind: 'agent', ...(actor.runId ? { runId: actor.runId } : {}), ...from } : { kind: 'owner', ...from };
         return { job: await autoPrompts.submit({ requestId: value.requestId, provider: value.provider, prompt: value.prompt, ...(value.cwd ? { cwd: value.cwd } : {}),
           ...(value.model ? { model: value.model } : {}), ...(value.effort ? { effort: value.effort } : {}) }, { origin }) };
       }
@@ -149,6 +183,78 @@ export class TowerApi {
       }
       case 'secrets.create': return { secret: await triggers.createSecret(value.secret, actor) };
       case 'secrets.delete': await triggers.deleteSecret(value.id, actor); return { deleted: true };
+    }
+  }
+
+  /**
+   * A controlling computer's request: answers leave out whatever points into a folder kept out of sharing or at a
+   * conversation it cannot see, and it can change only what it can see. Anything it cannot see reads as absent.
+   */
+  private async performRemote(name: OperationName, value: Record<string, any>, actor: TriggerActor, view: RemoteView): Promise<unknown> {
+    const { triggers, sessions, runs, autoPrompts } = this.services;
+    const missing = () => failure('Trigger not found.', 404);
+    const visible = (id: string) => { if (view.known(id) !== true || !triggers.list().some(trigger => trigger.id === id)) throw missing(); return triggers.get(id).trigger; };
+    const hereOnly = (trigger: Pick<Trigger, 'handler'>) => { if (trigger.handler.kind === 'coordinator') throw failure(COORDINATOR_HERE, 403); };
+    // A new configuration naming a folder or conversation it cannot see is refused the way a missing one is.
+    const shareable = (input: TriggerInput) => {
+      hereOnly(input);
+      if (input.handler.kind !== 'task' || view.target(input.handler.target)) return;
+      const target = input.handler.target;
+      throw target.mode === 'folder' ? failure(`Invalid trigger: The folder ${target.cwd} does not exist. Tower does not create folders for triggers.`, 400) : failure('Invalid trigger: The chosen session was not found.', 400);
+    };
+    const event = (id: string) => { const found = triggers.event(id); if (!view.event(found)) throw failure('This run is no longer in trigger history.', 404); return view.shownEvent(found); };
+    const find = (id: string) => { try { return triggers.event(id); } catch { return undefined; } };
+    switch (name) {
+      case 'sessions.list': case 'projects.list': case 'autoPrompt.submit': {
+        const result = await this.performLocal(name, value, actor) as Record<string, unknown>;
+        if (name === 'sessions.list') return { sessions: (result.sessions as Array<{ id: string }>).filter(session => view.sessions.has(session.id)) };
+        if (name === 'projects.list') return { projects: (result.projects as Array<{ cwd: string }>).filter(project => view.folder(project.cwd)) };
+        return result;
+      }
+      case 'sessions.read':
+        if (!view.sessions.has(value.id)) throw failure('Session not found.', 404);
+        return this.performLocal(name, value, actor);
+      case 'runs.list': {
+        if (!runs) throw failure('Runs are unavailable.', 503);
+        if (value.sessionId && !view.sessions.has(value.sessionId)) return { runs: [] };
+        const result = await this.performLocal(name, value, actor) as { runs: Array<{ sessionId: string }> };
+        return { runs: result.runs.filter(run => view.sessions.has(run.sessionId)) };
+      }
+      case 'autoPrompt.get': {
+        const job = autoPrompts?.get(value.requestId);
+        if (!job || !remoteJobVisible(job, view.scope, view.sessions, actor.controllerId)) throw failure('Auto Prompt request not found.', 404);
+        return { job: remoteJob(job, actor.controllerId, view.scope.matcher.revision) };
+      }
+      case 'triggers.list': return { triggers: triggers.list().filter(trigger => view.known(trigger.id) === true), overview: view.overview(triggers.overview(), find) };
+      case 'triggers.get': {
+        visible(value.id);
+        const found = triggers.get(value.id);
+        return { trigger: found.trigger, revisions: found.revisions.filter(revision => view.handler(revision.handler)), events: found.events.filter(item => view.event(item)).map(item => view.shownEvent(item)) };
+      }
+      case 'triggers.events': return { events: triggers.events(value).filter(item => view.event(item)).map(item => view.shownEvent(item)) };
+      case 'triggers.event': return { event: event(value.id) };
+      case 'triggers.audit': return { audit: triggers.audit({ ...value, limit: 200 }).filter(entry => view.audit(entry)).slice(0, value.limit ?? 50) };
+      case 'triggers.deleted': return { triggers: triggers.deleted().filter(trigger => view.handler(trigger.handler)) };
+      case 'triggers.preview': case 'triggers.settings': return this.performLocal(name, value, actor);
+      case 'secrets.list': return { secrets: triggers.secretList().map(secret => view.secret(secret)) };
+      case 'triggers.create': shareable(value.trigger); return this.performLocal(name, value, actor);
+      case 'triggers.update': hereOnly(visible(value.id)); shareable(value.trigger); return this.performLocal(name, value, actor);
+      case 'triggers.setEnabled': case 'triggers.delete': visible(value.id); return this.performLocal(name, value, actor);
+      case 'triggers.run': hereOnly(visible(value.id)); return { event: view.shownEvent((await this.performLocal(name, value, actor) as { event: Parameters<RemoteView['shownEvent']>[0] }).event) };
+      case 'triggers.restore': {
+        const deleted = triggers.deleted().find(trigger => trigger.id === value.id);
+        if (!deleted || !view.handler(deleted.handler)) throw failure('This deleted trigger is no longer kept.', 404);
+        hereOnly(deleted);
+        return this.performLocal(name, value, actor);
+      }
+      case 'triggers.revert': {
+        hereOnly(visible(value.id));
+        const earlier = triggers.get(value.id).revisions.find(revision => revision.revision === value.revision);
+        if (earlier && !view.handler(earlier.handler)) throw failure(`Revision ${value.revision} is no longer kept. Only the last 20 revisions can be restored.`, 404);
+        if (earlier) hereOnly(earlier);
+        return this.performLocal(name, value, actor);
+      }
+      default: throw failure('This is done in Tower on that computer itself.', 403);
     }
   }
 

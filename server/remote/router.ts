@@ -16,6 +16,7 @@ import type { AutoPromptJob, RunOrigin, Session } from '../../shared/types.js';
 import type { RemoteExclusionStore } from './exclusions.js';
 import { remoteJob, remoteJobVisible, remotePage, remoteRepository, remoteRun, remoteSession, remoteSessionIds, remoteSnapshot, type RemoteScope } from './visibility.js';
 import type { RepositoryAction } from '../../shared/repositories.js';
+import { isOperationName, OPERATIONS, REMOTE_PAGE_OPERATIONS } from '../../shared/api/operations.js';
 
 type Request = IncomingMessage | Http2ServerRequest;
 // The HTTP/2 compatibility response offers the same calls as an HTTP/1 response.
@@ -271,6 +272,15 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       return json(res, 200, { job: remoteJob(job, principal.controllerId, current.matcher.revision) });
     }
     if (method !== 'POST') throw notFound();
+    // Tower operations a controlling computer may use; the worker answers with only what this computer shares.
+    const operation = path.match(/^\/api\/v1\/([a-z]+\.[a-zA-Z]+)$/)?.[1];
+    if (operation) {
+      if (!REMOTE_PAGE_OPERATIONS.has(operation) || !backend.api) throw notFound();
+      const write = isOperationName(operation) && OPERATIONS[operation].write;
+      if (write) limit(principal);
+      const body = await readJson(req, 1_000_000);
+      return json(res, 200, { result: await backend.api(operation, body, context(principal, write ? requestId(req) : undefined)) });
+    }
     // Keystrokes have their own per-shell budget.
     if (terminal?.[2] === 'input' || terminal?.[2] === 'resize') {
       if (!terminals) throw notFound();

@@ -112,6 +112,9 @@ export function triggerRequestId(triggerId: string, dedupKey: string): string {
  * Owns trigger definitions, their history and the events they fire. One worker writes the engine file;
  * every change is computed on a copy, saved, and only then made current.
  */
+/** A change from a controlling computer marks the trigger as that computer's; a change made here clears it. */
+const remoteMark = (actor: TriggerActor): Pick<Trigger, 'remoteEdited'> => actor.controllerId ? { remoteEdited: { controllerId: actor.controllerId } } : {};
+
 export class TriggerService extends EventEmitter {
   private state: EngineState = empty();
   private writes: Promise<unknown> = Promise.resolve();
@@ -143,6 +146,8 @@ export class TriggerService extends EventEmitter {
     limits?: { acceptBytes?: number; maxBytes?: number; requestsPerMinute?: number };
     /** Ports this Tower listens on; HTTP triggers may never call them. */
     ownPorts?: () => Promise<number[]>;
+    /** Whether a folder is kept out of sharing with controlling computers right now. */
+    excludes?: (path: string) => Promise<boolean>;
     /** Reads the gh CLI's token; replaceable in tests. */
     ghToken?: () => Promise<string>;
     /** Sends GitHub API requests with this Authorization value; replaceable in tests. */
@@ -303,7 +308,7 @@ export class TriggerService extends EventEmitter {
     return this.commit(state => {
       if (state.triggers.length >= state.settings.maxTriggers) throw failure(`At most ${state.settings.maxTriggers} triggers can exist. Delete one first.`, 409);
       const now = new Date(this.now()).toISOString();
-      const trigger: Trigger = { ...input, id: randomUUID(), revision: 1, createdAt: now, updatedAt: now, createdBy: actor, updatedBy: actor };
+      const trigger: Trigger = { ...input, id: randomUUID(), revision: 1, createdAt: now, updatedAt: now, createdBy: actor, updatedBy: actor, ...remoteMark(actor) };
       this.guardAutoReply(trigger, undefined, actor, 'refuse');
       this.grantSecrets(state, trigger, actor);
       state.triggers.push(trigger);
@@ -374,7 +379,8 @@ export class TriggerService extends EventEmitter {
       if (state.triggers.some(item => item.id === id)) throw failure('This trigger already exists.', 409);
       if (state.triggers.length >= state.settings.maxTriggers) throw failure(`At most ${state.settings.maxTriggers} triggers can exist. Delete one first.`, 409);
       const now = new Date(this.now()).toISOString();
-      const trigger: Trigger = { ...structuredClone(deleted), revision: deleted.revision + 1, updatedAt: now, updatedBy: actor, enabled: false };
+      // Restored from a controlling computer, it is that computer's to run; restored here, it keeps what it had.
+      const trigger: Trigger = { ...structuredClone(deleted), revision: deleted.revision + 1, updatedAt: now, updatedBy: actor, enabled: false, ...remoteMark(actor) };
       const note = this.guardAutoReply(trigger, undefined, actor, 'strip') ?? '';
       this.grantSecrets(state, trigger, actor);
       state.triggers.push(trigger);
@@ -430,7 +436,7 @@ export class TriggerService extends EventEmitter {
     const event = trigger.source.kind === 'http' ? await this.runHttp(trigger, actor) : await this.commit(state => {
       const current = state.triggers.find(item => item.id === id);
       if (!current) throw failure('Trigger not found.', 404);
-      const created = this.fire(state, current, `manual:${randomUUID()}`, this.now(), 'manual');
+      const created = this.fire(state, current, `manual:${randomUUID()}`, this.now(), 'manual', actor);
       this.log(state, actor, 'run', current, current.revision, current.revision, `Ran now: ${created?.status ?? 'skipped'}`);
       return created;
     });
@@ -451,7 +457,7 @@ export class TriggerService extends EventEmitter {
     if (!trigger.enabled) throw failure('Turn the trigger on before running it.', 409);
     // A run that limits would skip is refused before anything is sent. Tried on a copy, so nothing is recorded.
     const warning = this.capacityError;
-    const probe = this.fire(structuredClone(this.state), trigger, `manual:${randomUUID()}`, this.now(), 'manual');
+    const probe = this.fire(structuredClone(this.state), trigger, `manual:${randomUUID()}`, this.now(), 'manual', actor);
     this.capacityError = warning;
     if (!probe || probe.status === 'skipped') throw failure(`Nothing was sent: ${probe?.reason ?? 'this trigger cannot record more runs right now.'}`, 409);
     const unlock = this.lock(id);
@@ -476,7 +482,7 @@ export class TriggerService extends EventEmitter {
         const current = state.triggers.find(item => item.id === id);
         if (!current) throw failure('Trigger not found.', 404);
         if (current.revision !== trigger.revision) throw failure('The trigger changed while its request was sent, so nothing ran.', 409);
-        const created = this.fire(state, current, `manual:${randomUUID()}`, this.now(), 'manual');
+        const created = this.fire(state, current, `manual:${randomUUID()}`, this.now(), 'manual', actor);
         if (!created) throw failure(`${current.name} could not record this run.`, 409);
         created.payload = this.payloadOf(current, outcome); created.summary = `Run now · ${this.summaryOf(outcome, undefined)}`;
         this.log(state, actor, 'run', current, current.revision, current.revision, `Ran now: ${created?.status ?? 'skipped'}`);
@@ -649,7 +655,7 @@ export class TriggerService extends EventEmitter {
       const fired: TriggerEvent[] = [];
       for (const issue of result.issues) {
         const key = source.watch.type === 'issue-opened' ? `issue:${issue.repository}#${issue.number}` : `assigned:${issue.repository}#${issue.number}:${slot}`;
-        const event = this.fire(state, current, manual ? `manual:${randomUUID()}:${key}` : key, slot, manual ? 'manual' : 'github');
+        const event = this.fire(state, current, manual ? `manual:${randomUUID()}:${key}` : key, slot, manual ? 'manual' : 'github', manual);
         if (!event) continue;
         event.payload = issue;
         event.summary = `${issue.repository}#${issue.number} ${issue.title}`.slice(0, 200);
@@ -799,8 +805,11 @@ export class TriggerService extends EventEmitter {
     return undefined;
   }
 
-  /** Records one firing. Overlap and hourly limits decide whether it waits, joins or is skipped. */
-  private fire(state: EngineState, trigger: Trigger, dedupKey: string, at: number, kind: TriggerEvent['kind']): TriggerEvent | undefined {
+  /**
+   * Records one firing. Overlap and hourly limits decide whether it waits, joins or is skipped. `by` is who asked for
+   * a run now: one asked for from a controlling computer counts as started there.
+   */
+  private fire(state: EngineState, trigger: Trigger, dedupKey: string, at: number, kind: TriggerEvent['kind'], by?: TriggerActor): TriggerEvent | undefined {
     const key = `${trigger.id} ${dedupKey}`;
     if (state.fired[key]) return undefined;
     const now = this.now();
@@ -814,10 +823,11 @@ export class TriggerService extends EventEmitter {
     state.recentFires = [...state.recentFires.filter(item => item.at > now - 60 * 60 * 1000), { at: now, triggerId: trigger.id }];
     const handler = trigger.handler;
     const untrustedInput = carriesOutsideContent(trigger.source);
+    const remote = by?.controllerId ? { controllerId: by.controllerId } : trigger.remoteEdited;
     // What runs is frozen with the event: a task's instructions and target, or a coordinator's rules.
     const input: TriggerEvent['input'] = handler.kind === 'task'
       ? { instructions: handler.instructions, provider: handler.provider, ...(handler.model ? { model: handler.model } : {}), ...(handler.effort ? { effort: handler.effort } : {}),
-        approvals: handler.approvals, target: handler.target, untrustedInput, overlap: trigger.policy.overlap }
+        approvals: handler.approvals, target: handler.target, untrustedInput, overlap: trigger.policy.overlap, ...(remote ? { remote: { controllerId: remote.controllerId } } : {}) }
       : { instructions: '', provider: handler.rules[0].provider, approvals: handler.approvals, target: { node: 'local', mode: 'auto' }, untrustedInput, overlap: trigger.policy.overlap,
         handler: 'coordinator', rules: structuredClone(handler.rules) };
     const event: TriggerEvent = { id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name, triggerRevision: trigger.revision, kind, dedupKey,
@@ -887,8 +897,13 @@ export class TriggerService extends EventEmitter {
       const { workflowId } = await executor.coordinate(event);
       return { status: 'running', dispatch: { workflowId } };
     }
-    const origin: RunOrigin = { kind: 'trigger', triggerId: event.triggerId, eventId: event.id };
     const input = event.input;
+    // Set up or started from a controlling computer: Auto Prompt then leaves out folders kept from sharing, and a
+    // folder or session of its own must not be in one either.
+    const origin: RunOrigin = { kind: 'trigger', triggerId: event.triggerId, eventId: event.id, ...(input.remote ? { controllerId: input.remote.controllerId } : {}) };
+    const withheld = input.remote && input.target.mode !== 'auto'
+      ? await this.options.excludes?.(input.target.mode === 'folder' ? input.target.cwd : this.options.executor.session(input.target.sessionId)?.cwd ?? '') ?? true : false;
+    if (withheld) return { status: 'error', error: 'This trigger was set up from another computer, and its folder is one this computer keeps out of sharing; it did not run.' };
     const unattended = input.approvals === 'auto';
     const prompt = this.prompt(event);
     const common = { ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}) };
@@ -1089,7 +1104,8 @@ export class TriggerService extends EventEmitter {
     return { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy };
   }
   private replace(state: EngineState, current: Trigger, input: TriggerInput, actor: TriggerActor): Trigger {
-    const next: Trigger = { ...current, ...structuredClone(input), revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor };
+    const { remoteEdited: _, ...kept } = current;
+    const next: Trigger = { ...kept, ...structuredClone(input), revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor, ...remoteMark(actor) };
     this.grantSecrets(state, next, actor);
     state.revisions[current.id] = [...(state.revisions[current.id] ?? []), current].slice(-MAX_REVISIONS);
     state.triggers = state.triggers.map(item => item.id === current.id ? next : item);

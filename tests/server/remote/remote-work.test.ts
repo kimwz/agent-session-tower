@@ -21,10 +21,11 @@ const CONTROLLER = 'controllera1b2c3d4e5f6';
 const remote = { kind: 'owner' as const, controllerId: CONTROLLER };
 const v7 = (tail: string) => `${Date.now().toString(16).padStart(12, '0').replace(/^(.{8})(.{4})$/, '$1-$2')}-7123-8abc-${tail}`;
 
-test('only the owner’s own work and the agents it starts can come from a controller', () => {
+test('only the owner’s own work, the agents it starts and the triggers it sets up can come from a controller', () => {
   assert.deepEqual(parseRunOrigin(remote), remote);
   assert.deepEqual(parseRunOrigin({ kind: 'agent', controllerId: CONTROLLER }), { kind: 'agent', controllerId: CONTROLLER });
-  for (const value of [{ kind: 'trigger', triggerId: 't', controllerId: CONTROLLER }, { kind: 'slack', workflowId: '10000000-0000-4000-8000-000000000001', controllerId: CONTROLLER },
+  assert.deepEqual(parseRunOrigin({ kind: 'trigger', triggerId: 't', controllerId: CONTROLLER }), { kind: 'trigger', triggerId: 't', controllerId: CONTROLLER });
+  for (const value of [{ kind: 'slack', workflowId: '10000000-0000-4000-8000-000000000001', controllerId: CONTROLLER },
     { kind: 'owner', controllerId: 'Not-Valid!' }, { kind: 'owner', controllerId: 42 }]) assert.equal(parseRunOrigin(value), undefined, JSON.stringify(value));
 });
 
@@ -35,12 +36,16 @@ test('remote work is inserted only into remote work from the same controller', (
   assert.equal(sameOrigin(remote, { kind: 'owner', controllerId: 'controllerffffffffffff' }), false);
 });
 
-test('remote turns never receive Tower’s or a coordinator’s tools, whatever conversation they reach', () => {
+test('remote turns get Tower’s tools like the owner’s own, but never a coordinator’s, whatever conversation they reach', () => {
   const session = { id: 'codex:coordinator' } as Session;
   const slack = { sessionMcp: () => ({ tower_slack: { command: 'x', args: ['--slack-mcp', 'state', '10000000-0000-4000-8000-000000000001'], env: {} } }) } as unknown as Pick<SlackService, 'sessionMcp'>;
   const resolve = runToolResolver({ stateDir: '/state', runs: { sessionOrigin: () => ({ kind: 'owner', untrustedInput: false }) }, slack, capabilities: new CapabilityRegistry(() => true) });
   const tools = resolve({ id: 'run', sessionId: session.id, origin: remote, prompt: 'x', status: 'queued', createdAt: '', output: '' }, session);
   assert.deepEqual(tools, { required: false, towerTools: 'remote' });
+  const plain = runToolResolver({ stateDir: '/state', runs: { sessionOrigin: () => ({ kind: 'owner', untrustedInput: false, controllerId: CONTROLLER }) }, capabilities: new CapabilityRegistry(() => true) });
+  const owned = plain({ id: 'run', sessionId: 'codex:plain', origin: remote, prompt: 'x', status: 'queued', createdAt: '', output: '' }, { id: 'codex:plain' } as Session);
+  assert.equal(owned.towerTools, 'attached', 'the owner at a controlling computer is the owner; what the tools show is filtered');
+  assert.ok(owned.servers?.tower);
 });
 
 test('a remote origin is kept with the run and the conversation across a restart', async t => {

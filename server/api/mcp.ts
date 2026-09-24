@@ -87,5 +87,7 @@ export async function handleMcpRequest(context: McpContext, token: string, body:
   if (body.method !== 'tools/call' || !operation) throw Object.assign(new Error('Unknown Tower tool.'), { statusCode: 404 });
   if (!context.api) throw Object.assign(new Error('Tower operations are unavailable.'), { statusCode: 503 });
   const { requestKey, ...input } = (body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments) ? body.arguments : {}) as Record<string, unknown>;
-  return context.api.call(operation, input, { kind: 'agent', via: 'mcp', sessionId: capability.sessionId, runId: run.id }, typeof requestKey === 'string' ? requestKey : undefined);
+  // A turn started from a controlling computer keeps to what that computer may see and change.
+  return context.api.call(operation, input, { kind: 'agent', via: 'mcp', sessionId: capability.sessionId, runId: run.id, ...(run.origin.controllerId ? { controllerId: run.origin.controllerId } : {}) },
+    typeof requestKey === 'string' ? requestKey : undefined);
 }

@@ -19,6 +19,8 @@ export interface Host {
   reporting?: boolean;
   /** It is moving to this Tower's version; while it restarts it is away, and it comes back by itself. */
   updating?: boolean;
+  /** Its triggers can be managed from this page now. */
+  triggers?: boolean;
   /** Some state of it is known to this page, even if out of date. */
   known: boolean;
   version?: string;
@@ -82,7 +84,7 @@ export function combinedView(local: Snapshot | null, nodes: ReadonlyMap<string, 
   if (!listed.length) return { view: local, hosts: [here], complete };
   const parts = listed.flatMap(node => { const snapshot = nodes.get(node.id); return snapshot ? [named(node.id, snapshot)] : []; });
   const hosts = [here, ...listed.map((node): Host => ({ node: node.id, name: node.label || node.name, status: node.status, live: node.status === 'connected' && node.streaming,
-    canWork: node.status === 'connected' && node.streaming && node.features.includes('work'), workspace: node.status === 'connected' && node.features.includes('workspace'), ...(node.features.includes('read') ? { reporting: true } : {}), known: Boolean(nodes.get(node.id)) && !nodes.get(node.id)!.scanning, ...(node.updating ? { updating: true } : {}), ...(node.version ? { version: node.version } : {}), providers: nodes.get(node.id)?.providers ?? [] }))];
+    canWork: node.status === 'connected' && node.streaming && node.features.includes('work'), workspace: node.status === 'connected' && node.features.includes('workspace'), ...(node.features.includes('read') ? { reporting: true } : {}), ...(node.status === 'connected' && node.features.includes('triggers') ? { triggers: true } : {}), known: Boolean(nodes.get(node.id)) && !nodes.get(node.id)!.scanning, ...(node.updating ? { updating: true } : {}), ...(node.version ? { version: node.version } : {}), providers: nodes.get(node.id)?.providers ?? [] }))];
   return { hosts, complete, view: { ...local,
     sessions: [...local.sessions, ...parts.flatMap(part => part.sessions)],
     runs: [...local.runs, ...parts.flatMap(part => part.runs)],

@@ -56,4 +56,10 @@ export const OPERATIONS = {
 } as const;
 
 export type OperationName = keyof typeof OPERATIONS;
+/**
+ * Operations a controlling computer's pages may use on this computer: its triggers and the names of its secrets.
+ * The worker answers them with only what this computer shares.
+ */
+export const REMOTE_PAGE_OPERATIONS: ReadonlySet<string> = new Set(['triggers.list', 'triggers.get', 'triggers.events', 'triggers.event', 'triggers.audit', 'triggers.deleted',
+  'triggers.preview', 'triggers.settings', 'triggers.create', 'triggers.update', 'triggers.setEnabled', 'triggers.delete', 'triggers.restore', 'triggers.revert', 'triggers.run', 'secrets.list']);
 export const isOperationName = (value: unknown): value is OperationName => typeof value === 'string' && Object.hasOwn(OPERATIONS, value);

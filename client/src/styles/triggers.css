@@ -102,3 +102,5 @@
   .trigger-header-row { grid-template-columns: 1fr 1fr; }
   .trigger-url { grid-template-columns: 1fr; }
 }
+.slack-head .trigger-computer { display: flex; flex-direction: row; flex: none; align-items: center; gap: 6px; margin-left: auto; font-size: 12px; color: var(--muted); }
+.trigger-computer select { max-width: 200px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); font: inherit; }

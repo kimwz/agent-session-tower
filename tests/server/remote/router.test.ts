@@ -58,6 +58,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     setGroup: async patch => { calls.push({ method: 'setGroup', args: [patch] }); return { cwd: patch.cwd, title: patch.title ?? '', pinned: true, hidden: true }; },
     attachment: async id => ({ metadata: { id, name: 'shot.png', mimeType: 'image/png', size: 4 }, content: Buffer.from('png!'), sessionId: id === '11111111-1111-4111-8111-111111111111' ? 'codex:open' : sessions[1].id }),
     cancel: async id => { calls.push({ method: 'cancel', args: [id] }); },
+    api: async (operation, input, context) => { calls.push({ method: 'api', args: [operation, input, context] }); return { answered: operation }; },
     ...(options.repositories ? { repositoryAction: async (cwd: string, action: string) => { calls.push({ method: 'repositoryAction', args: [cwd, action] }); return repository(cwd); } } : {}),
   };
   const router = createRemoteRouter({ backend, exclusions });
@@ -123,11 +124,23 @@ test('remote work carries the controller as its origin and a request ID, and is 
   assert.deepEqual(f.calls[2].args[1], { origin: { kind: 'owner', controllerId: CONTROLLER }, requestId: REQUEST_ID });
 });
 
+test('a controlling computer uses this computer’s trigger operations as itself, and each change once', async t => {
+  const f = await fixture(t);
+  const read = await f.call('/api/v1/triggers.list', { body: {} });
+  assert.equal(read.status, 200);
+  assert.deepEqual(read.json, { result: { answered: 'triggers.list' } });
+  assert.deepEqual(f.calls.at(-1)!.args, ['triggers.list', {}, { origin: { kind: 'owner', controllerId: CONTROLLER } }], 'the worker is told who asks, and filters for it');
+  assert.equal((await f.call('/api/v1/triggers.create', { body: { trigger: {} } })).status, 400, 'a change needs a request ID so it is made once');
+  const write = await f.call('/api/v1/triggers.create', { body: { trigger: {} }, headers: { 'x-tower-request-id': REQUEST_ID } });
+  assert.equal(write.status, 200);
+  assert.deepEqual(f.calls.at(-1)!.args[2], { origin: { kind: 'owner', controllerId: CONTROLLER }, requestId: REQUEST_ID });
+});
+
 test('local management and routes not listed for remote controllers do not exist for them', async t => {
   const f = await fixture(t);
   for (const [path, method] of [['/api/auth/overview', 'GET'], ['/api/auth/credentials', 'POST'], ['/api/remote/exclusions', 'GET'], ['/api/remote/exclusions', 'POST'],
     ['/api/workspace/tree?cwd=/', 'GET'], ['/api/workspace/terminals', 'POST'], ['/api/bootstrap', 'GET'], ['/api/health', 'GET'],
-    ['/api/v1/triggers.list', 'POST'], ['/api/slack', 'GET'], ['/', 'GET'], ['/api/link/controllers', 'GET']] as const) {
+    ['/api/v1/secrets.create', 'POST'], ['/api/v1/triggers.updateSettings', 'POST'], ['/api/v1/sessions.list', 'POST'], ['/api/v1/triggers.list', 'GET'], ['/api/slack', 'GET'], ['/', 'GET'], ['/api/link/controllers', 'GET']] as const) {
     const response = await f.call(path, { method, ...(method === 'POST' ? { body: {} } : {}) });
     assert.equal(response.status, 404, `${method} ${path}`);
   }

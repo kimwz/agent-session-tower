@@ -31,8 +31,8 @@ export function parseRunOrigin(value: unknown, references: 'required' | 'optiona
     if (value[key] !== undefined && (typeof value[key] !== 'string' || !REFERENCE.test(value[key]))) return undefined;
   }
   if (value.runId !== undefined && (typeof value.runId !== 'string' || !UUID.test(value.runId))) return undefined;
-  // Only the owner's own remote requests, and agents they start, can come from a controller.
-  if (value.controllerId !== undefined && (typeof value.controllerId !== 'string' || !CONTROLLER_ID.test(value.controllerId) || (kind !== 'owner' && kind !== 'agent'))) return undefined;
+  // Only the owner's own remote requests, agents they start and triggers set up remotely can come from a controller.
+  if (value.controllerId !== undefined && (typeof value.controllerId !== 'string' || !CONTROLLER_ID.test(value.controllerId) || (kind !== 'owner' && kind !== 'agent' && kind !== 'trigger'))) return undefined;
   if (value.workflowId !== undefined && !UUID.test(value.workflowId as string)) return undefined;
   if (references === 'required' && kind === 'slack' && value.workflowId === undefined) return undefined;
   if (references === 'required' && kind === 'trigger' && value.triggerId === undefined) return undefined;

@@ -233,7 +233,7 @@ async function main() {
     getAutoPrompt: id => runs.getAutoPrompt(id),
     cancelAutoPrompt: id => runs.cancelAutoPrompt(id),
     slackOverview: () => runs.slackOverview(),
-    api: (operation, input) => runs.api(operation, input),
+    api: (operation, input, context) => runs.api(operation, input, context && admit(context)),
     slackMutate: (action, body) => runs.slackMutate(action, body),
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
     enqueue: async (id, prompt, attachments, context) => {
@@ -264,7 +264,7 @@ async function main() {
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.
-    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
+    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
     handle: (req, res, principal) => remoteRouter.handle(req, res, principal),
     update: {
       request: version => updates.request(version),

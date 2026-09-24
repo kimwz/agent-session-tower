@@ -12,12 +12,15 @@ const KINDS: Array<{ kind: SourceKind | 'slack'; title: string; description: str
   { kind: 'slack', title: 'Slack 멘션', description: 'Slack에서 나를 멘션하면 지침에 따라 처리합니다.' },
 ];
 
-/** The kinds of trigger, as the first choice when adding one. Slack is set up in its own panel. */
-export function TriggerTypePicker({ onPick, onSlack, slackConnected }: { onPick: (kind: SourceKind) => void; onSlack: () => void; slackConnected: boolean }) {
+/**
+ * The kinds of trigger, as the first choice when adding one. Slack is set up in its own panel. On another computer
+ * (`remote`) only the kinds that need nothing checked there are offered: Slack and GitHub sign-ins stay with it.
+ */
+export function TriggerTypePicker({ onPick, onSlack, slackConnected, remote = false }: { onPick: (kind: SourceKind) => void; onSlack?: () => void; slackConnected: boolean; remote?: boolean }) {
   const { t } = useI18n();
-  return <ul className="trigger-picker">{KINDS.map(({ kind, title, description }) => {
+  return <ul className="trigger-picker">{KINDS.filter(({ kind }) => !remote || (kind !== 'slack' && kind !== 'github')).map(({ kind, title, description }) => {
     const Icon = KIND_ICONS[kind];
-    return <li key={kind}><button type="button" onClick={() => kind === 'slack' ? onSlack() : onPick(kind)}>
+    return <li key={kind}><button type="button" onClick={() => kind === 'slack' ? onSlack?.() : onPick(kind)}>
       <Icon size={20} /><span><strong>{t(title)}</strong><small>{kind === 'slack' && slackConnected ? t('연결됨 · 지침과 설정은 Slack 창에서 바꿉니다.') : t(description)}</small></span>
     </button></li>;
   })}</ul>;

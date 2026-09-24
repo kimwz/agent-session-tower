@@ -164,10 +164,13 @@ export type TriggerInput = z.infer<typeof TriggerInputSchema>;
 export type ActorKind = 'owner' | 'agent' | 'system';
 export interface TriggerActor {
   kind: ActorKind;
-  via: 'ui' | 'mcp' | 'migration';
+  /** `remote`: the owner working from a computer that controls this one. */
+  via: 'ui' | 'mcp' | 'migration' | 'remote';
   /** For an agent: the Tower session and run whose tool call made the change. */
   sessionId?: string;
   runId?: string;
+  /** The controlling computer the change came from: the owner there, or an agent in a turn started there. */
+  controllerId?: string;
 }
 
 export interface Trigger extends TriggerInput {
@@ -177,6 +180,11 @@ export interface Trigger extends TriggerInput {
   updatedAt: string;
   createdBy: TriggerActor;
   updatedBy: TriggerActor;
+  /**
+   * Created or last changed from a controlling computer. What it starts then never picks a folder this computer
+   * keeps out of sharing; a change made here clears it.
+   */
+  remoteEdited?: { controllerId: string };
 }
 
 export type TriggerEventStatus = 'skipped' | 'coalesced' | 'queued' | 'claimed' | 'running' | 'completed' | 'error' | 'cancelled' | 'uncertain';
@@ -194,7 +202,9 @@ export interface TriggerEvent {
   /** The configuration in force when it fired; later edits never change what this event runs. */
   input: { instructions: string; provider: 'claude' | 'codex'; model?: string; effort?: string; approvals: 'auto' | 'owner'; target: TriggerTarget; untrustedInput: boolean; overlap: TriggerPolicy['overlap'];
     /** A coordinator event carries the rules in force when it fired. */
-    handler?: 'task' | 'coordinator'; rules?: CoordinatorRule[] };
+    handler?: 'task' | 'coordinator'; rules?: CoordinatorRule[];
+    /** Started from, or set up from, a controlling computer: it never uses a folder kept out of sharing. */
+    remote?: { controllerId: string } };
   summary: string;
   reason?: string;
   error?: string;

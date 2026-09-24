@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, KeyRound, Plus, Trash2 } from 'lucide-react';
 import type { ProviderHealth, Session } from '../../../shared/types';
 import { GITHUB_API, type CoordinatorRule, type GitHubCheck, type HttpCondition, type HttpTestResult, type Trigger, type TriggerInput, type TriggerSecret } from '../../../shared/triggers';
@@ -7,7 +7,7 @@ import { absoluteTime, sessionTitle } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
 import { SlackRules } from '../slack/SlackPanel';
 import { KIND_ICONS } from './TriggerKinds';
-import { blankTrigger, browserZone, kindLabel, MEMBERS, switchedWatch, towerOperation, type CoordinatorHandler, type GitHubSource, type HttpSource, type Source, type SourceKind, type TaskHandler } from './trigger-helpers';
+import { blankTrigger, browserZone, kindLabel, MEMBERS, switchedWatch, towerOperation, TriggerMachine, type CoordinatorHandler, type GitHubSource, type HttpSource, type Source, type SourceKind, type TaskHandler } from './trigger-helpers';
 
 interface EditorContext { token: string; providers: ProviderHealth[]; projects: [string, string][]; sessions: Session[] }
 
@@ -29,6 +29,7 @@ function Choice<T extends string>({ value, options, onChange, label }: { value: 
  */
 export function TriggerEditor({ trigger, kind, token, providers, projects, sessions, busy, onCancel, onSave }: EditorContext & { trigger?: Trigger; kind: SourceKind; busy: boolean; onCancel: () => void; onSave: (input: TriggerInput) => void }) {
   const { t } = useI18n();
+  const machine = useContext(TriggerMachine);
   const [input, setInput] = useState<TriggerInput>(() => trigger ? { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy } : blankTrigger(kind));
   const source = input.source;
   const polled = source.kind !== 'schedule';
@@ -40,12 +41,15 @@ export function TriggerEditor({ trigger, kind, token, providers, projects, sessi
   const setMode = (mode: 'task' | 'coordinator') => setInput({ ...input, handler: mode === 'coordinator'
     ? { kind: 'coordinator', rules: coordinator?.rules ?? [newRule()], approvals: input.handler.approvals } : { ...task, approvals: input.handler.approvals } });
   const Icon = KIND_ICONS[source.kind];
+  // A coordinator answers on GitHub with that computer's sign-in; it is set up there.
+  const hereOnly = Boolean(machine.node) && input.handler.kind === 'coordinator';
   const whatTitle = source.kind === 'schedule' ? t('언제 실행할까요') : source.kind === 'http' ? t('무엇을 확인할까요') : t('어떤 이슈를 볼까요');
   return <form className="trigger-editor" onSubmit={event => { event.preventDefault(); onSave(input); }}><fieldset disabled={busy}>
     <header className="trigger-editor-head">
       <button type="button" className="icon-button" aria-label={t('목록으로')} onClick={onCancel}><ArrowLeft size={16} /></button>
       <Icon size={18} /><h3>{trigger ? t('{0} 트리거 편집', { 0: kindLabel(source.kind, t) }) : t('새 {0} 트리거', { 0: kindLabel(source.kind, t) })}</h3>
     </header>
+    {hereOnly && <p className="trigger-note trigger-warn">{t('GitHub 코디네이터 트리거는 {0}의 Tower에서 고칩니다. 여기서는 켜고 끄거나 지울 수 있습니다.', { 0: machine.name ?? '' })}</p>}
     <label className="trigger-name">{t('이름')}<input required maxLength={120} placeholder={t(source.kind === 'github' ? '예: 새 버그 이슈 분류' : source.kind === 'http' ? '예: 상태 페이지 감시' : '예: 평일 아침 리포트')} value={input.name} onChange={event => setInput({ ...input, name: event.target.value })} /></label>
     <Section step={1} title={whatTitle}>
       {source.kind === 'schedule' && <ScheduleFields token={token} schedule={source.schedule} onChange={schedule => setSource({ ...source, schedule })} />}
@@ -57,13 +61,13 @@ export function TriggerEditor({ trigger, kind, token, providers, projects, sessi
       <ScheduleFields polled token={token} schedule={source.schedule} onChange={schedule => setSource({ ...source, schedule })} />
     </Section>}
     <Section step={polled ? 3 : 2} title={t('무엇을 할까요')}>
-      {source.kind === 'github' && <Choice label={t('처리 방식')} value={coordinator ? 'coordinator' : 'task'} onChange={setMode}
+      {source.kind === 'github' && !machine.node && <Choice label={t('처리 방식')} value={coordinator ? 'coordinator' : 'task'} onChange={setMode}
         options={[['task', t('이슈마다 작업 실행')], ['coordinator', t('코디네이터 (댓글은 승인 후 게시)')]]} />}
       {coordinator ? <CoordinatorFields handler={coordinator} providers={providers} onChange={next => setInput({ ...input, handler: next })} />
         : <TaskFields task={task} kind={source.kind} providers={providers} projects={projects} sessions={sessions} onChange={setTask} />}
     </Section>
     <AdvancedSettings input={input} onChange={setInput} />
-    <footer className="trigger-editor-foot"><button type="button" className="secondary-button" onClick={onCancel}>{t('취소')}</button><button className="primary-button">{trigger ? t('저장') : t('만들기')}</button></footer>
+    <footer className="trigger-editor-foot"><button type="button" className="secondary-button" onClick={onCancel}>{t('취소')}</button><button className="primary-button" disabled={hereOnly}>{trigger ? t('저장') : t('만들기')}</button></footer>
   </fieldset></form>;
 }
 
@@ -71,8 +75,9 @@ export function TriggerEditor({ trigger, kind, token, providers, projects, sessi
 function ScheduleFields({ token, schedule, onChange, polled = false }: { token: string; schedule: Source['schedule']; onChange: (schedule: Source['schedule']) => void; polled?: boolean }) {
   const { t } = useI18n();
   const [preview, setPreview] = useState<string[] | string>('');
+  const { node } = useContext(TriggerMachine);
   const showPreview = async () => {
-    try { setPreview((await towerOperation<{ runs: string[] }>(token, 'triggers.preview', { schedule })).runs); }
+    try { setPreview((await towerOperation<{ runs: string[] }>(token, 'triggers.preview', { schedule }, node)).runs); }
     catch (cause) { setPreview(cause instanceof Error ? cause.message : String(cause)); }
   };
   return <>
@@ -136,7 +141,8 @@ function HttpFields({ token, source, onChange }: { token: string; source: HttpSo
   const [secrets, setSecrets] = useState<TriggerSecret[]>([]);
   const [result, setResult] = useState<HttpTestResult | string>('');
   const [testing, setTesting] = useState(false);
-  useEffect(() => { void towerOperation<{ secrets: TriggerSecret[] }>(token, 'secrets.list').then(value => setSecrets(value.secrets), () => setSecrets([])); }, [token]);
+  const machine = useContext(TriggerMachine);
+  useEffect(() => { void towerOperation<{ secrets: TriggerSecret[] }>(token, 'secrets.list', {}, machine.node).then(value => setSecrets(value.secrets), () => setSecrets([])); }, [token, machine.node]);
   const request = source.request;
   const condition = source.condition;
   const setRequest = (patch: Partial<HttpSource['request']>) => onChange({ ...source, request: { ...request, ...patch } });
@@ -185,7 +191,8 @@ function HttpFields({ token, source, onChange }: { token: string; source: HttpSo
         {condition.operator !== 'exists' && <input aria-label={t('값')} placeholder={t('값')} maxLength={1000} value={condition.value ?? ''} onChange={event => setCondition({ ...condition, value: event.target.value })} />}</span></label>}
     </div>}
     <div className="trigger-preview">
-      <button type="button" className="secondary-button" disabled={testing || !request.url} onClick={() => void test()}>{testing ? t('보내는 중') : t('요청 테스트')}</button>
+      {machine.node ? <small>{t('요청 테스트는 {0}의 Tower에서 할 수 있습니다.', { 0: machine.name ?? '' })}</small>
+        : <button type="button" className="secondary-button" disabled={testing || !request.url} onClick={() => void test()}>{testing ? t('보내는 중') : t('요청 테스트')}</button>}
       {request.method === 'POST' && <small>{t('POST 요청은 테스트에서도 실제로 전송됩니다.')}</small>}
       {typeof result === 'string' ? result && <p className="slack-error">{translateMessage(result)}</p>
         : <div className="trigger-test-result">
@@ -212,7 +219,8 @@ function GitHubFields({ token, source, onChange, onAccount }: { token: string; s
   const reset = () => { checks.current++; setCheck(''); setChecking(false); };
   // Typed text is kept as written, so a trailing line does not vanish while typing.
   const [repos, setRepos] = useState(source.watch.repos?.join('\n') ?? '');
-  useEffect(() => { void towerOperation<{ secrets: TriggerSecret[] }>(token, 'secrets.list').then(value => setSecrets(value.secrets.filter(secret => secret.origin === GITHUB_API)), () => setSecrets([])); }, [token]);
+  const machine = useContext(TriggerMachine);
+  useEffect(() => { void towerOperation<{ secrets: TriggerSecret[] }>(token, 'secrets.list', {}, machine.node).then(value => setSecrets(value.secrets.filter(secret => secret.origin === GITHUB_API)), () => setSecrets([])); }, [token, machine.node]);
   const watch = source.watch;
   const setWatch = (next: GitHubSource['watch']) => onChange({ ...source, watch: next });
   // Each kind of watch keeps its own filters, so switching away and back loses none of them.
@@ -242,7 +250,7 @@ function GitHubFields({ token, source, onChange, onAccount }: { token: string; s
         <option value="gh">{t('이 컴퓨터의 gh 로그인')}</option><option value="token">{t('저장한 토큰')}</option></select></label>
       {source.auth.type === 'token' && <label>{t('토큰')}<select required value={source.auth.secretId} onChange={event => { reset(); onChange({ ...source, account: '', auth: { type: 'token', secretId: event.target.value } }); }}>
         <option value="">{t('비밀 값 선택')}</option>{secrets.map(secret => <option key={secret.id} value={secret.id}>{secret.name}</option>)}</select></label>}
-      <button type="button" className="secondary-button" disabled={checking} onClick={() => void verify()}>{checking ? t('확인 중') : t('연결 확인')}</button>
+      {!machine.node && <button type="button" className="secondary-button" disabled={checking} onClick={() => void verify()}>{checking ? t('확인 중') : t('연결 확인')}</button>}
     </div>
     {typeof check === 'string' ? check ? <p className="slack-error">{translateMessage(check)}</p>
       : <p className={source.account ? 'trigger-note' : 'trigger-note trigger-warn'}>{source.account ? t('{0} 계정으로 확인합니다.', { 0: source.account }) : t('저장하기 전에 연결을 확인해 계정을 정하세요.')}</p>

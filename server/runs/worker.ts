@@ -172,7 +172,12 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (projection && ['settings', 'rules', 'connect', 'disconnect'].includes(args[0] as string)) await options.triggers?.recordSlack({ kind: 'owner', via: 'ui' }, projection.id, `Slack ${args[0] as string} changed`);
         return result;
       } break;
-      case 'api': if (options.api) return options.api.call(args[0], args[1], { kind: 'owner', via: 'ui' }); break;
+      case 'api': if (options.api) {
+        // The owner here, or the owner at a controlling computer: then it sees and changes only what is shared.
+        const admitted = args[2] === undefined ? undefined : admission(args[2]);
+        const controllerId = admitted?.origin?.controllerId;
+        return options.api.call(args[0], args[1], controllerId ? { kind: 'owner', via: 'remote', controllerId } : { kind: 'owner', via: 'ui' }, admitted?.requestId);
+      } break;
       case 'slackTool': if (options.slack) return options.slack.tool(args[0] as string, args[1] as string, args[2] as Record<string, unknown>); break;
     }
     throw Object.assign(new Error('Unknown runner operation.'), { statusCode: 400 });
@@ -408,7 +413,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // Ports seen once stay blocked, so a web restart never opens a moment when Tower can call itself.
     const towerPorts = new Set<number>();
     const ownPorts = async () => { for (const port of await lockedPorts(stateDir)) towerPorts.add(port); return [...towerPorts]; };
-    const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), ownPorts, executor: {
+    const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), ownPorts,
+      // A trigger set up from a controlling computer checks the sharing list as it is when it runs.
+      excludes: async path => { await exclusions.reload(); return exclusions.excludesNow(path); }, executor: {
       submitAutoPrompt: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); },
       getAutoPrompt: id => autoPrompts.get(id),
       create: (input, internal) => runs.create(input, internal),
@@ -429,6 +436,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     runs.setLaunchGate(run => run.origin?.kind === 'trigger' && run.origin.triggerId && !(run.origin.workflowId && run.autoPromptId !== run.origin.workflowId)
       && !triggers.launchAllowed(run.origin.triggerId, run.origin.eventId) ? 'The trigger was turned off before this run started, so it did not run.' : undefined);
     const api = new TowerApi({ stateDir, triggers, runs, github,
+      remote: async paths => { await exclusions.reload(); await exclusions.prepare(paths, { fresh: true }); return { matcher: exclusions.matcher(), coordinators: coordinators() }; },
       projects: () => {
         const snapshot = visible.snapshot();
         const titles = new Map((snapshot.groups ?? []).map(group => [group.cwd, group]));

@@ -1,5 +1,10 @@
+import { createContext } from 'react';
 import type { Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput } from '../../../shared/triggers';
+import { isOperationName, OPERATIONS } from '../../../shared/api/operations';
+import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { authPost } from '../auth/AuthGate';
+import { api } from '../common/lib';
+import { nodeHeaders, nodePath, settleRequest } from '../remote/scope';
 
 export type Source = TriggerInput['source'];
 export type SourceKind = Source['kind'];
@@ -9,9 +14,27 @@ export type TaskHandler = Extract<TriggerInput['handler'], { kind: 'task' }>;
 export type CoordinatorHandler = Extract<TriggerInput['handler'], { kind: 'coordinator' }>;
 type Translate = (key: string, values?: Record<string, string | number>) => string;
 
-/** Calls a Tower operation (shared/api/operations.ts) as the owner. */
-export function towerOperation<T>(token: string, operation: string, input: unknown = {}): Promise<T> {
-  return authPost<{ result: T }>(`/api/v1/${operation}`, token, input).then(response => response.result);
+/**
+ * The computer whose triggers the panel shows: this one (no node), or a joined one by its node id and name. Its
+ * triggers run there, and the parts that stay with that computer (secrets, limits, tests) are done there.
+ */
+export const TriggerMachine = createContext<{ node?: string; name?: string }>({});
+
+/**
+ * Calls a Tower operation (shared/api/operations.ts) as the owner, on this computer or on joined computer `node`.
+ * A change on another computer carries a request ID, so sending it again after a lost answer makes it once.
+ */
+export async function towerOperation<T>(token: string, operation: string, input: unknown = {}, node?: string): Promise<T> {
+  if (!node) return authPost<{ result: T }>(`/api/v1/${operation}`, token, input).then(response => response.result);
+  const body = JSON.stringify(input);
+  const write = isOperationName(operation) && OPERATIONS[operation].write;
+  const key = `v1:${operation}`;
+  const headers = { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token };
+  try {
+    const { result } = await api<{ result: T }>(nodePath(node, `/api/v1/${operation}`), { method: 'POST', headers: write ? nodeHeaders(node, headers, key, body) : headers, body });
+    if (write) settleRequest(node, key);
+    return result;
+  } catch (error) { if (write) settleRequest(node, key, error); throw error; }
 }
 
 export function eventStatusLabel(status: TriggerEvent['status'], t: (key: string) => string): string {
