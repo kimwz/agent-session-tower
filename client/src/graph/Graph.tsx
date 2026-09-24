@@ -5,7 +5,7 @@ import { Maximize, Minus, Plus, Scan } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../../shared/types';
 import type { RepositoryAction, RepositoryStatus } from '../../../shared/repositories';
 import { nodeTypes, type HostLink, type ProjectData } from './GraphNodes';
-import type { Host } from '../remote/hosts';
+import { workspaceNote, type Host } from '../remote/hosts';
 import { nodeOf } from '../remote/scope';
 import type { SlackPublicStatus } from '../../../shared/slack';
 import type { TriggerEvent, TriggerOverview } from '../../../shared/triggers';
@@ -113,7 +113,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     }
     return widths;
   }, [seedSessions, groupMetadata, visiblePins, language]);
-  const machines = useMemo<Host[]>(() => hosts?.length ? hosts : [{ name: hostname, status: 'local', live: true, canWork: true, known: true, providers }], [hosts, hostname, providers]);
+  const machines = useMemo<Host[]>(() => hosts?.length ? hosts : [{ name: hostname, status: 'local', live: true, canWork: true, workspace: true, known: true, providers }], [hosts, hostname, providers]);
   // A computer this page has not heard from yet keeps its saved card and folder places until it has.
   const unknownNodes = useMemo(() => new Set((allHosts ?? machines).filter(host => host.node && !host.known).map(host => host.node!)), [allHosts, machines]);
   const retain = useCallback((id: string) => {
@@ -157,7 +157,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
         const width = Math.max(columns * 268 + 14, minimumProjectWidths.get(projectId) || 0);
         const rows = Math.max(1, Math.ceil(members.length / columns));
         const metadata = groupMetadata.get(path);
-        const projectData: ProjectData = { token, name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, hidden: metadata?.hidden || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, manual, disabled, viewDisabled: groupActionsDisabled, saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate, onAutoPrompt, repository: repositoryByPath.get(path), onRepositoryAction, stale };
+        const projectData: ProjectData = { token, name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, hidden: metadata?.hidden || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, manual, disabled, viewDisabled: groupActionsDisabled, workspaceDisabled: groupActionsDisabled || !machine.workspace, workspaceNote: workspaceNote(machine), saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate, onAutoPrompt, repository: repositoryByPath.get(path), onRepositoryAction, stale };
         const savedProject = manualLayout.projects[projectId];
         if (manual && savedProject) {
           const bounds = manualProjectBounds(manualLayout, projectId, visibleAgentIds, minimumProjectWidths)!;

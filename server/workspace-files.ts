@@ -165,11 +165,23 @@ export async function saveWorkspaceFile(body: Record<string, unknown>, snapshot:
         const creating = body.revision === null;
         const target = await checkedPath(root, local, creating);
         let mode = 0o666 & ~process.umask();
-        if (!creating) {
+        // A save sent again after its answer was lost finds its own content already there: that is success.
+        const unchanged = { path: local, content: body.content as string, revision: revision(bytes) };
+        if (creating) {
+          const present = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; });
+          if (present) {
+            try { await checkHandle(present, root, local); if ((await readText(present)).equals(bytes)) return unchanged; }
+            finally { await present.close(); }
+            throw failure('A file or directory already exists at this path.', 409);
+          }
+        } else {
           handle = await open(target, constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK);
           await checkHandle(handle, root, local);
           const existing = await readText(handle);
-          if (revision(existing) !== body.revision) throw failure('File changed on disk. Reload before saving to avoid overwriting changes.', 409);
+          if (revision(existing) !== body.revision) {
+            if (existing.equals(bytes)) return unchanged;
+            throw failure('File changed on disk. Reload before saving to avoid overwriting changes.', 409);
+          }
           mode = (await handle.stat()).mode & 0o7777;
         }
         const temporaryLocal = [local.split('/').slice(0, -1).join('/'), `.tower-save-${randomUUID()}`].filter(Boolean).join('/');

@@ -45,6 +45,20 @@
 .workspace-terminal .workspace-terminal-tab>.workspace-terminal-tab-close { display:grid; place-items:center; padding:4px 6px 4px 3px; opacity:.65; }
 .workspace-terminal-tab-close:hover:not(:disabled), .workspace-terminal-tab-close:focus-visible { opacity:1; }
 .workspace-terminal-add { flex-shrink:0; }
+/* Shells in this folder opened elsewhere, which a new tab can join. */
+.workspace-terminal-shared { position:relative; flex-shrink:0; }
+.workspace-terminal-shared>button { display:flex; align-items:center; gap:5px; font-size:11px; white-space:nowrap; }
+.workspace-terminal-shared-menu { position:absolute; z-index:5; top:calc(100% + 4px); left:0; min-width:260px; max-width:min(360px, 80vw); padding:4px; border:1px solid #39516d; border-radius:7px; background:#101b29; box-shadow:0 10px 26px #0006; }
+.workspace-terminal-shared-menu ul { display:grid; gap:2px; margin:0; padding:0; list-style:none; }
+.workspace-terminal-shared-menu li { display:flex; align-items:center; gap:4px; padding:5px 5px 5px 9px; border-radius:5px; }
+.workspace-terminal-shared-menu li:hover, .workspace-terminal-shared-menu li:focus-within { background:#1a2c42; }
+.workspace-terminal-shared-menu li>span { display:grid; flex:1; gap:2px; min-width:0; }
+.workspace-terminal-shared-menu li button { flex-shrink:0; padding:3px 8px; font-size:11px; white-space:nowrap; }
+.workspace-terminal-shared-menu li button.danger { border-color:#8a3b34; color:#ffb8ad; }
+.workspace-terminal-shared-menu strong { overflow:hidden; font-size:12px; font-weight:500; text-overflow:ellipsis; white-space:nowrap; }
+.workspace-terminal-shared-menu small { font-size:10.5px; color:#8199b5; }
+.workspace-terminal-shared-menu p { margin:0; padding:8px 9px; color:#8199b5; font-size:11.5px; }
+.workspace-terminal-tab button[role="tab"] svg { margin-right:3px; vertical-align:-1px; }
 .workspace-terminal-panel { display:flex; flex:1; min-height:0; flex-direction:column; }
 .workspace-terminal-panel[hidden] { display:none; }
 .workspace-terminal-empty { display:flex; flex:1; flex-direction:column; align-items:center; justify-content:center; gap:10px; color:#829bb7; font-size:12px; }

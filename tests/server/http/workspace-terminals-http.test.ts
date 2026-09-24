@@ -1,7 +1,7 @@
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMonitorServer } from '../../../server/http/server.js';
@@ -110,4 +110,28 @@ test('credential changes end an open remote terminal stream and reject its old s
   assert.equal((await fetch(`${terminal}/events`, { headers: { cookie } })).status, 401);
   assert.equal((await fetch(`${terminal}/input`, { method: 'POST', headers, body: JSON.stringify({ data: 'must-not-run' }) })).status, 401);
   assert.deepEqual(inputs, []);
+});
+
+test('this Tower lists the shells in a folder, naming the computer that opened one from elsewhere', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-terminal-list-'));
+  const cwd = join(dir, 'project'); await mkdir(cwd);
+  const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'fixture', version: 'test', updatedAt: new Date().toISOString(), groups: [{ cwd, title: '', pinned: true }] };
+  const pty = (): WorkspacePty => ({ write: () => {}, resize: () => {}, kill: () => {}, onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }) });
+  const workspaceTerminals = new WorkspaceTerminals({ spawnPty: pty });
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, workspaceTerminals,
+    links: { identity: { key: '', cert: '', pin: '', id: '', fingerprint: '' }, hostname: () => 'fixture', exclusions: undefined as never, controller: undefined as never,
+      node: { list: () => [{ id: 'controllerabc', name: 'Studio Mac', fingerprint: '', state: 'paired', status: 'connected' }] } as never },
+    backend: { snapshot: () => snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('unused'); }, cancel: async () => {}, subscribe: () => () => {} },
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  // Shells are opened in the folder's real path, as the routes that open them do.
+  const root = await realpath(cwd);
+  const own = await workspaceTerminals.create(root, 80, 24);
+  const remote = await workspaceTerminals.create(root, 80, 24, { opener: 'controllerabc' });
+  await workspaceTerminals.create(dir, 80, 24);
+  const listed = await (await fetch(`${base}/api/workspace/terminals?${new URLSearchParams({ cwd })}`)).json() as { terminals: Array<{ id: string; openedBy?: string }> };
+  assert.deepEqual(listed.terminals.map(item => [item.id, item.openedBy]), [[own.id, undefined], [remote.id, 'Studio Mac']]);
+  assert.equal((await fetch(`${base}/api/workspace/terminals?${new URLSearchParams({ cwd: dir })}`)).status, 403, 'only folders Tower lists');
 });

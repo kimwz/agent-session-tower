@@ -27,17 +27,33 @@ export async function workspaceTerminalSession(cwd: string, resume: (id: string)
   try { return await operation; } finally { if (pending.get(cwd) === operation) pending.delete(cwd); }
 }
 
+/** The shell a slot reconnects to, if it has one. */
+export function savedWorkspaceTerminal(slot: string): string | undefined {
+  const known = ids.get(slot);
+  if (known) return known;
+  try { const saved = storage()?.getItem(prefix + slot) ?? null; return validId(saved) ? saved : undefined; } catch { return undefined; }
+}
+
+/** Points a new slot at an existing shell, so its tab joins that shell instead of starting one. */
+export function bindWorkspaceTerminal(slot: string, id: string): void {
+  if (!validId(id)) return;
+  ids.set(slot, id);
+  try { storage()?.setItem(prefix + slot, id); } catch { /* In-memory only. */ }
+}
+
 export function forgetWorkspaceTerminal(cwd: string, id: string): void {
   if (ids.get(cwd) === id) ids.delete(cwd);
   try { if (storage()?.getItem(prefix + cwd) === id) storage()?.removeItem(prefix + cwd); } catch { /* Storage may be disabled. */ }
 }
 
-export interface TerminalTab { key: string; number: number }
+/** `joined`: the tab shows a shell opened elsewhere; closing it leaves that shell open. */
+export interface TerminalTab { key: string; number: number; joined?: true }
 export const MAX_TERMINAL_TABS = 8;
 const tabsPrefix = 'agent-monitor.workspace-terminal-tabs:';
 const validTab = (value: unknown): value is TerminalTab => !!value && typeof value === 'object'
   && typeof (value as TerminalTab).key === 'string' && /^[a-z0-9-]{1,40}$/.test((value as TerminalTab).key)
-  && Number.isInteger((value as TerminalTab).number) && (value as TerminalTab).number >= 1 && (value as TerminalTab).number <= 999;
+  && Number.isInteger((value as TerminalTab).number) && (value as TerminalTab).number >= 1 && (value as TerminalTab).number <= 999
+  && [undefined, true].includes((value as TerminalTab).joined);
 
 /** The first tab keeps the pre-tab storage slot, so a shell opened before an upgrade reconnects. */
 export function terminalSlot(cwd: string, tab: TerminalTab): string { return tab.key === 'main' ? cwd : `${cwd}\u0000${tab.key}`; }

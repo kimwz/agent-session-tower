@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { workspaceTerminalSession, forgetWorkspaceTerminal, MAX_TERMINAL_TABS, nextTerminalTab, readTerminalTabs, saveTerminalTabs, terminalSlot } from '../../../client/src/workspace/terminal-session.js';
+import { bindWorkspaceTerminal, savedWorkspaceTerminal, workspaceTerminalSession, forgetWorkspaceTerminal, MAX_TERMINAL_TABS, nextTerminalTab, readTerminalTabs, saveTerminalTabs, terminalSlot } from '../../../client/src/workspace/terminal-session.js';
+import { workspacePath } from '../../../client/src/remote/scope.js';
 
 const firstId = '10000000-0000-4000-8000-000000000001';
 const secondId = '10000000-0000-4000-8000-000000000002';
@@ -74,7 +75,10 @@ test('terminal tabs persist per folder, keep the first tab on the pre-tab slot a
   assert.equal(nextTerminalTab([second]).number, 3);
   saveTerminalTabs(cwd, []);
   assert.deepEqual(readTerminalTabs(cwd), [], 'closing every tab is remembered');
-  for (const invalid of ['not json', JSON.stringify([{ key: 'Bad Key', number: 1 }]), JSON.stringify([main, main]),
+  const joined = { ...nextTerminalTab([main]), joined: true as const };
+  saveTerminalTabs(cwd, [main, joined]);
+  assert.deepEqual(readTerminalTabs(cwd), [main, joined], 'a tab that joined a shell opened elsewhere is remembered as such');
+  for (const invalid of ['not json', JSON.stringify([{ key: 'Bad Key', number: 1 }]), JSON.stringify([main, main]), JSON.stringify([{ ...main, joined: 'yes' }]),
     JSON.stringify(Array.from({ length: MAX_TERMINAL_TABS + 1 }, (_, index) => ({ key: `t${index}`, number: index + 1 })))]) {
     values.set(`agent-monitor.workspace-terminal-tabs:${cwd}`, invalid);
     assert.deepEqual(readTerminalTabs(cwd), [{ key: 'main', number: 1 }]);
@@ -86,4 +90,26 @@ test('terminal tabs persist per folder, keep the first tab on the pre-tab slot a
   assert.equal(created, 2);
   forgetWorkspaceTerminal(terminalSlot(cwd, main), firstId);
   forgetWorkspaceTerminal(terminalSlot(cwd, second), secondId);
+});
+
+test('a tab joining a shell opened elsewhere reconnects to it instead of starting one', async () => {
+  const slot = terminalSlot('/fixture/join', { key: 'joined', number: 2 });
+  assert.equal(savedWorkspaceTerminal(slot), undefined);
+  bindWorkspaceTerminal(slot, secondId);
+  assert.equal(savedWorkspaceTerminal(slot), secondId);
+  let created = 0;
+  let resumed = '';
+  assert.equal(await workspaceTerminalSession(slot, async id => { resumed = id; }, async () => { created++; return firstId; }), secondId);
+  assert.equal(resumed, secondId);
+  assert.equal(created, 0);
+  bindWorkspaceTerminal(slot, 'not-an-id');
+  assert.equal(savedWorkspaceTerminal(slot), secondId, 'only a shell ID can be joined');
+  forgetWorkspaceTerminal(slot, secondId);
+});
+
+test('workspace requests for another computer’s folder go to that computer with its own path', () => {
+  const node = 'b'.repeat(32);
+  assert.equal(workspacePath('/work/app', '/api/workspace/tree', { path: 'src' }), '/api/workspace/tree?cwd=%2Fwork%2Fapp&path=src');
+  assert.equal(workspacePath(`@${node}//work/app`, '/api/workspace/file', { path: 'a b.md' }), `/api/nodes/${node}/workspace/file?cwd=%2Fwork%2Fapp&path=a+b.md`);
+  assert.equal(workspacePath(`@${node}//work/app`, '/api/workspace/terminals'), `/api/nodes/${node}/workspace/terminals?cwd=%2Fwork%2Fapp`);
 });

@@ -33,7 +33,7 @@ import { SessionRow } from '../sessions/SessionRow';
 import { reconcileApprovalDecisions } from '../chat/chat-approvals';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { connectSnapshotStream, NodeSnapshotStore, SnapshotStore } from './snapshot-stream';
-import { combinedView, hostOf, hostProblem } from '../remote/hosts';
+import { combinedView, hostNames, hostOf, hostProblem, workspaceNote } from '../remote/hosts';
 import { localPart, nodeOf, nodePath, pathFor, splitScopedId } from '../remote/scope';
 
 type StatusFilter = 'all' | SessionStatus;
@@ -60,6 +60,7 @@ function TowerApp() {
   const [nodeSnapshots, setNodeSnapshots] = useState<ReadonlyMap<string, Snapshot>>(() => new Map());
   const [nodeStore] = useState(() => new NodeSnapshotStore(setNodeSnapshots));
   const { view, hosts, complete: hostsComplete } = useMemo(() => combinedView(snapshot, nodeSnapshots), [snapshot, nodeSnapshots]);
+  useEffect(() => { hostNames.clear(); for (const host of hosts) if (host.node) hostNames.set(host.node, host.name); }, [hosts]);
   const [machine, setMachine] = useState<'all' | 'local' | string>('all');
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   const [requestedSlackId, setSelectedSlackId] = useState<string | null | undefined>(undefined);
@@ -316,8 +317,8 @@ function TowerApp() {
   }, [refresh, selectSession, snapshots]);
 
   const chatHostEntry = activeChatId ? hostOf(hosts, nodeOf(activeChatId)) : undefined;
-  const chatHost = chatHostEntry?.node ? { name: chatHostEntry.name, live: chatHostEntry.live, canWork: chatHostEntry.canWork, problem: hostProblem(chatHostEntry) }
-    : activeChatId && nodeOf(activeChatId) ? { name: t("더 이상 연결되지 않은 컴퓨터"), live: false, canWork: false, problem: t("그 컴퓨터는 더 이상 연결되어 있지 않습니다.") } : undefined;
+  const chatHost = chatHostEntry?.node ? { name: chatHostEntry.name, live: chatHostEntry.live, canWork: chatHostEntry.canWork, problem: hostProblem(chatHostEntry), workspace: chatHostEntry.workspace, workspaceNote: workspaceNote(chatHostEntry) }
+    : activeChatId && nodeOf(activeChatId) ? { name: t("더 이상 연결되지 않은 컴퓨터"), live: false, canWork: false, workspace: false, problem: t("그 컴퓨터는 더 이상 연결되어 있지 않습니다.") } : undefined;
   const hasCanvasHistory = canvasVisibleSessions(mainSessions.filter(session => !finishedSlackIds.has(session.id)), [], true).length > 0;
   const canvasEmptyState = !canvasSessions.length && !visiblePins.length && <div className="graph-empty canvas-empty">
     <h3>{hasHiddenMatches ? t("폴더가 숨겨져 있습니다") : hasCanvasHistory ? t("표시할 세션이 없습니다") : t("새 세션을 시작해 보세요")}</h3>

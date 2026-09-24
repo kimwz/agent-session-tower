@@ -186,7 +186,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         // Reading Tower state is not a mutation; only changes count against the request budget.
         const read = path.match(/^\/api\/v1\/([a-z]+\.[a-zA-Z]+)$/)?.[1];
         const readOnly = read !== undefined && isOperationName(read) && !OPERATIONS[read].write;
-        if (!login && !readOnly && !/^\/api\/workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
+        if (!login && !readOnly && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
           const key = req.socket.remoteAddress || 'local';
           const now = Date.now();
           const rate = rates.get(key);
@@ -257,6 +257,14 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       }
       if (req.method === 'POST' && path === '/api/workspace/directory') {
         return json(res, 200, await createWorkspaceDirectory(await readJson(req), backend.snapshot()));
+      }
+      if (req.method === 'GET' && path === '/api/workspace/terminals') {
+        // Shells in this folder, whoever opened them, so any window can join one.
+        const cwd = await assertWorkspace(url.searchParams.get('cwd'), backend.snapshot());
+        const names = new Map(links && !('error' in links) ? links.node.list().map(item => [item.id, item.name]) : []);
+        const shells = (await workspaceTerminals.list?.()) ?? [];
+        return json(res, 200, { terminals: shells.filter(shell => shell.cwd === cwd && !shell.exited)
+          .map(shell => ({ id: shell.id, openedAt: shell.openedAt, ...(shell.opener === 'local' ? {} : { openedBy: names.get(shell.opener) ?? shell.opener }) })) });
       }
       if (req.method === 'POST' && path === '/api/workspace/terminals') {
         const body = await readJson(req);
@@ -331,6 +339,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
           return json(res, 200, { ok: true });
         }
         if (!nodes.known(nodeRoute[1])) return json(res, 404, { error: '연결된 컴퓨터가 아닙니다.' });
+        // A signed-in browser elsewhere loses its streams to other computers when it signs out, like its own.
+        if (!identity.local) trackStream(sessionId, res, () => res.destroy());
         return proxyToNode(req, res, nodes.session(nodeRoute[1]), `/api/${nodeRoute[2]}${url.search}`);
       }
       if (req.method === 'POST' && path === '/api/repositories') {

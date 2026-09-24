@@ -22,8 +22,17 @@ export interface WorkspaceTerminalOptions {
   /** A durable execution host keeps running shells until explicitly closed. */
   keepAliveOnDisconnect?: boolean;
 }
+/** Who opened a shell: this computer's own pages, or a controller over its link. */
+export interface TerminalOwner {
+  opener: string;
+  /** A controller's request ID; sending the same request again answers with the same shell. */
+  requestId?: string;
+}
+export interface TerminalSummary { id: string; cwd: string; opener: string; openedAt: string; exited: boolean }
 export interface WorkspaceTerminalBackend {
-  create(cwd: string, cols: unknown, rows: unknown): Promise<{ id: string }>;
+  create(cwd: string, cols: unknown, rows: unknown, owner?: TerminalOwner): Promise<{ id: string }>;
+  /** Shells with a known folder and opener; undefined when the shells' owner is too old to say. */
+  list?(): Promise<TerminalSummary[] | undefined> | TerminalSummary[] | undefined;
   attach(id: string, response: ServerResponse, lastEventId?: string): void | Promise<void>;
   input(id: string, data: unknown): void | Promise<void>;
   resize(id: string, cols: unknown, rows: unknown): void | Promise<void>;
@@ -33,11 +42,14 @@ export interface WorkspaceTerminalBackend {
 interface Output { id: number; data: string }
 interface Stream { response: ServerResponse; blocked: boolean; queue: string[]; bytes: number }
 interface Terminal {
+  cwd: string; opener: string; openedAt: string; request?: string;
   pty: WorkspacePty; output: Output[]; bytes: number; sequence: number; exitCode?: number;
   streams: Set<Stream>; subscriptions: Disposable[]; expiry?: ReturnType<typeof setTimeout>;
   inputRate: { at: number; count: number; bytes: number };
 }
 const BUFFER_LIMIT = 256 * 1024;
+/** Windows on this computer and on every controller can watch one shell together. */
+const MAX_STREAMS = 6;
 function failure(message: string, statusCode = 400): Error { return Object.assign(new Error(message), { statusCode }); }
 function frame(event: string, data: unknown, id?: number): string { return `${id === undefined ? '' : `id: ${id}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`; }
 
@@ -51,6 +63,8 @@ export function terminalSize(cols: unknown, rows: unknown): { cols: number; rows
 /** Only authenticated routes expose PTYs; a durable host may retain them across UI disconnects. */
 export class WorkspaceTerminals {
   private readonly terminals = new Map<string, Terminal>();
+  /** Creations in progress or done, by opener and request ID. */
+  private readonly requests = new Map<string, Promise<{ id: string }>>();
   private pending = 0;
   private disposed = false;
   private readonly heartbeat: ReturnType<typeof setInterval>;
@@ -61,10 +75,25 @@ export class WorkspaceTerminals {
     this.heartbeat.unref();
   }
 
-  async create(cwd: string, cols: unknown, rows: unknown): Promise<{ id: string }> {
+  create(cwd: string, cols: unknown, rows: unknown, owner: TerminalOwner = { opener: 'local' }): Promise<{ id: string }> {
+    if (!owner.requestId) return this.start(cwd, cols, rows, owner);
+    const key = `${owner.opener}\u0000${owner.requestId}`;
+    const known = this.requests.get(key);
+    if (known) return known;
+    const started = this.start(cwd, cols, rows, owner);
+    this.requests.set(key, started);
+    started.catch(() => { if (this.requests.get(key) === started) this.requests.delete(key); });
+    return started;
+  }
+
+  list(): TerminalSummary[] {
+    return [...this.terminals].map(([id, terminal]) => ({ id, cwd: terminal.cwd, opener: terminal.opener, openedAt: terminal.openedAt, exited: terminal.exitCode !== undefined }));
+  }
+
+  private async start(cwd: string, cols: unknown, rows: unknown, owner: TerminalOwner): Promise<{ id: string }> {
     const size = terminalSize(cols, rows);
     if (this.disposed) throw failure('터미널 서버가 종료되었습니다.', 503);
-    if (this.terminals.size + this.pending >= (this.options.maxTerminals ?? 8)) throw failure('열려 있는 터미널이 너무 많습니다. 사용하지 않는 터미널을 닫으세요.', 429);
+    if (this.terminals.size + this.pending >= (this.options.maxTerminals ?? 8)) throw failure('열려 있는 터미널이 너무 많습니다. 사용하지 않는 터미널을 닫거나, 폴더의 ‘열린 터미널’에서 남아 있는 터미널을 끝내세요.', 429);
     this.pending++;
     try {
       const env = Object.fromEntries(Object.entries(this.options.env ?? process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
@@ -74,7 +103,8 @@ export class WorkspaceTerminals {
       const pty = await factory(shell, windows ? [] : ['-l'], { ...size, cwd, name: 'xterm-256color', env: { ...env, TERM: 'xterm-256color' } });
       if (this.disposed) { pty.kill(); throw failure('터미널 서버가 종료되었습니다.', 503); }
       const id = randomUUID();
-      const terminal: Terminal = { pty, output: [], bytes: 0, sequence: 0, streams: new Set(), subscriptions: [], inputRate: { at: Date.now(), count: 0, bytes: 0 } };
+      const terminal: Terminal = { cwd, opener: owner.opener, openedAt: new Date().toISOString(), ...(owner.requestId ? { request: `${owner.opener}\u0000${owner.requestId}` } : {}),
+        pty, output: [], bytes: 0, sequence: 0, streams: new Set(), subscriptions: [], inputRate: { at: Date.now(), count: 0, bytes: 0 } };
       this.terminals.set(id, terminal);
       terminal.subscriptions.push(pty.onData(data => this.output(terminal, data)), pty.onExit(({ exitCode }) => {
         terminal.exitCode = exitCode;
@@ -106,7 +136,7 @@ export class WorkspaceTerminals {
   attach(id: string, response: ServerResponse, lastEventId?: string): void {
     const terminal = this.get(id);
     if (lastEventId !== undefined && (!/^\d{1,12}$/.test(lastEventId) || Number(lastEventId) > terminal.sequence)) throw failure('터미널 출력 위치가 올바르지 않습니다.');
-    if (terminal.streams.size >= 2) throw failure('터미널에 연결된 창이 너무 많습니다.', 429);
+    if (terminal.streams.size >= MAX_STREAMS) throw failure('터미널에 연결된 창이 너무 많습니다.', 429);
     if (terminal.expiry) clearTimeout(terminal.expiry);
     response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     const stream: Stream = { response, blocked: false, queue: [], bytes: 0 };
@@ -141,6 +171,7 @@ export class WorkspaceTerminals {
   close(id: string): void {
     const terminal = this.get(id);
     this.terminals.delete(id);
+    if (terminal.request) this.requests.delete(terminal.request);
     if (terminal.expiry) clearTimeout(terminal.expiry);
     for (const subscription of terminal.subscriptions) subscription.dispose();
     if (terminal.exitCode === undefined) { try { terminal.pty.kill(); } catch { /* Already gone. */ } }

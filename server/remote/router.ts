@@ -8,6 +8,10 @@ import { SnapshotStream } from '../http/snapshot-stream.js';
 import { SseClient } from '../http/sse-client.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
+import { assertWorkspace, createWorkspaceDirectory, listWorkspaceTree, MAX_WORKSPACE_FILE_BYTES, readWorkspaceFile, saveWorkspaceFile } from '../workspace-files.js';
+import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
+import { realpath, stat } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { AutoPromptJob, RunOrigin, Session } from '../../shared/types.js';
 import type { RemoteExclusionStore } from './exclusions.js';
 import { remoteJob, remoteJobVisible, remotePage, remoteRepository, remoteRun, remoteSession, remoteSessionIds, remoteSnapshot, type RemoteScope } from './visibility.js';
@@ -22,6 +26,8 @@ export interface RemotePrincipal { controllerId: string }
 export interface RemoteRouterOptions {
   backend: Backend;
   exclusions: RemoteExclusionStore;
+  /** This computer's shells; a controller opens and joins them in folders it can see. */
+  terminals?: WorkspaceTerminalBackend;
   /** Mutating requests one controller may make per minute. */
   mutationsPerMinute?: number;
 }
@@ -36,8 +42,10 @@ const REQUEST_ID_HEADER = 'x-tower-request-id';
  * answers with remote views that leave out excluded folders and coordinator conversations. Local management
  * (accounts, pairing, the exclusion list) has no route here at all.
  */
-export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 60 }: RemoteRouterOptions) {
+export function createRemoteRouter({ backend, exclusions, terminals, mutationsPerMinute = 60 }: RemoteRouterOptions) {
   const streams = new Map<string, { stream: SnapshotStream; clients: Set<SseClient> }>();
+  /** Terminal output streams to controllers; they end when the sharing list changes (the shells go on). */
+  const shellStreams = new Set<Reply>();
   const rates = new Map<string, { count: number; at: number }>();
   let scheduled: ReturnType<typeof setTimeout> | undefined;
   /** Resolves where every folder in the snapshot really is, so views are exact instead of hiding the unresolved. */
@@ -62,7 +70,11 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
   };
   const unsubscribe = backend.subscribe(publish);
   // A frame built or queued under the old list must never go out: end every stream; controllers reconnect to a fresh view.
-  const listChanged = () => { for (const id of [...streams.keys()]) disconnect(id); };
+  const listChanged = () => {
+    for (const id of [...streams.keys()]) disconnect(id);
+    for (const res of [...shellStreams]) res.end();
+    shellStreams.clear();
+  };
   exclusions.on('change', listChanged);
   exclusions.on('resolved', publish);
   const heartbeat = setInterval(() => { for (const entry of streams.values()) for (const client of entry.clients) client.heartbeat(); }, 15_000);
@@ -138,6 +150,19 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(JSON.stringify(body));
   };
+  /** A shell a controller may use: one Tower knows the folder and opener of, in a folder shared right now. */
+  const shell = async (id: string) => {
+    const found = (await terminals?.list?.())?.find(item => item.id === id && !item.exited);
+    if (!found || await exclusions.excludesNow(found.cwd)) throw httpError(404, '터미널을 찾을 수 없습니다. 새 터미널을 여세요.');
+    return found;
+  };
+  /** A path inside a shared folder that is not itself in an excluded folder. */
+  const sharedPath = async (cwd: unknown, path: unknown) => {
+    if (typeof cwd !== 'string') throw httpError(404, FOLDER_NOT_FOUND);
+    await listedFolder(cwd);
+    if (typeof path === 'string' && path && await exclusions.excludesNow(join(cwd, path))) throw httpError(404, '파일을 찾을 수 없습니다.');
+    return cwd;
+  };
   const limit = (principal: RemotePrincipal) => {
     const now = Date.now();
     const rate = rates.get(principal.controllerId);
@@ -199,6 +224,34 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
       res.end(method === 'HEAD' ? undefined : content);
       return;
     }
+    if (method === 'GET' && path === '/api/workspace/tree') {
+      const cwd = await sharedPath(url.searchParams.get('cwd'), url.searchParams.get('path') ?? '');
+      const listed = await listWorkspaceTree(cwd, url.searchParams.get('path') ?? '', backend.snapshot());
+      // Excluded folders inside a shared one are left out of its listing.
+      const hidden = await Promise.all(listed.entries.map(entry => exclusions.excludesNow(join(cwd, entry.path))));
+      return json(res, 200, { entries: listed.entries.filter((_, index) => !hidden[index]) });
+    }
+    if (method === 'GET' && path === '/api/workspace/file') {
+      const cwd = await sharedPath(url.searchParams.get('cwd'), url.searchParams.get('path'));
+      return json(res, 200, await readWorkspaceFile(cwd, url.searchParams.get('path'), backend.snapshot()));
+    }
+    const terminal = path.match(/^\/api\/workspace\/terminals\/([0-9a-f-]{36})\/(events|input|resize|close)$/);
+    if (method === 'GET' && path === '/api/workspace/terminals') {
+      const cwd = await sharedPath(url.searchParams.get('cwd'), '');
+      const root = await realpath(cwd).catch(() => cwd);
+      const shells = (await terminals?.list?.()) ?? [];
+      return json(res, 200, { terminals: shells.filter(item => item.cwd === root && !item.exited).map(item => ({ id: item.id, openedAt: item.openedAt, ...(item.opener === principal.controllerId ? {} : { openedBy: item.opener === 'local' ? 'local' : 'other' }) })) });
+    }
+    if (method === 'GET' && terminal?.[2] === 'events') {
+      if (!terminals) throw notFound();
+      await shell(terminal[1]);
+      const cursor = req.headers['last-event-id'];
+      if (Array.isArray(cursor)) throw httpError(400, '터미널 출력 위치가 올바르지 않습니다.');
+      shellStreams.add(res);
+      res.once('close', () => shellStreams.delete(res));
+      await terminals.attach(terminal[1], res, cursor);
+      return;
+    }
     const autoPrompt = path.match(/^\/api\/auto-prompts\/([a-f\d-]+)(\/cancel)?$/i);
     if (method === 'GET' && autoPrompt && !autoPrompt[2] && UUID.test(autoPrompt[1])) {
       const job = backend.getAutoPrompt?.(autoPrompt[1]);
@@ -207,7 +260,49 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
       return json(res, 200, { job: remoteJob(job, principal.controllerId, current.matcher.revision) });
     }
     if (method !== 'POST') throw notFound();
+    // Keystrokes have their own per-shell budget.
+    if (terminal?.[2] === 'input' || terminal?.[2] === 'resize') {
+      if (!terminals) throw notFound();
+      await shell(terminal[1]);
+      const body = await readJson(req);
+      if (terminal[2] === 'input') { if (Object.keys(body).some(key => key !== 'data')) throw httpError(400, '터미널 요청 형식이 올바르지 않습니다.'); await terminals.input(terminal[1], body.data); }
+      else { if (Object.keys(body).some(key => key !== 'cols' && key !== 'rows')) throw httpError(400, '터미널 요청 형식이 올바르지 않습니다.'); await terminals.resize(terminal[1], body.cols, body.rows); }
+      return json(res, 200, { ok: true });
+    }
     limit(principal);
+    if (terminal?.[2] === 'close') {
+      if (!terminals) throw notFound();
+      await shell(terminal[1]);
+      if (Object.keys(await readJson(req)).length) throw httpError(400, '터미널 요청 형식이 올바르지 않습니다.');
+      await terminals.close(terminal[1]);
+      return json(res, 200, { ok: true });
+    }
+    if (path === '/api/workspace/terminals') {
+      if (!terminals?.list) throw notFound();
+      const body = await readJson(req);
+      if (Object.keys(body).some(key => !['cwd', 'cols', 'rows'].includes(key))) throw httpError(400, '폴더와 터미널 크기만 지정할 수 있습니다.');
+      const id = requestId(req);
+      const cwd = await sharedPath(body.cwd, '');
+      // A shell a controller opens must be one every controller can find and this computer can close.
+      if (await terminals.list() === undefined) throw Object.assign(httpError(503, '이 컴퓨터의 터미널 호스트가 이전 버전입니다. 열린 터미널을 모두 닫으면 새 버전으로 바뀝니다.'), { disposition: 'not-admitted' });
+      const root = await assertWorkspace(cwd, backend.snapshot());
+      return json(res, 200, await terminals.create(root, body.cols, body.rows, { opener: principal.controllerId, requestId: id }));
+    }
+    if (path === '/api/workspace/file') {
+      const body = await readJson(req, 6 * MAX_WORKSPACE_FILE_BYTES + 16 * 1024);
+      await sharedPath(body.cwd, body.path);
+      return json(res, 200, await saveWorkspaceFile(body, backend.snapshot()));
+    }
+    if (path === '/api/workspace/directory') {
+      const body = await readJson(req);
+      const cwd = await sharedPath(body.cwd, body.path);
+      // A folder made by a request sent again after its answer was lost is already there: that is success.
+      try { return json(res, 200, await createWorkspaceDirectory(body, backend.snapshot())); }
+      catch (error) {
+        if (errorStatus(error) === 409 && typeof body.path === 'string' && await stat(join(cwd, body.path)).then(info => info.isDirectory(), () => false)) return json(res, 200, { path: body.path });
+        throw error;
+      }
+    }
     if (path === '/api/sessions') {
       const input = parseCreateSession(await readJson(req));
       const id = requestId(req);
@@ -341,6 +436,8 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
       clearInterval(recheck);
       if (scheduled) clearTimeout(scheduled);
       for (const id of [...streams.keys()]) disconnect(id);
+      for (const res of shellStreams) res.end();
+      shellStreams.clear();
     },
   };
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { ChevronRight, File, Folder, LoaderCircle, RefreshCw } from 'lucide-react';
 import { api } from '../common/lib';
+import { workspacePath } from '../remote/scope';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 
 export type WorkspaceEntry = { name: string; path: string; type: 'file' | 'directory' };
@@ -38,7 +39,7 @@ function DirectoryListing({ cwd, path, refresh, ...selection }: DirectoryProps) 
   useEffect(() => {
     const abort = new AbortController();
     setLoading(true); setError('');
-    void api<{ entries: WorkspaceEntry[] }>(`/api/workspace/tree?${new URLSearchParams({ cwd, path })}`, { signal: abort.signal }).then(result => {
+    void api<{ entries: WorkspaceEntry[] }>(workspacePath(cwd, '/api/workspace/tree', { path }), { signal: abort.signal }).then(result => {
       if (!abort.signal.aborted) setEntries(result.entries);
     }).catch(error => {
       if (!abort.signal.aborted) setError(error instanceof Error ? error.message : String(error));

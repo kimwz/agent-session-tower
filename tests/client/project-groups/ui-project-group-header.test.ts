@@ -72,11 +72,11 @@ test('a branch level with its remote shows a quiet badge, and uncommitted edits 
   assert.doesNotMatch(header(), /repository-sync/);
 });
 
-test('another computer’s folder shows its own path and leaves out this computer’s file tools', () => {
+test('another computer’s folder shows its own path and offers that computer’s file tools', () => {
   const node = 'b'.repeat(32);
   const markup = header({ path: `@${node}//Users/me/monitor` });
   assert.match(markup, /class="project-group-path folder-tail" title="\/Users\/me\/monitor"><bdi dir="ltr">\/Users\/me\/monitor<\/bdi>/);
   assert.doesNotMatch(markup, new RegExp(node));
   assert.match(markup, /aria-label="monitor 폴더에 새 세션"(?![^>]*disabled)/);
-  assert.doesNotMatch(markup, /workspace-actions/);
+  assert.match(markup, /workspace-actions/);
 });

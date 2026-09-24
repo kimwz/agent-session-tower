@@ -27,6 +27,12 @@ export function pathFor(scoped: string, build: (id: string) => string): string {
   return nodePath(node, build(id));
 }
 
+/** A workspace API path for a folder named by a scoped key: the folder's own computer, with its own path. */
+export function workspacePath(cwd: string, path: string, query: Record<string, string> = {}): string {
+  const { node, id } = splitScopedId(cwd);
+  return `${nodePath(node, path)}?${new URLSearchParams({ cwd: id, ...query })}`;
+}
+
 /** A time-ordered UUID, which another computer requires to run a new request at most once. */
 export function requestId(now = Date.now()): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));

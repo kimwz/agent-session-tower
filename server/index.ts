@@ -246,11 +246,13 @@ async function main() {
     console.error(`Remote computers are unavailable: ${error instanceof Error ? error.message : String(error)}`);
     return undefined;
   });
-  const remoteRouter = createRemoteRouter({ backend, exclusions });
+  const workspaceTerminals = new TerminalHostClient({ stateDir, legacy: runs.terminals });
+  const remoteRouter = createRemoteRouter({ backend, exclusions, terminals: workspaceTerminals });
   const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname });
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
-    // What this computer can do for a controller depends on the worker it runs with right now.
-    features: () => runs.coordinators() ? ['read', ...(runs.supports('remoteOrigins') ? ['work'] : [])] : [],
+    // What this computer can do for a controller depends on the worker it runs with right now; files and
+    // terminals do not need the worker.
+    features: () => [...runs.coordinators() ? ['read', ...(runs.supports('remoteOrigins') ? ['work'] : [])] : [], 'workspace'],
     handle: (req, res, principal) => remoteRouter.handle(req, res, principal) });
   if (nodeLinks) {
     nodeLinks.on('disconnected', (controllerId: string) => remoteRouter.disconnect(controllerId));
@@ -265,7 +267,7 @@ async function main() {
   }
   const { server, dispose } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes,
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions } : { error: linkError },
-    workspaceTerminals: new TerminalHostClient({ stateDir, legacy: runs.terminals }), remote: access.remote ? { origins: access.origins } : undefined });
+    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined });
   await new Promise<void>((accept, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => { server.removeListener('error', reject); accept(); });

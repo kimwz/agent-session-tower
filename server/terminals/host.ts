@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { acquireStateLock, MonitorAlreadyRunning } from '../instance/state-lock.js';
 import { MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths } from '../runs/runner-protocol.js';
-import { WorkspaceTerminals } from '../workspace-terminals.js';
+import { WorkspaceTerminals, type TerminalOwner } from '../workspace-terminals.js';
 
 /** The terminal host shares the worker's owner-only socket directory but has its own lock, socket and credential. */
 export async function terminalHostPaths(stateDir: string) {
@@ -45,7 +45,8 @@ export async function startTerminalHost(options: TerminalHostOptions) {
   const dispatch = async (method: string, args: unknown[]) => {
     switch (method) {
       case 'ping': return { active: options.terminals.hasActive() };
-      case 'create': return options.terminals.create(args[0] as string, args[1], args[2]);
+      case 'create': return options.terminals.create(args[0] as string, args[1], args[2], args[3] as TerminalOwner | undefined);
+      case 'list': return options.terminals.list();
       case 'input': return options.terminals.input(args[0] as string, args[1]);
       case 'resize': return options.terminals.resize(args[0] as string, args[1], args[2]);
       case 'close': return options.terminals.close(args[0] as string);

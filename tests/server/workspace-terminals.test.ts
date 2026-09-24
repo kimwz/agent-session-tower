@@ -139,3 +139,30 @@ test('adopting a live terminal cancels its prior disconnect expiry', async t => 
   assert.equal(ptys[0].killed, 0); terminals.input(id, 'still alive');
   assert.deepEqual(ptys[0].written, ['still alive']);
 });
+
+test('each shell knows its folder and who opened it, and a controller’s repeated request gets the same shell', async () => {
+  const { terminals, ptys } = setup();
+  const own = await terminals.create('/work/app', 80, 24);
+  const remote = await terminals.create('/work/app', 80, 24, { opener: 'controller-a', requestId: 'r1' });
+  const again = await terminals.create('/work/app', 100, 30, { opener: 'controller-a', requestId: 'r1' });
+  const other = await terminals.create('/work/app', 80, 24, { opener: 'controller-b', requestId: 'r1' });
+  assert.equal(again.id, remote.id, 'a request sent again after a lost answer does not open a second shell');
+  assert.notEqual(other.id, remote.id, 'request IDs are per controller');
+  assert.equal(ptys.length, 3);
+  const listed = terminals.list();
+  assert.deepEqual(listed.map(item => [item.id, item.cwd, item.opener, item.exited]), [[own.id, '/work/app', 'local', false], [remote.id, '/work/app', 'controller-a', false], [other.id, '/work/app', 'controller-b', false]]);
+  assert.ok(listed.every(item => !Number.isNaN(Date.parse(item.openedAt))));
+  terminals.close(remote.id);
+  const reopened = await terminals.create('/work/app', 80, 24, { opener: 'controller-a', requestId: 'r1' });
+  assert.notEqual(reopened.id, remote.id, 'a closed shell is not handed out again');
+  terminals.dispose();
+});
+
+test('windows on this computer and on several controllers can watch one shell together', async () => {
+  const { terminals } = setup();
+  const { id } = await terminals.create('/work/app', 80, 24);
+  const windows = Array.from({ length: 6 }, () => new Response());
+  for (const window of windows) terminals.attach(id, window.asHttp());
+  assert.throws(() => terminals.attach(id, new Response().asHttp()), /너무 많습니다/);
+  terminals.dispose();
+});

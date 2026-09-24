@@ -5,7 +5,7 @@ import { request, type ClientRequest, type ServerResponse } from 'node:http';
 import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import { MAX_RPC_BYTES, RUNNER_PROTOCOL } from '../runs/runner-protocol.js';
-import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
+import type { TerminalOwner, TerminalSummary, WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { terminalHostPaths, type TerminalHostReply } from './host.js';
 
 interface Options {
@@ -28,9 +28,19 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
   private closed = false;
   constructor(private readonly options: Options) {}
 
-  async create(cwd: string, cols: unknown, rows: unknown): Promise<{ id: string }> {
+  async create(cwd: string, cols: unknown, rows: unknown, owner?: TerminalOwner): Promise<{ id: string }> {
     await this.ensureHost();
-    return await this.call('create', [cwd, cols, rows]) as { id: string };
+    return await this.call('create', [cwd, cols, rows, ...(owner ? [owner] : [])]) as { id: string };
+  }
+  /** Shells of the terminal host; none when no host runs, and undefined for a host too old to list them. */
+  async list(): Promise<TerminalSummary[] | undefined> {
+    try { return await this.call('list') as TerminalSummary[]; }
+    catch (error) {
+      const status = (error as { statusCode?: number }).statusCode;
+      if (status === 503) return [];
+      if (status === 400) return undefined;
+      throw error;
+    }
   }
   async input(id: string, data: unknown): Promise<void> { await this.route(id, () => this.call('input', [id, data]), legacy => legacy.input(id, data)); }
   async resize(id: string, cols: unknown, rows: unknown): Promise<void> { await this.route(id, () => this.call('resize', [id, cols, rows]), legacy => legacy.resize(id, cols, rows)); }

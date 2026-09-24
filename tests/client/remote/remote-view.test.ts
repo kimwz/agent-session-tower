@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { Session, Snapshot } from '../../../shared/types.js';
 import type { RemoteNode } from '../../../shared/link.js';
 import { localPart, nodeHeaders, nodeOf, nodePath, pathFor, refusedBeforeRunning, requestId, scopedId, scopeSnapshot, settleRequest, splitScopedId } from '../../../client/src/remote/scope.js';
-import { combinedView, hostProblem, hostState } from '../../../client/src/remote/hosts.js';
+import { combinedView, hostProblem, hostState, workspaceNote } from '../../../client/src/remote/hosts.js';
 import { localOnlyAddress, RemoteContent } from '../../../client/src/remote/remote-content.js';
 import { Markdown } from '../../../client/src/chat/Markdown.js';
 import { createElement } from 'react';
@@ -154,6 +154,21 @@ test('each state of a joined computer explains in one sentence why work cannot g
   assert.equal(hostState(view({ status: 'removed-by-node', streaming: false })), 'removed-by-node');
   assert.match(hostProblem(view({ status: 'removed-by-node', streaming: false }))!, /새 명령이 필요합니다/);
   assert.equal(view({ status: 'offline', streaming: false }, false).known, false);
+});
+
+test('files and terminals of a joined computer open while it is connected and runs a Tower that serves them', () => {
+  const view = (node: Partial<RemoteNode>) => combinedView(snapshot([], { nodes: [remote(B, 'studio', { features: ['read', 'work', 'workspace'], ...node })] }), new Map([[B, snapshot([])]])).hosts;
+  const [here, ready] = view({});
+  assert.equal(here.workspace, true);
+  assert.equal(ready.workspace, true);
+  assert.equal(workspaceNote(ready), undefined);
+  assert.equal(view({ features: ['workspace'], streaming: false })[1].workspace, true, 'a computer whose worker is away still serves its files');
+  const old = view({ features: ['read', 'work'] })[1];
+  assert.equal(old.workspace, false);
+  assert.match(workspaceNote(old)!, /studio의 Tower를 업데이트하면 파일과 터미널을/);
+  const away = view({ status: 'offline', streaming: false })[1];
+  assert.equal(away.workspace, false);
+  assert.equal(workspaceNote(away), undefined, 'an offline computer is explained by its state, not by an update');
 });
 
 test('until this Tower has read its joined computers, the page treats the list as incomplete', () => {
