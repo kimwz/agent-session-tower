@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import type { RemoteChange } from '../../shared/link.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { linkDirectory } from '../link/identity.js';
-import { REMOTE_REQUEST_RETENTION_MS } from './request-ledger.js';
+import { REMOTE_REQUEST_RETENTION_MS, remoteRequestTime } from './request-ledger.js';
 
 /** How many changes are kept; the oldest go first. */
 const MAX_CHANGES = 1000;
@@ -23,11 +23,16 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
  */
 export class RemoteAudit {
   private changes: Saved[] = [];
-  /** Requests already recorded (controller and request) → when, so one sent again is recorded once. */
+  /**
+   * Requests already recorded (controller and request) → the later of when each arrived and the time in its ID, so one
+   * sent again is recorded once for as long as the request ledger would answer it again.
+   */
   private requests = new Map<string, number>();
   /** The latest computer that started controlling this one; kept apart so newer changes never push it out. */
   private joined?: RemoteChange;
   private unsaved = false;
+  /** A save is waiting; it writes the record as it is when it starts, so a burst of changes makes one write. */
+  private pending = false;
   private readonly path: string;
   private writes: Promise<unknown> = Promise.resolve();
 
@@ -60,17 +65,25 @@ export class RemoteAudit {
   /** Records a change a controlling computer made. The same `request` sent again is recorded once. */
   record(change: Omit<RemoteChange, 'at' | 'controller' | 'name'>, request?: string): void {
     const now = (this.options.now ?? Date.now)();
-    for (const [key, at] of this.requests) { if (at >= now - REMOTE_REQUEST_RETENTION_MS && this.requests.size < MAX_REQUESTS) break; this.requests.delete(key); }
+    for (const [known, at] of this.requests) if (at < now - REMOTE_REQUEST_RETENTION_MS) this.requests.delete(known);
     const key = request && `${change.controllerId}\n${request}`;
     if (key && this.requests.has(key)) return;
-    if (key) this.requests.set(key, now);
+    // One still inside its window is never forgotten to make room; past the limit a change is recorded without it.
+    if (key && this.requests.size < MAX_REQUESTS) this.requests.set(key, Math.max(now, remoteRequestTime(request) ?? now));
     const controller = this.options.name?.(change.controllerId);
     const entry: Saved = { at: new Date(now).toISOString(), ...change, ...(controller ? { controller } : {}) };
     this.changes = [...this.changes, entry].slice(-MAX_CHANGES);
     if (change.action === 'joined') this.joined = entry;
-    if (this.unsaved) return;
-    const data = JSON.stringify({ changes: this.changes, ...(this.joined ? { joined: this.joined } : {}), requests: [...this.requests] });
-    this.writes = this.writes.then(() => writePrivateJson(this.path, data)).catch(error => console.error(`Remote changes were not saved: ${message(error)}`));
+    this.save();
+  }
+
+  private save(): void {
+    if (this.unsaved || this.pending) return;
+    this.pending = true;
+    this.writes = this.writes.then(() => {
+      this.pending = false;
+      return writePrivateJson(this.path, JSON.stringify({ changes: this.changes, ...(this.joined ? { joined: this.joined } : {}), requests: [...this.requests] }));
+    }).catch(error => console.error(`Remote changes were not saved: ${message(error)}`));
   }
 
   /** Newest first. */

@@ -91,5 +91,23 @@ test('a request is remembered as long as it can be sent again, even after its ch
   clock += 8 * 24 * 60 * 60 * 1000;
   restarted.record({ controllerId: A, action: 'session', session: 'codex:s', target: '/work/app' }, request);
   assert.equal(restarted.list()[0].action, 'session', 'a request is not sent again after a week');
+  // A controlling computer's clock ahead of this one keeps its request known longer, as the request ledger does.
+  const ahead = `${(clock + 12 * 60 * 60 * 1000).toString(16).padStart(12, '0').replace(/^(.{8})(.{4})$/, '$1-$2')}-7123-8abc-0123456789ac`;
+  restarted.record({ controllerId: A, action: 'title', session: 'codex:s', target: '/work/app' }, ahead);
+  clock += 7 * 24 * 60 * 60 * 1000 + 6 * 60 * 60 * 1000;
+  restarted.record({ controllerId: A, action: 'title', session: 'codex:s', target: '/work/app' }, ahead);
+  assert.equal(restarted.list().filter(change => change.action === 'title').length, 1);
   await restarted.flush();
+});
+
+test('requests still inside their window are never forgotten to make room', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-remote-audit-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const audit = new RemoteAudit(stateDir);
+  await audit.start();
+  const id = (index: number) => `0199a2b3-c4d5-7123-8abc-${index.toString(16).padStart(12, '0')}`;
+  for (let index = 0; index < 20_001; index++) audit.record({ controllerId: A, action: 'file', target: '/work/app/a.ts' }, id(index));
+  audit.record({ controllerId: A, action: 'title', target: '/work/app' }, id(0));
+  assert.notEqual(audit.list()[0].action, 'title', 'the first request is still known');
+  await audit.flush();
 });
