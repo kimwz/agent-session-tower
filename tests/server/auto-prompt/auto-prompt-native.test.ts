@@ -15,6 +15,14 @@ const CLAUDE_PROGRESS = [
   { type: 'system', subtype: 'thinking_tokens', estimated_tokens: 12, estimated_tokens_delta: 4, user_message_uuid: 'fixture-message' },
   { type: 'system', subtype: 'thinking', content: 'Synthetic reasoning progress.' },
 ].map(frame => ({ ...frame, uuid: '11111111-1111-4111-8111-111111111111', session_id: 'fixture-session' }));
+const CLAUDE_STATUS = [
+  { type: 'system', subtype: 'commands_changed', commands: [{ name: 'review', description: 'Review a pull request', argumentHint: '' }] },
+  { type: 'system', subtype: 'status', status: 'requesting' },
+  { type: 'system', subtype: 'status', status: null, permissionMode: 'default' },
+  { type: 'system', subtype: 'session_state_changed', state: 'running' },
+  { type: 'system', subtype: 'notification', key: 'fixture', text: 'Synthetic notice.', priority: 'low' },
+  { type: 'system', subtype: 'session_state_changed', state: 'idle' },
+].map(frame => ({ ...frame, uuid: '11111111-1111-4111-8111-111111111111', session_id: 'fixture-session' }));
 
 async function fixture(t: TestContext, provider: 'claude' | 'codex' = 'codex', mode = 'success', progress: object[] = []) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-native-router-'));
@@ -52,6 +60,7 @@ else if (provider === 'claude') {
   if (mode === 'missing-structured') { delete result.structured_output; result.result = JSON.stringify(decision); }
   if (mode === 'error-result') { result.is_error=true; result.subtype='error_during_execution'; }
   if (mode !== 'incomplete') send(result, mode !== 'no-newline');
+  if (mode === 'status-after-result') { send({type:'keep_alive'}); for (const frame of JSON.parse(process.env.ROUTER_PROGRESS)) send(frame); }
   if (mode === 'trailing') process.stdout.write('bad tail');
 }
 else {
@@ -173,25 +182,29 @@ test('Claude accepts documented retry and thinking progress before and between r
   ]);
   assert.deepEqual(await runAutoPromptModel(f.request, f.dependencies), DECISION);
 });
-for (const mode of ['incomplete', 'error-result', 'tool-call', 'unknown-system']) {
-  test(`Claude progress cannot hide ${mode}`, async t => {
-    const f = await fixture(t, 'claude', mode, CLAUDE_PROGRESS);
-    await assert.rejects(runAutoPromptModel(f.request, f.dependencies));
-    assert.deepEqual(await readdir(join(f.directory, 'state', 'tmp')), []);
-  });
+for (const [label, frames] of [['progress', CLAUDE_PROGRESS], ['status lines', CLAUDE_STATUS]] as const) {
+  for (const mode of ['incomplete', 'missing-structured', 'error-result', 'tool-call', 'unknown-system']) {
+    test(`Claude ${label} cannot hide ${mode}`, async t => {
+      const f = await fixture(t, 'claude', mode, frames);
+      await assert.rejects(runAutoPromptModel(f.request, f.dependencies));
+      assert.deepEqual(await readdir(join(f.directory, 'state', 'tmp')), []);
+    });
+  }
 }
 test('Claude accepts the status lines newer versions send around a turn', async t => {
-  const status = [
-    { type: 'system', subtype: 'commands_changed', commands: [{ name: 'review', description: 'Review a pull request', argumentHint: '' }] },
-    { type: 'system', subtype: 'status', status: 'requesting' },
-    { type: 'system', subtype: 'status', status: null },
-    { type: 'system', subtype: 'session_state_changed', state: 'running' },
-    { type: 'system', subtype: 'notification', key: 'fixture', text: 'Synthetic notice.', priority: 'low' },
-    { type: 'system', subtype: 'session_state_changed', state: 'idle' },
-  ].map(frame => ({ ...frame, uuid: '11111111-1111-4111-8111-111111111111', session_id: 'fixture-session' }));
-  const f = await fixture(t, 'claude', 'success', status);
+  const f = await fixture(t, 'claude', 'success', [{ type: 'keep_alive' }, ...CLAUDE_STATUS]);
   assert.deepEqual(await runAutoPromptModel(f.request, f.dependencies), DECISION);
-  for (const frame of [{ ...status[0], commands: 'review' }, { ...status[1], status: 'running-tools' }, { ...status[3], state: 'requires_action' }, { ...status[4], text: {} }]) {
+  const after = await fixture(t, 'claude', 'status-after-result', CLAUDE_STATUS.slice(-1));
+  assert.deepEqual(await runAutoPromptModel(after.request, after.dependencies), DECISION);
+  const [commands, status, settled, state, notification] = CLAUDE_STATUS;
+  for (const frame of [
+    { ...commands, commands: 'review' }, { ...commands, commands: [{ description: 'No name' }] },
+    { ...status, status: 'running-tools' }, { ...status, status: 'compacting' }, { ...settled, compact_result: 'success' }, { ...settled, compact_error: 'Too long.' },
+    { ...state, state: 'requires_action' }, { ...notification, text: {} },
+    { ...status, subtype: 'compact_boundary', compact_metadata: { trigger: 'auto', pre_tokens: 1000 } },
+    { ...status, subtype: 'informational', content: 'Hook output.', level: 'info' },
+    { ...status, subtype: 'memory_recall', mode: 'select', memories: [{ path: '/private/memory.md', scope: 'personal' }] },
+  ]) {
     const refused = await fixture(t, 'claude', 'success', [frame]);
     await assert.rejects(runAutoPromptModel(refused.request, refused.dependencies), /unsupported routing event/, JSON.stringify(frame));
   }
