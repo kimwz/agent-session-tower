@@ -69,7 +69,16 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-/** The execution worker keeps its code until it idles, so requests can run on an older build than this page. */
+/**
+ * The execution worker keeps its code until it idles, so requests can run on an older build than this page. A newer
+ * worker (left by an update that was undone) is not waiting to be replaced.
+ */
 export function outdatedRunner(snapshot: Pick<Snapshot, 'version' | 'runnerVersion'> | null | undefined): string | undefined {
-  return snapshot?.runnerVersion && snapshot.runnerVersion !== snapshot.version ? snapshot.runnerVersion : undefined;
+  const runner = snapshot?.runnerVersion;
+  if (!runner || runner === snapshot.version) return undefined;
+  const parts = (value: string) => /^\d+\.\d+\.\d+$/.test(value) ? value.split('.').map(Number) : undefined;
+  const [mine, theirs] = [parts(snapshot.version), parts(runner)];
+  if (!mine || !theirs) return runner;
+  const index = mine.findIndex((part, position) => part !== theirs[position]);
+  return index >= 0 && theirs[index] < mine[index] ? runner : undefined;
 }

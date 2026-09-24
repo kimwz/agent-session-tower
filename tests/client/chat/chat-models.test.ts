@@ -120,5 +120,7 @@ test('a fresh composer restores the effort of the session\'s latest request, and
   assert.equal(getComposerState('s3').draft.effort, undefined, 'a later default request wins');
   assert.equal(outdatedRunner({ version: '1.12.2', runnerVersion: 'legacy' }), 'legacy');
   assert.equal(outdatedRunner({ version: '1.12.2', runnerVersion: '1.12.2' }), undefined);
+  assert.equal(outdatedRunner({ version: '1.12.2', runnerVersion: '1.12.1' }), '1.12.1');
+  assert.equal(outdatedRunner({ version: '1.12.2', runnerVersion: '1.13.0' }), undefined, 'a newer worker left by an undone update is not waiting to be replaced');
   assert.equal(outdatedRunner({ version: '1.12.2' }), undefined);
 });

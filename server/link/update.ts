@@ -81,7 +81,8 @@ function alive(pid: number): boolean {
 }
 /** When a process started, as the system tells it; a pid given to another process later starts at another time. */
 async function startedAt(pid: number): Promise<string | undefined> {
-  try { return (await run('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 5000 })).stdout.trim() || undefined; } catch { return undefined; }
+  // Read the same way whatever language and time zone the reader runs with.
+  try { return (await run('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 5000, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } })).stdout.trim() || undefined; } catch { return undefined; }
 }
 /** The lock's owner: its pid and when it started. However long the computer slept, a live helper still owns it. */
 async function lockOwner(stateDir: string): Promise<{ pid: number; started?: string } | undefined> {
@@ -350,7 +351,9 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
         if (answer) missed = 0;
       }
       if (linked.length && !await wait(async () => (await steps.controllers())?.some(id => linked.includes(id)), LINK_MS)) return await back('link-failed', 'verifying');
-      if (await same() === false) return await back('start-failed', 'verifying');
+      let final = await same();
+      for (let tries = 0; final === undefined && tries < 3; tries++) { await steps.sleep(1000); final = await same(); }
+      if (final !== true) return await back('start-failed', 'verifying');
       // Kept before the hold goes: stopped in between, the hold only runs out, and nothing is checked again unheld.
       await set('done');
       await rm(paths.hold, { force: true });
@@ -361,6 +364,7 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
       if (status.stage === 'rolling-back') return await back(status.code ?? 'interrupted', status.failedStage ?? 'verifying');
       if (status.stage === 'switching' || status.stage === 'verifying') return await verify(undefined, status.controllers ?? []);
       await set('failed', { code: 'interrupted', failedStage: status.stage });
+      await rm(paths.hold, { force: true });
       return status;
     }
     await set('installing');
