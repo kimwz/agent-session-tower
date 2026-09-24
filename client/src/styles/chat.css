@@ -581,3 +581,83 @@
   color:#7692b6;
   margin-top:10px
 }
+/* Your latest message stays at the top while you read the work that followed it. The anchor takes no space. */
+.pinned-prompt-anchor {
+  position:sticky;
+  top:0;
+  z-index:5;
+  height:0
+}
+/* What scrolls under the pinned message fades out above it instead of showing through the gap. */
+.pinned-prompt-anchor:has(.pinned-prompt)::before {
+  content:'';
+  position:absolute;
+  top:0;
+  left:-23px;
+  right:-23px;
+  height:26px;
+  background:linear-gradient(#0f1723 60%,#0f172300);
+  pointer-events:none
+}
+.pinned-prompt {
+  position:absolute;
+  top:6px;
+  left:0;
+  right:0;
+  background:#1c2b40f2;
+  border:1px solid #30425b;
+  border-radius:9px;
+  box-shadow:0 6px 18px #0009;
+  backdrop-filter:blur(6px)
+}
+.pinned-prompt-line {
+  display:flex;
+  align-items:center;
+  gap:9px;
+  width:100%;
+  min-width:0;
+  padding:7px 12px;
+  border:0;
+  background:none;
+  color:#becde2;
+  font:inherit;
+  font-size:12px;
+  text-align:left;
+  cursor:pointer
+}
+.pinned-prompt-label {
+  flex-shrink:0;
+  color:#a7bddd;
+  font-size:11px
+}
+.pinned-prompt-text {
+  flex:1;
+  min-width:0;
+  overflow:hidden;
+  white-space:nowrap;
+  text-overflow:ellipsis
+}
+.pinned-prompt-line>svg {
+  flex-shrink:0;
+  color:#8fa6c4
+}
+.pinned-prompt-body {
+  max-height:min(45vh,420px);
+  overflow-y:auto;
+  padding:2px 14px 10px;
+  border-top:1px solid #30425b;
+  color:#becde2;
+  font-size:13px;
+  overscroll-behavior:contain
+}
+.pinned-prompt-actions {
+  display:flex;
+  justify-content:flex-end;
+  gap:14px;
+  margin-top:8px
+}
+.pinned-prompt-actions .text-button {
+  display:inline-flex;
+  align-items:center;
+  gap:4px
+}

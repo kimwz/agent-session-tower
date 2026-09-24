@@ -1408,4 +1408,8 @@ export const english: Record<string, string> = {
   "취소함": "Cancelled",
   "추가할 컴퓨터(macOS 또는 Linux)의 터미널에서 아래 명령을 한 번 실행하세요. 같은 버전의 Tower가 설치되어 백그라운드에서 계속 실행되고, 이 컴퓨터에 연결됩니다. macOS에서는 로그인할 때, Linux에서는 컴퓨터가 켜질 때 시작합니다.": "Run this command once in a terminal on the computer you are adding (macOS or Linux). It installs the same version of Tower, keeps it running in the background, and connects it to this computer. It starts at login on macOS and when the computer starts on Linux.",
   "그 컴퓨터에는 Node.js 22.13 이상이 필요하고, 쓸 Claude Code나 Codex에 로그인되어 있어야 합니다.": "That computer needs Node.js 22.13 or later, and a sign-in to the Claude Code or Codex it will use.",
+  "보낸 메시지": "Your message",
+  "보낸 메시지 전체 보기": "Show your whole message",
+  "보낸 위치로 이동": "Go to where you sent it",
+  "백그라운드 작업": "Background task",
 };

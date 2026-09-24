@@ -455,6 +455,18 @@ test('instruction admission can refresh writer ownership without waiting for the
   assert.equal(service.get(`codex:${rootId}`)?.activeProcess, true);
 });
 
+test('a background task notice Claude Code writes as a user turn reads as a notice, not as the owner speaking', () => {
+  const content = '<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<output-file>/private/tmp/tasks/b1.output</output-file>\n<status>completed</status>\n'
+    + '<summary>Background command "Run the checks" completed (exit code 0)</summary>\n<event>check exit=0</event>\nIf this event is something the user would act on now, send a PushNotification.\n</task-notification>';
+  const row = { type: 'user', uuid: 'notice', origin: { kind: 'task-notification' }, timestamp: '2026-09-24T00:00:00.000Z', message: { role: 'user', content } };
+  assert.deepEqual(parseMessages('claude', row), [{ id: 'notice:0', role: 'system', toolName: 'Background task', timestamp: '2026-09-24T00:00:00.000Z',
+    text: '**completed** · Background command "Run the checks" completed (exit code 0)\n\ncheck exit=0' }]);
+  // Older transcripts carry no origin; the tag alone tells it apart. One with nothing to read is left out.
+  assert.equal(parseMessages('claude', { ...row, origin: undefined })[0]?.role, 'system');
+  assert.deepEqual(parseMessages('claude', { ...row, message: { role: 'user', content: '<task-notification>\n</task-notification>' } }), []);
+  assert.equal(parseMessages('claude', { ...row, origin: undefined, message: { role: 'user', content: 'Please explain <task-notification> tags' } })[0]?.role, 'user');
+});
+
 test('chat extraction omits injected setup and internal reasoning but retains visible commentary', () => {
   assert.deepEqual(parseMessages('codex', codexMessage('user', '# AGENTS.md instructions\nInternal setup')), []);
   assert.deepEqual(parseMessages('codex', row('response_item', { type: 'reasoning', summary: [{ text: 'Private reasoning' }] })), []);

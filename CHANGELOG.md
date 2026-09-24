@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.32.0] - 2026-09-24
+
+### Added
+- **Your message stays at the top of the chat.** While you read the work that followed a message you sent, that message is pinned to the top of the conversation as one line. Click it to read the whole message, or to go back to where you sent it, and fold it again. It gives way as soon as the message itself, or your next one, comes into view.
+
+### Changed
+- When a background task that Claude Code started ends, Claude Code notes it in the conversation as if you had written it. Tower now shows that note as a background task notice among the agent's work, with its status and summary, and no longer as your message. It no longer counts as your latest request, and it does not make a scheduled continuation think the conversation was continued outside Tower.
+
 ## [1.31.0] - 2026-09-24
 
 ### Changed

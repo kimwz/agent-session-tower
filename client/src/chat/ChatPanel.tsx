@@ -11,6 +11,7 @@ import { resumeCommand } from '../sessions/resume-command';
 import { absoluteTime, api, copyText, providerLabels, statusLabels } from '../common/lib';
 import { mergeLatestPage, prependOlderPage, type ChatHistory } from './chat-history';
 import { ChatTranscript } from './ChatTranscript';
+import { PinnedPrompt } from './PinnedPrompt';
 import { RunControl } from './RunControl';
 import { DraftAttachments } from './ChatAttachments';
 import { addDraftFiles, formatAttachmentSize, prepareDraftAttachments } from './chat-attachments';
@@ -235,6 +236,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
       {contextBanner}
     </header>
     <div className="chat-scroll" ref={scroller} onScroll={() => { const el = scroller.current; if (!el) return; const near = el.scrollHeight - el.scrollTop - el.clientHeight < 100; followRef.current = near; setFollowing(near); }}>
+      {detail && <PinnedPrompt key={sessionId} scroller={scroller} messages={detail.messages} runMatches={runProjection.matches} />}
       {loading && !detail ? <div className="chat-loading"><LoaderCircle className="spin" size={22} /><span>{t("대화 기록을 불러오는 중")}</span></div> : <>
         {loadError && <div className="chat-load-error"><TriangleAlert size={18} /><p>{translateMessage(loadError)}</p><button className="secondary-button" onClick={() => setRetry(value => value + 1)}><RefreshCw size={13} />{t("다시 불러오기")}</button></div>}
         {detail?.hasMore && <button className="load-older" onClick={() => { void loadOlder(); }} disabled={loadingOlder}>{loadingOlder ? <LoaderCircle className="spin" size={13} /> : <ArrowUp size={13} />}{loadingOlder ? t("불러오는 중…") : t("이전 대화 불러오기")}</button>}

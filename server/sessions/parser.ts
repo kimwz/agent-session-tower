@@ -69,6 +69,17 @@ function latestTime(previous: string | undefined, candidate: string | undefined)
 function isInjectedUser(value: string): boolean {
   return /^(?:# AGENTS\.md instructions|<environment_context>|<recommended_plugins>|<INSTRUCTIONS>|<system-reminder>|\[Request interrupted by user)/.test(value.trim());
 }
+/**
+ * What a `<task-notification>` says, for reading: its status and summary, and what the task reported. The file paths,
+ * ids and the instruction meant for the agent are left out. Undefined for anything else.
+ */
+function taskNotification(row: Json, blocks: Json[]): string | undefined {
+  const raw = blocks.filter(block => block?.type === 'text').map(block => text(block.text)).join('\n').trim();
+  if (row.origin?.kind !== 'task-notification' && !raw.startsWith('<task-notification>')) return undefined;
+  const tag = (name: string) => raw.match(new RegExp(`<${name}>([\\s\\S]*?)</${name}>`))?.[1]?.trim() ?? '';
+  const [status, summary] = [tag('status'), tag('summary')];
+  return text([status && summary ? `**${status}** · ${summary}` : status || summary, tag('event'), tag('result')].filter(Boolean).join('\n\n'));
+}
 function printJson(value: unknown): string {
   if (typeof value === 'string') return text(value);
   return text(JSON.stringify(value ?? {}, null, 2));
@@ -107,6 +118,9 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
   const value = row.message;
   const id = String(row.uuid || value.id || byteOffset);
   const blocks: Json[] = Array.isArray(value.content) ? value.content : [{ type: 'text', text: value.content }];
+  // Claude Code writes a background task's end into the conversation as a user turn; it is Claude Code's own notice.
+  const notice = value.role === 'user' ? taskNotification(row, blocks) : undefined;
+  if (notice !== undefined) return notice ? [{ id: `${id}:0`, role: 'system', toolName: 'Background task', text: notice, timestamp }] : [];
   const messages: ChatMessage[] = [];
   let prose = '';
   const flush = () => {
