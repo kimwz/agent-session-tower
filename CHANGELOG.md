@@ -4,6 +4,25 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.26.0] - 2026-09-24
+
+### Added
+- **Joined computers keep up with this Tower.** A computer that runs Tower as its background service now moves to this Tower's version by itself, soon after this Tower is updated. Nobody needs to touch that computer.
+  - It installs the new version beside the one it runs, checks that it starts, and restarts into it. It keeps the new version only after it has run for a minute without being restarted and has reconnected to this Tower. Otherwise it goes back to the version it ran and restarts that.
+  - Running work, approvals and terminals are not interrupted. The part that runs agents stays on the previous version until the update is kept, then moves over at a moment when no work is running. An update cut short, for example because the computer restarted, is checked again when Tower starts there.
+  - An update does not start with less than 2 GB of free disk space.
+  - **Remote computers** shows each computer's version, where an update stands, and a worker or terminal host still on the previous version.
+  - When an update fails, **Remote computers** shows why, and **다시 시도** asks again. A version that failed is not tried again by itself, even after this Tower restarts; an update that keeps being cut short is retried at most twice.
+  - It also says why a computer cannot follow this Tower: it does not run Tower as the background service, it runs a version from before this one, or it is newer than this Tower. Low disk space on a computer is shown too.
+  - On the canvas, a computer restarting into a new version shows as updating, not offline.
+  - Versions no longer in use are removed; the previous one is kept.
+
+### Changed
+- The header shows **Worker update pending** only for a worker older than the page, not for a newer one left by an update that was undone.
+
+### Notes
+- A computer running a version from before this one needs one update by hand on that computer. After that it follows this Tower.
+
 ## [1.25.0] - 2026-09-24
 
 ### Added
