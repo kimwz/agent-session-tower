@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.28.0] - 2026-09-24
+
+### Added
+- **See what controlling computers change here.** On a computer joined to another Tower, **이 컴퓨터를 제어하는 Tower** lists the latest changes those computers made there, newest first. Each entry shows which computer made the change, when, and what it changed.
+  - Recorded changes: new conversations, messages, titles, closing and reopening, approval answers, steering, cancelling, dismissing, Auto Prompt, repository pulls and pushes, folder names, saved files, new folders, terminals opened and closed, trigger changes, update requests, and joins.
+  - Only changes that were made are recorded, and each request is recorded once, even when it is sent again. A change stays in the list even if its folder is kept out of sharing right after.
+  - The contents of files and messages, answers to questions, and secret values are never recorded. Conversations are recorded by where they are and shown by their current title, so a first message never ends up in the list.
+  - The latest 1,000 changes are kept, and all of them can be read. A computer released since is still named as it was.
+- When a computer starts controlling this one, a notice by the header's remote button names it and says when. **보기**, or opening the panel, shows the list. Dismissing it in one tab dismisses it in every tab.
+
 ## [1.27.0] - 2026-09-24
 
 ### Added
