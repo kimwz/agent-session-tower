@@ -76,7 +76,7 @@ export async function runLinkCommand(args: string[]): Promise<void> {
   }
   if (!running) {
     running = await waitFor(() => runningTower(stateDir), 180_000);
-    if (!running) throw new Error(`Tower did not start. See ${resolve(stateDir, 'logs', 'tower.log')}.`);
+    if (!running) throw new Error(`Tower did not start. See ${resolve(stateDir, 'logs', 'tower.log')}${manager && manager !== 'launchd' ? ` and \`journalctl ${manager === 'systemd-user' ? '--user ' : ''}-u ${(await serviceStatus(stateDir)).file?.split('/').at(-1)}\`` : ''}.`);
   } else if (running.version !== code.version) {
     console.log(`Tower ${running.version} is running here (the other computer runs ${code.version}). Connecting with it.`);
   }

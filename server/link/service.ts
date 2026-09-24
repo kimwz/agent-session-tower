@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { defaultStateDir } from '../state-dir.js';
 import { releasePackage } from './join-code.js';
+import { APP_VERSION } from '../../shared/app-identity.js';
 
 const run = promisify(execFile);
 export const REPOSITORY = 'github:kimwz/agent-session-tower';
@@ -136,6 +137,9 @@ export function serviceFile(stateDir: string, manager: ServiceManager): string {
 
 const xml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
+/** npx and npm put their own and every parent folder's node_modules/.bin first; the service keeps the user's own PATH. */
+const userPath = (path = '/usr/bin:/bin') => path.split(':').filter(entry => entry.startsWith('/') && !/(^|\/)node_modules\/\.bin$|node-gyp-bin|\/_npx\//.test(entry));
+
 /**
  * What the service starts, and with which environment: the user's PATH without npx's folders (only absolute folders),
  * who the user is (a service started by systemd has no login shell or name of its own), and Tower's own variables.
@@ -143,8 +147,7 @@ const xml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;'
 function serviceCommand(stateDir: string, options: { port: number; node?: string; environment?: NodeJS.ProcessEnv }) {
   const paths = runtimePaths(stateDir);
   const env = options.environment ?? process.env;
-  // npx and npm put their own and every parent folder's node_modules/.bin first; the service keeps the user's PATH.
-  const path = (env.PATH ?? '/usr/bin:/bin').split(':').filter(entry => entry.startsWith('/') && !/(^|\/)node_modules\/\.bin$|node-gyp-bin|\/_npx\//.test(entry)).join(':');
+  const path = userPath(env.PATH).join(':');
   const variables: Record<string, string> = { PATH: path || '/usr/bin:/bin', HOME: env.HOME ?? homedir(), TOWER_SERVICE_LOG: join(paths.logs, 'tower.log') };
   for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'LANG', 'SHELL', 'USER', 'LOGNAME']) if (env[key]) variables[key] = env[key]!;
   const argumentsList = [options.node ?? process.execPath, entryPoint(paths.current), 'run', '--no-open', '--port', String(options.port), '--state-dir', stateDir];
@@ -233,13 +236,13 @@ const detail = (error: unknown) => String((error as { stderr?: unknown }).stderr
  * unexpectedly. The web process it starts brings up the worker and terminal host as usual. `start: false` only sets it
  * up, for a computer where Tower already runs and keeps serving until the next start.
  */
-export async function installService(stateDir: string, options: { port: number; node?: string; environment?: NodeJS.ProcessEnv; start?: boolean }): Promise<ServiceManager> {
+export async function installService(stateDir: string, options: { port: number; node?: string; environment?: NodeJS.ProcessEnv; start?: boolean; warn?: (line: string) => void }): Promise<ServiceManager> {
   const manager = await serviceManager();
   if (!manager) throw new Error(process.platform === 'linux' ? `This computer does not run systemd, so Tower cannot keep itself running here. ${START_YOURSELF}`
     : `The background service is available on macOS and on Linux with systemd. ${START_YOURSELF}`);
   await mkdir(runtimePaths(stateDir).logs, { recursive: true, mode: 0o700 });
   const node = options.node ?? await stableNode();
-  const environment = await serviceEnvironment(manager, options.environment ?? process.env, node);
+  const environment = await serviceEnvironment(manager, options.environment ?? process.env, node, options.warn ?? (line => console.log(line)));
   const file = serviceFile(stateDir, manager);
   // Kept, so a later version can write the same service again with what it knows then (see refreshService).
   await writeFile(join(runtimePaths(stateDir).root, 'service.json'), JSON.stringify({ manager, port: options.port, node, environment }), { mode: 0o600 });
@@ -271,23 +274,37 @@ export async function installService(stateDir: string, options: { port: number; 
 }
 
 /** How to run Tower without a service, in the form that works where it was started through npx. */
-export const START_YOURSELF = 'Start Tower yourself (npx --yes github:kimwz/agent-session-tower --no-open, or agent-session-tower --no-open if it is installed), keep it running, and run this command again.';
+export const START_YOURSELF = `Start Tower yourself (npx --yes ${releasePackage(APP_VERSION)} --no-open, or agent-session-tower --no-open if it is installed), keep it running, and run this command again.`;
 
 /**
  * The environment the service is given. Who the user is comes from the system, not from variables sudo -E may have
  * carried over. A service for the whole computer runs as root, so its PATH leaves out folders others may write to;
  * the folder of the Node it runs stays, for npm.
  */
-async function serviceEnvironment(manager: ServiceManager, env: NodeJS.ProcessEnv, node: string): Promise<NodeJS.ProcessEnv> {
+async function serviceEnvironment(manager: ServiceManager, env: NodeJS.ProcessEnv, node: string, warn: (line: string) => void): Promise<NodeJS.ProcessEnv> {
   const me = userInfo();
-  const own = { ...env, HOME: me.homedir, USER: me.username, LOGNAME: me.username, ...(me.shell ? { SHELL: me.shell } : {}) };
+  // Only what the service uses is kept (it is saved for refreshService): no tokens or keys the shell happens to hold.
+  const own: NodeJS.ProcessEnv = { PATH: userPath(env.PATH).join(':'), HOME: me.homedir, USER: me.username, LOGNAME: me.username, ...(me.shell ? { SHELL: me.shell } : {}) };
+  for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'LANG']) if (env[key]) own[key] = env[key];
   if (manager !== 'systemd-system') return own;
   const kept: string[] = [];
-  for (const folder of (env.PATH ?? '').split(':')) {
-    if (folder.startsWith('/') && await stat(folder).then(info => info.isDirectory() && (info.mode & 0o022) === 0, () => false)) kept.push(folder);
-  }
+  for (const folder of userPath(env.PATH)) if (await rootOnly(folder)) kept.push(folder);
+  // Node and npm, and what npm installs globally, are wherever this Node is; root runs that Node already, so it stays,
+  // and whoever else can change it is named.
   if (!kept.includes(dirname(node))) kept.push(dirname(node));
+  const real = await realpath(node).catch(() => node);
+  if (!await rootOnly(dirname(real)) || !await stat(real).then(info => info.uid === 0 && (info.mode & 0o022) === 0, () => false)) {
+    warn(`Warning: ${real}, or a folder it is in, can be changed by an account other than root, and Tower runs it as root. Anyone with that account could then control this computer; a Node only root can change (from your distribution's packages, for example) avoids this.`);
+  }
   return { ...own, PATH: kept.join(':') };
+}
+
+/** Whether only root can change this folder, and every folder above it. */
+async function rootOnly(folder: string): Promise<boolean> {
+  for (let current = folder; ; current = dirname(current)) {
+    if (!await stat(current).then(info => info.isDirectory() && info.uid === 0 && (info.mode & 0o022) === 0, () => false)) return false;
+    if (dirname(current) === current) return true;
+  }
 }
 
 /**
