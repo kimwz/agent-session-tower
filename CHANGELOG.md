@@ -4,6 +4,24 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.25.0] - 2026-09-24
+
+### Added
+- **Another computer's files and terminals.** The code editor and terminal buttons on a joined computer's folders, and in its conversations, open that computer's files and a shell running there. The workspace is titled with the computer's name, and the terminal says where commands run.
+  - Folders that computer keeps out of sharing, and everything inside them, are left out of its file tree and cannot be opened, saved or used to start a shell from here.
+  - A save or a new shell sent again after a lost answer is not repeated: the file is written once, and you get the same shell back.
+  - Closing this Tower, reloading the page or losing the link leaves the shells running. Only closing a terminal tab or ending a terminal stops one. A tab that loses its computer offers **다시 연결** and reaches the same shell again.
+  - A computer running an older Tower shows why its files and terminals cannot be opened yet.
+- **Shared terminals.** **Open terminals** in the terminal bar lists the shells open in that folder that no tab here shows: ones opened on the computer itself, from another window, or by another computer that controls it. Join one to see its output so far and type into it together. Closing a joined tab leaves the shell running for the others. Ending a shell from the list, after a confirmation, stops it for everyone.
+
+### Changed
+- Up to six windows can watch the same terminal at once, instead of two.
+- When too many terminals are open, the message points to **Open terminals** for ending leftover ones.
+
+### Fixed
+- A newly joined computer appears on the canvas right away. Before, its first requests could be refused, and the canvas waited for a retry before showing it.
+- A computer removed while it was still joining is told to stop, instead of staying linked.
+
 ## [1.24.0] - 2026-09-24
 
 ### Added
