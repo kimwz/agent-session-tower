@@ -47,3 +47,25 @@ test('a listener that cannot use a frame does not take this Tower down; the stre
   assert.equal(streams[0].destroyed, true);
   assert.equal(mirrors.snapshot(NODE)?.sessions[0].title, 'good');
 });
+
+test('a first frame that arrives before its answer’s status is kept, and a refused stream is not read', async t => {
+  const streams: Stream[] = [];
+  const statuses = [200, 403];
+  const links = new EventEmitter() as EventEmitter & Pick<ControllerLinks, 'list' | 'session'>;
+  links.list = () => [{ id: NODE, name: 'b', fingerprint: '', status: 'connected', features: [], pairedAt: now }];
+  links.session = () => ({ request: () => { const stream = new Stream(); streams.push(stream); return stream; } }) as never;
+  const mirrors = new NodeMirrors(links as unknown as ControllerLinks);
+  t.after(() => mirrors.close());
+  // The snapshot frame, then the status: both reach this side, in that order.
+  streams[0].frame('snapshot', 1, snapshot('early'));
+  assert.equal(mirrors.snapshot(NODE), undefined, 'not used before the status says it is the stream');
+  streams[0].emit('response', { ':status': statuses[0] });
+  assert.equal(mirrors.snapshot(NODE)?.sessions[0].title, 'early');
+  assert.equal(mirrors.live(NODE), true);
+  const refused = new NodeMirrors(links as unknown as ControllerLinks);
+  t.after(() => refused.close());
+  streams[1].frame('snapshot', 1, snapshot('refused'));
+  streams[1].emit('response', { ':status': statuses[1] });
+  assert.equal(refused.snapshot(NODE), undefined);
+  assert.equal(streams[1].destroyed, true, 'it starts over');
+});
