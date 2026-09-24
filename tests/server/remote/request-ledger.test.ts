@@ -1,5 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
+import { until } from '../../helpers/until.ts';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -73,7 +74,8 @@ test('a retry that arrives while the first attempt is still running gets that at
   let runs = 0;
   const execute = async () => { runs++; await new Promise<void>(resolve => { release = resolve; }); return { runId: 'run-1' }; };
   const first = ledger.once(CONTROLLER, 'autoPrompt', id, { prompt: 'x' }, execute, record, () => undefined);
-  await new Promise(resolve => setTimeout(resolve, 20));
+  // The retry arrives once the first attempt is under way, however long its claim took to save.
+  await until(() => runs === 1);
   const retry = ledger.once(CONTROLLER, 'autoPrompt', id, { prompt: 'x' }, execute, record, () => undefined);
   release();
   assert.deepEqual(await Promise.all([first, retry]), [{ runId: 'run-1' }, { runId: 'run-1' }]);
