@@ -47,11 +47,13 @@ The integrated terminal runs an interactive shell in that folder on the Tower se
 - **Choose a model and reasoning effort.** Keep the agent's defaults or select a model and effort level for your next request, a new session, or an Auto Prompt.
 - **Approve tools and answer questions in chat.** Tower-launched sessions keep native permission settings. Review actions from Codex and its child agents, answer questions, and complete supported connector forms in the web UI. Existing Codex desktop sessions handle approvals in their original app.
 - **Keep projects stable.** Sessions stay grouped under their starting folder even when an agent changes directories while working. Resuming from Tower uses that project folder.
+- **Keep branches in sync.** A git project folder shows how many commits its branch is behind (↓) or ahead of (↑) its upstream. Tower fetches in the background and, before it starts work in a folder, fast-forwards a branch that is only behind, with no uncommitted changes and no agent working there. Anything else waits for you: open the badge to pull or push (never forced).
+- **Give every agent the same ground rules.** On start, Tower adds a short section to your global `~/.claude/CLAUDE.md` (an import of `~/.agent-monitor/agent-guidance.md`) and `~/.codex/AGENTS.md`: fetch and fast-forward before changing a repository, use a separate worktree when another agent shares the folder, and do not leave commits unpushed without saying so. The rest of those files is left as is. To keep Tower out of a file, write `<!-- agent-session-tower:off -->` in it.
 - **Organize your workspace.** Rename sessions and project groups, pin projects, drag nodes, search, filter, and hide or reopen sessions.
 - **Catch new activity.** Unread indicators help you find replies and results you have not opened yet.
 - **Access it remotely.** Open the web UI from another device on your LAN or VPN, with password-protected access to the machine running your agents.
 
-Local use needs no Tower login, API key, database, or CLI hooks. Remote use requires an account configured on the host. Your agents keep using their existing CLI accounts and model settings.
+Local use needs no Tower login, API key, database, or CLI hooks; the only provider files Tower writes are the guidance sections above. Remote use requires an account configured on the host. Your agents keep using their existing CLI accounts and model settings.
 
 ## Remote access
 

@@ -16,6 +16,7 @@ import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Archive, Check, ChevronDown, CircleHelp, Folder, LoaderCircle, Monitor, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Search, ShieldCheck, Terminal, TriangleAlert, WifiOff, X } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, Provider, Run, Session, SessionStatus, Snapshot } from '../../../shared/types';
+import type { RepositoryAction, RepositoryStatus } from '../../../shared/repositories';
 import { Graph } from '../graph/Graph';
 import { BrandMark, ProviderIcon } from '../common/Icons';
 import { useMediaQuery } from '../common/use-media-query';
@@ -209,6 +210,16 @@ function TowerApp() {
       setGroupSaving(new Set(groupInFlight.current));
     }
   }, [connection, snapshots, token]);
+  const repositoryAction = useCallback(async (cwd: string, action: RepositoryAction): Promise<string | undefined> => {
+    if (!token || connection !== 'connected') return t("연결이 끊겨 있습니다.");
+    try {
+      const { repository } = await api<{ repository: RepositoryStatus }>('/api/repositories', { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify({ cwd, action }) });
+      snapshots.provisional(previous => previous ? { ...previous, repositories: [...(previous.repositories || []).filter(item => item.cwd !== cwd), repository] } : previous);
+      return repository.lastAction && !repository.lastAction.ok && action !== 'refresh' ? repository.lastAction.error : undefined;
+    } catch (error) {
+      return error instanceof Error ? error.message : t("Git 작업을 처리하지 못했습니다.");
+    }
+  }, [connection, snapshots, token]);
   const sessions = snapshot?.sessions || [];
   const groups = snapshot?.groups || emptyProjectGroups;
   const groupTitles = useMemo(() => new Map(groups.map(group => [group.cwd, group.title])), [groups]);
@@ -301,7 +312,7 @@ function TowerApp() {
         {!snapshot || (snapshot.scanning && sessions.length === 0 && !visiblePins.length && !monitorVisible(!!slack?.connected, snapshot.triggers)) ? <>
           <div className="graph-loading"><div className="loading-constellation"><span /><span /><span /><Monitor size={25} /></div><h3>{t("이 Mac의 에이전트를 찾고 있습니다")}</h3><p>{t("Claude Code와 Codex의 실제 세션 기록을 연결합니다.")}</p></div>
         </> : <Graph slackUnreadIds={slackUnreadIds} slack={slack || undefined} selectedSlackId={selectedSlackId} onSelectSlack={selectSlack}
-          triggerOverview={snapshot.triggers} triggerEvents={triggerEvents} triggerUnreadIds={triggerUnreadIds} selectedTriggerEventId={triggerEventId} onSelectTriggerEvent={selectTriggerEvent} triggerHasMore={triggerHasMore} onMoreTriggers={loadMoreTriggers} token={token} providers={snapshot.providers} sessions={canvasSessions} allSessions={mainSessions} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} onCanvasClick={closeChat} filterKey={`${filterKey}:${showHidden}`} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} onAutoPrompt={openAutoPrompt} showHidden={showHidden} onShowHiddenChange={setShowHidden} settingsSuspended={showHelp || showNewSession || showAutoPrompt || (sidebarIsDrawer && showSidebar) || (mobileViewport && (!!selectedId || monitorOpen))} emptyState={canvasEmptyState} />}
+          triggerOverview={snapshot.triggers} triggerEvents={triggerEvents} triggerUnreadIds={triggerUnreadIds} selectedTriggerEventId={triggerEventId} onSelectTriggerEvent={selectTriggerEvent} triggerHasMore={triggerHasMore} onMoreTriggers={loadMoreTriggers} token={token} providers={snapshot.providers} sessions={canvasSessions} allSessions={mainSessions} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} onCanvasClick={closeChat} filterKey={`${filterKey}:${showHidden}`} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} onAutoPrompt={openAutoPrompt} repositories={snapshot.repositories} onRepositoryAction={repositoryAction} showHidden={showHidden} onShowHiddenChange={setShowHidden} settingsSuspended={showHelp || showNewSession || showAutoPrompt || (sidebarIsDrawer && showSidebar) || (mobileViewport && (!!selectedId || monitorOpen))} emptyState={canvasEmptyState} />}
       </main>
       {monitorOpen && !activeChatId && <TriggerMonitorPanel token={token} slack={slack} slackError={slackError} mentionId={selectedSlackId} jobs={snapshot?.autoPrompts || []} slackUnreadIds={slackUnreadIds} onSlackRead={acknowledgeSlack}
         events={triggerEvents} eventId={triggerEventId} triggerUnreadIds={triggerUnreadIds} onTriggerRead={acknowledgeTrigger} hasMore={triggerHasMore} onMore={() => void loadMoreTriggers()} onEventUpdate={updateTriggerEvent} onClose={closeChat} onSelectMention={selectSlack} onSelectEvent={selectTriggerEvent} onNavigate={onSelect} />}

@@ -22,6 +22,9 @@ import { AuthStore } from './auth/store.js';
 import { readWebAsset } from './http/web-assets.js';
 import { projectSessionStates } from './sessions/snapshot.js';
 import { ProviderCapabilities } from './providers/capabilities.js';
+import { RepositoryMonitor, watchedRepositoryPaths } from './repositories/monitor.js';
+import { installAgentGuidance } from './agent-guidance/install.js';
+import { overlapsRepository } from '../shared/repositories.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
@@ -119,6 +122,11 @@ async function main() {
     auth.close(); await releaseLock();
     throw new Error('Configure an account first: start with --host 127.0.0.1 or --host 0.0.0.0, then open local Account management.');
   }
+  // Only the owner's own Tower (default state directory) points their global instructions at itself.
+  if (stateDir === defaultStateDir()) {
+    await installAgentGuidance({ stateDir, claudeHome: process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), codexHome: process.env.CODEX_HOME || join(homedir(), '.codex') })
+      .catch(error => console.error(`Agent guidance was not updated: ${error instanceof Error ? error.message : String(error)}`));
+  }
   const titles = new SessionTitleStore(stateDir);
   const dismissedRuns = new DismissedRunStore(stateDir);
   const closedSessions = new ClosedSessionStore(stateDir);
@@ -132,12 +140,19 @@ async function main() {
   const changed = () => { for (const listener of listeners) listener(); };
   const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed });
   runs.on('change', changed);
+  const repositories = new RepositoryMonitor({
+    watched: () => watchedRepositoryPaths(runs.sessionList(), groups.list()),
+    busy: status => runs.sessionList().some(session => session.status === 'working' && overlapsRepository(status, session.cwd))
+      || runs.list().some(run => (run.status === 'running' || run.status === 'queued') && overlapsRepository(status, runs.getSession(run.sessionId)?.cwd ?? '')),
+    onChange: changed,
+  });
   const snapshot = (): Snapshot => {
     const all = runs.sessionList();
     const managed = runs.list();
     return {
       sessions: projectSessionStates(all, managed, runs.settledRunIds()).map(session => closedSessions.apply(titles.apply(session))),
       groups: groups.list(),
+      repositories: repositories.list(),
       providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider).length })),
       runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning: history.indexing, hostname: hostname(), version: APP_VERSION,
       ...(runs.triggerOverview() ? { triggers: runs.triggerOverview() } : {}),
@@ -169,7 +184,7 @@ async function main() {
       changed();
       return titles.apply(updated);
     },
-    createSession: input => runs.create(input, { origin: OWNER }),
+    createSession: async input => { await repositories.prepareRun(input.cwd); return runs.create(input, { origin: OWNER }); },
     startAutoPrompt: input => runs.submitAutoPrompt(input, { origin: OWNER }),
     getAutoPrompt: id => runs.getAutoPrompt(id),
     cancelAutoPrompt: id => runs.cancelAutoPrompt(id),
@@ -177,7 +192,12 @@ async function main() {
     api: (operation, input) => runs.api(operation, input),
     slackMutate: (action, body) => runs.slackMutate(action, body),
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
-    enqueue: (id, prompt, attachments) => runs.enqueue(id, prompt, attachments, { origin: OWNER }),
+    enqueue: async (id, prompt, attachments) => {
+      const cwd = runs.getSession(id)?.cwd;
+      if (cwd) await repositories.prepareRun(cwd);
+      return runs.enqueue(id, prompt, attachments, { origin: OWNER });
+    },
+    repositoryAction: (cwd, action) => repositories.act(cwd, action),
     attachment: id => runs.attachment(id), cancel: id => runs.cancel(id), steerRun: id => runs.steer(id),
     respondToApproval: (runId, approvalId, decision) => runs.respondToApproval(runId, approvalId, decision),
     dismiss: async id => {
@@ -203,16 +223,18 @@ async function main() {
   if (open) openBrowser(access.browserUrl);
   let closing = false;
   capabilities.start();
+  repositories.start();
   const shutdown = async () => {
     if (closing) return;
     closing = true;
     const stoppingCapabilities = capabilities.stop();
+    const stoppingRepositories = repositories.stop();
     history.stop();
     auth.close();
     dispose();
     server.closeAllConnections();
     server.close();
-    try { await finishCleanup([auth.flush(), stoppingCapabilities, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), runs.close()]); } finally { await releaseLock(); }
+    try { await finishCleanup([auth.flush(), stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), runs.close()]); } finally { await releaseLock(); }
   };
   const onSignal = () => { void shutdown().catch(error => { console.error(`Agent Session Tower shutdown: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }); };
   process.once('SIGINT', onSignal);

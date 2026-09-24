@@ -1,3 +1,4 @@
+import type { RepositoryStatus } from './repositories.js';
 import type { TriggerOverview } from './triggers.js';
 export type Provider = 'claude' | 'codex';
 /** Who reviews Codex approval requests. Absent keeps Codex's own configured reviewer. */
@@ -238,6 +239,8 @@ export interface ProjectGroupPatch {
 }
 export interface Snapshot {
   sessions: Session[];
+  /** Branch sync state of recently used project folders that are git repositories. */
+  repositories?: RepositoryStatus[];
   providers: ProviderHealth[];
   runs: Run[];
   scanning: boolean;

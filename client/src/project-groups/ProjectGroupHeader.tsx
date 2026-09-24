@@ -3,6 +3,8 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Eye, EyeOff, Folder, Grip, LoaderCircle, Pencil, Pin, Plus, X } from 'lucide-react';
 import type { ProjectGroupPatch } from '../../../shared/types';
+import type { RepositoryAction, RepositoryStatus } from '../../../shared/repositories';
+import { RepositorySync } from './RepositorySync';
 import { WorkspaceActions } from '../workspace/WorkspaceActions';
 import { projectGroupDisplayTitle } from './project-group-title';
 
@@ -21,6 +23,9 @@ export type ProjectGroupHeaderData = {
   error?: string;
   onUpdate: (patch: ProjectGroupPatch) => Promise<boolean>;
   onCreate: (cwd: string) => void;
+  repository?: RepositoryStatus;
+  /** Resolves to an error message when the action failed. */
+  onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>;
 };
 
 function GroupTitleDialog({ data, onClose }: { data: ProjectGroupHeaderData; onClose: () => void }) {
@@ -78,7 +83,7 @@ export function ProjectGroupHeader({ data }: { data: ProjectGroupHeaderData }) {
   return <>
     <div className="project-group-heading">
       <div className="project-group-title"><Folder size={16} aria-hidden="true" /><strong title={data.name}><bdi dir="ltr">{projectGroupDisplayTitle(data.name)}</bdi></strong><button className="project-group-action nodrag nopan" aria-label={t("{0} 그룹 제목 편집", { 0: data.name })} title={t("그룹 제목 편집")} disabled={disabled} onClick={() => setEditing(true)}><Pencil size={13} /></button></div>
-      <div className="project-group-path folder-tail" title={data.path}><bdi dir="ltr">{data.path}</bdi></div>
+      <div className="project-group-location"><div className="project-group-path folder-tail" title={data.path}><bdi dir="ltr">{data.path}</bdi></div>{data.repository && data.onRepositoryAction && <RepositorySync status={data.repository} busy={data.active > 0} disabled={data.disabled} onAction={data.onRepositoryAction} />}</div>
       <div className="project-group-bottom"><span>{data.count}{t("개 세션")}{data.active > 0 && t(" · {0}개 작업 중", { 0: data.active })}</span><div className="project-group-actions nodrag nopan">
         <WorkspaceActions cwd={data.path} token={data.token || ''} disabled={disabled} />
         <button className={`project-group-action ${data.pinned ? 'pinned' : ''}`} aria-label={t("{0} 그룹 {1}", { 0: data.name, 1: data.pinned ? t("고정 해제") : t("고정") })} aria-pressed={data.pinned} title={data.pinned ? t("그룹 고정 해제") : t("세션이 없어도 그룹 유지")} disabled={disabled} onClick={() => { void data.onUpdate({ cwd: data.path, pinned: !data.pinned }); }}>{data.saving && !editing ? <LoaderCircle size={14} className="spin" /> : <Pin size={14} />}</button>

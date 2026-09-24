@@ -14,7 +14,7 @@ export function providerDirectories(env: NodeJS.ProcessEnv): string[] {
     .filter(directory => directory && isAbsolute(directory));
 }
 
-export async function findExecutable(name: Provider | 'gh', env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
+export async function findExecutable(name: Provider | 'gh' | 'git',env: NodeJS.ProcessEnv = process.env): Promise<string | undefined> {
   for (const directory of providerDirectories(env)) {
     const candidate = join(directory, name);
     try {

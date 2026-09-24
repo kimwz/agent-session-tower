@@ -4,6 +4,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { WorkspaceContext } from '../../../client/src/workspace/WorkspaceOverlay.js';
 import { ProjectGroupHeader, type ProjectGroupHeaderData } from '../../../client/src/project-groups/ProjectGroupHeader.js';
+import { repositoryOutOfSync } from '../../../client/src/project-groups/RepositorySync.js';
+import type { RepositoryStatus } from '../../../shared/repositories.js';
 
 const data = (patch: Partial<ProjectGroupHeaderData> = {}): ProjectGroupHeaderData => ({
   token: 'test-token', name: 'monitor', title: '', path: '/Users/me/monitor', count: 3, active: 0, pinned: false, hidden: false, manual: false,
@@ -50,4 +52,22 @@ test('a failed group change is announced where the group is shown', () => {
 test('only a hand-arranged canvas shows the drag grip', () => {
   assert.match(header({ manual: true }), /project-drag-grip/);
   assert.doesNotMatch(header(), /project-drag-grip/);
+});
+
+const repository = (patch: Partial<RepositoryStatus> = {}): RepositoryStatus => ({
+  cwd: '/Users/me/monitor', root: '/Users/me/monitor', branch: 'main', upstream: 'origin/main', ahead: 0, behind: 0, changes: 0, checkedAt: '2026-09-24T00:00:00.000Z', ...patch,
+});
+
+test('a git folder shows how far its branch is behind or ahead of the remote, and says so in words', () => {
+  const markup = header({ repository: repository({ behind: 3, ahead: 1, changes: 2 }), onRepositoryAction: async () => undefined });
+  assert.match(markup, /class="repository-sync nodrag nopan out-of-sync"/);
+  assert.match(markup, /aria-label="Git 동기화: main ↔ origin\/main: 3개 뒤처짐, 푸시하지 않은 커밋 1개, 커밋하지 않은 파일 2개"/);
+  assert.match(markup, /<\/svg>3<\/span>.*<\/svg>1<\/span>/s);
+});
+
+test('a branch level with its remote shows a quiet badge, and uncommitted edits alone are not out of sync', () => {
+  const markup = header({ repository: repository({ changes: 4 }), onRepositoryAction: async () => undefined });
+  assert.match(markup, /class="repository-sync nodrag nopan"/);
+  assert.equal(repositoryOutOfSync(repository({ upstream: undefined, ahead: 3 })), false);
+  assert.doesNotMatch(header(), /repository-sync/);
 });

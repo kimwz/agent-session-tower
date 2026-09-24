@@ -32,3 +32,14 @@
 .group-title-dialog footer { display:flex; justify-content:flex-end; gap:8px; margin-top:24px; }
 .group-title-save { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-width:70px; min-height:34px; padding:7px 14px; border:1px solid #5579a2; border-radius:6px; background:#29496c; color:#dbeaff; font-size:12px; }
 .group-title-save:hover:enabled { background:#365d88; }
+.project-group-location { display:flex; align-items:center; gap:6px; min-width:0; margin:3px 0 0; }
+.project-group-location>.project-group-path { flex:1; min-width:0; margin:0; }
+.repository-sync { display:inline-flex; flex-shrink:0; align-items:center; gap:4px; height:16px; margin:-1px 0; padding:0 5px; border:1px solid transparent; border-radius:5px; color:#7f95b2; font-size:10px; font-variant-numeric:tabular-nums; cursor:pointer; }
+.repository-sync:hover { background:#304967; color:#e0edff; }
+.repository-sync:focus-visible { outline:2px solid #97c4ff; outline-offset:1px; }
+.repository-sync>span { display:inline-flex; align-items:center; gap:1px; }
+.repository-sync.out-of-sync { color:#f2c879; border-color:#6b5a35; background:#3a321f66; }
+.repository-sync.failed { color:#f3aaa2; border-color:#844c49; }
+.repository-dialog footer button { display:inline-flex; align-items:center; gap:6px; }
+.repository-summary { margin:0 0 6px; font-size:13px; line-height:1.6; color:#d4e1f2; overflow-wrap:anywhere; }
+.repository-dialog .repository-failed { color:#f0a59c; }

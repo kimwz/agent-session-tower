@@ -20,7 +20,7 @@
 .auto-prompt-trigger:disabled { opacity:.4; cursor:default; }
 .manual-project-lane { position:relative; }
 .manual-project-lane .project-group-title { padding-right:44px; }
-.manual-project-lane .project-group-path { margin-right:44px; }
+.manual-project-lane .project-group-location { margin-right:44px; }
 .host-node.has-auto-prompt { gap:10px; padding:16px 60px 16px 14px; }
 .host-node.has-auto-prompt .host-icon { flex-shrink:0; }
 .host-node.has-auto-prompt .host-copy { flex:1; min-width:0; }

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, typ
 import { applyNodeChanges, Background, BackgroundVariant, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type FitViewOptions, type Node, type NodeChange } from '@xyflow/react';
 import { Maximize, Minus, Plus, Scan } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../../shared/types';
+import type { RepositoryAction, RepositoryStatus } from '../../../shared/repositories';
 import { nodeTypes, type ProjectData } from './GraphNodes';
 import type { SlackPublicStatus } from '../../../shared/slack';
 import type { TriggerEvent, TriggerOverview } from '../../../shared/triggers';
@@ -20,7 +21,7 @@ import { projectGroupMinimumWidth, projectGroupTitleMeasurer } from '../project-
 
 type GraphProps = { slackUnreadIds?: ReadonlySet<string>; slack?: SlackPublicStatus | null; selectedSlackId?: string | null; onSelectSlack?: (id: string | null) => void;
   triggerOverview?: TriggerOverview; triggerEvents?: TriggerEvent[]; triggerUnreadIds?: ReadonlySet<string>; selectedTriggerEventId?: string | null; onSelectTriggerEvent?: (id: string) => void; triggerHasMore?: boolean; onMoreTriggers?: () => void;
-  token?: string; providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
+  token?: string; providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void; repositories?: RepositoryStatus[]; onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
 
 const noEvents: TriggerEvent[] = [];
 
@@ -33,7 +34,7 @@ function viewportTransitionDuration() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 280;
 }
 
-function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
+function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
   const { language } = useI18n();
   const { fitView, zoomIn, zoomOut, getViewport, setViewport } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
@@ -86,6 +87,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
   const manual = preferences.mode === 'manual';
   const retainedGroups = useMemo(() => groups.filter(group => group.pinned || group.hidden), [groups]);
   const groupMetadata = useMemo(() => new Map(groups.map(group => [group.cwd, group])), [groups]);
+  const repositoryByPath = useMemo(() => new Map((repositories ?? []).map(repository => [repository.cwd, repository])), [repositories]);
   const visibleAgentIds = useMemo(() => new Set(sessions.map(session => session.id)), [sessions]);
   const seedSessions = useMemo(() => manual ? sessions : graphSessionGroups(sessions, graphLimit, selectedId).flatMap(([, members]) => members), [manual, sessions, graphLimit, selectedId]);
   const minimumProjectWidths = useMemo(() => {
@@ -129,7 +131,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
       const width = Math.max(columns * 268 + 14, minimumProjectWidths.get(projectId) || 0);
       const rows = Math.max(1, Math.ceil(members.length / columns));
       const metadata = groupMetadata.get(path);
-      const projectData: ProjectData = { token, name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, hidden: metadata?.hidden || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, manual, disabled: groupActionsDisabled, saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate, onAutoPrompt };
+      const projectData: ProjectData = { token, name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, hidden: metadata?.hidden || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, manual, disabled: groupActionsDisabled, saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate, onAutoPrompt, repository: repositoryByPath.get(path), onRepositoryAction };
       const savedProject = manualLayout.projects[projectId];
       if (manual && savedProject) {
         const bounds = manualProjectBounds(manualLayout, projectId, visibleAgentIds, minimumProjectWidths)!;
@@ -165,7 +167,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     const hostPosition = manual ? clearHostPosition(manualLayout.host, ns.filter(node => node.type === 'projectGroup').map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }))) : { x: Math.max(0, (x - 36) / 2 - 128), y: 0 };
     ns.push({ id: 'host', type: 'host', position: hostPosition, data: { name: hostname, active: sessions.filter(s => s.status === 'working').length, providers, disabled: groupActionsDisabled, onAutoPrompt }, style: { width: 256, height: HOST_HEIGHT, pointerEvents: 'all' }, zIndex: 20, draggable: manual, dragHandle: '.host-node', selectable: false, focusable: false });
     return { modelNodes: ns, edges: es, shown: grouped.reduce((total, [, members]) => total + members.length, 0) };
-  }, [slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, showMonitor, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, hostname, providers, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt]);
+  }, [slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, showMonitor, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, hostname, providers, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt, repositoryByPath, onRepositoryAction]);
 
   const [nodes, setNodes] = useState(modelNodes);
   const visibleProjectKey = modelNodes.filter(node => node.type === 'projectGroup' || node.type === 'triggerMonitor').map(node => node.id).join('|');

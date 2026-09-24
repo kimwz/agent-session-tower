@@ -18,6 +18,7 @@ import { requestIdentity, sessionCookie, setSessionCookie } from './auth.js';
 import type { AuthStatus } from '../../shared/auth.js';
 import type { SlackPublicStatus } from '../../shared/slack.js';
 import { OPERATIONS, isOperationName } from '../../shared/api/operations.js';
+import type { RepositoryAction, RepositoryStatus } from '../../shared/repositories.js';
 
 export interface Backend {
   /** Tower operations (see shared/api/operations.ts), run by the worker as the owner. */
@@ -29,6 +30,7 @@ export interface Backend {
   setTitle?(id: string, title: string): Promise<Session | undefined>;
   setClosed?(id: string, closed: boolean): Promise<Session | undefined>;
   setGroup?(patch: ProjectGroupPatch): Promise<ProjectGroup>;
+  repositoryAction?(cwd: string, action: RepositoryAction): Promise<RepositoryStatus>;
   createSession?(input: CreateSessionRequest): Promise<{ session: Session; run: Run }>;
   startAutoPrompt?(input: AutoPromptRequest): Promise<AutoPromptJob>;
   getAutoPrompt?(id: string): AutoPromptJob | undefined;
@@ -292,6 +294,14 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         const patch = normalizeProjectGroupPatch(await readJson(req));
         if (!backend.setGroup) return json(res, 503, { error: '폴더 그룹을 저장할 수 없습니다.' });
         return json(res, 200, { group: await backend.setGroup(patch) });
+      }
+      if (req.method === 'POST' && path === '/api/repositories') {
+        const body = await readJson(req, 8192);
+        if (typeof body.cwd !== 'string' || !body.cwd.startsWith('/') || body.cwd.includes('\0') || !['pull', 'push', 'refresh'].includes(body.action as string)) {
+          return json(res, 400, { error: '프로젝트 폴더와 작업(pull, push, refresh)을 지정하세요.' });
+        }
+        if (!backend.repositoryAction) return json(res, 503, { error: 'Git 상태를 확인할 수 없습니다.' });
+        return json(res, 200, { repository: await backend.repositoryAction(body.cwd, body.action as RepositoryAction) });
       }
       const attachmentMatch = path.match(/^\/api\/attachments\/([^/]+)$/);
       if ((req.method === 'GET' || req.method === 'HEAD') && attachmentMatch) {
