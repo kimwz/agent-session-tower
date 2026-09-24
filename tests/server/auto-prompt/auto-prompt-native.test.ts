@@ -180,6 +180,22 @@ for (const mode of ['incomplete', 'error-result', 'tool-call', 'unknown-system']
     assert.deepEqual(await readdir(join(f.directory, 'state', 'tmp')), []);
   });
 }
+test('Claude accepts the status lines newer versions send around a turn', async t => {
+  const status = [
+    { type: 'system', subtype: 'commands_changed', commands: [{ name: 'review', description: 'Review a pull request', argumentHint: '' }] },
+    { type: 'system', subtype: 'status', status: 'requesting' },
+    { type: 'system', subtype: 'status', status: null },
+    { type: 'system', subtype: 'session_state_changed', state: 'running' },
+    { type: 'system', subtype: 'notification', key: 'fixture', text: 'Synthetic notice.', priority: 'low' },
+    { type: 'system', subtype: 'session_state_changed', state: 'idle' },
+  ].map(frame => ({ ...frame, uuid: '11111111-1111-4111-8111-111111111111', session_id: 'fixture-session' }));
+  const f = await fixture(t, 'claude', 'success', status);
+  assert.deepEqual(await runAutoPromptModel(f.request, f.dependencies), DECISION);
+  for (const frame of [{ ...status[0], commands: 'review' }, { ...status[1], status: 'running-tools' }, { ...status[3], state: 'requires_action' }, { ...status[4], text: {} }]) {
+    const refused = await fixture(t, 'claude', 'success', [frame]);
+    await assert.rejects(runAutoPromptModel(refused.request, refused.dependencies), /unsupported routing event/, JSON.stringify(frame));
+  }
+});
 test('Claude rejects malformed progress and execution events', async t => {
   const invalid = [
     { ...CLAUDE_PROGRESS[0], attempt: '1' },

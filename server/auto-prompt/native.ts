@@ -48,6 +48,13 @@ function isClaudeRoutingProgress(frame: Record<string, any>): boolean {
   if (frame.subtype === 'thinking_tokens') return Number.isSafeInteger(frame.estimated_tokens)
     && Number.isSafeInteger(frame.estimated_tokens_delta)
     && (frame.user_message_uuid === undefined || typeof frame.user_message_uuid === 'string');
+  // Status lines newer Claude Code sends around any turn. None runs anything or adds to what the model reads: the
+  // current slash commands (commands_changed, from 2.1.281), whether it is requesting or compacting, whether the turn is
+  // idle or running (not waiting for an answer), and a short notice.
+  if (frame.subtype === 'commands_changed') return Array.isArray(frame.commands);
+  if (frame.subtype === 'status') return ['compacting', 'requesting', null].includes(frame.status);
+  if (frame.subtype === 'session_state_changed') return frame.state === 'idle' || frame.state === 'running';
+  if (frame.subtype === 'notification') return typeof frame.key === 'string' && typeof frame.text === 'string';
   if (frame.subtype === 'api_retry') return Number.isSafeInteger(frame.attempt)
     && Number.isSafeInteger(frame.max_retries) && Number.isSafeInteger(frame.retry_delay_ms)
     && (frame.error_status === null || Number.isSafeInteger(frame.error_status))
