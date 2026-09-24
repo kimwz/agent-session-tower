@@ -458,7 +458,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
     }
   });
   // A large attachment for another computer can arrive slowly when the link to it is slow.
-  server.requestTimeout = 120_000;
+  server.requestTimeout = 60_000;
   server.headersTimeout = 10_000;
   server.on('clientError', (_err, socket) => socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'));
   const dispose = () => {

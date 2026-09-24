@@ -19,7 +19,9 @@ export const NODE_ANSWER = 'node-answer';
 export const TOO_LARGE = 'too-large';
 const OFFLINE = '그 컴퓨터에 지금 연결되어 있지 않습니다. 다시 연결되면 다시 시도하세요.';
 /** After a request left for the other computer, a lost answer says nothing about whether it ran. */
-const LOST = '그 컴퓨터와의 연결이 끊겨 요청이 처리됐는지 확인하지 못했습니다. 같은 요청을 다시 보내면 한 번만 처리됩니다.';
+const LOST = '그 컴퓨터와의 연결이 끊겨 요청이 처리됐는지 확인하지 못했습니다.';
+/** Only a request that names itself is run once however often it is sent. */
+const ONCE = ' 같은 요청을 다시 보내면 한 번만 처리됩니다.';
 
 const fail = (res: ServerResponse, status: number, error: string, code: string, disposition?: 'not-admitted' | 'uncertain') => {
   if (res.headersSent) { res.destroy(); return; }
@@ -41,6 +43,7 @@ export function proxyToNode(req: IncomingMessage, res: ServerResponse, session: 
     const headers: OutgoingHttpHeaders = { ':method': req.method ?? 'GET', ':path': path };
     for (const name of REQUEST_HEADERS) { const value = req.headers[name]; if (typeof value === 'string') headers[name] = value; }
     const bodyless = req.method === 'GET' || req.method === 'HEAD';
+    const lost = typeof req.headers['x-tower-request-id'] === 'string' ? LOST + ONCE : LOST;
     let stream: ClientHttp2Stream;
     try { stream = session.request(headers, { endStream: bodyless }); }
     catch { fail(res, 503, OFFLINE, NODE_OFFLINE, 'not-admitted'); return resolve(); }
@@ -51,12 +54,12 @@ export function proxyToNode(req: IncomingMessage, res: ServerResponse, session: 
     const touch = () => { clearTimeout(quiet); quiet = setTimeout(() => timeout(), QUIET_MS); };
     const timeout = () => {
       stream.close(http2.constants.NGHTTP2_CANCEL);
-      fail(res, 504, '그 컴퓨터가 제때 응답하지 않았습니다. 같은 요청을 다시 보내면 한 번만 처리됩니다.', NODE_OFFLINE, 'uncertain');
+      fail(res, 504, `그 컴퓨터가 제때 응답하지 않았습니다.${lost === LOST ? '' : ONCE}`, NODE_OFFLINE, 'uncertain');
       finish();
     };
     // The page went away: stop this request. Anything it already started keeps running over there.
     res.once('close', () => { if (!stream.destroyed) stream.close(http2.constants.NGHTTP2_CANCEL); finish(); });
-    stream.on('error', () => { fail(res, 502, LOST, NODE_OFFLINE, 'uncertain'); finish(); });
+    stream.on('error', () => { fail(res, 502, lost, NODE_OFFLINE, 'uncertain'); finish(); });
 
     if (!bodyless) {
       let sent = 0;
@@ -107,6 +110,6 @@ export function proxyToNode(req: IncomingMessage, res: ServerResponse, session: 
       });
       stream.on('end', () => { res.end(); finish(); });
     });
-    stream.on('close', () => { if (!done) { if (!res.headersSent) fail(res, 502, LOST, NODE_OFFLINE, 'uncertain'); else res.end(); finish(); } });
+    stream.on('close', () => { if (!done) { if (!res.headersSent) fail(res, 502, lost, NODE_OFFLINE, 'uncertain'); else res.end(); finish(); } });
   });
 }

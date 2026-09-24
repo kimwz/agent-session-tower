@@ -27,7 +27,9 @@ type GraphProps = { slackUnreadIds?: ReadonlySet<string>; slack?: SlackPublicSta
   /** Every computer on the canvas; without joined computers only this one. */
   hosts?: Host[];
   /** The list of joined computers is final; until then nothing saved for one of them is forgotten. */
-  hostsComplete?: boolean; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string, node?: string) => void; repositories?: RepositoryStatus[]; onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
+  hostsComplete?: boolean;
+  /** Every joined computer, including those the computer filter leaves off the canvas. */
+  allHosts?: Host[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string, node?: string) => void; repositories?: RepositoryStatus[]; onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
 
 const noEvents: TriggerEvent[] = [];
 
@@ -40,7 +42,7 @@ function viewportTransitionDuration() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 280;
 }
 
-function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, hosts, hostsComplete = true, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
+function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, hosts, hostsComplete = true, allHosts, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
   const { language } = useI18n();
   const { fitView, zoomIn, zoomOut, getViewport, setViewport } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
@@ -113,7 +115,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
   }, [seedSessions, groupMetadata, visiblePins, language]);
   const machines = useMemo<Host[]>(() => hosts?.length ? hosts : [{ name: hostname, status: 'local', live: true, canWork: true, known: true, providers }], [hosts, hostname, providers]);
   // A computer this page has not heard from yet keeps its saved card and folder places until it has.
-  const unknownNodes = useMemo(() => new Set(machines.filter(host => host.node && !host.known).map(host => host.node!)), [machines]);
+  const unknownNodes = useMemo(() => new Set((allHosts ?? machines).filter(host => host.node && !host.known).map(host => host.node!)), [allHosts, machines]);
   const retain = useCallback((id: string) => {
     const node = nodeOf(id) ?? nodeOf(id.startsWith('project:') ? decodeURIComponent(id.slice('project:'.length)) : undefined);
     return node !== undefined && (!hostsComplete || unknownNodes.has(node));
@@ -181,7 +183,8 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
       const saved = machine.node ? manualLayout.hosts?.[machine.node] : manualLayout.host;
       const beside = frames.length ? { x: Math.min(...frames.map(frame => frame.position.x)), y: Math.min(...frames.map(frame => frame.position.y)) - HOST_HEIGHT - 40 } : automatic;
       const hostPosition = manual ? clearHostPosition(saved ?? beside, ns.filter(node => node.type === 'projectGroup').map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }))) : automatic;
-      ns.push({ id: hostId, type: 'host', position: hostPosition, data: { name: machine.name, active: sessions.filter(s => s.status === 'working' && s.node === machine.node).length, providers: machine.providers, disabled, onAutoPrompt: () => onAutoPrompt(undefined, machine.node),
+      // An empty node id says "this computer" explicitly, unlike a shortcut that leaves the computer open.
+      ns.push({ id: hostId, type: 'host', position: hostPosition, data: { name: machine.name, active: sessions.filter(s => s.status === 'working' && s.node === machine.node).length, providers: machine.providers, disabled, onAutoPrompt: () => onAutoPrompt(undefined, machine.node ?? ''),
         ...(machine.node ? { link: { status: machine.status as HostLink['status'], live: machine.live, known: machine.known, canWork: machine.canWork, ...(machine.version ? { version: machine.version } : {}) } } : {}) }, style: { width: 256, height: HOST_HEIGHT, pointerEvents: 'all' }, zIndex: 20, draggable: manual, dragHandle: '.host-node', selectable: false, focusable: false });
       // The Slack and trigger monitor belongs to this computer and sits right after its folders.
       if (!machine.node && monitorShown) { monitorAt = x; x += monitorWidth + 36; }
@@ -190,7 +193,8 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     if (monitorShown) {
       const slackEvents = slack?.connected ? slack.events : [];
       const items = monitorItems(slackEvents, triggerEvents, slackLimit, selectedTriggerEventId ?? selectedSlackId);
-      const right = monitorAt;
+      // Hand-placed folders can be anywhere; then the monitor starts right of all of them.
+      const right = manual ? ns.filter(node => node.type === 'projectGroup').reduce((max, node) => Math.max(max, node.position.x + Number(node.style?.width || 0) + 36), 0) : monitorAt;
       const remaining = monitorTotal - items.length;
       const layout = slackMentionLayout(items.length, remaining > 0 || triggerHasMore);
       const active = slackEvents.filter(slackWorkflowWorking).length + triggerEvents.filter(triggerEventWorking).length;

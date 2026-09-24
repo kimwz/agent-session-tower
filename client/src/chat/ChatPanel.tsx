@@ -20,7 +20,7 @@ import { matchChatRuns } from './chat-runs';
 import { EffortPicker, ModelPicker, supportedEffort } from './ModelPicker';
 import { useChatAppearance } from './chat-appearance';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
-import { localPart, nodeHeaders, nodeOf, pathFor, refusedBeforeRunning, scopeDetail, settleRequest } from '../remote/scope';
+import { localPart, nodeHeaders, nodeOf, pathFor, scopeDetail, settleRequest } from '../remote/scope';
 import { RemoteContent } from '../remote/remote-content';
 
 const emptyMessages: readonly ChatMessage[] = [];
@@ -157,7 +157,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
       markComposerSending(id);
       const body = JSON.stringify({ prompt: message, ...prepared, ...(submitted.model ? { model: submitted.model } : {}), ...(submitted.effort ? { effort: submitted.effort } : {}) });
       await api<{ run: Run }>(pathFor(id, local => `/api/sessions/${encodeURIComponent(local)}/messages`), { method: 'POST', headers: nodeHeaders(nodeOf(id), { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, `message:${id}`, body), body }).catch(error => {
-        if (refusedBeforeRunning(error)) settleRequest(nodeOf(id), `message:${id}`);
+        settleRequest(nodeOf(id), `message:${id}`, error);
         throw error;
       });
       settleRequest(nodeOf(id), `message:${id}`);

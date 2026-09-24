@@ -178,7 +178,6 @@ export class NodeMirrors extends EventEmitter {
     mirror.snapshot = next;
     mirror.sequence = sequence;
     mirror.live = true;
-    mirror.failures = 0;
     try { this.emit('change', id); }
     catch {
       // Whatever this state broke on this side, it stays with this computer: back to the last good state, and a fresh start.
@@ -186,6 +185,8 @@ export class NodeMirrors extends EventEmitter {
       mirror.sequence = previous.sequence;
       return false;
     }
+    // Only a frame this Tower could use shows the stream is healthy; one it refuses keeps the retry waits growing.
+    mirror.failures = 0;
     return true;
   }
 }

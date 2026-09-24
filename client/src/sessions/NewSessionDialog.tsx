@@ -10,7 +10,7 @@ import { codexApprovalsRequest, readCodexApprovalsChoice, type CodexApprovalsCho
 import { CodexApprovalsSelect } from './CodexApprovalsSelect';
 import { EffortPicker, ModelPicker, supportedEffort } from '../chat/ModelPicker';
 import { hostProblem, type Host } from '../remote/hosts';
-import { localPart, nodeHeaders, nodeOf, nodePath, refusedBeforeRunning, scopeRun, scopeSession, settleRequest } from '../remote/scope';
+import { localPart, nodeHeaders, nodeOf, nodePath, scopeRun, scopeSession, settleRequest } from '../remote/scope';
 
 interface NewSessionDialogProps {
   providers: ProviderHealth[];
@@ -91,7 +91,7 @@ export function NewSessionDialog({ providers: localProviders, hosts = [], projec
       // Sending the same session again after an unknown outcome reuses its request ID, so it starts at most once.
       const result = await api<{ session: Session; run: Run }>(nodePath(machine, '/api/sessions'), {
         method: 'POST', headers: nodeHeaders(machine, { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, 'new-session', body), body,
-      }).catch(error => { if (refusedBeforeRunning(error)) settleRequest(machine, 'new-session'); throw error; });
+      }).catch(error => { settleRequest(machine, 'new-session', error); throw error; });
       settleRequest(machine, 'new-session');
       onCreated(machine ? scopeSession(machine, result.session) : result.session, machine ? scopeRun(machine, result.run) : result.run);
       onClose();

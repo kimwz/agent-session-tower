@@ -117,9 +117,21 @@ test('a request to another computer keeps its ID until it is settled, and change
   assert.notEqual(edited, first);
   settleRequest(B, 'message:x');
   assert.notEqual(id(nodeHeaders(B, {}, 'message:x', '{"prompt":"b"}')), edited, 'once settled, the next send is new');
+  // A send that may have run keeps its ID, even when a later attempt is refused before running.
+  const risky = id(nodeHeaders(B, {}, 'message:y', 'same'));
+  settleRequest(B, 'message:y', { status: 409, disposition: 'uncertain' });
+  assert.equal(id(nodeHeaders(B, {}, 'message:y', 'same')), risky);
+  settleRequest(B, 'message:y', { status: 503, disposition: 'not-admitted' });
+  assert.equal(id(nodeHeaders(B, {}, 'message:y', 'same')), risky);
+  settleRequest(B, 'message:y');
+  assert.notEqual(id(nodeHeaders(B, {}, 'message:y', 'same')), risky, 'a success settles it');
+  const refused = id(nodeHeaders(B, {}, 'message:z', 'same'));
+  settleRequest(B, 'message:z', { status: 400 });
+  assert.notEqual(id(nodeHeaders(B, {}, 'message:z', 'same')), refused, 'a plain refusal never ran');
   assert.deepEqual(nodeHeaders(undefined, { a: '1' }, 'message:x', 'x'), { a: '1' }, 'this computer needs no request ID');
   assert.equal(refusedBeforeRunning({ status: 503, disposition: 'not-admitted' }), true);
   assert.equal(refusedBeforeRunning({ status: 409 }), true);
+  assert.equal(refusedBeforeRunning({ status: 409, disposition: 'uncertain' }), false, 'the ledger says it may have run');
   assert.equal(refusedBeforeRunning({ status: 503, disposition: 'uncertain' }), false);
   assert.equal(refusedBeforeRunning(new TypeError('Failed to fetch')), false);
 });
