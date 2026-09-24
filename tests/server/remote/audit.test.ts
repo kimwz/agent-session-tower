@@ -27,6 +27,7 @@ test('changes from controlling computers are kept privately, newest first, up to
   assert.equal((await stat(join(stateDir, 'link', 'remote-changes.json'))).mode & 0o777, 0o600);
   audit.record({ controllerId: B, action: 'joined' });
   assert.equal(audit.lastJoin()?.controllerId, B);
+  await audit.flush();
 });
 
 test('a request sent again is recorded once, and its ID is not shown', async t => {
@@ -42,6 +43,7 @@ test('a request sent again is recorded once, and its ID is not shown', async t =
   audit.record({ controllerId: A, action: 'title', session: 'codex:s', target: '/work/app' });
   assert.deepEqual(audit.list().map(change => `${change.controllerId === A ? 'A' : 'B'} ${change.action}`), ['A title', 'A title', 'B message', 'A message']);
   assert.ok(!JSON.stringify(audit.list()).includes(request));
+  await audit.flush();
 });
 
 test('a record that cannot be read is set aside, and one that cannot be saved never stops Tower', async t => {
