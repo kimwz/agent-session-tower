@@ -59,6 +59,11 @@ export class ControllerLinks extends EventEmitter {
   /** What each joined computer last reported, and when; kept while it restarts into a new version. */
   private readonly reports = new Map<string, NodeReport>();
   private readonly reportedAt = new Map<string, number>();
+  /**
+   * Versions this Tower saw fail on each computer. A computer reports only its last update, so with several
+   * controllers another one's failure would hide this one's; they are asked for again only when the owner says so.
+   */
+  private readonly failed = new Map<string, Set<string>>();
   private unauthenticated = 0;
   private readonly unauthenticatedFrom = new Map<string, number>();
   /** Set when the saved state could not be read: nothing is saved over it until the owner looks. */
@@ -151,6 +156,7 @@ export class ControllerLinks extends EventEmitter {
     const live = this.connected.get(id);
     if (!live) throw Object.assign(new Error('그 컴퓨터가 연결되어 있지 않습니다. 연결되면 다시 시도하세요.'), { statusCode: 409 });
     if (!live.hello.features.includes('update')) throw Object.assign(new Error('그 컴퓨터는 Tower를 백그라운드 서비스로 실행하지 않아 여기서 업데이트할 수 없습니다.'), { statusCode: 409 });
+    this.failed.get(id)?.delete(this.options.version);
     const code = await this.askUpdate(id, live);
     if (code === 'busy') throw Object.assign(new Error('그 컴퓨터가 다른 버전으로 업데이트하는 중입니다. 끝난 뒤 다시 시도하세요.'), { statusCode: 409 });
     if (code) throw Object.assign(new Error('그 컴퓨터가 업데이트 요청을 받지 않았습니다.'), { statusCode: 502 });
@@ -177,6 +183,7 @@ export class ControllerLinks extends EventEmitter {
     // Its claimed invitation goes too, so it cannot finish joining again with the old code.
     this.reports.delete(id);
     this.reportedAt.delete(id);
+    this.failed.delete(id);
     await this.save({ ...this.state, nodes: this.state.nodes.filter(item => item.id !== id), invites: this.state.invites.filter(item => item.claimedBy !== node.pin),
       removed: [...this.state.removed.filter(item => item.pin !== node.pin), { pin: node.pin, at: new Date(this.now()).toISOString() }].slice(-200) });
     const live = this.connected.get(id);
@@ -370,10 +377,15 @@ export class ControllerLinks extends EventEmitter {
     if (!live.hello.features.includes('status')) return;
     const answer = await linkRequest(live.session, 'GET', '/link/status', undefined, HELLO_MS).catch(() => undefined);
     const report = answer?.status === 200 ? parseReport(answer.json) : undefined;
-    if (!report || this.connected.get(id) !== live) return;
+    if (this.connected.get(id) !== live) return;
+    // One report that did not come through does not end following an update under way.
+    if (!report) { this.watch(id, live); return; }
     this.report(id, report);
-    const failed = report.update?.stage === 'failed' && report.update.version === this.options.version;
-    if (live.hello.features.includes('update') && newerVersion(this.options.version, report.versions.web) && !updateActive(report.update) && !failed) await this.askUpdate(id, live);
+    // An update cut short (the computer restarted, say) did not fail; it may be asked for again.
+    const update = report.update;
+    if (update?.stage === 'failed' && update.code !== 'interrupted') this.failed.set(id, new Set([...this.failed.get(id) ?? [], update.version]));
+    const failed = this.failed.get(id)?.has(this.options.version);
+    if (live.hello.features.includes('update') && newerVersion(this.options.version, report.versions.web) && !updateActive(update) && !failed) await this.askUpdate(id, live);
     this.watch(id, live);
   }
 
@@ -433,7 +445,7 @@ export class ControllerLinks extends EventEmitter {
 }
 
 const STAGES = new Set(['installing', 'checking', 'switching', 'verifying', 'rolling-back', 'done', 'failed']);
-const FAILURES = new Set(['install-failed', 'check-failed', 'switch-failed', 'start-failed', 'link-failed', 'rollback-failed', 'interrupted']);
+const FAILURES = new Set(['low-disk', 'install-failed', 'check-failed', 'switch-failed', 'start-failed', 'link-failed', 'rollback-failed', 'interrupted']);
 const RELEASE = /^\d+\.\d+\.\d+$/;
 const text = (value: unknown, pattern = /^[\w.:-]{1,40}$/) => typeof value === 'string' && pattern.test(value) ? value : undefined;
 
@@ -450,8 +462,9 @@ function parseReport(value: unknown): NodeReport | undefined {
   const web = text(report?.versions?.web);
   if (!report || !web || typeof report.service !== 'boolean') return undefined;
   const worker = text(report.versions?.worker);
+  const terminalHost = text(report.versions?.terminalHost);
   const update = parseUpdate(report.update);
-  return { versions: { web, ...(worker ? { worker } : {}) }, service: report.service, ...(update ? { update } : {}),
+  return { versions: { web, ...(worker ? { worker } : {}), ...(terminalHost ? { terminalHost } : {}) }, service: report.service, ...(update ? { update } : {}),
     ...(typeof report.diskFree === 'number' && Number.isFinite(report.diskFree) && report.diskFree >= 0 ? { diskFree: report.diskFree } : {}) };
 }
 

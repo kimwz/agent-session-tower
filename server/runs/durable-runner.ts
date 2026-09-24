@@ -13,12 +13,15 @@ import { MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerCapability, typ
 import { readHandoff } from './handoff.js';
 import type { TriggerOverview } from '../../shared/triggers.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
+import { newerVersion } from '../link/service.js';
 
 interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number; version?: string;
   /** How long a handed-off worker's successor may stay silent before this web starts a worker itself. */
   successorTimeoutMs?: number;
   /** While an update of this computer is being tried, the worker is not handed over to this web's build. */
   handoffHeld?: () => Promise<boolean>;
+  /** Meanwhile a worker that has to be started is the previous version's, from this entry point. */
+  heldWorkerEntry?: () => Promise<string | undefined>;
   spawn?: (command: { execPath: string; args: string[] }) => void }
 
 /** A disposable UI connection. Only the independent worker owns provider lifetimes. */
@@ -70,7 +73,8 @@ export class DurableRunManager extends EventEmitter {
   }
 
   private async spawnWorker(): Promise<void> {
-    const command = this.workerCommand();
+    const held = await this.options.heldWorkerEntry?.().catch(() => undefined);
+    const command = held ? { execPath: process.execPath, args: [held, '--runner-worker', this.paths!.stateDir] } : this.workerCommand();
     let spawnError: Error | undefined;
     if (this.options.spawn) this.options.spawn(command);
     else {
@@ -94,7 +98,9 @@ export class DurableRunManager extends EventEmitter {
    * approvals and shells are never interrupted; the worker waits for them to finish on its own.
    */
   async requestHandoff(force = false): Promise<boolean> {
-    if (!this.snapshot || !this.supports('handoff') || (!force && this.snapshot.version === (this.options.version ?? APP_VERSION))) return false;
+    const own = this.options.version ?? APP_VERSION;
+    // A worker newer than this build (left by an update that was then undone) is never handed back to it.
+    if (!this.snapshot || !this.supports('handoff') || (!force && (this.snapshot.version === own || newerVersion(this.snapshot.version ?? '', own)))) return false;
     await this.call('requestHandoff', [this.workerCommand()]);
     return true;
   }

@@ -145,22 +145,24 @@ export function UpdateLine({ token, node, version, busy, run }: { token: string;
   const { t } = useI18n();
   const update = node.report?.update;
   const stages: Partial<Record<UpdateStage, string>> = { installing: t('설치하는 중'), checking: t('설치한 버전을 점검하는 중'), switching: t('새 버전으로 전환하는 중'), verifying: t('새 버전이 다시 연결되는지 확인하는 중'), 'rolling-back': t('이전 버전으로 되돌리는 중') };
-  const failures: Record<UpdateFailure, string> = { 'install-failed': t('설치하지 못했습니다. 그 컴퓨터의 네트워크와 디스크 공간을 확인하세요.'), 'check-failed': t('설치한 버전이 실행되지 않았습니다.'),
+  const failures: Record<UpdateFailure, string> = { 'low-disk': t('그 컴퓨터의 디스크 여유 공간이 2GB보다 적어 설치하지 않았습니다.'), 'install-failed': t('설치하지 못했습니다. 그 컴퓨터의 네트워크와 디스크 공간을 확인하세요.'), 'check-failed': t('설치한 버전이 실행되지 않았습니다.'),
     'switch-failed': t('새 버전으로 다시 시작하지 못했습니다.'), 'start-failed': t('새 버전이 제때 응답하지 않았습니다.'), 'link-failed': t('새 버전이 이 컴퓨터에 다시 연결하지 못했습니다.'),
     interrupted: t('업데이트가 중간에 멈췄습니다. 그 컴퓨터가 다시 시작됐을 수 있습니다.'), 'rollback-failed': t('이전 버전으로도 돌아가지 못했습니다.') };
-  const retry = <button type="button" className="secondary-button" disabled={busy || node.status !== 'connected'} onClick={() => { void run(() => post(token, `/api/link/nodes/${node.id}/update`, {})); }}><RefreshCw size={13} />{t('다시 시도')}</button>;
+  const ask = (label: string) => <button type="button" className="secondary-button" disabled={busy || node.status !== 'connected'} onClick={() => { void run(() => post(token, `/api/link/nodes/${node.id}/update`, {})); }}><RefreshCw size={13} />{label}</button>;
   if (update && stages[update.stage]) return <p className="remote-update" role="status"><LoaderCircle size={13} className="spin" aria-hidden="true" />{t('v{0}(으)로 업데이트: {1}', { 0: update.version, 1: stages[update.stage]! })}</p>;
   if (update?.stage === 'failed' && newer(update.version, node.version)) {
-    const reason = update.code ? failures[update.code] : '';
-    return <p className="remote-update failed" role="status">{update.code === 'rollback-failed'
-      ? t('v{0}(으)로 업데이트하지 못했고, {1} 그 컴퓨터에서 Tower를 확인하세요(기록: logs/update.log).', { 0: update.version, 1: reason })
-      : t('v{0}(으)로 업데이트하지 못해 v{1}로 계속 실행 중입니다. {2}', { 0: update.version, 1: update.previous, 2: reason })}{update.code !== 'rollback-failed' && retry}</p>;
+    // Running the previous version again, it came back whatever the helper saw.
+    const back = update.code !== 'rollback-failed' || (node.status === 'connected' && node.version === update.previous);
+    const reason = update.code && (update.code !== 'rollback-failed' || !back) ? failures[update.code] : '';
+    return <div className="remote-update failed"><p role="status">{back
+      ? t('v{0}(으)로 업데이트하지 못해 v{1}(으)로 계속 실행 중입니다. {2}', { 0: update.version, 1: update.previous, 2: reason })
+      : t('v{0}(으)로 업데이트하지 못했고, {1} 그 컴퓨터에서 Tower를 확인하세요(기록: logs/update.log).', { 0: update.version, 1: reason })}</p>{back && ask(t('다시 시도'))}</div>;
   }
   if (newer(node.version, version)) return <p className="remote-update">{t('이 Tower보다 새 버전입니다. 이 컴퓨터의 Tower를 업데이트하세요.')}</p>;
   if (!newer(version, node.version) || node.status !== 'connected') return null;
-  if (!node.features.includes('status')) return <p className="remote-update">{t('이 Tower보다 이전 버전입니다. 그 컴퓨터에서 Tower를 한 번 직접 업데이트하면, 그다음부터는 이 Tower를 따라 자동으로 업데이트됩니다.')}</p>;
+  if (!node.features.includes('status')) return <p className="remote-update">{t('이 Tower보다 이전 버전입니다. 그 컴퓨터에서 Tower를 한 번 직접 업데이트하세요. 백그라운드 서비스로 실행 중이면 그다음부터는 이 Tower를 따라 자동으로 업데이트됩니다.')}</p>;
   if (!node.features.includes('update')) return <p className="remote-update">{t('이 Tower보다 이전 버전입니다. 그 컴퓨터는 Tower를 백그라운드 서비스로 실행하지 않아 자동으로 업데이트되지 않습니다. 그 컴퓨터에서 직접 업데이트하세요.')}</p>;
-  return <p className="remote-update">{t('v{0}(으)로 업데이트를 요청합니다.', { 0: version })}{retry}</p>;
+  return <div className="remote-update"><p>{t('이 Tower(v{0})보다 이전 버전입니다.', { 0: version })}</p>{ask(t('지금 업데이트'))}</div>;
 }
 
 function NodeRow({ token, node, version, busy, run }: { token: string; node: NodeSummary; version: string; busy: boolean; run: Run }) {
@@ -173,6 +175,8 @@ function NodeRow({ token, node, version, busy, run }: { token: string; node: Nod
   const reported = node.report?.versions;
   // The worker takes the new version once no work is running; until then it differs, and that is expected.
   const worker = reported?.worker && reported.worker !== reported.web ? reported.worker : undefined;
+  // So does a terminal host that keeps open terminals; it moves once they are all closed.
+  const terminalHost = reported?.terminalHost && reported.terminalHost !== reported.web ? reported.terminalHost : undefined;
   const free = node.report?.diskFree;
   const lowDisk = free !== undefined && free < 2 * 1024 ** 3 ? (free / 1024 ** 3).toFixed(1) : undefined;
   return <li className="slack-rule-row remote-row">
@@ -182,7 +186,7 @@ function NodeRow({ token, node, version, busy, run }: { token: string; node: Nod
         <input autoFocus maxLength={80} value={label} placeholder={node.name} onChange={event => setLabel(event.target.value)} aria-label={t('표시 이름')} />
         <button className="secondary-button" disabled={busy}>{t('저장')}</button><button type="button" className="secondary-button" onClick={() => { setLabel(node.label ?? ''); setEditing(false); }}>{t('취소')}</button></form>
         : <strong>{name}</strong>}
-      <small>{status}{node.version ? ` · v${node.version}` : ''}{worker ? ` · ${t('작업 실행기 v{0} (진행 중인 작업이 끝나면 바뀜)', { 0: worker })}` : ''} · {t('지문')} {node.fingerprint}{node.status !== 'connected' && node.lastSeenAt ? ` · ${t('마지막 연결')} ${relativeTime(node.lastSeenAt)}` : ''}{lowDisk ? ` · ${t('디스크 여유 {0}GB', { 0: lowDisk })}` : ''}</small>
+      <small>{status}{node.version ? ` · v${node.version}` : ''}{worker ? ` · ${t('작업 실행기 v{0} (진행 중인 작업이 끝나면 바뀜)', { 0: worker })}` : ''}{terminalHost ? ` · ${t('터미널 호스트 v{0} (열린 터미널이 모두 닫히면 바뀜)', { 0: terminalHost })}` : ''} · {t('지문')} {node.fingerprint}{node.status !== 'connected' && node.lastSeenAt ? ` · ${t('마지막 연결')} ${relativeTime(node.lastSeenAt)}` : ''}{lowDisk ? ` · ${t('디스크 여유 {0}GB', { 0: lowDisk })}` : ''}</small>
       <UpdateLine token={token} node={node} version={version} busy={busy} run={run} />
     </div>
     {!editing && <button type="button" className="secondary-button" disabled={busy} onClick={() => setEditing(true)}>{t('이름 변경')}</button>}

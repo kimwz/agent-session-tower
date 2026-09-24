@@ -4,7 +4,7 @@ export interface HubStatus { enabled: boolean; port: number; listening: boolean;
 export type NodeStatus = 'connected' | 'offline' | 'update-required' | 'removed-by-node';
 /** Where an update of a joined computer stands. Until `done`, the computer runs its previous version again on failure. */
 export type UpdateStage = 'installing' | 'checking' | 'switching' | 'verifying' | 'rolling-back' | 'done' | 'failed';
-export type UpdateFailure = 'install-failed' | 'check-failed' | 'switch-failed' | 'start-failed' | 'link-failed' | 'rollback-failed' | 'interrupted';
+export type UpdateFailure = 'low-disk' | 'install-failed' | 'check-failed' | 'switch-failed' | 'start-failed' | 'link-failed' | 'rollback-failed' | 'interrupted';
 export interface UpdateStatus {
   version: string; previous: string; stage: UpdateStage; startedAt: string; updatedAt: string;
   /** Why it failed, and the stage it failed in. */

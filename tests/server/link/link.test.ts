@@ -110,6 +110,10 @@ test('a controller asks a joined computer on an older version to move to its own
   await until(() => a.controller.list()[0]?.report?.update?.code === 'start-failed', 5000);
   await new Promise(resolve => setTimeout(resolve, 300));
   assert.deepEqual(asked, ['1.25.0'], 'a failed update is not asked for again by itself');
+  update = { ...update, version: '1.26.0', code: 'check-failed' };
+  await until(() => a.controller.list()[0]?.report?.update?.version === '1.26.0', 5000);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.deepEqual(asked, ['1.25.0'], 'another controller’s failure does not make this one forget its own');
   await a.controller.update(joined.id);
   assert.deepEqual(asked, ['1.25.0', '1.25.0'], 'the owner asks again');
 });

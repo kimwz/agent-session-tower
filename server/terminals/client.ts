@@ -110,9 +110,10 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
     } finally { await file.close(); }
   }
 
-  /** The running host's version, without starting one; undefined when none runs. */
-  async hostVersion(): Promise<string | undefined> {
-    try { return (await this.exchange('ping')).version; } catch { return undefined; }
+  /** The running host's version, without starting one: null when none runs; a failure to ask is an error. */
+  async hostVersion(): Promise<string | null> {
+    try { return (await this.exchange('ping')).version; }
+    catch (error) { if ((error as { hostAbsent?: boolean }).hostAbsent) return null; throw error; }
   }
 
   private async call(method: string, args: unknown[] = []): Promise<unknown> { return (await this.exchange(method, args)).result; }

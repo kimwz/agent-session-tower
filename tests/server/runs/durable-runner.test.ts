@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -431,15 +431,40 @@ test('while an update of this computer is being tried, the new web does not take
   await f.host.close();
   let handoffs = 0;
   const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {} });
-  t.after(() => host.close());
   let held = true;
   const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => held });
-  t.after(() => client.close());
-  await client.start();
-  await new Promise(resolve => setTimeout(resolve, 300));
-  assert.equal(handoffs, 0, 'going back to the previous version must still find the previous worker');
-  held = false;
-  await until(() => handoffs === 1);
+  // Closed here, before the fixture's own cleanup removes the folder they write to.
+  try {
+    await client.start();
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(handoffs, 0, 'going back to the previous version must still find the previous worker');
+    held = false;
+    await until(() => handoffs === 1);
+  } finally { await client.close(); await host.close(); }
+});
+
+test('a worker newer than this web, left by an update that was undone, is not handed back to it', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let handoffs = 0;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {} });
+  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '0.0.1' });
+  try {
+    await client.start();
+    assert.equal(await client.requestHandoff(), false);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(handoffs, 0);
+  } finally { await client.close(); await host.close(); }
+});
+
+test('a worker that has to start while an update is tried is the previous version’s', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-held-worker-'));
+  const stateDir = join(directory, 'state');
+  const spawned: Array<{ execPath: string; args: string[] }> = [];
+  const client = new DurableRunManager({ stateDir, startupTimeoutMs: 200, heldWorkerEntry: async () => '/versions/1.0.0/bin/tower.mjs', spawn: command => spawned.push(command) });
+  t.after(async () => { await client.close(); await rm(directory, { recursive: true, force: true }); await rm((await runnerPaths(stateDir)).directory, { recursive: true, force: true }); });
+  await assert.rejects(client.start());
+  assert.deepEqual(spawned.map(command => command.args), [['/versions/1.0.0/bin/tower.mjs', '--runner-worker', await realpath(stateDir)]]);
 });
 
 test('requests that arrive while the worker hands off are refused, never half-accepted', async t => {

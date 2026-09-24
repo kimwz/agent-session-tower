@@ -36,7 +36,7 @@ import { NodeLinks } from './link/node.js';
 import { runLinkCommand } from './link/cli.js';
 import { RemoteNodes } from './link/nodes.js';
 import { NodeViewStore } from './link/views.js';
-import { diskFree, handoffHeld, managedByService, runUpdateHelper, serviceSteps, Updates } from './link/update.js';
+import { diskFree, handoffHeld, heldWorkerEntry, managedByService, runUpdateHelper, serviceSteps, Updates } from './link/update.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
@@ -84,8 +84,8 @@ async function main() {
     return;
   }
   if (args[0] === '--update-helper') {
-    if (args.length !== 4) throw new Error('The update helper requires a state directory, a version and a port.');
-    await runUpdateHelper(resolve(args[1]), args[2], serviceSteps(resolve(args[1]), Number(args[3])));
+    if (args.length !== 4 && !(args.length === 5 && args[4] === '--resume')) throw new Error('The update helper requires a state directory, a version and a port.');
+    await runUpdateHelper(resolve(args[1]), args[2], serviceSteps(resolve(args[1]), Number(args[3])), args[4] === '--resume');
     return;
   }
   if (args[0] === 'join' || args[0] === 'service') {
@@ -163,7 +163,8 @@ async function main() {
   // Only the background service's own install is replaced by an update; an update left unfinished is settled first.
   const updates = new Updates({ stateDir, version: APP_VERSION, port, managed: await managedByService(stateDir, process.argv[1], Boolean(serviceLog)) });
   await updates.recover().catch(error => console.error(`The last update could not be settled: ${error instanceof Error ? error.message : String(error)}`));
-  const runs = new DurableRunManager({ stateDir, handoffHeld: () => handoffHeld(stateDir) });
+  // While an update is tried, the worker stays the previous version's, and one that is needed is started from it.
+  const runs = new DurableRunManager({ stateDir, handoffHeld: () => handoffHeld(stateDir), heldWorkerEntry: () => heldWorkerEntry(stateDir) });
   // Load persisted history before shutdown or an HTTP request can touch the runner.
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await exclusions.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
   /** Local browser requests are the owner's; a remote controller's carry its own origin and request ID. */
@@ -266,9 +267,10 @@ async function main() {
     update: {
       request: version => updates.request(version),
       report: async () => {
-        const [update, free] = await Promise.all([updates.status(), diskFree(stateDir)]);
+        const [update, free, terminalHost] = await Promise.all([updates.status(), diskFree(stateDir), workspaceTerminals.hostVersion().catch(() => undefined)]);
         const worker = runs.runnerVersion();
-        return { versions: { web: APP_VERSION, ...(worker ? { worker } : {}) }, service: updates.managed, ...(update ? { update } : {}), ...(free !== undefined ? { diskFree: free } : {}) };
+        return { versions: { web: APP_VERSION, ...(worker ? { worker } : {}), ...(terminalHost ? { terminalHost } : {}) }, service: updates.managed,
+          ...(update ? { update } : {}), ...(free !== undefined ? { diskFree: free } : {}) };
       },
     } });
   if (nodeLinks) {
@@ -302,9 +304,11 @@ async function main() {
   if (open) openBrowser(access.browserUrl);
   let closing = false;
   // Versions an update left behind go once neither the worker nor the terminal host runs them.
+  // A version is in use while the worker or terminal host runs it; when either cannot be asked, nothing is removed.
   const prune = async () => {
     const worker = runs.runnerVersion();
-    if (worker && worker !== 'legacy') await updates.prune([worker, await workspaceTerminals.hostVersion()]);
+    if (!worker || worker === 'legacy') return;
+    await updates.prune(async () => [worker, await workspaceTerminals.hostVersion()]);
   };
   const pruneLater = () => { void prune().catch(error => console.error(`Old versions were not removed: ${error instanceof Error ? error.message : String(error)}`)); };
   const pruning = [setTimeout(pruneLater, 60_000), setInterval(pruneLater, 60 * 60_000)];
