@@ -65,6 +65,17 @@ test('a computer joins with a code; each side then knows the other and requests 
   assert.equal((await stat(join(b.stateDir, 'link', 'controllers.json'))).mode & 0o777, 0o600);
 });
 
+test('a new link is used only once the joined computer has recorded its pairing, so the first request is served', async t => {
+  const a = await computer(t, 'computer-a');
+  const b = await computer(t, 'computer-b');
+  await a.listen();
+  const first = new Promise<number>(resolve => a.controller.once('connected', (id: string) => {
+    linkRequest(a.controller.session(id)!, 'GET', '/api/snapshot').then(answer => resolve(answer.status), () => resolve(0));
+  }));
+  await b.node.join((await a.controller.invite()).code);
+  assert.equal(await first, 200);
+});
+
 test('a code works once: a second computer using it is not accepted', async t => {
   const a = await computer(t, 'computer-a');
   const b = await computer(t, 'computer-b');

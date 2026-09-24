@@ -245,14 +245,15 @@ export class ControllerLinks extends EventEmitter {
       }
       clearTimeout(deadline);
       done();
+      // Until it hears this, the other computer keeps offering its invitation and serves nothing else, so it is
+      // told before the link is used. If it cannot be told, this link starts over and its claim resumes.
+      if (hello.pairing) {
+        const answer = await linkRequest(end.session, 'POST', '/link/paired', { name: this.options.hostname(), fingerprint: this.options.identity.fingerprint });
+        if (answer.status !== 200) throw new Error('Not confirmed.');
+      }
       // The link may have ended while its pairing was being saved, or this Tower may be shutting down.
       if (this.closed || end.session.destroyed || ws.readyState !== ws.OPEN) throw new Error('The link ended.');
-      const live: Connected = { session: end.session, ws, hello };
-      this.attach(node, live);
-      // Until it hears this, the other computer keeps offering its invitation. If it cannot be told, this link
-      // starts over so it is told on the next connection.
-      if (hello.pairing) await linkRequest(end.session, 'POST', '/link/paired', { name: this.options.hostname(), fingerprint: this.options.identity.fingerprint })
-        .then(answer => { if (answer.status !== 200) throw new Error('Not confirmed.'); }).catch(() => live.gone?.());
+      this.attach(node, { session: end.session, ws, hello });
     } catch {
       clearTimeout(deadline);
       done();
