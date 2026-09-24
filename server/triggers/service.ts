@@ -70,7 +70,7 @@ interface EngineState {
   secretGrants: Record<string, string[]>;
 }
 
-const MAX_REVISIONS = 20;
+export const MAX_REVISIONS = 20;
 const MAX_TOMBSTONES = 20;
 const MAX_AUDIT = 1000;
 const MAX_EVENTS = 500;
@@ -108,13 +108,14 @@ export function triggerRequestId(triggerId: string, dedupKey: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+/** A change from a controlling computer marks the trigger as that computer's; a change made here clears it. */
+const remoteMark = (actor: TriggerActor): Pick<Trigger, 'remoteEdited'> => actor.controllerId ? { remoteEdited: { controllerId: actor.controllerId } } : {};
+const unmarked = <T extends Trigger>({ remoteEdited: _, ...trigger }: T): Omit<T, 'remoteEdited'> => trigger;
+
 /**
  * Owns trigger definitions, their history and the events they fire. One worker writes the engine file;
  * every change is computed on a copy, saved, and only then made current.
  */
-/** A change from a controlling computer marks the trigger as that computer's; a change made here clears it. */
-const remoteMark = (actor: TriggerActor): Pick<Trigger, 'remoteEdited'> => actor.controllerId ? { remoteEdited: { controllerId: actor.controllerId } } : {};
-
 export class TriggerService extends EventEmitter {
   private state: EngineState = empty();
   private writes: Promise<unknown> = Promise.resolve();
@@ -335,7 +336,8 @@ export class TriggerService extends EventEmitter {
     return this.commit(state => {
       const current = this.revisionOf(state, id, expectedRevision);
       // A toggle keeps no copy of the definition in history, so it never runs out of space; the audit records it.
-      const next: Trigger = { ...current, enabled, revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor };
+      // Turning it on or off is a change too: from a controlling computer it marks the trigger, from here it clears it.
+      const next: Trigger = { ...unmarked(current), enabled, revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor, ...remoteMark(actor) };
       state.triggers = state.triggers.map(item => item.id === id ? next : item);
       if (enabled && !current.enabled) this.schedule(state, next);
       if (!enabled && current.enabled) this.turnedOff(state, id);
@@ -380,7 +382,7 @@ export class TriggerService extends EventEmitter {
       if (state.triggers.length >= state.settings.maxTriggers) throw failure(`At most ${state.settings.maxTriggers} triggers can exist. Delete one first.`, 409);
       const now = new Date(this.now()).toISOString();
       // Restored from a controlling computer, it is that computer's to run; restored here, it keeps what it had.
-      const trigger: Trigger = { ...structuredClone(deleted), revision: deleted.revision + 1, updatedAt: now, updatedBy: actor, enabled: false, ...remoteMark(actor) };
+      const trigger: Trigger = { ...unmarked(structuredClone(deleted)), revision: deleted.revision + 1, updatedAt: now, updatedBy: actor, enabled: false, ...remoteMark(actor) };
       const note = this.guardAutoReply(trigger, undefined, actor, 'strip') ?? '';
       this.grantSecrets(state, trigger, actor);
       state.triggers.push(trigger);
@@ -901,9 +903,9 @@ export class TriggerService extends EventEmitter {
     // Set up or started from a controlling computer: Auto Prompt then leaves out folders kept from sharing, and a
     // folder or session of its own must not be in one either.
     const origin: RunOrigin = { kind: 'trigger', triggerId: event.triggerId, eventId: event.id, ...(input.remote ? { controllerId: input.remote.controllerId } : {}) };
-    const withheld = input.remote && input.target.mode !== 'auto'
-      ? await this.options.excludes?.(input.target.mode === 'folder' ? input.target.cwd : this.options.executor.session(input.target.sessionId)?.cwd ?? '') ?? true : false;
-    if (withheld) return { status: 'error', error: 'This trigger was set up from another computer, and its folder is one this computer keeps out of sharing; it did not run.' };
+    // Checked as the last step before a run is handed over, so a change to the sharing list meanwhile counts.
+    const withheld = async (cwd: string) => Boolean(input.remote) && (await this.options.excludes?.(cwd) ?? true);
+    const refused = { status: 'error' as const, error: 'This trigger was set up from another computer, and its folder is one this computer keeps out of sharing; it did not run.' };
     const unattended = input.approvals === 'auto';
     const prompt = this.prompt(event);
     const common = { ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}) };
@@ -917,6 +919,7 @@ export class TriggerService extends EventEmitter {
     if (input.target.mode === 'folder') {
       const cwd = input.target.cwd;
       if (!(await stat(cwd).then(info => info.isDirectory(), () => false))) return { status: 'error', error: `The folder ${cwd} no longer exists. Tower does not create folders for triggers.` };
+      if (await withheld(cwd)) return refused;
       const { session, run } = await executor.create({ provider: input.provider, cwd, prompt, title: `${event.triggerName}`, ...common, ...reviewer },
         { autoPromptId: event.requestId, origin, untrustedInput: input.untrustedInput, unattended, createFolder: false, trustWorkspace: this.state.trustedFolders.includes(cwd) });
       return { status: 'running', dispatch: { runId: run.id, sessionId: session.id, createdSessionId: session.id } };
@@ -925,6 +928,7 @@ export class TriggerService extends EventEmitter {
     const session = executor.session(input.target.sessionId);
     if (!session) return { status: 'error', error: 'The chosen session no longer exists.' };
     if (session.provider !== input.provider) return { status: 'error', error: `The chosen session is a ${session.provider} session, not ${input.provider}.` };
+    if (await withheld(session.cwd) || await withheld(executor.session(session.id)?.cwd ?? '')) return refused;
     const run = await executor.enqueue(session.id, prompt, common, { autoPromptId: event.requestId, origin, unattended });
     return { status: 'running', dispatch: { runId: run.id, sessionId: run.sessionId } };
   }
@@ -1104,8 +1108,7 @@ export class TriggerService extends EventEmitter {
     return { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy };
   }
   private replace(state: EngineState, current: Trigger, input: TriggerInput, actor: TriggerActor): Trigger {
-    const { remoteEdited: _, ...kept } = current;
-    const next: Trigger = { ...kept, ...structuredClone(input), revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor, ...remoteMark(actor) };
+    const next: Trigger = { ...unmarked(current), ...structuredClone(input), revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor, ...remoteMark(actor) };
     this.grantSecrets(state, next, actor);
     state.revisions[current.id] = [...(state.revisions[current.id] ?? []), current].slice(-MAX_REVISIONS);
     state.triggers = state.triggers.map(item => item.id === current.id ? next : item);

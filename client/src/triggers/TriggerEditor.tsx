@@ -246,9 +246,10 @@ function GitHubFields({ token, source, onChange, onAccount }: { token: string; s
       setWatch(watch.type === 'issue-opened' ? { ...watch, repos: names } : { ...watch, ...(names.length ? { repos: names } : { repos: undefined }) }); }} />
       <small>{watch.type === 'issue-opened' ? t('한 줄에 하나씩 owner/name. 처음 확인할 때 이미 있던 이슈로는 실행하지 않습니다.') : t('비우면 모든 저장소. 한 줄에 하나씩 owner/name.')}</small></label>
     <div className="trigger-account">
-      <label>{t('GitHub 계정')}<select value={source.auth.type} onChange={event => { reset(); onChange({ ...source, account: '', auth: event.target.value === 'token' ? { type: 'token', secretId: secrets[0]?.id ?? '' } : { type: 'gh' } }); }}>
-        <option value="gh">{t('이 컴퓨터의 gh 로그인')}</option><option value="token">{t('저장한 토큰')}</option></select></label>
-      {source.auth.type === 'token' && <label>{t('토큰')}<select required value={source.auth.secretId} onChange={event => { reset(); onChange({ ...source, account: '', auth: { type: 'token', secretId: event.target.value } }); }}>
+      {/* The sign-in is checked on the computer that uses it, so on another computer it stays as it is. */}
+      <label>{t('GitHub 계정')}<select disabled={Boolean(machine.node)} value={source.auth.type} onChange={event => { reset(); onChange({ ...source, account: '', auth: event.target.value === 'token' ? { type: 'token', secretId: secrets[0]?.id ?? '' } : { type: 'gh' } }); }}>
+        <option value="gh">{machine.node ? t('{0}의 gh 로그인', { 0: machine.name ?? '' }) : t('이 컴퓨터의 gh 로그인')}</option><option value="token">{t('저장한 토큰')}</option></select></label>
+      {source.auth.type === 'token' && <label>{t('토큰')}<select required disabled={Boolean(machine.node)} value={source.auth.secretId} onChange={event => { reset(); onChange({ ...source, account: '', auth: { type: 'token', secretId: event.target.value } }); }}>
         <option value="">{t('비밀 값 선택')}</option>{secrets.map(secret => <option key={secret.id} value={secret.id}>{secret.name}</option>)}</select></label>}
       {!machine.node && <button type="button" className="secondary-button" disabled={checking} onClick={() => void verify()}>{checking ? t('확인 중') : t('연결 확인')}</button>}
     </div>

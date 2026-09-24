@@ -15,8 +15,8 @@ export { blankGitHubSource, blankHttpSource, blankTrigger, eventStatusLabel, sch
 
 type Tab = 'triggers' | 'history' | 'connections' | 'limits';
 interface Context { token: string; providers: ProviderHealth[]; projects: [string, string][]; sessions: Session[] }
-/** A joined computer whose triggers can be managed from here. */
-export interface TriggerComputer { node: string; name: string; providers: ProviderHealth[] }
+/** A joined computer; `ready` when its triggers can be managed from here now (connected, with a Tower that can). */
+export interface TriggerComputer { node: string; name: string; providers: ProviderHealth[]; ready: boolean; connected: boolean }
 /** Folders and conversations a trigger on that computer can aim at, named as that computer knows them. */
 export type TriggerTargets = (node: string) => { projects: [string, string][]; sessions: Session[] };
 /** What the triggers tab shows: the list, the kind picker for a new trigger, or the editor. */
@@ -42,32 +42,39 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
   const [view, setView] = useState<View>({ page: 'list' });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  // The computer whose triggers are shown; another computer's overview comes with its list, not with this page's.
+  // The computer whose triggers are shown. Once chosen it stays chosen: a computer that goes away is shown as away,
+  // and nothing meant for it is ever done here instead. Its overview comes with its list, not with this page's.
   const [node, setNode] = useState('');
-  const computer = computers.find(item => item.node === node);
+  const computer = node ? computers.find(item => item.node === node) : undefined;
+  const away = Boolean(node) && !computer?.ready;
   const [remoteOverview, setRemoteOverview] = useState<TriggerOverview>();
-  const overview = computer ? remoteOverview : ownOverview;
-  const providers = computer ? computer.providers : ownProviders;
-  const { projects, sessions } = computer && targets ? targets(computer.node) : { projects: ownProjects, sessions: ownSessions };
-  const available = computer ? true : Boolean(ownOverview);
+  const overview = node ? remoteOverview : ownOverview;
+  const providers = node ? computer?.providers ?? [] : ownProviders;
+  const { projects, sessions } = node && targets ? targets(node) : { projects: ownProjects, sessions: ownSessions };
+  const available = node ? !away : Boolean(ownOverview);
+  const target = node || undefined;
+  // An answer for a computer no longer shown, or older than a later one, is dropped.
+  const asked = useRef(0);
   const refresh = useCallback(async () => {
     if (!available) return;
+    const mine = ++asked.current;
     try {
-      const result = await towerOperation<{ triggers: Trigger[]; overview: TriggerOverview }>(token, 'triggers.list', {}, computer?.node);
+      const result = await towerOperation<{ triggers: Trigger[]; overview: TriggerOverview }>(token, 'triggers.list', {}, target);
+      if (mine !== asked.current) return;
       setTriggers(result.triggers);
-      if (computer) setRemoteOverview(result.overview);
+      if (target) setRemoteOverview(result.overview);
       setError('');
     }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-  }, [available, token, computer?.node]);
+    catch (cause) { if (mine === asked.current) setError(cause instanceof Error ? cause.message : String(cause)); }
+  }, [available, token, target]);
   const revisions = ownOverview?.triggers.map(item => `${item.id}:${item.revision}`).join(',');
-  useEffect(() => { void refresh(); }, [refresh, computer ? '' : revisions]);
+  useEffect(() => { void refresh(); }, [refresh, target ? '' : revisions]);
   // Another computer's triggers are not on this page's live stream; they are asked for again while shown.
   useEffect(() => {
-    if (!computer) return;
+    if (!target || away) return;
     const timer = window.setInterval(() => { void refresh(); }, 5000);
     return () => window.clearInterval(timer);
-  }, [computer?.node, refresh]);
+  }, [target, away, refresh]);
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null;
     dialog.current?.showModal();
@@ -81,35 +88,42 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
   };
   const editing = view.page === 'edit';
   const leave = (next: () => void) => { if (!editing || window.confirm(t('저장하지 않은 트리거 변경 사항을 버릴까요?'))) next(); };
-  const choose = (next: string) => leave(() => { setNode(next); setTriggers(null); setRemoteOverview(undefined); setError(''); setView({ page: 'list' }); if (next && (tab === 'connections' || tab === 'limits')) setTab('triggers'); });
+  const choose = (next: string) => leave(() => { asked.current++; setNode(next); setTriggers(null); setRemoteOverview(undefined); setError(''); setView({ page: 'list' }); if (next && (tab === 'connections' || tab === 'limits')) setTab('triggers'); });
+  const name = computer?.name ?? t('연결된 컴퓨터');
+  const coordinators = new Set(target ? (triggers ?? []).filter(item => item.handler.kind === 'coordinator').map(item => item.id) : []);
   const close = () => leave(onClose);
   const summaries = new Map(overview?.triggers.map(item => [item.id, item]));
-  const slack = computer ? undefined : overview?.triggers.find(item => item.kind === 'slack');
+  const slack = target ? undefined : overview?.triggers.find(item => item.kind === 'slack');
   const tabs = [['triggers', t('트리거'), Zap], ['history', t('기록'), History], ['connections', t('연결'), Plug], ['limits', t('한도'), Gauge]] as const;
-  return createPortal(<TriggerMachine.Provider value={computer ? { node: computer.node, name: computer.name } : {}}><dialog ref={dialog} className="slack-dialog trigger-dialog" aria-labelledby="trigger-title" onCancel={event => { event.preventDefault(); close(); }}><div className="slack-panel">
-    <header className="slack-head"><div><h2 id="trigger-title">{t('트리거')}</h2><p>{computer ? t('{0}의 트리거입니다. 정한 때가 되면 그 컴퓨터에서 실행됩니다.', { 0: computer.name }) : t('정한 시간이나 GitHub·HTTP·Slack에서 일이 생기면 프로젝트 에이전트에게 작업을 맡깁니다.')}</p></div>
+  return createPortal(<TriggerMachine.Provider value={target ? { node: target, name } : {}}><dialog ref={dialog} className="slack-dialog trigger-dialog" aria-labelledby="trigger-title" onCancel={event => { event.preventDefault(); close(); }}><div className="slack-panel">
+    <header className="slack-head"><div><h2 id="trigger-title">{t('트리거')}</h2><p>{target ? t('{0}의 트리거입니다. 정한 때가 되면 그 컴퓨터에서 실행됩니다.', { 0: name }) : t('정한 시간이나 GitHub·HTTP·Slack에서 일이 생기면 프로젝트 에이전트에게 작업을 맡깁니다.')}</p></div>
       {computers.length > 0 && <label className="trigger-computer">{t('컴퓨터')}<select value={node} onChange={event => choose(event.target.value)}>
-        <option value="">{t('이 컴퓨터')}</option>{computers.map(item => <option key={item.node} value={item.node}>{item.name}</option>)}</select></label>}
+        <option value="">{t('이 컴퓨터')}</option>{computers.map(item => <option key={item.node} value={item.node} disabled={!item.ready && item.node !== node}>
+          {item.ready ? item.name : !item.connected ? t('{0} (오프라인)', { 0: item.name }) : t('{0} (Tower 업데이트 필요)', { 0: item.name })}</option>)}</select></label>}
       <button className="icon-button" aria-label={t('닫기')} onClick={close}><X size={18} /></button></header>
     <nav className="slack-tabs" role="tablist">{tabs.map(([id, label, Icon]) =>
       <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? 'active' : ''} onClick={() => leave(() => { setView({ page: 'list' }); setTab(id); })}><Icon size={14} />{label}</button>)}</nav>
     <div className="slack-body">
       {error && <p role="alert" className="slack-error">{translateMessage(error)}</p>}
       {overview?.storageError && <p role="alert" className="slack-error">{translateMessage(overview.storageError)}</p>}
-      {!available ? <section className="trigger-list"><p className="slack-empty">{t('실행 워커가 새 버전으로 교체되면 트리거를 사용할 수 있습니다. 진행 중인 작업이 끝나면 자동으로 교체됩니다.')}</p>
+      {away && editing && <p role="alert" className="slack-error">{t('{0}에 지금 연결되어 있지 않아 저장할 수 없습니다. 다시 연결되면 저장할 수 있습니다.', { 0: name })}</p>}
+      {away && !editing ? <section className="trigger-list"><p className="slack-empty">{computer?.connected
+        ? t('{0}의 Tower를 업데이트하면 여기서 트리거를 관리할 수 있습니다.', { 0: name })
+        : t('{0}에 지금 연결되어 있지 않습니다. 다시 연결되면 트리거를 보여 줍니다. 그 컴퓨터의 트리거는 그대로 실행됩니다.', { 0: name })}</p></section>
+      : !available && !target ? <section className="trigger-list"><p className="slack-empty">{t('실행 워커가 새 버전으로 교체되면 트리거를 사용할 수 있습니다. 진행 중인 작업이 끝나면 자동으로 교체됩니다.')}</p>
         <ol className="slack-rule-list"><SlackRow onOpen={onOpenSlack} /></ol></section>
         : tab === 'triggers' ? view.page === 'edit'
-          ? <TriggerEditor key={view.trigger?.id ?? `new:${view.kind}`} kind={view.kind} trigger={view.trigger} token={token} providers={providers} projects={projects} sessions={sessions} busy={busy}
+          ? <TriggerEditor key={view.trigger?.id ?? `new:${view.kind}`} kind={view.kind} trigger={view.trigger} token={token} providers={providers} projects={projects} sessions={sessions} busy={busy || away}
             onCancel={() => leave(() => setView({ page: 'list' }))} onSave={input => run(async () => {
-              if (!view.trigger) await towerOperation(token, 'triggers.create', { trigger: input }, computer?.node);
-              else await towerOperation(token, 'triggers.update', { id: view.trigger.id, expectedRevision: view.trigger.revision, trigger: input }, computer?.node);
+              if (!view.trigger) await towerOperation(token, 'triggers.create', { trigger: input }, target);
+              else await towerOperation(token, 'triggers.update', { id: view.trigger.id, expectedRevision: view.trigger.revision, trigger: input }, target);
             }).then(ok => { if (ok) setView({ page: 'list' }); })} />
           : view.page === 'pick' || (triggers && !triggers.length)
             ? <section className="trigger-list">
               <div className="trigger-toolbar"><h3>{view.page === 'pick' ? t('어떤 트리거를 만들까요?') : t('첫 트리거를 만들어 보세요')}</h3>
                 {view.page === 'pick' && <button type="button" className="secondary-button" onClick={() => setView({ page: 'list' })}>{t('취소')}</button>}</div>
-              <TriggerTypePicker slackConnected={Boolean(slack)} onPick={kind => setView({ page: 'edit', kind })} onSlack={onOpenSlack} remote={Boolean(computer)} />
-              {computer && <p className="trigger-note">{t('Slack과 GitHub 트리거는 계정 확인이 필요해 {0}의 Tower에서 만듭니다.', { 0: computer.name })}</p>}
+              <TriggerTypePicker slackConnected={Boolean(slack)} onPick={kind => setView({ page: 'edit', kind })} onSlack={onOpenSlack} remote={Boolean(target)} />
+              {target && <p className="trigger-note">{t('Slack과 GitHub 트리거는 계정 확인이 필요해 {0}의 Tower에서 만듭니다.', { 0: name })}</p>}
               {view.page !== 'pick' && slack && <ol className="slack-rule-list"><SlackRow summary={slack} onOpen={onOpenSlack} /></ol>}
             </section>
             : <section className="trigger-list">
@@ -117,16 +131,16 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
                 <button type="button" className="primary-button" onClick={() => setView({ page: 'pick' })}><Plus size={14} />{t('트리거 추가')}</button></div>
               <ol className="slack-rule-list">
                 {slack && <SlackRow summary={slack} onOpen={onOpenSlack} />}
-                {triggers?.map(trigger => <TriggerRow key={trigger.id} trigger={trigger} summary={summaries.get(trigger.id)} busy={busy}
-                  onToggle={enabled => void run(() => towerOperation(token, 'triggers.setEnabled', { id: trigger.id, expectedRevision: trigger.revision, enabled }, computer?.node))}
-                  onRun={() => void run(() => towerOperation(token, 'triggers.run', { id: trigger.id }, computer?.node))}
+                {triggers?.map(trigger => <TriggerRow key={trigger.id} trigger={trigger} summary={summaries.get(trigger.id)} busy={busy} remote={target ? name : undefined}
+                  onToggle={enabled => void run(() => towerOperation(token, 'triggers.setEnabled', { id: trigger.id, expectedRevision: trigger.revision, enabled }, target))}
+                  onRun={() => void run(() => towerOperation(token, 'triggers.run', { id: trigger.id }, target))}
                   onEdit={() => setView({ page: 'edit', kind: trigger.source.kind, trigger })}
-                  onDelete={() => void run(() => towerOperation(token, 'triggers.delete', { id: trigger.id, expectedRevision: trigger.revision }, computer?.node))} />)}
+                  onDelete={() => void run(() => towerOperation(token, 'triggers.delete', { id: trigger.id, expectedRevision: trigger.revision }, target))} />)}
               </ol>
-              {!slack && !computer && <p className="trigger-note">{t('Slack 멘션도 트리거로 쓸 수 있습니다. 연결 탭에서 연결하세요.')}</p>}
+              {!slack && !target && <p className="trigger-note">{t('Slack 멘션도 트리거로 쓸 수 있습니다. 연결 탭에서 연결하세요.')}</p>}
             </section>
-        : tab === 'history' ? overview ? <TriggerHistory token={token} overview={overview} onChanged={refresh} /> : null
-        : computer ? <p className="trigger-note">{tab === 'connections' ? t('{0}의 연결과 비밀 값은 그 컴퓨터의 Tower에서 설정합니다.', { 0: computer.name }) : t('{0}의 트리거 한도는 그 컴퓨터의 Tower에서 설정합니다.', { 0: computer.name })}</p>
+        : tab === 'history' ? overview ? <TriggerHistory token={token} overview={overview} coordinators={coordinators} onChanged={refresh} /> : null
+        : target ? <p className="trigger-note">{tab === 'connections' ? t('{0}의 연결과 비밀 값은 그 컴퓨터의 Tower에서 설정합니다.', { 0: name }) : t('{0}의 트리거 한도는 그 컴퓨터의 Tower에서 설정합니다.', { 0: name })}</p>
         : tab === 'connections' ? <TriggerConnections token={token} slack={slack} onOpenSlack={onOpenSlack} />
         : <TriggerLimits token={token} />}
     </div>
@@ -145,7 +159,8 @@ function SlackRow({ summary, onOpen }: { summary?: TriggerSummary; onOpen: () =>
   </div></li>;
 }
 
-function TriggerRow({ trigger, summary, busy, onToggle, onRun, onEdit, onDelete }: { trigger: Trigger; summary?: TriggerSummary; busy: boolean; onToggle: (enabled: boolean) => void; onRun: () => void; onEdit: () => void; onDelete: () => void }) {
+/** `remote` names the joined computer the trigger is on, when it is not this one. */
+function TriggerRow({ trigger, summary, busy, remote, onToggle, onRun, onEdit, onDelete }: { trigger: Trigger; summary?: TriggerSummary; busy: boolean; remote?: string; onToggle: (enabled: boolean) => void; onRun: () => void; onEdit: () => void; onDelete: () => void }) {
   const { t } = useI18n();
   const [confirm, setConfirm] = useState(false);
   const last = summary?.lastEvent;
@@ -160,13 +175,16 @@ function TriggerRow({ trigger, summary, busy, onToggle, onRun, onEdit, onDelete 
       <span className="slack-badges">
         {trigger.handler.kind === 'coordinator' && <span>{t('코디네이터')}</span>}
         {trigger.updatedBy.kind === 'agent' && <span className="accent" title={trigger.updatedBy.sessionId}>{t('에이전트가 변경')}</span>}
-        {trigger.remoteEdited && <span title={t('다른 컴퓨터에서 마지막으로 바꾼 트리거는 이 컴퓨터가 원격 공유에서 제외한 폴더를 쓰지 않습니다.')}>{t('다른 컴퓨터에서 변경')}</span>}
+        {trigger.remoteEdited && (remote
+          ? <span title={t('원격에서 마지막으로 바꾼 트리거는 {0}이(가) 원격 공유에서 제외한 폴더를 쓰지 않습니다.', { 0: remote })}>{t('원격에서 변경')}</span>
+          : <span title={t('다른 컴퓨터에서 마지막으로 바꾼 트리거는 이 컴퓨터가 원격 공유에서 제외한 폴더를 쓰지 않습니다.')}>{t('다른 컴퓨터에서 변경')}</span>)}
         {status && <span className={summary?.paused || last?.status === 'error' || last?.status === 'uncertain' ? 'warn' : ''} title={summary?.paused?.reason ?? last?.error ?? last?.reason}>{status}</span>}
         {summary?.error && <span className="warn" title={summary.error}>{t('확인 실패')}</span>}
       </span>
     </button>
     <div className="slack-rule-tools">
-      <button type="button" className="icon-button" aria-label={polled ? t('지금 확인') : t('지금 실행')} title={trigger.enabled ? polled ? t('지금 확인') : t('지금 실행') : t('켜야 실행할 수 있습니다.')} disabled={busy || !trigger.enabled} onClick={onRun}><Play size={15} /></button>
+      <button type="button" className="icon-button" aria-label={polled ? t('지금 확인') : t('지금 실행')} disabled={busy || !trigger.enabled || (Boolean(remote) && trigger.handler.kind === 'coordinator')} onClick={onRun}
+        title={remote && trigger.handler.kind === 'coordinator' ? t('코디네이터 트리거는 {0}의 Tower에서 실행합니다.', { 0: remote }) : trigger.enabled ? polled ? t('지금 확인') : t('지금 실행') : t('켜야 실행할 수 있습니다.')}><Play size={15} /></button>
       <button type="button" className="icon-button" aria-label={t('편집')} title={t('편집')} onClick={onEdit}><Pencil size={15} /></button>
       {confirm ? <button type="button" className="slack-danger" onClick={() => { setConfirm(false); onDelete(); }} onBlur={() => setConfirm(false)}>{t('삭제 확인')}</button>
         : <button type="button" className="icon-button" aria-label={t('삭제')} title={t('삭제')} onClick={() => setConfirm(true)}><Trash2 size={15} /></button>}
@@ -177,7 +195,8 @@ function TriggerRow({ trigger, summary, busy, onToggle, onRun, onEdit, onDelete 
 /** Audit actions whose label and trigger name already say everything; the stored summary would only repeat them. */
 const SELF_EVIDENT = new Set<TriggerAuditEntry['action']>(['create', 'delete', 'enable', 'disable']);
 
-function TriggerHistory({ token, overview, onChanged }: { token: string; overview: TriggerOverview; onChanged: () => Promise<void> }) {
+/** `coordinators`: triggers on another computer that are changed there, so they are not reverted or restored from here. */
+function TriggerHistory({ token, overview, coordinators = new Set(), onChanged }: { token: string; overview: TriggerOverview; coordinators?: ReadonlySet<string>; onChanged: () => Promise<void> }) {
   const { t } = useI18n();
   const { node } = useContext(TriggerMachine);
   const [audit, setAudit] = useState<TriggerAuditEntry[]>([]);
@@ -208,15 +227,15 @@ function TriggerHistory({ token, overview, onChanged }: { token: string; overvie
     <h3>{t('변경 기록')}</h3>
     {audit.length ? <ol className="trigger-log">{audit.map(entry => <li key={entry.id}>
       <Pencil size={14} /><div><p><strong>{entry.triggerName || t('트리거 설정')}</strong><span>{auditActionLabel(entry.action, t)}</span></p>
-      <small>{relativeTime(entry.at)} · {entry.actor.kind === 'agent' ? entry.actor.controllerId ? t('다른 컴퓨터에서 시작한 에이전트 ({0})', { 0: entry.actor.sessionId ?? '?' }) : t('에이전트 ({0})', { 0: entry.actor.sessionId ?? '?' })
-        : entry.actor.kind === 'owner' ? entry.actor.controllerId ? t('나 (다른 컴퓨터에서)') : t('나') : t('시스템')}</small>
+      <small>{relativeTime(entry.at)} · {entry.actor.kind === 'agent' ? entry.actor.controllerId ? t('원격 제어로 시작한 에이전트 ({0})', { 0: entry.actor.sessionId ?? '?' }) : t('에이전트 ({0})', { 0: entry.actor.sessionId ?? '?' })
+        : entry.actor.kind === 'owner' ? entry.actor.controllerId ? t('원격 제어') : t('나') : t('시스템')}</small>
       {!SELF_EVIDENT.has(entry.action) && <small className="trigger-detail" title={entry.summary}>{entry.summary}</small>}</div>
-      {entry.fromRevision && currentRevision.has(entry.triggerId) && ['update', 'revert'].includes(entry.action) &&
+      {entry.fromRevision && currentRevision.has(entry.triggerId) && !coordinators.has(entry.triggerId) && ['update', 'revert'].includes(entry.action) &&
         <button type="button" className="secondary-button" onClick={() => void act('triggers.revert', { id: entry.triggerId, revision: entry.fromRevision, expectedRevision: currentRevision.get(entry.triggerId) })}><RotateCcw size={13} />{t('이 변경 전으로 되돌리기')}</button>}
     </li>)}</ol> : <p className="trigger-note">{t('아직 변경 기록이 없습니다.')}</p>}
     {deleted.length > 0 && <><h3>{t('삭제한 트리거')}</h3><ol className="trigger-log">{deleted.map(trigger => { const Icon = KIND_ICONS[trigger.source.kind]; return <li key={`${trigger.id}:${trigger.revision}`}>
       <Icon size={14} /><div><p><strong>{trigger.name}</strong><span>{kindLabel(trigger.source.kind, t)}</span></p><small>{relativeTime(trigger.updatedAt)}</small></div>
-      <button type="button" className="secondary-button" onClick={() => void act('triggers.restore', { id: trigger.id })}><RotateCcw size={13} />{t('복원 (꺼진 상태)')}</button>
+      {!(node && trigger.handler.kind === 'coordinator') && <button type="button" className="secondary-button" onClick={() => void act('triggers.restore', { id: trigger.id })}><RotateCcw size={13} />{t('복원 (꺼진 상태)')}</button>}
     </li>; })}</ol></>}
   </section>;
 }

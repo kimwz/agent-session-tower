@@ -272,7 +272,7 @@ function TowerApp() {
   const projects = useMemo(() => projectGroupChoices(allMainSessions, groups), [allMainSessions, groups, language]);
   // Triggers and the sharing list belong to each computer; this computer's panel reaches joined computers' triggers too.
   const localProjects = useMemo(() => projects.filter(([key]) => !nodeOf(key)), [projects]);
-  const triggerComputers = useMemo(() => hosts.flatMap(host => host.node && host.triggers ? [{ node: host.node, name: host.name, providers: host.providers }] : []), [hosts]);
+  const triggerComputers = useMemo(() => hosts.flatMap(host => host.node ? [{ node: host.node, name: host.name, providers: host.providers, ready: Boolean(host.triggers), connected: host.status === 'connected' }] : []), [hosts]);
   // What a trigger on another computer can aim at, named as that computer knows it.
   const triggerTargets = useCallback((node: string) => ({
     projects: projects.filter(([key]) => nodeOf(key) === node).map(([key, title]): [string, string] => [localPart(key), title]),

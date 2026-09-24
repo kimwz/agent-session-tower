@@ -9,12 +9,14 @@ import { TowerApi } from '../../../server/api/tower-api.js';
 import { TriggerService } from '../../../server/triggers/service.js';
 import type { AutoPromptJob, Run, RunOrigin, Session } from '../../../shared/types.js';
 import type { TriggerActor, TriggerEvent } from '../../../shared/triggers.js';
+import { RemoteView } from '../../../server/api/remote-view.js';
 import { until } from '../../helpers/until.ts';
 
 const CONTROLLER = 'controllera1b2c3d4e5f6';
 const remote: TriggerActor = { kind: 'owner', via: 'remote', controllerId: CONTROLLER };
 const owner: TriggerActor = { kind: 'owner', via: 'ui' };
-const requests = (() => { let next = 0; return () => `0199a2b3-c4d5-7123-8abc-${String(++next).padStart(12, '0')}`; })();
+/** Request IDs as a controlling computer makes them: UUIDv7, with the time they were made. */
+const requests = (() => { let next = 0; return () => { const time = Date.now().toString(16).padStart(12, '0'); return `${time.slice(0, 8)}-${time.slice(8)}-7123-8abc-${String(++next).padStart(12, '0')}`; }; })();
 
 /** This computer with a shared folder `open` and a folder `secret` kept out of sharing, and a conversation in each. */
 async function fixture(t: TestContext) {
@@ -35,6 +37,8 @@ async function fixture(t: TestContext) {
     create: async (input, internal) => {
       started.push({ how: 'folder', origin: internal.origin, cwd: input.cwd });
       const run: Run = { id: randomUUID(), sessionId: `codex:${randomUUID()}`, prompt: '', status: 'running', createdAt: '', output: '' };
+      // A session a run starts is listed like any other.
+      sessions.push(session(run.sessionId, input.cwd));
       return { session: session(run.sessionId, input.cwd), run };
     },
     enqueue: async () => { throw new Error('unused'); }, runs: () => runs, session: id => sessions.find(item => item.id === id) } });
@@ -42,8 +46,8 @@ async function fixture(t: TestContext) {
   const submitted: Array<{ origin?: RunOrigin }> = [];
   const api = new TowerApi({ stateDir: root, triggers, runs: { list: () => runs }, sessions: { list: () => sessions, read: async () => [] },
     projects: () => [{ cwd: open, title: 'open', sessions: 1, pinned: false }, { cwd: secret, title: 'secret', sessions: 1, pinned: false }],
-    autoPrompts: { submit: async (request, internal) => { submitted.push(internal); return job(request.requestId); }, get: () => undefined },
-    remote: async () => ({ matcher: { revision: 1, excludes }, coordinators: new Set() }) });
+    autoPrompts: { submit: async (request, internal) => { submitted.push(internal); return { ...job(request.requestId), ...(internal.origin ? { origin: internal.origin } : {}) }; }, get: () => undefined },
+    remote: async () => ({ matcher: { revision: 1, excludes }, coordinators: new Set(['codex:coordinator']) }) });
   t.after(async () => { triggers.close(); await rm(root, { recursive: true, force: true }); });
   const call = <T>(name: string, input: unknown, actor = remote, key?: string) => api.call(name, input, actor, key ?? (actor.controllerId && actor.kind === 'owner' ? requests() : undefined)) as Promise<T>;
   return { root, open, secret, excluded, sessions, runs, started, submitted, triggers, api, call };
@@ -79,31 +83,77 @@ test('a controlling computer sees only triggers and runs that stay in shared fol
 
 test('a controlling computer cannot aim a trigger at what it cannot see, and its changes mark the trigger as its own', async t => {
   const f = await fixture(t);
-  await assert.rejects(f.call('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.secret }) }), { statusCode: 400, message: /does not exist/ });
-  await assert.rejects(f.call('triggers.create', { trigger: trigger({ mode: 'session', sessionId: 'codex:private' }) }), { statusCode: 400, message: /session was not found/ });
+  const refusal = (cwd: string) => f.call('triggers.create', { trigger: trigger({ mode: 'folder', cwd }) }).then(() => '', (error: Error & { statusCode: number }) => `${error.statusCode} ${error.message.replace(cwd, '<folder>')}`);
+  const missing = await refusal(join(f.root, 'nope'));
+  assert.match(missing, /^400 /);
+  for (const cwd of [f.secret, join(f.secret, 'inner'), join(f.secret, 'nope')]) assert.equal(await refusal(cwd), missing, 'a folder kept from sharing reads exactly as one that is not there');
+  const sessionMissing = await f.call('triggers.create', { trigger: trigger({ mode: 'session', sessionId: 'codex:nowhere' }) }).catch((error: Error) => error.message);
+  assert.equal(await f.call('triggers.create', { trigger: trigger({ mode: 'session', sessionId: 'codex:private' }) }).catch((error: Error) => error.message), sessionMissing);
   const created = (await f.call<{ trigger: { id: string; remoteEdited?: unknown; createdBy: TriggerActor } }>('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.open }) })).trigger;
   assert.deepEqual(created.remoteEdited, { controllerId: CONTROLLER });
   assert.deepEqual(created.createdBy, remote);
   await assert.rejects(f.call('triggers.update', { id: created.id, expectedRevision: 1, trigger: trigger({ mode: 'folder', cwd: f.secret }) }), { statusCode: 400 });
   const local = (await f.call<{ trigger: { remoteEdited?: unknown } }>('triggers.update', { id: created.id, expectedRevision: 1, trigger: trigger({ mode: 'auto' }) }, owner)).trigger;
   assert.equal(local.remoteEdited, undefined, 'a change made here makes it this computer’s again');
-  const again = (await f.call<{ trigger: { remoteEdited?: unknown } }>('triggers.revert', { id: created.id, expectedRevision: 2, revision: 1 })).trigger;
-  assert.deepEqual(again.remoteEdited, { controllerId: CONTROLLER });
-  const coordinator = { name: 'Issues', source: { kind: 'github', account: 'octo', watch: { type: 'mentions' }, schedule: { type: 'interval', everySeconds: 300 } },
+  await f.call('triggers.delete', { id: created.id, expectedRevision: 2 });
+  const restored = (await f.call<{ trigger: { remoteEdited?: unknown } }>('triggers.restore', { id: created.id }, owner)).trigger;
+  assert.equal(restored.remoteEdited, undefined, 'restored here, it is this computer’s');
+  const coordinator = { name: 'Issues', source: { kind: 'github', account: 'octo', auth: { type: 'gh' }, watch: { type: 'assigned-to-me' }, schedule: { type: 'interval', everySeconds: 300 } },
     handler: { kind: 'coordinator', rules: [{ id: 'r', name: 'r', enabled: true, condition: 'c', instructions: 'i', replyInstructions: 'r', provider: 'codex' }] } };
-  await assert.rejects(f.call('triggers.create', { trigger: coordinator }), (error: { statusCode?: number }) => error.statusCode === 403 || error.statusCode === 400);
+  await assert.rejects(f.call('triggers.create', { trigger: coordinator }), { statusCode: 403, message: /on that computer itself/ });
+  const issues = (await f.call<{ trigger: { id: string; revision: number } }>('triggers.create', { trigger: coordinator }, owner)).trigger;
+  await assert.rejects(f.call('triggers.run', { id: issues.id }), { statusCode: 403 });
+  const off = (await f.call<{ trigger: { enabled: boolean; remoteEdited?: unknown } }>('triggers.setEnabled', { id: issues.id, enabled: false, expectedRevision: issues.revision })).trigger;
+  assert.equal(off.enabled, false, 'a coordinator trigger can still be turned off from there');
+  assert.deepEqual(off.remoteEdited, { controllerId: CONTROLLER }, 'turning it on or off is a change too');
   for (const [name, input] of [['triggers.updateSettings', { settings: { maxTriggers: 10, maxConcurrentRuns: 2, maxEventsPerHour: 10, privateHosts: [] } }], ['secrets.create', { secret: { name: 'x', origin: 'https://example.com', value: 'a-long-secret-value-here' } }]] as const) {
     await assert.rejects(f.call(name, input), { statusCode: 403 }, `${name} stays with this computer`);
   }
 });
 
-test('a change from a controlling computer is made once per request, even when sent again', async t => {
+test('a change from a controlling computer is made once per request, and its answer sent again follows what is shared now', async t => {
   const f = await fixture(t);
   const key = requests();
   const first = await f.call<{ trigger: { id: string } }>('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.open }) }, remote, key);
   const again = await f.call<{ trigger: { id: string } }>('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.open }) }, remote, key);
   assert.equal(again.trigger.id, first.trigger.id);
   assert.equal(f.triggers.list().length, 1);
+  f.excluded.add(f.open);
+  await assert.rejects(f.call('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.open }) }, remote, key), { statusCode: 404 }, 'the recorded answer names a folder no longer shared');
+  const old = `00000000-0001-7123-8abc-000000000001`;
+  await assert.rejects(f.call('triggers.create', { trigger: trigger({ mode: 'auto' }) }, remote, old), { statusCode: 409, disposition: 'not-admitted' }, 'a request older than the record kept is never run');
+});
+
+test('history a controlling computer reads leaves out revisions, runs and conversations it cannot see', async t => {
+  const f = await fixture(t);
+  const moved = (await f.call<{ trigger: { id: string } }>('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.secret }, 'Private at first') }, owner)).trigger;
+  await f.call('triggers.update', { id: moved.id, expectedRevision: 1, trigger: trigger({ mode: 'folder', cwd: f.open }, 'Shared now') }, owner);
+  await f.call('triggers.setEnabled', { id: moved.id, expectedRevision: 2, enabled: false }, owner);
+  const audit = (await f.call<{ audit: Array<{ action: string; triggerName: string }> }>('triggers.audit', {})).audit;
+  assert.deepEqual(audit.map(entry => entry.action), ['disable'], 'the creation and the change away from the private folder name a revision it cannot see');
+  const got = await f.call<{ trigger: { name: string }; revisions: unknown[] }>('triggers.get', { id: moved.id });
+  assert.equal(got.trigger.name, 'Shared now');
+  assert.deepEqual(got.revisions, [], 'the earlier revision, in the private folder, is left out');
+  const agent: TriggerActor = { kind: 'agent', via: 'mcp', sessionId: 'codex:private', runId: randomUUID() };
+  const byAgent = (await f.call<{ trigger: { id: string } }>('triggers.create', { trigger: trigger({ mode: 'auto' }, 'By an agent') }, agent, 'agent-1')).trigger;
+  const seen = await f.call<{ trigger: { createdBy: TriggerActor } }>('triggers.get', { id: byAgent.id });
+  assert.deepEqual(seen.trigger.createdBy, { kind: 'agent', via: 'mcp' }, 'a conversation it cannot see is not named');
+  const hidden = (await f.call<{ trigger: { id: string } }>('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.secret }, 'Private') }, owner)).trigger;
+  const shared = (await f.call<{ trigger: { id: string } }>('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.open }, 'Shared') }, owner)).trigger;
+  await f.call('triggers.run', { id: shared.id }, owner);
+  await until(() => f.started.length === 1);
+  await f.call('triggers.run', { id: hidden.id }, owner);
+  await until(() => f.started.length === 2);
+  const page = (await f.call<{ events: TriggerEvent[] }>('triggers.events', { limit: 1 })).events;
+  assert.deepEqual(page.map(event => event.triggerId), [shared.id], 'a newer run it cannot see does not take the only place on the page');
+});
+
+test('a coordinator’s runs stay on this computer with its conversations', () => {
+  const scope = { matcher: { revision: 1, excludes: () => false }, coordinators: new Set(['codex:coordinator']) };
+  const view = new RemoteView(scope, [], { triggers: [], deleted: [], revisions: {} });
+  const base = { id: 'e', triggerId: 't', triggerName: 'Issues', triggerRevision: 1, kind: 'github', dedupKey: 'k', occurredAt: '', receivedAt: '', updatedAt: '', status: 'running', summary: '', requestId: 'r' } as const;
+  assert.equal(view.event({ ...base, input: { instructions: '', provider: 'codex', approvals: 'auto', target: { node: 'local', mode: 'auto' }, untrustedInput: true, overlap: 'skip', handler: 'coordinator', rules: [] },
+    dispatch: { workflowId: '10000000-0000-4000-8000-000000000001', sessionId: 'codex:coordinator', createdSessionId: 'codex:coordinator', runId: 'r1' } }), false);
 });
 
 test('what a trigger set up remotely starts never uses a folder kept out of sharing, whenever that became so', async t => {
