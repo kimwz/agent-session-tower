@@ -290,3 +290,21 @@ test('what the gate needs is looked at again after the last step before the prov
     assert.ok(looked.includes(run.id));
   } finally { await manager.close(); }
 });
+
+test('a waiting run is judged by a look taken for it, not by an old one', async t => {
+  const f = await fixture(t);
+  let spawned = 0;
+  // The last look is old until one is taken for the run.
+  let old = true;
+  const manager = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 20,
+    findExecutable: async provider => `/fixture/${provider}`, spawnProcess: () => { spawned++; throw new Error('spawn is not needed here'); } });
+  await manager.start();
+  try {
+    manager.setLaunchGate(run => run.origin?.controllerId && old ? 'kept out of sharing' : undefined, async () => { old = false; });
+    const { run } = await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Scheduled' }, { origin: { kind: 'trigger', triggerId: 'daily', controllerId: 'controllera1b2c3d4e5f6' } });
+    const { until } = await import('../../helpers/until.ts');
+    const ended = await until(() => manager.list().find(item => item.id === run.id && ['cancelled', 'error', 'running'].includes(item.status)));
+    assert.notEqual(ended.error, 'kept out of sharing');
+    assert.equal(spawned, 1, 'it went on to start');
+  } finally { await manager.close(); }
+});

@@ -60,7 +60,8 @@ async function fixture(t: TestContext) {
       if (looking.skip) looking.skip--; else looking.during = undefined;
       await during?.();
       return { matcher: { revision: 1, excludes }, coordinators: new Set(['codex:coordinator']) }; } });
-  t.after(async () => { triggers.close(); await rm(root, { recursive: true, force: true }); });
+  // Runs still being handed over finish writing before the folder goes.
+  t.after(async () => { triggers.close(); await triggers.settle(); await rm(root, { recursive: true, force: true, maxRetries: 3 }); });
   const call = <T>(name: string, input: unknown, actor = remote, key?: string) => api.call(name, input, actor, key ?? (actor.controllerId && actor.kind === 'owner' ? requests() : undefined)) as Promise<T>;
   return { root, open, secret, excluded, sessions, runs, started, submitted, triggers, api, call, admitting, looking };
 }
@@ -282,13 +283,13 @@ test('where a folder really is, and the sharing list, are looked at again for ev
   const worker = new RemoteExclusionStore(join(root, 'state'), { recheckMs: 10 });
   await worker.start();
   const launch = remoteTriggerLaunch(worker, { list: () => [run], getSession: () => session });
-  await launch.prepare();
+  await launch.prepareRun(run);
   assert.equal(launch.refused(run), false);
   await new Promise(resolve => setTimeout(resolve, 100));
-  await launch.prepare();
+  await launch.prepareRun(run);
   assert.equal(launch.refused(run), false, 'a shared folder is looked at again, not taken as private because its last look is old');
   await store.add(open);
-  await launch.prepare();
+  await launch.prepareRun(run);
   assert.equal(launch.refused(run), true, 'the list as saved now');
   await store.remove(open);
   await launch.prepareRun(run);

@@ -601,6 +601,9 @@ export class RunManager extends EventEmitter {
         // explicitly configure a worker limit impose a global queue.
         if (this.options.maxConcurrent !== undefined && this.owned.size + this.bridged.size + this.stdio.size >= this.options.maxConcurrent) break;
         if (run.status !== 'queued' || this.admissions.has(run.id)) continue;
+        // Each run's own look, taken now: an earlier run's start may have taken a while.
+        await this.prepareLaunch(run);
+        if (run.status !== 'queued' || this.admissions.has(run.id) || this.stopping) continue;
         const refused = this.launchGate?.(run);
         if (refused) {
           run.status = 'cancelled'; run.error = refused; run.finishedAt = new Date().toISOString(); this.changed();

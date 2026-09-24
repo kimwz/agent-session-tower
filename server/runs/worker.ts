@@ -378,9 +378,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   catch (error) { if (error instanceof MonitorAlreadyRunning) return; throw error; }
   const sessions = new SessionService();
   const terminals = new WorkspaceTerminals({ keepAliveOnDisconnect: true });
-  // Before waiting runs start; set once the sharing list is read (see remoteTriggerLaunch).
-  let beforeLaunch = async (): Promise<void> => {};
-  const runs = new RunManager({ stateDir, getSession: id => sessions.get(id), refreshSessions: async () => { await sessions.refresh(true); await beforeLaunch(); },
+  const runs = new RunManager({ stateDir, getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true),
     openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }), trustWorkspace });
   try {
     await sessions.start();
@@ -437,7 +435,6 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // A run still waiting when its trigger is turned off or deleted never starts.
     // A coordinator conversation already under way continues, like an accepted Slack conversation; only its first turn waits on the trigger.
     const remoteLaunch = remoteTriggerLaunch(exclusions, runs);
-    beforeLaunch = () => remoteLaunch.prepare();
     runs.setLaunchGate(run => {
       if (run.origin?.kind !== 'trigger' || !run.origin.triggerId) return undefined;
       if (!(run.origin.workflowId && run.autoPromptId !== run.origin.workflowId) && !triggers.launchAllowed(run.origin.triggerId, run.origin.eventId)) return 'The trigger was turned off before this run started, so it did not run.';
