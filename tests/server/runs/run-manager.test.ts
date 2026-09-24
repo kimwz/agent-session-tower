@@ -889,6 +889,27 @@ test("Tower's note never hides a reply Claude gives only as its result", async t
   assert.match(result.output, /\(default\)\. Approval requests will wait for you in Tower\.\nOnly the result$/);
 });
 
+test('work the owner starts through an agent or from a controller runs Claude automatically; Slack and unrecorded work keep its own mode', async t => {
+  const f = await fixture({ provider: 'claude' });
+  t.after(f.cleanup);
+  const origins = [{ kind: 'agent', runId: '40000000-0000-4000-8000-000000000001' }, { kind: 'owner', controllerId: 'a'.repeat(32) },
+    { kind: 'slack', workflowId: '40000000-0000-4000-8000-000000000002' }, undefined] as const;
+  for (const origin of origins) {
+    const run = await f.manager.enqueue(f.session.id, `From ${origin?.kind ?? 'nowhere'}`, {}, origin ? { origin } : {});
+    assert.equal((await finished(f.manager, run.id)).status, 'completed');
+  }
+  assert.deepEqual(f.launches.map(launch => launch.args.includes('--permission-mode') ? launch.args[launch.args.indexOf('--permission-mode') + 1] : 'own'), ['auto', 'auto', 'own', 'own']);
+});
+
+test("the owner's turn in a Slack conversation still requires Codex's automatic reviewer", async t => {
+  const f = await fixture({ mode: 'old-reviewer', resolveRunTools: () => ({ servers: { tower_slack: { command: '/fixture/node', args: ['bridge.mjs'] } }, required: true }) });
+  t.after(f.cleanup);
+  const run = await f.manager.enqueue(f.session.id, 'Send the reply', {}, { origin: { kind: 'owner' } });
+  const result = await finished(f.manager, run.id);
+  assert.equal(result.status, 'error');
+  assert.match(result.error ?? '', /did not confirm Auto approval review\. No message was submitted/);
+});
+
 test('a trigger set to wait for the owner starts Claude in its own mode', async t => {
   const f = await fixture({ provider: 'claude' });
   t.after(f.cleanup);

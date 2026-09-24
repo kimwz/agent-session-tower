@@ -8,7 +8,7 @@ import type { Attachment, AttachmentInput, AutoPromptDecision, AutoPromptJob, Au
 import { isImageAttachment } from '../../shared/attachments.js';
 import { AttachmentStore, attachmentMetadata, type StoredAttachment } from '../stores/attachments.js';
 import { RunError, type RunAdmission, type RunManager } from '../runs/manager.js';
-import { automatedOrigin, parseRunOrigin } from '../runs/origin.js';
+import { ownerOrigin, parseRunOrigin } from '../runs/origin.js';
 import { runAutoPromptModel } from './native.js';
 import type { ExclusionMatcher } from '../remote/exclusions.js';
 import { remoteWorkingSnapshot } from '../remote/visibility.js';
@@ -211,8 +211,8 @@ export class AutoPromptManager extends EventEmitter {
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, staged: prepared.attachments, job: {
       id: input.requestId, origin, ...(origin.controllerId ? { exclusionRevision: this.options.remote!.matcher().revision } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
-      // Tower's own turns always use Codex's automatic reviewer, so only triggers and Slack keep the one they chose.
-      ...(input.provider === 'codex' && input.codexApprovalsReviewer && automatedOrigin(origin) ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}),
+      // The owner's own turns always use Codex's automatic reviewer; only other work keeps the one it chose.
+      ...(input.provider === 'codex' && input.codexApprovalsReviewer && !ownerOrigin(origin) ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}),
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
       ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
       ...(input.model ? { model: input.model } : {}),

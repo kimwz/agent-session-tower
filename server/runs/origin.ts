@@ -56,6 +56,11 @@ export function sessionOriginOf(origin: RunOrigin | undefined, untrustedInput: b
 
 /** Work nobody typed into Tower: Slack coordination and delegation, and trigger runs. */
 export function automatedOrigin(origin: RunOrigin | undefined): boolean { return origin?.kind === 'slack' || origin?.kind === 'trigger'; }
+/**
+ * The owner's own work: what they type into Tower, here or from a controller, and what their agents start with Tower's
+ * tools. It always runs in the provider's automatic approval mode. Work with no recorded origin is not assumed to be it.
+ */
+export function ownerOrigin(origin: RunOrigin | undefined): boolean { return origin?.kind === 'owner' || origin?.kind === 'agent'; }
 
 /** Runs without a recorded origin compare as unknown. */
 export function sameOrigin(a: RunOrigin | undefined, b: RunOrigin | undefined): boolean {

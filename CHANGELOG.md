@@ -9,9 +9,9 @@ format, and saved browser preferences are the compatibility surface.
 ### Changed
 - **Claude and Codex approve automatically in every turn Tower runs for you.** Claude Code runs in its auto mode, where a classifier decides which actions go ahead, and Codex hands approval requests to its automatic reviewer (Approve for me). This covers the chat, new conversations and Auto Prompt, on this computer and on joined computers, so a remote computer no longer stops to ask about each command.
   - The **승인 검토** choice is gone from the new conversation and Auto Prompt windows.
-  - It also applies when Tower continues a conversation started elsewhere. A Codex conversation keeps the automatic reviewer for its later turns, including ones in the Codex app.
-  - Where the automatic mode is not available, the turn still runs, the chat says so, and approval requests wait in Tower as before. This happens when Claude Code's auto mode is not offered for the plan or model, or with an older Codex.
-  - Triggers and Slack keep their own **승인** setting.
+  - It also applies when Tower continues a conversation started elsewhere, and to work your agents start with Tower's tools. A Codex conversation keeps the automatic reviewer for its later turns, including ones in the Codex app.
+  - Where the automatic mode is not available, the turn still runs and the chat says so. Approval requests then wait for you as before: in Tower, or in the Codex app for a turn sent to a conversation open there. This happens when Claude Code's auto mode is not offered for the plan or model, or with an older Codex.
+  - Triggers and Slack keep their own **승인** setting. A trigger that continues a Codex conversation you have already used from Tower gets that conversation's automatic reviewer.
 
 ## [1.30.1] - 2026-09-24
 

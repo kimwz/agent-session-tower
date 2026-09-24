@@ -90,9 +90,15 @@ test("Tower's own Codex turns hand approvals to the automatic reviewer, new or r
   const resumed = await f.manager.enqueue(accepted.session.id, 'continue in the same conversation', {}, owner);
   assert.equal((await finished(f.manager, resumed.id)).status, 'completed');
   assert.equal((await threadParams()).approvalsReviewer, 'auto_review');
+  for (const origin of [{ kind: 'agent' as const, runId: '40000000-0000-4000-8000-000000000001' }, { kind: 'owner' as const, controllerId: 'a'.repeat(32) }]) {
+    const delegated = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: `From ${origin.kind}` }, { origin });
+    assert.equal((await finished(f.manager, delegated.run.id)).status, 'completed');
+    assert.equal((await threadParams()).approvalsReviewer, 'auto_review');
+  }
+  // Work with no recorded origin is not taken for the owner's: the thread keeps Codex's own reviewer.
   const unrecorded = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'No recorded origin' });
   assert.equal((await finished(f.manager, unrecorded.run.id)).status, 'completed');
-  assert.equal((await threadParams()).approvalsReviewer, 'auto_review');
+  assert.equal((await threadParams()).approvalsReviewer, undefined);
   const claude = await f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Claude ignores it', codexApprovalsReviewer: 'auto_review' });
   assert.equal(claude.run.codexApprovalsReviewer, undefined);
   await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Invalid reviewer', codexApprovalsReviewer: 'always' as 'user' }), { statusCode: 400 });

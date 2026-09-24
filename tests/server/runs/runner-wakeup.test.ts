@@ -47,12 +47,13 @@ async function fixture(turns: unknown[][], saved?: Run[]) {
   const session: Session = { id: SESSION, nativeId: ID, provider: 'claude', title: 'Wakeup fixture', cwd: directory, project: 'fixture', status: 'completed', statusReason: '',
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
   const sessions = new Map([[SESSION, session]]);
+  const launches: string[][] = [];
   const manager = new RunManager({ getSession: id => sessions.get(id), refreshSessions: async () => {}, stateDir, pollMs: 20,
     findExecutable: async provider => `/fixture/${provider}`, env: { PROMPTS: prompts, TURNS: JSON.stringify(turns) },
-    spawnProcess: (_file, args, options) => spawn(process.execPath, [script, ...args], options) });
+    spawnProcess: (_file, args, options) => { launches.push(args); return spawn(process.execPath, [script, ...args], options); } });
   await manager.start();
   const received = async () => (await readFile(prompts, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as string);
-  return { manager, session, sessions, stateDir, received, cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
+  return { manager, session, sessions, stateDir, received, launches, cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
 }
 
 const settled = (manager: RunManager, id: string) => until(() => { const run = manager.list().find(item => item.id === id); return run && !['queued', 'running'].includes(run.status) ? run : undefined; });
@@ -96,10 +97,12 @@ test('a continuation waits for its time, survives a worker restart, and resumes 
     { id: '30000000-0000-4000-8000-000000000003', sessionId: SESSION, origin: { kind: 'owner' }, prompt: 'Due', status: 'queued', createdAt, output: '',
       scheduled: { at: new Date(Date.now() - 60_000).toISOString(), afterRunId: '30000000-0000-4000-8000-000000000001' } },
   ];
-  const { manager, received, cleanup } = await fixture([[]], saved);
+  const { manager, received, launches, cleanup } = await fixture([[]], saved);
   t.after(cleanup);
   assert.equal((await settled(manager, saved[2].id)).status, 'completed');
   assert.deepEqual(await received(), ['Due']);
+  // The owner's continuation runs in automatic mode like the turn that scheduled it.
+  assert.equal(launches[0][launches[0].indexOf('--permission-mode') + 1], 'auto');
   const later = manager.list().find(run => run.id === saved[1].id)!;
   assert.equal(later.status, 'queued');
   assert.equal(manager.hasWorkWithin(5 * 60_000), false);

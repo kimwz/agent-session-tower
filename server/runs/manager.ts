@@ -21,7 +21,7 @@ import { findExecutable, providerDirectories, PROVIDERS } from '../providers/dis
 import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
-import { automatedOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
+import { automatedOrigin, ownerOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
 import { WakeupTracker, type Wakeup } from './wakeup.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
@@ -334,11 +334,10 @@ export class RunManager extends EventEmitter {
     if (!PROVIDERS.includes(input.provider)) throw new RunError('Claude 또는 Codex를 선택하세요.');
     const model = requestedModel(input.model);
     const effort = requestedEffort(input.effort, input.provider);
-    // Only a Codex thread has an approvals reviewer. Tower's own turns always use the automatic one (see
-    // launchCodex), so a reviewer is kept only for the triggers and Slack work that choose it; one sent by an
-    // older page is still checked, then left out.
+    // Only a Codex thread has an approvals reviewer. The owner's own turns always use the automatic one (see
+    // launchCodex), so one an older page sends is still checked, then left out; triggers and Slack keep theirs.
     const requestedReviewer = input.provider === 'codex' ? requestedApprovalsReviewer(input.codexApprovalsReviewer) : undefined;
-    const approvalsReviewer = automatedOrigin(internal.origin) ? requestedReviewer : undefined;
+    const approvalsReviewer = ownerOrigin(internal.origin) ? undefined : requestedReviewer;
     if (typeof input.cwd !== 'string' || input.cwd.includes('\0') || input.cwd.length > 4096) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
     const cwd = input.cwd === '~' || input.cwd.startsWith('~/') ? join(homedir(), input.cwd.slice(1)) : input.cwd;
     if (!isAbsolute(cwd)) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
@@ -679,7 +678,7 @@ export class RunManager extends EventEmitter {
     let started = false;
     const bridge = await this.options.openCodexBridge({
       threadId: session.nativeId, runId: run.id, prompt: attachmentPrompt(run.prompt, attachments),
-      ...(automated(run) ? {} : { approvalsReviewer: 'auto_review' as const }),
+      ...(ownerOrigin(run.origin) ? { approvalsReviewer: 'auto_review' as const } : {}),
       ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
       ...(attachments.length ? { imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) } : {}),
       onStarted: () => {
@@ -746,10 +745,10 @@ export class RunManager extends EventEmitter {
     const tools = this.runTools(run, session);
     const mcpServers = tools.servers;
     if (tools.towerTools) run.towerTools = tools.towerTools;
-    // Tower's own turns hand approvals to Codex's automatic reviewer, in new and resumed threads alike; if Codex does
-    // not confirm it, the turn still runs and approvals wait in Tower. Triggers and Slack keep the reviewer their
-    // setting chose when the thread started, and Slack's tools require the automatic one.
-    const owner = !automated(run);
+    // The owner's own turns hand approvals to Codex's automatic reviewer, in new and resumed threads alike; if Codex
+    // does not confirm it, the turn still runs and approvals wait in Tower. Other work keeps the reviewer its setting
+    // chose when the thread started, and Slack's tools require the automatic one.
+    const owner = ownerOrigin(run.origin);
     const approvalsReviewer = mcpServers?.tower_slack || owner ? 'auto_review' as const : creating ? run.codexApprovalsReviewer : undefined;
     const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
       executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
@@ -1164,7 +1163,7 @@ async function privateMcpConfig(mcpServers: NonNullable<RunTools['servers']>): P
   } catch (error) { remove(); throw error; }
 }
 function automated(run: Run): boolean { return automatedOrigin(run.origin); }
-/** Tower's own turns always run in the provider's automatic approval mode; triggers and Slack follow their setting. */
-function automaticApprovals(run: Run): boolean { return run.unattended === true || !automated(run); }
+/** The owner's own turns always run in the provider's automatic approval mode; triggers and Slack follow their setting. */
+function automaticApprovals(run: Run): boolean { return run.unattended === true || ownerOrigin(run.origin); }
 /** Modes at least as careful as asking the owner. Anything else is not what an unattended run asked for. */
 const OWNER_APPROVAL_MODES = new Set(['default', 'manual', 'plan', 'dontAsk']);

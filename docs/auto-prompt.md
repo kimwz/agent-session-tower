@@ -28,7 +28,7 @@ The router receives bounded structured data: project labels, session titles, rec
 
 Codex context uses the latest `last_token_usage.total_tokens` and `model_context_window`, rather than cumulative billed tokens. Claude context uses the latest input, cache creation, and cache read token counts. Capacity and percentage are omitted when native data does not establish a window size; Tower does not infer capacity from a model name.
 
-The routing model is `opus` for Claude Code and `gpt-5.6-sol` for Codex. Its invocation is temporary and restricted to making the selection, using the user's existing native authentication. The destination retains its native model, sandbox, and permission settings. The normal approval UI continues to apply to actual task execution.
+The routing model is `opus` for Claude Code and `gpt-5.6-sol` for Codex. Its invocation is temporary and restricted to making the selection, using the user's existing native authentication. The destination keeps its native model and sandbox settings. Like every turn Tower starts, it runs in the provider's automatic approval mode, and the normal approval UI shows whatever still needs you (see [tool approvals](usage.md#tool-approvals)).
 
 ## Request lifecycle
 
