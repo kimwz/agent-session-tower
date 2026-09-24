@@ -306,3 +306,22 @@ test('a routing call waits for an update of its CLI, then runs; cancelled, it st
   await assert.rejects(cancelled, /cancelled/);
   assert.deepEqual((await readdir(flags)).filter(name => name.includes('.probe-')), [], 'a waiting call leaves nothing behind');
 });
+
+test('an installer a previous worker left running still holds its CLI: its turns wait until it is gone', async t => {
+  const f = await fixture(t);
+  const { flags } = toolUpdatePaths(f.stateDir);
+  await mkdir(flags, { recursive: true });
+  // The worker that took it is gone; the installer (this process, here) still runs.
+  await writeFile(join(flags, 'codex.update'), `999999999 ${process.pid}`);
+  const updates = new ToolUpdates({ stateDir: f.stateDir, env: { PATH: '' }, firstMs: 10 ** 9, adoptPollMs: 20, find: async () => undefined,
+    hold: (name, quiet) => { f.holds.push([name, quiet]); f.held().add(name); return () => { f.held().delete(name); }; } });
+  t.after(() => updates.stop());
+  updates.start();
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.deepEqual([...f.held()], ['codex']);
+  assert.equal(updates.busy(), true, 'the worker does not hand off meanwhile');
+  await rm(join(flags, 'codex.update'));
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.deepEqual([...f.held()], []);
+  assert.equal(updates.busy(), false);
+});

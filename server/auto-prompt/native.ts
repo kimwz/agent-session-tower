@@ -141,6 +141,12 @@ export async function runAutoPromptModel(options: AutoPromptModelRequest, depend
   env.PATH = providerDirectories(env).join(delimiter);
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_SESSION_ID;
+  // Never while the CLI is being updated, its lookup included: a half-replaced install would fail the routing for no
+  // reason of its own.
+  return afterUpdating(dependencies.stateDir ?? defaultStateDir(), options.provider, options.signal, () => routeWith(options, dependencies, env, schema));
+}
+
+async function routeWith(options: AutoPromptModelRequest, dependencies: AutoPromptNativeDependencies, env: NodeJS.ProcessEnv, schema: string): Promise<unknown> {
   const executable = await (dependencies.findExecutable ?? findExecutable)(options.provider, env);
   if (!executable) throw failure(`${options.provider === 'claude' ? 'Claude Code' : 'Codex'} CLI was not found. Install and sign in to the native CLI first.`);
   const tempRoot = join(dependencies.stateDir ?? defaultStateDir(), 'tmp');
@@ -162,8 +168,7 @@ export async function runAutoPromptModel(options: AutoPromptModelRequest, depend
     const stdin = options.provider === 'codex' ? options.prompt : JSON.stringify({
       type: 'user', message: { role: 'user', content: [{ type: 'text', text: options.prompt }, ...images.blocks] },
     }) + '\n';
-    // Never while the CLI is being updated: a half-replaced install would fail the routing for no reason of its own.
-    return await afterUpdating(dependencies.stateDir ?? defaultStateDir(), options.provider, options.signal, () => collect(options, dependencies, executable, args, directory, env, stdin));
+    return await collect(options, dependencies, executable, args, directory, env, stdin);
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 

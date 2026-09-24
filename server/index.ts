@@ -140,6 +140,9 @@ async function main() {
   try { releaseLock = await acquireStateLock(stateDir, port); }
   catch (error) {
     if (error instanceof MonitorAlreadyRunning) {
+      // Started as the service while a Tower started by hand holds the folder: it ends as a failure, so launchd or
+      // systemd start it again later and it takes over once that Tower has stopped.
+      if (serviceLog) { console.error(`Another Tower (pid ${error.owner.pid}) is using ${stateDir}; the service tries again shortly.`); process.exitCode = 75; return; }
       const url = await existingServerUrl(error, { bindHost: host, remoteAccess: access.remote, probeHosts: access.probeHosts });
       if (url) {
         console.log(`Agent Session Tower is already running.\n${url}`);

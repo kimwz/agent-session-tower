@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { access, appendFile, link, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { access, appendFile, link, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { delimiter, dirname, join, sep } from 'node:path';
 import { promisify } from 'node:util';
@@ -110,7 +110,13 @@ async function claimUpdate(flags: string, provider: Provider): Promise<{ release
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         await link(staged, file);
-        return { release: () => rm(file, { force: true }), add: pid => writeFile(file, `${process.pid} ${pid}`, { mode: 0o600 }) };
+        // Rewritten aside and renamed over it, so the claim never reads empty while the installer is being added.
+        const add = async (pid: number) => {
+          const next = `${file}-${process.pid}-${randomUUID()}`;
+          await writeFile(next, `${process.pid} ${pid}`, { mode: 0o600, flag: 'wx' });
+          await rename(next, file).catch(async error => { await rm(next, { force: true }); throw error; });
+        };
+        return { release: () => rm(file, { force: true }), add };
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         if (await held(file)) return undefined;
@@ -217,6 +223,7 @@ export interface ToolUpdatesOptions {
   firstMs?: number;
   everyMs?: number;
   probeWaitMs?: number;
+  adoptPollMs?: number;
   onChange?: () => void;
 }
 
@@ -229,6 +236,7 @@ export interface ToolUpdatesOptions {
 export class ToolUpdates {
   private timer?: ReturnType<typeof setTimeout>;
   private running?: Promise<void>;
+  private adopting?: Promise<void>;
   private stopped = false;
   private paused = false;
   constructor(private readonly options: ToolUpdatesOptions) {}
@@ -236,12 +244,31 @@ export class ToolUpdates {
   private get commands(): ToolCommands { return this.options.commands ?? nativeCommands; }
   private now(): number { return this.options.now?.() ?? Date.now(); }
 
-  start(): void { this.schedule(this.options.firstMs ?? FIRST_MS); }
-  busy(): boolean { return this.running !== undefined; }
+  start(): void {
+    this.adopting = this.adopt().finally(() => { this.adopting = undefined; });
+    this.schedule(this.options.firstMs ?? FIRST_MS);
+  }
+  busy(): boolean { return this.running !== undefined || this.adopting !== undefined; }
+
+  /**
+   * An installer a previous worker started can outlive it. Its CLI is held here too, so no turn starts on a half-replaced
+   * install, until the installer is gone.
+   */
+  private async adopt(): Promise<void> {
+    const { flags } = toolUpdatePaths(this.options.stateDir);
+    await Promise.all(PROVIDERS.map(async provider => {
+      const file = join(flags, `${provider}.update`);
+      if (!await held(file)) return;
+      const release = this.options.hold(provider, false);
+      this.log(`${provider}: an update a previous worker started is still running; its turns wait for it`);
+      try { while (!this.stopped && await held(file)) await new Promise(resolve => setTimeout(resolve, this.options.adoptPollMs ?? 2000)); }
+      finally { release?.(); }
+    }));
+  }
   /** While the worker hands off, no update starts; one found running keeps the worker from handing off. */
   pause(): void { this.paused = true; }
   resume(): void { this.paused = false; }
-  async stop(): Promise<void> { this.stopped = true; clearTimeout(this.timer); await this.running; }
+  async stop(): Promise<void> { this.stopped = true; clearTimeout(this.timer); await Promise.all([this.running, this.adopting]); }
 
   private schedule(ms: number): void {
     clearTimeout(this.timer);
@@ -325,11 +352,13 @@ export class ToolUpdates {
     const releaseHold = this.stopped || this.paused ? undefined : this.options.hold(provider, install.method === 'npm');
     if (!releaseHold) return waiting;
     let claim: Awaited<ReturnType<typeof claimUpdate>>;
+    // The installer's pid is added as it starts; the claim is released only after that write has landed.
+    let adding: Promise<void> = Promise.resolve();
     try {
       const { flags } = toolUpdatePaths(this.options.stateDir);
       claim = await claimUpdate(flags, provider);
       if (!claim) return waiting;
-      const started = (pid: number) => { void claim!.add(pid).catch(() => {}); };
+      const started = (pid: number) => { adding = adding.then(() => claim!.add(pid)).catch(() => {}); };
       for (const until = Date.now() + (this.options.probeWaitMs ?? PROBE_WAIT_MS); await probing(flags, provider) && Date.now() < until;) await new Promise(resolve => setTimeout(resolve, 200));
       if (await probing(flags, provider)) return waiting;
       const updating: SavedToolUpdate = { ...base, state: 'updating', ...(retrying ? { retry: retrying } : {}) };
@@ -355,6 +384,7 @@ export class ToolUpdates {
       if (!after) return { status: { ...base, state: 'broken', reason: 'command-failed', retry, nextAt: retry.nextAt, ...(fix ? { fix } : {}) }, againMs: Date.parse(retry.nextAt) - done };
       return { status: { ...base, version: after, state: 'failed', reason: result.code === 0 ? 'not-updated' : 'command-failed', retry, nextAt: retry.nextAt }, againMs: Date.parse(retry.nextAt) - done };
     } finally {
+      await adding;
       await claim?.release();
       releaseHold();
     }

@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -291,4 +291,19 @@ test('invalid images fail before native launch and temporary data is removed', a
   assert.equal(f.launched(), undefined);
   assert.deepEqual(await readdir(join(f.directory, 'state', 'tmp')), []);
   assert.equal((await stat(path)).isFile(), true);
+});
+
+test('routing waits for an update of its CLI before it even looks the CLI up, then routes', async t => {
+  const f = await fixture(t);
+  const flags = join(f.dependencies.stateDir!, 'runtime', 'tool-updates');
+  await mkdir(flags, { recursive: true });
+  await writeFile(join(flags, 'codex.update'), String(process.pid));
+  let lookups = 0;
+  const find = f.dependencies.findExecutable!;
+  const routing = runAutoPromptModel(f.request, { ...f.dependencies, findExecutable: async (...args) => { lookups++; return find(...args); } });
+  await delay(1500);
+  assert.equal(lookups, 0, 'nothing of the CLI is touched while it is being replaced');
+  await rm(join(flags, 'codex.update'));
+  assert.deepEqual(await routing, DECISION);
+  assert.equal(lookups, 1);
 });
