@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { File, Folder, FolderPlus, FilePlus, PanelLeft, RefreshCw, Save, Terminal, X } from 'lucide-react';
 import { api } from '../common/lib';
+import type { Snapshot } from '../../../shared/types';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { WorkspaceEditor } from './WorkspaceEditor';
@@ -49,7 +50,15 @@ export function WorkspacePage({ cwd, machine: machineName, initialTool, toolRequ
   };
   // Paths and bodies name the folder as its own computer knows it.
   const { node, id: folderPath } = splitScopedId(cwd);
-  const machine = node ? machineName ?? t('연결된 컴퓨터') : undefined;
+  // A workspace page opened on its own asks this Tower for the computer's name.
+  const [fetchedName, setFetchedName] = useState<string>();
+  useEffect(() => {
+    if (!node || machineName) return;
+    let current = true;
+    void api<Snapshot>('/api/snapshot').then(snapshot => { const found = snapshot.nodes?.find(item => item.id === node); if (current && found) setFetchedName(found.label || found.name); }).catch(() => {});
+    return () => { current = false; };
+  }, [node, machineName]);
+  const machine = node ? machineName ?? fetchedName ?? t('연결된 컴퓨터') : undefined;
   const post = (path: string, body: object) => api(nodePath(node, path), { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify({ ...body, cwd: folderPath }) });
   const save = useCallback(async () => {
     const current = documentRef.current;

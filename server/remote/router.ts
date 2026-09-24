@@ -11,7 +11,7 @@ import { normalizeSessionTitle } from '../stores/session-titles.js';
 import { assertWorkspace, createWorkspaceDirectory, listWorkspaceTree, MAX_WORKSPACE_FILE_BYTES, readWorkspaceFile, saveWorkspaceFile } from '../workspace-files.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { realpath, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { AutoPromptJob, RunOrigin, Session } from '../../shared/types.js';
 import type { RemoteExclusionStore } from './exclusions.js';
 import { remoteJob, remoteJobVisible, remotePage, remoteRepository, remoteRun, remoteSession, remoteSessionIds, remoteSnapshot, type RemoteScope } from './visibility.js';
@@ -229,12 +229,12 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
     if (method === 'GET' && path === '/api/workspace/tree') {
       const at = url.searchParams.get('path') ?? '';
       const cwd = await sharedPath(url.searchParams.get('cwd'), at);
-      const shared = async (entry: string) => !await exclusions.excludesNow(join(cwd, entry));
+      const hidden = await exclusions.entriesOf(join(cwd, at));
       // Excluded folders inside a shared one are left out of its listing, and do not count toward its limit.
-      const listed = await listWorkspaceTree(cwd, at, backend.snapshot(), shared);
+      const listed = await listWorkspaceTree(cwd, at, backend.snapshot(), entry => !hidden(basename(entry)));
       await sharedPath(cwd, at);
-      const kept = await Promise.all(listed.entries.map(entry => shared(entry.path)));
-      return json(res, 200, { entries: listed.entries.filter((_, index) => kept[index]) });
+      const now = await exclusions.entriesOf(join(cwd, at));
+      return json(res, 200, { entries: listed.entries.filter(entry => !now(entry.name)) });
     }
     if (method === 'GET' && path === '/api/workspace/file') {
       const cwd = await sharedPath(url.searchParams.get('cwd'), url.searchParams.get('path'));

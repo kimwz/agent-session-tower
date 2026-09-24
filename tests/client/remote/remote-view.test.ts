@@ -166,6 +166,7 @@ test('files and terminals of a joined computer open while it is connected and ru
   const old = view({ features: ['read', 'work'] })[1];
   assert.equal(old.workspace, false);
   assert.match(workspaceNote(old)!, /studio의 Tower를 업데이트하면 파일과 터미널을/);
+  assert.match(workspaceNote(view({ features: [] })[1])!, /준비되는 중입니다/, 'a computer whose worker has not answered yet is getting ready, not out of date');
   const away = view({ status: 'offline', streaming: false })[1];
   assert.equal(away.workspace, false);
   assert.equal(workspaceNote(away), undefined, 'an offline computer is explained by its state, not by an update');

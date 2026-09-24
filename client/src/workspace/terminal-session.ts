@@ -33,13 +33,31 @@ const requestPrefix = 'agent-monitor.workspace-terminal-request:';
  * is known, so a shell whose answer was lost is the one a new try gets back.
  */
 export function terminalRequest(slot: string, create: () => string): { id: string; reused: boolean } {
-  try { const saved = storage()?.getItem(requestPrefix + slot) ?? null; if (validId(saved)) return { id: saved, reused: true }; } catch { /* In-memory only. */ }
+  const saved = savedRequest(slot);
+  if (saved) return { id: saved.id, reused: true };
   const id = create();
-  try { storage()?.setItem(requestPrefix + slot, id); } catch { /* In-memory only. */ }
+  keepRequest(slot, { id });
   return { id, reused: false };
 }
-export function settleTerminalRequest(slot: string): void {
+/**
+ * Records how a try of a slot's request ended. `done` (it succeeded, or it is known to have run) forgets it.
+ * `refused` forgets it only if no earlier try may have run it; `unknown` marks it as possibly run, and from then on
+ * the same request is sent until one answer settles it.
+ */
+export function settleTerminalRequest(slot: string, outcome: 'done' | 'refused' | 'unknown' = 'done'): void {
+  const saved = savedRequest(slot);
+  if (outcome === 'unknown') { if (saved) keepRequest(slot, { ...saved, uncertain: true }); return; }
+  if (outcome === 'refused' && saved?.uncertain) return;
   try { storage()?.removeItem(requestPrefix + slot); } catch { /* Storage may be disabled. */ }
+}
+function savedRequest(slot: string): { id: string; uncertain?: true } | undefined {
+  try {
+    const saved = JSON.parse(storage()?.getItem(requestPrefix + slot) ?? 'null') as { id?: unknown; uncertain?: unknown } | null;
+    return saved && typeof saved.id === 'string' && validId(saved.id) ? { id: saved.id, ...(saved.uncertain === true ? { uncertain: true as const } : {}) } : undefined;
+  } catch { return undefined; }
+}
+function keepRequest(slot: string, request: { id: string; uncertain?: true }): void {
+  try { storage()?.setItem(requestPrefix + slot, JSON.stringify(request)); } catch { /* In-memory only. */ }
 }
 
 /** The shell a slot reconnects to, if it has one. */

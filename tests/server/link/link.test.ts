@@ -76,6 +76,19 @@ test('a new link is used only once the joined computer has recorded its pairing,
   assert.equal(await first, 200);
 });
 
+test('a computer removed while it is being told it joined is told to stop instead, and never attached', async t => {
+  const a = await computer(t, 'computer-a');
+  const b = await computer(t, 'computer-b');
+  await a.listen();
+  let attached = false;
+  a.controller.once('paired', (id: string) => { void a.controller.remove(id); });
+  a.controller.on('connected', () => { attached = true; });
+  await b.node.join((await a.controller.invite()).code);
+  await until(() => b.node.list().find(item => item.status === 'removed'), 5000);
+  assert.equal(attached, false);
+  assert.deepEqual(a.controller.list(), []);
+});
+
 test('a code works once: a second computer using it is not accepted', async t => {
   const a = await computer(t, 'computer-a');
   const b = await computer(t, 'computer-b');

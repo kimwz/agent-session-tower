@@ -15,6 +15,8 @@ export interface Host {
   canWork: boolean;
   /** Its files and terminals can be opened from this page now. */
   workspace: boolean;
+  /** It reports what it can do; until its worker answers it reports nothing. */
+  reporting?: boolean;
   /** Some state of it is known to this page, even if out of date. */
   known: boolean;
   version?: string;
@@ -49,6 +51,7 @@ export function hostProblem(host: Host): string | undefined {
 /** Why a connected computer's files and terminals cannot be opened, when that is so. */
 export function workspaceNote(host: Host | undefined): string | undefined {
   if (!host?.node || host.workspace || host.status !== 'connected') return undefined;
+  if (!host.reporting) return t('{0}이(가) 준비되는 중입니다. 잠시 후 파일과 터미널을 열 수 있습니다.', { 0: host.name });
   return t('{0}의 Tower를 업데이트하면 파일과 터미널을 열 수 있습니다.', { 0: host.name });
 }
 const named = (node: string, snapshot: Snapshot) => {
@@ -76,7 +79,7 @@ export function combinedView(local: Snapshot | null, nodes: ReadonlyMap<string, 
   if (!listed.length) return { view: local, hosts: [here], complete };
   const parts = listed.flatMap(node => { const snapshot = nodes.get(node.id); return snapshot ? [named(node.id, snapshot)] : []; });
   const hosts = [here, ...listed.map((node): Host => ({ node: node.id, name: node.label || node.name, status: node.status, live: node.status === 'connected' && node.streaming,
-    canWork: node.status === 'connected' && node.streaming && node.features.includes('work'), workspace: node.status === 'connected' && node.features.includes('workspace'), known: Boolean(nodes.get(node.id)) && !nodes.get(node.id)!.scanning, ...(node.version ? { version: node.version } : {}), providers: nodes.get(node.id)?.providers ?? [] }))];
+    canWork: node.status === 'connected' && node.streaming && node.features.includes('work'), workspace: node.status === 'connected' && node.features.includes('workspace'), ...(node.features.includes('read') ? { reporting: true } : {}), known: Boolean(nodes.get(node.id)) && !nodes.get(node.id)!.scanning, ...(node.version ? { version: node.version } : {}), providers: nodes.get(node.id)?.providers ?? [] }))];
   return { hosts, complete, view: { ...local,
     sessions: [...local.sessions, ...parts.flatMap(part => part.sessions)],
     runs: [...local.runs, ...parts.flatMap(part => part.runs)],

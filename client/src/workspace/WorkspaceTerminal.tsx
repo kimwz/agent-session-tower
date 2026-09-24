@@ -229,7 +229,11 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
         // Only a request never sent before is sure to get a shell with no history to replay.
         created = !once?.reused;
         try { const { id } = await postPath<{ id: string }>('/api/workspace/terminals', { cwd: localPart(cwd), cols: terminal.cols, rows: terminal.rows }, once?.id); settleTerminalRequest(slot); return id; }
-        catch (error) { if (refusedBeforeRunning(error)) settleTerminalRequest(slot); throw error; }
+        catch (error) {
+          // 410: it ran, and its shell was closed since. A refusal after a try that may have run keeps the request.
+          settleTerminalRequest(slot, (error as { status?: number }).status === 410 ? 'done' : refusedBeforeRunning(error) ? 'refused' : 'unknown');
+          throw error;
+        }
       },
     ).then(result => {
       id = result;
@@ -238,6 +242,8 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
       // Before listening again, check the shell is still there: a closed one ends this tab instead of retrying forever.
       const retry = () => {
         if (disposed || closed) return;
+        // Whatever the shell printed meanwhile is replayed, so it is not answered as if it were new.
+        created = false;
         postPath(`/api/workspace/terminals/${encodeURIComponent(id)}/resize`, { cols: terminal.cols, rows: terminal.rows }).then(() => {
           // A new stream replays the shell's output from the start; the screen starts over so nothing shows twice.
           if (!disposed && !closed) { terminal.reset(); listen(); }
@@ -261,7 +267,8 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
           // The browser gives up on an answer that is not a stream (another computer away, for example); try again,
           // less often, and say so when it keeps failing although the shell is there.
           if (current.readyState !== EventSource.CLOSED) return;
-          if (++failedOpens >= 3) setError(t('터미널에 다시 연결하지 못했습니다. 이 터미널을 보는 창이 너무 많거나 그 컴퓨터에 닿지 않습니다. 계속 다시 시도합니다.'));
+          if (++failedOpens >= 3) setError(node ? t('터미널에 다시 연결하지 못했습니다. 이 터미널을 보는 창이 너무 많거나 그 컴퓨터에 닿지 않습니다. 계속 다시 시도합니다.')
+            : t('터미널에 다시 연결하지 못했습니다. 이 터미널을 보는 창이 너무 많을 수 있습니다. 계속 다시 시도합니다.'));
           reconnect = setTimeout(retry, Math.min(3000 * failedOpens, 30_000));
         };
         current.onopen = () => {
@@ -274,8 +281,9 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
     }).catch(value => {
       closed = true; terminal.options.disableStdin = true; fail(value);
       // Without an answer that the shell is gone, it may still be running: the tab offers to reach it again.
-      const status = (value as { status?: number }).status;
-      if (!disposed) { setStarting(false); setExited(true); setLost(status === undefined || status >= 500); }
+      // A refusal that says nothing was done (an old terminal host, for example) is not a lost connection.
+      const { status, disposition } = value as { status?: number; disposition?: string };
+      if (!disposed) { setStarting(false); setExited(true); setLost(status === undefined || (status >= 500 && disposition !== 'not-admitted')); }
     });
     return () => { disposed = true; clearTimeout(timer); clearTimeout(reconnect); input.dispose(); resize.dispose(); observer.disconnect(); stream?.close(); terminal.dispose(); if (terminalRef.current?.terminal === terminal) terminalRef.current = undefined; };
   }, [cwd, slot, token, generation]);

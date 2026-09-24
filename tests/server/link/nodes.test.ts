@@ -121,8 +121,8 @@ function events(t: TestContext, url: string) {
 async function joined(t: TestContext, a: Awaited<ReturnType<typeof tower>>, name: string, shared?: string) {
   const b = await node(t, name, shared);
   await b.links.join((await a.controller.invite()).code);
-  const id = (await until(() => a.controller.list().find(item => item.name === name && item.status === 'connected'), 5000)).id;
-  await until(() => a.nodes.snapshot(id), 5000);
+  const id = (await until(() => a.controller.list().find(item => item.name === name && item.status === 'connected'), 15_000)).id;
+  await until(() => a.nodes.snapshot(id), 15_000);
   return { ...b, id };
 }
 

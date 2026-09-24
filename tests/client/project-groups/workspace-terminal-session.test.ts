@@ -121,8 +121,13 @@ test('the request that opens a tab’s shell on another computer is kept across 
   const create = () => [firstId, secondId][made++];
   assert.deepEqual(terminalRequest(slot, create), { id: firstId, reused: false });
   assert.deepEqual(terminalRequest(slot, create), { id: firstId, reused: true }, 'after a lost answer, and after a reload, the same request goes again');
+  settleTerminalRequest(slot, 'unknown');
+  settleTerminalRequest(slot, 'refused');
+  assert.deepEqual(terminalRequest(slot, create), { id: firstId, reused: true }, 'a refusal after a try that may have run does not free the request');
   settleTerminalRequest(slot);
   assert.deepEqual(terminalRequest(slot, create), { id: secondId, reused: false }, 'once answered, the next shell is a new request');
+  settleTerminalRequest(slot, 'refused');
+  assert.deepEqual(terminalRequest(slot, create).reused, false, 'a request refused before anything ran is not kept');
 });
 
 test('workspace requests for another computer’s folder go to that computer with its own path', () => {

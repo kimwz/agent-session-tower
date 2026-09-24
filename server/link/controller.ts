@@ -253,6 +253,11 @@ export class ControllerLinks extends EventEmitter {
       }
       // The link may have ended while its pairing was being saved, or this Tower may be shutting down.
       if (this.closed || end.session.destroyed || ws.readyState !== ws.OPEN) throw new Error('The link ended.');
+      // The owner may have removed it while it was being told; then it is told to stop instead.
+      if (!this.state.nodes.some(item => item.id === node.id)) {
+        await linkRequest(end.session, 'POST', '/link/revoke', {}).catch(() => {});
+        throw new Error('Removed while joining.');
+      }
       this.attach(node, { session: end.session, ws, hello });
     } catch {
       clearTimeout(deadline);

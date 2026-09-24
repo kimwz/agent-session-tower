@@ -198,6 +198,20 @@ export class RemoteExclusionStore extends EventEmitter {
     return canonical === undefined || this.matches(normalized, canonical);
   }
 
+  /**
+   * A check for the entries of one folder as listed from disk. An entry's real location is the folder's own real
+   * location and its name (links among the entries are never listed), so each needs no look of its own.
+   */
+  async entriesOf(folder: string): Promise<(name: string) => boolean> {
+    if (!this.roots.length) return () => false;
+    if (!validFolderPath(folder)) return () => true;
+    await this.follow();
+    const normalized = normalize(folder);
+    const canonical = await canonicalPath(normalized);
+    const roots = this.roots;
+    return name => canonical === undefined || this.matches(join(normalized, name), join(canonical, name), roots);
+  }
+
   private async follow(): Promise<void> {
     const folders = this.folders;
     const roots = await rootsOf(folders);

@@ -1322,4 +1322,6 @@ export const english: Record<string, string> = {
   "그 컴퓨터의 터미널 호스트가 이전 버전이라 여기서 터미널을 열 수 없습니다. 그 컴퓨터에서 열린 터미널이 모두 닫히면 새 버전으로 바뀝니다.": "That computer’s terminal host is an older version, so terminals cannot be opened from here. It updates once every terminal open on that computer is closed.",
   "그 컴퓨터의 실행 작업자가 업데이트를 기다리고 있습니다. 잠시 후 다시 시도하세요.": "That computer’s worker is waiting to be updated. Try again shortly.",
   "이 요청으로 연 터미널은 이미 닫혔습니다. 새 터미널을 여세요.": "The terminal this request opened has already been closed. Open a new terminal.",
+  "{0}이(가) 준비되는 중입니다. 잠시 후 파일과 터미널을 열 수 있습니다.": "{0} is getting ready. Its files and terminals open shortly.",
+  "터미널에 다시 연결하지 못했습니다. 이 터미널을 보는 창이 너무 많을 수 있습니다. 계속 다시 시도합니다.": "Could not reconnect to the terminal. Too many windows may be watching it. Still trying.",
 };
