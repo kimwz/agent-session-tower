@@ -4,6 +4,20 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.23.0] - 2026-09-24
+
+### Added
+- **Join your other computers to this Tower.** Open **Remote computers** (the network icon in the header), turn on **Accept connections from other computers**, and choose **Add a computer**. Run the command it shows once in a terminal on the other computer. That computer installs the same Tower version, keeps it running in the background from each login, and links back to this one. It only dials out, so it opens no port of its own. This Tower opens one link port (8765 by default); its own page stays on localhost.
+  - The link is mutually authenticated and pinned to both computers' keys. A code works once and expires after ten minutes. Each computer shows the other's fingerprint.
+  - The link comes back by itself after a restart, sleep or network change on either side. A computer that stops answering is marked offline within about 40 seconds. Removing a computer on either side never stops work running there.
+  - One computer can be joined to several Towers. The **Towers controlling this computer** tab lists them, and a code can be pasted there too if Tower already runs on that computer. While another Tower is controlling this computer, the header icon shows a dot.
+  - The **Sharing** tab manages the folders this computer never shares with the Towers that control it.
+- **`agent-session-tower join <code>`** and **`agent-session-tower service install|uninstall|status`** (macOS). The service runs the installed version from `<state>/runtime` with your `PATH`, keeps its log in `<state>/logs/tower.log`, and restarts after a crash.
+
+### Notes
+- This release adds the link and its management. Seeing and working with a joined computer's sessions on this canvas comes in the next release.
+- The other computer needs Node.js 22.13 or later and Git, and its own Claude Code or Codex sign-in.
+
 ## [1.22.0] - 2026-09-24
 
 ### Added
