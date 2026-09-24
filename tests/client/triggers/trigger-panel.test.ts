@@ -4,6 +4,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { blankGitHubSource, blankHttpSource, blankTrigger, eventStatusLabel, scheduleLabel, TriggerButton } from '../../../client/src/triggers/TriggerPanel.js';
 import { setLanguage, translate } from '../../../client/src/i18n/i18n.js';
+import { TriggerTypePicker } from '../../../client/src/triggers/TriggerKinds.js';
+import { switchedWatch } from '../../../client/src/triggers/trigger-helpers.js';
 import { TriggerInputSchema } from '../../../shared/triggers.js';
 
 test('a new scheduled run from the panel is exactly what the server accepts once named and instructed', () => {
@@ -62,3 +64,21 @@ test('a GitHub coordinator trigger from the panel carries its rules and approval
   assert.equal(TriggerInputSchema.safeParse({ ...input, handler: { ...input.handler, rules: [] } }).success, false, 'a coordinator needs at least one rule');
 });
 
+
+test('adding a trigger starts from a choice of every kind, GitHub included, and the editor starts from that kind', () => {
+  setLanguage('en');
+  const markup = renderToStaticMarkup(createElement(TriggerTypePicker, { onPick: () => {}, onSlack: () => {}, slackConnected: false }));
+  for (const title of ['Scheduled run', 'GitHub issues', 'HTTP response', 'Slack mentions']) assert.match(markup, new RegExp(title));
+  for (const kind of ['schedule', 'http', 'github'] as const) assert.equal(blankTrigger(kind).source.kind, kind);
+});
+
+test('switching what a GitHub trigger watches and back keeps the filters the owner had set', () => {
+  const opened = { type: 'issue-opened' as const, repos: ['octo/app'], labels: ['bug'], authors: ['alice'], authorAssociation: 'any' as const };
+  const kept: Parameters<typeof switchedWatch>[0] = { 'issue-opened': opened };
+  const assigned = switchedWatch(kept, 'assigned-to-me', ['octo/app']);
+  assert.deepEqual(assigned, { type: 'assigned-to-me', repos: ['octo/app'], includePullRequests: false });
+  kept['assigned-to-me'] = { type: 'assigned-to-me', repos: ['octo/app'], includePullRequests: true };
+  assert.deepEqual(switchedWatch(kept, 'issue-opened', ['octo/app', 'octo/lib']), { ...opened, repos: ['octo/app', 'octo/lib'] }, 'labels, authors and author scope come back');
+  assert.deepEqual(switchedWatch(kept, 'assigned-to-me', []), { type: 'assigned-to-me', includePullRequests: true }, 'so does including pull requests');
+  assert.deepEqual(switchedWatch({}, 'issue-opened', []), { type: 'issue-opened', repos: [], authorAssociation: ['OWNER', 'MEMBER', 'COLLABORATOR'] }, 'a first switch starts from the members-only default');
+});

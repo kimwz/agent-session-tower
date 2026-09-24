@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { SlackWorkflow } from '../../../shared/slack';
 import { translateMessage, useI18n } from '../i18n/i18n';
-import { towerOperation } from './TriggerPanel';
+import { towerOperation } from './trigger-helpers';
 
 interface Conversation { id: string; status: string; repository: string; issue: number; replies: NonNullable<SlackWorkflow['replies']>; error?: string }
 

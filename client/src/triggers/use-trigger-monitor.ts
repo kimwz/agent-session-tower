@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { TriggerEvent, TriggerOverview } from '../../../shared/triggers';
-import { towerOperation } from './TriggerPanel';
+import { towerOperation } from './trigger-helpers';
 import { keepTriggerEvents, laneWorthy, mergeTriggerEvents, readTriggerState, RecheckQueue, reconcileSnapshot, TRIGGER_READ_KEY, TRIGGER_READ_SINCE_KEY, triggerEventRevision, triggerUnread, type TriggerReadState } from './trigger-monitor';
 
 const PAGE = 20;

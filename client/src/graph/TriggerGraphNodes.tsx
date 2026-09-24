@@ -4,7 +4,7 @@ import { ArrowUpRight, CalendarClock, CircleDot, Globe, GripHorizontal, Play, Ra
 import type { TriggerEvent } from '../../../shared/triggers';
 import { translate as t, useI18n } from '../i18n/i18n';
 import { relativeTime } from '../common/lib';
-import { eventStatusLabel } from '../triggers/TriggerPanel';
+import { eventStatusLabel } from '../triggers/trigger-helpers';
 import { triggerEventWorking } from '../triggers/trigger-monitor';
 
 export type TriggerMonitorData = {

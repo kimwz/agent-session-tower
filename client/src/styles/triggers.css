@@ -2,37 +2,103 @@
 .trigger-button { position: relative; }
 .trigger-button.attention::after { content: ''; position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
 .trigger-dialog .slack-tabs button svg { flex: none; }
-.trigger-editor { padding: 0; }
-.trigger-editor .slack-rules { display: grid; gap: 14px; }
+.trigger-note { margin: 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.trigger-note.trigger-warn { color: var(--amber); }
+
+/* List */
+.trigger-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.trigger-toolbar p { flex: 1 1 260px; margin: 0; }
+.trigger-toolbar h3 { margin: 0; font-size: 14px; color: var(--bright); }
+.trigger-list .slack-rule-row > .slack-rule-text { flex: 1; }
+.trigger-list > .trigger-note { margin-top: 10px; }
+.trigger-kind { display: inline-grid; place-items: center; flex: none; width: 28px; height: 28px; border-radius: 7px; background: var(--surface-raised); color: var(--muted); }
+.trigger-list .slack-rule-summary .trigger-kind { color: var(--text); }
+
+/* Kind picker */
+.trigger-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0 0 14px; padding: 0; list-style: none; }
+.trigger-picker button { display: flex; align-items: flex-start; gap: 12px; width: 100%; height: 100%; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.trigger-picker button:hover { border-color: #94b5f688; background: var(--surface-raised); }
+.trigger-picker button:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.trigger-picker button > svg { flex: none; margin-top: 2px; color: var(--blue); }
+.trigger-picker span { display: grid; gap: 4px; }
+.trigger-picker strong { font-size: 13px; }
+.trigger-picker small { color: var(--muted); font-size: 12px; line-height: 1.5; }
+
+/* Editor */
+.trigger-editor > fieldset { display: grid; gap: 16px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.trigger-editor-head { display: flex; align-items: center; gap: 8px; }
+.trigger-editor-head > svg { color: var(--blue); }
+.trigger-editor-head h3 { margin: 0; font-size: 15px; color: var(--bright); }
+.trigger-section { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; min-width: 0; }
+.trigger-section h4 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--bright); }
+.trigger-section h4 span { display: inline-grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: #254c7a; color: #edf5ff; font-size: 11px; }
+.trigger-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.trigger-grid .wide { grid-column: 1 / -1; }
 .trigger-model { display: flex; gap: 8px; flex-wrap: wrap; }
-.trigger-model select { flex: 1 1 140px; }
+.trigger-model > * { flex: 1 1 120px; }
+.trigger-inline span { display: flex; align-items: center; gap: 8px; color: var(--muted); }
+.trigger-inline input { max-width: 110px; }
+.trigger-choice { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 3px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); justify-self: start; align-self: flex-start; }
+.trigger-field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.trigger-field small { color: var(--subtle); font-size: 11px; line-height: 1.5; }
+.trigger-choice button { padding: 6px 12px; border: 0; border-radius: 6px; background: none; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+.trigger-choice button:hover { color: var(--text); }
+.trigger-choice button.active { background: var(--surface-raised); color: var(--bright); box-shadow: inset 0 0 0 1px #94b5f655; }
+.trigger-choice button:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+.trigger-url { display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 8px; }
+.trigger-account { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.trigger-account label { flex: 1 1 200px; }
+.trigger-add { justify-self: start; display: inline-flex; align-items: center; gap: 6px; }
 .trigger-preview { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
 .trigger-preview ol { margin: 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
-.trigger-history h3 { margin: 18px 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); letter-spacing: .04em; text-transform: uppercase; }
-.trigger-history h3:first-of-type { margin-top: 0; }
-.trigger-history .slack-activity button { display: inline-flex; align-items: center; gap: 6px; }
-.trigger-list .slack-rule-row > svg { flex: none; color: var(--muted); }
-.trigger-list .slack-rule-row > .slack-rule-text { flex: 1; }
-.trigger-editor .slack-rule-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-.trigger-note { margin: 0; font-size: 12px; color: var(--muted); }
+.trigger-preview p { margin: 0; }
 .trigger-headers { display: grid; gap: 6px; }
-.trigger-headers > span { font-size: 12px; font-weight: 600; }
 .trigger-headers small { font-size: 12px; color: var(--muted); }
-.trigger-headers > button { justify-self: start; display: inline-flex; align-items: center; gap: 6px; }
 .trigger-header-row { display: grid; grid-template-columns: minmax(90px, 1fr) minmax(0, 2fr) auto auto; gap: 6px; align-items: center; }
 .trigger-header-row .secondary-button { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .trigger-test-result { flex: 1 1 100%; display: grid; gap: 6px; min-width: 0; font-size: 12px; }
 .trigger-test-result p { margin: 0; }
 .trigger-test-result pre { margin: 0; max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; word-break: break-all; }
-.trigger-secrets { margin-top: 14px; }
-.trigger-secrets h3 { margin: 0; font-size: 13px; }
-.trigger-secrets p { margin: 0; }
-.trigger-secrets .slack-activity button { display: inline-flex; align-items: center; gap: 6px; }
+.trigger-checkbox { display: flex; align-items: center; gap: 8px; }
+.trigger-panel .slack-rule-editor, .trigger-section .slack-rule-editor { padding-left: 16px; }
+.trigger-advanced { border: 1px solid var(--line); border-radius: 10px; }
+.trigger-advanced summary { display: flex; align-items: baseline; gap: 10px; padding: 12px 14px; cursor: pointer; }
+.trigger-advanced summary strong { font-size: 13px; color: var(--bright); }
+.trigger-advanced summary span { color: var(--muted); font-size: 12px; }
+.trigger-advanced[open] summary { border-bottom: 1px solid var(--line); }
+.trigger-advanced > .trigger-grid { padding: 14px; }
+.trigger-editor-foot { position: sticky; bottom: -24px; display: flex; justify-content: flex-end; gap: 8px; margin: 0 -24px -24px; padding: 12px 24px 16px; border-top: 1px solid var(--line); background: var(--surface); }
+
+/* Connections and limits */
+.trigger-connections { display: grid; gap: 12px; }
+.trigger-card { display: grid; gap: 10px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; }
+.trigger-card h4 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--bright); }
+.trigger-card p { margin: 0; }
+.trigger-card .slack-activity { margin: 0; }
+.trigger-card .slack-activity button { display: inline-flex; align-items: center; gap: 6px; }
 .trigger-secret-form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; align-items: end; }
 .trigger-secret-form .slack-actions { grid-column: 1 / -1; }
-.trigger-secret-form .primary-button { display: inline-flex; align-items: center; gap: 6px; }
-.trigger-checkbox { display: flex; align-items: center; gap: 8px; }
+.trigger-secret-form .secondary-button { display: inline-flex; align-items: center; gap: 6px; }
+.trigger-hosts { display: grid; gap: 10px; }
+
+/* History */
+.trigger-history h3 { margin: 20px 0 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.trigger-history h3:first-of-type { margin-top: 0; }
+.trigger-log { display: grid; gap: 0; margin: 0; padding: 0; list-style: none; }
+.trigger-log li { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.trigger-log li > svg { flex: none; margin-top: 2px; color: var(--subtle); }
+.trigger-log li > div { display: grid; flex: 1; gap: 3px; min-width: 0; }
+.trigger-log p { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; color: var(--text); }
+.trigger-log p strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trigger-log p span { flex: none; padding: 0 7px; border: 1px solid var(--line); border-radius: 10px; color: var(--muted); font-size: 11px; }
+.trigger-log small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.trigger-log .trigger-detail { color: var(--subtle); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trigger-log li > button { flex: none; display: inline-flex; align-items: center; gap: 6px; }
+.trigger-status.error, .trigger-status.uncertain { color: var(--amber); border-color: #e9b78355; }
+.trigger-status.completed { color: var(--teal); border-color: #88d5c455; }
+
 @media (max-width: 640px) {
+  .trigger-picker, .trigger-grid, .trigger-secret-form { grid-template-columns: 1fr; }
   .trigger-header-row { grid-template-columns: 1fr 1fr; }
-  .trigger-secret-form { grid-template-columns: 1fr; }
+  .trigger-url { grid-template-columns: 1fr; }
 }

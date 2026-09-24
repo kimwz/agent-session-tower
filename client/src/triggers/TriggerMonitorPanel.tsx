@@ -8,7 +8,7 @@ import { SessionTail } from '../chat/SessionTail';
 import { absoluteTime } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
 import { SlackMentionDetail, SlackOverview } from '../slack/SlackMonitorPanel';
-import { eventStatusLabel, towerOperation } from './TriggerPanel';
+import { eventStatusLabel, towerOperation } from './trigger-helpers';
 import { triggerEventWorking } from './trigger-monitor';
 
 /**
