@@ -1,6 +1,6 @@
 import { constants } from 'node:fs';
-import { chmod, mkdir, open } from 'node:fs/promises';
-import { hostname } from 'node:os';
+import { chmod, link, mkdir, open, unlink } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { certificatePin, createLinkCertificate } from './certificate.js';
 
@@ -35,16 +35,17 @@ export async function loadLinkIdentity(stateDir: string): Promise<LinkIdentity> 
     const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     try { saved = JSON.parse(await file.readFile('utf8')); } finally { await file.close(); }
   } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-  if (saved && (typeof saved.key !== 'string' || typeof saved.cert !== 'string')) throw new Error('The saved link identity is invalid.');
-  const identity = saved as { key: string; cert: string } | undefined ?? createLinkCertificate(`agent-session-tower ${hostname()}`);
+  if (saved && (typeof saved.key !== 'string' || typeof saved.cert !== 'string')) throw new Error(`${path} is not a link identity. Move it away to make a new one; computers joined with the old one must join again.`);
+  // The certificate names no computer: anyone reaching the link port sees it before proving anything.
+  const identity = saved as { key: string; cert: string } | undefined ?? createLinkCertificate();
   if (!saved) {
-    // Written once and never replaced: other Towers pinned this key.
-    const file = await open(path, 'wx', 0o600).catch(async error => {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') return undefined;
-      throw error;
-    });
-    if (file) { try { await file.writeFile(JSON.stringify(identity)); await file.sync(); } finally { await file.close(); } }
-    else return loadLinkIdentity(stateDir);
+    // Written whole, once, and never replaced: other Towers pinned this key.
+    const temporary = `${path}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+    const file = await open(temporary, 'wx', 0o600);
+    try { await file.writeFile(JSON.stringify(identity)); await file.sync(); } finally { await file.close(); }
+    try { await link(temporary, path); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; await unlink(temporary); return loadLinkIdentity(stateDir); }
+    await unlink(temporary);
   }
   const pin = certificatePin(identity.cert);
   return { key: identity.key, cert: identity.cert, pin, id: linkId(pin), fingerprint: displayFingerprint(pin) };

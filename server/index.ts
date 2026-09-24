@@ -1,4 +1,5 @@
 import { hostname, homedir } from 'node:os';
+import { stat, truncate } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -115,6 +116,9 @@ async function main() {
   const here = dirname(fileURLToPath(import.meta.url));
   const clientDir = isSea() ? here : here.includes(`${join('dist', 'server')}`) ? resolve(here, '../client') : resolve(here, '../dist/client');
   if (!await readWebAsset(clientDir, '/')) throw new Error('Web UI is unavailable. Rebuild or replace this installation.');
+  // The background service appends to one log file; it is started over when it grows large.
+  const serviceLog = process.env.TOWER_SERVICE_LOG;
+  if (serviceLog) await stat(serviceLog).then(info => info.size > 10 * 1024 * 1024 ? truncate(serviceLog, 0) : undefined).catch(() => {});
   let releaseLock: () => Promise<void>;
   try { releaseLock = await acquireStateLock(stateDir, port); }
   catch (error) {
@@ -163,8 +167,10 @@ async function main() {
       || runs.list().some(run => (run.status === 'running' || run.status === 'queued') && overlapsRepository(status, runs.getSession(run.sessionId)?.cwd ?? '')),
     onChange: changed,
   });
+  let controlledBy = (): string[] => [];
   const snapshot = (): Snapshot => {
     const all = runs.sessionList();
+    const controllers = controlledBy();
     const managed = runs.list();
     return {
       sessions: projectSessionStates(all, managed, runs.settledRunIds()).map(session => closedSessions.apply(titles.apply(session))),
@@ -175,6 +181,7 @@ async function main() {
       ...(runs.triggerOverview() ? { triggers: runs.triggerOverview() } : {}),
       ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}),
       ...(runs.runnerVersion() && runs.runnerVersion() !== APP_VERSION ? { runnerUpdate: runs.supports('handoff') ? 'automatic' as const : 'manual' as const } : {}),
+      ...(controllers.length ? { controlledBy: controllers } : {}),
       updatedAt: new Date().toISOString(),
     };
   };
@@ -225,16 +232,26 @@ async function main() {
     subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
   };
   // Other computers: those this one controls, those that control it, and what it answers them with.
-  const identity = await loadLinkIdentity(stateDir);
+  // Without a usable identity only remote computers are unavailable; everything else runs as usual.
+  let linkError = '';
+  const identity = await loadLinkIdentity(stateDir).catch(error => {
+    linkError = `원격 컴퓨터를 사용할 수 없습니다: ${error instanceof Error ? error.message : String(error)}`;
+    console.error(`Remote computers are unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return undefined;
+  });
   const remoteRouter = createRemoteRouter({ backend, exclusions });
-  const controllerLinks = new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname });
-  const nodeLinks = new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
+  const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname });
+  const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
     // What this computer can do for a controller depends on the worker it runs with right now.
     features: () => runs.coordinators() ? ['read', ...(runs.supports('remoteOrigins') ? ['work'] : [])] : [],
     handle: (req, res, principal) => remoteRouter.handle(req, res, principal) });
-  nodeLinks.on('disconnected', (controllerId: string) => remoteRouter.disconnect(controllerId));
+  if (nodeLinks) {
+    nodeLinks.on('disconnected', (controllerId: string) => remoteRouter.disconnect(controllerId));
+    controlledBy = () => nodeLinks.list().filter(item => item.status === 'connected').map(item => item.name);
+    nodeLinks.on('change', changed);
+  }
   const { server, dispose } = createMonitorServer({ port, clientDir, backend,
-    auth, exclusions, links: { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions },
+    auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions } : { error: linkError },
     workspaceTerminals: new TerminalHostClient({ stateDir, legacy: runs.terminals }), remote: access.remote ? { origins: access.origins } : undefined });
   await new Promise<void>((accept, reject) => {
     server.once('error', reject);
@@ -255,11 +272,11 @@ async function main() {
   capabilities.start();
   repositories.start();
   // Links come up after the web server, so a joining computer never reaches a half-started Tower.
-  await Promise.all([controllerLinks.start(), nodeLinks.start()]).catch(error => console.error(`Remote computers are unavailable: ${error instanceof Error ? error.message : String(error)}`));
+  await Promise.all([controllerLinks?.start(), nodeLinks?.start()]).catch(error => console.error(`Remote computers are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   const shutdown = async () => {
     if (closing) return;
     closing = true;
-    const stoppingLinks = Promise.all([nodeLinks.close(), controllerLinks.close()]).then(() => remoteRouter.dispose());
+    const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => remoteRouter.dispose());
     const stoppingCapabilities = capabilities.stop();
     const stoppingRepositories = repositories.stop();
     history.stop();

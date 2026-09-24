@@ -59,8 +59,8 @@ export interface HttpOptions {
   workspaceTerminals?: WorkspaceTerminalBackend;
   /** The list of folders never shared with remote controllers; managed only from this machine's own browser. */
   exclusions?: RemoteExclusionStore;
-  /** Remote computers, managed from this Tower's own pages. */
-  links?: LinkRoutes;
+  /** Remote computers, managed from this Tower's own pages; or why they are unavailable. */
+  links?: LinkRoutes | { error: string };
 }
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',

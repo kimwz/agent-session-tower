@@ -8,7 +8,7 @@ import { WebSocketServer, createWebSocketStream, type WebSocket } from 'ws';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { displayFingerprint, linkDirectory, linkId, type LinkIdentity } from './identity.js';
 import { joinCommand, encodeJoinCode, type JoinCode } from './join-code.js';
-import { LINK_PATH, LINK_PROTOCOL, MAX_FRAME_BYTES, linkRequest, openControllerEnd, pairingProof, proofMatches } from './transport.js';
+import { LINK_PATH, LINK_PROTOCOL, MAX_FRAME_BYTES, REMOVED_CLOSE_CODE, linkRequest, openControllerEnd, pairingProof, proofMatches } from './transport.js';
 import { advertisedAddresses } from './addresses.js';
 import type { HubStatus, NodeStatus, NodeSummary } from '../../shared/link.js';
 
@@ -17,16 +17,24 @@ const INVITE_MS = 10 * 60_000;
 const CLAIM_GRACE_MS = 10 * 60_000;
 const HELLO_MS = 10_000;
 const MAX_UNAUTHENTICATED = 16;
+const MAX_UNAUTHENTICATED_PER_ADDRESS = 4;
+/** Connections that have not yet asked for the link, in total and from one address. */
+const MAX_WAITING = 32;
+const MAX_WAITING_PER_ADDRESS = 4;
 const ATTEMPTS_PER_MINUTE = 30;
 const PING_MS = 20_000;
 
 export interface HubSettings { enabled: boolean; port: number; bind: string; custom: string[] }
-interface NodeRecord { id: string; pin: string; name: string; label?: string; pairedAt: string; lastSeenAt?: string; version?: string }
+interface NodeRecord {
+  id: string; pin: string; name: string; label?: string; pairedAt: string; lastSeenAt?: string; version?: string;
+  /** The computer stopped trusting this controller; shown until it joins again or is removed here. */
+  left?: true;
+}
 interface InviteRecord { id: string; secret: string; expiresAt: number; claimedBy?: string }
 interface State { version: 1; settings: HubSettings; nodes: NodeRecord[]; removed: Array<{ pin: string; at: string }>; invites: InviteRecord[] }
 
 interface Hello { protocol: number; name: string; version: string; features: string[]; pairing?: { inviteId: string; proof: string } }
-interface Connected { session: ClientHttp2Session; ws: WebSocket; hello: Hello; ping?: ReturnType<typeof setInterval> }
+interface Connected { session: ClientHttp2Session; ws: WebSocket; hello: Hello; ping?: ReturnType<typeof setInterval>; gone?: () => void }
 
 /**
  * This computer as a controller: it opens the link port, hands out join codes, and keeps one authenticated
@@ -38,13 +46,15 @@ export class ControllerLinks extends EventEmitter {
   private listener?: { server: Server; wss: WebSocketServer; port: number };
   private listenError?: string;
   private readonly connected = new Map<string, Connected>();
-  private readonly removedByNode = new Set<string>();
   private unauthenticated = 0;
+  private readonly unauthenticatedFrom = new Map<string, number>();
+  /** Set when the saved state could not be read: nothing is saved over it until the owner looks. */
+  private broken?: string;
   private readonly attempts = new Map<string, { count: number; at: number }>();
   private writes: Promise<unknown> = Promise.resolve();
   private closed = false;
 
-  constructor(private readonly options: { stateDir: string; identity: LinkIdentity; version: string; hostname: () => string; now?: () => number }) {
+  constructor(private readonly options: { stateDir: string; identity: LinkIdentity; version: string; hostname: () => string; now?: () => number; pingMs?: number }) {
     super();
     this.path = join(linkDirectory(options.stateDir), 'controller.json');
   }
@@ -54,11 +64,19 @@ export class ControllerLinks extends EventEmitter {
   async start(): Promise<void> {
     try {
       const saved = await readPrivateJson(this.path) as State;
-      if (!saved || saved.version !== 1 || !saved.settings || !Array.isArray(saved.nodes) || !Array.isArray(saved.removed) || !Array.isArray(saved.invites)) throw new Error('Saved link state is invalid.');
-      this.state = saved;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+      if (!saved || saved.version !== 1 || !saved.settings || !Array.isArray(saved.nodes) || !Array.isArray(saved.removed) || !Array.isArray(saved.invites)) throw new Error('invalid');
+      const now = this.now();
+      this.state = { ...saved, invites: saved.invites.filter(item => item.expiresAt + CLAIM_GRACE_MS > now) };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      this.broken = `${join(linkDirectory(this.options.stateDir), 'controller.json')} 파일을 읽을 수 없어 원격 컴퓨터를 관리할 수 없습니다. 파일을 확인하거나 옮긴 뒤 Tower를 다시 시작하세요.`;
+      return;
+    }
     if (this.state.settings.enabled) await this.listen();
   }
+
+  /** Why remote computers cannot be managed right now, if they cannot. */
+  get error(): string | undefined { return this.broken; }
 
   hub(): HubStatus {
     const { enabled } = this.state.settings;
@@ -92,7 +110,7 @@ export class ControllerLinks extends EventEmitter {
   list(): NodeSummary[] {
     return this.state.nodes.map(node => {
       const live = this.connected.get(node.id);
-      const status: NodeStatus = live ? (live.hello.protocol === LINK_PROTOCOL ? 'connected' : 'update-required') : this.removedByNode.has(node.id) ? 'removed-by-node' : 'offline';
+      const status: NodeStatus = live ? (live.hello.protocol === LINK_PROTOCOL ? 'connected' : 'update-required') : node.left ? 'removed-by-node' : 'offline';
       return { id: node.id, name: live?.hello.name ?? node.name, ...(node.label ? { label: node.label } : {}), fingerprint: displayFingerprint(node.pin), status,
         ...(live?.hello.version ?? node.version ? { version: live?.hello.version ?? node.version } : {}), features: live?.hello.features ?? [],
         pairedAt: node.pairedAt, ...(node.lastSeenAt ? { lastSeenAt: node.lastSeenAt } : {}) };
@@ -124,7 +142,6 @@ export class ControllerLinks extends EventEmitter {
       await linkRequest(live.session, 'POST', '/link/revoke', {}).catch(() => {});
       this.disconnect(id);
     }
-    this.removedByNode.delete(id);
     this.emit('change');
   }
 
@@ -138,11 +155,25 @@ export class ControllerLinks extends EventEmitter {
   private async listen(): Promise<void> {
     const server = createServer((_req, res) => { res.writeHead(404); res.end(); });
     const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES, perMessageDeflate: false });
+    // Limits apply from the moment a connection is accepted, before it says anything.
+    const waiting = new Map<Socket, string>();
+    server.on('connection', (socket: Socket) => {
+      const ip = socket.remoteAddress ?? 'unknown';
+      let fromAddress = 0;
+      for (const address of waiting.values()) if (address === ip) fromAddress++;
+      if (waiting.size >= MAX_WAITING || fromAddress >= MAX_WAITING_PER_ADDRESS || !this.admit(ip)) { socket.destroy(); return; }
+      waiting.set(socket, ip);
+      socket.setTimeout(HELLO_MS, () => socket.destroy());
+      socket.once('close', () => waiting.delete(socket));
+    });
     server.on('upgrade', (req: IncomingMessage, socket: Socket, head: Buffer) => {
-      const ip = req.socket.remoteAddress ?? 'unknown';
+      waiting.delete(socket);
+      socket.setTimeout(0);
       // Browsers always send Origin on WebSocket upgrades; only another Tower connects here.
-      if (req.url !== LINK_PATH || req.headers.origin !== undefined || !this.admit(ip)) { socket.destroy(); return; }
-      wss.handleUpgrade(req, socket, head, ws => { void this.accept(ws); });
+      const ip = socket.remoteAddress ?? 'unknown';
+      if (req.url !== LINK_PATH || req.headers.origin !== undefined || this.closed || this.unauthenticated >= MAX_UNAUTHENTICATED
+        || (this.unauthenticatedFrom.get(ip) ?? 0) >= MAX_UNAUTHENTICATED_PER_ADDRESS) { socket.destroy(); return; }
+      wss.handleUpgrade(req, socket, head, ws => { void this.accept(ws, ip); });
     });
     server.headersTimeout = 10_000;
     server.requestTimeout = 10_000;
@@ -168,7 +199,7 @@ export class ControllerLinks extends EventEmitter {
   }
 
   private admit(ip: string): boolean {
-    if (this.closed || this.unauthenticated >= MAX_UNAUTHENTICATED) return false;
+    if (this.closed) return false;
     const now = this.now();
     if (this.attempts.size > 1000) for (const [key, value] of this.attempts) if (now - value.at > 60_000) this.attempts.delete(key);
     const attempt = this.attempts.get(ip);
@@ -176,10 +207,17 @@ export class ControllerLinks extends EventEmitter {
     return ++attempt.count <= ATTEMPTS_PER_MINUTE;
   }
 
-  private async accept(ws: WebSocket): Promise<void> {
+  private async accept(ws: WebSocket, ip: string): Promise<void> {
     this.unauthenticated++;
+    this.unauthenticatedFrom.set(ip, (this.unauthenticatedFrom.get(ip) ?? 0) + 1);
     let settled = false;
-    const done = () => { if (!settled) { settled = true; this.unauthenticated--; } };
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      this.unauthenticated--;
+      const left = (this.unauthenticatedFrom.get(ip) ?? 1) - 1;
+      if (left > 0) this.unauthenticatedFrom.set(ip, left); else this.unauthenticatedFrom.delete(ip);
+    };
     ws.on('error', () => ws.terminate());
     const deadline = setTimeout(() => { done(); ws.terminate(); }, HELLO_MS);
     ws.once('close', () => { clearTimeout(deadline); done(); });
@@ -188,7 +226,8 @@ export class ControllerLinks extends EventEmitter {
       const answer = await linkRequest(end.session, 'GET', '/link/hello', undefined, HELLO_MS);
       const hello = parseHello(answer.json);
       if (answer.status !== 200 || !hello) throw new Error('The other computer did not introduce itself.');
-      const node = this.state.nodes.find(item => item.pin === end.pin) ?? await this.pair(end.pin, end.exporter, hello);
+      const known = this.state.nodes.find(item => item.pin === end.pin);
+      const node = (hello.pairing ? await this.pair(end.pin, end.exporter, hello, known) : undefined) ?? known;
       if (!node) {
         // Removed from this side while it was away, and not joining again with a new code: tell it to stop connecting.
         if (this.state.removed.some(item => item.pin === end.pin)) await linkRequest(end.session, 'POST', '/link/revoke', {}).catch(() => {});
@@ -196,9 +235,13 @@ export class ControllerLinks extends EventEmitter {
       }
       clearTimeout(deadline);
       done();
+      // The link may have ended while its pairing was being saved, or this Tower may be shutting down.
+      if (this.closed || end.session.destroyed || ws.readyState !== ws.OPEN) throw new Error('The link ended.');
       this.attach(node, { session: end.session, ws, hello });
-      // Until it hears this, the other computer keeps offering its invitation, including after a lost reply.
-      if (hello.pairing) await linkRequest(end.session, 'POST', '/link/paired', { name: this.options.hostname(), fingerprint: this.options.identity.fingerprint }).catch(() => {});
+      // Until it hears this, the other computer keeps offering its invitation. If it cannot be told, the link
+      // starts over so it is told on the next connection.
+      if (hello.pairing) await linkRequest(end.session, 'POST', '/link/paired', { name: this.options.hostname(), fingerprint: this.options.identity.fingerprint })
+        .then(answer => { if (answer.status !== 200) throw new Error('Not confirmed.'); }).catch(() => this.connected.get(node.id)?.gone?.());
     } catch {
       clearTimeout(deadline);
       done();
@@ -207,7 +250,7 @@ export class ControllerLinks extends EventEmitter {
   }
 
   /** Accepts an unknown computer only with a valid proof for an open (or, after a lost reply, its own claimed) invite. */
-  private async pair(pin: string, exporter: Buffer, hello: Hello): Promise<NodeRecord | undefined> {
+  private async pair(pin: string, exporter: Buffer, hello: Hello, known?: NodeRecord): Promise<NodeRecord | undefined> {
     const pairing = hello.pairing;
     if (!pairing) return undefined;
     const now = this.now();
@@ -217,25 +260,19 @@ export class ControllerLinks extends EventEmitter {
     const resumed = invite.claimedBy === pin && invite.expiresAt + CLAIM_GRACE_MS > now;
     if (!open && !resumed) return undefined;
     if (!proofMatches(pairingProof(invite.secret, exporter, { inviteId: invite.id, controllerPin: this.options.identity.pin, nodePin: pin }), pairing.proof)) return undefined;
-    const node: NodeRecord = { id: linkId(pin), pin, name: hello.name.slice(0, 100) || 'Computer', pairedAt: new Date(now).toISOString(), version: hello.version };
+    const { left: _, ...kept } = known ?? {} as Partial<NodeRecord>;
+    const node: NodeRecord = { ...kept, id: linkId(pin), pin, name: hello.name.slice(0, 100) || 'Computer', pairedAt: known?.pairedAt ?? new Date(now).toISOString(), version: hello.version };
     await this.save({ ...this.state,
       invites: this.state.invites.map(item => item.id === invite.id ? { ...item, claimedBy: pin } : item),
       nodes: [...this.state.nodes.filter(item => item.pin !== pin), node],
       removed: this.state.removed.filter(item => item.pin !== pin) });
-    this.emit('paired', node.id);
+    if (!known) this.emit('paired', node.id);
     return node;
   }
 
   private attach(node: NodeRecord, live: Connected): void {
     this.disconnect(node.id);
     this.connected.set(node.id, live);
-    this.removedByNode.delete(node.id);
-    let waiting = false;
-    live.ping = setInterval(() => {
-      if (waiting) { live.session.destroy(); return; }
-      waiting = true;
-      live.session.ping(() => { waiting = false; });
-    }, PING_MS);
     const gone = (code?: number) => {
       if (this.connected.get(node.id) !== live) return;
       clearInterval(live.ping);
@@ -243,14 +280,21 @@ export class ControllerLinks extends EventEmitter {
       live.session.destroy();
       live.ws.terminate();
       // The other computer removed this controller itself.
-      if (code === 4001) this.removedByNode.add(node.id);
-      void this.touch(node.id);
+      void this.touch(node.id, undefined, code === REMOVED_CLOSE_CODE);
       this.emit('change');
       this.emit('disconnected', node.id);
     };
+    live.gone = () => gone();
+    // A computer that stops answering (asleep, or its network changed) is dropped at once, not when TCP gives up.
+    let answered = this.now();
+    const every = this.options.pingMs ?? PING_MS;
+    live.ping = setInterval(() => {
+      if (live.session.destroyed || live.ws.readyState !== live.ws.OPEN || this.now() - answered > every * 2) { gone(); return; }
+      try { live.session.ping(error => { if (!error) answered = this.now(); }); } catch { gone(); }
+    }, every);
     live.ws.once('close', code => gone(code));
     live.session.once('close', () => gone());
-    void this.touch(node.id, live.hello.version);
+    void this.touch(node.id, live.hello.version, false);
     this.emit('change');
     this.emit('connected', node.id);
   }
@@ -264,11 +308,16 @@ export class ControllerLinks extends EventEmitter {
     live.ws.terminate();
   }
 
-  private async touch(id: string, version?: string): Promise<void> {
-    await this.save({ ...this.state, nodes: this.state.nodes.map(node => node.id === id ? { ...node, lastSeenAt: new Date(this.now()).toISOString(), ...(version ? { version } : {}) } : node) }).catch(() => {});
+  private async touch(id: string, version: string | undefined, left: boolean): Promise<void> {
+    await this.save({ ...this.state, nodes: this.state.nodes.map(node => {
+      if (node.id !== id) return node;
+      const { left: _, ...rest } = node;
+      return { ...rest, lastSeenAt: new Date(this.now()).toISOString(), ...(version ? { version } : {}), ...(left ? { left: true as const } : {}) };
+    }) }).catch(() => {});
   }
 
   private save(next: State): Promise<void> {
+    if (this.broken) return Promise.reject(Object.assign(new Error(this.broken), { statusCode: 503 }));
     this.state = next;
     const data = JSON.stringify(next);
     const write = this.writes.then(() => writePrivateJson(this.path, data));

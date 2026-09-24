@@ -7,10 +7,10 @@ export interface NodeSummary {
   id: string; name: string; label?: string; fingerprint: string; status: NodeStatus;
   version?: string; features: string[]; pairedAt: string; lastSeenAt?: string;
 }
-export type ControllerStatus = 'connected' | 'connecting' | 'offline' | 'expired' | 'refused';
+export type ControllerStatus = 'connected' | 'connecting' | 'offline' | 'expired' | 'refused' | 'removed';
 /** A computer that controls this one. */
 export interface ControllerSummary {
-  id: string; name: string; fingerprint: string; state: 'claiming' | 'paired' | 'expired'; status: ControllerStatus;
+  id: string; name: string; fingerprint: string; state: 'claiming' | 'paired' | 'expired' | 'removed'; status: ControllerStatus;
   pairedAt?: string; lastConnectedAt?: string; error?: string;
 }
 export interface LinkOverview {
@@ -20,5 +20,7 @@ export interface LinkOverview {
   controllers: ControllerSummary[];
   /** `error` is set while the saved list cannot be read; every folder is then hidden from remote computers. */
   exclusions: { folders: string[]; revision: number; error?: string };
+  /** Saved link state that could not be read; nothing is changed until the owner deals with it. */
+  errors?: string[];
 }
 export interface LinkInvite { code: string; command: string; expiresAt: number }

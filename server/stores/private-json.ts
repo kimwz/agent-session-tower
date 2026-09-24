@@ -7,7 +7,7 @@ export async function readPrivateJson(path: string): Promise<unknown> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const info = await file.stat();
-    if (!info.isFile() || info.size > 12_000_000) throw new Error('Saved session identities are invalid or too large.');
+    if (!info.isFile() || info.size > 12_000_000) throw new Error(`Saved state in ${path} is invalid or too large.`);
     await file.chmod(0o600);
     return JSON.parse(await file.readFile('utf8'));
   } finally { await file.close(); }

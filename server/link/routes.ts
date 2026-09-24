@@ -17,14 +17,16 @@ export interface LinkRoutes {
  * This Tower's own pages manage its links: the computers it controls, the ones that control it, and the
  * folders it never shares. A remote controller's link has no route here.
  */
-export async function handleLinkRoute(req: IncomingMessage, res: ServerResponse, path: string, links: LinkRoutes, json: (res: ServerResponse, status: number, body: unknown) => void): Promise<boolean> {
+export async function handleLinkRoute(req: IncomingMessage, res: ServerResponse, path: string, links: LinkRoutes | { error: string }, json: (res: ServerResponse, status: number, body: unknown) => void): Promise<boolean> {
   if (!path.startsWith('/api/link')) return false;
+  if ('error' in links) { json(res, 503, { error: links.error }); return true; }
   const overview = () => ({
     identity: { name: links.hostname(), fingerprint: links.identity.fingerprint },
     hub: links.controller.hub(),
     nodes: links.controller.list(),
     controllers: links.node.list(),
     exclusions: { folders: links.exclusions.list(), revision: links.exclusions.revision, ...(links.exclusions.error ? { error: links.exclusions.error } : {}) },
+    ...(links.controller.error || links.node.error ? { errors: [links.controller.error, links.node.error].filter((item): item is string => Boolean(item)) } : {}),
   });
   if (req.method === 'GET' && path === '/api/link') { json(res, 200, overview()); return true; }
   if (req.method !== 'POST') return false;
@@ -32,6 +34,8 @@ export async function handleLinkRoute(req: IncomingMessage, res: ServerResponse,
   const only = (...keys: string[]) => Object.keys(body).every(key => keys.includes(key));
   if (path === '/api/link/hub') {
     if (!only('enabled', 'port') || (body.enabled !== undefined && typeof body.enabled !== 'boolean') || (body.port !== undefined && typeof body.port !== 'number')) { json(res, 400, { error: '연결 받기 설정이 올바르지 않습니다.' }); return true; }
+    // A port chosen by the system would change on every restart, and joined computers would lose this one.
+    if (body.port !== undefined && (!Number.isInteger(body.port) || (body.port as number) < 1024 || (body.port as number) > 65535)) { json(res, 400, { error: '포트는 1024에서 65535 사이여야 합니다.' }); return true; }
     await links.controller.setHub({ ...(body.enabled !== undefined ? { enabled: body.enabled as boolean } : {}), ...(body.port !== undefined ? { port: body.port as number } : {}) });
     json(res, 200, overview()); return true;
   }

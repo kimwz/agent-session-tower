@@ -10,6 +10,8 @@ export const LINK_PROTOCOL = 1;
 const EXPORTER_LABEL = 'EXPORTER-agent-session-tower-link';
 export const LINK_PATH = '/tower-link';
 export const MAX_FRAME_BYTES = 1024 * 1024;
+/** Sent when a computer stops trusting its controller, so the controller can say so. */
+export const REMOVED_CLOSE_CODE = 4001;
 
 const peerPin = (socket: TLSSocket): string | undefined => {
   const certificate = socket.getPeerX509Certificate();

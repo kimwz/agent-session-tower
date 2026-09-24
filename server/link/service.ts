@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { access, cp, mkdir, readFile, readlink, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 import { defaultStateDir } from '../state-dir.js';
@@ -49,18 +49,29 @@ export async function installVersion(stateDir: string, version: string, log: (li
   return directory;
 }
 
-/** The `node_modules` folder holding the package at `root`, if it is a complete install of `version`. */
+/**
+ * The `node_modules` folder holding the package at `root`, if it is npx's own install of `version`. Other installs
+ * (global, or inside a project) share their folder with unrelated packages and are not copied.
+ */
 async function installedPackage(root: string, version: string): Promise<string | undefined> {
   const parent = dirname(root);
-  if (basename(root) !== 'agent-session-tower' || basename(parent) !== 'node_modules') return undefined;
+  if (basename(root) !== 'agent-session-tower' || basename(parent) !== 'node_modules' || !parent.split(sep).includes('_npx')) return undefined;
   const manifest = await readFile(join(root, 'package.json'), 'utf8').then(text => JSON.parse(text) as { version?: string }, () => undefined);
   if (manifest?.version !== version) return undefined;
   const built = await access(join(root, 'dist', 'server', 'index.js'), constants.R_OK).then(() => true, () => false);
   return built ? parent : undefined;
 }
 
-/** Points `current` at a version atomically. */
+const newer = (a: string, b: string) => {
+  const [x, y] = [a, b].map(value => value.split('.').map(Number));
+  for (let index = 0; index < 3; index++) if (x[index] !== y[index]) return x[index] > y[index];
+  return false;
+};
+
+/** Points `current` at a version atomically. A newer version already in use is kept: the service never goes back. */
 export async function useVersion(stateDir: string, version: string): Promise<void> {
+  const current = await currentVersion(stateDir);
+  if (current && /^\d+\.\d+\.\d+$/.test(current) && newer(current, version)) return;
   const paths = runtimePaths(stateDir);
   const temporary = `${paths.current}.${process.pid}`;
   await rm(temporary, { force: true });
@@ -82,7 +93,9 @@ const xml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;'
 export function renderServicePlist(stateDir: string, options: { port: number; node?: string; environment?: NodeJS.ProcessEnv }): string {
   const paths = runtimePaths(stateDir);
   const env = options.environment ?? process.env;
-  const variables: Record<string, string> = { PATH: env.PATH ?? '/usr/bin:/bin', HOME: env.HOME ?? homedir() };
+  // npx and npm put their own and every parent folder's node_modules/.bin first; the service keeps the user's PATH.
+  const path = (env.PATH ?? '/usr/bin:/bin').split(':').filter(entry => entry && !/(^|\/)node_modules\/\.bin$|node-gyp-bin|\/_npx\//.test(entry)).join(':');
+  const variables: Record<string, string> = { PATH: path || '/usr/bin:/bin', HOME: env.HOME ?? homedir(), TOWER_SERVICE_LOG: join(paths.logs, 'tower.log') };
   for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'LANG']) if (env[key]) variables[key] = env[key]!;
   const argumentsList = [options.node ?? process.execPath, entryPoint(paths.current), 'run', '--no-open', '--port', String(options.port), '--state-dir', stateDir];
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -121,7 +134,10 @@ export async function installService(stateDir: string, options: { port: number; 
   await writeFile(file, plist, { mode: 0o644 });
   const domain = `gui/${process.getuid?.() ?? 501}`;
   await run('launchctl', ['bootout', domain, file]).catch(() => {});
-  await run('launchctl', ['bootstrap', domain, file]);
+  await run('launchctl', ['bootstrap', domain, file]).catch(() => {
+    // Without a desktop login (for example over SSH after a restart) there is no session to start it in yet.
+    throw new Error('The background service is set up, but macOS can start it only after someone logs in to this Mac\'s desktop. Log in on this Mac (or turn on automatic login), then run this command again.');
+  });
 }
 
 /**

@@ -262,4 +262,6 @@ export interface Snapshot {
   triggers?: TriggerOverview;
   /** While the worker runs another build: whether it will hand over by itself. */
   runnerUpdate?: 'automatic' | 'manual';
+  /** Names of the other Towers controlling this computer right now. */
+  controlledBy?: string[];
 }

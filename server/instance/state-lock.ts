@@ -90,3 +90,15 @@ export async function lockedPorts(stateDir: string): Promise<number[]> {
   }
   return ports;
 }
+
+/** The live Tower web servers that hold this state directory: their process and port. */
+export async function lockOwners(stateDir: string): Promise<Array<{ pid: number; port: number }>> {
+  const lock = join(stateDir, '.instance-lock');
+  const names = await readdir(lock).catch(() => [] as string[]);
+  const owners: Array<{ pid: number; port: number }> = [];
+  for (const name of names.filter(item => /^owner-[\da-f-]{36}\.json$/.test(item))) {
+    const owner = await readFile(join(lock, name), 'utf8').then(text => JSON.parse(text) as Owner).catch(() => undefined);
+    if (owner && Number.isSafeInteger(owner.pid) && owner.pid > 0 && Number.isInteger(owner.port) && owner.port > 0 && isAlive(owner.pid)) owners.push({ pid: owner.pid, port: owner.port });
+  }
+  return owners;
+}
