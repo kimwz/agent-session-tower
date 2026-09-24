@@ -20,6 +20,8 @@ export function startCodexFixture({ defaultId, otherId, created = false }) {
       if (mode === 'invalid-event') { send(null); return; }
       send({ id: request.id, result: {} });
     } else if (request.method === 'thread/start' || request.method === 'thread/resume') {
+      if (request.params.approvalsReviewer && mode === 'refuse-reviewer') { send({ id: request.id, error: { code: -32600, message: 'Invalid request: unknown variant `auto_review`, expected `user` for approvalsReviewer' } }); return; }
+      if (request.params.approvalsReviewer && mode === 'refuse-thread') { send({ id: request.id, error: { code: -32600, message: 'Invalid request: thread is not available' } }); return; }
       threadMethod = request.method; threadParams = request.params;
       threadId = request.params.threadId || defaultId;
       if (mode === 'hold-before-id') return;

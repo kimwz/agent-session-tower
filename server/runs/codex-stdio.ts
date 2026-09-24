@@ -56,6 +56,8 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 const record = (value: unknown): value is RecordValue => !!value && typeof value === 'object' && !Array.isArray(value);
 const requestId = (value: unknown): value is RequestId => typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value));
 const timestamp = (seconds: unknown): string | undefined => typeof seconds === 'number' && Number.isFinite(seconds) && Math.abs(seconds) < 8_640_000_000_000 ? new Date(seconds * 1000).toISOString() : undefined;
+/** How Codex names the setting when it refuses a reviewer it does not know. */
+const REVIEWER_REFUSAL = /approvals_?reviewer|auto_review/i;
 const approvalError = () => Object.assign(new Error('This approval is no longer pending. Refresh the conversation.'), { statusCode: 409 });
 
 /** A dedicated stdio process owns only this run. Never connect it to the desktop daemon. */
@@ -173,13 +175,21 @@ class StdioRun implements CodexStdioRun {
     await this.request('initialize', { clientInfo: { name: APP_NAME, title: APP_TITLE, version: APP_VERSION }, capabilities: { experimentalApi: true, requestAttestation: false } });
     if (this.result) return;
     this.write({ method: 'initialized' });
-    const resumed = await this.request(this.options.threadId ? 'thread/resume' : 'thread/start', {
+    const open = (approvalsReviewer?: CodexApprovalsReviewer) => this.request(this.options.threadId ? 'thread/resume' : 'thread/start', {
       ...(this.options.mcpServers ? { config: { mcp_servers: this.options.mcpServers } } : {}),
       ...(this.options.threadId ? { threadId: this.options.threadId, excludeTurns: true }
         : { cwd: this.options.cwd }),
-      ...(this.options.approvalsReviewer ? { approvalsReviewer: this.options.approvalsReviewer } : {}),
+      ...(approvalsReviewer ? { approvalsReviewer } : {}),
       ...(this.options.model ? { model: this.options.model } : {}),
     });
+    let resumed: any;
+    try { resumed = await open(this.options.approvalsReviewer); }
+    catch (error) {
+      // A Codex that refuses the reviewer itself opened nothing, so the owner's turn opens the thread again without it.
+      if (!this.options.approvalsReviewerPreferred || !(error as { rpcRejected?: boolean }).rpcRejected || !REVIEWER_REFUSAL.test(message(error))) throw error;
+      if (this.result) return;
+      resumed = await open();
+    }
     if (this.result) return;
     // For unattended work, auto approval review is an execution requirement, not a preference. Older
     // providers that ignore it must not receive the task under another mode.

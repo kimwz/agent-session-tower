@@ -127,6 +127,37 @@ test("a Codex that does not confirm the automatic reviewer still runs the owner'
   assert.match(refused.error ?? '', /did not confirm Auto approval review\. No message was submitted/);
 });
 
+test("a Codex that refuses the automatic reviewer still runs the owner's new and resumed turns, never unattended work", async t => {
+  const f = await fixture(t, 'refuse-reviewer');
+  const threadParams = async () => JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8')).threadParams;
+  const note = /^\[Tower\] Codex did not confirm Auto approval review\. Approval requests will wait for you in Tower\.\n/;
+  const owner = { origin: { kind: 'owner' as const } };
+  const created = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Create' }, owner);
+  const done = await finished(f.manager, created.run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, note);
+  assert.equal((await threadParams()).approvalsReviewer, undefined);
+  const resumed = await f.manager.enqueue(created.session.id, 'continue', {}, owner);
+  const next = await finished(f.manager, resumed.id);
+  assert.equal(next.status, 'completed');
+  assert.match(next.output, note);
+  assert.equal((await threadParams()).threadId, CODEX_ID);
+  const trigger = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Scheduled', codexApprovalsReviewer: 'auto_review' },
+    { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
+  const refused = await finished(f.manager, trigger.run.id);
+  assert.equal(refused.status, 'error');
+  assert.match(refused.error ?? '', /unknown variant `auto_review`/);
+});
+
+test("any other refusal of the owner's Codex thread is reported, never retried", async t => {
+  const f = await fixture(t, 'refuse-thread');
+  const created = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Create' }, { origin: { kind: 'owner' } });
+  const failed = await finished(f.manager, created.run.id);
+  assert.equal(failed.status, 'error');
+  assert.match(failed.error ?? '', /thread is not available/);
+  assert.equal(f.launches.length, 1);
+});
+
 test('a queued creation keeps its approval reviewer across a Tower restart', async t => {
   const f = await fixture(t, 'hold-before-id', 1);
   const trigger = { origin: { kind: 'trigger' as const, triggerId: 'daily' } };
