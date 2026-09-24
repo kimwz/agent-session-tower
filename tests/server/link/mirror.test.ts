@@ -68,4 +68,14 @@ test('a first frame that arrives before its answer’s status is kept, and a ref
   streams[1].emit('response', { ':status': statuses[1] });
   assert.equal(refused.snapshot(NODE), undefined);
   assert.equal(streams[1].destroyed, true, 'it starts over');
+  // A first frame split around the status, and inside a character.
+  const split = new NodeMirrors(links as unknown as ControllerLinks);
+  t.after(() => split.close());
+  const bytes = Buffer.from(`id: 1\nevent: snapshot\ndata: ${JSON.stringify(snapshot('파서 작업'))}\n\n`);
+  const cut = bytes.indexOf(Buffer.from('파')) + 1;
+  streams[2].emit('data', bytes.subarray(0, cut));
+  streams[2].emit('response', { ':status': 200 });
+  assert.equal(split.snapshot(NODE), undefined);
+  streams[2].emit('data', bytes.subarray(cut));
+  assert.equal(split.snapshot(NODE)?.sessions[0].title, '파서 작업');
 });

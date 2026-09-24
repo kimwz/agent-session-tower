@@ -115,26 +115,29 @@ export class NodeMirrors extends EventEmitter {
       mirror.silence = setTimeout(() => { if (mirror.stream === stream) stream.close(http2.constants.NGHTTP2_CANCEL); }, SILENCE_MS);
     };
     quiet();
+    // Closing is not immediate; nothing that arrives after it is read.
+    let ended = false;
+    const end = () => { ended = true; stream.close(http2.constants.NGHTTP2_CANCEL); };
     const read = () => {
-      let end: number;
-      while ((end = buffer.indexOf('\n\n')) >= 0) {
-        const frame = buffer.slice(0, end);
-        buffer = buffer.slice(end + 2);
-        if (!this.frame(id, mirror, frame)) { stream.close(http2.constants.NGHTTP2_CANCEL); return; }
+      let at: number;
+      while (!ended && (at = buffer.indexOf('\n\n')) >= 0) {
+        const frame = buffer.slice(0, at);
+        buffer = buffer.slice(at + 2);
+        if (!this.frame(id, mirror, frame)) end();
       }
     };
     // The first frames can arrive before the answer's status is known; they wait for it rather than being lost.
     stream.on('response', headers => {
       status = Number(headers[':status']);
-      if (status !== 200) { stream.close(http2.constants.NGHTTP2_CANCEL); return; }
+      if (status !== 200) { end(); return; }
       if (mirror.stream === stream) read();
     });
     stream.on('data', (chunk: Buffer) => {
-      if (mirror.stream !== stream) return;
+      if (mirror.stream !== stream || ended) return;
       quiet();
-      if (status && status !== 200) return;
+      if (status !== 0 && status !== 200) return;
       buffer += decoder.write(chunk);
-      if (buffer.length > MAX_FRAME_CHARS) { stream.close(http2.constants.NGHTTP2_CANCEL); return; }
+      if (buffer.length > MAX_FRAME_CHARS) { end(); return; }
       if (status === 200) read();
     });
     stream.on('error', () => {});
