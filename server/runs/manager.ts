@@ -22,6 +22,7 @@ import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
+import { WakeupTracker, type Wakeup } from './wakeup.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -77,6 +78,9 @@ const MAX_PROMPT = 32_000;
 const MAX_RUNS = 100;
 const MAX_QUEUED = 32;
 const FINISHED = new Set<Run['status']>(['completed', 'error', 'cancelled']);
+/** A scheduled continuation Tower was not running for is still delivered this long after its time. */
+const SCHEDULE_GRACE_MS = 60 * 60 * 1000;
+const due = (run: Run, now = Date.now()) => !run.scheduled || Date.parse(run.scheduled.at) <= now;
 
 export class RunError extends Error {
   constructor(message: string, public readonly statusCode = 400) { super(message); }
@@ -225,11 +229,16 @@ export class RunManager extends EventEmitter {
         if (run.steering?.state === 'sending') run.steering.state = 'uncertain';
         const context = nativeContextObservation(run.contextUsage);
         if (context) run.contextUsage = context; else delete run.contextUsage;
-        if (run.status === 'running' || run.status === 'queued') {
+        // A continuation that has not started is only a time and the agent's own prompt; it waits again.
+        if (run.status === 'queued' && run.scheduled && Date.parse(run.scheduled.at) > Date.now() - SCHEDULE_GRACE_MS) run.output = scheduledOutput;
+        else if (run.status === 'running' || run.status === 'queued') {
+          const missedSchedule = run.status === 'queued' && run.scheduled;
           run.status = run.status === 'running' ? 'error' : 'cancelled';
           run.error = run.steering
             ? 'Agent Session Tower stopped before this inserted instruction finished. It was not resent. Check the conversation before sending again.'
-            : 'Agent Session Tower stopped before this task finished. It was not restarted; send the instruction again to continue.';
+            : missedSchedule
+              ? 'Agent Session Tower was not running when this scheduled continuation was due. It was not started; send an instruction to continue.'
+              : 'Agent Session Tower stopped before this task finished. It was not restarted; send the instruction again to continue.';
           run.finishedAt = new Date().toISOString();
         }
         this.runs.set(run.id, run);
@@ -255,10 +264,14 @@ export class RunManager extends EventEmitter {
 
   private sessionWithContext(session: Session): Session {
     let latest: Run['contextUsage'];
+    let scheduledAt: string | undefined;
     for (const run of this.runs.values()) {
-      if (run.sessionId === session.id && run.contextUsage && (!latest || run.contextUsage.updatedAt > latest.updatedAt)) latest = run.contextUsage;
+      if (run.sessionId !== session.id) continue;
+      if (run.contextUsage && (!latest || run.contextUsage.updatedAt > latest.updatedAt)) latest = run.contextUsage;
+      if (run.status === 'queued' && run.scheduled) scheduledAt = run.scheduled.at;
     }
-    return withNativeContext(session, latest);
+    const current = withNativeContext(session, latest);
+    return scheduledAt ? { ...current, scheduledAt } : current;
   }
 
   /** Stable monitor IDs keep layout, titles and closure attached after native discovery. */
@@ -384,7 +397,7 @@ export class RunManager extends EventEmitter {
     if (!this.started || this.stopping) throw new RunError('The task runner is not accepting instructions.', 503);
     if (typeof prompt !== 'string' || (!prompt.trim() && !hasAttachments)) throw new RunError('Enter an instruction or attach a file first.');
     if (prompt.length > MAX_PROMPT) throw new RunError(`Instructions must be at most ${MAX_PROMPT.toLocaleString()} characters.`, 413);
-    if ([...this.runs.values()].filter((run) => run.status === 'queued').length >= MAX_QUEUED) throw new RunError('The task queue is full. Wait for a task to finish.', 429);
+    if ([...this.runs.values()].filter((run) => run.status === 'queued' && !run.scheduled).length >= MAX_QUEUED) throw new RunError('The task queue is full. Wait for a task to finish.', 429);
   }
 
   /** External content only enters conversations Tower created and can keep marked. */
@@ -430,12 +443,14 @@ export class RunManager extends EventEmitter {
     try { await this.flush(); } // An accepted instruction is durable before launching the provider.
     catch (error) { this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error; }
     finally { this.admissions.delete(run.id); }
+    // An accepted instruction replaces the continuation the agent planned; its next turn can schedule again.
+    for (const other of this.runs.values()) if (other.sessionId === sessionId && other.status === 'queued' && other.scheduled) this.supersede(other, 'A newer instruction was sent before the scheduled time.');
     void this.pump();
     return { ...run };
   }
 
   private steeringTarget(run: Run) {
-    if (this.stopping || run.status !== 'queued' || run.steering || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
+    if (this.stopping || run.status !== 'queued' || run.steering || run.scheduled || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
     const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering);
     if (!target || (run.model && run.model !== (target.model ?? this.getSession(run.sessionId)?.model)) || (run.effort && run.effort !== target.effort)) return undefined;
     // An inserted instruction runs with the active turn's tools and approvals. Tools follow origin and
@@ -540,6 +555,8 @@ export class RunManager extends EventEmitter {
     if (this.notifyTimer) { clearTimeout(this.notifyTimer); this.notifyTimer = undefined; }
     this.cancelOutputPersist();
     for (const run of this.runs.values()) {
+      // A continuation that has not started stays saved; the next worker delivers it.
+      if (run.status === 'queued' && run.scheduled) continue;
       if ((run.status === 'queued' || run.status === 'running') && !this.bridged.has(run.id) && !this.stdio.has(run.id)) {
         run.status = 'cancelled';
         run.finishedAt = new Date().toISOString();
@@ -593,14 +610,17 @@ export class RunManager extends EventEmitter {
     if (this.pumping || this.stopping || !this.started) return;
     this.pumping = true;
     try {
-      if (![...this.runs.values()].some((run) => run.status === 'queued')) return;
+      if (![...this.runs.values()].some((run) => run.status === 'queued' && due(run))) return;
       await this.options.refreshSessions();
       for (const run of this.runs.values()) {
         if (this.stopping) break;
         // Independent conversations can run immediately. Only callers that
         // explicitly configure a worker limit impose a global queue.
         if (this.options.maxConcurrent !== undefined && this.owned.size + this.bridged.size + this.stdio.size >= this.options.maxConcurrent) break;
-        if (run.status !== 'queued' || this.admissions.has(run.id)) continue;
+        if (run.status !== 'queued' || this.admissions.has(run.id) || !due(run)) continue;
+        // Someone continued the conversation outside Tower after the agent scheduled this.
+        const requested = run.scheduled && this.getSession(run.sessionId)?.lastRequestAt;
+        if (requested && Date.parse(requested) > Date.parse(run.createdAt)) { this.supersede(run, 'The conversation continued before the scheduled time.'); continue; }
         // Each run's own look, taken now: an earlier run's start may have taken a while.
         await this.prepareLaunch(run);
         if (run.status !== 'queued' || this.admissions.has(run.id) || this.stopping) continue;
@@ -848,6 +868,7 @@ export class RunManager extends EventEmitter {
     let messageHasPartial = false;
     let contextInput: { model: string; usedTokens: number } | undefined;
     let identitySaved: Promise<void> = Promise.resolve();
+    const wakeups = new WakeupTracker(MAX_PROMPT);
     owned.claude = new ClaudeControl({
       write: message => new Promise<void>((resolve, reject) => {
         if (run.status !== 'running' || child.exitCode !== null || child.stdin.destroyed || child.stdin.writableEnded) { reject(new Error('Provider input is closed.')); return; }
@@ -907,6 +928,7 @@ export class RunManager extends EventEmitter {
       }
       const mainContext = event.parent_tool_use_id == null && (event.session_id === undefined || event.session_id === session.nativeId);
       if (mainContext && event.type === 'system' && event.subtype === 'compact_boundary') contextInput = undefined;
+      if (mainContext) wakeups.observe(event);
       if (mainContext && event.type === 'assistant' && !event.isMeta && !event.is_meta) {
         const model = event.message?.model;
         if (!String(model || '').includes('synthetic')) {
@@ -981,13 +1003,44 @@ export class RunManager extends EventEmitter {
       if (run.status !== 'cancelled') {
         if (!streamError && code === 0 && (!sawCompletion || !sawSessionId)) streamError = 'The provider exited without confirming completion in the requested conversation.';
         if (streamError || code !== 0) this.fail(run, streamError ?? (stderr.trim() || `The provider exited ${signal ? `with signal ${signal}` : `with code ${code ?? 'unknown'}`}.`));
-        else { run.status = 'completed'; run.finishedAt = new Date().toISOString(); this.changed(); }
+        else {
+          run.status = 'completed'; run.finishedAt = new Date().toISOString();
+          const wakeup = wakeups.pending;
+          if (wakeup && !this.stopping) this.scheduleContinuation(run, wakeup);
+          this.changed();
+        }
       } else this.changed();
       finish();
       if (!this.stopping) void this.options.refreshSessions().catch(() => {}).finally(() => this.pump());
     });
     owned.claude.start(input);
     this.changed();
+  }
+
+  /**
+   * Queues the agent's own continuation with the authority of the turn that scheduled it. Slack and trigger
+   * work follows its event's lifecycle, so an agent there does not schedule more of it.
+   */
+  private scheduleContinuation(after: Run, wakeup: Wakeup): void {
+    if (automated(after)) return;
+    const live = [...this.runs.values()].filter(run => run.status === 'queued' || run.status === 'running');
+    if (live.some(run => run.sessionId === after.sessionId) || live.filter(run => run.scheduled).length >= MAX_QUEUED) return;
+    const run: Run = { id: randomUUID(), sessionId: after.sessionId, origin: after.origin ?? { kind: 'unknown' }, prompt: wakeup.prompt, status: 'queued',
+      createdAt: new Date().toISOString(), output: scheduledOutput, scheduled: { at: new Date(wakeup.at).toISOString(), afterRunId: after.id },
+      ...(after.unattended ? { unattended: true } : {}), ...(after.model ? { model: after.model } : {}), ...(after.effort ? { effort: after.effort } : {}) };
+    this.runs.set(run.id, run);
+    this.prune();
+  }
+
+  private supersede(run: Run, reason: string): void {
+    run.status = 'cancelled'; run.finishedAt = new Date().toISOString(); run.output = `Scheduled continuation not started: ${reason}`;
+    this.changed();
+  }
+
+  /** Work that is live, or will start within `withinMs`. A continuation due later waits in saved state for any worker. */
+  hasWorkWithin(withinMs: number): boolean {
+    const until = Date.now() + withinMs;
+    return [...this.runs.values()].some(run => run.status === 'running' || (run.status === 'queued' && due(run, until)));
   }
 
   private stopOwned(id: string, owned: OwnedProcess): void {
@@ -1081,6 +1134,7 @@ export class RunManager extends EventEmitter {
   }
 }
 
+const scheduledOutput = 'Scheduled by the agent. Tower resumes this conversation at the scheduled time.';
 function errorMessage(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 async function privateMcpConfig(mcpServers: NonNullable<RunTools['servers']>): Promise<{ path: string; remove: () => void }> {
   const directory = await mkdtemp(join(tmpdir(), 'tower-mcp-'));

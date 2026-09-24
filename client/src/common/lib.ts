@@ -8,6 +8,20 @@ export const statusLabels: Record<SessionStatus, string> = {
   get completed() { return t('완료'); },
   get error() { return t('중단·오류'); },
 };
+/** A continuation the agent scheduled is not a finished conversation: it resumes on its own. */
+export function sessionState(session: Pick<Session, 'status' | 'scheduledAt'>): { key: SessionStatus | 'scheduled'; label: string } {
+  if (session.scheduledAt && session.status !== 'working') return { key: 'scheduled', label: scheduledLabel(session.scheduledAt) };
+  return { key: session.status, label: statusLabels[session.status] };
+}
+/** Past its time, a continuation is waiting for the conversation to be free. */
+export function scheduledLabel(at: string, now = Date.now()) {
+  return Date.parse(at) <= now ? t('이어서 진행 대기 중') : t('{0}에 이어서 진행', { 0: clockTime(at) });
+}
+export function clockTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Date().toDateString() === date.toDateString() ? date.toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit', hour12: false }) : absoluteTime(value);
+}
 export const providerLabels = { claude: 'Claude Code', codex: 'Codex' };
 export function relativeTime(value: string, now = Date.now()) {
   const elapsed = Math.max(0, now - new Date(value).getTime());

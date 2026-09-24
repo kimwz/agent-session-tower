@@ -304,7 +304,8 @@
 .row-status.working {
   color:#8acdb5
 }
-.row-status.idle {
+.row-status.idle,
+.row-status.scheduled {
   color:#b3bfda
 }
 .row-status.error {

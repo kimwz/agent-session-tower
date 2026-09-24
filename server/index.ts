@@ -180,7 +180,7 @@ async function main() {
   const repositories = new RepositoryMonitor({
     watched: () => watchedRepositoryPaths(runs.sessionList(), groups.list()),
     busy: status => runs.sessionList().some(session => session.status === 'working' && overlapsRepository(status, session.cwd))
-      || runs.list().some(run => (run.status === 'running' || run.status === 'queued') && overlapsRepository(status, runs.getSession(run.sessionId)?.cwd ?? '')),
+      || runs.list().some(run => (run.status === 'running' || (run.status === 'queued' && !(run.scheduled && Date.parse(run.scheduled.at) > Date.now()))) && overlapsRepository(status, runs.getSession(run.sessionId)?.cwd ?? '')),
     onChange: changed,
   });
   let controlledBy = (): string[] => [];
@@ -229,6 +229,8 @@ async function main() {
       const session = runs.getSession(id);
       if (!session) return undefined;
       const updated = await closedSessions.set(session, closed);
+      // Closing a conversation also stops what its agent planned to do in it later.
+      if (closed) for (const run of runs.list()) if (run.sessionId === session.id && run.status === 'queued' && run.scheduled) await runs.cancel(run.id).catch(() => {});
       changed();
       return titles.apply(updated);
     },

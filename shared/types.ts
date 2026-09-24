@@ -45,6 +45,8 @@ export interface Session {
   resumable: boolean;
   activeProcess?: boolean;
   filePath?: string;
+  /** When a continuation the agent scheduled for itself resumes this conversation. */
+  scheduledAt?: string;
 }
 export interface SessionContextUsage {
   usedTokens: number;
@@ -149,6 +151,12 @@ export interface Run {
   approvals?: RunApproval[];
   canSteer?: boolean;
   steering?: { targetRunId: string; state: 'sending' | 'delivered' | 'uncertain'; requestedAt: string; deliveredAt?: string };
+  /**
+   * A continuation the agent scheduled for itself (Claude's ScheduleWakeup) in the turn `afterRunId`. The native
+   * wakeup lives only inside the provider process, which ends with Tower's turn, so Tower keeps the run queued
+   * until `at` and then resumes the conversation with the agent's own prompt.
+   */
+  scheduled?: { at: string; afterRunId: string };
 }
 export interface RunApproval {
   id: string;

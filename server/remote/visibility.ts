@@ -62,9 +62,9 @@ const pick = <T extends object, K extends keyof T>(value: T, keys: readonly K[])
 };
 const SESSION_FIELDS = ['id', 'nativeId', 'provider', 'title', 'customTitle', 'closed', 'creationPending', 'cwd', 'project', 'parentId', 'parentLink',
   'launchedByAgent', 'launchedBy', 'agentName', 'model', 'contextUsage', 'status', 'statusReason', 'createdAt', 'updatedAt', 'lastRequestAt',
-  'lastCompletedAt', 'lastMessage', 'messageCount', 'readRevision', 'isSubagent', 'resumable', 'activeProcess'] as const satisfies readonly (keyof Session)[];
+  'lastCompletedAt', 'lastMessage', 'messageCount', 'readRevision', 'isSubagent', 'resumable', 'activeProcess', 'scheduledAt'] as const satisfies readonly (keyof Session)[];
 const RUN_FIELDS = ['id', 'sessionId', 'unattended', 'towerTools', 'prompt', 'status', 'createdAt', 'startedAt', 'finishedAt', 'output', 'error', 'attachments', 'model',
-  'effort', 'codexApprovalsReviewer', 'autoPromptId', 'contextUsage', 'approvals', 'canSteer', 'steering'] as const satisfies readonly (keyof Run)[];
+  'effort', 'codexApprovalsReviewer', 'autoPromptId', 'contextUsage', 'approvals', 'canSteer', 'steering', 'scheduled'] as const satisfies readonly (keyof Run)[];
 const JOB_FIELDS = ['id', 'unattended', 'untrustedInput', 'sessionMode', 'model', 'effort', 'provider', 'cwd', 'prompt', 'codexApprovalsReviewer', 'routerModel',
   'status', 'stage', 'createdAt', 'updatedAt', 'attachments', 'sessionId', 'runId', 'error'] as const satisfies readonly (keyof AutoPromptJob)[];
 

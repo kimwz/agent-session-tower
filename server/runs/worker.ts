@@ -250,7 +250,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   let handoffTimer: ReturnType<typeof setInterval> | undefined;
   // Status alone is not enough: a cancelled turn may still be closing its provider process.
   const quiet = () => !pending && !options.runs.busy() && !options.autoPrompts?.busy()
-    && !options.runs.list().some(run => run.status === 'running' || run.status === 'queued')
+    // A continuation scheduled for later is saved and delivered by the successor.
+    && !options.runs.hasWorkWithin(5 * 60 * 1000)
     && !options.autoPrompts?.list().some(job => !['completed', 'error', 'cancelled'].includes(job.status))
     && !options.terminals?.hasActive()
     && !options.inFlight?.();

@@ -221,7 +221,8 @@
 .agent-state.error {
   color:#c7a083
 }
-.agent-state.idle {
+.agent-state.idle,
+.agent-state.scheduled {
   color:#9dadd5
 }
 .agent-state>i {

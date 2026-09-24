@@ -28,6 +28,7 @@ export function isSavedRun(value: unknown): value is Run {
     && (run.codexApprovalsReviewer === undefined || ['user', 'auto_review'].includes(run.codexApprovalsReviewer))
     && (run.autoPromptId === undefined || UUID.test(run.autoPromptId))
     && (run.steering === undefined || isSavedSteering(run.steering, run))
+    && (run.scheduled === undefined || isSavedSchedule(run.scheduled, run))
     && (run.attachments === undefined || (Array.isArray(run.attachments) && run.attachments.length <= 10 && run.attachments.every(item => attachmentMetadata(item))))
     && ['queued', 'running', 'completed', 'error', 'cancelled'].includes(run.status ?? '');
 }
@@ -41,6 +42,14 @@ export function isSavedSteering(value: unknown, run: Partial<Run>): boolean {
     && (steering.deliveredAt === undefined || timestamp(steering.deliveredAt))
     && (steering.state !== 'delivered' || steering.deliveredAt !== undefined)
     && run.status !== 'queued';
+}
+
+export function isSavedSchedule(value: unknown, run: Partial<Run>): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const scheduled = value as Partial<NonNullable<Run['scheduled']>>;
+  return typeof scheduled.at === 'string' && Number.isFinite(Date.parse(scheduled.at))
+    && typeof scheduled.afterRunId === 'string' && UUID.test(scheduled.afterRunId) && scheduled.afterRunId !== run.id
+    && run.steering === undefined && !run.attachments?.length;
 }
 
 export function isCreatedSession(value: unknown): value is CreatedSession {
