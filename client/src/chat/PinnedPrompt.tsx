@@ -37,8 +37,15 @@ export function PinnedPrompt({ scroller, messages, previousUser, runMatches }: {
   useI18n();
   const [pinned, setPinned] = useState<string>();
   const [open, setOpen] = useState(false);
+  // The opened message never reaches past the chat, however short it gets.
+  const [height, setHeight] = useState<number>();
   const line = useRef<HTMLButtonElement>(null);
-  const update = useCallback(() => { if (scroller.current) setPinned(pinnedMessageId(scroller.current, Boolean(previousUser))); }, [scroller, previousUser]);
+  const update = useCallback(() => {
+    const element = scroller.current;
+    if (!element) return;
+    setPinned(pinnedMessageId(element, Boolean(previousUser)));
+    setHeight(Math.max(120, Math.floor(element.clientHeight * 0.6)));
+  }, [scroller, previousUser]);
   // Looked at again when the view scrolls, and when anything in it changes size (width, text size, a message opened)
   // without a scroll. Attached before the first paint, so the chat's own first scroll to the latest is seen too.
   useLayoutEffect(() => {
@@ -70,7 +77,6 @@ export function PinnedPrompt({ scroller, messages, previousUser, runMatches }: {
     found.tabIndex = -1;
     found.focus({ preventScroll: true });
   };
-  const height = scroller.current ? Math.max(120, Math.floor(scroller.current.clientHeight * 0.6)) : undefined;
   return <div className="pinned-prompt-anchor">
     <div className={`pinned-prompt${open ? ' open' : ''}`} onKeyDown={event => { if (open && event.key === 'Escape') { event.preventDefault(); fold(); } }}>
       <button ref={line} type="button" className="pinned-prompt-line" aria-expanded={open} title={open ? t('접기') : t('보낸 메시지 전체 보기')} onClick={() => setOpen(!open)}>

@@ -61,7 +61,7 @@ test('a notice an older worker still sends as your message reads as a notice, an
     setLanguage('ko');
     const at = '2026-09-24T00:00:00.000Z';
     const raw = '<task-notification>\n<task-id>b1</task-id>\n<status>failed</status>\n<summary>Background command "deploy" failed</summary>\n</task-notification>';
-    const html = renderToStaticMarkup(createElement(ChatTranscript, { messages: [
+    const html = renderToStaticMarkup(createElement(ChatTranscript, { provider: 'claude', messages: [
       { id: 'a1', role: 'assistant', text: 'Working on it', timestamp: at },
       { id: 'n1', role: 'user', text: raw, timestamp: at },
       { id: 'a2', role: 'assistant', text: 'Done', timestamp: at },
@@ -69,5 +69,8 @@ test('a notice an older worker still sends as your message reads as a notice, an
     assert.doesNotMatch(html, /data-user-message/);
     assert.doesNotMatch(html, /task-notification/);
     assert.match(html, /<strong>백그라운드 작업<\/strong>/, 'a group of notices alone is named for them');
+    const codex = renderToStaticMarkup(createElement(ChatTranscript, { provider: 'codex', messages: [{ id: 'c1', role: 'user', text: `${raw}\n\nWhy did this fail?`, timestamp: at }] }));
+    assert.match(codex, /data-user-message="c1"/, 'a Codex message is what you wrote, however it starts');
+    assert.match(codex, /Why did this fail/);
   } finally { setLanguage(language); }
 });

@@ -1,7 +1,7 @@
 import { translate as t, useI18n } from '../i18n/i18n';
 import { memo, useMemo, useRef, useState } from 'react';
 import { ChevronDown, TriangleAlert } from 'lucide-react';
-import type { ChatMessage } from '../../../shared/types';
+import type { ChatMessage, Provider } from '../../../shared/types';
 import { isTaskNotification, taskNotice, TASK_NOTICE } from '../../../shared/task-notification';
 import { groupConsecutiveTools, type ToolGroup } from './chat-tool-groups';
 import { Message } from './Message';
@@ -20,14 +20,17 @@ export const ToolMessageGroup = memo(function ToolMessageGroup({ group }: { grou
   </details>;
 });
 
-/** A background task's notice that an older worker or computer still sends as your message reads as the notice it is. */
-export function readableNotice(message: ChatMessage): ChatMessage {
-  if (message.role !== 'user' || !isTaskNotification(message.text)) return message;
+/**
+ * A background task's notice that an older worker or computer still sends as your message reads as the notice it is.
+ * Only Claude Code writes these; a Codex message that happens to start like one is what you wrote.
+ */
+export function readableNotice(message: ChatMessage, provider?: Provider): ChatMessage {
+  if (provider !== 'claude' || message.role !== 'user' || !isTaskNotification(message.text)) return message;
   const notice = taskNotice(message.text);
   return { ...message, role: 'system', toolName: TASK_NOTICE, text: notice.text, ...(notice.failed ? { isError: true } : {}) };
 }
 
-export const ChatTranscript = memo(function ChatTranscript({ messages, runMatches }: { messages: readonly ChatMessage[]; runMatches?: ReadonlyMap<string, ChatRunMatch> }) {
-  const entries = useMemo(() => groupConsecutiveTools(messages.map(readableNotice)), [messages]);
+export const ChatTranscript = memo(function ChatTranscript({ messages, runMatches, provider }: { messages: readonly ChatMessage[]; runMatches?: ReadonlyMap<string, ChatRunMatch>; provider?: Provider }) {
+  const entries = useMemo(() => groupConsecutiveTools(messages.map(message => readableNotice(message, provider))), [messages, provider]);
   return <>{entries.map(entry => entry.kind === 'tools' ? <ToolMessageGroup key={`tools:${entry.id}`} group={entry} /> : <Message key={`message:${entry.message.id}`} message={entry.message} runMatch={runMatches?.get(entry.message.id)} />)}</>;
 });
