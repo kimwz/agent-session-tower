@@ -23,6 +23,8 @@ const MAX_WAITING = 32;
 const MAX_WAITING_PER_ADDRESS = 4;
 const ATTEMPTS_PER_MINUTE = 30;
 const PING_MS = 20_000;
+/** A joined computer's worker can be replaced by a newer one; what it can do is asked again this often. */
+const HELLO_REFRESH_MS = 60_000;
 
 export interface HubSettings { enabled: boolean; port: number; bind: string; custom: string[] }
 interface NodeRecord {
@@ -36,7 +38,7 @@ interface InviteRecord { id: string; secret: string; expiresAt: number; claimedB
 interface State { version: 1; settings: HubSettings; nodes: NodeRecord[]; removed: Array<{ pin: string; at: string }>; invites: InviteRecord[] }
 
 interface Hello { protocol: number; name: string; version: string; features: string[]; pairing?: { inviteId: string; proof: string } }
-interface Connected { session: ClientHttp2Session; ws: WebSocket; hello: Hello; ping?: ReturnType<typeof setInterval>; gone?: () => void }
+interface Connected { session: ClientHttp2Session; ws: WebSocket; hello: Hello; ping?: ReturnType<typeof setInterval>; refresh?: ReturnType<typeof setInterval>; gone?: () => void }
 
 /**
  * This computer as a controller: it opens the link port, hands out join codes, and keeps one authenticated
@@ -56,7 +58,7 @@ export class ControllerLinks extends EventEmitter {
   private writes: Promise<unknown> = Promise.resolve();
   private closed = false;
 
-  constructor(private readonly options: { stateDir: string; identity: LinkIdentity; version: string; hostname: () => string; now?: () => number; pingMs?: number }) {
+  constructor(private readonly options: { stateDir: string; identity: LinkIdentity; version: string; hostname: () => string; now?: () => number; pingMs?: number; refreshMs?: number }) {
     super();
     this.path = join(linkDirectory(options.stateDir), 'controller.json');
   }
@@ -279,6 +281,7 @@ export class ControllerLinks extends EventEmitter {
     const gone = (code?: number) => {
       if (this.connected.get(node.id) !== live) return;
       clearInterval(live.ping);
+      clearInterval(live.refresh);
       this.connected.delete(node.id);
       live.session.destroy();
       live.ws.terminate();
@@ -295,6 +298,16 @@ export class ControllerLinks extends EventEmitter {
       if (live.session.destroyed || live.ws.readyState !== live.ws.OPEN || this.now() - answered > every * 2) { gone(); return; }
       try { live.session.ping(error => { if (!error) answered = this.now(); }); } catch { gone(); }
     }, every);
+    live.refresh = setInterval(() => {
+      void linkRequest(live.session, 'GET', '/link/hello', undefined, HELLO_MS).then(answer => {
+        const hello = parseHello(answer.json);
+        if (answer.status !== 200 || !hello || this.connected.get(node.id) !== live) return;
+        const { pairing: _, ...current } = hello;
+        const changed = JSON.stringify([current.name, current.version, current.features, current.protocol]) !== JSON.stringify([live.hello.name, live.hello.version, live.hello.features, live.hello.protocol]);
+        live.hello = current;
+        if (changed) { void this.touch(node.id, current.version, false); this.emit('change'); }
+      }).catch(() => {});
+    }, this.options.refreshMs ?? HELLO_REFRESH_MS);
     live.ws.once('close', code => gone(code));
     live.session.once('close', () => gone());
     void this.touch(node.id, live.hello.version, false);
@@ -307,6 +320,7 @@ export class ControllerLinks extends EventEmitter {
     if (!live) return;
     this.connected.delete(id);
     clearInterval(live.ping);
+    clearInterval(live.refresh);
     live.session.destroy();
     live.ws.terminate();
   }

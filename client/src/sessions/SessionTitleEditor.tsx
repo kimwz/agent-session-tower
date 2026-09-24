@@ -4,6 +4,7 @@ import { Check, LoaderCircle, Pencil, X } from 'lucide-react';
 import type { Session } from '../../../shared/types';
 import { api, sessionTitle } from '../common/lib';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
+import { pathFor, scopeSession } from '../remote/scope';
 
 export function SessionTitleEditor({ session, token, connected, onSaved }: {
   session: Session;
@@ -34,11 +35,11 @@ export function SessionTitleEditor({ session, token, connected, onSaved }: {
     if (unavailable || inFlight.current) return;
     inFlight.current = true; setSaving(true); setError('');
     try {
-      const result = await api<{ session: Session }>(`/api/sessions/${encodeURIComponent(session.id)}/title`, {
+      const result = await api<{ session: Session }>(pathFor(session.id, id => `/api/sessions/${encodeURIComponent(id)}/title`), {
         method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token },
         body: JSON.stringify({ title: title.trim() }),
       });
-      onSaved(result.session);
+      onSaved(session.node ? scopeSession(session.node, result.session) : result.session);
       finish();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : t("제목을 저장하지 못했습니다."));

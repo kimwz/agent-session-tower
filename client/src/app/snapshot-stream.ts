@@ -98,8 +98,44 @@ export class SnapshotStore {
   }
 }
 
+/** One frame about a joined computer, carried on this Tower's event stream. */
+interface NodeFrame { node: string; sequence?: number; snapshot?: Snapshot; patch?: SnapshotPatch; removed?: true }
+
+/**
+ * The shared snapshots of joined computers, each continued by its own frames. Unlike this computer's store, a
+ * computer's state is only ever what its frames said; a computer the page stops hearing about is dropped by the
+ * page once this Tower no longer lists it.
+ */
+export class NodeSnapshotStore {
+  private readonly streams = new Map<string, { sequence: number; snapshot: Snapshot }>();
+  private shown: ReadonlyMap<string, Snapshot> = new Map();
+
+  constructor(private readonly show: (snapshots: ReadonlyMap<string, Snapshot>) => void) {}
+
+  /** False when the frame cannot continue that computer's stream; the caller must reconnect. */
+  frame(frame: NodeFrame): boolean {
+    if (typeof frame.node !== 'string') return false;
+    if (frame.removed) { this.streams.delete(frame.node); this.publish(); return true; }
+    if (!Number.isSafeInteger(frame.sequence)) return false;
+    if (frame.snapshot) this.streams.set(frame.node, { sequence: frame.sequence!, snapshot: frame.snapshot });
+    else {
+      const current = this.streams.get(frame.node);
+      if (!current || !frame.patch || frame.patch.base !== current.sequence) return false;
+      try { this.streams.set(frame.node, { sequence: frame.sequence!, snapshot: applySnapshotPatch(current.snapshot, frame.patch) }); }
+      catch { return false; }
+    }
+    this.publish();
+    return true;
+  }
+
+  private publish(): void {
+    this.shown = new Map([...this.streams].map(([node, stream]) => [node, stream.snapshot]));
+    this.show(this.shown);
+  }
+}
+
 export interface SnapshotEventSource {
-  addEventListener(type: 'snapshot' | 'patch', listener: (event: MessageEvent<string>) => void): void;
+  addEventListener(type: 'snapshot' | 'patch' | 'node', listener: (event: MessageEvent<string>) => void): void;
   onopen: ((event: Event) => void) | null;
   onerror: ((event: Event) => void) | null;
   close(): void;
@@ -114,13 +150,13 @@ export interface SnapshotStreamHandlers {
 
 /** Connects `store` to the server's snapshot events and returns a disconnect function. */
 export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotStreamHandlers,
-  open: (url: string) => SnapshotEventSource = url => new EventSource(url), timers: Timers = realTimers): () => void {
+  open: (url: string) => SnapshotEventSource = url => new EventSource(url), timers: Timers = realTimers, nodes?: NodeSnapshotStore): () => void {
   let source: SnapshotEventSource | undefined;
   let closed = false;
   let lastResync = -Infinity;
   let resyncTimer: unknown;
   const connect = () => {
-    const current = source = open('/api/events?patch=1');
+    const current = source = open(nodes ? '/api/events?patch=1&nodes=1' : '/api/events?patch=1');
     current.addEventListener('snapshot', event => {
       if (current !== source) return;
       let snapshot: Snapshot;
@@ -134,6 +170,12 @@ export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotSt
       try { applied = store.patch(Number(event.lastEventId), JSON.parse(event.data) as SnapshotPatch); } catch { /* Unreadable patches resynchronize. */ }
       if (applied) handlers.onFrame();
       else resync();
+    });
+    current.addEventListener('node', event => {
+      if (current !== source || !nodes) return;
+      let applied = false;
+      try { applied = nodes.frame(JSON.parse(event.data) as NodeFrame); } catch { /* Unreadable frames resynchronize. */ }
+      if (!applied) resync();
     });
     current.onopen = () => { if (current === source) { store.setConnected(true); handlers.onOpen(); } };
     current.onerror = () => { if (current === source) { store.setConnected(false); handlers.onError(); } };

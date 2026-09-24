@@ -26,3 +26,9 @@ export interface LinkOverview {
   errors?: string[];
 }
 export interface LinkInvite { id: string; code: string; command: string; expiresAt: number }
+/** A joined computer as this Tower's own page shows it, beside its shared snapshot. */
+export interface RemoteNode {
+  id: string; name: string; label?: string; status: NodeStatus; version?: string; features: string[]; lastSeenAt?: string;
+  /** Its shared state is arriving now; otherwise what is shown of it is the last state seen. */
+  streaming: boolean;
+}

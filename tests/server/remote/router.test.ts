@@ -14,7 +14,7 @@ const CONTROLLER = 'controllera1b2c3d4e5f6';
 const REQUEST_ID = '0199a2b3-c4d5-7123-8abc-0123456789ab';
 const now = new Date().toISOString();
 
-async function fixture(t: TestContext, options: { coordinators?: string[] | null; beforeDetail?: () => Promise<void>; job?: (job: AutoPromptJob) => AutoPromptJob; beforeCancel?: () => Promise<void> } = {}) {
+async function fixture(t: TestContext, options: { coordinators?: string[] | null; beforeDetail?: () => Promise<void>; job?: (job: AutoPromptJob) => AutoPromptJob; beforeCancel?: () => Promise<void>; repositories?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-router-')));
   const open = join(root, 'open'), secret = join(root, 'secret');
   await mkdir(join(secret, 'deep'), { recursive: true });
@@ -37,8 +37,9 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
       origin: { kind: 'owner', controllerId: CONTROLLER } }];
   const calls: Array<{ method: string; args: unknown[] }> = [];
   const listeners = new Set<() => void>();
+  const repository = (cwd: string, root = cwd) => ({ cwd, root, branch: 'main', upstream: 'origin/main', ahead: 0, behind: 1, changes: 0, checkedAt: now, lastAction: { kind: 'pull' as const, ok: false, error: `could not pull ${root}`, at: now } });
   const snapshot = (): Snapshot => ({ sessions, runs, providers: [], autoPrompts: jobs, groups: [{ cwd: open, title: 'Open', pinned: true }, { cwd: secret, title: 'Secret', pinned: true }],
-    scanning: false, hostname: 'machine-b', version: 'test', updatedAt: now });
+    ...(options.repositories ? { repositories: [repository(open), repository(join(open, 'nested'), secret)] } : {}), scanning: false, hostname: 'machine-b', version: 'test', updatedAt: now });
   const lookup = (id: string) => sessions.find(item => item.id === id || `${item.provider}:${item.nativeId}` === id);
   const backend: Backend = {
     snapshot, subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -57,6 +58,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     setGroup: async patch => { calls.push({ method: 'setGroup', args: [patch] }); return { cwd: patch.cwd, title: patch.title ?? '', pinned: true, hidden: true }; },
     attachment: async id => ({ metadata: { id, name: 'shot.png', mimeType: 'image/png', size: 4 }, content: Buffer.from('png!'), sessionId: id === '11111111-1111-4111-8111-111111111111' ? 'codex:open' : sessions[1].id }),
     cancel: async id => { calls.push({ method: 'cancel', args: [id] }); },
+    ...(options.repositories ? { repositoryAction: async (cwd: string, action: string) => { calls.push({ method: 'repositoryAction', args: [cwd, action] }); return repository(cwd); } } : {}),
   };
   const router = createRemoteRouter({ backend, exclusions });
   const server = createServer((req, res) => { void router.handle(req, res, { controllerId: CONTROLLER }); });
@@ -124,7 +126,7 @@ test('remote work carries the controller as its origin and a request ID, and is 
 test('local management and routes not listed for remote controllers do not exist for them', async t => {
   const f = await fixture(t);
   for (const [path, method] of [['/api/auth/overview', 'GET'], ['/api/auth/credentials', 'POST'], ['/api/remote/exclusions', 'GET'], ['/api/remote/exclusions', 'POST'],
-    ['/api/repositories', 'POST'], ['/api/workspace/tree?cwd=/', 'GET'], ['/api/workspace/terminals', 'POST'], ['/api/bootstrap', 'GET'], ['/api/health', 'GET'],
+    ['/api/workspace/tree?cwd=/', 'GET'], ['/api/workspace/terminals', 'POST'], ['/api/bootstrap', 'GET'], ['/api/health', 'GET'],
     ['/api/v1/triggers.list', 'POST'], ['/api/slack', 'GET'], ['/', 'GET'], ['/api/link/controllers', 'GET']] as const) {
     const response = await f.call(path, { method, ...(method === 'POST' ? { body: {} } : {}) });
     assert.equal(response.status, 404, `${method} ${path}`);
@@ -248,4 +250,17 @@ test('an Auto Prompt answer looks at its folder again now, even right after a sy
   await symlink(f.secret, link);
   const response = await f.call('/api/auto-prompts', { body: { requestId: '0199a2b3-c4d5-7123-8abc-000000000003', provider: 'codex', prompt: 'go' } });
   assert.equal(response.status, 404, 'no wait for the regular recheck');
+});
+
+test('a controller can sync a shared folder’s branch, never one reaching into an excluded folder', async t => {
+  const f = await fixture(t, { repositories: true });
+  await mkdir(join(f.open, 'nested'));
+  const pulled = await f.call('/api/repositories', { body: { cwd: f.open, action: 'pull' } });
+  assert.equal(pulled.status, 200);
+  assert.deepEqual(pulled.json.repository.lastAction, { kind: 'pull', ok: false, at: pulled.json.repository.lastAction.at }, 'git’s own words, which can name other folders, stay here');
+  assert.equal((await f.call('/api/repositories', { body: { cwd: f.secret, action: 'refresh' } })).status, 404);
+  assert.equal((await f.call('/api/repositories', { body: { cwd: join(f.open, 'nested'), action: 'push' } })).status, 404, 'a repository whose root is excluded is not pushed');
+  assert.equal((await f.call('/api/repositories', { body: { cwd: join(f.open, 'unknown'), action: 'pull' } })).status, 404, 'a pull needs a repository Tower already knows');
+  assert.equal((await f.call('/api/repositories', { body: { cwd: f.open, action: 'rebase' } })).status, 400);
+  assert.deepEqual(f.calls.filter(call => call.method === 'repositoryAction').map(call => call.args), [[f.open, 'pull']]);
 });

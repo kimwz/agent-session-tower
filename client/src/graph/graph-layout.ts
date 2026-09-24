@@ -1,8 +1,9 @@
 import type { Session } from '../../../shared/types';
 import { sortSessions } from '../common/lib';
+import { scopedId } from '../remote/scope';
 
 export function graphProjectKey(session: Session): string {
-  return session.cwd || session.project || 'unknown';
+  return session.cwd || scopedId(session.node, session.project || 'unknown');
 }
 
 export function graphProjectId(path: string): string {

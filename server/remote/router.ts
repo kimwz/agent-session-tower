@@ -10,7 +10,8 @@ import { isImageAttachment } from '../../shared/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
 import type { AutoPromptJob, RunOrigin, Session } from '../../shared/types.js';
 import type { RemoteExclusionStore } from './exclusions.js';
-import { remoteJob, remoteJobVisible, remotePage, remoteRun, remoteSession, remoteSessionIds, remoteSnapshot, type RemoteScope } from './visibility.js';
+import { remoteJob, remoteJobVisible, remotePage, remoteRepository, remoteRun, remoteSession, remoteSessionIds, remoteSnapshot, type RemoteScope } from './visibility.js';
+import type { RepositoryAction } from '../../shared/repositories.js';
 
 type Request = IncomingMessage | Http2ServerRequest;
 // The HTTP/2 compatibility response offers the same calls as an HTTP/1 response.
@@ -290,6 +291,19 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
       const after = await jobVisible(cancelled, principal);
       if (!after) throw notFound();
       return json(res, 200, { job: remoteJob(cancelled, principal.controllerId, after.matcher.revision) });
+    }
+    if (path === '/api/repositories') {
+      const body = await readJson(req, 8192);
+      if (typeof body.cwd !== 'string' || !['pull', 'push', 'refresh'].includes(body.action as string) || Object.keys(body).some(key => key !== 'cwd' && key !== 'action')) throw httpError(400, '프로젝트 폴더와 작업(pull, push, refresh)을 지정하세요.');
+      await folderAllowed(body.cwd);
+      // A pull or push changes the whole repository, so its root must be known and shared before anything runs.
+      const known = backend.snapshot().repositories?.find(item => item.cwd === body.cwd);
+      if (body.action !== 'refresh' && (!known || await exclusions.excludesNow(known.root))) throw httpError(404, FOLDER_NOT_FOUND);
+      if (!backend.repositoryAction) throw httpError(503, 'Git 상태를 확인할 수 없습니다.');
+      const status = await backend.repositoryAction(body.cwd, body.action as RepositoryAction);
+      // The repository can reach beyond the folder asked about; its root must be shared too.
+      if (await exclusions.excludesNow(status.root)) throw httpError(404, FOLDER_NOT_FOUND);
+      return json(res, 200, { repository: remoteRepository(status) });
     }
     if (path === '/api/groups') {
       // Pins and screen hiding belong to whoever is looking; a controller keeps its own. Only the name is shared.

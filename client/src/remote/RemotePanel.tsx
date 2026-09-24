@@ -127,7 +127,7 @@ function Nodes({ token, overview, busy, run, invite, known, onInvite }: { token:
     </div>}
     <h3 className="remote-heading">{t('연결된 컴퓨터')} <span className="auth-count">{overview.nodes.length}</span></h3>
     {overview.nodes.length ? <><ol className="slack-rule-list">{overview.nodes.map(node => <NodeRow key={node.id} token={token} node={node} busy={busy} run={run} />)}</ol>
-      <p className="trigger-note">{t('연결된 컴퓨터의 세션을 이 화면의 캔버스에서 보고 다루는 기능은 다음 업데이트에서 추가됩니다.')}</p></>
+      <p className="trigger-note">{t('연결된 컴퓨터와 그 세션은 캔버스에 컴퓨터별로 나타납니다. 세션 목록의 컴퓨터 필터로 한 컴퓨터만 볼 수 있습니다.')}</p></>
       : <p className="slack-empty">{t('아직 연결된 컴퓨터가 없습니다.')}</p>}
   </section>;
 }

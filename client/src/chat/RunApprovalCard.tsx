@@ -4,6 +4,7 @@ import type { RunApproval, RunApprovalResponse } from '../../../shared/types';
 import { mcpFormUnsupportedReason, validateApprovalResponse } from '../../../shared/approval-interactions';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { approvalDecisionState, formApprovalContent, safeApprovalUrl, submitApprovalDecision, subscribeApprovalDecisions } from './chat-approvals';
+import { localOnlyAddress, useRemoteContent } from '../remote/remote-content';
 
 type FieldSchema = Record<string, unknown>;
 function choices(schema: FieldSchema): Array<{ value: string; label: string }> {
@@ -49,7 +50,9 @@ export const RunApprovalCard = memo(function RunApprovalCard({ runId, approval, 
   const fields = Object.entries(approval.input);
   const inactive = disabled || !token || state !== 'idle';
   const unsupported = interaction?.type === 'mcp-form' ? mcpFormUnsupportedReason(interaction.schema) : undefined;
-  const url = interaction?.type === 'mcp-url' ? safeApprovalUrl(interaction.url) : undefined;
+  const remote = useRemoteContent();
+  const localOnly = interaction?.type === 'mcp-url' && remote !== undefined && localOnlyAddress(interaction.url);
+  const url = interaction?.type === 'mcp-url' && !localOnly ? safeApprovalUrl(interaction.url) : undefined;
   const cannotAccept = !!unsupported || (interaction?.type === 'mcp-url' && !url);
 
   useEffect(() => {
@@ -111,7 +114,9 @@ export const RunApprovalCard = memo(function RunApprovalCard({ runId, approval, 
         </> : interaction?.type === 'mcp-url' ? <>
           <p className="run-approval-server">{t('서버')}: {interaction.serverName}</p>
           <p>{t('링크에서 작업을 완료한 후 확인하세요.')}</p>
-          {url ? <a className="run-approval-link" href={url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer"><ExternalLink size={12} aria-hidden="true" />{interaction.url}</a> : <p role="alert" className="run-approval-error">{t('안전하게 열 수 없는 링크입니다.')}</p>}
+          {url ? <a className="run-approval-link" href={url} target="_blank" rel="noopener noreferrer" referrerPolicy="no-referrer"><ExternalLink size={12} aria-hidden="true" />{interaction.url}</a>
+            : localOnly ? <p role="alert" className="run-approval-error">{t('{0}에서만 열 수 있는 주소입니다: {1}', { 0: remote, 1: interaction.url })}</p>
+            : <p role="alert" className="run-approval-error">{t('안전하게 열 수 없는 링크입니다.')}</p>}
         </> : fields.length ? <dl>{fields.map(([key, value]) => <div key={key}><dt>{key}</dt><dd><pre>{typeof value === 'string' ? value : JSON.stringify(value, null, 2)}</pre></dd></div>)}</dl> : <p className="run-approval-description">{t('추가 입력 없음')}</p>}
       </div>
       {error && <p className="run-approval-error" role="alert">{translateMessage(error)}</p>}

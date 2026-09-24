@@ -1,13 +1,14 @@
 import { translate as t } from '../i18n/i18n';
 import type { ProjectGroup, Session } from '../../../shared/types';
+import { localPart } from '../remote/scope';
 
-/** Temporary worktrees stay in session history but do not occupy the canvas. */
+/** Temporary worktrees stay in session history but do not occupy the canvas, on any computer. */
 function temporaryCanvasProject(cwd: string): boolean {
-  return /^\/(?:private\/)?tmp(?:\/|$)/.test(cwd);
+  return /^\/(?:private\/)?tmp(?:\/|$)/.test(localPart(cwd));
 }
 
 export function projectGroupLabel(cwd: string, title?: string, fallback?: string): string {
-  return title?.trim() || fallback || cwd.split('/').filter(Boolean).at(-1) || t("프로젝트 없음");
+  return title?.trim() || fallback || localPart(cwd).split('/').filter(Boolean).at(-1) || t("프로젝트 없음");
 }
 
 export function projectGroupChoices(sessions: Session[], groups: ProjectGroup[]): [string, string][] {

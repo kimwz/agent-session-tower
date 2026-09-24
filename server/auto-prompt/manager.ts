@@ -202,10 +202,11 @@ export class AutoPromptManager extends EventEmitter {
 
   private async admit(input: AutoPromptRequest, fingerprint: string, origin: RunOrigin, untrustedInput: boolean, unattended: boolean): Promise<AutoPromptJob> {
     const snapshot = await this.snapshotFor(origin);
-    providerReady(snapshot, input.provider);
+    // A folder that cannot be used is refused the same way whether or not the provider is ready.
     const inventory = directories(snapshot);
     if (!inventory.length) throw new RunError('라우팅할 작업 폴더가 없습니다. 먼저 프로젝트 폴더를 추가하세요.');
     if (input.cwd) await this.checkDirectory(input.cwd, inventory);
+    providerReady(snapshot, input.provider);
     const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments });
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, staged: prepared.attachments, job: {

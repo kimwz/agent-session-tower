@@ -1,3 +1,4 @@
+import type { RemoteNode } from './link.js';
 import type { RepositoryStatus } from './repositories.js';
 import type { TriggerOverview } from './triggers.js';
 export type Provider = 'claude' | 'codex';
@@ -6,6 +7,8 @@ export type CodexApprovalsReviewer = 'user' | 'auto_review';
 export type SessionStatus = 'working' | 'idle' | 'completed' | 'error';
 export interface Session {
   id: string;
+  /** Set only in a controller's page, for an item of a joined computer: that computer's id. Servers never send it. */
+  node?: string;
   nativeId: string;
   provider: Provider;
   title: string;
@@ -123,6 +126,8 @@ export interface RunOrigin {
 export interface Run {
   id: string;
   sessionId: string;
+  /** Set only in a controller's page, for an item of a joined computer: that computer's id. Servers never send it. */
+  node?: string;
   origin?: RunOrigin;
   /** Started with no one watching; the provider's automatic approval mode decides. */
   unattended?: boolean;
@@ -206,6 +211,8 @@ export interface AutoPromptDecision {
   reason: string;
 }
 export interface AutoPromptJob {
+  /** Set only in a controller's page, for an item of a joined computer: that computer's id. Servers never send it. */
+  node?: string;
   origin?: RunOrigin;
   /** For remote work: the remote-sharing exclusion revision its candidates were filtered with. */
   exclusionRevision?: number;
@@ -264,4 +271,6 @@ export interface Snapshot {
   runnerUpdate?: 'automatic' | 'manual';
   /** Names of the other Towers controlling this computer right now. */
   controlledBy?: string[];
+  /** Computers joined to this Tower; each one's own snapshot arrives on the same event stream. */
+  nodes?: RemoteNode[];
 }

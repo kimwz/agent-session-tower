@@ -9,9 +9,13 @@ import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { codexApprovalsRequest, readCodexApprovalsChoice, type CodexApprovalsChoice } from './codex-approvals-preference';
 import { CodexApprovalsSelect } from './CodexApprovalsSelect';
 import { EffortPicker, ModelPicker, supportedEffort } from '../chat/ModelPicker';
+import type { Host } from '../remote/hosts';
+import { localPart, nodeHeaders, nodeOf, nodePath, scopeRun, scopeSession } from '../remote/scope';
 
 interface NewSessionDialogProps {
   providers: ProviderHealth[];
+  /** Every computer this page can start work on; without joined computers only this one. */
+  hosts?: Host[];
   projects: Array<[string, string]>;
   initialCwd?: string;
   token: string;
@@ -20,15 +24,20 @@ interface NewSessionDialogProps {
   onCreated: (session: Session, run: Run) => void;
 }
 
-export function NewSessionDialog({ providers, projects, initialCwd, token, connected, onClose, onCreated }: NewSessionDialogProps) {
+export function NewSessionDialog({ providers: localProviders, hosts = [], projects: allProjects, initialCwd, token, connected, onClose, onCreated }: NewSessionDialogProps) {
   useI18n();
   const id = useId();
   const dialog = useRef<HTMLDialogElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
   const promptInput = useRef<HTMLTextAreaElement>(null);
   const inFlight = useRef(false);
+  // The computer comes from the folder the dialog was opened for; the folder is then that computer's own path.
+  const [machine, setMachine] = useState<string | undefined>(() => nodeOf(initialCwd));
+  const host = hosts.find(item => item.node === machine);
+  const providers = machine ? host?.providers ?? [] : localProviders;
+  const projects = allProjects.filter(([key]) => nodeOf(key) === machine).map(([key, label]): [string, string] => [localPart(key), label]);
   const [provider, setProvider] = useState<Provider>(() => providers.find(item => item.available)?.provider || 'claude');
-  const [cwd, setCwd] = useState(initialCwd || projects[0]?.[0] || '');
+  const [cwd, setCwd] = useState(initialCwd ? localPart(initialCwd) : projects[0]?.[0] || '');
   const [title, setTitle] = useState('');
   const [prompt, setPrompt] = useState('');
   const [model, setModel] = useState<string>();
@@ -39,7 +48,15 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
   const [folderError, setFolderError] = useState('');
   const providerAvailable = providers.some(item => item.provider === provider && item.available);
   const providerHealth = providers.find(item => item.provider === provider);
-  const unavailable = !connected || !token || !providerAvailable;
+  const unavailable = !connected || !token || !providerAvailable || (machine !== undefined && !host?.canWork);
+  const chooseMachine = (next: string | undefined) => {
+    const nextProviders = next ? hosts.find(item => item.node === next)?.providers ?? [] : localProviders;
+    setMachine(next);
+    setProvider(nextProviders.find(item => item.available)?.provider || 'claude');
+    const folder = allProjects.find(([key]) => nodeOf(key) === next)?.[0];
+    setCwd(folder ? localPart(folder) : '');
+    setModel(undefined); setEffort(undefined); setFolderError(''); setError('');
+  };
   const uniqueProjects = [...new Map(projects).entries()];
 
   useEffect(() => {
@@ -68,13 +85,13 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
     setFolderError('');
     dialog.current?.focus();
     try {
-      const result = await api<{ session: Session; run: Run }>('/api/sessions', {
+      const result = await api<{ session: Session; run: Run }>(nodePath(machine, '/api/sessions'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token },
+        headers: nodeHeaders(machine, { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }),
         body: JSON.stringify({ provider, cwd: cwd.trim(), prompt: prompt.trim(), ...(title.trim() ? { title: title.trim() } : {}),
           ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...codexApprovalsRequest(provider, approvals) }),
       });
-      onCreated(result.session, result.run);
+      onCreated(machine ? scopeSession(machine, result.session) : result.session, machine ? scopeRun(machine, result.run) : result.run);
       onClose();
     } catch (cause) {
       setError(cause instanceof Error && !(cause instanceof TypeError) ? cause.message : t("연결을 확인하지 못했습니다. 그래프에서 새 세션이 시작되었는지 확인해 주세요."));
@@ -86,6 +103,8 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
 
   const connectionMessage = !connected ? t("다시 연결되면 세션을 시작할 수 있습니다.")
     : !token ? t("연결을 확인하고 있습니다.")
+      : machine !== undefined && !host?.live ? t("{0}에 다시 연결되면 세션을 시작할 수 있습니다.", { 0: host?.name ?? t("그 컴퓨터") })
+      : machine !== undefined && !host?.canWork ? t("{0}의 Tower를 업데이트하면 세션을 시작할 수 있습니다.", { 0: host?.name ?? t("그 컴퓨터") })
       : !providerAvailable ? t("{0}를 현재 사용할 수 없습니다.", { 0: providerLabels[provider] }) : '';
 
   return createPortal(<dialog
@@ -125,6 +144,13 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
         <button type="button" className="icon-button" aria-label={t("새 세션 창 닫기")} disabled={submitting} onClick={onClose}><X size={19} /></button>
       </header>
 
+      {hosts.length > 1 && <div className="new-session-field new-session-machine-field">
+        <label htmlFor={`${id}-machine`}>{t("컴퓨터")}</label>
+        <select id={`${id}-machine`} className="new-session-machine" value={machine ?? ''} disabled={submitting} onChange={event => chooseMachine(event.target.value || undefined)}>
+          {hosts.map(item => <option key={item.node ?? ''} value={item.node ?? ''}>{item.node ? item.canWork ? item.name : t("{0} (지금 사용할 수 없음)", { 0: item.name }) : t("{0} (이 컴퓨터)", { 0: item.name })}</option>)}
+        </select>
+      </div>}
+
       <fieldset className="new-session-provider-field" disabled={submitting}>
         <legend>{t("도구")}</legend>
         <div className="new-session-providers">
@@ -146,7 +172,7 @@ export function NewSessionDialog({ providers, projects, initialCwd, token, conne
           <input ref={folderInput} id={`${id}-folder`} list={`${id}-projects`} value={cwd} placeholder={t("/Users/…/프로젝트")} required disabled={submitting} autoComplete="off" spellCheck={false} aria-describedby={`${id}-folder-help${folderError ? ` ${id}-folder-error` : ''}`} aria-invalid={!!folderError} onChange={event => { setCwd(event.target.value); setFolderError(''); }} />
         </div>
         <datalist id={`${id}-projects`}>{uniqueProjects.map(([path, label]) => <option key={path} value={path}>{label}</option>)}</datalist>
-        <p id={`${id}-folder-help`} className="new-session-help">{t("이 Mac의 폴더 경로. 없는 폴더는 새로 만듭니다.")}</p>
+        <p id={`${id}-folder-help`} className="new-session-help">{machine ? t("{0}의 폴더 경로. 없는 폴더는 새로 만듭니다.", { 0: host?.name ?? '' }) : t("이 Mac의 폴더 경로. 없는 폴더는 새로 만듭니다.")}</p>
         {folderError && <p id={`${id}-folder-error`} className="new-session-error" role="alert">{translateMessage(folderError)}</p>}
       </div>
 

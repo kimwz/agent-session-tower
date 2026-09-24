@@ -4,6 +4,18 @@ import type { SseClient } from './sse-client.js';
 
 interface Published { sequence: number; snapshot: Snapshot; index: SnapshotIndex; frame?: string }
 interface Subscriber { patches: boolean; sentAt: number }
+/** How frames of one stream are written; another computer's stream names itself in every frame. */
+export interface FrameFormat {
+  /** Streams sharing one browser connection keep separate pending snapshots. */
+  key: string;
+  snapshot(sequence: number, snapshot: Snapshot): string;
+  patch(sequence: number, patch: SnapshotPatch): string;
+}
+const OWN_FRAMES: FrameFormat = {
+  key: '',
+  snapshot: (sequence, snapshot) => `id: ${sequence}\nevent: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`,
+  patch: (sequence, patch) => `id: ${sequence}\nevent: patch\ndata: ${JSON.stringify(patch)}\n\n`,
+};
 
 /**
  * Numbers every published snapshot and sends each browser only real changes: nothing when the
@@ -16,7 +28,7 @@ export class SnapshotStream {
   private current?: Published;
   private readonly subscribers = new Map<SseClient, Subscriber>();
 
-  constructor(private readonly read: () => Snapshot, private readonly now: () => number = Date.now) {}
+  constructor(private readonly read: () => Snapshot, private readonly now: () => number = Date.now, private readonly format: FrameFormat = OWN_FRAMES) {}
 
   get size(): number { return this.subscribers.size; }
 
@@ -28,11 +40,11 @@ export class SnapshotStream {
     const changes = previous && diffSnapshots(previous.index, snapshot, index);
     if (previous && !changes) return;
     const current = this.current = { sequence: ++this.sequence, snapshot, index };
-    const patch = changes && `id: ${current.sequence}\nevent: patch\ndata: ${JSON.stringify({ base: previous.sequence, ...changes } satisfies SnapshotPatch)}\n\n`;
-    const complete = () => completeFrame(current);
+    const patch = changes && this.format.patch(current.sequence, { base: previous.sequence, ...changes } satisfies SnapshotPatch);
+    const complete = () => this.completeFrame(current);
     const sentAt = this.now();
     for (const [client, subscriber] of this.subscribers) {
-      client.update(subscriber.patches ? patch : undefined, complete);
+      client.update(subscriber.patches ? patch : undefined, complete, this.format.key);
       subscriber.sentAt = sentAt;
     }
   }
@@ -48,7 +60,7 @@ export class SnapshotStream {
     const now = this.now();
     for (const [client, subscriber] of this.subscribers) {
       if (subscriber.patches || now - subscriber.sentAt < maxAgeMs) continue;
-      client.update(undefined, () => completeFrame(current));
+      client.update(undefined, () => this.completeFrame(current), this.format.key);
       subscriber.sentAt = now;
     }
   }
@@ -61,8 +73,10 @@ export class SnapshotStream {
       this.current = { sequence: ++this.sequence, snapshot, index: indexSnapshot(snapshot) };
     }
     this.subscribers.set(client, { patches, sentAt: this.now() });
-    client.snapshot(`${prefix}${completeFrame(this.current)}`);
+    client.snapshot(`${prefix}${this.completeFrame(this.current)}`, this.format.key);
   }
+
+  has(client: SseClient): boolean { return this.subscribers.has(client); }
 
   detach(client: SseClient): void {
     this.subscribers.delete(client);
@@ -71,12 +85,17 @@ export class SnapshotStream {
 
   close(): void {
     const clients = [...this.subscribers.keys()];
-    this.subscribers.clear();
-    this.current = undefined;
+    this.release();
     for (const client of clients) client.end();
   }
-}
 
-function completeFrame(published: Published): string {
-  return published.frame ??= `id: ${published.sequence}\nevent: snapshot\ndata: ${JSON.stringify(published.snapshot)}\n\n`;
+  /** Stops sending without ending the browsers' connections, which may carry other streams. */
+  release(): void {
+    this.subscribers.clear();
+    this.current = undefined;
+  }
+
+  private completeFrame(published: Published): string {
+    return published.frame ??= this.format.snapshot(published.sequence, published.snapshot);
+  }
 }

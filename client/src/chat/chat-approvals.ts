@@ -1,6 +1,7 @@
 import { api, ApiError } from '../common/lib';
 import type { Run, RunApprovalResponse } from '../../../shared/types';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
+import { pathFor } from '../remote/scope';
 
 export type ApprovalDecision = RunApprovalResponse;
 type Result = 'accepted' | 'stale';
@@ -42,7 +43,7 @@ export function submitApprovalDecision(runId: string, approvalId: string, decisi
   const key = keyFor(runId, approvalId);
   const existing = pending.get(key);
   if (existing) return existing.promise;
-  const request = api(`/api/runs/${encodeURIComponent(runId)}/approvals/${encodeURIComponent(approvalId)}`, {
+  const request = api(pathFor(runId, id => `/api/runs/${encodeURIComponent(id)}/approvals/${encodeURIComponent(approvalId)}`), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token },
     body: JSON.stringify(typeof decision === 'string' ? { decision } : decision),

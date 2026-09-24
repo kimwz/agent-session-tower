@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { connectSnapshotStream, RECONCILE_MS, RESYNC_MS, SnapshotStore, type SnapshotEventSource } from '../../../client/src/app/snapshot-stream.js';
+import { connectSnapshotStream, NodeSnapshotStore, RECONCILE_MS, RESYNC_MS, SnapshotStore, type SnapshotEventSource } from '../../../client/src/app/snapshot-stream.js';
 import type { SnapshotPatch } from '../../../shared/snapshot-patch.js';
 import type { Session, Snapshot } from '../../../shared/types.js';
 
@@ -127,9 +127,9 @@ class FakeSource implements SnapshotEventSource {
   closed = false;
   private listeners = new Map<string, (event: MessageEvent<string>) => void>();
   constructor(readonly url: string) { FakeSource.opened.push(this); }
-  addEventListener(type: 'snapshot' | 'patch', listener: (event: MessageEvent<string>) => void) { this.listeners.set(type, listener); }
+  addEventListener(type: 'snapshot' | 'patch' | 'node', listener: (event: MessageEvent<string>) => void) { this.listeners.set(type, listener); }
   close() { this.closed = true; }
-  emit(type: 'snapshot' | 'patch', id: number, data: unknown) {
+  emit(type: 'snapshot' | 'patch' | 'node', id: number, data: unknown) {
     this.listeners.get(type)!({ data: typeof data === 'string' ? data : JSON.stringify(data), lastEventId: String(id) } as MessageEvent<string>);
   }
 }
@@ -163,4 +163,29 @@ test('a patch that does not continue the stream reconnects for a complete snapsh
   assert.equal(unreadable, 1);
   disconnect();
   assert.equal(FakeSource.opened[2].closed, true);
+});
+
+test('joined computers’ frames keep their own streams on the same connection, and a gap in one reconnects', () => {
+  FakeSource.opened = [];
+  const clock = new Clock();
+  const store = new SnapshotStore(() => {}, clock);
+  let shown: ReadonlyMap<string, Snapshot> = new Map();
+  const nodes = new NodeSnapshotStore(value => { shown = value; });
+  const disconnect = connectSnapshotStream(store, { onFrame: () => {}, onOpen: () => {}, onError: () => {}, onUnreadable: () => {} }, url => new FakeSource(url), clock, nodes);
+  const first = FakeSource.opened[0];
+  assert.equal(first.url, '/api/events?patch=1&nodes=1', 'a page that shows joined computers asks for them');
+  first.emit('snapshot', 1, snapshot('Here'));
+  first.emit('node', 0, { node: 'b', sequence: 1, snapshot: snapshot('Over there') });
+  first.emit('node', 0, { node: 'c', sequence: 4, snapshot: snapshot('Third') });
+  first.emit('node', 0, { node: 'b', sequence: 2, patch: retitle(1, 'Renamed there') });
+  assert.equal(title(shown.get('b') ?? null), 'Renamed there');
+  assert.equal(title(shown.get('c') ?? null), 'Third');
+  first.emit('node', 0, { node: 'c', removed: true });
+  assert.deepEqual([...shown.keys()], ['b']);
+  assert.equal(first.closed, false);
+  first.emit('node', 0, { node: 'b', sequence: 5, patch: retitle(4, 'Gap') });
+  assert.equal(first.closed, true, 'a patch that does not continue that computer’s stream starts over');
+  clock.advance(0);
+  assert.equal(FakeSource.opened.length, 2);
+  disconnect();
 });

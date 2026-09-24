@@ -20,10 +20,14 @@ import { matchChatRuns } from './chat-runs';
 import { EffortPicker, ModelPicker, supportedEffort } from './ModelPicker';
 import { useChatAppearance } from './chat-appearance';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
+import { localPart, nodeHeaders, nodeOf, pathFor, scopeDetail } from '../remote/scope';
+import { RemoteContent } from '../remote/remote-content';
 
 const emptyMessages: readonly ChatMessage[] = [];
 
-export function ChatPanel({ sessionId, session, allSessions, provider, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, sessionClosed = false, changingClosed = false, readRevision = '', onRead, contextBanner }: { contextBanner?: ReactNode; sessionId: string; session?: Session; allSessions: Session[]; provider?: ProviderHealth; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
+export function ChatPanel({ sessionId, session, allSessions, provider, host, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, sessionClosed = false, changingClosed = false, readRevision = '', onRead, contextBanner }: { contextBanner?: ReactNode; sessionId: string; session?: Session; allSessions: Session[]; provider?: ProviderHealth;
+  /** The joined computer this conversation lives on; absent for this computer. */
+  host?: { name: string; live: boolean; canWork: boolean }; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
   useI18n();
   const appearance = useChatAppearance();
   const [detail, setDetail] = useState<ChatHistory | null>(null);
@@ -68,9 +72,9 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
     const controller = new AbortController();
     let timeout: number | undefined;
     const read = () => {
-      void api<SessionDetail>(`/api/sessions/${encodeURIComponent(sessionId)}?limit=100`, { signal: controller.signal }).then(next => {
+      void api<SessionDetail>(pathFor(sessionId, id => `/api/sessions/${encodeURIComponent(id)}?limit=100`), { signal: controller.signal }).then(next => {
         if (controller.signal.aborted) return;
-        setDetail(previous => mergeLatestPage(previous, next));
+        setDetail(previous => mergeLatestPage(previous, scopeDetail(nodeOf(sessionId), next)));
         setLoading(false); setLoadError('');
       }).catch(error => {
         if (controller.signal.aborted) return;
@@ -117,7 +121,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
     const id = sessionId;
     const requestedBefore = detail.nextBefore;
     try {
-      const older = await api<SessionDetail>(`/api/sessions/${encodeURIComponent(sessionId)}?limit=100&before=${requestedBefore}`);
+      const older = scopeDetail(nodeOf(id), await api<SessionDetail>(pathFor(id, local => `/api/sessions/${encodeURIComponent(local)}?limit=100&before=${requestedBefore}`)));
       if (sessionRef.current !== id) return;
       followRef.current = false; setFollowing(false);
       setDetail(previous => prependOlderPage(previous, older, requestedBefore));
@@ -149,7 +153,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
     try {
       const prepared = await prepareDraftAttachments(submitted.attachments);
       markComposerSending(id);
-      await api<{ run: Run }>(`/api/sessions/${encodeURIComponent(id)}/messages`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify({ prompt: message, ...prepared, ...(submitted.model ? { model: submitted.model } : {}), ...(submitted.effort ? { effort: submitted.effort } : {}) }) });
+      await api<{ run: Run }>(pathFor(id, local => `/api/sessions/${encodeURIComponent(local)}/messages`), { method: 'POST', headers: nodeHeaders(nodeOf(id), { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }), body: JSON.stringify({ prompt: message, ...prepared, ...(submitted.model ? { model: submitted.model } : {}), ...(submitted.effort ? { effort: submitted.effort } : {}) }) });
       finishComposerSend(id, submitted);
       if (mounted.current && sessionRef.current === id) { followRef.current = true; setFollowing(true); }
       onSnapshotRefresh();
@@ -159,7 +163,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
   const cancelRun = useCallback(async (id: string) => {
     if (!token || !connected) return;
     setCancelling(id); setSendError('');
-    try { await api(`/api/runs/${encodeURIComponent(id)}/cancel`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' }); onSnapshotRefresh(); }
+    try { await api(pathFor(id, local => `/api/runs/${encodeURIComponent(local)}/cancel`), { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' }); onSnapshotRefresh(); }
     catch (error) { setSendError(error instanceof Error ? error.message : t("작업을 중지하지 못했습니다.")); }
     finally { setCancelling(''); }
   }, [connected, onSnapshotRefresh, setSendError, token]);
@@ -168,7 +172,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
     const requestedSession = sessionRef.current;
     setSteering(id); setSendError('');
     try {
-      await api(`/api/runs/${encodeURIComponent(id)}/steer`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' });
+      await api(pathFor(id, local => `/api/runs/${encodeURIComponent(local)}/steer`), { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' });
       onSnapshotRefresh();
     } catch (error) {
       if (sessionRef.current === requestedSession) setSendError(error instanceof Error ? error.message : t("요청을 끼워넣지 못했습니다."));
@@ -180,7 +184,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
     const requestedSession = sessionRef.current;
     setDismissing(id); setSendError('');
     try {
-      await api(`/api/runs/${encodeURIComponent(id)}/dismiss`, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' });
+      await api(pathFor(id, local => `/api/runs/${encodeURIComponent(local)}/dismiss`), { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' });
       onSnapshotRefresh();
     } catch (error) { if (sessionRef.current === requestedSession) setSendError(error instanceof Error ? error.message : t("실패 내역을 지우지 못했습니다.")); }
     finally { setDismissing(''); }
@@ -193,14 +197,16 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
 
   let composerHint: ReactNode = <><kbd>⌘</kbd><kbd>Enter</kbd><span>{t("전송")}</span></>;
   if (!connected) composerHint = t("서버에 다시 연결되면 요청을 보낼 수 있습니다.");
+  else if (host && !host.live) composerHint = t("{0}에 다시 연결되면 요청을 보낼 수 있습니다.", { 0: host.name });
+  else if (host && !host.canWork) composerHint = t("{0}의 Tower를 업데이트하면 이어서 작업할 수 있습니다.", { 0: host.name });
   else if (current?.creationPending) composerHint = t("새 세션을 시작하고 있습니다.");
   else if (current && !current.resumable) composerHint = t("이 세션은 대화 기록만 확인할 수 있습니다.");
   else if (provider && !provider.available) composerHint = t("{0} CLI를 설치하면 이어서 작업할 수 있습니다.", { 0: current ? providerLabels[current.provider] : t("에이전트") });
   else if (!token) composerHint = t("연결을 준비하는 중…");
-  const disabled = !connected || !current?.resumable || !provider?.available || !token;
+  const disabled = !connected || !current?.resumable || !provider?.available || !token || (host !== undefined && !host.canWork);
   const sendingLabel = stage === 'preparing' ? t("파일 준비 중") : t("보내는 중");
 
-  return <><div className="chat-panel-spacer" aria-hidden="true" style={{ width: appearance.width, flexBasis: appearance.width }} /><aside className="chat-panel" style={{ '--chat-font-size': `${appearance.fontSize}px`, '--chat-width': `${appearance.width}px` } as CSSProperties} aria-label={t("세션 대화")}>
+  return <RemoteContent.Provider value={host?.name}><div className="chat-panel-spacer" aria-hidden="true" style={{ width: appearance.width, flexBasis: appearance.width }} /><aside className="chat-panel" style={{ '--chat-font-size': `${appearance.fontSize}px`, '--chat-width': `${appearance.width}px` } as CSSProperties} aria-label={t("세션 대화")}>
     <div className="chat-resize-handle" role="separator" tabIndex={0} aria-label={t("대화창 너비 조절")} aria-orientation="vertical" aria-valuemin={320} aria-valuemax={appearance.maxWidth} aria-valuenow={appearance.width}
       onPointerDown={appearance.startResize} onPointerMove={appearance.resize} onPointerUp={appearance.stopResize} onPointerCancel={appearance.stopResize} onLostPointerCapture={appearance.stopResize}
       onKeyDown={event => { if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); appearance.changeWidth(appearance.width + (event.key === 'ArrowLeft' ? 20 : -20)); } }} />
@@ -215,11 +221,11 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
       </div>
       <div className="chat-context-row">
         {current && <span className={`status-badge ${current.status}`} title={translateMessage(current.statusReason)}><i />{statusLabels[current.status]}</span>}
-        <button className="chat-project" onClick={() => setShowMetadata(!showMetadata)} aria-expanded={showMetadata}><Folder size={12} /><span className="folder-tail" title={current?.cwd || current?.project || t("세션 정보")}><bdi dir="ltr">{current?.project || t("세션 정보")}</bdi></span><ChevronDown size={12} className={showMetadata ? 'rotate' : ''} /></button>
-        {current?.cwd && <WorkspaceActions key={current.cwd} cwd={current.cwd} token={token} disabled={!connected} />}
+        <button className="chat-project" onClick={() => setShowMetadata(!showMetadata)} aria-expanded={showMetadata}><Folder size={12} /><span className="folder-tail" title={(current?.cwd && localPart(current.cwd)) || current?.project || t("세션 정보")}><bdi dir="ltr">{current?.project || t("세션 정보")}</bdi></span><ChevronDown size={12} className={showMetadata ? 'rotate' : ''} /></button>
+        {current?.cwd && !host && <WorkspaceActions key={current.cwd} cwd={current.cwd} token={token} disabled={!connected} />}
         <SessionFamilyNav sessions={allSessions} selectedId={sessionId} onNavigate={onNavigate} />
       </div>
-      {showMetadata && current && <dl className="session-metadata"><div><dt>{t("작업 폴더")}</dt><dd>{current.cwd || t("정보 없음")}</dd></div>{current.model && <div><dt>{t("모델")}</dt><dd>{current.model}</dd></div>}<div><dt>{t("세션 ID")}</dt><dd>{current.nativeId}<button className="icon-button" title={t("세션 ID 복사")} aria-label={t("세션 ID 복사")} onClick={() => { void copyText(current.nativeId).then(success => { setCopied(success); window.setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button></dd></div>{resumeCommand(current) && <div><dt>{t("터미널")}</dt><dd><code className="resume-command">{resumeCommand(current)}</code><ResumeCommandButton session={current} size={12} /></dd></div>}<div><dt>{t("상태 판단")}</dt><dd>{translateMessage(current.statusReason)}</dd></div><div><dt>{t("시작")}</dt><dd>{absoluteTime(current.createdAt)}</dd></div></dl>}
+      {showMetadata && current && <dl className="session-metadata">{host && <div><dt>{t("컴퓨터")}</dt><dd>{host.name}</dd></div>}<div><dt>{t("작업 폴더")}</dt><dd>{(current.cwd && localPart(current.cwd)) || t("정보 없음")}</dd></div>{current.model && <div><dt>{t("모델")}</dt><dd>{current.model}</dd></div>}<div><dt>{t("세션 ID")}</dt><dd>{current.nativeId}<button className="icon-button" title={t("세션 ID 복사")} aria-label={t("세션 ID 복사")} onClick={() => { void copyText(current.nativeId).then(success => { setCopied(success); window.setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button></dd></div>{resumeCommand(current) && <div><dt>{t("터미널")}</dt><dd><code className="resume-command">{resumeCommand(current)}</code><ResumeCommandButton session={current} size={12} /></dd></div>}<div><dt>{t("상태 판단")}</dt><dd>{translateMessage(current.statusReason)}</dd></div><div><dt>{t("시작")}</dt><dd>{absoluteTime(current.createdAt)}</dd></div></dl>}
       {contextBanner}
     </header>
     <div className="chat-scroll" ref={scroller} onScroll={() => { const el = scroller.current; if (!el) return; const near = el.scrollHeight - el.scrollTop - el.clientHeight < 100; followRef.current = near; setFollowing(near); }}>
@@ -265,7 +271,8 @@ export function ChatPanel({ sessionId, session, allSessions, provider, runs, tok
           <button className="send-button" type="submit" disabled={disabled || (!prompt.trim() && !attachments.length) || sending} aria-label={sending ? t("요청 보내는 중") : t("요청 보내기")}>{sending ? <LoaderCircle className="spin" size={14} /> : <Send size={14} />}<span>{sending ? sendingLabel : t("보내기")}</span></button>
         </div>
       </form>
-      <p className="composer-note"><Terminal size={11} />{t("이 기기의 {0}에서 기존 대화를 이어갑니다.", { 0: current ? providerLabels[current.provider] : t("에이전트") })}</p>
+      <p className="composer-note"><Terminal size={11} />{host ? t("{0}의 {1}에서 기존 대화를 이어갑니다.", { 0: host.name, 1: current ? providerLabels[current.provider] : t("에이전트") })
+        : t("이 기기의 {0}에서 기존 대화를 이어갑니다.", { 0: current ? providerLabels[current.provider] : t("에이전트") })}</p>
     </div>
-  </aside></>;
+  </aside></RemoteContent.Provider>;
 }

@@ -19,6 +19,8 @@ export type ManualGraphLayout = {
   projects: Record<string, ManualProject>;
   agents: Record<string, ManualAgent>;
   host: GraphPosition;
+  /** Joined computers placed by hand, by computer id. */
+  hosts?: Record<string, GraphPosition>;
   /** Logical origins sit on the last visible frame; older saves are migrated once on load. */
   anchoredFrames?: true;
 };
@@ -27,6 +29,8 @@ export type ManualGraphOptions = {
   visibleProjectIds?: ReadonlySet<string>;
   minimumProjectWidths?: ReadonlyMap<string, number>;
   repairHeaderWidths?: boolean;
+  /** Cards and folders of a computer this page has no state for yet keep their places. */
+  retain?: (id: string) => boolean;
 };
 
 export const AGENT_WIDTH = 242;
@@ -146,7 +150,9 @@ export function parseGraphPreferences(value: string | null): GraphPreferences {
       if (!record(item) || typeof item.projectId !== 'string' || !Object.hasOwn(projectMap, item.projectId) || !position(item.position)) continue;
       agents.push([id, { projectId: item.projectId, position: { ...item.position } }]);
     }
-    let restored: ManualGraphLayout = { projects: projectMap, agents: Object.fromEntries(agents), host: position(layout.host) ? { ...layout.host } : fallback.layout.host, anchoredFrames: true };
+    const hosts = Object.entries(record(layout.hosts) ? layout.hosts : {}).flatMap(([id, item]) => /^[a-f0-9]{32}$/.test(id) && position(item) ? [[id, { x: item.x, y: item.y }] as const] : []);
+    let restored: ManualGraphLayout = { projects: projectMap, agents: Object.fromEntries(agents), host: position(layout.host) ? { ...layout.host } : fallback.layout.host,
+      ...(hosts.length ? { hosts: Object.fromEntries(hosts) } : {}), anchoredFrames: true };
     // Older saves drew a folder without visible cards around all of its stored
     // cards. Anchor those origins there once so the upgrade moves nothing.
     if (layout.anchoredFrames !== true) restored = anchorVisibleFrames(restored);
@@ -254,9 +260,10 @@ export function reconcileManualGraph(layout: ManualGraphLayout, allSessions: Ses
   const liveAgents = new Set(allSessions.map(session => session.id));
   const activity = new Map(allSessions.map(session => [session.id, sessionActivityAt(session)]));
   const liveProjects = new Set([...allSessions.map(session => graphProjectId(graphProjectKey(session))), ...pinnedGroups.map(group => graphProjectId(group.cwd))]);
-  if (prune && Object.keys(agents).some(id => !liveAgents.has(id))) agents = Object.fromEntries(Object.entries(agents).filter(([id]) => liveAgents.has(id)));
-  if (prune && Object.keys(projects).some(id => !liveProjects.has(id))) {
-    projects = Object.fromEntries(Object.entries(projects).filter(([id]) => liveProjects.has(id)));
+  const retain = options.retain ?? (() => false);
+  if (prune && Object.keys(agents).some(id => !liveAgents.has(id) && !retain(id))) agents = Object.fromEntries(Object.entries(agents).filter(([id]) => liveAgents.has(id) || retain(id)));
+  if (prune && Object.keys(projects).some(id => !liveProjects.has(id) && !retain(id))) {
+    projects = Object.fromEntries(Object.entries(projects).filter(([id]) => liveProjects.has(id) || retain(id)));
     for (const [id, project] of Object.entries(projects)) {
       if (!project.pendingHeaderRepairs || Object.keys(project.pendingHeaderRepairs).every(source => Object.hasOwn(projects, source))) continue;
       const pending = Object.fromEntries(Object.entries(project.pendingHeaderRepairs).filter(([source]) => Object.hasOwn(projects, source)));
@@ -351,11 +358,16 @@ export function moveManualGraphNodes(layout: ManualGraphLayout, changes: { id: s
   let projects = layout.projects;
   let agents = layout.agents;
   let host = layout.host;
+  let hosts = layout.hosts;
   const movedProjects = new Set<string>();
   for (const change of changes) {
     if (!position(change.position)) continue;
+    const remote = /^host:([a-f0-9]{32})$/.exec(change.id)?.[1];
     if (change.id === 'host') {
       if (host.x !== change.position.x || host.y !== change.position.y) host = { ...change.position };
+    } else if (remote) {
+      const saved = hosts?.[remote];
+      if (!saved || saved.x !== change.position.x || saved.y !== change.position.y) hosts = { ...hosts, [remote]: { x: change.position.x, y: change.position.y } };
     } else if (Object.hasOwn(projects, change.id)) {
       const project = projects[change.id];
       const bounds = projectBounds(change.id, project, agents, visibleIds);
@@ -382,7 +394,8 @@ export function moveManualGraphNodes(layout: ManualGraphLayout, changes: { id: s
       projects = { ...projects, [id]: { ...projects[id], appliedHeaderWidth: width } };
     }
   }
-  return normalizeProjectSizes(anchorVisibleFrames(projects === layout.projects && agents === layout.agents && host === layout.host ? layout : { ...layout, projects, agents, host }, visibleIds));
+  return normalizeProjectSizes(anchorVisibleFrames(projects === layout.projects && agents === layout.agents && host === layout.host && hosts === layout.hosts ? layout
+    : { ...layout, projects, agents, host, ...(hosts ? { hosts } : {}) }, visibleIds));
 }
 
 export function manualSessionGroups(sessions: Session[]): [string, Session[]][] {

@@ -1,6 +1,7 @@
 import type { AutoPromptJob, AutoPromptRequest } from '../../../shared/types';
 import { api, ApiError } from '../common/lib';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
+import { nodePath, scopedId, scopeJob } from '../remote/scope';
 
 export const autoPromptPending = (job: AutoPromptJob) => job.status === 'queued' || job.status === 'routing' || job.status === 'dispatching';
 
@@ -23,20 +24,24 @@ export interface AutoPromptAttempt {
   takeCompletedSession: (job: AutoPromptJob) => string | undefined;
 }
 
-/** One immutable request survives dialog close, response loss, and explicit retries. */
-export function createAutoPromptAttempt(request: AutoPromptRequest, requestApi: RequestApi = api): AutoPromptAttempt {
-  const id = request.requestId;
+/**
+ * One immutable request survives dialog close, response loss, and explicit retries. On a joined computer
+ * (`node`) the request and its job carry that computer's name in this page.
+ */
+export function createAutoPromptAttempt(request: AutoPromptRequest, requestApi: RequestApi = api, node?: string): AutoPromptAttempt {
+  const id = scopedId(node, request.requestId);
   const body = JSON.stringify(request);
+  const named = (result: { job: AutoPromptJob }) => node ? { job: scopeJob(node, result.job) } : result;
   let inFlight: Promise<AutoPromptOutcome> | undefined;
   let completionTaken = false;
   async function submit(token: string): Promise<AutoPromptOutcome> {
     try {
-      return await requestApi<{ job: AutoPromptJob }>('/api/auto-prompts', {
+      return named(await requestApi<{ job: AutoPromptJob }>(nodePath(node, '/api/auto-prompts'), {
         method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body, signal: AbortSignal.timeout(20_000),
-      });
+      }));
     } catch (error) {
       try {
-        return await requestApi<{ job: AutoPromptJob }>(`/api/auto-prompts/${encodeURIComponent(id)}`, { signal: AbortSignal.timeout(10_000) });
+        return named(await requestApi<{ job: AutoPromptJob }>(nodePath(node, `/api/auto-prompts/${encodeURIComponent(request.requestId)}`), { signal: AbortSignal.timeout(10_000) }));
       } catch (lookupError) {
         // A missing job alone does not prove that an interrupted POST was rejected.
         const rejected = error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408

@@ -4,7 +4,9 @@ import { applyNodeChanges, Background, BackgroundVariant, ReactFlow, ReactFlowPr
 import { Maximize, Minus, Plus, Scan } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../../shared/types';
 import type { RepositoryAction, RepositoryStatus } from '../../../shared/repositories';
-import { nodeTypes, type ProjectData } from './GraphNodes';
+import { nodeTypes, type HostLink, type ProjectData } from './GraphNodes';
+import type { Host } from '../remote/hosts';
+import { nodeOf } from '../remote/scope';
 import type { SlackPublicStatus } from '../../../shared/slack';
 import type { TriggerEvent, TriggerOverview } from '../../../shared/triggers';
 import { SlackMentionNode } from './SlackGraphNodes';
@@ -21,7 +23,9 @@ import { projectGroupMinimumWidth, projectGroupTitleMeasurer } from '../project-
 
 type GraphProps = { slackUnreadIds?: ReadonlySet<string>; slack?: SlackPublicStatus | null; selectedSlackId?: string | null; onSelectSlack?: (id: string | null) => void;
   triggerOverview?: TriggerOverview; triggerEvents?: TriggerEvent[]; triggerUnreadIds?: ReadonlySet<string>; selectedTriggerEventId?: string | null; onSelectTriggerEvent?: (id: string) => void; triggerHasMore?: boolean; onMoreTriggers?: () => void;
-  token?: string; providers: ProviderHealth[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string) => void; repositories?: RepositoryStatus[]; onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
+  token?: string; providers: ProviderHealth[];
+  /** Every computer on the canvas; without joined computers only this one. */
+  hosts?: Host[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string) => void; onAutoPrompt: (cwd?: string, node?: string) => void; repositories?: RepositoryStatus[]; onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
 
 const noEvents: TriggerEvent[] = [];
 
@@ -34,7 +38,7 @@ function viewportTransitionDuration() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 280;
 }
 
-function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
+function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, hosts, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
   const { language } = useI18n();
   const { fitView, zoomIn, zoomOut, getViewport, setViewport } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
@@ -105,7 +109,14 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     }
     return widths;
   }, [seedSessions, groupMetadata, visiblePins, language]);
-  const manualOptions = useMemo(() => ({ minimumProjectWidths, visibleProjectIds: new Set(minimumProjectWidths.keys()), repairHeaderWidths: manual }), [minimumProjectWidths, manual]);
+  const machines = useMemo<Host[]>(() => hosts?.length ? hosts : [{ name: hostname, status: 'local', live: true, canWork: true, known: true, providers }], [hosts, hostname, providers]);
+  // A computer this page has not heard from yet keeps its saved card and folder places until it has.
+  const unknownNodes = useMemo(() => new Set(machines.filter(host => host.node && !host.known).map(host => host.node!)), [machines]);
+  const retain = useCallback((id: string) => {
+    const node = nodeOf(id) ?? nodeOf(id.startsWith('project:') ? decodeURIComponent(id.slice('project:'.length)) : undefined);
+    return node !== undefined && unknownNodes.has(node);
+  }, [unknownNodes]);
+  const manualOptions = useMemo(() => ({ minimumProjectWidths, visibleProjectIds: new Set(minimumProjectWidths.keys()), repairHeaderWidths: manual, retain }), [minimumProjectWidths, manual, retain]);
   const manualLayout = useMemo(() => reconcileManualGraph(preferences.layout, allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions), [preferences.layout, allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions]);
 
   useEffect(() => {
@@ -125,29 +136,48 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     const ns: Node[] = [];
     const es: Edge[] = [];
     let x = 0;
-    grouped.forEach(([path, members]) => {
-      const columns = grouped.length === 1 && members.length > 6 ? 4 : members.length > 2 ? 2 : 1;
-      const projectId = graphProjectId(path);
-      const width = Math.max(columns * 268 + 14, minimumProjectWidths.get(projectId) || 0);
-      const rows = Math.max(1, Math.ceil(members.length / columns));
-      const metadata = groupMetadata.get(path);
-      const projectData: ProjectData = { token, name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, hidden: metadata?.hidden || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, manual, disabled: groupActionsDisabled, saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate, onAutoPrompt, repository: repositoryByPath.get(path), onRepositoryAction };
-      const savedProject = manualLayout.projects[projectId];
-      if (manual && savedProject) {
-        const bounds = manualProjectBounds(manualLayout, projectId, visibleAgentIds, minimumProjectWidths)!;
-        ns.push({ id: projectId, type: 'projectGroup', zIndex: 1, position: bounds.position, data: projectData, style: { width: bounds.width, height: bounds.height }, dragHandle: '.project-drag-handle', selectable: false, draggable: true, focusable: false });
-      } else {
-        ns.push({ id: projectId, type: 'projectGroup', zIndex: 1, position: { x, y: 185 }, data: projectData, style: { width, height: rows * 215 + 121 }, draggable: false, selectable: false, focusable: false });
-      }
-      es.push({ id: `host-${projectId}`, source: 'host', target: projectId, type: 'smoothstep', zIndex: 0, animated: motion && members.some(s => s.status === 'working'), style: { stroke: '#2e3e52', strokeWidth: 1.2 }, pathOptions: { borderRadius: 14 } } as Edge);
-      members.forEach((session, index) => {
-        const savedAgent = manualLayout.agents[session.id];
-        const placedManually = manual && savedProject && savedAgent;
-        // Flat world positions keep pointer and drag-stop coordinates independent
-        // from the enclosing rectangle as its origin follows moving cards.
-        ns.push({ id: session.id, type: 'agent', position: placedManually ? { x: savedProject.position.x + savedAgent.position.x, y: savedProject.position.y + savedAgent.position.y } : { x: x + 20 + (index % columns) * 268, y: 291 + Math.floor(index / columns) * 215 }, zIndex: 3, ...(placedManually ? { dragHandle: '.agent-card' } : {}), data: { session, selected: session.id === selectedId, unread: unreadIds?.has(session.id) || false, onSelect }, style: { pointerEvents: 'all' }, draggable: !!placedManually, selectable: false, focusable: false });
+    // Each computer gets its own cluster: its host node above the folders it shares, left to right.
+    machines.forEach((machine, machineIndex) => {
+      const hostId = machine.node ? `host:${machine.node}` : 'host';
+      const stale = Boolean(machine.node) && !machine.live;
+      const disabled = groupActionsDisabled || !machine.canWork;
+      const entries = grouped.filter(([path]) => nodeOf(path) === machine.node);
+      const start = x;
+      entries.forEach(([path, members]) => {
+        const columns = grouped.length === 1 && members.length > 6 ? 4 : members.length > 2 ? 2 : 1;
+        const projectId = graphProjectId(path);
+        const width = Math.max(columns * 268 + 14, minimumProjectWidths.get(projectId) || 0);
+        const rows = Math.max(1, Math.ceil(members.length / columns));
+        const metadata = groupMetadata.get(path);
+        const projectData: ProjectData = { token, name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, hidden: metadata?.hidden || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, manual, disabled, saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate, onAutoPrompt, repository: repositoryByPath.get(path), onRepositoryAction, stale };
+        const savedProject = manualLayout.projects[projectId];
+        if (manual && savedProject) {
+          const bounds = manualProjectBounds(manualLayout, projectId, visibleAgentIds, minimumProjectWidths)!;
+          ns.push({ id: projectId, type: 'projectGroup', zIndex: 1, position: bounds.position, data: projectData, style: { width: bounds.width, height: bounds.height }, dragHandle: '.project-drag-handle', selectable: false, draggable: true, focusable: false });
+        } else {
+          ns.push({ id: projectId, type: 'projectGroup', zIndex: 1, position: { x, y: 185 }, data: projectData, style: { width, height: rows * 215 + 121 }, draggable: false, selectable: false, focusable: false });
+        }
+        es.push({ id: `${hostId}-${projectId}`, source: hostId, target: projectId, type: 'smoothstep', zIndex: 0, animated: motion && !stale && members.some(s => s.status === 'working'), style: { stroke: '#2e3e52', strokeWidth: 1.2 }, pathOptions: { borderRadius: 14 } } as Edge);
+        members.forEach((session, index) => {
+          const savedAgent = manualLayout.agents[session.id];
+          const placedManually = manual && savedProject && savedAgent;
+          // Flat world positions keep pointer and drag-stop coordinates independent
+          // from the enclosing rectangle as its origin follows moving cards.
+          ns.push({ id: session.id, type: 'agent', position: placedManually ? { x: savedProject.position.x + savedAgent.position.x, y: savedProject.position.y + savedAgent.position.y } : { x: x + 20 + (index % columns) * 268, y: 291 + Math.floor(index / columns) * 215 }, zIndex: 3, ...(placedManually ? { dragHandle: '.agent-card' } : {}), data: { session, selected: session.id === selectedId, unread: unreadIds?.has(session.id) || false, onSelect, stale }, style: { pointerEvents: 'all' }, draggable: !!placedManually, selectable: false, focusable: false });
+        });
+        x += width + 36;
       });
-      x += width + 36;
+      // With several computers, one without shown folders still has its own place beside the others.
+      if (!entries.length && machines.length > 1) x += 256 + 36;
+      const frames = ns.filter(node => node.type === 'projectGroup' && entries.some(([path]) => node.id === graphProjectId(path)))
+        .map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }));
+      const automatic = { x: Math.max(start, (start + x - 36) / 2 - 128), y: 0 };
+      const saved = machine.node ? manualLayout.hosts?.[machine.node] : manualLayout.host;
+      const beside = frames.length ? { x: Math.min(...frames.map(frame => frame.position.x)), y: Math.min(...frames.map(frame => frame.position.y)) - HOST_HEIGHT - 40 } : automatic;
+      const hostPosition = manual ? clearHostPosition(saved ?? beside, ns.filter(node => node.type === 'projectGroup').map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }))) : automatic;
+      ns.push({ id: hostId, type: 'host', position: hostPosition, data: { name: machine.name, active: sessions.filter(s => s.status === 'working' && s.node === machine.node).length, providers: machine.providers, disabled, onAutoPrompt: () => onAutoPrompt(undefined, machine.node),
+        ...(machine.node ? { link: { status: machine.status as HostLink['status'], live: machine.live, ...(machine.version ? { version: machine.version } : {}) } } : {}) }, style: { width: 256, height: HOST_HEIGHT, pointerEvents: 'all' }, zIndex: 20, draggable: manual, dragHandle: '.host-node', selectable: false, focusable: false });
+      if (machineIndex < machines.length - 1) x += 72;
     });
     if (showMonitor) {
       const slackEvents = slack?.connected ? slack.events : [];
@@ -164,10 +194,8 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
         : { id: `trigger:event:${item.id}`, type: 'triggerEvent', parentId: TRIGGER_MONITOR_ID, extent: 'parent', style: { pointerEvents: 'all' }, position: layout.positions[index], zIndex: 3, draggable: false, selectable: false, focusable: false, data: { event: item.event, unread: triggerUnreadIds?.has(item.id) || false, selected: item.id === selectedTriggerEventId, onSelect: onSelectTriggerEvent } }));
       es.push({ id: 'host-monitor', source: 'host', target: TRIGGER_MONITOR_ID, type: 'smoothstep', animated: motion && active > 0, style: { stroke: '#675077', strokeWidth: 1.2 } });
     }
-    const hostPosition = manual ? clearHostPosition(manualLayout.host, ns.filter(node => node.type === 'projectGroup').map(node => ({ position: node.position, width: Number(node.style?.width) || 0, height: Number(node.style?.height) || 0 }))) : { x: Math.max(0, (x - 36) / 2 - 128), y: 0 };
-    ns.push({ id: 'host', type: 'host', position: hostPosition, data: { name: hostname, active: sessions.filter(s => s.status === 'working').length, providers, disabled: groupActionsDisabled, onAutoPrompt }, style: { width: 256, height: HOST_HEIGHT, pointerEvents: 'all' }, zIndex: 20, draggable: manual, dragHandle: '.host-node', selectable: false, focusable: false });
     return { modelNodes: ns, edges: es, shown: grouped.reduce((total, [, members]) => total + members.length, 0) };
-  }, [slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, showMonitor, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, hostname, providers, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt, repositoryByPath, onRepositoryAction]);
+  }, [slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, showMonitor, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, machines, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt, repositoryByPath, onRepositoryAction]);
 
   const [nodes, setNodes] = useState(modelNodes);
   const visibleProjectKey = modelNodes.filter(node => node.type === 'projectGroup' || node.type === 'triggerMonitor').map(node => node.id).join('|');

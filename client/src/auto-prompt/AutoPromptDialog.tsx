@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, Folder, LoaderCircle, Paperclip, Send, ShieldCheck, Sparkles, Square, TriangleAlert, X } from 'lucide-react';
+import { Check, ChevronDown, Folder, LoaderCircle, Monitor, Paperclip, Send, ShieldCheck, Sparkles, Square, TriangleAlert, X } from 'lucide-react';
 import type { AutoPromptJob, Provider, ProviderHealth, Session } from '../../../shared/types';
 import { MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../../shared/attachments';
 import { DraftAttachments } from '../chat/ChatAttachments';
@@ -13,11 +13,17 @@ import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { codexApprovalsRequest, readCodexApprovalsChoice, type CodexApprovalsChoice } from '../sessions/codex-approvals-preference';
 import { CodexApprovalsSelect } from '../sessions/CodexApprovalsSelect';
 import { EffortPicker, ModelPicker, supportedEffort } from '../chat/ModelPicker';
+import type { Host } from '../remote/hosts';
+import { localPart, nodeOf, pathFor, requestId, scopeJob } from '../remote/scope';
 
 interface AutoPromptDialogProps {
   visible: boolean;
   initialCwd?: string;
+  /** The joined computer to open on when no folder names it. */
+  initialNode?: string;
   providers: ProviderHealth[];
+  /** Every computer this page can send work to; without joined computers only this one. */
+  hosts?: Host[];
   projects: Array<[string, string]>;
   sessions: Session[];
   jobs: AutoPromptJob[];
@@ -37,7 +43,7 @@ function progressLabel(job: AutoPromptJob) {
 }
 
 /** Stays mounted while hidden so an admitted request can never become a fresh submission. */
-export function AutoPromptDialog({ visible, initialCwd, providers, projects, sessions, jobs, token, connected, onClose, onNavigate, onRefresh }: AutoPromptDialogProps) {
+export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: localProviders, hosts = [], projects: allProjects, sessions, jobs, token, connected, onClose, onNavigate, onRefresh }: AutoPromptDialogProps) {
   useI18n();
   const id = useId();
   const dialog = useRef<HTMLDialogElement>(null);
@@ -48,6 +54,10 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
   const seenTerminalId = useRef('');
   const sending = useRef(false);
   const generation = useRef(0);
+  const [machine, setMachine] = useState<string | undefined>();
+  const host = hosts.find(item => item.node === machine);
+  const providers = machine ? host?.providers ?? [] : localProviders;
+  const projects = allProjects.filter(([key]) => nodeOf(key) === machine).map(([key, label]): [string, string] => [localPart(key), label]);
   const [provider, setProvider] = useState<Provider>('claude');
   const [model, setModel] = useState<string>();
   const [effort, setEffort] = useState<string>();
@@ -67,7 +77,7 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
   const locked = !!attemptId || preparing || submitting;
   const providerAvailable = providers.some(item => item.provider === provider && item.available);
   const providerHealth = providers.find(item => item.provider === provider);
-  const unavailable = !connected || !token || !providerAvailable;
+  const unavailable = !connected || !token || !providerAvailable || (machine !== undefined && !host?.canWork);
 
   const receiveJob = useCallback((incoming: AutoPromptJob) => {
     if (incoming.id !== attempt.current?.id) return;
@@ -91,8 +101,8 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
   }
 
   // Defaults are applied only when opening a fresh dialog, never to an unresolved request.
-  const opening = useRef({ initialCwd, providers });
-  opening.current = { initialCwd, providers };
+  const opening = useRef({ initialCwd, initialNode, localProviders, hosts });
+  opening.current = { initialCwd, initialNode, localProviders, hosts };
   useEffect(() => {
     const element = dialog.current;
     if (!visible || !element) return;
@@ -105,8 +115,11 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
       setPrompt(''); setAttachments([]);
     }
     if (!attempt.current && !sending.current) {
-      setCwd(opening.current.initialCwd || '');
-      setProvider(opening.current.providers.find(item => item.available)?.provider || 'claude');
+      const { initialCwd: folder, initialNode: node, localProviders: here, hosts: machines } = opening.current;
+      const chosen = nodeOf(folder) ?? node;
+      setMachine(chosen);
+      setCwd(folder ? localPart(folder) : '');
+      setProvider((chosen ? machines.find(item => item.node === chosen)?.providers ?? [] : here).find(item => item.available)?.provider || 'claude');
       setModel(undefined); setEffort(undefined);
     }
     element.showModal();
@@ -151,8 +164,8 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
     let timer: number;
     async function check() {
       try {
-        const result = await api<{ job: AutoPromptJob }>(`/api/auto-prompts/${encodeURIComponent(attemptId)}`);
-        if (!stopped) receiveJob(result.job);
+        const result = await api<{ job: AutoPromptJob }>(pathFor(attemptId, id => `/api/auto-prompts/${encodeURIComponent(id)}`));
+        if (!stopped) receiveJob(nodeOf(attemptId) ? scopeJob(nodeOf(attemptId)!, result.job) : result.job);
       } catch { /* Keep the same request available for explicit retry if admission is unknown. */ }
       if (!stopped) timer = window.setTimeout(() => { void check(); }, 2500);
     }
@@ -177,8 +190,8 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
         setPreparing(true);
         const prepared = await prepareDraftAttachments(attachments);
         seenTerminalId.current = '';
-        attempt.current = createAutoPromptAttempt({ requestId: crypto.randomUUID(), provider, ...(cwd ? { cwd } : {}), prompt, ...prepared,
-          ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...codexApprovalsRequest(provider, approvals) });
+        attempt.current = createAutoPromptAttempt({ requestId: requestId(), provider, ...(cwd ? { cwd } : {}), prompt, ...prepared,
+          ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...codexApprovalsRequest(provider, approvals) }, undefined, machine);
         setAttemptId(attempt.current.id);
         setPreparing(false);
       }
@@ -207,10 +220,10 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
     if (!job || !['queued', 'routing'].includes(job.status) || cancelling || !connected || !token) return;
     setCancelling(true); setError('');
     try {
-      const result = await api<{ job: AutoPromptJob }>(`/api/auto-prompts/${encodeURIComponent(job.id)}/cancel`, {
+      const result = await api<{ job: AutoPromptJob }>(pathFor(job.id, id => `/api/auto-prompts/${encodeURIComponent(id)}/cancel`), {
         method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}',
       });
-      receiveJob(result.job);
+      receiveJob(job.node ? scopeJob(job.node, result.job) : result.job);
       onRefresh();
     } catch (cause) { setError(cause instanceof Error ? cause.message : t('요청 취소를 확인하지 못했습니다.')); }
     finally { setCancelling(false); }
@@ -221,7 +234,10 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
   const target = sessions.find(session => session.id === job?.sessionId);
   const statusLabel = preparing ? t('첨부 파일 준비 중…') : job && pending ? progressLabel(job) : submitting ? t('요청 접수를 확인하고 있습니다…') : '';
   const connectionMessage = !connected ? t('서버에 다시 연결되면 요청을 보낼 수 있습니다.')
-    : !token ? t('연결을 확인하고 있습니다.') : !providerAvailable ? t('{0}를 현재 사용할 수 없습니다.', { 0: providerLabels[provider] }) : '';
+    : !token ? t('연결을 확인하고 있습니다.')
+    : machine !== undefined && !host?.live ? t('{0}에 다시 연결되면 요청을 보낼 수 있습니다.', { 0: host?.name ?? t('그 컴퓨터') })
+    : machine !== undefined && !host?.canWork ? t('{0}의 Tower를 업데이트하면 요청을 보낼 수 있습니다.', { 0: host?.name ?? t('그 컴퓨터') })
+    : !providerAvailable ? t('{0}를 현재 사용할 수 없습니다.', { 0: providerLabels[provider] }) : '';
   const requestError = error || (job?.status === 'error' ? job.error || t('요청을 보내지 못했습니다.') : '');
 
   return createPortal(<dialog ref={dialog} className="auto-prompt-dialog" aria-labelledby={`${id}-heading`} aria-describedby={`${id}-description`} tabIndex={-1}
@@ -241,6 +257,12 @@ export function AutoPromptDialog({ visible, initialCwd, providers, projects, ses
     }}>
     <header className="auto-prompt-heading"><div><h2 id={`${id}-heading`}><Sparkles size={22} aria-hidden="true" />Auto Prompt</h2><p id={`${id}-description`}>{t('요청에 맞는 폴더와 세션을 찾아 작업을 보냅니다.')}</p></div><button type="button" className="icon-button" aria-label={t('Auto Prompt 창 닫기')} onClick={onClose}><X size={19} /></button></header>
     <div className="auto-prompt-selectors">
+      {hosts.length > 1 && <label className="auto-prompt-directory auto-prompt-machine"><span className="sr-only">{t('컴퓨터')}</span><Monitor size={16} aria-hidden="true" /><select aria-label={t('컴퓨터')} value={machine ?? ''} disabled={locked} onChange={event => {
+        const next = event.target.value || undefined;
+        setMachine(next); setCwd('');
+        setProvider((next ? hosts.find(item => item.node === next)?.providers ?? [] : localProviders).find(item => item.available)?.provider || 'claude');
+        setModel(undefined); setEffort(undefined); setError('');
+      }}>{hosts.map(item => <option key={item.node ?? ''} value={item.node ?? ''}>{item.node ? item.canWork ? item.name : t('{0} (지금 사용할 수 없음)', { 0: item.name }) : t('{0} (이 컴퓨터)', { 0: item.name })}</option>)}</select><ChevronDown size={13} aria-hidden="true" /></label>}
       <label className="auto-prompt-directory"><span className="sr-only">{t('작업 폴더')}</span><Folder size={16} aria-hidden="true" /><select aria-label={t('작업 폴더')} title={cwd || 'Auto'} value={cwd} disabled={locked} onChange={event => setCwd(event.target.value)}><option value="">Auto</option>{[...choices].map(([path, label]) => <option key={path} value={path}>{label} · {path}</option>)}</select><ChevronDown size={13} aria-hidden="true" /></label>
       <div className="auto-prompt-providers" role="group" aria-label={t('에이전트 종류')}>
         {(['claude', 'codex'] as const).map(value => {

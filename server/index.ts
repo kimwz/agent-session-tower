@@ -34,6 +34,8 @@ import { loadLinkIdentity } from './link/identity.js';
 import { ControllerLinks } from './link/controller.js';
 import { NodeLinks } from './link/node.js';
 import { runLinkCommand } from './link/cli.js';
+import { RemoteNodes } from './link/nodes.js';
+import { NodeViewStore } from './link/views.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
@@ -170,9 +172,11 @@ async function main() {
     onChange: changed,
   });
   let controlledBy = (): string[] => [];
+  let remoteNodes: RemoteNodes | undefined;
   const snapshot = (): Snapshot => {
     const all = runs.sessionList();
     const controllers = controlledBy();
+    const nodes = remoteNodes?.list() ?? [];
     const managed = runs.list();
     return {
       sessions: projectSessionStates(all, managed, runs.settledRunIds()).map(session => closedSessions.apply(titles.apply(session))),
@@ -184,6 +188,7 @@ async function main() {
       ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}),
       ...(runs.runnerVersion() && runs.runnerVersion() !== APP_VERSION ? { runnerUpdate: runs.supports('handoff') ? 'automatic' as const : 'manual' as const } : {}),
       ...(controllers.length ? { controlledBy: controllers } : {}),
+      ...(nodes.length ? { nodes } : {}),
       updatedAt: new Date().toISOString(),
     };
   };
@@ -252,7 +257,13 @@ async function main() {
     controlledBy = () => nodeLinks.list().filter(item => item.status === 'connected').map(item => item.name);
     nodeLinks.on('change', changed);
   }
-  const { server, dispose } = createMonitorServer({ port, clientDir, backend,
+  const nodeViews = new NodeViewStore(stateDir);
+  await nodeViews.start().catch(error => console.error(`Remote folder views were not loaded: ${error instanceof Error ? error.message : String(error)}`));
+  if (controllerLinks) {
+    remoteNodes = new RemoteNodes(controllerLinks, nodeViews);
+    remoteNodes.on('summary', changed);
+  }
+  const { server, dispose } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes,
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions } : { error: linkError },
     workspaceTerminals: new TerminalHostClient({ stateDir, legacy: runs.terminals }), remote: access.remote ? { origins: access.origins } : undefined });
   await new Promise<void>((accept, reject) => {
@@ -278,7 +289,8 @@ async function main() {
   const shutdown = async () => {
     if (closing) return;
     closing = true;
-    const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => remoteRouter.dispose());
+    remoteNodes?.close();
+    const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => { remoteRouter.dispose(); return nodeViews.flush(); });
     const stoppingCapabilities = capabilities.stop();
     const stoppingRepositories = repositories.stop();
     history.stop();

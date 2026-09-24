@@ -80,3 +80,20 @@ test('the host disables Auto Prompt while the connection cannot start a run', ()
   assert.match(host({ disabled: true }), /auto-prompt-trigger[^>]*disabled=""/);
   assert.doesNotMatch(host(), /disabled=""/);
 });
+
+test('a joined computer’s host node says whether it is connected, out of date or needs an update', () => {
+  const live = host({ name: 'studio', link: { status: 'connected', live: true, version: '1.23.0' } });
+  assert.match(live, /class="host-with-usage is-remote"/);
+  assert.match(live, /class="host-link connected live" role="status"><i><\/i>연결됨 · v1\.23\.0/);
+  assert.match(live, /aria-label="studio에서 Auto Prompt 열기"/);
+  const away = host({ name: 'studio', link: { status: 'offline', live: false } });
+  assert.match(away, /class="host-with-usage is-remote is-stale"/);
+  assert.match(away, /<i><\/i>오프라인<\/span>/, 'the version is left out while it is away');
+  assert.match(away, /마지막으로 본 상태입니다/);
+  assert.match(host({ link: { status: 'update-required', live: false } }), /업데이트 필요/);
+  assert.doesNotMatch(host(), /host-link/, 'this computer’s own host node is unchanged');
+});
+
+test('cards of an unreachable computer are marked as its last known state', () => {
+  assert.match(agent({}, { stale: true }), /class="agent-card claude working [^"]*is-stale"/);
+});

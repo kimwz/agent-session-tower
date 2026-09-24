@@ -93,7 +93,7 @@ function remoteProvider(provider: ProviderHealth, sessionCount: number): Provide
     ...(provider.efforts ? { efforts: structuredClone(provider.efforts) } : {}), ...(provider.defaultEffort ? { defaultEffort: provider.defaultEffort } : {}) };
 }
 /** Git errors can name other folders; a remote controller gets the branch state without the raw text. */
-function remoteRepository(status: RepositoryStatus): RepositoryStatus {
+export function remoteRepository(status: RepositoryStatus): RepositoryStatus {
   return { ...pick(status, ['cwd', 'root', 'branch', 'upstream', 'ahead', 'behind', 'changes', 'checkedAt', 'fetchedAt'] as const),
     ...(status.lastAction ? { lastAction: pick(status.lastAction, ['kind', 'ok', 'commits', 'at'] as const) } : {}) };
 }

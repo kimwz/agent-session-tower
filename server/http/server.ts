@@ -6,12 +6,14 @@ import { ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus,
 import type { RequestContext } from './request-context.js';
 import type { RemoteExclusionStore } from '../remote/exclusions.js';
 import { handleLinkRoute, type LinkRoutes } from '../link/routes.js';
+import type { RemoteNodes } from '../link/nodes.js';
+import { proxyToNode } from '../link/proxy.js';
 import { normalizeProjectGroupPatch } from '../stores/project-groups.js';
 import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { SseClient } from './sse-client.js';
 import { publicSnapshot } from './public-snapshot.js';
-import { SnapshotStream } from './snapshot-stream.js';
+import { SnapshotStream, type FrameFormat } from './snapshot-stream.js';
 import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
 import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
 import { WorkspaceTerminals, type WorkspaceTerminalBackend } from '../workspace-terminals.js';
@@ -61,6 +63,8 @@ export interface HttpOptions {
   exclusions?: RemoteExclusionStore;
   /** Remote computers, managed from this Tower's own pages; or why they are unavailable. */
   links?: LinkRoutes | { error: string };
+  /** Joined computers this page shows and works with through their links. */
+  nodes?: RemoteNodes;
 }
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -71,7 +75,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links }: HttpOptions) {
+export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -102,6 +106,26 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
     stream.resendToCompletePages(60_000);
   }, 15_000);
   heartbeat.unref();
+  // Each joined computer's snapshot travels on the same browser connection as this Tower's, in its own frames.
+  const nodeStreams = new Map<string, SnapshotStream>();
+  const nodeClients = new Set<SseClient>();
+  const nodeFrames = (id: string): FrameFormat => ({ key: id,
+    snapshot: (sequence, snapshot) => `event: node\ndata: ${JSON.stringify({ node: id, sequence, snapshot })}\n\n`,
+    patch: (sequence, patch) => `event: node\ndata: ${JSON.stringify({ node: id, sequence, patch })}\n\n` });
+  const nodeChanged = (id: string) => {
+    if (!nodes?.snapshot(id)) return;
+    let feed = nodeStreams.get(id);
+    if (!feed) { feed = new SnapshotStream(() => nodes.snapshot(id)!, Date.now, nodeFrames(id)); nodeStreams.set(id, feed); }
+    for (const client of nodeClients) if (!feed.has(client)) feed.attach(client, true);
+    feed.publish();
+  };
+  const nodeRemoved = (id: string) => {
+    nodeStreams.get(id)?.release();
+    nodeStreams.delete(id);
+    for (const client of nodeClients) client.snapshot(`event: node\ndata: ${JSON.stringify({ node: id, removed: true })}\n\n`, id);
+  };
+  nodes?.on('change', nodeChanged);
+  nodes?.on('removed', nodeRemoved);
 
   const server = createServer(async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -297,6 +321,18 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         return json(res, 200, { folders: exclusions.list(), revision: exclusions.revision, ...(exclusions.error ? { error: exclusions.error } : {}) });
       }
       if (links && await handleLinkRoute(req, res, path, links, json)) return;
+      const nodeRoute = url.pathname.match(/^\/api\/nodes\/([a-f0-9]{32})\/(.+)$/);
+      if (nodes && nodeRoute) {
+        if (nodeRoute[2] === 'view' && req.method === 'POST') {
+          // How this Tower shows another computer's folder stays here.
+          const body = await readJson(req, 8192);
+          if (Object.keys(body).some(key => !['cwd', 'pinned', 'hidden'].includes(key)) || (body.pinned === undefined && body.hidden === undefined)) return json(res, 400, { error: '고정 또는 숨김 상태를 지정하세요.' });
+          await nodes.setView(nodeRoute[1], body.cwd, { pinned: body.pinned, hidden: body.hidden });
+          return json(res, 200, { ok: true });
+        }
+        if (!nodes.known(nodeRoute[1])) return json(res, 404, { error: '연결된 컴퓨터가 아닙니다.' });
+        return proxyToNode(req, res, nodes.session(nodeRoute[1]), `/api/${nodeRoute[2]}${url.search}`);
+      }
       if (req.method === 'POST' && path === '/api/repositories') {
         const body = await readJson(req, 8192);
         if (typeof body.cwd !== 'string' || !body.cwd.startsWith('/') || body.cwd.includes('\0') || !['pull', 'push', 'refresh'].includes(body.action as string)) {
@@ -320,11 +356,20 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (req.method === 'GET' && path === '/api/events') {
         if (clients.size >= 40) return json(res, 503, { error: '열린 모니터 연결이 너무 많습니다.' });
         res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
-        const client = new SseClient(res, () => { clients.delete(client); stream.detach(client); });
+        const client = new SseClient(res, () => {
+          clients.delete(client); stream.detach(client);
+          nodeClients.delete(client);
+          for (const feed of nodeStreams.values()) feed.detach(client);
+        });
         clients.add(client);
         if (!identity.local) trackStream(sessionId, res, () => client.end());
         // Pages that predate patches omit the parameter and keep receiving complete snapshots.
         stream.attach(client, url.searchParams.get('patch') === '1', 'retry: 2000\n\n');
+        // Pages that know about joined computers ask for them; others see only this Tower, as before.
+        if (nodes && url.searchParams.get('nodes') === '1' && url.searchParams.get('patch') === '1') {
+          nodeClients.add(client);
+          for (const id of nodes.ids()) nodeChanged(id);
+        }
         return;
       }
       if (req.method === 'POST' && path === '/api/sessions') {
@@ -424,6 +469,11 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
     clearInterval(heartbeat);
     if (scheduled) clearTimeout(scheduled);
     stream.close();
+    nodes?.off('change', nodeChanged);
+    nodes?.off('removed', nodeRemoved);
+    for (const feed of nodeStreams.values()) feed.release();
+    nodeStreams.clear();
+    nodeClients.clear();
     for (const client of clients) client.end();
     clients.clear();
   };

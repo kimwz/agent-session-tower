@@ -1,4 +1,5 @@
 import type { Session } from '../../../shared/types';
+import { localPart } from '../remote/scope';
 
 const SAFE_NATIVE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -15,5 +16,6 @@ function shellQuote(value: string) {
 export function resumeCommand(session: Pick<Session, 'provider' | 'nativeId' | 'cwd' | 'resumable'>): string | undefined {
   if (!session.resumable || !SAFE_NATIVE_ID.test(session.nativeId)) return undefined;
   const resume = session.provider === 'claude' ? `claude --resume ${session.nativeId}` : `codex resume ${session.nativeId}`;
-  return session.cwd?.startsWith('/') ? `cd ${shellQuote(session.cwd)} && ${resume}` : resume;
+  const cwd = session.cwd ? localPart(session.cwd) : '';
+  return cwd.startsWith('/') ? `cd ${shellQuote(cwd)} && ${resume}` : resume;
 }

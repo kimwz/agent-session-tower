@@ -50,3 +50,17 @@
 .remote-port label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
 .remote-port input { width: 110px; }
 .remote-port small { flex-basis: 100%; font-size: 11.5px; color: var(--amber); }
+
+/* Joined computers on the canvas */
+.host-with-usage.is-remote .host-node { border-color: #4a5f7e; }
+.host-node .host-link i { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
+.host-node .host-link.connected.live i { background: var(--teal); }
+.host-node .host-link.update-required i, .host-node .host-link.removed-by-node i { background: var(--amber); }
+.host-with-usage.is-stale { opacity: .75; }
+.manual-project-lane.is-stale, .agent-card.is-stale { opacity: .55; }
+.session-row-machine { flex: none; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 10px; }
+.auto-prompt-machine { flex: 0 1 220px; }
+.new-session-machine-field { margin: 0 0 21px; }
+.session-row.is-stale { opacity: .6; }
+/* The computer and folder filters share the row evenly. */
+.sidebar-selects:has(label + label) label { flex: 1 1 0; }

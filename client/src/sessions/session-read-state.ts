@@ -24,8 +24,9 @@ export function acknowledgeSession(state: ReadState, id: string, revision: strin
   return state[id] === revision ? state : { ...state, [id]: revision };
 }
 
-export function pruneReadState(state: ReadState, sessions: readonly Session[]): ReadState {
+/** Drops read marks of sessions that are gone; `keep` spares those whose computer has not been heard from yet. */
+export function pruneReadState(state: ReadState, sessions: readonly Session[], keep: (id: string) => boolean = () => false): ReadState {
   const ids = new Set(sessions.map(session => session.id));
-  const entries = Object.entries(state).filter(([id]) => ids.has(id));
+  const entries = Object.entries(state).filter(([id]) => ids.has(id) || keep(id));
   return entries.length === Object.keys(state).length ? state : Object.fromEntries(entries);
 }

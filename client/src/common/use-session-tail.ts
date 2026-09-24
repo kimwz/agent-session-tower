@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { SessionDetail } from '../../../shared/types';
 import { api } from './lib';
+import { nodeOf, pathFor, scopeDetail } from '../remote/scope';
 
 /** The latest messages of a session that automation started, refreshed every few seconds while shown. */
 export function useSessionTail(sessionId: string | undefined, key?: string) {
@@ -14,7 +15,7 @@ export function useSessionTail(sessionId: string | undefined, key?: string) {
     const controller = new AbortController();
     async function poll() {
       try {
-        const next = await api<SessionDetail>(`/api/sessions/${encodeURIComponent(sessionId!)}?limit=100`, { signal: controller.signal });
+        const next = scopeDetail(nodeOf(sessionId), await api<SessionDetail>(pathFor(sessionId!, id => `/api/sessions/${encodeURIComponent(id)}?limit=100`), { signal: controller.signal }));
         if (!disposed) { setDetail(next); setError(''); }
       } catch (cause) { if (!disposed) setError(cause instanceof Error ? cause.message : String(cause)); }
       if (!disposed) timer = setTimeout(() => void poll(), 3000);
