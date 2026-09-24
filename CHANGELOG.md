@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.28.1] - 2026-09-24
+
+### Fixed
+- A joined computer could stay missing from the canvas after it connected, until something changed on it. Its first shared state could arrive before the connection's status and was dropped. It is now kept and shown.
+
 ## [1.28.0] - 2026-09-24
 
 ### Added
