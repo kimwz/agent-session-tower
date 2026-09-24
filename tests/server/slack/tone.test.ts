@@ -43,7 +43,13 @@ test('collection is asynchronous, keeps worker alive, and never enables or sends
   const overview = await service.mutate('tone/collect', {}); assert.equal(overview.tone.status, 'collecting'); assert.equal(service.hasActive(), true);
   await flush(); assert.ok(resolve); resolve({ guide: 'Use concise polite sentences.' }); await flush();
   assert.equal(service.overview().tone.enabled, false); assert.equal(service.overview().tone.sampleCount, 1); assert.equal(service.hasActive(), false);
-  assert.equal((await readFile(join(dir, 'slack-tone.json'), 'utf8')).includes('private fixture'), false);
+  // The guide is saved in the background; wait for the file rather than a guessed number of turns.
+  let saved: string | undefined;
+  for (const deadline = Date.now() + 5000; saved === undefined && Date.now() < deadline;) {
+    saved = await readFile(join(dir, 'slack-tone.json'), 'utf8').catch(() => undefined);
+    if (saved === undefined) await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(saved?.includes('private fixture'), false);
   await service.mutate('tone/save', { guide: 'Be brief', enabled: true }); assert.equal(service.overview().tone.enabled, true);
   await assert.rejects(service.mutate('tone/save', { guide: 'x'.repeat(4001), enabled: true }), { statusCode: 400 });
 });
