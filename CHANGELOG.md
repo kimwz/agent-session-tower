@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.22.0] - 2026-09-24
+
+### Added
+- **Groundwork for using this Tower from your other computers.** Coming releases let one Tower show and control the sessions of your other computers. This release adds what keeps that safe; nothing you see changes yet.
+  - Each computer keeps a list of folders it never shares with another computer. Folders below them and conversations started there are left out too. If the list cannot be read, every folder stays private until it can. The panel for editing the list comes in the next release.
+  - Work another computer sends is marked as coming from that computer. When Tower picks the folder for it, an excluded folder is never chosen. It never reaches a Slack or GitHub coordinator conversation, and Tower tools are not attached to it. A request sent again after a lost connection runs only once.
+
+### Changed
+- When a request is refused because the execution worker is being replaced, the error now says it was not accepted, so it is safe to send again.
+
 ## [1.21.0] - 2026-09-24
 
 ### Added
