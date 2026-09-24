@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.27.0] - 2026-09-24
+
+### Added
+- **Another computer's triggers.** The trigger panel has a computer selector. From this Tower you can list, create, change, turn on or off, run, delete, restore and revert a joined computer's triggers, and they run on that computer.
+  - That computer shows only what it shares. Triggers, runs, earlier revisions, deleted triggers and change history that point into a folder it keeps out of sharing, or at a conversation it does not show, look the same as ones that do not exist. A trigger cannot be pointed at them.
+  - A change sent from another computer is applied once per request, even when it is sent again. It marks the trigger as set up from that computer. A marked trigger's runs never use a folder kept out of sharing, even one excluded later: this is checked again right before the run is handed over and when the provider starts. A change made on the computer itself removes the mark.
+  - While the chosen computer is away or on an older version, the panel stays on that computer and does not save there. A late answer from a computer you switched away from is ignored.
+  - Slack, GitHub sign-ins, secrets, limits and HTTP tests are managed only in that computer's own Tower. GitHub coordinator triggers, and the conversations and runs they use, stay on that computer; from here they can only be turned off or deleted.
+- **Tower's tools in turns started from another computer.** Turns you start on a joined computer from this Tower get Tower's tools, like turns started there. What the tools see and start is limited to what that computer shares, and work they start remembers who started it.
+
 ## [1.26.0] - 2026-09-24
 
 ### Added
