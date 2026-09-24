@@ -32,3 +32,4 @@ import './slack.css';
 import './slack-canvas.css';
 import './slack-monitor.css';
 import './triggers.css';
+import './remote.css';

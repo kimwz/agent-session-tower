@@ -26,7 +26,13 @@ import { RepositoryMonitor, watchedRepositoryPaths } from './repositories/monito
 import { installAgentGuidance } from './agent-guidance/install.js';
 import { overlapsRepository } from '../shared/repositories.js';
 import { RemoteExclusionStore } from './remote/exclusions.js';
+import { createRemoteRouter } from './remote/router.js';
 import type { RequestContext } from './http/request-context.js';
+import type { Backend } from './http/server.js';
+import { loadLinkIdentity } from './link/identity.js';
+import { ControllerLinks } from './link/controller.js';
+import { NodeLinks } from './link/node.js';
+import { runLinkCommand } from './link/cli.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
@@ -40,6 +46,8 @@ Usage: agent-session-tower [run] [options]
 
   run                  Start the local session monitor (default)
   doctor               Check local CLI availability
+  join <code>          Let another Tower control this computer (the code comes from its Remote computers panel)
+  service <action>     install | uninstall | status: keep Tower running in the background (macOS)
   --port <number>      Listening port (default: 8000)
   --host <IPv4>        Bind address (default: 127.0.0.1; 0.0.0.0 for remote access)
   --no-open            Do not open the browser automatically
@@ -69,6 +77,10 @@ async function main() {
   if (args[0] === '--runner-worker') {
     if (args.length !== 2 || !args[1]) throw new Error('Runner worker requires a state directory.');
     await runRunnerWorker(resolve(args[1]));
+    return;
+  }
+  if (args[0] === 'join' || args[0] === 'service') {
+    await runLinkCommand(args);
     return;
   }
   if (args[0] === '--terminal-host') {
@@ -172,8 +184,7 @@ async function main() {
     const page = await history.read(runs.nativeSessionId(id), before, limit);
     return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
   };
-  const { server, dispose } = createMonitorServer({ port, clientDir,
-    auth, exclusions, workspaceTerminals: new TerminalHostClient({ stateDir, legacy: runs.terminals }), remote: access.remote ? { origins: access.origins } : undefined, backend: {
+  const backend: Backend = {
     snapshot, detail,
     session: id => { const found = runs.getSession(id); return found && closedSessions.apply(titles.apply(found)); },
     coordinators: () => runs.coordinators(),
@@ -212,7 +223,19 @@ async function main() {
       changed();
     },
     subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
-  } });
+  };
+  // Other computers: those this one controls, those that control it, and what it answers them with.
+  const identity = await loadLinkIdentity(stateDir);
+  const remoteRouter = createRemoteRouter({ backend, exclusions });
+  const controllerLinks = new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname });
+  const nodeLinks = new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
+    // What this computer can do for a controller depends on the worker it runs with right now.
+    features: () => runs.coordinators() ? ['read', ...(runs.supports('remoteOrigins') ? ['work'] : [])] : [],
+    handle: (req, res, principal) => remoteRouter.handle(req, res, principal) });
+  nodeLinks.on('disconnected', (controllerId: string) => remoteRouter.disconnect(controllerId));
+  const { server, dispose } = createMonitorServer({ port, clientDir, backend,
+    auth, exclusions, links: { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions },
+    workspaceTerminals: new TerminalHostClient({ stateDir, legacy: runs.terminals }), remote: access.remote ? { origins: access.origins } : undefined });
   await new Promise<void>((accept, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => { server.removeListener('error', reject); accept(); });
@@ -231,9 +254,12 @@ async function main() {
   let closing = false;
   capabilities.start();
   repositories.start();
+  // Links come up after the web server, so a joining computer never reaches a half-started Tower.
+  await Promise.all([controllerLinks.start(), nodeLinks.start()]).catch(error => console.error(`Remote computers are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   const shutdown = async () => {
     if (closing) return;
     closing = true;
+    const stoppingLinks = Promise.all([nodeLinks.close(), controllerLinks.close()]).then(() => remoteRouter.dispose());
     const stoppingCapabilities = capabilities.stop();
     const stoppingRepositories = repositories.stop();
     history.stop();
@@ -241,7 +267,7 @@ async function main() {
     dispose();
     server.closeAllConnections();
     server.close();
-    try { await finishCleanup([auth.flush(), stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), runs.close()]); } finally { await releaseLock(); }
+    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), runs.close()]); } finally { await releaseLock(); }
   };
   const onSignal = () => { void shutdown().catch(error => { console.error(`Agent Session Tower shutdown: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }); };
   process.once('SIGINT', onSignal);

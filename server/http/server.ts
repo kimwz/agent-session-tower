@@ -5,6 +5,7 @@ import { normalizeSessionTitle } from '../stores/session-titles.js';
 import { ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus, parseAutoPrompt, parseCreateSession, parseMessage, readJson, UUID } from './requests.js';
 import type { RequestContext } from './request-context.js';
 import type { RemoteExclusionStore } from '../remote/exclusions.js';
+import { handleLinkRoute, type LinkRoutes } from '../link/routes.js';
 import { normalizeProjectGroupPatch } from '../stores/project-groups.js';
 import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
@@ -58,6 +59,8 @@ export interface HttpOptions {
   workspaceTerminals?: WorkspaceTerminalBackend;
   /** The list of folders never shared with remote controllers; managed only from this machine's own browser. */
   exclusions?: RemoteExclusionStore;
+  /** Remote computers, managed from this Tower's own pages. */
+  links?: LinkRoutes;
 }
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -68,7 +71,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions }: HttpOptions) {
+export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -293,6 +296,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         }
         return json(res, 200, { folders: exclusions.list(), revision: exclusions.revision, ...(exclusions.error ? { error: exclusions.error } : {}) });
       }
+      if (links && await handleLinkRoute(req, res, path, links, json)) return;
       if (req.method === 'POST' && path === '/api/repositories') {
         const body = await readJson(req, 8192);
         if (typeof body.cwd !== 'string' || !body.cwd.startsWith('/') || body.cwd.includes('\0') || !['pull', 'push', 'refresh'].includes(body.action as string)) {

@@ -1,0 +1,45 @@
+/* Remote computers reuse the Slack automation dialog; only what differs is defined here. */
+.remote-dialog .slack-tabs button svg { flex: none; }
+.remote-section { display: grid; gap: 12px; }
+.remote-heading { display: flex; align-items: center; gap: 8px; margin: 6px 0 0; font-size: 13px; color: var(--bright); }
+.remote-identity { margin: 16px 0 0; font-size: 12px; color: var(--muted); }
+.remote-identity code, .remote-row code { color: var(--text); }
+
+/* This computer as a controller */
+.remote-hub { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; }
+.remote-switch { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--bright); cursor: pointer; }
+.remote-switch input { width: 16px; height: 16px; accent-color: var(--blue); }
+.remote-addresses { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.remote-addresses li { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.remote-addresses code { color: var(--text); overflow-wrap: anywhere; }
+.remote-addresses small { color: var(--subtle); white-space: nowrap; }
+.remote-invite { display: grid; gap: 8px; }
+.remote-invite > .primary-button { justify-self: start; }
+.remote-command { display: grid; gap: 8px; padding: 12px 14px; border: 1px solid #94b5f655; border-radius: 10px; background: #94b5f60d; }
+.remote-command p { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text); }
+.remote-copy { display: flex; align-items: flex-start; gap: 6px; min-width: 0; }
+.remote-copy code { flex: 1; min-width: 0; max-height: 96px; overflow: auto; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); font-size: 11.5px; line-height: 1.5; color: var(--bright); overflow-wrap: anywhere; white-space: pre-wrap; user-select: all; }
+.remote-copy .icon-button { flex: none; }
+.remote-joined { display: flex; align-items: center; gap: 8px; margin: 0; padding: 10px 12px; border-radius: 8px; background: #88d5c41a; color: var(--teal); font-size: 13px; }
+.remote-command .trigger-note svg { vertical-align: -2px; }
+
+/* Lists */
+.remote-row { gap: 10px; }
+.remote-row .slack-rule-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.remote-row .slack-rule-text strong { font-size: 13px; color: var(--bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-row .slack-rule-text small { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+.remote-row > svg { flex: none; color: var(--muted); }
+.remote-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--subtle); }
+.remote-dot.connected { background: var(--teal); box-shadow: 0 0 0 3px #88d5c422; }
+.remote-dot.connecting, .remote-dot.offline { background: var(--subtle); }
+.remote-dot.update-required, .remote-dot.expired { background: var(--amber); }
+.remote-dot.removed-by-node, .remote-dot.refused { background: var(--danger); }
+.remote-rename { display: flex; gap: 6px; }
+.remote-rename input { flex: 1; min-width: 0; }
+
+/* Forms */
+.remote-join { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.remote-join label { flex: 1 1 260px; display: grid; gap: 6px; font-size: 12px; color: var(--muted); }
+.remote-join input { width: 100%; min-width: 0; font-family: var(--mono, ui-monospace, monospace); font-size: 12px; }
+.remote-button { position: relative; }
+.remote-button.attention::after { content: ''; position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
