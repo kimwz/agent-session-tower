@@ -54,7 +54,8 @@ async function fixture(t: TestContext) {
     services.push(service);
     return service;
   };
-  t.after(async () => { for (const service of services) service.close(); await rm(directory, { recursive: true, force: true }); });
+  // Saves still under way are waited for, or removing the folder races a write into it.
+  t.after(async () => { for (const service of services) service.close(); await Promise.all(services.map(service => service.settle())); await rm(directory, { recursive: true, force: true, maxRetries: 3 }); });
   const finish = (status: Run['status'] = 'completed') => { for (const run of runs) if (run.status === 'running') run.status = status; };
   return { directory, project, clock, runs, jobs, calls, sessions, executor, open, finish };
 }

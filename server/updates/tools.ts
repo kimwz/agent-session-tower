@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { appendFile, link, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { delimiter, dirname, join, sep } from 'node:path';
 import { promisify } from 'node:util';
+import { isSea } from 'node:sea';
 import type { Provider } from '../../shared/types.js';
 import type { ToolUpdate, ToolUpdateReason } from '../../shared/link.js';
 import { findExecutable, providerDirectories, PROVIDERS } from '../providers/discovery.js';
@@ -254,16 +255,16 @@ export class ToolUpdates {
     if (!executable) return broken ?? {};
     const real = await realpath(executable).catch(() => executable);
     const install = classifyInstall(provider, real);
-    const node = this.options.node ?? process.execPath;
+    const node = this.options.node ?? await towerNode(env);
     const root = (this.options.uid ?? process.getuid?.()) === 0;
-    const npm = install.method === 'npm' ? await npmCli(node, providerDirectories(env)) : undefined;
+    const npm = install.method === 'npm' && node ? await npmCli(node, providerDirectories(env)) : undefined;
     const target = await this.commands.latest(PACKAGES[provider]).catch(() => undefined) ?? previous?.target;
     // A process running as root runs nothing another account could have changed, not even to ask its version.
-    if (root && !(await rootSafe(executable) && await rootSafe(node) && (!npm || await rootSafe(npm)))) {
+    if (root && !(await rootSafe(executable) && (!node || await rootSafe(node)) && (!npm || await rootSafe(npm)))) {
       return { status: { method: install.method, state: 'unsupported', reason: 'not-root-only', checkedAt: new Date(now).toISOString(), ...(target ? { target } : {}) } };
     }
     // The update and version commands find the Node that runs Tower first: npm and the npm CLIs start with `env node`.
-    const folders = [dirname(node), ...providerDirectories(env)];
+    const folders = [...node ? [dirname(node)] : [], ...providerDirectories(env)];
     const path = root ? (await Promise.all(folders.map(async folder => await rootOnly(folder) ? folder : undefined))).filter(Boolean) as string[] : folders;
     const run = { ...env, PATH: [...new Set(path)].join(delimiter), CI: '1', npm_config_update_notifier: 'false' };
     const version = await this.commands.version(executable, run);
@@ -293,7 +294,7 @@ export class ToolUpdates {
       const stuck = () => { this.log(`${provider}: npm is still running after ${NPM_STUCK_MS / MINUTE} minutes`); void progress({ ...updating, reason: 'stuck' }); };
       const result = install.method === 'native'
         ? await this.commands.update(executable, ['update'], run, { ms: NATIVE_TIMEOUT_MS, kill: true })
-        : await this.commands.update(node, [npm!, 'install', '-g', '--prefix', (install as { prefix: string }).prefix, `${PACKAGES[provider]}@${target}`, '--no-audit', '--no-fund', '--loglevel=error'], run, { ms: NPM_STUCK_MS, kill: false, stuck });
+        : await this.commands.update(node!, [npm!, 'install', '-g', '--prefix', (install as { prefix: string }).prefix, `${PACKAGES[provider]}@${target}`, '--no-audit', '--no-fund', '--loglevel=error'], run, { ms: NPM_STUCK_MS, kill: false, stuck });
       this.log(`${provider}: exit ${result.code}\n${result.output.trim().slice(-4000)}`);
       let after = await this.commands.version(executable, run);
       const done = this.now();
@@ -301,7 +302,7 @@ export class ToolUpdates {
       // A global npm install that no longer starts is put back to the version it had.
       if (!after && install.method === 'npm') {
         this.log(`${provider}: does not start after the update; reinstalling ${version}`);
-        const repaired = await this.commands.update(node, [npm!, 'install', '-g', '--prefix', install.prefix, `${PACKAGES[provider]}@${version}`, '--no-audit', '--no-fund', '--loglevel=error'], run, { ms: NPM_STUCK_MS, kill: false, stuck });
+        const repaired = await this.commands.update(node!, [npm!, 'install', '-g', '--prefix', install.prefix, `${PACKAGES[provider]}@${version}`, '--no-audit', '--no-fund', '--loglevel=error'], run, { ms: NPM_STUCK_MS, kill: false, stuck });
         this.log(`${provider}: reinstall exit ${repaired.code}\n${repaired.output.trim().slice(-4000)}`);
         after = await this.commands.version(executable, run);
       }
@@ -320,6 +321,20 @@ export class ToolUpdates {
 function fixCommand(provider: Provider, install: Install, version: string): string | undefined {
   if (install.method === 'npm') return `npm install -g --prefix '${install.prefix.replace(/'/g, `'\\''`)}' ${PACKAGES[provider]}@${version}`;
   return install.method === 'native' ? 'curl -fsSL https://claude.ai/install.sh | bash' : undefined;
+}
+
+/**
+ * The Node that runs npm and the npm-installed CLIs: the one running Tower, or, when Tower is a single executable (whose
+ * own path is not Node), the first Node on the path. Undefined when there is none; only a global npm install needs it.
+ */
+async function towerNode(env: NodeJS.ProcessEnv): Promise<string | undefined> {
+  if (!isSea()) return process.execPath;
+  const own = await realpath(process.execPath).catch(() => process.execPath);
+  for (const folder of providerDirectories(env)) {
+    const real = await realpath(join(folder, 'node')).catch(() => undefined);
+    if (real && real !== own) return join(folder, 'node');
+  }
+  return undefined;
 }
 
 /** npm's own script, run by Tower's Node: the one beside that Node first, else the first on the path. */

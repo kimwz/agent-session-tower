@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { APP_VERSION, HEALTH_APPLICATION_ID } from '../../shared/app-identity.js';
 import type { LinkOverview } from '../../shared/link.js';
-import { lockOwners, type OwnerCommand } from '../instance/state-lock.js';
+import { commandEnvironment, lockOwners, type OwnerCommand } from '../instance/state-lock.js';
 import { defaultStateDir } from '../state-dir.js';
 import { decodeJoinCode } from './join-code.js';
 import { displayFingerprint, linkId } from './identity.js';
@@ -119,7 +119,10 @@ async function runService(action: string | undefined, stateDir: string, port: nu
     // A Tower started by hand keeps serving until the service is set up to take its place. Otherwise the service starts
     // now; one already running is started again with what was just installed, its worker and terminals going on.
     const replacing = running && !running.service ? running : undefined;
-    const manager = await installService(stateDir, { port: running?.port ?? port, start: !replacing });
+    // The service takes over with the configuration the Tower it replaces ran with (which Claude Code and Codex homes,
+    // which PATH), not with this shell's.
+    const environment = replacing?.command?.env ? commandEnvironment(replacing.command.env) : undefined;
+    const manager = await installService(stateDir, { port: running?.port ?? port, start: !replacing, ...(environment ? { environment } : {}) });
     if (replacing) await takeOver(stateDir, replacing, version);
     console.log(`${running?.service ? `The background service was started again with Tower ${version}; running agents and terminals go on. It` : `Tower ${version} now`} starts in the background ${EVERY_START[manager]}, and keeps itself, Claude Code and Codex up to date.`);
   } else if (action === 'uninstall') {
@@ -186,7 +189,7 @@ function takeOverSteps(stateDir: string): TakeOverSteps {
       mkdirSync(logs, { recursive: true, mode: 0o700 });
       const output = openSync(resolve(logs, 'tower.log'), 'a', 0o600);
       try {
-        const child = spawn(command.execPath, command.argv, { cwd: command.cwd, env: process.env, detached: true, stdio: ['ignore', output, output] });
+        const child = spawn(command.execPath, command.argv, { cwd: command.cwd, env: commandEnvironment(command.env), detached: true, stdio: ['ignore', output, output] });
         child.unref();
         return new Promise((accept, reject) => { child.once('spawn', accept); child.once('error', reject); });
       } finally { closeSync(output); }
@@ -204,7 +207,7 @@ function takeOverSteps(stateDir: string): TakeOverSteps {
  * was started (a Tower too old to have kept that gets the installed version), so a Tower keeps serving either way, and
  * the error says which of these happened.
  */
-export async function takeOver(stateDir: string, running: { pid: number; port: number; command?: OwnerCommand }, version: string, steps: TakeOverSteps = takeOverSteps(stateDir)): Promise<void> {
+export async function takeOver(stateDir: string, running: { pid: number; port: number; version?: string; command?: OwnerCommand }, version: string, steps: TakeOverSteps = takeOverSteps(stateDir)): Promise<void> {
   const log = resolve(runtimePaths(stateDir).logs, 'tower.log');
   const until = async <T>(read: () => Promise<T | undefined>, ms: number): Promise<T | undefined> => {
     for (const deadline = steps.now() + ms; ;) {
@@ -229,9 +232,13 @@ export async function takeOver(stateDir: string, running: { pid: number; port: n
   const how = running.command ? 'the Tower you started was started again the same way' : `Tower ${version} was started by hand in its place (the Tower you started is too old to say how it was started)`;
   const command = running.command ?? { execPath: process.execPath, argv: [entryPoint(versionDirectory(stateDir, version)), 'run', '--no-open', '--port', String(running.port), '--state-dir', stateDir], cwd: process.cwd() };
   const refused = await steps.start(command).then(() => undefined, (error: Error) => error.message);
-  const back = refused === undefined ? await until(async () => { const web = await steps.read(running.port); return web && web.pid !== running.pid ? web : undefined; }, 60_000) : undefined;
+  // Back means the same Tower as before answers again: the one that was running, or the installed one in its place.
+  const expected = running.command ? running.version : version;
+  let seen: WebState | undefined;
+  const back = refused === undefined ? await until(async () => { const web = seen = await steps.read(running.port); return web && web.pid !== running.pid && (!expected || web.version === expected) ? web : undefined; }, 60_000) : undefined;
   if (back) throw new Error(`The background service did not take over: ${failure}. It was stopped, and ${how}; Tower ${back.version} answers on port ${running.port} again (pid ${back.pid}). See ${log}.`);
-  throw new Error(`The background service did not take over: ${failure}. It was stopped, and ${how}, but ${refused !== undefined ? `that could not be started (${refused})` : `nothing answers on port ${running.port} after a minute`}. See ${log}, and start Tower yourself if it does not come up.`);
+  const instead = seen && seen.pid !== running.pid ? `Tower ${seen.version} answers on port ${running.port} instead of ${expected}` : `nothing answers on port ${running.port} after a minute`;
+  throw new Error(`The background service did not take over: ${failure}. It was stopped, and ${how}, but ${refused !== undefined ? `that could not be started (${refused})` : instead}. See ${log}, and start Tower yourself if it does not come up.`);
 }
 function portFree(port: number): Promise<boolean> {
   return new Promise(resolve => {

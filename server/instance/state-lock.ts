@@ -4,8 +4,19 @@ import { join } from 'node:path';
 import { isSea } from 'node:sea';
 import { processStart } from './process-start.js';
 
-/** How a process was started, so it can be started again the same way. */
-export interface OwnerCommand { execPath: string; argv: string[]; cwd: string }
+/**
+ * How a process was started, so it can be started again the same way: its command, and the part of its environment
+ * that decides which Tower, Claude Code and Codex it uses (never tokens or anything else the shell held).
+ */
+export interface OwnerCommand { execPath: string; argv: string[]; cwd: string; env?: Record<string, string> }
+export const COMMAND_ENV = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'TOWER_AUTO_UPDATE'] as const;
+/** `base` with what a recorded command's environment decides put back as it was: set as recorded, or left unset. */
+export function commandEnvironment(recorded: Record<string, string> | undefined, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  if (!recorded) return base;
+  const env = { ...base };
+  for (const key of COMMAND_ENV) { if (recorded[key] === undefined) delete env[key]; else env[key] = recorded[key]; }
+  return env;
+}
 /**
  * `started` tells the owner apart from a later process given the same pid, as after a restart. `command` is missing in
  * records of older versions.
@@ -15,12 +26,16 @@ interface Owner { pid: number; port: number; createdAt: string; started?: string
 /** This process's own command: Node's options (a loader such as tsx) first; a single executable is its own entry. */
 function ownCommand(): OwnerCommand {
   const argv = isSea() ? process.argv.slice(2) : [...process.execArgv.filter(arg => !/^--inspect(?:-brk|-port|-publish-uid)?(?:=|$)/.test(arg)), ...process.argv.slice(1)];
-  return { execPath: process.execPath, argv, cwd: process.cwd() };
+  const env = Object.fromEntries(COMMAND_ENV.flatMap(key => typeof process.env[key] === 'string' ? [[key, process.env[key]!]] : []));
+  return { execPath: process.execPath, argv, cwd: process.cwd(), env };
 }
 const parseCommand = (value: unknown): OwnerCommand | undefined => {
   const command = value as Partial<OwnerCommand> | undefined;
-  return command && typeof command === 'object' && typeof command.execPath === 'string' && command.execPath && typeof command.cwd === 'string' && command.cwd
-    && Array.isArray(command.argv) && command.argv.every(arg => typeof arg === 'string') ? { execPath: command.execPath, argv: [...command.argv], cwd: command.cwd } : undefined;
+  if (!command || typeof command !== 'object' || typeof command.execPath !== 'string' || !command.execPath || typeof command.cwd !== 'string' || !command.cwd
+    || !Array.isArray(command.argv) || !command.argv.every(arg => typeof arg === 'string')) return undefined;
+  const recorded = command.env && typeof command.env === 'object' ? command.env as Record<string, unknown> : undefined;
+  const env = recorded && Object.fromEntries(COMMAND_ENV.flatMap(key => typeof recorded[key] === 'string' ? [[key, recorded[key] as string]] : []));
+  return { execPath: command.execPath, argv: [...command.argv], cwd: command.cwd, ...(env ? { env } : {}) };
 };
 
 export class MonitorAlreadyRunning extends Error {

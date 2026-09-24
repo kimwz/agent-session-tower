@@ -209,18 +209,25 @@ test('a Tower started by hand is replaced by the service only once the service a
 });
 
 test('a service that does not take over is stopped, and the Tower started by hand is started again exactly as it was', async () => {
-  const command = { execPath: '/opt/node/bin/node', argv: ['--import', 'tsx', '/src/tower/server/index.ts', 'run', '--no-open'], cwd: '/src/tower' };
+  const command = { execPath: '/opt/node/bin/node', argv: ['--import', 'tsx', '/src/tower/server/index.ts', 'run', '--no-open'], cwd: '/src/tower', env: { CODEX_HOME: '/work/codex-home' } };
   // The service answers, but its web never reaches the worker.
   const f = switching({ pid: 200, version: '1.32.0', service: true });
-  await assert.rejects(takeOver('/state', { pid: 100, port: 8000, command }, '1.32.0', f.steps),
+  await assert.rejects(takeOver('/state', { pid: 100, port: 8000, version: '1.31.0', command }, '1.32.0', f.steps),
     /did not take over: its web did not reach the execution worker within 2 minutes\. It was stopped, and the Tower you started was started again the same way; Tower 1\.31\.0 answers on port 8000 again \(pid 300\)/);
   assert.deepEqual(f.done, ['stop 100', 'start service', 'stop service', 'start by hand']);
   assert.deepEqual(f.started, [command]);
   assert.ok(f.waited() >= 120_000, 'the service is given its two minutes');
   // The started one does not come up either: that is said, too.
   const silent = switching(undefined, { restores: false });
-  await assert.rejects(takeOver('/state', { pid: 100, port: 8000, command }, '1.32.0', silent.steps),
+  await assert.rejects(takeOver('/state', { pid: 100, port: 8000, version: '1.31.0', command }, '1.32.0', silent.steps),
     /nothing answered on port 8000 within 2 minutes\. It was stopped, and the Tower you started was started again the same way, but nothing answers on port 8000 after a minute\. See .*tower\.log, and start Tower yourself/);
+});
+
+test('only the Tower that was running counts as back: another version answering in its place is said to be one', async () => {
+  const command = { execPath: '/opt/node/bin/node', argv: ['/src/tower/bin/agent-session-tower.mjs', 'run'], cwd: '/src/tower' };
+  const other = switching(undefined, { refuses: true, restores: '1.30.0' });
+  await assert.rejects(takeOver('/state', { pid: 100, port: 8000, version: '1.31.0', command }, '1.32.0', other.steps),
+    /started again the same way, but Tower 1\.30\.0 answers on port 8000 instead of 1\.31\.0/);
 });
 
 test('a Tower too old to say how it was started gets the installed version started by hand in its place', async () => {

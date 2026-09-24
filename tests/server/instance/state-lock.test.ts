@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { acquireStateLock, lockOwners } from '../../../server/instance/state-lock.js';
+import { acquireStateLock, commandEnvironment, COMMAND_ENV, lockOwners } from '../../../server/instance/state-lock.js';
 
 async function fixture(t: { after: (fn: () => unknown) => void }) {
   const stateDir = await mkdtemp(join(tmpdir(), 'agent-monitor-lock-'));
@@ -69,6 +69,8 @@ test('an owner records how it was started, so it can be started again the same w
   assert.equal(owner?.command?.execPath, process.execPath);
   assert.equal(owner?.command?.cwd, process.cwd());
   assert.deepEqual(owner?.command?.argv.slice(-process.argv.length + 1), process.argv.slice(1), 'its own arguments come last, after Node’s own options');
+  assert.deepEqual(Object.keys(owner?.command?.env ?? {}).filter(key => !(COMMAND_ENV as readonly string[]).includes(key)), [], 'only what picks its tools is kept, never tokens');
+  assert.equal(owner?.command?.env?.PATH, process.env.PATH);
   await release();
   const lock = join(stateDir, '.instance-lock');
   await mkdir(lock);
@@ -76,4 +78,10 @@ test('an owner records how it was started, so it can be started again the same w
   assert.deepEqual(await lockOwners(stateDir), [{ pid: process.pid, port: 8001 }]);
   await writeFile(join(lock, 'owner-11111111-1111-4111-8111-111111111111.json'), JSON.stringify({ pid: process.pid, port: 8001, command: { execPath: '/bin/node', argv: [1], cwd: '/' } }));
   assert.deepEqual(await lockOwners(stateDir), [{ pid: process.pid, port: 8001 }], 'a command that is not one is left out');
+});
+
+test('a recorded environment is put back as it was: what it set is set again, and what it left unset stays unset', () => {
+  const base = { PATH: '/now/bin', CODEX_HOME: '/now/codex', SECRET: 'kept as it is' };
+  assert.deepEqual(commandEnvironment({ PATH: '/then/bin', CLAUDE_CONFIG_DIR: '/then/claude' }, base), { PATH: '/then/bin', CLAUDE_CONFIG_DIR: '/then/claude', SECRET: 'kept as it is' });
+  assert.equal(commandEnvironment(undefined, base), base, 'an older record changes nothing');
 });
