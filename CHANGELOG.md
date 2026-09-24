@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.29.0] - 2026-09-24
+
+### Added
+- **An agent that says it will come back does come back.** When a Claude Code turn started from Tower ends with a scheduled wakeup (`ScheduleWakeup`, for example "I'll check the review again in 20 minutes"), Tower now keeps that schedule and resumes the conversation at that time with the agent's own instruction. Until now the wakeup was lost when the turn's process ended, so the conversation showed as finished and never continued.
+  - The canvas card and the conversation list show **HH:MM에 이어서 진행** instead of **완료**, and the chat shows the planned instruction with **예약 취소**.
+  - The continuation runs with the same authority, model and effort as the turn that scheduled it. A newer instruction, or activity in the conversation outside Tower, replaces it; the agent can schedule again in its next turn. Closing the conversation cancels it. Slack and trigger turns do not schedule continuations.
+  - It is saved, so it survives a Tower restart or a worker update. One missed by more than an hour while Tower was not running is not started.
+
 ## [1.28.1] - 2026-09-24
 
 ### Fixed
