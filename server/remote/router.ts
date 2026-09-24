@@ -17,6 +17,7 @@ import type { RemoteExclusionStore } from './exclusions.js';
 import { remoteJob, remoteJobVisible, remotePage, remoteRepository, remoteRun, remoteSession, remoteSessionIds, remoteSnapshot, type RemoteScope } from './visibility.js';
 import type { RepositoryAction } from '../../shared/repositories.js';
 import { isOperationName, OPERATIONS, REMOTE_PAGE_OPERATIONS } from '../../shared/api/operations.js';
+import type { RemoteAction, RemoteChange } from '../../shared/link.js';
 
 type Request = IncomingMessage | Http2ServerRequest;
 // The HTTP/2 compatibility response offers the same calls as an HTTP/1 response.
@@ -31,6 +32,8 @@ export interface RemoteRouterOptions {
   terminals?: WorkspaceTerminalBackend;
   /** Mutating requests one controller may make per minute. */
   mutationsPerMinute?: number;
+  /** Records what controllers change here, for this computer's owner. */
+  audit?: { record(change: Omit<RemoteChange, 'at'>): void };
 }
 
 const NOT_FOUND = '찾을 수 없습니다.';
@@ -43,7 +46,7 @@ const REQUEST_ID_HEADER = 'x-tower-request-id';
  * answers with remote views that leave out excluded folders and coordinator conversations. Local management
  * (accounts, pairing, the exclusion list) has no route here at all.
  */
-export function createRemoteRouter({ backend, exclusions, terminals, mutationsPerMinute = 60 }: RemoteRouterOptions) {
+export function createRemoteRouter({ backend, exclusions, terminals, mutationsPerMinute = 60, audit }: RemoteRouterOptions) {
   const streams = new Map<string, { stream: SnapshotStream; clients: Set<SseClient> }>();
   /** Terminal output streams to controllers; they end when the sharing list changes (the shells go on). */
   const shellStreams = new Set<Reply>();
@@ -191,7 +194,16 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
     req.once('close', () => client.end());
   };
 
-  const route = async (req: Request, res: Reply, principal: RemotePrincipal, url: URL): Promise<void> => {
+  /** `note` names the change a request made, recorded once it succeeded. */
+  /** A conversation as this computer's owner knows it in the record: its title, or where it works. */
+  const named = (session: Session | undefined) => session ? session.customTitle || session.title || session.cwd : undefined;
+  /** The trigger a change was about, by name when the answer or the request names it. */
+  const triggerName = (body: Record<string, unknown>, result: unknown) => {
+    const answered = (result as { trigger?: { name?: unknown }; event?: { triggerName?: unknown } } | undefined);
+    const name = answered?.trigger?.name ?? answered?.event?.triggerName ?? (body.trigger as { name?: unknown } | undefined)?.name ?? body.id;
+    return typeof name === 'string' ? name.slice(0, 200) : undefined;
+  };
+  const route = async (req: Request, res: Reply, principal: RemotePrincipal, url: URL, note: (action: RemoteAction, target?: string, detail?: string) => void): Promise<void> => {
     const path = decodeURIComponent(url.pathname);
     const method = req.method;
     if (method === 'GET' && path === '/api/snapshot') return json(res, 200, view(principal));
@@ -282,8 +294,11 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       // Tower's operations answer in words meant for whoever asked; an unexpected failure is not described. A refusal of
       // something done only here is not a refused link (a controller reads 401 and 403 from here that way), so it is
       // sent as a conflict.
-      try { return json(res, 200, { result: await backend.api(operation, body, context(principal, write ? requestId(req) : undefined)) }); }
+      let result: unknown;
+      try { result = await backend.api(operation, body, context(principal, write ? requestId(req) : undefined)); }
       catch (error) { const status = errorStatus(error); throw Object.assign(error as Error, status === 403 ? { statusCode: 409 } : {}, { shown: status !== 500 }); }
+      if (write) note('trigger', triggerName(body, result), operation.slice('triggers.'.length));
+      return json(res, 200, { result });
     }
     // Keystrokes have their own per-shell budget.
     if (terminal?.[2] === 'input' || terminal?.[2] === 'resize') {
@@ -297,9 +312,10 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
     limit(principal);
     if (terminal?.[2] === 'close') {
       if (!terminals) throw notFound();
-      await shell(terminal[1]);
+      const { cwd } = await shell(terminal[1]);
       if (Object.keys(await readJson(req)).length) throw httpError(400, '터미널 요청 형식이 올바르지 않습니다.');
       await terminals.close(terminal[1]);
+      note('terminal-close', cwd);
       return json(res, 200, { ok: true });
     }
     if (path === '/api/workspace/terminals') {
@@ -311,18 +327,22 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       // A shell a controller opens must be one every controller can find and this computer can close.
       if (await terminals.list() === undefined) throw Object.assign(httpError(503, '그 컴퓨터의 터미널 호스트가 이전 버전이라 여기서 터미널을 열 수 없습니다. 그 컴퓨터에서 열린 터미널이 모두 닫히면 새 버전으로 바뀝니다.'), { disposition: 'not-admitted' });
       const root = await assertWorkspace(cwd, backend.snapshot());
-      return json(res, 200, await terminals.create(root, body.cols, body.rows, { opener: principal.controllerId, requestId: id }));
+      const opened = await terminals.create(root, body.cols, body.rows, { opener: principal.controllerId, requestId: id });
+      note('terminal-open', root);
+      return json(res, 200, opened);
     }
     if (path === '/api/workspace/file') {
       const body = await readJson(req, 6 * MAX_WORKSPACE_FILE_BYTES + 16 * 1024);
       await sharedPath(body.cwd, body.path);
-      return json(res, 200, await saveWorkspaceFile(body, backend.snapshot()));
+      const saved = await saveWorkspaceFile(body, backend.snapshot());
+      note('file', join(body.cwd as string, saved.path));
+      return json(res, 200, saved);
     }
     if (path === '/api/workspace/directory') {
       const body = await readJson(req);
       const cwd = await sharedPath(body.cwd, body.path);
       // A folder made by a request sent again after its answer was lost is already there: that is success.
-      try { return json(res, 200, await createWorkspaceDirectory(body, backend.snapshot())); }
+      try { const made = await createWorkspaceDirectory(body, backend.snapshot()); note('directory', join(cwd, made.path)); return json(res, 200, made); }
       catch (error) {
         if (errorStatus(error) === 409 && typeof body.path === 'string' && await stat(join(cwd, body.path)).then(info => info.isDirectory(), () => false)) return json(res, 200, { path: body.path });
         throw error;
@@ -336,6 +356,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       const result = await backend.createSession(input, context(principal, id));
       // A retry answers with what the first request made; that must still be shared.
       if (await exclusions.excludesNow(result.session.cwd)) throw notFound();
+      note('session', result.session.cwd);
       return json(res, 202, { session: remoteSession(result.session), run: remoteRun(result.run) });
     }
     const message = path.match(/^\/api\/sessions\/([^/]+)\/messages$/);
@@ -344,6 +365,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       const body = parseMessage(await readJson(req, ATTACHMENT_BODY_BYTES));
       const created = await backend.enqueue(found.id, body.prompt, body.attachments, context(principal, requestId(req)));
       await stillVisible(found.id);
+      note('message', named(found));
       return json(res, 202, { run: remoteRun(created) });
     }
     const title = path.match(/^\/api\/sessions\/([^/]+)\/title$/);
@@ -354,6 +376,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       const updated = await backend.setTitle(found.id, value);
       if (!updated) throw notFound();
       await stillVisible(found.id);
+      note('title', named(updated));
       return json(res, 200, { session: remoteSession(updated) });
     }
     const closed = path.match(/^\/api\/sessions\/([^/]+)\/(close|reopen)$/);
@@ -364,6 +387,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       const updated = await backend.setClosed(found.id, closed[2] === 'close');
       if (!updated) throw notFound();
       await stillVisible(found.id);
+      note(closed[2] === 'close' ? 'close' : 'reopen', named(updated));
       return json(res, 200, { session: remoteSession(updated) });
     }
     const approval = url.pathname.match(/^\/api\/runs\/([^/]+)\/approvals\/([^/]+)$/);
@@ -374,6 +398,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       if (!backend.respondToApproval) throw httpError(503, '이 실행기의 승인 요청을 처리할 수 없습니다.');
       const answered = await backend.respondToApproval(found.id, decodeURIComponent(approval[2]), response);
       await stillVisible(found.sessionId);
+      note('approval', named(backend.session?.(found.sessionId)));
       return json(res, 200, { run: remoteRun(answered) });
     }
     const runAction = path.match(/^\/api\/runs\/([^/]+)\/(steer|cancel|dismiss)$/);
@@ -385,11 +410,13 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
         if (!backend.steerRun) throw httpError(503, '이 실행기는 요청 끼워넣기를 지원하지 않습니다.');
         const steered = await backend.steerRun(found.id);
         await stillVisible(found.sessionId);
+        note('steer', named(backend.session?.(found.sessionId)));
         return json(res, 200, { run: remoteRun(steered) });
       }
-      if (runAction[2] === 'cancel') { await backend.cancel(found.id); return json(res, 200, { ok: true }); }
+      if (runAction[2] === 'cancel') { await backend.cancel(found.id); note('cancel', named(backend.session?.(found.sessionId))); return json(res, 200, { ok: true }); }
       if (!backend.dismiss) throw httpError(503, '실패 기록을 지울 수 없습니다.');
       await backend.dismiss(found.id);
+      note('dismiss', named(backend.session?.(found.sessionId)));
       return json(res, 200, { ok: true });
     }
     if (path === '/api/auto-prompts') {
@@ -400,6 +427,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       // A retry of a finished request answers with that job; it is shown only while everything it touched is shared.
       const current = await jobVisible(job, principal);
       if (!current) throw notFound();
+      note('auto-prompt', job.cwd ?? job.decision?.cwd);
       return json(res, 202, { job: remoteJob(job, principal.controllerId, current.matcher.revision) });
     }
     if (autoPrompt && autoPrompt[2] && UUID.test(autoPrompt[1])) {
@@ -410,6 +438,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       const cancelled = await backend.cancelAutoPrompt(job.id);
       const after = await jobVisible(cancelled, principal);
       if (!after) throw notFound();
+      note('auto-prompt-cancel', cancelled.cwd ?? cancelled.decision?.cwd);
       return json(res, 200, { job: remoteJob(cancelled, principal.controllerId, after.matcher.revision) });
     }
     if (path === '/api/repositories') {
@@ -423,6 +452,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       const status = await backend.repositoryAction(body.cwd, body.action as RepositoryAction);
       // The repository can reach beyond the folder asked about; its root must be shared too.
       if (await exclusions.excludesNow(status.root)) throw httpError(404, FOLDER_NOT_FOUND);
+      if (body.action !== 'refresh') note('repository', body.cwd, body.action as string);
       return json(res, 200, { repository: remoteRepository(status) });
     }
     if (path === '/api/groups') {
@@ -432,6 +462,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       await folderAllowed(body.cwd);
       if (!backend.setGroup) throw httpError(503, '폴더 그룹을 저장할 수 없습니다.');
       const group = await backend.setGroup({ cwd: body.cwd, title: normalizeSessionTitle(body.title) });
+      note('folder-name', group.cwd);
       return json(res, 200, { group: { cwd: group.cwd, title: group.title, pinned: group.pinned } });
     }
     throw notFound();
@@ -442,7 +473,9 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       const res = response as Reply;
       try {
         await prepare();
-        await route(req, res, principal, new URL(req.url || '/', 'http://remote.invalid'));
+        let noted: Omit<RemoteChange, 'at' | 'controllerId'> | undefined;
+        await route(req, res, principal, new URL(req.url || '/', 'http://remote.invalid'), (action, target, detail) => { noted = { action, ...(target ? { target } : {}), ...(detail ? { detail } : {}) }; });
+        if (noted) audit?.record({ controllerId: principal.controllerId, ...noted });
       } catch (error) {
         const status = errorStatus(error);
         const disposition = errorDisposition(error);

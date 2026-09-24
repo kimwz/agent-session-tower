@@ -69,3 +69,16 @@
 /* With a computer filter, the computer and folder filters each get a full row. */
 .sidebar-selects:has(label + label) { flex-wrap: wrap; row-gap: 2px; }
 .sidebar-selects:has(label + label) label { flex: 1 1 100%; }
+.remote-anchor { position: relative; display: inline-flex; }
+.remote-join-notice { position: absolute; top: calc(100% + 8px); right: 0; z-index: 30; display: grid; gap: 8px; width: 260px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); box-shadow: 0 12px 28px #0007; font-size: 12.5px; color: var(--text); }
+.remote-join-notice p { margin: 0; line-height: 1.5; }
+.remote-join-notice div { display: flex; justify-content: flex-end; gap: 6px; }
+.remote-changes { display: grid; gap: 8px; margin-top: 18px; }
+.remote-changes h3 { margin: 0; font-size: 13px; color: var(--bright); }
+.remote-changes ol { display: grid; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.remote-changes li { display: grid; grid-template-columns: minmax(120px, auto) minmax(0, 1fr) auto; align-items: baseline; gap: 10px; padding: 6px 8px; border-radius: 6px; font-size: 12px; }
+.remote-changes li:nth-child(odd) { background: color-mix(in srgb, var(--line) 35%, transparent); }
+.remote-change-target { min-width: 0; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
+.remote-changes small { color: var(--muted); white-space: nowrap; }
+.remote-changes .secondary-button { justify-self: start; }
+@media (max-width: 680px) { .remote-changes li { grid-template-columns: minmax(0, 1fr); gap: 2px; } }

@@ -43,6 +43,16 @@ export interface LinkOverview {
   /** Saved link state that could not be read; nothing is changed until the owner deals with it. */
   errors?: string[];
 }
+/** A change a controlling computer made on this one, as this computer's owner reads it. */
+export type RemoteAction = 'joined' | 'session' | 'message' | 'title' | 'close' | 'reopen' | 'approval' | 'steer' | 'cancel' | 'dismiss' | 'auto-prompt' | 'auto-prompt-cancel'
+  | 'repository' | 'folder-name' | 'file' | 'directory' | 'terminal-open' | 'terminal-close' | 'trigger';
+export interface RemoteChange {
+  at: string; controllerId: string; action: RemoteAction;
+  /** What it touched: a conversation's title, a folder or file path, a trigger's name. Never content. */
+  target?: string;
+  /** For a repository: pull, push or refresh; for a trigger: the operation. */
+  detail?: string;
+}
 export interface LinkInvite { id: string; code: string; command: string; expiresAt: number }
 /** A joined computer as this Tower's own page shows it, beside its shared snapshot. */
 export interface RemoteNode {

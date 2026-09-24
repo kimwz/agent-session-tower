@@ -271,6 +271,8 @@ export interface Snapshot {
   runnerUpdate?: 'automatic' | 'manual';
   /** Names of the other Towers controlling this computer right now. */
   controlledBy?: string[];
+  /** The latest computer that started controlling this one, for a notice here. */
+  controllerJoined?: { name: string; at: string };
   /** Computers joined to this Tower; each one's own snapshot arrives on the same event stream. */
   nodes?: RemoteNode[];
 }

@@ -66,7 +66,8 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     },
     ...(options.repositories ? { repositoryAction: async (cwd: string, action: string) => { calls.push({ method: 'repositoryAction', args: [cwd, action] }); return repository(cwd); } } : {}),
   };
-  const router = createRemoteRouter({ backend, exclusions });
+  const changes: unknown[] = [];
+  const router = createRemoteRouter({ backend, exclusions, audit: { record: change => changes.push(change) } });
   const server = createServer((req, res) => { void router.handle(req, res, { controllerId: CONTROLLER }); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -78,7 +79,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     let json: any; try { json = JSON.parse(text); } catch { json = undefined; }
     return { status: response.status, json, text, headers: response.headers };
   };
-  return { root, open, secret, exclusions, calls, listeners, base, call, secretSession: sessions[1], setCoordinators: (value: string[] | null) => { coordinatorIds = value; } };
+  return { root, open, secret, exclusions, calls, changes, listeners, base, call, secretSession: sessions[1], setCoordinators: (value: string[] | null) => { coordinatorIds = value; } };
 }
 
 test('a remote controller reads sessions, conversations and attachments only outside excluded folders', async t => {
@@ -143,6 +144,17 @@ test('a controlling computer uses this computer’s trigger operations as itself
   assert.deepEqual([refused.status, refused.json], [409, { error: 'GitHub coordinator triggers are created, changed and run on that computer itself.' }], 'its refusal is told as such, not as a refused link');
   const broken = await f.call('/api/v1/triggers.get', { body: { id: '/private/path' } });
   assert.deepEqual([broken.status, broken.json], [500, { error: '요청을 처리하지 못했습니다.' }], 'an unexpected failure is not described');
+});
+
+test('each change a controlling computer makes is recorded for this computer’s owner, and nothing refused or read', async t => {
+  const f = await fixture(t);
+  await f.call('/api/snapshot');
+  assert.equal((await f.call('/api/sessions', { body: { provider: 'codex', cwd: f.secret, prompt: 'no' }, headers: { 'x-tower-request-id': REQUEST_ID } })).status, 404);
+  assert.deepEqual(f.changes, [], 'reading and refused changes leave no record');
+  assert.equal((await f.call('/api/sessions', { body: { provider: 'codex', cwd: f.open, prompt: 'Look into the parser' }, headers: { 'x-tower-request-id': REQUEST_ID } })).status, 202);
+  assert.equal((await f.call('/api/groups', { body: { cwd: f.open, title: 'Parser' } })).status, 200);
+  assert.deepEqual(f.changes, [{ controllerId: CONTROLLER, action: 'session', target: f.open }, { controllerId: CONTROLLER, action: 'folder-name', target: f.open }]);
+  assert.ok(!JSON.stringify(f.changes).includes('Look into the parser'), 'what was asked is not kept, only that a session started there');
 });
 
 test('local management and routes not listed for remote controllers do not exist for them', async t => {

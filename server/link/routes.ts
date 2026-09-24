@@ -4,6 +4,7 @@ import type { RemoteExclusionStore } from '../remote/exclusions.js';
 import type { ControllerLinks } from './controller.js';
 import type { NodeLinks } from './node.js';
 import type { LinkIdentity } from './identity.js';
+import type { RemoteAudit } from '../remote/audit.js';
 
 export interface LinkRoutes {
   identity: LinkIdentity;
@@ -11,6 +12,8 @@ export interface LinkRoutes {
   controller: ControllerLinks;
   node: NodeLinks;
   exclusions: RemoteExclusionStore;
+  /** What controlling computers changed here. */
+  changes?: RemoteAudit;
 }
 
 /**
@@ -29,6 +32,12 @@ export async function handleLinkRoute(req: IncomingMessage, res: ServerResponse,
     ...(links.controller.error || links.node.error ? { errors: [links.controller.error, links.node.error].filter((item): item is string => Boolean(item)) } : {}),
   });
   if (req.method === 'GET' && path === '/api/link') { json(res, 200, overview()); return true; }
+  if (req.method === 'GET' && path === '/api/link/changes') {
+    // Named as this computer knows its controllers now; one removed since keeps the name it was last shown with.
+    const names = new Map(links.node.list().map(item => [item.id, item.name]));
+    json(res, 200, { changes: (links.changes?.list() ?? []).map(change => ({ ...change, ...(names.has(change.controllerId) ? { controller: names.get(change.controllerId) } : {}) })) });
+    return true;
+  }
   if (req.method !== 'POST') return false;
   const body = await readJson(req, 16 * 1024);
   const only = (...keys: string[]) => Object.keys(body).every(key => keys.includes(key));

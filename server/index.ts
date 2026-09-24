@@ -35,6 +35,7 @@ import { ControllerLinks } from './link/controller.js';
 import { NodeLinks } from './link/node.js';
 import { runLinkCommand } from './link/cli.js';
 import { RemoteNodes } from './link/nodes.js';
+import { RemoteAudit } from './remote/audit.js';
 import { NodeViewStore } from './link/views.js';
 import { newerVersion } from './link/service.js';
 import { diskFree, handoffHeld, heldWorkerEntry, managedByService, runUpdateHelper, serviceSteps, Updates } from './link/update.js';
@@ -183,6 +184,7 @@ async function main() {
     onChange: changed,
   });
   let controlledBy = (): string[] => [];
+  let controllerJoined = (): { name: string; at: string } | undefined => undefined;
   let remoteNodes: RemoteNodes | undefined;
   const snapshot = (): Snapshot => {
     const all = runs.sessionList();
@@ -200,6 +202,7 @@ async function main() {
       // Only an older worker is waiting to be replaced; a newer one left by an update that was undone stays as it is.
       ...(runs.runnerVersion() && (runs.runnerVersion() === 'legacy' || newerVersion(APP_VERSION, runs.runnerVersion()!)) ? { runnerUpdate: runs.supports('handoff') ? 'automatic' as const : 'manual' as const } : {}),
       ...(controllers.length ? { controlledBy: controllers } : {}),
+      ...(controllerJoined() ? { controllerJoined: controllerJoined() } : {}),
       ...(remoteNodes?.ready ? { nodes } : {}),
       updatedAt: new Date().toISOString(),
     };
@@ -259,7 +262,10 @@ async function main() {
     return undefined;
   });
   const workspaceTerminals = new TerminalHostClient({ stateDir, legacy: runs.terminals });
-  const remoteRouter = createRemoteRouter({ backend, exclusions, terminals: workspaceTerminals });
+  // What controlling computers change here is kept for this computer's owner to read.
+  const remoteChanges = new RemoteAudit(stateDir);
+  await remoteChanges.start();
+  const remoteRouter = createRemoteRouter({ backend, exclusions, terminals: workspaceTerminals, audit: remoteChanges });
   const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname });
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
@@ -279,6 +285,12 @@ async function main() {
     nodeLinks.on('disconnected', (controllerId: string) => remoteRouter.disconnect(controllerId));
     controlledBy = () => nodeLinks.list().filter(item => item.status === 'connected').map(item => item.name);
     nodeLinks.on('change', changed);
+    nodeLinks.on('paired', (controllerId: string) => { remoteChanges.record({ controllerId, action: 'joined' }); changed(); });
+    controllerJoined = () => {
+      const joined = remoteChanges.lastJoin();
+      const name = joined && nodeLinks.list().find(item => item.id === joined.controllerId)?.name;
+      return joined && name ? { name, at: joined.at } : undefined;
+    };
   }
   const nodeViews = new NodeViewStore(stateDir);
   await nodeViews.start().catch(error => console.error(`Remote folder views were not loaded: ${error instanceof Error ? error.message : String(error)}`));
@@ -287,7 +299,7 @@ async function main() {
     remoteNodes.on('summary', changed);
   }
   const { server, dispose } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes,
-    auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions } : { error: linkError },
+    auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges } : { error: linkError },
     workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined });
   await new Promise<void>((accept, reject) => {
     server.once('error', reject);
@@ -332,7 +344,7 @@ async function main() {
     dispose();
     server.closeAllConnections();
     server.close();
-    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), runs.close()]); } finally { await releaseLock(); }
+    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), runs.close()]); } finally { await releaseLock(); }
   };
   const onSignal = () => { void shutdown().catch(error => { console.error(`Agent Session Tower shutdown: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }); };
   process.once('SIGINT', onSignal);
