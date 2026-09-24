@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.30.1] - 2026-09-24
+
+### Fixed
+- Auto Prompt failed on every request on computers with Claude Code 2.1.281 or later, reporting "Claude Code returned an unsupported routing event (system/commands_changed)". Newer Claude Code reports status lines during a turn: the slash commands available, whether it is waiting on the model, whether the turn is running, short notices, and a heartbeat. Auto Prompt now accepts these while it chooses a conversation. None of them runs anything or adds to what the model reads. Anything else it does not recognize still stops the choice, as before, and so does a turn that starts compacting its context.
+
 ## [1.30.0] - 2026-09-24
 
 ### Added
