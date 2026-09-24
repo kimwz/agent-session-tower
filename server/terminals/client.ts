@@ -110,7 +110,14 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
     } finally { await file.close(); }
   }
 
-  private async call(method: string, args: unknown[] = []): Promise<unknown> {
+  /** The running host's version, without starting one; undefined when none runs. */
+  async hostVersion(): Promise<string | undefined> {
+    try { return (await this.exchange('ping')).version; } catch { return undefined; }
+  }
+
+  private async call(method: string, args: unknown[] = []): Promise<unknown> { return (await this.exchange(method, args)).result; }
+
+  private async exchange(method: string, args: unknown[] = []): Promise<TerminalHostReply> {
     const token = await this.credential();
     const paths = await this.hostPaths();
     const body = JSON.stringify({ protocol: RUNNER_PROTOCOL, method, args });
@@ -130,7 +137,7 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
     });
     if (reply.protocol !== RUNNER_PROTOCOL || reply.stateDir !== paths.stateDir) throw failure('The terminal host is incompatible.', 503);
     if (reply.error) throw failure(reply.error.message, reply.error.statusCode);
-    return reply.result;
+    return reply;
   }
 
   private async pipe(id: string, response: ServerResponse, cursor?: string): Promise<void> {

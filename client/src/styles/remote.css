@@ -30,6 +30,9 @@
 .remote-row .slack-rule-text { flex: 1; min-width: 0; display: grid; gap: 2px; }
 .remote-row .slack-rule-text strong { font-size: 13px; color: var(--bright); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .remote-row .slack-rule-text small { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+.remote-update { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 2px 0 0; font-size: 11.5px; color: var(--text); }
+.remote-update.failed { color: var(--amber); }
+.remote-update .secondary-button { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; font-size: 11px; }
 .remote-row > svg { flex: none; color: var(--muted); }
 .remote-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--subtle); }
 .remote-dot.connected { background: var(--teal); box-shadow: 0 0 0 3px #88d5c422; }
@@ -56,6 +59,7 @@
 .host-node .host-link i { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
 .host-node .host-link.connected.live i { background: var(--teal); }
 .host-node .host-link.update-required i, .host-node .host-link.removed-by-node i { background: var(--amber); }
+.host-node .host-link.updating i { background: var(--amber); animation: blink 1.4s infinite; }
 .host-with-usage.is-stale { opacity: .75; }
 .manual-project-lane.is-stale, .agent-card.is-stale { opacity: .55; }
 .session-row-machine { flex: none; max-width: 96px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 10px; }

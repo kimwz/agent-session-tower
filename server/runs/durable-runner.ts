@@ -17,6 +17,8 @@ import { APP_VERSION } from '../../shared/app-identity.js';
 interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number; version?: string;
   /** How long a handed-off worker's successor may stay silent before this web starts a worker itself. */
   successorTimeoutMs?: number;
+  /** While an update of this computer is being tried, the worker is not handed over to this web's build. */
+  handoffHeld?: () => Promise<boolean>;
   spawn?: (command: { execPath: string; args: string[] }) => void }
 
 /** A disposable UI connection. Only the independent worker owns provider lifetimes. */
@@ -29,6 +31,8 @@ export class DurableRunManager extends EventEmitter {
   private timer?: ReturnType<typeof setInterval>;
   private polling = false;
   private closed = false;
+  /** A handoff this build asks for once the update that started it is kept. */
+  private handoffDue = false;
   private terminalStreams = new Set<ClientRequest>();
   readonly terminals: WorkspaceTerminalBackend = {
     create: async (cwd, cols, rows) => this.call('terminalCreate', [cwd, cols, rows]) as Promise<{ id: string }>,
@@ -54,7 +58,8 @@ export class DurableRunManager extends EventEmitter {
       void this.poll().finally(() => { this.polling = false; });
     }, this.options.pollMs ?? 1000);
     this.timer.unref();
-    await this.requestHandoff().catch(() => {});
+    if (await this.options.handoffHeld?.().catch(() => false)) this.handoffDue = true;
+    else await this.requestHandoff().catch(() => {});
   }
 
   /** The command for this build's worker; an outdated worker starts it itself when it hands off. */
@@ -95,7 +100,7 @@ export class DurableRunManager extends EventEmitter {
   }
 
   private async poll(): Promise<void> {
-    try { await this.call('snapshot'); this.unreachableSince = undefined; this.recovery = undefined; return; }
+    try { await this.call('snapshot'); this.unreachableSince = undefined; this.recovery = undefined; await this.releaseHandoff(); return; }
     catch (error) {
       if ((error as { incompatible?: boolean }).incompatible || (error as { statusCode?: number }).statusCode !== 503) return;
     }
@@ -111,6 +116,12 @@ export class DurableRunManager extends EventEmitter {
     if (Date.now() < recovery.nextAt) return;
     try { await this.spawnWorker(); this.recovery = undefined; this.unreachableSince = undefined; }
     catch { recovery.nextAt = Date.now() + recovery.delay; recovery.delay = Math.min(recovery.delay * 2, 60_000); }
+  }
+
+  private async releaseHandoff(): Promise<void> {
+    if (!this.handoffDue || await this.options.handoffHeld?.().catch(() => false)) return;
+    this.handoffDue = false;
+    await this.requestHandoff().catch(() => { this.handoffDue = true; });
   }
 
   private async handoffFrom(instance: string) {

@@ -9,7 +9,7 @@ import { readJson } from '../http/requests.js';
 import { displayFingerprint, linkDirectory, linkId, type LinkIdentity } from './identity.js';
 import { decodeJoinCode } from './join-code.js';
 import { LINK_PROTOCOL, MAX_FRAME_BYTES, REMOVED_CLOSE_CODE, openNodeEnd, pairingProof } from './transport.js';
-import type { ControllerStatus, ControllerSummary } from '../../shared/link.js';
+import type { ControllerStatus, ControllerSummary, NodeReport } from '../../shared/link.js';
 
 const CLAIM_GRACE_MS = 10 * 60_000;
 const RETRY_MIN_MS = 1000;
@@ -37,6 +37,11 @@ export interface NodeLinkOptions {
   features: () => string[];
   /** Serves a paired controller's requests. */
   handle: (req: Http2ServerRequest, res: Http2ServerResponse, principal: { controllerId: string }) => void | Promise<void>;
+  /** A controller asking this computer to move to a newer version, and what it reports about itself. */
+  update?: {
+    request(version: unknown): Promise<{ status: number; body: unknown }>;
+    report(): Promise<NodeReport>;
+  };
   now?: () => number;
   pingMs?: number;
 }
@@ -279,6 +284,13 @@ export class NodeLinks extends EventEmitter {
         return;
       }
       if (record.state !== 'paired') return json(404, { error: 'Not found.' });
+      // Controllers are the owner's own computers: keeping this one up to date is theirs to ask for.
+      if (req.method === 'GET' && req.url === '/link/status' && this.options.update) return json(200, await this.options.update.report());
+      if (req.method === 'POST' && req.url === '/link/update' && this.options.update) {
+        const body = await readJson(req, 4096);
+        const answer = await this.options.update.request(body.version);
+        return json(answer.status, answer.body);
+      }
       await this.options.handle(req, res, { controllerId: id });
     } catch {
       if (!res.headersSent) json(500, { error: 'The request failed.' }); else res.end();

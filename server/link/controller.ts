@@ -10,7 +10,9 @@ import { displayFingerprint, linkDirectory, linkId, type LinkIdentity } from './
 import { joinCommand, encodeJoinCode, type JoinCode } from './join-code.js';
 import { LINK_PATH, LINK_PROTOCOL, MAX_FRAME_BYTES, REMOVED_CLOSE_CODE, linkRequest, openControllerEnd, pairingProof, proofMatches } from './transport.js';
 import { advertisedAddresses } from './addresses.js';
-import type { HubStatus, NodeStatus, NodeSummary } from '../../shared/link.js';
+import type { HubStatus, NodeReport, NodeStatus, NodeSummary, UpdateStatus } from '../../shared/link.js';
+import { newerVersion } from './service.js';
+import { updateActive } from './update.js';
 
 export const DEFAULT_LINK_PORT = 8765;
 const INVITE_MS = 10 * 60_000;
@@ -25,6 +27,10 @@ const ATTEMPTS_PER_MINUTE = 30;
 const PING_MS = 20_000;
 /** A joined computer's worker can be replaced by a newer one; what it can do is asked again this often. */
 const HELLO_REFRESH_MS = 60_000;
+/** While a joined computer updates itself, how far it got is asked this often. */
+const UPDATE_POLL_MS = 5_000;
+/** An update last heard of this long ago, on a computer that is away, is no longer known to be going on. */
+const UPDATE_QUIET_MS = 10 * 60_000;
 
 export interface HubSettings { enabled: boolean; port: number; bind: string; custom: string[] }
 interface NodeRecord {
@@ -38,7 +44,7 @@ interface InviteRecord { id: string; secret: string; expiresAt: number; claimedB
 interface State { version: 1; settings: HubSettings; nodes: NodeRecord[]; removed: Array<{ pin: string; at: string }>; invites: InviteRecord[] }
 
 interface Hello { protocol: number; name: string; version: string; features: string[]; pairing?: { inviteId: string; proof: string } }
-interface Connected { session: ClientHttp2Session; ws: WebSocket; hello: Hello; ping?: ReturnType<typeof setInterval>; refresh?: ReturnType<typeof setInterval>; gone?: () => void }
+interface Connected { session: ClientHttp2Session; ws: WebSocket; hello: Hello; ping?: ReturnType<typeof setInterval>; refresh?: ReturnType<typeof setInterval>; watch?: ReturnType<typeof setTimeout>; gone?: () => void }
 
 /**
  * This computer as a controller: it opens the link port, hands out join codes, and keeps one authenticated
@@ -50,6 +56,9 @@ export class ControllerLinks extends EventEmitter {
   private listener?: { server: Server; wss: WebSocketServer; port: number };
   private listenError?: string;
   private readonly connected = new Map<string, Connected>();
+  /** What each joined computer last reported, and when; kept while it restarts into a new version. */
+  private readonly reports = new Map<string, NodeReport>();
+  private readonly reportedAt = new Map<string, number>();
   private unauthenticated = 0;
   private readonly unauthenticatedFrom = new Map<string, number>();
   /** Set when the saved state could not be read: nothing is saved over it until the owner looks. */
@@ -59,7 +68,7 @@ export class ControllerLinks extends EventEmitter {
   private closed = false;
   private loaded = false;
 
-  constructor(private readonly options: { stateDir: string; identity: LinkIdentity; version: string; hostname: () => string; now?: () => number; pingMs?: number; refreshMs?: number }) {
+  constructor(private readonly options: { stateDir: string; identity: LinkIdentity; version: string; hostname: () => string; now?: () => number; pingMs?: number; refreshMs?: number; updatePollMs?: number }) {
     super();
     this.path = join(linkDirectory(options.stateDir), 'controller.json');
   }
@@ -87,6 +96,8 @@ export class ControllerLinks extends EventEmitter {
   get error(): string | undefined { return this.broken; }
   /** The saved computers are loaded: the list is the complete one. */
   get ready(): boolean { return this.loaded; }
+  /** The version joined computers are asked to move to. */
+  get version(): string { return this.options.version; }
 
   hub(): HubStatus {
     const { enabled } = this.state.settings;
@@ -123,8 +134,27 @@ export class ControllerLinks extends EventEmitter {
       const status: NodeStatus = live ? (live.hello.protocol === LINK_PROTOCOL ? 'connected' : 'update-required') : node.left ? 'removed-by-node' : 'offline';
       return { id: node.id, name: live?.hello.name ?? node.name, ...(node.label ? { label: node.label } : {}), fingerprint: displayFingerprint(node.pin), status,
         ...(live?.hello.version ?? node.version ? { version: live?.hello.version ?? node.version } : {}), features: live?.hello.features ?? [],
-        pairedAt: node.pairedAt, ...(node.lastSeenAt ? { lastSeenAt: node.lastSeenAt } : {}), ...(node.invite ? { invite: node.invite } : {}) };
+        pairedAt: node.pairedAt, ...(node.lastSeenAt ? { lastSeenAt: node.lastSeenAt } : {}), ...(node.invite ? { invite: node.invite } : {}),
+        ...(this.reports.has(node.id) ? { report: this.shownReport(node.id, Boolean(live)) } : {}) };
     });
+  }
+
+  private shownReport(id: string, live: boolean): NodeReport {
+    const report = this.reports.get(id)!;
+    if (live || !updateActive(report.update) || this.now() - (this.reportedAt.get(id) ?? 0) < UPDATE_QUIET_MS) return report;
+    const { update: _, ...rest } = report;
+    return rest;
+  }
+
+  /** The owner asks a joined computer to move to this Tower's version, for example again after a failed update. */
+  async update(id: string): Promise<void> {
+    const live = this.connected.get(id);
+    if (!live) throw Object.assign(new Error('그 컴퓨터가 연결되어 있지 않습니다. 연결되면 다시 시도하세요.'), { statusCode: 409 });
+    if (!live.hello.features.includes('update')) throw Object.assign(new Error('그 컴퓨터는 Tower를 백그라운드 서비스로 실행하지 않아 여기서 업데이트할 수 없습니다.'), { statusCode: 409 });
+    const code = await this.askUpdate(id, live);
+    if (code === 'busy') throw Object.assign(new Error('그 컴퓨터가 다른 버전으로 업데이트하는 중입니다. 끝난 뒤 다시 시도하세요.'), { statusCode: 409 });
+    if (code) throw Object.assign(new Error('그 컴퓨터가 업데이트 요청을 받지 않았습니다.'), { statusCode: 502 });
+    this.watch(id, live);
   }
 
   /** The live session to a joined computer, for requests on the owner's behalf. */
@@ -145,6 +175,8 @@ export class ControllerLinks extends EventEmitter {
     const node = this.state.nodes.find(item => item.id === id);
     if (!node) return;
     // Its claimed invitation goes too, so it cannot finish joining again with the old code.
+    this.reports.delete(id);
+    this.reportedAt.delete(id);
     await this.save({ ...this.state, nodes: this.state.nodes.filter(item => item.id !== id), invites: this.state.invites.filter(item => item.claimedBy !== node.pin),
       removed: [...this.state.removed.filter(item => item.pin !== node.pin), { pin: node.pin, at: new Date(this.now()).toISOString() }].slice(-200) });
     const live = this.connected.get(id);
@@ -294,6 +326,7 @@ export class ControllerLinks extends EventEmitter {
       if (this.connected.get(node.id) !== live) return;
       clearInterval(live.ping);
       clearInterval(live.refresh);
+      clearTimeout(live.watch);
       this.connected.delete(node.id);
       live.session.destroy();
       live.ws.terminate();
@@ -318,6 +351,7 @@ export class ControllerLinks extends EventEmitter {
         const changed = JSON.stringify([current.name, current.version, current.features, current.protocol]) !== JSON.stringify([live.hello.name, live.hello.version, live.hello.features, live.hello.protocol]);
         live.hello = current;
         if (changed) { void this.touch(node.id, current.version, false); this.emit('change'); }
+        void this.follow(node.id, live);
       }).catch(() => {});
     }, this.options.refreshMs ?? HELLO_REFRESH_MS);
     live.ws.once('close', code => gone(code));
@@ -325,6 +359,45 @@ export class ControllerLinks extends EventEmitter {
     void this.touch(node.id, live.hello.version, false);
     this.emit('change');
     this.emit('connected', node.id);
+    void this.follow(node.id, live);
+  }
+
+  /**
+   * Reads what a joined computer reports about itself and, when it runs an older version as the background service,
+   * asks it to move to this one. An update that failed for this version is asked for again only by the owner.
+   */
+  private async follow(id: string, live: Connected): Promise<void> {
+    if (!live.hello.features.includes('status')) return;
+    const answer = await linkRequest(live.session, 'GET', '/link/status', undefined, HELLO_MS).catch(() => undefined);
+    const report = answer?.status === 200 ? parseReport(answer.json) : undefined;
+    if (!report || this.connected.get(id) !== live) return;
+    this.report(id, report);
+    const failed = report.update?.stage === 'failed' && report.update.version === this.options.version;
+    if (live.hello.features.includes('update') && newerVersion(this.options.version, report.versions.web) && !updateActive(report.update) && !failed) await this.askUpdate(id, live);
+    this.watch(id, live);
+  }
+
+  private watch(id: string, live: Connected): void {
+    clearTimeout(live.watch);
+    if (this.connected.get(id) === live && updateActive(this.reports.get(id)?.update)) live.watch = setTimeout(() => { void this.follow(id, live); }, this.options.updatePollMs ?? UPDATE_POLL_MS);
+  }
+
+  /** Asks for this Tower's version; resolves to the refusal's code, if it was refused. */
+  private async askUpdate(id: string, live: Connected): Promise<string | undefined> {
+    const answer = await linkRequest(live.session, 'POST', '/link/update', { version: this.options.version }, HELLO_MS).catch(() => undefined);
+    const body = answer?.json as { update?: unknown; code?: unknown } | undefined;
+    const update = parseUpdate(body?.update);
+    const known = this.reports.get(id);
+    if (update && known) this.report(id, { ...known, update });
+    if (!answer) return 'unanswered';
+    return answer.status >= 400 ? typeof body?.code === 'string' ? body.code : 'refused' : undefined;
+  }
+
+  private report(id: string, report: NodeReport): void {
+    this.reportedAt.set(id, this.now());
+    if (JSON.stringify(this.reports.get(id)) === JSON.stringify(report)) return;
+    this.reports.set(id, report);
+    this.emit('change');
   }
 
   private disconnect(id: string): void {
@@ -333,6 +406,7 @@ export class ControllerLinks extends EventEmitter {
     this.connected.delete(id);
     clearInterval(live.ping);
     clearInterval(live.refresh);
+    clearTimeout(live.watch);
     live.session.destroy();
     live.ws.terminate();
   }
@@ -356,6 +430,29 @@ export class ControllerLinks extends EventEmitter {
     this.writes = write.catch(() => {});
     return write;
   }
+}
+
+const STAGES = new Set(['installing', 'checking', 'switching', 'verifying', 'rolling-back', 'done', 'failed']);
+const FAILURES = new Set(['install-failed', 'check-failed', 'switch-failed', 'start-failed', 'link-failed', 'rollback-failed', 'interrupted']);
+const RELEASE = /^\d+\.\d+\.\d+$/;
+const text = (value: unknown, pattern = /^[\w.:-]{1,40}$/) => typeof value === 'string' && pattern.test(value) ? value : undefined;
+
+/** Only the facts a report is made of get through; nothing a joined computer sends is shown as it came. */
+function parseUpdate(value: unknown): UpdateStatus | undefined {
+  const update = value as Partial<UpdateStatus> | undefined;
+  if (!update || typeof update !== 'object' || !text(update.version, RELEASE) || !text(update.previous) || !STAGES.has(update.stage as string)) return undefined;
+  const at = (item: unknown) => typeof item === 'string' && !Number.isNaN(Date.parse(item)) ? new Date(item).toISOString() : undefined;
+  return { version: update.version!, previous: update.previous!, stage: update.stage!, startedAt: at(update.startedAt) ?? new Date(0).toISOString(), updatedAt: at(update.updatedAt) ?? new Date(0).toISOString(),
+    ...(FAILURES.has(update.code as string) ? { code: update.code } : {}), ...(STAGES.has(update.failedStage as string) ? { failedStage: update.failedStage } : {}) };
+}
+function parseReport(value: unknown): NodeReport | undefined {
+  const report = value as Partial<NodeReport> | undefined;
+  const web = text(report?.versions?.web);
+  if (!report || !web || typeof report.service !== 'boolean') return undefined;
+  const worker = text(report.versions?.worker);
+  const update = parseUpdate(report.update);
+  return { versions: { web, ...(worker ? { worker } : {}) }, service: report.service, ...(update ? { update } : {}),
+    ...(typeof report.diskFree === 'number' && Number.isFinite(report.diskFree) && report.diskFree >= 0 ? { diskFree: report.diskFree } : {}) };
 }
 
 function parseHello(value: unknown): Hello | undefined {

@@ -21,7 +21,7 @@ export async function handleLinkRoute(req: IncomingMessage, res: ServerResponse,
   if (!path.startsWith('/api/link')) return false;
   if ('error' in links) { json(res, 503, { error: links.error }); return true; }
   const overview = () => ({
-    identity: { name: links.hostname(), fingerprint: links.identity.fingerprint },
+    identity: { name: links.hostname(), fingerprint: links.identity.fingerprint, version: links.controller.version },
     hub: links.controller.hub(),
     nodes: links.controller.list(),
     controllers: links.node.list(),
@@ -48,9 +48,11 @@ export async function handleLinkRoute(req: IncomingMessage, res: ServerResponse,
     await links.node.join(body.code);
     json(res, 200, overview()); return true;
   }
-  const node = path.match(/^\/api\/link\/nodes\/([a-f0-9]{32})(\/remove)?$/);
+  const node = path.match(/^\/api\/link\/nodes\/([a-f0-9]{32})(\/remove|\/update)?$/);
   if (node) {
-    if (node[2]) { if (!only()) { json(res, 400, { error: '요청 본문은 비워 두세요.' }); return true; } await links.controller.remove(node[1]); }
+    if (node[2] && !only()) { json(res, 400, { error: '요청 본문은 비워 두세요.' }); return true; }
+    if (node[2] === '/remove') await links.controller.remove(node[1]);
+    else if (node[2] === '/update') await links.controller.update(node[1]);
     else { if (!only('label') || typeof body.label !== 'string') { json(res, 400, { error: '표시 이름을 입력하세요.' }); return true; } await links.controller.rename(node[1], body.label); }
     json(res, 200, overview()); return true;
   }

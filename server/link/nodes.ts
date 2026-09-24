@@ -4,6 +4,7 @@ import type { ProjectGroup, Snapshot } from '../../shared/types.js';
 import type { RemoteNode } from '../../shared/link.js';
 import type { ControllerLinks } from './controller.js';
 import { NodeMirrors } from './mirror.js';
+import { updateActive } from './update.js';
 import type { NodeViewStore } from './views.js';
 
 /**
@@ -26,7 +27,7 @@ export class RemoteNodes extends EventEmitter {
   list(): RemoteNode[] {
     return this.links.list().map(node => ({ id: node.id, name: node.name, ...(node.label ? { label: node.label } : {}), status: node.status,
       ...(node.version ? { version: node.version } : {}), features: node.features, ...(node.lastSeenAt ? { lastSeenAt: node.lastSeenAt } : {}),
-      streaming: node.status === 'connected' && this.mirrors.live(node.id) }));
+      streaming: node.status === 'connected' && this.mirrors.live(node.id), ...(updateActive(node.report?.update) ? { updating: true } : {}) }));
   }
 
   /** Computers with a shared state to show. */

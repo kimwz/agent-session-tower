@@ -426,6 +426,22 @@ test('an outdated worker hands off only when nothing is running, and the web fol
   assert.equal(after.origin?.kind, 'owner');
 });
 
+test('while an update of this computer is being tried, the new web does not take the worker over', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let handoffs = 0;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {} });
+  t.after(() => host.close());
+  let held = true;
+  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => held });
+  t.after(() => client.close());
+  await client.start();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(handoffs, 0, 'going back to the previous version must still find the previous worker');
+  held = false;
+  await until(() => handoffs === 1);
+});
+
 test('requests that arrive while the worker hands off are refused, never half-accepted', async t => {
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();

@@ -74,6 +74,10 @@ export function newerVersion(a: string, b: string): boolean {
 export async function useVersion(stateDir: string, version: string): Promise<void> {
   const current = await currentVersion(stateDir);
   if (current && newerVersion(current, version)) return;
+  await pointCurrent(stateDir, version);
+}
+/** Points `current` at an installed version atomically, older or not; only an update going back uses that. */
+export async function pointCurrent(stateDir: string, version: string): Promise<void> {
   const paths = runtimePaths(stateDir);
   const temporary = `${paths.current}.${process.pid}`;
   await rm(temporary, { force: true });

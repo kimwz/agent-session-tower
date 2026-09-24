@@ -17,6 +17,8 @@ export interface Host {
   workspace: boolean;
   /** It reports what it can do; until its worker answers it reports nothing. */
   reporting?: boolean;
+  /** It is moving to this Tower's version; while it restarts it is away, and it comes back by itself. */
+  updating?: boolean;
   /** Some state of it is known to this page, even if out of date. */
   known: boolean;
   version?: string;
@@ -27,12 +29,12 @@ export interface Host {
 const scoped = new Map<string, { raw: Snapshot; named: Snapshot }>();
 
 /** Where a computer stands for this page: what it shows and whether work can be sent to it. */
-export type HostState = 'here' | 'ready' | 'loading' | 'read-only' | 'offline' | 'update-required' | 'removed-by-node';
+export type HostState = 'here' | 'ready' | 'loading' | 'read-only' | 'offline' | 'updating' | 'update-required' | 'removed-by-node';
 export function hostState(host: Host): HostState {
   if (!host.node) return 'here';
   if (host.status === 'update-required') return 'update-required';
   if (host.status === 'removed-by-node') return 'removed-by-node';
-  if (host.status !== 'connected') return 'offline';
+  if (host.status !== 'connected') return host.updating ? 'updating' : 'offline';
   if (!host.live) return 'loading';
   return host.canWork ? 'ready' : 'read-only';
 }
@@ -41,6 +43,7 @@ export function hostProblem(host: Host): string | undefined {
   const name = host.name;
   switch (hostState(host)) {
     case 'offline': return t('{0}이(가) 오프라인입니다. 다시 연결되면 이어서 할 수 있습니다.', { 0: name });
+    case 'updating': return t('{0}이(가) 새 버전으로 다시 시작하는 중입니다. 곧 다시 연결됩니다.', { 0: name });
     case 'loading': return t('{0}의 상태를 불러오는 중입니다.', { 0: name });
     case 'read-only': return t('{0}의 Tower를 업데이트하면 작업을 보낼 수 있습니다.', { 0: name });
     case 'update-required': return t('{0}의 Tower 버전이 이 컴퓨터와 맞지 않습니다. 두 컴퓨터를 같은 버전으로 업데이트하세요.', { 0: name });
@@ -79,7 +82,7 @@ export function combinedView(local: Snapshot | null, nodes: ReadonlyMap<string, 
   if (!listed.length) return { view: local, hosts: [here], complete };
   const parts = listed.flatMap(node => { const snapshot = nodes.get(node.id); return snapshot ? [named(node.id, snapshot)] : []; });
   const hosts = [here, ...listed.map((node): Host => ({ node: node.id, name: node.label || node.name, status: node.status, live: node.status === 'connected' && node.streaming,
-    canWork: node.status === 'connected' && node.streaming && node.features.includes('work'), workspace: node.status === 'connected' && node.features.includes('workspace'), ...(node.features.includes('read') ? { reporting: true } : {}), known: Boolean(nodes.get(node.id)) && !nodes.get(node.id)!.scanning, ...(node.version ? { version: node.version } : {}), providers: nodes.get(node.id)?.providers ?? [] }))];
+    canWork: node.status === 'connected' && node.streaming && node.features.includes('work'), workspace: node.status === 'connected' && node.features.includes('workspace'), ...(node.features.includes('read') ? { reporting: true } : {}), known: Boolean(nodes.get(node.id)) && !nodes.get(node.id)!.scanning, ...(node.updating ? { updating: true } : {}), ...(node.version ? { version: node.version } : {}), providers: nodes.get(node.id)?.providers ?? [] }))];
   return { hosts, complete, view: { ...local,
     sessions: [...local.sessions, ...parts.flatMap(part => part.sessions)],
     runs: [...local.runs, ...parts.flatMap(part => part.runs)],

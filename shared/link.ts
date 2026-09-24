@@ -2,12 +2,30 @@
 export interface LinkAddress { url: string; kind: 'custom' | 'tailscale' | 'local-name' | 'lan' }
 export interface HubStatus { enabled: boolean; port: number; listening: boolean; error?: string; addresses: LinkAddress[] }
 export type NodeStatus = 'connected' | 'offline' | 'update-required' | 'removed-by-node';
+/** Where an update of a joined computer stands. Until `done`, the computer runs its previous version again on failure. */
+export type UpdateStage = 'installing' | 'checking' | 'switching' | 'verifying' | 'rolling-back' | 'done' | 'failed';
+export type UpdateFailure = 'install-failed' | 'check-failed' | 'switch-failed' | 'start-failed' | 'link-failed' | 'rollback-failed' | 'interrupted';
+export interface UpdateStatus {
+  version: string; previous: string; stage: UpdateStage; startedAt: string; updatedAt: string;
+  /** Why it failed, and the stage it failed in. */
+  code?: UpdateFailure; failedStage?: UpdateStage;
+}
+/** What a joined computer reports about itself: structured facts only, never paths or log text. */
+export interface NodeReport {
+  versions: { web: string; worker?: string; terminalHost?: string };
+  /** It runs as the background service and can update itself. */
+  service: boolean;
+  update?: UpdateStatus;
+  diskFree?: number;
+}
 /** A computer this one controls. */
 export interface NodeSummary {
   id: string; name: string; label?: string; fingerprint: string; status: NodeStatus;
   version?: string; features: string[]; pairedAt: string; lastSeenAt?: string;
   /** The code it last joined with. */
   invite?: string;
+  /** Its last report, kept while it restarts for an update. */
+  report?: NodeReport;
 }
 export type ControllerStatus = 'connected' | 'connecting' | 'offline' | 'expired' | 'refused' | 'removed';
 /** A computer that controls this one. */
@@ -16,7 +34,7 @@ export interface ControllerSummary {
   pairedAt?: string; lastConnectedAt?: string; error?: string;
 }
 export interface LinkOverview {
-  identity: { name: string; fingerprint: string };
+  identity: { name: string; fingerprint: string; version: string };
   hub: HubStatus;
   nodes: NodeSummary[];
   controllers: ControllerSummary[];
@@ -31,4 +49,6 @@ export interface RemoteNode {
   id: string; name: string; label?: string; status: NodeStatus; version?: string; features: string[]; lastSeenAt?: string;
   /** Its shared state is arriving now; otherwise what is shown of it is the last state seen. */
   streaming: boolean;
+  /** It is moving to this Tower's version and comes back by itself. */
+  updating?: boolean;
 }

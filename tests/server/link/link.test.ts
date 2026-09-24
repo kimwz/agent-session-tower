@@ -8,19 +8,21 @@ import { WebSocket, WebSocketServer, createWebSocketStream } from 'ws';
 import { connect as tlsConnect } from 'node:tls';
 import { connect, type Socket } from 'node:net';
 import { ControllerLinks } from '../../../server/link/controller.js';
-import { NodeLinks } from '../../../server/link/node.js';
+import { NodeLinks, type NodeLinkOptions } from '../../../server/link/node.js';
+import type { UpdateStatus } from '../../../shared/link.js';
 import { loadLinkIdentity, type LinkIdentity } from '../../../server/link/identity.js';
 import { decodeJoinCode, encodeJoinCode } from '../../../server/link/join-code.js';
 import { linkRequest, openControllerEnd, openNodeEnd, pairingProof } from '../../../server/link/transport.js';
 import { until } from '../../helpers/until.ts';
 
-async function computer(t: TestContext, name: string, options: { pingMs?: number; now?: () => number } = {}) {
+async function computer(t: TestContext, name: string, options: { pingMs?: number; refreshMs?: number; updatePollMs?: number; now?: () => number; version?: string; features?: string[]; update?: NodeLinkOptions['update'] } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), `tower-link-${name}-`));
   const identity = await loadLinkIdentity(stateDir);
   const served: Array<{ controllerId: string; path: string }> = [];
   const open = async () => {
-    const controller = new ControllerLinks({ stateDir, identity, version: '1.23.0', hostname: () => name, ...options });
-    const node = new NodeLinks({ stateDir, identity, version: '1.23.0', hostname: () => name, features: () => ['work'], ...options,
+    const { version = '1.23.0', features = ['work'], ...timing } = options;
+    const controller = new ControllerLinks({ stateDir, identity, version, hostname: () => name, ...timing });
+    const node = new NodeLinks({ stateDir, identity, version, hostname: () => name, features: () => features, ...timing,
       handle: (req, res, principal) => { served.push({ controllerId: principal.controllerId, path: req.url }); res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ hostname: name, controllerId: principal.controllerId })); } });
     await controller.start();
     await node.start();
@@ -87,6 +89,64 @@ test('a computer removed while it is being told it joined is told to stop instea
   await until(() => b.node.list().find(item => item.status === 'removed'), 5000);
   assert.equal(attached, false);
   assert.deepEqual(a.controller.list(), []);
+});
+
+test('a controller asks a joined computer on an older version to move to its own, follows it, and asks again only when told', async t => {
+  const asked: unknown[] = [];
+  let update: UpdateStatus | undefined;
+  const at = '2026-09-24T00:00:00.000Z';
+  const a = await computer(t, 'computer-a', { version: '1.25.0', refreshMs: 50, updatePollMs: 20 });
+  const b = await computer(t, 'computer-b', { version: '1.24.0', features: ['work', 'status', 'update'], update: {
+    request: async version => { asked.push(version); update = { version: String(version), previous: '1.24.0', stage: 'installing', startedAt: at, updatedAt: at }; return { status: 202, body: { update } }; },
+    report: async () => ({ versions: { web: '1.24.0', worker: '1.23.0' }, service: true, ...(update ? { update } : {}), diskFree: 5e9 }),
+  } });
+  await a.listen();
+  await b.node.join((await a.controller.invite()).code);
+  const joined = await connected(a.controller, 'computer-b');
+  await until(() => a.controller.list()[0]?.report?.update?.stage === 'installing', 5000);
+  assert.deepEqual(asked, ['1.25.0']);
+  assert.deepEqual(a.controller.list()[0].report?.versions, { web: '1.24.0', worker: '1.23.0' });
+  update = { ...update!, stage: 'failed', code: 'start-failed', failedStage: 'verifying' };
+  await until(() => a.controller.list()[0]?.report?.update?.code === 'start-failed', 5000);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.deepEqual(asked, ['1.25.0'], 'a failed update is not asked for again by itself');
+  await a.controller.update(joined.id);
+  assert.deepEqual(asked, ['1.25.0', '1.25.0'], 'the owner asks again');
+});
+
+test('a computer away in the middle of an update shows it as updating, until nothing has been heard for a long time', async t => {
+  let clock = Date.now();
+  const at = new Date(clock).toISOString();
+  const update: UpdateStatus = { version: '1.25.0', previous: '1.24.0', stage: 'switching', startedAt: at, updatedAt: at };
+  const a = await computer(t, 'computer-a', { version: '1.25.0', now: () => clock });
+  const b = await computer(t, 'computer-b', { version: '1.24.0', features: ['work', 'status', 'update'], update: {
+    request: async () => ({ status: 202, body: { update } }),
+    report: async () => ({ versions: { web: '1.24.0' }, service: true, update }),
+  } });
+  await a.listen();
+  await b.node.join((await a.controller.invite()).code);
+  await until(() => a.controller.list()[0]?.report?.update, 5000);
+  await b.stop();
+  await until(() => a.controller.list()[0]?.status === 'offline', 5000);
+  assert.equal(a.controller.list()[0].report?.update?.stage, 'switching', 'a computer restarting into a new version is expected back');
+  clock += 11 * 60_000;
+  assert.equal(a.controller.list()[0].report?.update, undefined);
+});
+
+test('a joined computer that cannot update itself is never asked to', async t => {
+  let asked = 0;
+  const a = await computer(t, 'computer-a', { version: '1.25.0', refreshMs: 50 });
+  const b = await computer(t, 'computer-b', { version: '1.24.0', features: ['work', 'status'], update: {
+    request: async () => { asked++; return { status: 409, body: { code: 'not-service' } }; },
+    report: async () => ({ versions: { web: '1.24.0' }, service: false }),
+  } });
+  await a.listen();
+  await b.node.join((await a.controller.invite()).code);
+  const joined = await connected(a.controller, 'computer-b');
+  await until(() => a.controller.list()[0]?.report, 5000);
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(asked, 0);
+  await assert.rejects(a.controller.update(joined.id), { statusCode: 409 });
 });
 
 test('a code works once: a second computer using it is not accepted', async t => {

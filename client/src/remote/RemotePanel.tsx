@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, Copy, FolderX, LoaderCircle, Monitor, Network, Plus, Radio, Trash2, X } from 'lucide-react';
-import type { ControllerSummary, LinkInvite, LinkOverview, NodeSummary } from '../../../shared/link';
+import { Check, Copy, FolderX, LoaderCircle, Monitor, Network, Plus, Radio, RefreshCw, Trash2, X } from 'lucide-react';
+import type { ControllerSummary, LinkInvite, LinkOverview, NodeSummary, UpdateFailure, UpdateStage } from '../../../shared/link';
 import { api, copyText, relativeTime } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
 
@@ -126,19 +126,55 @@ function Nodes({ token, overview, busy, run, invite, known, onInvite }: { token:
         </div>}
     </div>}
     <h3 className="remote-heading">{t('연결된 컴퓨터')} <span className="auth-count">{overview.nodes.length}</span></h3>
-    {overview.nodes.length ? <><ol className="slack-rule-list">{overview.nodes.map(node => <NodeRow key={node.id} token={token} node={node} busy={busy} run={run} />)}</ol>
+    {overview.nodes.length ? <><ol className="slack-rule-list">{overview.nodes.map(node => <NodeRow key={node.id} token={token} node={node} version={overview.identity.version} busy={busy} run={run} />)}</ol>
       <p className="trigger-note">{t('연결된 컴퓨터와 그 세션은 캔버스에 컴퓨터별로 나타납니다. 세션 목록의 컴퓨터 필터로 한 컴퓨터만 볼 수 있습니다.')}</p></>
       : <p className="slack-empty">{t('아직 연결된 컴퓨터가 없습니다.')}</p>}
   </section>;
 }
 
-function NodeRow({ token, node, busy, run }: { token: string; node: NodeSummary; busy: boolean; run: Run }) {
+/** Whether released version `a` is newer than `b`. */
+function newer(a: string | undefined, b: string | undefined): boolean {
+  const [x, y] = [a, b].map(value => /^\d+\.\d+\.\d+$/.test(value ?? '') ? value!.split('.').map(Number) : undefined);
+  if (!x || !y) return false;
+  for (let index = 0; index < 3; index++) if (x[index] !== y[index]) return x[index] > y[index];
+  return false;
+}
+
+/** Where a joined computer's version stands against this Tower's, and what its update is doing or why it failed. */
+export function UpdateLine({ token, node, version, busy, run }: { token: string; node: NodeSummary; version: string; busy: boolean; run: Run }) {
+  const { t } = useI18n();
+  const update = node.report?.update;
+  const stages: Partial<Record<UpdateStage, string>> = { installing: t('설치하는 중'), checking: t('설치한 버전을 점검하는 중'), switching: t('새 버전으로 전환하는 중'), verifying: t('새 버전이 다시 연결되는지 확인하는 중'), 'rolling-back': t('이전 버전으로 되돌리는 중') };
+  const failures: Record<UpdateFailure, string> = { 'install-failed': t('설치하지 못했습니다. 그 컴퓨터의 네트워크와 디스크 공간을 확인하세요.'), 'check-failed': t('설치한 버전이 실행되지 않았습니다.'),
+    'switch-failed': t('새 버전으로 다시 시작하지 못했습니다.'), 'start-failed': t('새 버전이 제때 응답하지 않았습니다.'), 'link-failed': t('새 버전이 이 컴퓨터에 다시 연결하지 못했습니다.'),
+    interrupted: t('업데이트가 중간에 멈췄습니다. 그 컴퓨터가 다시 시작됐을 수 있습니다.'), 'rollback-failed': t('이전 버전으로도 돌아가지 못했습니다.') };
+  const retry = <button type="button" className="secondary-button" disabled={busy || node.status !== 'connected'} onClick={() => { void run(() => post(token, `/api/link/nodes/${node.id}/update`, {})); }}><RefreshCw size={13} />{t('다시 시도')}</button>;
+  if (update && stages[update.stage]) return <p className="remote-update" role="status"><LoaderCircle size={13} className="spin" aria-hidden="true" />{t('v{0}(으)로 업데이트: {1}', { 0: update.version, 1: stages[update.stage]! })}</p>;
+  if (update?.stage === 'failed' && newer(update.version, node.version)) {
+    const reason = update.code ? failures[update.code] : '';
+    return <p className="remote-update failed" role="status">{update.code === 'rollback-failed'
+      ? t('v{0}(으)로 업데이트하지 못했고, {1} 그 컴퓨터에서 Tower를 확인하세요(기록: logs/update.log).', { 0: update.version, 1: reason })
+      : t('v{0}(으)로 업데이트하지 못해 v{1}로 계속 실행 중입니다. {2}', { 0: update.version, 1: update.previous, 2: reason })}{update.code !== 'rollback-failed' && retry}</p>;
+  }
+  if (newer(node.version, version)) return <p className="remote-update">{t('이 Tower보다 새 버전입니다. 이 컴퓨터의 Tower를 업데이트하세요.')}</p>;
+  if (!newer(version, node.version) || node.status !== 'connected') return null;
+  if (!node.features.includes('status')) return <p className="remote-update">{t('이 Tower보다 이전 버전입니다. 그 컴퓨터에서 Tower를 한 번 직접 업데이트하면, 그다음부터는 이 Tower를 따라 자동으로 업데이트됩니다.')}</p>;
+  if (!node.features.includes('update')) return <p className="remote-update">{t('이 Tower보다 이전 버전입니다. 그 컴퓨터는 Tower를 백그라운드 서비스로 실행하지 않아 자동으로 업데이트되지 않습니다. 그 컴퓨터에서 직접 업데이트하세요.')}</p>;
+  return <p className="remote-update">{t('v{0}(으)로 업데이트를 요청합니다.', { 0: version })}{retry}</p>;
+}
+
+function NodeRow({ token, node, version, busy, run }: { token: string; node: NodeSummary; version: string; busy: boolean; run: Run }) {
   const { t } = useI18n();
   const [editing, setEditing] = useState(false);
   const [label, setLabel] = useState(node.label ?? '');
   const name = node.label || node.name;
   const status = { connected: t('연결됨'), offline: t('오프라인'), 'update-required': t('업데이트 필요'), 'removed-by-node': t('상대 컴퓨터가 연결을 끊음') }[node.status];
   const save = (event: FormEvent) => { event.preventDefault(); void run(() => post(token, `/api/link/nodes/${node.id}`, { label })).then(ok => { if (ok) setEditing(false); }); };
+  const reported = node.report?.versions;
+  // The worker takes the new version once no work is running; until then it differs, and that is expected.
+  const worker = reported?.worker && reported.worker !== reported.web ? reported.worker : undefined;
+  const free = node.report?.diskFree;
+  const lowDisk = free !== undefined && free < 2 * 1024 ** 3 ? (free / 1024 ** 3).toFixed(1) : undefined;
   return <li className="slack-rule-row remote-row">
     <span className={`remote-dot ${node.status}`} aria-hidden="true" />
     <div className="slack-rule-text">
@@ -146,7 +182,8 @@ function NodeRow({ token, node, busy, run }: { token: string; node: NodeSummary;
         <input autoFocus maxLength={80} value={label} placeholder={node.name} onChange={event => setLabel(event.target.value)} aria-label={t('표시 이름')} />
         <button className="secondary-button" disabled={busy}>{t('저장')}</button><button type="button" className="secondary-button" onClick={() => { setLabel(node.label ?? ''); setEditing(false); }}>{t('취소')}</button></form>
         : <strong>{name}</strong>}
-      <small>{status}{node.version ? ` · v${node.version}` : ''} · {t('지문')} {node.fingerprint}{node.status !== 'connected' && node.lastSeenAt ? ` · ${t('마지막 연결')} ${relativeTime(node.lastSeenAt)}` : ''}</small>
+      <small>{status}{node.version ? ` · v${node.version}` : ''}{worker ? ` · ${t('작업 실행기 v{0} (진행 중인 작업이 끝나면 바뀜)', { 0: worker })}` : ''} · {t('지문')} {node.fingerprint}{node.status !== 'connected' && node.lastSeenAt ? ` · ${t('마지막 연결')} ${relativeTime(node.lastSeenAt)}` : ''}{lowDisk ? ` · ${t('디스크 여유 {0}GB', { 0: lowDisk })}` : ''}</small>
+      <UpdateLine token={token} node={node} version={version} busy={busy} run={run} />
     </div>
     {!editing && <button type="button" className="secondary-button" disabled={busy} onClick={() => setEditing(true)}>{t('이름 변경')}</button>}
     <button type="button" className="icon-button" aria-label={t('{0} 연결 해제', { 0: name })} title={t('연결 해제')} disabled={busy}

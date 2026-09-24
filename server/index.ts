@@ -36,6 +36,7 @@ import { NodeLinks } from './link/node.js';
 import { runLinkCommand } from './link/cli.js';
 import { RemoteNodes } from './link/nodes.js';
 import { NodeViewStore } from './link/views.js';
+import { diskFree, handoffHeld, managedByService, runUpdateHelper, serviceSteps, Updates } from './link/update.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
@@ -80,6 +81,11 @@ async function main() {
   if (args[0] === '--runner-worker') {
     if (args.length !== 2 || !args[1]) throw new Error('Runner worker requires a state directory.');
     await runRunnerWorker(resolve(args[1]));
+    return;
+  }
+  if (args[0] === '--update-helper') {
+    if (args.length !== 4) throw new Error('The update helper requires a state directory, a version and a port.');
+    await runUpdateHelper(resolve(args[1]), args[2], serviceSteps(resolve(args[1]), Number(args[3])));
     return;
   }
   if (args[0] === 'join' || args[0] === 'service') {
@@ -154,7 +160,10 @@ async function main() {
   const closedSessions = new ClosedSessionStore(stateDir);
   const groups = new ProjectGroupStore(stateDir);
   const exclusions = new RemoteExclusionStore(stateDir);
-  const runs = new DurableRunManager({ stateDir });
+  // Only the background service's own install is replaced by an update; an update left unfinished is settled first.
+  const updates = new Updates({ stateDir, version: APP_VERSION, port, managed: await managedByService(stateDir, process.argv[1], Boolean(serviceLog)) });
+  await updates.recover().catch(error => console.error(`The last update could not be settled: ${error instanceof Error ? error.message : String(error)}`));
+  const runs = new DurableRunManager({ stateDir, handoffHeld: () => handoffHeld(stateDir) });
   // Load persisted history before shutdown or an HTTP request can touch the runner.
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await exclusions.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
   /** Local browser requests are the owner's; a remote controller's carry its own origin and request ID. */
@@ -250,9 +259,18 @@ async function main() {
   const remoteRouter = createRemoteRouter({ backend, exclusions, terminals: workspaceTerminals });
   const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname });
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
-    // What this computer can do for a controller depends on the worker it runs with right now.
-    features: () => runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : [])] : [],
-    handle: (req, res, principal) => remoteRouter.handle(req, res, principal) });
+    // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
+    // and updating do not.
+    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
+    handle: (req, res, principal) => remoteRouter.handle(req, res, principal),
+    update: {
+      request: version => updates.request(version),
+      report: async () => {
+        const [update, free] = await Promise.all([updates.status(), diskFree(stateDir)]);
+        const worker = runs.runnerVersion();
+        return { versions: { web: APP_VERSION, ...(worker ? { worker } : {}) }, service: updates.managed, ...(update ? { update } : {}), ...(free !== undefined ? { diskFree: free } : {}) };
+      },
+    } });
   if (nodeLinks) {
     nodeLinks.on('disconnected', (controllerId: string) => remoteRouter.disconnect(controllerId));
     controlledBy = () => nodeLinks.list().filter(item => item.status === 'connected').map(item => item.name);
@@ -283,6 +301,14 @@ async function main() {
   console.log('  Reading local Claude Code and Codex sessions…\n  Press Ctrl+C to stop the web server. Agent work continues independently.\n');
   if (open) openBrowser(access.browserUrl);
   let closing = false;
+  // Versions an update left behind go once neither the worker nor the terminal host runs them.
+  const prune = async () => {
+    const worker = runs.runnerVersion();
+    if (worker && worker !== 'legacy') await updates.prune([worker, await workspaceTerminals.hostVersion()]);
+  };
+  const pruneLater = () => { void prune().catch(error => console.error(`Old versions were not removed: ${error instanceof Error ? error.message : String(error)}`)); };
+  const pruning = [setTimeout(pruneLater, 60_000), setInterval(pruneLater, 60 * 60_000)];
+  for (const timer of pruning) timer.unref();
   capabilities.start();
   repositories.start();
   // Links come up after the web server, so a joining computer never reaches a half-started Tower.
@@ -290,6 +316,7 @@ async function main() {
   const shutdown = async () => {
     if (closing) return;
     closing = true;
+    for (const timer of pruning) clearTimeout(timer);
     remoteNodes?.close();
     const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => { remoteRouter.dispose(); return nodeViews.flush(); });
     const stoppingCapabilities = capabilities.stop();
