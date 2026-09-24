@@ -4,6 +4,23 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.24.0] - 2026-09-24
+
+### Added
+- **Your joined computers on this canvas.** Each computer joined under **Remote computers** now appears beside this one: its own host node, with its connection state and version, above the folders and sessions it shares. Open a conversation to read it and continue it, answer approvals, stop or steer a request, rename or close a session, sync a folder's branch, and start a new session or an Auto Prompt there. The new-session and Auto Prompt dialogs ask which computer to use.
+  - Everything happens on the computer the session belongs to, with that computer's own Claude Code and Codex sign-ins. A request sent again after a lost answer runs only once.
+  - A computer that goes offline stays on the canvas, dimmed, showing what it last reported. Its sessions come back up to date when it reconnects, and nothing running there is stopped.
+  - Two computers with the same folder or session stay apart everywhere: on the canvas, in the session list, in saved card positions and read marks.
+  - With more than one computer, the session list has a computer filter and shows each session's computer.
+  - Pinning and hiding another computer's folder is kept on this Tower only. Renaming a folder renames it on that computer.
+  - Links in another computer's conversations that point at its own local addresses (localhost, LAN) are shown as text, since they would open something on this computer instead.
+
+### Changed
+- Auto Prompt checks the chosen folder before the provider, so a folder it cannot use is reported the same way whether or not Claude Code or Codex is ready.
+
+### Notes
+- Opening another computer's files and terminals from this canvas comes in the next release.
+
 ## [1.23.0] - 2026-09-24
 
 ### Added
