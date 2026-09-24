@@ -73,3 +73,23 @@ test('a record that cannot be read is set aside, and one that cannot be saved ne
   assert.equal(unsaved.list().length, 1, 'kept while Tower runs');
   assert.ok(errors.some(message => /will not be saved/.test(message)));
 });
+
+test('a request is remembered as long as it can be sent again, even after its change leaves the list', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-remote-audit-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  let clock = Date.parse('2026-09-24T00:00:00.000Z');
+  const audit = new RemoteAudit(stateDir, { now: () => clock });
+  await audit.start();
+  const request = '0199a2b3-c4d5-7123-8abc-0123456789ab';
+  audit.record({ controllerId: A, action: 'session', session: 'codex:s', target: '/work/app' }, request);
+  for (let index = 0; index < 1000; index++) audit.record({ controllerId: A, action: 'file', target: `/work/app/${index}.ts` });
+  await audit.flush();
+  const restarted = new RemoteAudit(stateDir, { now: () => clock });
+  await restarted.start();
+  restarted.record({ controllerId: A, action: 'session', session: 'codex:s', target: '/work/app' }, request);
+  assert.ok(!restarted.list().some(change => change.action === 'session'), 'pushed out of the list, still known');
+  clock += 8 * 24 * 60 * 60 * 1000;
+  restarted.record({ controllerId: A, action: 'session', session: 'codex:s', target: '/work/app' }, request);
+  assert.equal(restarted.list()[0].action, 'session', 'a request is not sent again after a week');
+  await restarted.flush();
+});

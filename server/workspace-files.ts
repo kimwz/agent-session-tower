@@ -155,6 +155,10 @@ async function serialized<T>(key: string, action: () => Promise<T>): Promise<T> 
   finally { release(); if (writes.get(key) === current) writes.delete(key); }
 }
 
+/** Saves answered without writing, because the file already held exactly that content (a save sent again). */
+const unwritten = new WeakSet<object>();
+export const wroteNothing = (saved: object): boolean => unwritten.has(saved);
+
 export async function saveWorkspaceFile(body: Record<string, unknown>, snapshot: Snapshot) {
   try {
     if (Object.keys(body).some(key => !['cwd', 'path', 'content', 'revision'].includes(key))) throw failure('Unexpected file request fields.');
@@ -174,6 +178,7 @@ export async function saveWorkspaceFile(body: Record<string, unknown>, snapshot:
         let mode = 0o666 & ~process.umask();
         // A save sent again after its answer was lost finds its own content already there: that is success.
         const unchanged = { path: local, content: body.content as string, revision: revision(bytes) };
+        unwritten.add(unchanged);
         if (creating) {
           const present = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; });
           if (present) {

@@ -8,7 +8,7 @@ import { SnapshotStream } from '../http/snapshot-stream.js';
 import { SseClient } from '../http/sse-client.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
-import { assertWorkspace, createWorkspaceDirectory, listWorkspaceTree, MAX_WORKSPACE_FILE_BYTES, readWorkspaceFile, saveWorkspaceFile } from '../workspace-files.js';
+import { assertWorkspace, createWorkspaceDirectory, listWorkspaceTree, MAX_WORKSPACE_FILE_BYTES, readWorkspaceFile, saveWorkspaceFile, wroteNothing } from '../workspace-files.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { realpath, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
@@ -209,7 +209,8 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
   const triggerChange = (operation: string, body: Record<string, unknown>) => operation === 'triggers.setEnabled' ? (body.enabled ? 'enable' : 'disable') : operation.slice('triggers.'.length);
   /** How an approval was answered; never what was answered. */
   const answerKind = (response: NonNullable<ReturnType<typeof approvalResponse>>) => typeof response === 'string' ? response : 'answers' in response ? 'answers' : response.action;
-  type Note = (action: RemoteAction, fields?: Pick<RemoteChange, 'target' | 'detail' | 'session'>) => void;
+  /** `request` names the request when it is not the X-Tower-Request-Id sent with it: what is done once is recorded once. */
+  type Note = (action: RemoteAction, fields?: Pick<RemoteChange, 'target' | 'detail' | 'session'>, request?: string) => void;
   // `note` records a change as soon as it is made, before the answer is judged for the controller: a change made
   // stays in the record even when what it touched stopped being shared meanwhile.
   const route = async (req: Request, res: Reply, principal: RemotePrincipal, url: URL, note: Note): Promise<void> => {
@@ -344,7 +345,8 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       const body = await readJson(req, 6 * MAX_WORKSPACE_FILE_BYTES + 16 * 1024);
       await sharedPath(body.cwd, body.path);
       const saved = await saveWorkspaceFile(body, backend.snapshot());
-      note('file', { target: join(body.cwd as string, saved.path) });
+      // A save sent again finds its content already there: nothing changed this time.
+      if (!wroteNothing(saved)) note('file', { target: join(body.cwd as string, saved.path) });
       return json(res, 200, saved);
     }
     if (path === '/api/workspace/directory') {
@@ -433,7 +435,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       if (request.cwd) await listedFolder(request.cwd);
       if (!backend.startAutoPrompt) throw httpError(503, 'Auto Prompt를 현재 사용할 수 없습니다.');
       const job = await backend.startAutoPrompt(request, context(principal, request.requestId.toLowerCase()));
-      note('auto-prompt', { target: job.cwd ?? job.decision?.cwd });
+      note('auto-prompt', { target: job.cwd ?? job.decision?.cwd }, request.requestId.toLowerCase());
       // A retry of a finished request answers with that job; it is shown only while everything it touched is shared.
       const current = await jobVisible(job, principal);
       if (!current) throw notFound();
@@ -445,7 +447,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       if (!job || !await jobVisible(job, principal)) throw notFound();
       if (!backend.cancelAutoPrompt) throw httpError(503, 'Auto Prompt를 현재 사용할 수 없습니다.');
       const cancelled = await backend.cancelAutoPrompt(job.id);
-      note('auto-prompt-cancel', { target: cancelled.cwd ?? cancelled.decision?.cwd });
+      note('auto-prompt-cancel', { target: cancelled.cwd ?? cancelled.decision?.cwd }, `cancel:${job.id}`);
       const after = await jobVisible(cancelled, principal);
       if (!after) throw notFound();
       return json(res, 200, { job: remoteJob(cancelled, principal.controllerId, after.matcher.revision) });
@@ -487,8 +489,8 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
         // A request sent again carries the same ID, and is recorded once.
         const sent = req.headers[REQUEST_ID_HEADER];
         const request = typeof sent === 'string' && UUID.test(sent) ? sent.toLowerCase() : undefined;
-        await route(req, res, principal, new URL(req.url || '/', 'http://remote.invalid'), (action, fields = {}) => {
-          audit?.record({ controllerId: principal.controllerId, action, ...Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) }, request);
+        await route(req, res, principal, new URL(req.url || '/', 'http://remote.invalid'), (action, fields = {}, named = request) => {
+          audit?.record({ controllerId: principal.controllerId, action, ...Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) }, named);
         });
       } catch (error) {
         const status = errorStatus(error);

@@ -87,7 +87,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
   const server = createServer((req, res) => { void router.handle(req, res, { controllerId: CONTROLLER }); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  t.after(async () => { router.dispose(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await rm(root, { recursive: true, force: true }); });
+  t.after(async () => { router.dispose(); server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); await audit.flush(); await rm(root, { recursive: true, force: true, maxRetries: 3 }); });
   const call = async (path: string, init: { method?: string; body?: unknown; headers?: Record<string, string> } = {}) => {
     const response = await fetch(`${base}${path}`, { method: init.method ?? (init.body === undefined ? 'GET' : 'POST'), headers: { 'content-type': 'application/json', ...init.headers },
       ...(init.body !== undefined ? { body: JSON.stringify(init.body) } : {}) });
@@ -177,6 +177,14 @@ test('each change a controlling computer makes is recorded for this computer’s
   assert.ok(!JSON.stringify(f.changes()).includes('SECRET123'), 'what was asked is not kept, nor a title made from it');
   assert.equal((await f.call('/api/v1/triggers.setEnabled', { body: { id: 't1', enabled: false, expectedRevision: 1 }, headers: { 'x-tower-request-id': '0199a2b3-c4d5-7123-8abc-0123456789ad' } })).status, 200);
   assert.deepEqual(f.changes().at(-1), { controllerId: CONTROLLER, action: 'trigger', target: 't1', detail: 'disable' });
+  // Requests that carry their ID in the body, or none: an Auto Prompt, a save that finds its content already there.
+  const asked = () => f.call('/api/auto-prompts', { body: { requestId: '0199a2b3-c4d5-7123-8abc-0123456789ae', provider: 'codex', cwd: f.open, prompt: 'go' } });
+  assert.equal((await asked()).status, 202);
+  assert.equal((await asked()).status, 202);
+  const saved = () => f.call('/api/workspace/file', { body: { cwd: f.open, path: 'notes.md', content: 'hello', revision: null } });
+  assert.equal((await saved()).status, 200);
+  assert.equal((await saved()).status, 200, 'sent again, it finds its own content');
+  assert.deepEqual(f.changes().slice(-2).map(change => change.action), ['auto-prompt', 'file']);
 });
 
 test('a change made is recorded even when its folder stops being shared before it is answered, and a failed pull is not', async t => {

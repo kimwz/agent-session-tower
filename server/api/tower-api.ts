@@ -148,7 +148,6 @@ export class TowerApi {
       return read;
     }
     if (name === 'triggers.preview' || name === 'triggers.settings') return this.performLocal(name, value, actor);
-    if (name === 'triggers.delete') return answer;
     // Everything an answer shows is read here, before the look that judges it.
     const held = this.held();
     const find = (id: string | undefined) => { try { return id ? triggers.event(id) : undefined; } catch { return undefined; } };
@@ -233,6 +232,12 @@ export class TowerApi {
         const view = await this.view(held);
         const shown = trigger(view, (answer as { trigger?: { id?: string } }).trigger?.id);
         return shown ? { trigger: shown } : SUCCEEDED;
+      }
+      case 'triggers.delete': {
+        // Named while what was deleted can still be seen.
+        const view = await this.view(held);
+        const gone = held.kept.deleted.find(item => item.id === value.id);
+        return gone && view.handler(gone.handler) ? answer : { ...SUCCEEDED, deleted: true };
       }
       case 'triggers.run': {
         const found = find((answer as { event?: { id?: string } }).event?.id);

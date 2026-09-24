@@ -108,7 +108,7 @@ test('a controlling computer cannot aim a trigger at what it cannot see, and its
   await assert.rejects(f.call('triggers.update', { id: created.id, expectedRevision: 1, trigger: trigger({ mode: 'folder', cwd: f.secret }) }), { statusCode: 400 });
   const local = (await f.call<{ trigger: { remoteEdited?: unknown } }>('triggers.update', { id: created.id, expectedRevision: 1, trigger: trigger({ mode: 'auto' }) }, owner)).trigger;
   assert.equal(local.remoteEdited, undefined, 'a change made here makes it this computer’s again');
-  await f.call('triggers.delete', { id: created.id, expectedRevision: 2 });
+  assert.deepEqual(await f.call('triggers.delete', { id: created.id, expectedRevision: 2 }), { deleted: true, trigger: { id: created.id, name: 'Digest' } });
   const restored = (await f.call<{ trigger: { remoteEdited?: unknown } }>('triggers.restore', { id: created.id }, owner)).trigger;
   assert.equal(restored.remoteEdited, undefined, 'restored here, it is this computer’s');
   const coordinator = { name: 'Issues', source: { kind: 'github', account: 'octo', auth: { type: 'gh' }, watch: { type: 'assigned-to-me' }, schedule: { type: 'interval', everySeconds: 300 } },

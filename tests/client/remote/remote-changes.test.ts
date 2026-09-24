@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage } from '../../../client/src/i18n/i18n.js';
+import { absoluteTime } from '../../../client/src/common/lib.js';
 import { RemoteButton, RemoteChanges } from '../../../client/src/remote/RemotePanel.js';
 
 test('this computer’s owner reads what controlling computers changed here, by computer and without content', () => {
@@ -15,10 +16,10 @@ test('this computer’s owner reads what controlling computers changed here, by 
     { at: '2026-09-24T00:56:00.000Z', controllerId: 'a'.repeat(32), controller: 'Office Mac', action: 'update', detail: '1.28.0' },
   ] }));
   assert.match(markup, /저장소 동기화<\/strong> · 받기/);
-  assert.match(markup, /승인 요청에 답함<\/strong> · 거부<\/span><span class="remote-change-target" title="Parser work">Parser work/, 'a conversation by its title now, its start shown');
+  assert.match(markup, /승인 요청에 답함<\/strong> · 거부함<\/span><span class="remote-change-target" title="Parser work"><bdi dir="auto">Parser work/, 'a conversation by its title now, its start shown');
   assert.match(markup, /트리거 변경<\/strong> · 끔<\/span><span class="remote-change-target" title="Nightly digest">/);
   assert.match(markup, /업데이트 요청<\/strong> · 1\.28\.0/);
-  assert.match(markup, /<time dateTime="2026-09-24T01:00:00.000Z"[^>]*>9월 24일 10:00<\/time>/, 'when, in words anyone can read');
+  assert.ok(markup.includes(`>${absoluteTime('2026-09-24T01:00:00.000Z')}</time>`), 'when, in words anyone can read');
   assert.match(markup, /Office Mac/);
   assert.match(markup, /해제된 컴퓨터/, 'a computer no longer linked is still shown as one');
   assert.match(markup, /readme\.md/);

@@ -306,7 +306,7 @@ async function main() {
   }
   const { server, dispose } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes,
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
-      sessionNames: () => new Map(snapshot().sessions.map(session => [session.id, session.customTitle || session.title])) } : { error: linkError },
+      sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })) } : { error: linkError },
     workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined });
   await new Promise<void>((accept, reject) => {
     server.once('error', reject);
