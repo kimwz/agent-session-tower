@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, cp, mkdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { access, cp, lstat, mkdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { homedir, userInfo } from 'node:os';
 import { basename, dirname, join, sep } from 'node:path';
 import { promisify } from 'node:util';
@@ -299,12 +299,21 @@ async function serviceEnvironment(manager: ServiceManager, env: NodeJS.ProcessEn
   return { ...own, PATH: kept.join(':') };
 }
 
-/** Whether only root can change this folder, and every folder above it. */
+/**
+ * Whether only root can change this folder: every part of it as written (a link there could be pointed elsewhere) and
+ * every folder where it really is, up to /.
+ */
 async function rootOnly(folder: string): Promise<boolean> {
-  for (let current = folder; ; current = dirname(current)) {
-    if (!await stat(current).then(info => info.isDirectory() && info.uid === 0 && (info.mode & 0o022) === 0, () => false)) return false;
-    if (dirname(current) === current) return true;
-  }
+  const real = await realpath(folder).catch(() => undefined);
+  if (!real) return false;
+  const guarded = async (path: string, look: typeof stat) => {
+    for (let current = path; ; current = dirname(current)) {
+      // A link is changed only by replacing it in its folder, which the next step checks.
+      if (!await look(current).then(info => info.uid === 0 && (info.isSymbolicLink() || (info.isDirectory() && (info.mode & 0o022) === 0)), () => false)) return false;
+      if (dirname(current) === current) return true;
+    }
+  };
+  return await guarded(folder, lstat) && await guarded(real, stat);
 }
 
 /**

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
+import { endianness } from 'node:os';
 import { canonicalIp, isLoopbackAddress } from '../auth/store.js';
 
 export const SESSION_COOKIE = 'tower_session';
@@ -31,27 +32,36 @@ function loopbackPeer(socket: Socket): Promise<number | undefined> {
   let known = peers.get(socket);
   if (!known) {
     const { remoteAddress, remotePort, localAddress, localPort } = socket;
-    known = !remoteAddress || !remotePort || !localAddress || !localPort ? Promise.resolve(undefined)
-      : readFile(remoteAddress.includes(':') ? '/proc/net/tcp6' : '/proc/net/tcp', 'utf8').then(table => socketOwner(table, { address: remoteAddress, port: remotePort }, { address: localAddress, port: localPort }), () => undefined);
+    known = !remoteAddress || !remotePort || !localAddress || !localPort ? Promise.resolve(undefined) : (async () => {
+      // The kernel lists its sockets while they change, so a busy computer can leave one out of a reading; read again.
+      for (let attempt = 0; attempt < 4; attempt++) {
+        if (attempt) await new Promise(resolve => setTimeout(resolve, 20 * attempt));
+        const table = await readFile(remoteAddress.includes(':') ? '/proc/net/tcp6' : '/proc/net/tcp', 'utf8').catch(() => undefined);
+        if (table === undefined) return undefined;
+        const owner = socketOwner(table, { address: remoteAddress, port: remotePort }, { address: localAddress, port: localPort });
+        if (owner !== undefined) return owner;
+      }
+      return undefined;
+    })();
     peers.set(socket, known);
   }
   return known;
 }
 
-/** An address and port as the kernel's socket tables print them, in either byte order the computer may use. */
-export function tableEndpoints(address: string, port: number): string[] {
+/** An address and port as the kernel's socket tables print them: in this computer's byte order (`order`). */
+export function tableEndpoint(address: string, port: number, order: 'LE' | 'BE' = endianness()): string | undefined {
   const hex = (bytes: number[]) => bytes.map(byte => byte.toString(16).toUpperCase().padStart(2, '0')).join('');
   const tail = `:${port.toString(16).toUpperCase().padStart(4, '0')}`;
   if (!address.includes(':')) {
     const bytes = address.split('.').map(Number);
-    if (bytes.length !== 4 || bytes.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) return [];
-    return [hex([...bytes].reverse()) + tail, hex(bytes) + tail];
+    if (bytes.length !== 4 || bytes.some(byte => !Number.isInteger(byte) || byte < 0 || byte > 255)) return undefined;
+    return hex(order === 'LE' ? [...bytes].reverse() : bytes) + tail;
   }
   const bytes = ipv6Bytes(address);
-  if (!bytes) return [];
+  if (!bytes) return undefined;
   // Four 32-bit words, each in the computer's own byte order.
   const words = [0, 4, 8, 12].map(at => bytes.slice(at, at + 4));
-  return [hex(words.flatMap(word => [...word].reverse())) + tail, hex(bytes) + tail];
+  return hex(order === 'LE' ? words.flatMap(word => [...word].reverse()) : bytes) + tail;
 }
 function ipv6Bytes(address: string): number[] | undefined {
   let text = address.replace(/%.*$/, '');
@@ -73,13 +83,15 @@ function ipv6Bytes(address: string): number[] | undefined {
  * address, remote address, state, ..., uid in the eighth column, inode in the tenth). Rows no process holds (waiting to
  * close, listening, or without an inode) are not owners; when no single connection matches, the owner is unknown.
  */
-export function socketOwner(table: string, peer: { address: string; port: number }, own: { address: string; port: number }): number | undefined {
-  const from = new Set(tableEndpoints(peer.address, peer.port));
-  const to = new Set(tableEndpoints(own.address, own.port));
-  const owners = table.split('\n').slice(1).map(line => line.trim().split(/\s+/))
-    .filter(fields => fields.length >= 10 && from.has(fields[1]) && to.has(fields[2]) && fields[3] !== '06' && fields[3] !== '0A' && fields[9] !== '0' && /^\d+$/.test(fields[7]))
-    .map(fields => Number(fields[7]));
-  return owners.length === 1 ? owners[0] : undefined;
+export function socketOwner(table: string, peer: { address: string; port: number }, own: { address: string; port: number }, order: 'LE' | 'BE' = endianness()): number | undefined {
+  const from = tableEndpoint(peer.address, peer.port, order);
+  const to = tableEndpoint(own.address, own.port, order);
+  if (!from || !to) return undefined;
+  const rows = table.split('\n').slice(1).map(line => line.trim().split(/\s+/))
+    .filter(fields => fields.length >= 10 && fields[1] === from && fields[2] === to && fields[3] !== '06' && fields[3] !== '0A' && fields[9] !== '0' && /^\d+$/.test(fields[7]));
+  // A socket listed twice by one reading is still one socket.
+  const sockets = new Map(rows.map(fields => [fields[9], Number(fields[7])]));
+  return sockets.size === 1 ? [...sockets.values()][0] : undefined;
 }
 
 export function sessionCookie(req: IncomingMessage): string {
