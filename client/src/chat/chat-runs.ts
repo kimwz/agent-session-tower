@@ -1,4 +1,5 @@
 import type { Attachment, ChatMessage, Run } from '../../../shared/types';
+import { localPart } from '../remote/scope';
 import { isImageAttachment } from '../../../shared/attachments';
 
 export interface ChatRunMatch {
@@ -33,7 +34,7 @@ function matchesAttachmentPrompt(text: string, run: Run): boolean {
     if (!lines[index]?.startsWith(prefix)) return false;
     try {
       const path: unknown = JSON.parse(lines[index].slice(prefix.length));
-      if (typeof path !== 'string' || !path.startsWith('/') || !path.endsWith(`/attachments/${attachment.id}/content/${attachment.name}`)) return false;
+      if (typeof path !== 'string' || !path.startsWith('/') || !path.endsWith(`/attachments/${localPart(attachment.id)}/content/${attachment.name}`)) return false;
       paths.push(path);
     } catch { return false; }
   }

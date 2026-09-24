@@ -76,3 +76,20 @@ test('heartbeat backpressure also waits for drain before writing the latest snap
   assert.deepEqual(response.frames, [': heartbeat\n\n', 'latest']);
   client.end();
 });
+
+test('a stalled page keeps the newest snapshot of each stream it carries, and gets all of them on drain', () => {
+  const response = new Response();
+  const client = new SseClient(response, () => {});
+  response.accepting = false;
+  client.snapshot('own-1');
+  for (let index = 0; index < 100; index++) {
+    client.update(`own-patch-${index}`, () => `own-${index}`);
+    client.update(`b-patch-${index}`, () => `b-${index}`, 'b');
+    client.update(`c-patch-${index}`, () => `c-${index}`, 'c');
+  }
+  client.snapshot('b-removed', 'b');
+  assert.deepEqual(response.frames, ['own-1']);
+  response.accepting = true;
+  response.emit('drain');
+  assert.deepEqual(response.frames, ['own-1', 'own-99', 'c-99', 'b-removed'], 'each stream resumes from its own latest complete state');
+});

@@ -57,6 +57,7 @@ export class ControllerLinks extends EventEmitter {
   private readonly attempts = new Map<string, { count: number; at: number }>();
   private writes: Promise<unknown> = Promise.resolve();
   private closed = false;
+  private loaded = false;
 
   constructor(private readonly options: { stateDir: string; identity: LinkIdentity; version: string; hostname: () => string; now?: () => number; pingMs?: number; refreshMs?: number }) {
     super();
@@ -72,15 +73,20 @@ export class ControllerLinks extends EventEmitter {
       const now = this.now();
       this.state = { ...saved, invites: saved.invites.filter(item => item.expiresAt + CLAIM_GRACE_MS > now) };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      this.broken = `${join(linkDirectory(this.options.stateDir), 'controller.json')} 파일을 읽을 수 없어 원격 컴퓨터를 관리할 수 없습니다. 파일을 확인하거나 옮긴 뒤 Tower를 다시 시작하세요.`;
-      return;
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        this.broken = `${join(linkDirectory(this.options.stateDir), 'controller.json')} 파일을 읽을 수 없어 원격 컴퓨터를 관리할 수 없습니다. 파일을 확인하거나 옮긴 뒤 Tower를 다시 시작하세요.`;
+        return;
+      }
     }
+    this.loaded = true;
+    this.emit('change');
     if (this.state.settings.enabled) await this.listen();
   }
 
   /** Why remote computers cannot be managed right now, if they cannot. */
   get error(): string | undefined { return this.broken; }
+  /** The saved computers are loaded: the list is the complete one. */
+  get ready(): boolean { return this.loaded; }
 
   hub(): HubStatus {
     const { enabled } = this.state.settings;

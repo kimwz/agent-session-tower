@@ -37,10 +37,25 @@ export function requestId(now = Date.now()): string {
   const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
-/** Headers for a change sent to `node`; a request that creates work names itself so a retry never runs twice. */
-export function nodeHeaders(node: string | undefined, headers: Record<string, string>): Record<string, string> {
-  return node ? { ...headers, 'X-Tower-Request-Id': requestId() } : headers;
+const attempts = new Map<string, { body: string; id: string }>();
+/**
+ * Headers for a request to `node` that creates work. The same request (`key` and `body`) keeps its ID until it is
+ * settled, so sending it again after an unknown outcome can never run it twice; changed content is a new request.
+ */
+export function nodeHeaders(node: string | undefined, headers: Record<string, string>, key?: string, body?: string): Record<string, string> {
+  if (!node) return headers;
+  if (!key) return { ...headers, 'X-Tower-Request-Id': requestId() };
+  const scoped = `${node}\u0000${key}`;
+  const known = attempts.get(scoped);
+  const id = known && known.body === body ? known.id : requestId();
+  attempts.set(scoped, { body: body ?? '', id });
+  return { ...headers, 'X-Tower-Request-Id': id };
 }
+/** The request reached a known end: accepted, or refused before anything ran. The next send is a new request. */
+export function settleRequest(node: string | undefined, key: string): void { if (node) attempts.delete(`${node}\u0000${key}`); }
+/** Whether an error says the request was not accepted, so a new one may be sent. */
+export const refusedBeforeRunning = (error: unknown) => (error as { disposition?: string })?.disposition === 'not-admitted'
+  || ((error as { status?: number })?.status ?? 0) >= 400 && ((error as { status?: number }).status ?? 0) < 500;
 
 export function scopeSession(node: string, session: Session): Session {
   return { ...session, id: scopedId(node, session.id), cwd: session.cwd ? scopedId(node, session.cwd) : '', node,

@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { Session, Snapshot } from '../../../shared/types.js';
 import type { RemoteNode } from '../../../shared/link.js';
-import { localPart, nodeOf, nodePath, pathFor, requestId, scopedId, scopeSnapshot, splitScopedId } from '../../../client/src/remote/scope.js';
-import { combinedView } from '../../../client/src/remote/hosts.js';
+import { localPart, nodeHeaders, nodeOf, nodePath, pathFor, refusedBeforeRunning, requestId, scopedId, scopeSnapshot, settleRequest, splitScopedId } from '../../../client/src/remote/scope.js';
+import { combinedView, hostProblem, hostState } from '../../../client/src/remote/hosts.js';
 import { localOnlyAddress, RemoteContent } from '../../../client/src/remote/remote-content.js';
 import { Markdown } from '../../../client/src/chat/Markdown.js';
 import { createElement } from 'react';
@@ -94,7 +94,9 @@ test('hand-placed cards of a computer not heard from yet keep their places, and 
 test('links from another computer to its own local addresses are recognized so they are not opened here', () => {
   for (const href of ['http://localhost:3000/', 'http://127.0.0.1:8080', 'http://[::1]:5173/', 'http://192.168.0.12/', 'http://10.1.2.3', 'http://172.20.0.1', 'http://169.254.1.1', 'http://studio.local:3000', 'http://100.101.1.2', 'http://[fd00::1]/'])
     assert.equal(localOnlyAddress(href), true, href);
-  for (const href of ['https://github.com/kimwz/agent-session-tower', 'http://172.32.0.1', 'mailto:me@example.com', undefined, 'not a url'])
+  for (const href of ['//localhost:3000/app', 'http://localhost.:3000/app', '/api/snapshot', 'relative/page', 'http://intranet/', 'http://0.0.0.0:8000'])
+    assert.equal(localOnlyAddress(href), true, href);
+  for (const href of ['https://github.com/kimwz/agent-session-tower', 'http://172.32.0.1', 'https://fda.gov', 'https://fc2.com', 'mailto:me@example.com', undefined])
     assert.equal(localOnlyAddress(href), false, String(href));
 });
 
@@ -104,4 +106,45 @@ test('another computer’s conversation shows its local links as text and keeps 
   assert.match(remote, /<span class="markdown-local-link" title="studio에서만 열 수 있는 주소입니다: http:\/\/localhost:3000">dev server<\/span>/);
   assert.match(remote, /<a href="https:\/\/example.com" target="_blank"/);
   assert.match(render(undefined), /<a href="http:\/\/localhost:3000"/, 'this computer’s own links open as before');
+});
+
+test('a request to another computer keeps its ID until it is settled, and changed content is a new request', () => {
+  const id = (headers: Record<string, string>) => headers['X-Tower-Request-Id'];
+  const first = id(nodeHeaders(B, {}, 'message:x', '{"prompt":"a"}'));
+  assert.equal(id(nodeHeaders(B, {}, 'message:x', '{"prompt":"a"}')), first, 'sending it again after an unknown outcome is the same request');
+  assert.notEqual(id(nodeHeaders(C, {}, 'message:x', '{"prompt":"a"}')), first, 'another computer is another request');
+  const edited = id(nodeHeaders(B, {}, 'message:x', '{"prompt":"b"}'));
+  assert.notEqual(edited, first);
+  settleRequest(B, 'message:x');
+  assert.notEqual(id(nodeHeaders(B, {}, 'message:x', '{"prompt":"b"}')), edited, 'once settled, the next send is new');
+  assert.deepEqual(nodeHeaders(undefined, { a: '1' }, 'message:x', 'x'), { a: '1' }, 'this computer needs no request ID');
+  assert.equal(refusedBeforeRunning({ status: 503, disposition: 'not-admitted' }), true);
+  assert.equal(refusedBeforeRunning({ status: 409 }), true);
+  assert.equal(refusedBeforeRunning({ status: 503, disposition: 'uncertain' }), false);
+  assert.equal(refusedBeforeRunning(new TypeError('Failed to fetch')), false);
+});
+
+test('a computer still reading its sessions is not treated as known, so saved places and read marks stay', () => {
+  const { hosts } = combinedView(snapshot([], { nodes: [remote(B, 'studio')] }), new Map([[B, snapshot([], { scanning: true })]]));
+  assert.equal(hosts[1].known, false);
+});
+
+test('each state of a joined computer explains in one sentence why work cannot go there, or says nothing when it can', () => {
+  const view = (node: Partial<RemoteNode>, known = true) => combinedView(snapshot([], { nodes: [remote(B, 'studio', node)] }), known ? new Map([[B, snapshot([])]]) : new Map()).hosts[1];
+  assert.equal(hostState(view({})), 'ready');
+  assert.equal(hostProblem(view({})), undefined);
+  assert.equal(hostState(view({ status: 'offline', streaming: false })), 'offline');
+  assert.match(hostProblem(view({ status: 'offline', streaming: false }))!, /studio이\(가\) 오프라인입니다/);
+  assert.equal(hostState(view({ streaming: false })), 'loading');
+  assert.equal(hostState(view({ features: ['read'] })), 'read-only');
+  assert.match(hostProblem(view({ features: ['read'] }))!, /업데이트하면 작업을 보낼 수 있습니다/);
+  assert.equal(hostState(view({ status: 'update-required', streaming: false })), 'update-required');
+  assert.equal(hostState(view({ status: 'removed-by-node', streaming: false })), 'removed-by-node');
+  assert.match(hostProblem(view({ status: 'removed-by-node', streaming: false }))!, /새 명령이 필요합니다/);
+  assert.equal(view({ status: 'offline', streaming: false }, false).known, false);
+});
+
+test('until this Tower has read its joined computers, the page treats the list as incomplete', () => {
+  assert.equal(combinedView(snapshot([]), new Map()).complete, false, 'a snapshot without the list of computers');
+  assert.equal(combinedView(snapshot([], { nodes: [] }), new Map()).complete, true);
 });

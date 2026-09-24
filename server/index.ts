@@ -188,7 +188,7 @@ async function main() {
       ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}),
       ...(runs.runnerVersion() && runs.runnerVersion() !== APP_VERSION ? { runnerUpdate: runs.supports('handoff') ? 'automatic' as const : 'manual' as const } : {}),
       ...(controllers.length ? { controlledBy: controllers } : {}),
-      ...(nodes.length ? { nodes } : {}),
+      ...(remoteNodes?.ready ? { nodes } : {}),
       updatedAt: new Date().toISOString(),
     };
   };

@@ -23,10 +23,11 @@ const session = (id: string, cwd: string, title = id): Session => ({ id, nativeI
   status: 'idle', statusReason: '', createdAt: now, updatedAt: now, lastMessage: '', messageCount: 1, isSubagent: false, resumable: true });
 
 /** A joined computer with a real remote router over a backend of fixed sessions, one of them in an excluded folder. */
-async function node(t: TestContext, name: string) {
+async function node(t: TestContext, name: string, shared?: string) {
   const root = await realpath(await mkdtemp(join(tmpdir(), `tower-nodes-${name}-`)));
-  const open = join(root, 'open'), secret = join(root, 'secret');
-  await mkdir(open); await mkdir(secret); await mkdir(join(root, 'state'));
+  // Two computers can have the very same folder; `shared` gives them one.
+  const open = shared ?? join(root, 'open'), secret = join(root, 'secret');
+  await mkdir(open, { recursive: true }); await mkdir(secret); await mkdir(join(root, 'state'));
   const exclusions = new RemoteExclusionStore(join(root, 'state'));
   await exclusions.start();
   await exclusions.add(secret);
@@ -47,10 +48,17 @@ async function node(t: TestContext, name: string) {
   const router = createRemoteRouter({ backend, exclusions });
   const identity = await loadLinkIdentity(join(root, 'state'));
   const seen: Array<{ url: string; headers: Record<string, unknown> }> = [];
+  const hung: unknown[] = [];
   const links = new NodeLinks({ stateDir: join(root, 'state'), identity, version: '1.23.0', hostname: () => name, features: () => ['read', 'work'],
     handle: (req: Http2ServerRequest, res, principal) => {
       seen.push({ url: req.url, headers: { ...req.headers } });
       if (req.url === '/api/refuse') { res.writeHead(401, { 'content-type': 'application/json' }); res.end('{"error":"no"}'); return; }
+      // Answers a joined computer should never give, and one it gives for a file.
+      if (req.url === '/api/svg') { res.writeHead(200, { 'content-type': 'image/svg+xml' }); res.end('<svg onload="alert(1)"/>'); return; }
+      if (req.url === '/api/redirect') { res.writeHead(302, { location: 'http://127.0.0.1/', 'content-type': 'application/json' }); res.end('{}'); return; }
+      if (req.url === '/api/picture') { res.writeHead(200, { 'content-type': 'image/png', 'content-disposition': `inline; filename="x"; filename*=UTF-8''%ED%99%94%EB%A9%B4.png`, 'set-cookie': 'a=b' }); res.end('png!'); return; }
+      if (req.url === '/api/archive') { res.writeHead(200, { 'content-type': 'application/octet-stream', 'content-disposition': 'attachment; filename*=UTF-8\'\'evil%22%0d%0aX:1' }); res.end('zip!'); return; }
+      if (req.url === '/api/hang') { hung.push(res); return; }
       return router.handle(req, res, principal);
     } });
   await links.start();
@@ -110,8 +118,8 @@ function events(t: TestContext, url: string) {
   return frames;
 }
 
-async function joined(t: TestContext, a: Awaited<ReturnType<typeof tower>>, name: string) {
-  const b = await node(t, name);
+async function joined(t: TestContext, a: Awaited<ReturnType<typeof tower>>, name: string, shared?: string) {
+  const b = await node(t, name, shared);
   await b.links.join((await a.controller.invite()).code);
   const id = (await until(() => a.controller.list().find(item => item.name === name && item.status === 'connected'), 5000)).id;
   await until(() => a.nodes.snapshot(id), 5000);
@@ -193,13 +201,55 @@ test('a joined computer that goes away stays shown as last seen, and leaves the 
   assert.equal(a.nodes.snapshot(b.id), undefined);
 });
 
-test('two joined computers with the same folders and session ids arrive as separate streams', async t => {
+test('two joined computers with the same folder and session ids stay apart in streams, requests and views', async t => {
   const a = await tower(t);
-  const b = await joined(t, a, 'computer-b');
-  const c = await joined(t, a, 'computer-c');
+  const folder = join(await realpath(await mkdtemp(join(tmpdir(), 'tower-nodes-same-'))), 'app');
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  const b = await joined(t, a, 'computer-b', folder);
+  const c = await joined(t, a, 'computer-c', folder);
   const frames = events(t, `${a.base}/api/events?patch=1&nodes=1`);
   await until(() => frames.filter(frame => frame.event === 'node').length >= 2 || undefined, 5000);
   const streams = frames.filter(frame => frame.event === 'node');
   assert.deepEqual(streams.map(frame => frame.data.node).sort(), [b.id, c.id].sort());
-  for (const frame of streams) assert.deepEqual(frame.data.snapshot.sessions.map((item: Session) => item.id), ['codex:shared']);
+  for (const frame of streams) assert.deepEqual(frame.data.snapshot.sessions.map((item: Session) => [item.id, item.cwd]), [['codex:shared', folder]]);
+  // A message for one computer's session reaches that computer only.
+  assert.equal((await a.post(`/api/nodes/${c.id}/sessions/codex:shared/messages`, { prompt: 'for c' }, { 'X-Tower-Request-Id': '0199a2b3-c4d5-7123-8abc-0123456789ac' })).status, 202);
+  assert.deepEqual(c.calls.map(call => call.args[1]), ['for c']);
+  assert.deepEqual(b.calls, []);
+  // Hiding the folder on one computer leaves the same folder on the other as it was.
+  assert.equal((await a.post(`/api/nodes/${b.id}/view`, { cwd: folder, hidden: true })).status, 200);
+  await until(() => a.nodes.snapshot(b.id)?.groups?.some(group => group.hidden), 5000);
+  assert.equal(a.nodes.snapshot(c.id)?.groups?.some(group => group.hidden), false);
+});
+
+test('the proxy lets through only safe answers: no redirects or active documents, files as images or downloads', async t => {
+  const a = await tower(t);
+  const b = await joined(t, a, 'computer-b');
+  const svg = await fetch(`${a.base}/api/nodes/${b.id}/svg`);
+  assert.equal(svg.status, 502);
+  assert.equal((await svg.json() as { code: string }).code, 'node-answer');
+  assert.equal((await fetch(`${a.base}/api/nodes/${b.id}/redirect`, { redirect: 'manual' })).status, 502);
+  const picture = await fetch(`${a.base}/api/nodes/${b.id}/picture`);
+  assert.equal(picture.status, 200);
+  assert.equal(picture.headers.get('content-type'), 'image/png');
+  assert.match(picture.headers.get('content-disposition') ?? '', /^inline; filename="attachment"; filename\*=UTF-8''%ED%99%94%EB%A9%B4\.png$/);
+  assert.match(picture.headers.get('content-security-policy') ?? '', /sandbox/);
+  assert.equal(picture.headers.get('set-cookie'), null, 'the other computer sets nothing for this Tower\'s origin');
+  const archive = await fetch(`${a.base}/api/nodes/${b.id}/archive`);
+  assert.equal(archive.headers.get('content-type'), 'application/octet-stream');
+  assert.equal(archive.headers.get('content-disposition'), 'attachment; filename="attachment"', 'a name that could break the header is dropped');
+});
+
+test('a request whose answer is lost after it left says it may have run, so the page sends the same request again', async t => {
+  const a = await tower(t);
+  const b = await joined(t, a, 'computer-b');
+  const pending = fetch(`${a.base}/api/nodes/${b.id}/hang`);
+  await until(() => b.seen.find(item => item.url === '/api/hang'), 5000);
+  await b.stop();
+  const lost = await pending;
+  assert.equal(lost.status, 502);
+  assert.equal((await lost.json() as { disposition: string }).disposition, 'uncertain');
+  await until(() => a.controller.list().find(item => item.id === b.id && item.status === 'offline'), 5000);
+  const offline = await fetch(`${a.base}/api/nodes/${b.id}/sessions/codex:shared`);
+  assert.equal((await offline.json() as { disposition: string }).disposition, 'not-admitted', 'nothing left for an offline computer');
 });

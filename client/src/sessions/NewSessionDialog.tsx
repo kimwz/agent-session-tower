@@ -9,8 +9,8 @@ import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { codexApprovalsRequest, readCodexApprovalsChoice, type CodexApprovalsChoice } from './codex-approvals-preference';
 import { CodexApprovalsSelect } from './CodexApprovalsSelect';
 import { EffortPicker, ModelPicker, supportedEffort } from '../chat/ModelPicker';
-import type { Host } from '../remote/hosts';
-import { localPart, nodeHeaders, nodeOf, nodePath, scopeRun, scopeSession } from '../remote/scope';
+import { hostProblem, type Host } from '../remote/hosts';
+import { localPart, nodeHeaders, nodeOf, nodePath, refusedBeforeRunning, scopeRun, scopeSession, settleRequest } from '../remote/scope';
 
 interface NewSessionDialogProps {
   providers: ProviderHealth[];
@@ -74,7 +74,8 @@ export function NewSessionDialog({ providers: localProviders, hosts = [], projec
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (inFlight.current || unavailable || !prompt.trim() || !cwd.trim()) return;
-    if (!/^(\/|~(\/|$))/.test(cwd.trim())) {
+    // `~` means this computer's home; another computer's folder is given in full.
+    if (machine ? !cwd.trim().startsWith('/') : !/^(\/|~(\/|$))/.test(cwd.trim())) {
       setFolderError(t("/로 시작하는 전체 폴더 경로를 입력해 주세요."));
       folderInput.current?.focus();
       return;
@@ -85,12 +86,13 @@ export function NewSessionDialog({ providers: localProviders, hosts = [], projec
     setFolderError('');
     dialog.current?.focus();
     try {
+      const body = JSON.stringify({ provider, cwd: cwd.trim(), prompt: prompt.trim(), ...(title.trim() ? { title: title.trim() } : {}),
+        ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...codexApprovalsRequest(provider, approvals) });
+      // Sending the same session again after an unknown outcome reuses its request ID, so it starts at most once.
       const result = await api<{ session: Session; run: Run }>(nodePath(machine, '/api/sessions'), {
-        method: 'POST',
-        headers: nodeHeaders(machine, { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }),
-        body: JSON.stringify({ provider, cwd: cwd.trim(), prompt: prompt.trim(), ...(title.trim() ? { title: title.trim() } : {}),
-          ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...codexApprovalsRequest(provider, approvals) }),
-      });
+        method: 'POST', headers: nodeHeaders(machine, { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, 'new-session', body), body,
+      }).catch(error => { if (refusedBeforeRunning(error)) settleRequest(machine, 'new-session'); throw error; });
+      settleRequest(machine, 'new-session');
       onCreated(machine ? scopeSession(machine, result.session) : result.session, machine ? scopeRun(machine, result.run) : result.run);
       onClose();
     } catch (cause) {
@@ -103,8 +105,7 @@ export function NewSessionDialog({ providers: localProviders, hosts = [], projec
 
   const connectionMessage = !connected ? t("다시 연결되면 세션을 시작할 수 있습니다.")
     : !token ? t("연결을 확인하고 있습니다.")
-      : machine !== undefined && !host?.live ? t("{0}에 다시 연결되면 세션을 시작할 수 있습니다.", { 0: host?.name ?? t("그 컴퓨터") })
-      : machine !== undefined && !host?.canWork ? t("{0}의 Tower를 업데이트하면 세션을 시작할 수 있습니다.", { 0: host?.name ?? t("그 컴퓨터") })
+      : machine !== undefined && host && hostProblem(host) ? hostProblem(host)!
       : !providerAvailable ? t("{0}를 현재 사용할 수 없습니다.", { 0: providerLabels[provider] }) : '';
 
   return createPortal(<dialog

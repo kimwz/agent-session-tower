@@ -16,6 +16,7 @@ export class NodeViewStore extends EventEmitter {
   private views: Views = {};
   private readonly path: string;
   private writes: Promise<unknown> = Promise.resolve();
+  private broken?: string;
 
   constructor(stateDir: string) {
     super();
@@ -27,7 +28,9 @@ export class NodeViewStore extends EventEmitter {
       const saved = await readPrivateJson(this.path);
       if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new Error('Saved remote folder views are invalid.');
       this.views = saved as Views;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.broken = `${this.path} 파일을 읽을 수 없어 다른 컴퓨터 폴더의 고정·숨김을 저장할 수 없습니다. 파일을 확인하거나 옮긴 뒤 Tower를 다시 시작하세요.`;
+    }
   }
 
   of(node: string): Readonly<Record<string, FolderView>> { return this.views[node] ?? {}; }
@@ -56,6 +59,7 @@ export class NodeViewStore extends EventEmitter {
   flush(): Promise<unknown> { return this.writes; }
 
   private save(next: Views): Promise<void> {
+    if (this.broken) return Promise.reject(Object.assign(new Error(this.broken), { statusCode: 503 }));
     this.views = next;
     const data = JSON.stringify(next);
     const write = this.writes.then(() => writePrivateJson(this.path, data));

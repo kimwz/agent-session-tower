@@ -13,7 +13,7 @@ import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { codexApprovalsRequest, readCodexApprovalsChoice, type CodexApprovalsChoice } from '../sessions/codex-approvals-preference';
 import { CodexApprovalsSelect } from '../sessions/CodexApprovalsSelect';
 import { EffortPicker, ModelPicker, supportedEffort } from '../chat/ModelPicker';
-import type { Host } from '../remote/hosts';
+import { hostProblem, type Host } from '../remote/hosts';
 import { localPart, nodeOf, pathFor, requestId, scopeJob } from '../remote/scope';
 
 interface AutoPromptDialogProps {
@@ -235,8 +235,7 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
   const statusLabel = preparing ? t('첨부 파일 준비 중…') : job && pending ? progressLabel(job) : submitting ? t('요청 접수를 확인하고 있습니다…') : '';
   const connectionMessage = !connected ? t('서버에 다시 연결되면 요청을 보낼 수 있습니다.')
     : !token ? t('연결을 확인하고 있습니다.')
-    : machine !== undefined && !host?.live ? t('{0}에 다시 연결되면 요청을 보낼 수 있습니다.', { 0: host?.name ?? t('그 컴퓨터') })
-    : machine !== undefined && !host?.canWork ? t('{0}의 Tower를 업데이트하면 요청을 보낼 수 있습니다.', { 0: host?.name ?? t('그 컴퓨터') })
+    : machine !== undefined && host && hostProblem(host) ? hostProblem(host)!
     : !providerAvailable ? t('{0}를 현재 사용할 수 없습니다.', { 0: providerLabels[provider] }) : '';
   const requestError = error || (job?.status === 'error' ? job.error || t('요청을 보내지 못했습니다.') : '');
 

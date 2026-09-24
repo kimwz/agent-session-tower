@@ -31,6 +31,8 @@ export class RemoteNodes extends EventEmitter {
 
   /** Computers with a shared state to show. */
   ids(): string[] { return this.mirrors.ids(); }
+  /** The list of joined computers is complete; before that a page must not forget any it knew. */
+  get ready(): boolean { return this.links.ready; }
 
   snapshot(id: string): Snapshot | undefined {
     const snapshot = this.mirrors.snapshot(id);
@@ -45,6 +47,8 @@ export class RemoteNodes extends EventEmitter {
     return this.views.set(id, cwd, patch);
   }
 
+  private readonly streaming = new Map<string, boolean>();
+
   close(): void {
     this.mirrors.off('change', this.mirrorChanged);
     this.mirrors.off('removed', this.mirrorRemoved);
@@ -53,7 +57,6 @@ export class RemoteNodes extends EventEmitter {
     this.mirrors.close();
   }
 
-  private readonly streaming = new Map<string, boolean>();
   private readonly mirrorChanged = (id: string) => {
     this.emit('change', id);
     const live = this.mirrors.live(id);

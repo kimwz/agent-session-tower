@@ -5,6 +5,17 @@ import { applySnapshotPatch, type SnapshotPatch } from '../../shared/snapshot-pa
 import type { Snapshot } from '../../shared/types.js';
 import type { ControllerLinks } from './controller.js';
 
+/** The shape the rest of this Tower relies on; another computer's frames are checked before they are used. */
+function plausible(value: unknown): value is Snapshot {
+  const snapshot = value as Partial<Snapshot> | null;
+  const list = (item: unknown) => item === undefined || Array.isArray(item);
+  return !!snapshot && typeof snapshot === 'object' && Array.isArray(snapshot.sessions) && Array.isArray(snapshot.runs) && Array.isArray(snapshot.providers)
+    && list(snapshot.groups) && list(snapshot.autoPrompts) && list(snapshot.repositories) && typeof snapshot.hostname === 'string'
+    && snapshot.sessions.every(item => item && typeof item.id === 'string' && typeof item.cwd === 'string')
+    && snapshot.runs.every(item => item && typeof item.id === 'string' && typeof item.sessionId === 'string')
+    && (snapshot.groups ?? []).every(item => item && typeof item.cwd === 'string');
+}
+
 /** A complete snapshot of a busy computer can be large; anything beyond this is not a frame. */
 const MAX_FRAME_CHARS = 32 * 1024 * 1024;
 const RETRY_MIN_MS = 1000;
@@ -153,21 +164,28 @@ export class NodeMirrors extends EventEmitter {
     if (event !== 'snapshot' && event !== 'patch') return true;
     const sequence = Number(eventId);
     if (!Number.isSafeInteger(sequence)) return false;
+    let next: Snapshot;
     try {
-      if (event === 'snapshot') {
-        const snapshot = JSON.parse(data) as Snapshot;
-        if (!snapshot || !Array.isArray(snapshot.sessions) || !Array.isArray(snapshot.runs)) return false;
-        mirror.snapshot = snapshot;
-      } else {
+      if (event === 'snapshot') next = JSON.parse(data) as Snapshot;
+      else {
         const patch = JSON.parse(data) as SnapshotPatch;
-        if (!mirror.snapshot || patch.base !== mirror.sequence) return false;
-        mirror.snapshot = applySnapshotPatch(mirror.snapshot, patch);
+        if (!mirror.snapshot || !patch || patch.base !== mirror.sequence) return false;
+        next = applySnapshotPatch(mirror.snapshot, patch);
       }
     } catch { return false; }
+    if (!plausible(next)) return false;
+    const previous = { snapshot: mirror.snapshot, sequence: mirror.sequence };
+    mirror.snapshot = next;
     mirror.sequence = sequence;
     mirror.live = true;
     mirror.failures = 0;
-    this.emit('change', id);
+    try { this.emit('change', id); }
+    catch {
+      // Whatever this state broke on this side, it stays with this computer: back to the last good state, and a fresh start.
+      mirror.snapshot = previous.snapshot;
+      mirror.sequence = previous.sequence;
+      return false;
+    }
     return true;
   }
 }

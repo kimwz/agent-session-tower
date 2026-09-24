@@ -20,15 +20,17 @@ import { matchChatRuns } from './chat-runs';
 import { EffortPicker, ModelPicker, supportedEffort } from './ModelPicker';
 import { useChatAppearance } from './chat-appearance';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
-import { localPart, nodeHeaders, nodeOf, pathFor, scopeDetail } from '../remote/scope';
+import { localPart, nodeHeaders, nodeOf, pathFor, refusedBeforeRunning, scopeDetail, settleRequest } from '../remote/scope';
 import { RemoteContent } from '../remote/remote-content';
 
 const emptyMessages: readonly ChatMessage[] = [];
 
 export function ChatPanel({ sessionId, session, allSessions, provider, host, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, sessionClosed = false, changingClosed = false, readRevision = '', onRead, contextBanner }: { contextBanner?: ReactNode; sessionId: string; session?: Session; allSessions: Session[]; provider?: ProviderHealth;
   /** The joined computer this conversation lives on; absent for this computer. */
-  host?: { name: string; live: boolean; canWork: boolean }; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
+  host?: { name: string; live: boolean; canWork: boolean; problem?: string }; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
   useI18n();
+  // Changes to a joined computer's conversation need that computer reachable, not only this Tower.
+  const reachable = connected && (!host || host.canWork);
   const appearance = useChatAppearance();
   const [detail, setDetail] = useState<ChatHistory | null>(null);
   const [loading, setLoading] = useState(true);
@@ -147,13 +149,18 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
     const id = sessionId;
     const candidate = getComposerState(id).draft;
     const message = candidate.prompt.trim();
-    if ((!message && !candidate.attachments.length) || !token || !connected || !current?.resumable || !provider?.available) return;
+    if ((!message && !candidate.attachments.length) || !token || !reachable || !current?.resumable || !provider?.available) return;
     const submitted = startComposerSend(id);
     if (!submitted) return;
     try {
       const prepared = await prepareDraftAttachments(submitted.attachments);
       markComposerSending(id);
-      await api<{ run: Run }>(pathFor(id, local => `/api/sessions/${encodeURIComponent(local)}/messages`), { method: 'POST', headers: nodeHeaders(nodeOf(id), { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }), body: JSON.stringify({ prompt: message, ...prepared, ...(submitted.model ? { model: submitted.model } : {}), ...(submitted.effort ? { effort: submitted.effort } : {}) }) });
+      const body = JSON.stringify({ prompt: message, ...prepared, ...(submitted.model ? { model: submitted.model } : {}), ...(submitted.effort ? { effort: submitted.effort } : {}) });
+      await api<{ run: Run }>(pathFor(id, local => `/api/sessions/${encodeURIComponent(local)}/messages`), { method: 'POST', headers: nodeHeaders(nodeOf(id), { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, `message:${id}`, body), body }).catch(error => {
+        if (refusedBeforeRunning(error)) settleRequest(nodeOf(id), `message:${id}`);
+        throw error;
+      });
+      settleRequest(nodeOf(id), `message:${id}`);
       finishComposerSend(id, submitted);
       if (mounted.current && sessionRef.current === id) { followRef.current = true; setFollowing(true); }
       onSnapshotRefresh();
@@ -161,14 +168,14 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
   }
 
   const cancelRun = useCallback(async (id: string) => {
-    if (!token || !connected) return;
+    if (!token || !reachable) return;
     setCancelling(id); setSendError('');
     try { await api(pathFor(id, local => `/api/runs/${encodeURIComponent(local)}/cancel`), { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' }); onSnapshotRefresh(); }
     catch (error) { setSendError(error instanceof Error ? error.message : t("작업을 중지하지 못했습니다.")); }
     finally { setCancelling(''); }
-  }, [connected, onSnapshotRefresh, setSendError, token]);
+  }, [reachable, onSnapshotRefresh, setSendError, token]);
   const steerRun = useCallback(async (id: string) => {
-    if (!token || !connected) return;
+    if (!token || !reachable) return;
     const requestedSession = sessionRef.current;
     setSteering(id); setSendError('');
     try {
@@ -178,9 +185,9 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
       if (sessionRef.current === requestedSession) setSendError(error instanceof Error ? error.message : t("요청을 끼워넣지 못했습니다."));
       onSnapshotRefresh();
     } finally { setSteering(''); }
-  }, [connected, onSnapshotRefresh, setSendError, token]);
+  }, [reachable, onSnapshotRefresh, setSendError, token]);
   const dismissRun = useCallback(async (id: string) => {
-    if (!token || !connected) return;
+    if (!token || !reachable) return;
     const requestedSession = sessionRef.current;
     setDismissing(id); setSendError('');
     try {
@@ -188,7 +195,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
       onSnapshotRefresh();
     } catch (error) { if (sessionRef.current === requestedSession) setSendError(error instanceof Error ? error.message : t("실패 내역을 지우지 못했습니다.")); }
     finally { setDismissing(''); }
-  }, [connected, onSnapshotRefresh, setSendError, token]);
+  }, [reachable, onSnapshotRefresh, setSendError, token]);
   const retryPrompt = useCallback((run: Run) => {
     if (getComposerState(sessionId).stage) return;
     const next = draftFromRun(run);
@@ -197,13 +204,12 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
 
   let composerHint: ReactNode = <><kbd>⌘</kbd><kbd>Enter</kbd><span>{t("전송")}</span></>;
   if (!connected) composerHint = t("서버에 다시 연결되면 요청을 보낼 수 있습니다.");
-  else if (host && !host.live) composerHint = t("{0}에 다시 연결되면 요청을 보낼 수 있습니다.", { 0: host.name });
-  else if (host && !host.canWork) composerHint = t("{0}의 Tower를 업데이트하면 이어서 작업할 수 있습니다.", { 0: host.name });
+  else if (host?.problem) composerHint = host.problem;
   else if (current?.creationPending) composerHint = t("새 세션을 시작하고 있습니다.");
   else if (current && !current.resumable) composerHint = t("이 세션은 대화 기록만 확인할 수 있습니다.");
   else if (provider && !provider.available) composerHint = t("{0} CLI를 설치하면 이어서 작업할 수 있습니다.", { 0: current ? providerLabels[current.provider] : t("에이전트") });
   else if (!token) composerHint = t("연결을 준비하는 중…");
-  const disabled = !connected || !current?.resumable || !provider?.available || !token || (host !== undefined && !host.canWork);
+  const disabled = !reachable || !current?.resumable || !provider?.available || !token || (host !== undefined && !host.canWork);
   const sendingLabel = stage === 'preparing' ? t("파일 준비 중") : t("보내는 중");
 
   return <RemoteContent.Provider value={host?.name}><div className="chat-panel-spacer" aria-hidden="true" style={{ width: appearance.width, flexBasis: appearance.width }} /><aside className="chat-panel" style={{ '--chat-font-size': `${appearance.fontSize}px`, '--chat-width': `${appearance.width}px` } as CSSProperties} aria-label={t("세션 대화")}>
@@ -213,19 +219,19 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
     <header className="chat-header">
       <div className="chat-heading-line">
         {current && <span className={`provider-square ${current.provider} ${current.status}`} role="img" aria-label={providerLabels[current.provider]} title={providerLabels[current.provider]}><ProviderIcon provider={current.provider} /></span>}
-        {current ? <SessionTitleEditor key={current.id} session={current} token={token} connected={connected} onSaved={updated => { onSessionUpdate(updated); setDetail(previous => previous ? { ...previous, session: { ...previous.session, customTitle: updated.customTitle } } : previous); onSnapshotRefresh(); }} /> : <h2 className="chat-loading-title">{t("대화 불러오는 중")}</h2>}
+        {current ? <SessionTitleEditor key={current.id} session={current} token={token} connected={reachable} onSaved={updated => { onSessionUpdate(updated); setDetail(previous => previous ? { ...previous, session: { ...previous.session, customTitle: updated.customTitle } } : previous); onSnapshotRefresh(); }} /> : <h2 className="chat-loading-title">{t("대화 불러오는 중")}</h2>}
         <div className="chat-header-actions">
-          {onSessionClose && <button className="icon-button session-close-button" aria-label={sessionClosed ? t("세션 다시 열기") : t("세션 종료")} title={sessionClosed ? t("그래프에 다시 표시") : t("그래프에서 숨기기 · 실행 중인 작업은 계속됩니다")} disabled={changingClosed || !connected || !token} onClick={() => { setSendError(''); void Promise.resolve(onSessionClose()).catch(error => setSendError(error instanceof Error ? error.message : t("세션 상태를 저장하지 못했습니다."))); }}>{changingClosed ? <LoaderCircle className="spin" size={15} /> : sessionClosed ? <ArchiveRestore size={16} /> : <Archive size={16} />}</button>}
+          {onSessionClose && <button className="icon-button session-close-button" aria-label={sessionClosed ? t("세션 다시 열기") : t("세션 종료")} title={sessionClosed ? t("그래프에 다시 표시") : t("그래프에서 숨기기 · 실행 중인 작업은 계속됩니다")} disabled={changingClosed || !reachable || !token} onClick={() => { setSendError(''); void Promise.resolve(onSessionClose()).catch(error => setSendError(error instanceof Error ? error.message : t("세션 상태를 저장하지 못했습니다."))); }}>{changingClosed ? <LoaderCircle className="spin" size={15} /> : sessionClosed ? <ArchiveRestore size={16} /> : <Archive size={16} />}</button>}
           <button className="icon-button close-chat" onClick={onClose} aria-label={t("대화 닫기")} title={t("닫기 (Esc)")}><X size={18} /></button>
         </div>
       </div>
       <div className="chat-context-row">
         {current && <span className={`status-badge ${current.status}`} title={translateMessage(current.statusReason)}><i />{statusLabels[current.status]}</span>}
         <button className="chat-project" onClick={() => setShowMetadata(!showMetadata)} aria-expanded={showMetadata}><Folder size={12} /><span className="folder-tail" title={(current?.cwd && localPart(current.cwd)) || current?.project || t("세션 정보")}><bdi dir="ltr">{current?.project || t("세션 정보")}</bdi></span><ChevronDown size={12} className={showMetadata ? 'rotate' : ''} /></button>
-        {current?.cwd && !host && <WorkspaceActions key={current.cwd} cwd={current.cwd} token={token} disabled={!connected} />}
+        {current?.cwd && !host && <WorkspaceActions key={current.cwd} cwd={current.cwd} token={token} disabled={!reachable} />}
         <SessionFamilyNav sessions={allSessions} selectedId={sessionId} onNavigate={onNavigate} />
       </div>
-      {showMetadata && current && <dl className="session-metadata">{host && <div><dt>{t("컴퓨터")}</dt><dd>{host.name}</dd></div>}<div><dt>{t("작업 폴더")}</dt><dd>{(current.cwd && localPart(current.cwd)) || t("정보 없음")}</dd></div>{current.model && <div><dt>{t("모델")}</dt><dd>{current.model}</dd></div>}<div><dt>{t("세션 ID")}</dt><dd>{current.nativeId}<button className="icon-button" title={t("세션 ID 복사")} aria-label={t("세션 ID 복사")} onClick={() => { void copyText(current.nativeId).then(success => { setCopied(success); window.setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button></dd></div>{resumeCommand(current) && <div><dt>{t("터미널")}</dt><dd><code className="resume-command">{resumeCommand(current)}</code><ResumeCommandButton session={current} size={12} /></dd></div>}<div><dt>{t("상태 판단")}</dt><dd>{translateMessage(current.statusReason)}</dd></div><div><dt>{t("시작")}</dt><dd>{absoluteTime(current.createdAt)}</dd></div></dl>}
+      {showMetadata && current && <dl className="session-metadata">{host && <div><dt>{t("컴퓨터")}</dt><dd>{host.name}</dd></div>}<div><dt>{t("작업 폴더")}</dt><dd>{(current.cwd && localPart(current.cwd)) || t("정보 없음")}</dd></div>{current.model && <div><dt>{t("모델")}</dt><dd>{current.model}</dd></div>}<div><dt>{t("세션 ID")}</dt><dd>{current.nativeId}<button className="icon-button" title={t("세션 ID 복사")} aria-label={t("세션 ID 복사")} onClick={() => { void copyText(current.nativeId).then(success => { setCopied(success); window.setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button></dd></div>{resumeCommand(current) && !host && <div><dt>{t("터미널")}</dt><dd><code className="resume-command">{resumeCommand(current)}</code><ResumeCommandButton session={current} size={12} /></dd></div>}<div><dt>{t("상태 판단")}</dt><dd>{translateMessage(current.statusReason)}</dd></div><div><dt>{t("시작")}</dt><dd>{absoluteTime(current.createdAt)}</dd></div></dl>}
       {contextBanner}
     </header>
     <div className="chat-scroll" ref={scroller} onScroll={() => { const el = scroller.current; if (!el) return; const near = el.scrollHeight - el.scrollTop - el.clientHeight < 100; followRef.current = near; setFollowing(near); }}>
@@ -242,7 +248,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
     <div className="composer-section">
       {current?.resumable === false && current.parentId && <button className="parent-session-link" onClick={() => onNavigate(current.parentId!)}><GitBranch size={14} /><span>{t("부모 세션에서 이어가기")}</span><ArrowUp size={13} /></button>}
       {sendError && <div className="inline-error" role="alert"><TriangleAlert size={15} /><span>{translateMessage(sendError)}</span><button aria-label={t("오류 메시지 닫기")} onClick={() => setSendError('')}><X size={13} /></button></div>}
-      {controlRuns.length > 0 && <div ref={runControls} className={`run-controls${approvalKey ? ' has-approvals' : ''}`} aria-label={t("진행 중이거나 실패한 요청")}>{controlRuns.map(run => <RunControl key={run.id} run={run} onCancel={cancelRun} onRetry={retryPrompt} onDismiss={dismissRun} onSteer={steerRun} steering={steering === run.id} cancelling={cancelling === run.id} dismissing={dismissing === run.id} disabled={!connected || !token || !!cancelling || !!dismissing || !!steering} retryDisabled={disabled || sending} showPrompt={!runProjection.matchedRunIds.has(run.id)} token={token} onSnapshotRefresh={onSnapshotRefresh} />)}</div>}
+      {controlRuns.length > 0 && <div ref={runControls} className={`run-controls${approvalKey ? ' has-approvals' : ''}`} aria-label={t("진행 중이거나 실패한 요청")}>{controlRuns.map(run => <RunControl key={run.id} run={run} onCancel={cancelRun} onRetry={retryPrompt} onDismiss={dismissRun} onSteer={steerRun} steering={steering === run.id} cancelling={cancelling === run.id} dismissing={dismissing === run.id} disabled={!reachable || !token || !!cancelling || !!dismissing || !!steering} retryDisabled={disabled || sending} showPrompt={!runProjection.matchedRunIds.has(run.id)} token={token} onSnapshotRefresh={onSnapshotRefresh} />)}</div>}
       <form className={`composer ${disabled ? 'disabled' : ''} ${dragging ? 'composer-dragging' : ''}`} onSubmit={event => { event.preventDefault(); void sendPrompt(); }}
         onDragOver={event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = disabled || sending ? 'none' : 'copy'; if (!disabled && !sending) setDragging(true); } }}
         onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}

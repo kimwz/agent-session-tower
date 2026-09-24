@@ -170,3 +170,13 @@ test('matched running requests show only status and stop; pending actions disabl
   assert.doesNotMatch(html, /확인해 주세요|RUN_OUTPUT_MUST_NOT_RENDER/);
   assert.match(renderToStaticMarkup(createElement(RunControl, { ...props, disabled: true })), /disabled=""/);
 });
+
+test('a joined computer’s attached files are matched by the ids that computer wrote into the conversation', () => {
+  const request = run('attachments', { attachments: [file, image] });
+  const message = row('native', wrapped(request));
+  const node = 'b'.repeat(32);
+  const named = { ...request, sessionId: `@${node}/session`, attachments: request.attachments!.map(attachment => ({ ...attachment, id: `@${node}/${attachment.id}` })) };
+  const projection = matchChatRuns([message], [named], `@${node}/session`);
+  assert.equal(projection.matches.get('native')?.text, request.prompt);
+  assert.deepEqual(projection.matches.get('native')?.attachments?.map(attachment => attachment.id), [`@${node}/text-id`, `@${node}/image-id`]);
+});
