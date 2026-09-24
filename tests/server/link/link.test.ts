@@ -467,3 +467,19 @@ test('an unreadable link identity is reported instead of being replaced', async 
   await assert.rejects(loadLinkIdentity(stateDir));
   assert.equal(await readFile(join(stateDir, 'link', 'identity.json'), 'utf8'), '');
 });
+
+test('a code run on a computer that is already joined is spent, and names the computer that used it', async t => {
+  const a = await computer(t, 'computer-a');
+  const b = await computer(t, 'computer-b');
+  const c = await computer(t, 'computer-c');
+  await a.listen();
+  await b.node.join((await a.controller.invite()).code);
+  await connected(a.controller, 'computer-b');
+  const again = await a.controller.invite();
+  await b.node.join(again.code);
+  await until(() => a.controller.list().find(node => node.invite === again.id && node.status === 'connected'), 5000);
+  await until(() => b.node.list().find(item => item.state === 'paired' && item.status === 'connected'), 5000);
+  await c.node.join(again.code);
+  await until(() => c.node.list().find(item => item.status !== 'connecting'), 5000);
+  assert.deepEqual(a.controller.list().map(node => node.name), ['computer-b']);
+});

@@ -56,7 +56,7 @@ export function RemotePanel({ token, projects, onClose }: { token: string; proje
     known.current = new Set(overview?.nodes.map(node => node.id) ?? []);
     setInvite(await post<LinkInvite>(token, '/api/link/invite', {}));
   });
-  const tabs = { nodes: [t('이 컴퓨터가 제어'), Monitor], controllers: [t('이 컴퓨터를 제어'), Radio], exclusions: [t('공유 제외'), FolderX] } as const;
+  const tabs = { nodes: [t('연결한 컴퓨터'), Monitor], controllers: [t('이 컴퓨터를 제어하는 Tower'), Radio], exclusions: [t('공유 제외'), FolderX] } as const;
   const moveTab = (event: KeyboardEvent) => {
     if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
     event.preventDefault();
@@ -89,7 +89,8 @@ function Nodes({ token, overview, busy, run, invite, known, onInvite }: { token:
   const [now, setNow] = useState(Date.now());
   const [port, setPort] = useState('');
   useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1000); return () => window.clearInterval(timer); }, []);
-  const joined = invite ? overview.nodes.find(node => !known.has(node.id)) : undefined;
+  // A computer that joined with this code, including one that was joined before and used it to join again.
+  const joined = invite ? overview.nodes.find(node => node.invite === invite.id || !known.has(node.id)) : undefined;
   const hub = overview.hub;
   const copy = async (kind: 'command' | 'code', value: string) => { if (await copyText(value)) { setCopied(kind); window.setTimeout(() => setCopied(''), 1500); } };
   const expired = invite && invite.expiresAt <= now;
@@ -106,6 +107,7 @@ function Nodes({ token, overview, busy, run, invite, known, onInvite }: { token:
       {!hub.listening && <form className="remote-port" onSubmit={changePort}>
         <label>{t('연결용 포트')}<input type="number" min={1024} max={65535} inputMode="numeric" value={port} placeholder={String(hub.port)} onChange={event => setPort(event.target.value)} /></label>
         <button className="secondary-button" disabled={busy || !port}>{t('포트 변경')}</button>
+        {overview.nodes.length > 0 && <small>{t('포트를 바꾸면 이미 연결한 컴퓨터는 새 명령으로 다시 연결해야 합니다.')}</small>}
       </form>}
       {hub.enabled && hub.listening && hub.addresses.length > 0 && <ul className="remote-addresses">{hub.addresses.map(address =>
         <li key={address.url}><code>{address.url.replace(/^ws:\/\//, '').replace(/\/tower-link$/, '')}</code><small>{address.kind === 'tailscale' ? 'Tailscale' : address.kind === 'local-name' ? t('이 네트워크 이름') : address.kind === 'lan' ? t('같은 네트워크') : t('직접 지정한 주소')}</small></li>)}</ul>}
@@ -118,7 +120,7 @@ function Nodes({ token, overview, busy, run, invite, known, onInvite }: { token:
           <p>{t('추가할 컴퓨터의 터미널에서 아래 명령을 한 번 실행하세요. 같은 버전의 Tower가 설치되고, 로그인할 때마다 백그라운드에서 켜지며, 이 컴퓨터에 연결됩니다.')}</p>
           <div className="remote-copy"><code>{invite.command}</code><button type="button" className="icon-button" aria-label={t('명령 복사')} onClick={() => void copy('command', invite.command)}>{copied === 'command' ? <Check size={15} /> : <Copy size={15} />}</button></div>
           <p className="trigger-note">{t('그 컴퓨터에는 Node.js 22.13 이상과 Git이 필요하고, 쓸 Claude Code나 Codex에 로그인되어 있어야 합니다.')}</p>
-          <p className="trigger-note">{t('그 컴퓨터에서 Tower가 이미 실행 중이면, 그 화면의 원격 컴퓨터 → 이 컴퓨터를 제어 탭에 이 코드를 붙여 넣어도 됩니다.')}</p>
+          <p className="trigger-note">{t('그 컴퓨터에서 Tower가 이미 실행 중이면, 그 화면의 원격 컴퓨터 → 이 컴퓨터를 제어하는 Tower 탭에 이 코드를 붙여 넣어도 됩니다.')}</p>
           <div className="remote-copy"><code>{invite.code}</code><button type="button" className="icon-button" aria-label={t('코드 복사')} onClick={() => void copy('code', invite.code)}>{copied === 'code' ? <Check size={15} /> : <Copy size={15} />}</button></div>
           <p className="trigger-note"><LoaderCircle size={12} className="spin" /> {t('연결을 기다리는 중 · {0}분 {1}초 뒤 만료', { 0: Math.floor(Math.max(0, invite.expiresAt - now) / 60_000), 1: Math.floor(Math.max(0, invite.expiresAt - now) / 1000) % 60 })}</p>
         </div>}

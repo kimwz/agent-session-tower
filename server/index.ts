@@ -118,6 +118,8 @@ async function main() {
   if (!await readWebAsset(clientDir, '/')) throw new Error('Web UI is unavailable. Rebuild or replace this installation.');
   // The background service appends to one log file; it is started over when it grows large.
   const serviceLog = process.env.TOWER_SERVICE_LOG;
+  // Only this process reads it; the worker, shells and agents it starts do not inherit it.
+  delete process.env.TOWER_SERVICE_LOG;
   if (serviceLog) await stat(serviceLog).then(info => info.size > 10 * 1024 * 1024 ? truncate(serviceLog, 0) : undefined).catch(() => {});
   let releaseLock: () => Promise<void>;
   try { releaseLock = await acquireStateLock(stateDir, port); }

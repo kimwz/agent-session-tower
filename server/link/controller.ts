@@ -29,6 +29,8 @@ interface NodeRecord {
   id: string; pin: string; name: string; label?: string; pairedAt: string; lastSeenAt?: string; version?: string;
   /** The computer stopped trusting this controller; shown until it joins again or is removed here. */
   left?: true;
+  /** The last code it joined with, so the page that showed the code can tell it was used. */
+  invite?: string;
 }
 interface InviteRecord { id: string; secret: string; expiresAt: number; claimedBy?: string }
 interface State { version: 1; settings: HubSettings; nodes: NodeRecord[]; removed: Array<{ pin: string; at: string }>; invites: InviteRecord[] }
@@ -96,7 +98,7 @@ export class ControllerLinks extends EventEmitter {
   }
 
   /** A single-use code valid for ten minutes. Needs the link port open, since the joining computer dials it. */
-  async invite(): Promise<{ code: string; command: string; expiresAt: number }> {
+  async invite(): Promise<{ id: string; code: string; command: string; expiresAt: number }> {
     if (!this.listener) throw Object.assign(new Error('먼저 다른 컴퓨터의 연결 받기를 켜세요.'), { statusCode: 409 });
     const addresses = this.hub().addresses.map(item => item.url);
     if (!addresses.length) throw Object.assign(new Error('다른 컴퓨터가 이 컴퓨터에 닿을 네트워크 주소가 없습니다.'), { statusCode: 409 });
@@ -104,7 +106,7 @@ export class ControllerLinks extends EventEmitter {
     const now = this.now();
     await this.save({ ...this.state, invites: [...this.state.invites.filter(item => item.expiresAt + CLAIM_GRACE_MS > now), invite] });
     const code: JoinCode = { v: 1, name: this.options.hostname(), pin: this.options.identity.pin, addresses: addresses.slice(0, 8), inviteId: invite.id, secret: invite.secret, expiresAt: invite.expiresAt, version: this.options.version };
-    return { code: encodeJoinCode(code), command: joinCommand(code), expiresAt: invite.expiresAt };
+    return { id: invite.id, code: encodeJoinCode(code), command: joinCommand(code), expiresAt: invite.expiresAt };
   }
 
   list(): NodeSummary[] {
@@ -113,7 +115,7 @@ export class ControllerLinks extends EventEmitter {
       const status: NodeStatus = live ? (live.hello.protocol === LINK_PROTOCOL ? 'connected' : 'update-required') : node.left ? 'removed-by-node' : 'offline';
       return { id: node.id, name: live?.hello.name ?? node.name, ...(node.label ? { label: node.label } : {}), fingerprint: displayFingerprint(node.pin), status,
         ...(live?.hello.version ?? node.version ? { version: live?.hello.version ?? node.version } : {}), features: live?.hello.features ?? [],
-        pairedAt: node.pairedAt, ...(node.lastSeenAt ? { lastSeenAt: node.lastSeenAt } : {}) };
+        pairedAt: node.pairedAt, ...(node.lastSeenAt ? { lastSeenAt: node.lastSeenAt } : {}), ...(node.invite ? { invite: node.invite } : {}) };
     });
   }
 
@@ -237,11 +239,12 @@ export class ControllerLinks extends EventEmitter {
       done();
       // The link may have ended while its pairing was being saved, or this Tower may be shutting down.
       if (this.closed || end.session.destroyed || ws.readyState !== ws.OPEN) throw new Error('The link ended.');
-      this.attach(node, { session: end.session, ws, hello });
-      // Until it hears this, the other computer keeps offering its invitation. If it cannot be told, the link
+      const live: Connected = { session: end.session, ws, hello };
+      this.attach(node, live);
+      // Until it hears this, the other computer keeps offering its invitation. If it cannot be told, this link
       // starts over so it is told on the next connection.
       if (hello.pairing) await linkRequest(end.session, 'POST', '/link/paired', { name: this.options.hostname(), fingerprint: this.options.identity.fingerprint })
-        .then(answer => { if (answer.status !== 200) throw new Error('Not confirmed.'); }).catch(() => this.connected.get(node.id)?.gone?.());
+        .then(answer => { if (answer.status !== 200) throw new Error('Not confirmed.'); }).catch(() => live.gone?.());
     } catch {
       clearTimeout(deadline);
       done();
@@ -261,7 +264,7 @@ export class ControllerLinks extends EventEmitter {
     if (!open && !resumed) return undefined;
     if (!proofMatches(pairingProof(invite.secret, exporter, { inviteId: invite.id, controllerPin: this.options.identity.pin, nodePin: pin }), pairing.proof)) return undefined;
     const { left: _, ...kept } = known ?? {} as Partial<NodeRecord>;
-    const node: NodeRecord = { ...kept, id: linkId(pin), pin, name: hello.name.slice(0, 100) || 'Computer', pairedAt: known?.pairedAt ?? new Date(now).toISOString(), version: hello.version };
+    const node: NodeRecord = { ...kept, id: linkId(pin), pin, name: hello.name.slice(0, 100) || 'Computer', pairedAt: known?.pairedAt ?? new Date(now).toISOString(), version: hello.version, invite: invite.id };
     await this.save({ ...this.state,
       invites: this.state.invites.map(item => item.id === invite.id ? { ...item, claimedBy: pin } : item),
       nodes: [...this.state.nodes.filter(item => item.pin !== pin), node],
@@ -318,7 +321,10 @@ export class ControllerLinks extends EventEmitter {
 
   private save(next: State): Promise<void> {
     if (this.broken) return Promise.reject(Object.assign(new Error(this.broken), { statusCode: 503 }));
-    this.state = next;
+    // Codes past their grace period, and their secrets, are not kept.
+    const now = this.now();
+    this.state = next.invites.every(item => item.expiresAt + CLAIM_GRACE_MS > now) ? next : { ...next, invites: next.invites.filter(item => item.expiresAt + CLAIM_GRACE_MS > now) };
+    next = this.state;
     const data = JSON.stringify(next);
     const write = this.writes.then(() => writePrivateJson(this.path, data));
     this.writes = write.catch(() => {});

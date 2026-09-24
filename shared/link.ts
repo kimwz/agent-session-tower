@@ -6,6 +6,8 @@ export type NodeStatus = 'connected' | 'offline' | 'update-required' | 'removed-
 export interface NodeSummary {
   id: string; name: string; label?: string; fingerprint: string; status: NodeStatus;
   version?: string; features: string[]; pairedAt: string; lastSeenAt?: string;
+  /** The code it last joined with. */
+  invite?: string;
 }
 export type ControllerStatus = 'connected' | 'connecting' | 'offline' | 'expired' | 'refused' | 'removed';
 /** A computer that controls this one. */
@@ -23,4 +25,4 @@ export interface LinkOverview {
   /** Saved link state that could not be read; nothing is changed until the owner deals with it. */
   errors?: string[];
 }
-export interface LinkInvite { code: string; command: string; expiresAt: number }
+export interface LinkInvite { id: string; code: string; command: string; expiresAt: number }

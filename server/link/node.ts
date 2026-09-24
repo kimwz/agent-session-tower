@@ -107,10 +107,10 @@ export class NodeLinks extends EventEmitter {
     const id = linkId(code.pin);
     const existing = this.records.find(record => record.id === id);
     if (existing?.state === 'paired') {
-      // Already joined. The controller may have removed this computer while it was away, so the new invitation
-      // is offered on the next connection too; a controller that still knows this computer simply confirms it.
-      const claim = this.live.has(id) ? {} : { inviteId: code.inviteId, secret: code.secret, expiresAt: code.expiresAt };
-      await this.save(this.records.map(record => record.id === id ? { ...record, addresses: code.addresses, ...claim } : record));
+      // Already joined. The controller may have removed this computer while it was away, so the new invitation is
+      // offered on a fresh connection; a controller that still knows this computer confirms it and spends the code.
+      await this.save(this.records.map(record => record.id === id ? { ...record, addresses: code.addresses, inviteId: code.inviteId, secret: code.secret, expiresAt: code.expiresAt } : record));
+      this.stop(id);
     } else {
       const record: ControllerRecord = { id, pin: code.pin, name: code.name, addresses: code.addresses, state: 'claiming', inviteId: code.inviteId, secret: code.secret, expiresAt: code.expiresAt };
       await this.save([...this.records.filter(item => item.id !== id), record]);

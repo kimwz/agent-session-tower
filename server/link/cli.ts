@@ -8,7 +8,7 @@ import { lockOwners } from '../instance/state-lock.js';
 import { defaultStateDir } from '../state-dir.js';
 import { decodeJoinCode } from './join-code.js';
 import { displayFingerprint, linkId } from './identity.js';
-import { installService, installVersion, serviceStatus, uninstallService, useVersion } from './service.js';
+import { currentVersion, installService, installVersion, newerVersion, serviceStatus, uninstallService, useVersion } from './service.js';
 
 const USAGE = `Usage:
   agent-session-tower join <code> [--state-dir <path>] [--port <number>] [--no-service]
@@ -45,21 +45,28 @@ export async function runLinkCommand(args: string[]): Promise<void> {
   const name = code.name.replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
   console.log(`Connecting this computer to ${name} (fingerprint ${displayFingerprint(code.pin)}).`);
   let running = await runningTower(stateDir);
-  if (running && !await get(running.base, '/api/link').then(() => true, () => false)) {
-    throw new Error(`Tower ${running.version} is running here but cannot join other computers yet. Quit it, then run this command again.`);
+  if (running) {
+    const links = await fetch(`${running.base}/api/link`).catch(() => undefined);
+    if (links?.status === 404) throw new Error(`Tower ${running.version} is running here but cannot join other computers yet. Quit it, then run this command again.`);
+    if (!links?.ok) throw new Error(((await links?.json().catch(() => ({})) ?? {}) as { error?: string }).error ?? 'The Tower running here did not answer. Try again in a moment.');
   }
   if (!running && (!service || process.platform !== 'darwin')) {
     throw new Error(!service ? 'Tower is not running here. Start it (agent-session-tower --no-open) and run this command again, or leave out --no-service.'
       : 'Tower is not running here. On this system, start it with your service manager (agent-session-tower --no-open) and run this command again.');
   }
   if (!running && !await portFree(port)) throw new Error(`Port ${port} is used by another program on this computer. Run this command again with --port ${port + 1} (or another free port).`);
-  // Coming back after a logout or restart without anyone at this computer needs the background service.
-  if (service && process.platform === 'darwin' && !(await serviceStatus(stateDir)).installed) {
-    await installVersion(stateDir, code.version, line => console.log(line), packageRoot());
-    await useVersion(stateDir, code.version);
+  // Coming back after a logout or restart without anyone at this computer needs the background service. When Tower
+  // is not running, the service is (re)started with the requested port; a service that already runs is left alone.
+  const installed = process.platform === 'darwin' ? await serviceStatus(stateDir) : undefined;
+  if (service && installed && (!installed.installed || !installed.version || !running)) {
+    // Never older than what already runs here: an older web would take the worker back a version.
+    const version = running && newerVersion(running.version, code.version) ? running.version : code.version;
+    await installVersion(stateDir, version, line => console.log(line), packageRoot());
+    await useVersion(stateDir, version);
     await installService(stateDir, { port: running?.port ?? port });
-    console.log(running ? `Tower ${code.version} will start in the background from your next login. The Tower running now keeps serving until then.`
-      : `Tower ${code.version} now starts in the background whenever you log in. Waiting for it to start…`);
+    const current = await currentVersion(stateDir) ?? version;
+    console.log(running ? `Tower ${current} will start in the background from your next login. The Tower running now keeps serving until then. (Use --no-service to leave the login service out.)`
+      : `Tower ${current} now starts in the background whenever you log in. Waiting for it to start…`);
   }
   if (!running) {
     running = await waitFor(() => runningTower(stateDir), 180_000);
@@ -80,6 +87,7 @@ export async function runLinkCommand(args: string[]): Promise<void> {
     : 'Another computer answered at that address. Check the addresses in the code.');
   console.log(`Connected. ${name} can now see and control this computer. Folders you exclude in Tower (Remote computers → Sharing) stay private.`);
   console.log('Tower runs while you are logged in to this computer. To keep it reachable, let it log in automatically and keep it from sleeping (System Settings → Energy).');
+  console.log('Work runs with this computer\'s own Claude Code and Codex sign-ins; sign in to them here if you have not yet.');
 }
 
 async function runService(action: string | undefined, stateDir: string, port: number): Promise<void> {

@@ -62,16 +62,18 @@ async function installedPackage(root: string, version: string): Promise<string |
   return built ? parent : undefined;
 }
 
-const newer = (a: string, b: string) => {
+/** Whether released version `a` is newer than `b`. */
+export function newerVersion(a: string, b: string): boolean {
+  if (!/^\d+\.\d+\.\d+$/.test(a) || !/^\d+\.\d+\.\d+$/.test(b)) return false;
   const [x, y] = [a, b].map(value => value.split('.').map(Number));
   for (let index = 0; index < 3; index++) if (x[index] !== y[index]) return x[index] > y[index];
   return false;
-};
+}
 
 /** Points `current` at a version atomically. A newer version already in use is kept: the service never goes back. */
 export async function useVersion(stateDir: string, version: string): Promise<void> {
   const current = await currentVersion(stateDir);
-  if (current && /^\d+\.\d+\.\d+$/.test(current) && newer(current, version)) return;
+  if (current && newerVersion(current, version)) return;
   const paths = runtimePaths(stateDir);
   const temporary = `${paths.current}.${process.pid}`;
   await rm(temporary, { force: true });
@@ -134,9 +136,10 @@ export async function installService(stateDir: string, options: { port: number; 
   await writeFile(file, plist, { mode: 0o644 });
   const domain = `gui/${process.getuid?.() ?? 501}`;
   await run('launchctl', ['bootout', domain, file]).catch(() => {});
-  await run('launchctl', ['bootstrap', domain, file]).catch(() => {
+  await run('launchctl', ['bootstrap', domain, file]).catch(error => {
     // Without a desktop login (for example over SSH after a restart) there is no session to start it in yet.
-    throw new Error('The background service is set up, but macOS can start it only after someone logs in to this Mac\'s desktop. Log in on this Mac (or turn on automatic login), then run this command again.');
+    const detail = String((error as { stderr?: unknown }).stderr || (error as Error).message).trim().split('\n')[0];
+    throw new Error(`The background service is set up, but macOS did not start it (${detail}). If no one is logged in to this Mac's desktop, log in there (or turn on automatic login), then run this command again.`);
   });
 }
 
