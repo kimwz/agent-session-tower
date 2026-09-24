@@ -300,20 +300,34 @@ async function serviceEnvironment(manager: ServiceManager, env: NodeJS.ProcessEn
 }
 
 /**
- * Whether only root can change this folder: every part of it as written (a link there could be pointed elsewhere) and
- * every folder where it really is, up to /.
+ * Whether only root can change this folder: every folder and link met on the way to it, following links hop by hop as
+ * the system does, is root's, and no folder among them can be written by others. A link is changed only through the
+ * folder it is in, which is checked on the way.
  */
-async function rootOnly(folder: string): Promise<boolean> {
-  const real = await realpath(folder).catch(() => undefined);
-  if (!real) return false;
-  const guarded = async (path: string, look: typeof stat) => {
-    for (let current = path; ; current = dirname(current)) {
-      // A link is changed only by replacing it in its folder, which the next step checks.
-      if (!await look(current).then(info => info.uid === 0 && (info.isSymbolicLink() || (info.isDirectory() && (info.mode & 0o022) === 0)), () => false)) return false;
-      if (dirname(current) === current) return true;
+export async function rootOnly(folder: string, look: { lstat: (path: string) => Promise<{ uid: number; mode: number; isDirectory(): boolean; isSymbolicLink(): boolean }>; readlink: (path: string) => Promise<string> } = { lstat, readlink }): Promise<boolean> {
+  const guarded = (info: { uid: number; mode: number; isDirectory(): boolean }) => info.uid === 0 && info.isDirectory() && (info.mode & 0o022) === 0;
+  if (!folder.startsWith('/') || !await look.lstat('/').then(guarded, () => false)) return false;
+  let current = '/';
+  let rest = folder.split('/').filter(Boolean);
+  for (let links = 0; rest.length;) {
+    const part = rest.shift()!;
+    if (part === '.') continue;
+    if (part === '..') { current = dirname(current); continue; }
+    const next = join(current, part);
+    const info = await look.lstat(next).catch(() => undefined);
+    if (!info || info.uid !== 0) return false;
+    if (info.isSymbolicLink()) {
+      if (++links > 40) return false;
+      const target = await look.readlink(next).catch(() => undefined);
+      if (target === undefined) return false;
+      rest = [...target.split('/').filter(Boolean), ...rest];
+      if (target.startsWith('/')) current = '/';
+      continue;
     }
-  };
-  return await guarded(folder, lstat) && await guarded(real, stat);
+    if (!guarded(info)) return false;
+    current = next;
+  }
+  return true;
 }
 
 /**

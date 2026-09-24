@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, readlink, rm, writeFile } from 'node:fs/promi
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { renderServicePlist, renderServiceUnit, runtimePaths, serviceLabel, serviceUnit, currentVersion, useVersion, installVersion, versionDirectory, entryPoint } from '../../../server/link/service.js';
+import { renderServicePlist, renderServiceUnit, rootOnly, runtimePaths, serviceLabel, serviceUnit, currentVersion, useVersion, installVersion, versionDirectory, entryPoint } from '../../../server/link/service.js';
 import { runLinkCommand } from '../../../server/link/cli.js';
 import { encodeJoinCode, joinCommand, releasePackage } from '../../../server/link/join-code.js';
 import { linkId } from '../../../server/link/identity.js';
@@ -175,4 +175,31 @@ test('join hands the code to the Tower running here and waits until the other co
   assert.deepEqual(received, [{ token: 'a'.repeat(64), body: { code } }]);
   assert.ok(lines.some(line => line.startsWith('Connected. computer-a[2J can now see')), lines.join('\n'));
   assert.ok(lines.every(line => !line.includes('\u001b')), 'the pasted name cannot drive the terminal');
+});
+
+test('a root service keeps a folder in its PATH only when root alone controls every folder and link on the way to it', async () => {
+  // A small file system: root's folders, Alice's home, and links between them.
+  const entries: Record<string, { uid: number; mode?: number; link?: string }> = {
+    '/': { uid: 0, mode: 0o755 }, '/usr': { uid: 0, mode: 0o755 }, '/usr/bin': { uid: 0, mode: 0o755 }, '/opt': { uid: 0, mode: 0o755 },
+    '/tmp': { uid: 0, mode: 0o1777 }, '/home': { uid: 0, mode: 0o755 }, '/home/alice': { uid: 1000, mode: 0o755 }, '/home/alice/bin': { uid: 1000, mode: 0o755 },
+    '/bin': { uid: 0, link: 'usr/bin' }, '/opt/tools': { uid: 0, link: '/home/alice/current' }, '/home/alice/current': { uid: 1000, link: '/usr/bin' },
+    '/opt/direct': { uid: 0, link: '/home/alice/bin' }, '/opt/root-bin': { uid: 0, link: '../usr/bin' }, '/opt/loop': { uid: 0, link: '/opt/loop' },
+  };
+  const look = {
+    lstat: async (path: string) => {
+      const entry = entries[path];
+      if (!entry) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      return { uid: entry.uid, mode: entry.mode ?? 0o777, isDirectory: () => !entry.link, isSymbolicLink: () => Boolean(entry.link) };
+    },
+    readlink: async (path: string) => entries[path]!.link!,
+  };
+  assert.equal(await rootOnly('/usr/bin', look), true);
+  assert.equal(await rootOnly('/bin', look), true, 'root’s own link to root’s folder');
+  assert.equal(await rootOnly('/opt/root-bin', look), true, 'a relative link, followed from the folder it is in');
+  assert.equal(await rootOnly('/home/alice/bin', look), false);
+  assert.equal(await rootOnly('/opt/direct', look), false, 'root’s link into Alice’s folder');
+  assert.equal(await rootOnly('/opt/tools', look), false, 'root’s link to Alice’s link to root’s folder: Alice can repoint the middle one');
+  assert.equal(await rootOnly('/tmp', look), false, 'a folder anyone can write to');
+  assert.equal(await rootOnly('/opt/loop', look), false);
+  assert.equal(await rootOnly('relative/bin', look), false);
 });
