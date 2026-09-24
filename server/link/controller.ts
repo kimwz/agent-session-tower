@@ -71,7 +71,6 @@ export class ControllerLinks extends EventEmitter {
   private readonly reports = new Map<string, NodeReport>();
   private readonly reportedAt = new Map<string, number>();
 
-  /** Updates of each computer seen cut short, by when they started: asked for again by itself only twice. */
   private unauthenticated = 0;
   private readonly unauthenticatedFrom = new Map<string, number>();
   /** Set when the saved state could not be read: nothing is saved over it until the owner looks. */

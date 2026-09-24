@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Check, Copy, LoaderCircle, TriangleAlert } from 'lucide-react';
+import { Check, Clock, Copy, LoaderCircle, TriangleAlert } from 'lucide-react';
 import type { AutoUpdateStatus, ToolUpdate, ToolUpdateReason } from '../../../shared/link';
 import type { Provider, Snapshot } from '../../../shared/types';
 import { absoluteTime, copyText, providerLabels } from '../common/lib';
@@ -30,7 +30,7 @@ function useReasons(): Record<ToolUpdateReason, string> {
 export function useToolLabel() {
   const { t } = useI18n();
   const reasons = useReasons();
-  return (tool: ToolUpdate | undefined): { text: string; title: string; tone: 'ok' | 'busy' | 'warn' } | undefined => {
+  return (tool: ToolUpdate | undefined): { text: string; title: string; tone: 'ok' | 'busy' | 'wait' | 'warn' } | undefined => {
     if (!tool) return undefined;
     const version = tool.version ? `v${tool.version}` : '';
     const next = tool.nextAt ? t('{0}에 다시 시도합니다.', { 0: absoluteTime(tool.nextAt) }) : '';
@@ -38,7 +38,7 @@ export function useToolLabel() {
     switch (tool.state) {
       case 'current': return { text: version, title: tool.updatedAt ? t('최신 버전입니다. {0}에 자동으로 업데이트했습니다.', { 0: absoluteTime(tool.updatedAt) }) : t('최신 버전입니다.'), tone: 'ok' };
       case 'updating': return { text: t('{0} → v{1} 업데이트 중', { 0: version, 1: tool.target ?? '' }), title: tool.reason === 'stuck' ? reasons.stuck : t('새 작업은 업데이트가 끝나면 시작됩니다.'), tone: 'busy' };
-      case 'waiting': return { text: t('{0} → v{1} 대기', { 0: version, 1: tool.target ?? '' }), title: t('Tower에서 이 에이전트의 작업이 모두 끝나면 업데이트합니다.'), tone: 'busy' };
+      case 'waiting': return { text: t('{0} → v{1} 대기', { 0: version, 1: tool.target ?? '' }), title: t('이 에이전트가 하는 작업(Tower의 요청과 라우팅, 터미널에서 진행 중인 대화)이 모두 끝나면 업데이트합니다.'), tone: 'wait' };
       case 'failed': return { text: t('{0} · 업데이트 실패', { 0: version }), title: [t('v{0}(으)로 업데이트하지 못했습니다.', { 0: tool.target ?? '' }), reason, next].filter(Boolean).join(' '), tone: 'warn' };
       // Nothing is tried again while it does not start, so no retry time is shown; this computer's own page names the fix.
       case 'broken': return { text: t('실행 안 됨'), title: [t('업데이트 뒤 실행되지 않고, 이전 버전으로도 되돌리지 못했습니다. 직접 다시 설치하세요(기록: logs/tool-update.log).'), tool.fix ? t('다시 설치하는 명령: {0}', { 0: tool.fix }) : ''].filter(Boolean).join(' '), tone: 'warn' };
@@ -48,12 +48,22 @@ export function useToolLabel() {
   };
 }
 
-/** Beside a CLI in the sidebar: its version, or what its update is doing. */
+const icon = (tone: 'ok' | 'busy' | 'wait' | 'warn', size: number) => tone === 'busy' ? <LoaderCircle size={size} className="spin" aria-hidden="true" />
+  : tone === 'wait' ? <Clock size={size} aria-hidden="true" /> : tone === 'warn' ? <TriangleAlert size={size} aria-hidden="true" /> : null;
+
+/** Beside a CLI in the sidebar: its version, or what its update is doing. A broken one copies the command that fixes it. */
 export function ToolVersion({ tool }: { tool?: ToolUpdate }) {
+  const { t } = useI18n();
+  const [copied, setCopied] = useState(false);
   const label = useToolLabel()(tool);
   if (!label || !label.text) return null;
-  return <small className={`tool-version ${label.tone}`} title={label.title}>
-    {label.tone === 'busy' ? <LoaderCircle size={9} className="spin" aria-hidden="true" /> : label.tone === 'warn' ? <TriangleAlert size={9} aria-hidden="true" /> : null}{label.text}</small>;
+  if (tool?.state === 'broken' && tool.fix) {
+    const fix = tool.fix;
+    return <button type="button" className={`tool-version ${label.tone}`} title={`${label.title} ${t('눌러서 명령 복사')}`}
+      onClick={() => { void copyText(fix).then(ok => { if (ok) { setCopied(true); setTimeout(() => setCopied(false), 2000); } }); }}>
+      {copied ? <Check size={9} aria-hidden="true" /> : icon(label.tone, 9)}{copied ? t('명령 복사됨') : label.text}</button>;
+  }
+  return <small className={`tool-version ${label.tone}`} title={label.title}>{icon(label.tone, 9)}{label.text}</small>;
 }
 
 /** A joined computer's CLIs, from its report. */
@@ -62,7 +72,7 @@ export function NodeTools({ autoUpdate }: { autoUpdate?: AutoUpdateStatus }) {
   const tools = (['claude', 'codex'] as Provider[]).map(provider => ({ provider, label: label(autoUpdate?.tools[provider]) })).filter(item => item.label?.text);
   if (!tools.length) return null;
   return <p className="remote-tools">{tools.map(({ provider, label: shown }) => <span key={provider} className={`tool-version ${shown!.tone}`} title={shown!.title}>
-    {shown!.tone === 'warn' && <TriangleAlert size={10} aria-hidden="true" />}{providerLabels[provider]} {shown!.text}</span>)}</p>;
+    {icon(shown!.tone, 10)}{providerLabels[provider]} {shown!.text}</span>)}</p>;
 }
 
 /**

@@ -46,7 +46,7 @@ The service starts at login on macOS, and at boot with systemd on Linux. Joining
   - Claude Code's native install, with `claude update`. It keeps each version separately and switches between them atomically.
   - A global npm install of Claude Code or Codex. npm reinstalls it in the same prefix and is never interrupted. If the CLI no longer starts afterwards, the previous version is put back; if that fails too, the sidebar shows the command that reinstalls it.
 
-  An update starts only while Tower has no run of that CLI starting or running. New runs wait until it finishes; running terminals outside Tower are not held. When Tower runs as root, it updates only a CLI, Node and npm that only root can change. Other installs, such as Homebrew or a manual download, are left alone and shown as not updated automatically.
+  An update starts only while Tower has no run of that CLI starting or running and no Auto Prompt or Slack routing call using it; new ones wait until it finishes. A global npm install, which replaces files as it goes, also waits until no conversation of that CLI is working anywhere, in a terminal included. A CLI you start in a terminal while an update runs is not held back. When Tower runs as root, it updates only a CLI, Node and npm that only root can change. Other installs, such as Homebrew or a manual download, are left alone and shown as not updated automatically.
 - **What you see.**
   - The sidebar shows each CLI's version, and whether it is updating, waiting, or failed with the next retry time.
   - The header shows a Tower update that failed and when it runs again.

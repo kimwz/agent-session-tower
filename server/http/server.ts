@@ -207,6 +207,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         return json(res, 200, { result: await backend.api(operation[1], await readJson(req, 1_000_000)) });
       }
       if (path === '/api/tower/update' && req.method === 'POST') {
+        // Like account management, replacing this computer's Tower is for someone at this computer.
+        if (!identity.local) return json(res, 403, { error: 'Tower 업데이트는 로컬 접속에서만 요청할 수 있습니다.' });
         if (!towerUpdate) return json(res, 503, { error: 'Updates are unavailable.' });
         const body = await readJson(req, 1_000) as { version?: unknown };
         if (!body || typeof body !== 'object' || Object.keys(body).some(key => key !== 'version') || (body.version !== undefined && (typeof body.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(body.version)))) {

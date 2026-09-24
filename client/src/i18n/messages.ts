@@ -1442,4 +1442,6 @@ export const english: Record<string, string> = {
   "Tower 업데이트 재시도 대기": "Tower update retry pending",
   "{0}에 자동으로 다시 시도합니다.": "Trying again automatically at {0}.",
   "지금 다시 시도": "Try again now",
+  "이 에이전트가 하는 작업(Tower의 요청과 라우팅, 터미널에서 진행 중인 대화)이 모두 끝나면 업데이트합니다.": "Updates once this agent's work, Tower's requests and routing and conversations running in terminals, has finished.",
+  "눌러서 명령 복사": "Click to copy the command.",
 };

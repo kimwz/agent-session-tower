@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
+import { afterUpdating } from '../updates/tools.js';
 import { constants } from 'node:fs';
 import { lstat, mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
 import { delimiter, isAbsolute, join } from 'node:path';
@@ -161,7 +162,8 @@ export async function runAutoPromptModel(options: AutoPromptModelRequest, depend
     const stdin = options.provider === 'codex' ? options.prompt : JSON.stringify({
       type: 'user', message: { role: 'user', content: [{ type: 'text', text: options.prompt }, ...images.blocks] },
     }) + '\n';
-    return await collect(options, dependencies, executable, args, directory, env, stdin);
+    // Never while the CLI is being updated: a half-replaced install would fail the routing for no reason of its own.
+    return await afterUpdating(dependencies.stateDir ?? defaultStateDir(), options.provider, options.signal, () => collect(options, dependencies, executable, args, directory, env, stdin));
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 

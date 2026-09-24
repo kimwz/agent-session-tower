@@ -81,8 +81,9 @@ export class TowerAutoUpdate {
   }
 
   private async look(): Promise<void> {
-    // Turned off (development and fixture instances), nothing is asked of GitHub either.
-    if (!this.options.enabled) return;
+    // Turned off (development and fixture instances), nothing is asked of GitHub either; nor by a computer that follows
+    // the Tower controlling it, which brings it the version to move to.
+    if (!this.options.enabled || (this.options.updates.managed && this.options.controllers() > 0)) return;
     const latest = await this.options.latest();
     if (latest) { this.latest = latest; this.options.onChange?.(); }
     const { updates, version } = this.options;

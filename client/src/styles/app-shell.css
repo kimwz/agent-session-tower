@@ -142,3 +142,4 @@
 .tower-update { cursor: pointer; background: transparent; font: inherit; font-size: 11px; }
 .provider-health .tool-version { font-size: 9px; color: var(--subtle); }
 .provider-health .tool-version.warn { color: var(--amber); }
+button.tool-version { padding:0; border:0; background:none; font:inherit; cursor:pointer }

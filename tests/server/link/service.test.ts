@@ -1,3 +1,4 @@
+import { userInfo } from 'node:os';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, readlink, rm, writeFile } from 'node:fs/promises';
@@ -5,7 +6,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { renderServicePlist, renderServiceUnit, rootOnly, runtimePaths, serviceLabel, serviceUnit, currentVersion, useVersion, installVersion, versionDirectory, entryPoint } from '../../../server/link/service.js';
-import { runLinkCommand, takeOver, type TakeOverSteps, type WebState } from '../../../server/link/cli.js';
+import { refuseTakeover, runLinkCommand, takeOver, type TakeOverSteps, type WebState } from '../../../server/link/cli.js';
 import { encodeJoinCode, joinCommand, releasePackage } from '../../../server/link/join-code.js';
 import { linkId } from '../../../server/link/identity.js';
 import { defaultStateDir } from '../../../server/state-dir.js';
@@ -220,7 +221,7 @@ test('a service that does not take over is stopped, and the Tower started by han
   // The started one does not come up either: that is said, too.
   const silent = switching(undefined, { restores: false });
   await assert.rejects(takeOver('/state', { pid: 100, port: 8000, version: '1.31.0', command }, '1.32.0', silent.steps),
-    /nothing answered on port 8000 within 2 minutes\. It was stopped, and the Tower you started was started again the same way, but nothing answers on port 8000 after a minute\. See .*tower\.log, and start Tower yourself/);
+    /nothing answered on port 8000 within 2 minutes\. It was stopped, and the Tower you started was started again the same way, but nothing answers on port 8000 after a minute\. The service is still set up .*service uninstall`\. See .*tower\.log, and start Tower yourself/);
 });
 
 test('only the Tower that was running counts as back: another version answering in its place is said to be one', async () => {
@@ -228,6 +229,14 @@ test('only the Tower that was running counts as back: another version answering 
   const other = switching(undefined, { refuses: true, restores: '1.30.0' });
   await assert.rejects(takeOver('/state', { pid: 100, port: 8000, version: '1.31.0', command }, '1.32.0', other.steps),
     /started again the same way, but Tower 1\.30\.0 answers on port 8000 instead of 1\.31\.0/);
+});
+
+test('a Tower started with another home or on another address is never taken over, since the service would be a different one', () => {
+  const command = { execPath: '/opt/node/bin/node', argv: ['run'], cwd: '/' };
+  assert.throws(() => refuseTakeover({ pid: 100, bindHost: '127.0.0.1', command: { ...command, env: { HOME: '/tmp/elsewhere' } } }), /uses \/tmp\/elsewhere as its home.*Nothing was changed/);
+  assert.throws(() => refuseTakeover({ pid: 100, bindHost: '0.0.0.0', command }), /listens on 0\.0\.0\.0.*other devices would lose it/);
+  assert.doesNotThrow(() => refuseTakeover({ pid: 100, bindHost: '127.0.0.1', command: { ...command, env: { HOME: userInfo().homedir } } }));
+  assert.doesNotThrow(() => refuseTakeover({ pid: 100 }), 'an older Tower that says neither is taken over as before');
 });
 
 test('a Tower too old to say how it was started gets the installed version started by hand in its place', async () => {

@@ -1149,7 +1149,6 @@ export class RunManager extends EventEmitter {
   /** Waits for every accepted change to reach disk, without stopping or cancelling anything. */
   async flushState(): Promise<void> { this.persist(); await this.flush(); }
 
-  /** True while any provider process, desktop turn or admission is still live, whatever the run status says. */
   /**
    * Holds new launches of `provider` while its CLI is updated, but only when none of its runs is starting or running;
    * undefined when one is. Synchronous, so nothing launches between the look and the hold. Releasing it starts what
@@ -1170,6 +1169,7 @@ export class RunManager extends EventEmitter {
     };
   }
 
+  /** True while any provider process, desktop turn or admission is still live, whatever the run status says. */
   busy(): boolean { return this.owned.size + this.bridged.size + this.stdio.size + this.admissions.size + this.reservedSessions.size > 0 || this.pumping; }
 
   private async flush(): Promise<void> {

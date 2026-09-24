@@ -83,7 +83,7 @@ test('a paired computer follows its controller, a disabled or unmanaged Tower on
   const paired = await fixture(t, { controllers: 1 });
   await paired.auto.check();
   assert.deepEqual(paired.requests, []);
-  assert.deepEqual(paired.auto.status(), { kind: 'service', latest: '1.32.0', checkedAt: '2026-09-24T00:00:00.000Z', followsController: true });
+  assert.deepEqual(paired.auto.status(), { kind: 'service', followsController: true }, 'a computer following its controller does not even ask GitHub');
   const unmanaged = await fixture(t, { managed: false });
   await unmanaged.auto.check();
   assert.deepEqual(unmanaged.requests, []);

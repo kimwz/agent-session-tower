@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readdir, realpath, rm, symlink, writeFile } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Provider } from '../../../shared/types.js';
-import { classifyInstall, nativeCommands, publicToolUpdates, readToolUpdates, ToolUpdates, toolUpdatePaths, unlessUpdating, type ToolCommands } from '../../../server/updates/tools.js';
+import { afterUpdating, classifyInstall, nativeCommands, publicToolUpdates, readToolUpdates, ToolUpdates, toolUpdatePaths, unlessUpdating, type ToolCommands } from '../../../server/updates/tools.js';
 import { until } from '../../helpers/until.ts';
 
 const HOUR = 60 * 60_000;
@@ -43,13 +43,17 @@ async function fixture(t: TestContext, options: { claude?: 'native' | 'npm' | 'o
   let gate: Promise<void> | undefined;
   let behaviour: (provider: Provider, args: string[]) => { code: number; version?: string | null } = (provider, args) => ({ code: 0, version: latest[provider] });
   let held = new Set<Provider>();
+  const envs: NodeJS.ProcessEnv[] = [];
+  const holds: Array<[Provider, boolean]> = [];
   let busy = new Set<Provider>();
   let clock = Date.parse('2026-09-24T00:00:00Z');
   const provider = (file: string): Provider => file.includes('claude') ? 'claude' : 'codex';
   const commands: ToolCommands = {
     version: async executable => { asked.push(executable); return versions[provider(executable)]; },
-    update: async (file, args) => {
+    update: async (file, args, env, limit) => {
       calls.push([file, ...args]);
+      envs.push(env);
+      limit.started?.(process.pid);
       await gate;
       const which = args.some(arg => arg.includes('codex')) || file.includes('codex') ? 'codex' : 'claude';
       const result = behaviour(which, args);
@@ -58,15 +62,16 @@ async function fixture(t: TestContext, options: { claude?: 'native' | 'npm' | 'o
     },
     latest: async pkg => pkg.includes('codex') ? latest.codex : latest.claude,
   };
-  const updates = new ToolUpdates({ stateDir, env: { PATH: '' }, node: join(root, 'node/bin/node'), uid: options.uid ?? 501, commands, now: () => clock, probeWaitMs: 300,
+  const updates = new ToolUpdates({ stateDir, env: { PATH: '', CLAUDECODE: '1', CODEX_SANDBOX_NETWORK_DISABLED: '1', KEEP: 'kept' }, node: join(root, 'node/bin/node'), uid: options.uid ?? 501, commands, now: () => clock, probeWaitMs: 300,
     find: async name => executables[name],
-    hold: name => {
+    hold: (name, quiet) => {
+      holds.push([name, quiet]);
       if (busy.has(name) || held.has(name)) return undefined;
       held.add(name);
       return () => { held.delete(name); };
     } });
   return {
-    root, stateDir, updates, calls, asked, versions, latest, executables,
+    root, stateDir, updates, calls, asked, versions, latest, executables, envs, holds,
     status: () => readToolUpdates(stateDir),
     held: () => held,
     busy: (names: Provider[]) => { busy = new Set(names); },
@@ -258,4 +263,46 @@ test('a CLI that is not installed has no status', async t => {
   assert.equal(status.codex, undefined);
   assert.deepEqual([status.claude?.state, status.claude?.target], ['current', '2.1.280']);
   void HOUR;
+});
+
+test('an npm update asks Tower to keep every conversation of the CLI quiet, and runs without an agent session’s own markers', async t => {
+  const f = await fixture(t);
+  await f.updates.check();
+  assert.deepEqual(f.holds, [['claude', false], ['codex', true]], 'only npm, which replaces files as it goes, needs every conversation quiet');
+  for (const env of f.envs) {
+    assert.equal(env.CLAUDECODE, undefined);
+    assert.equal(env.CODEX_SANDBOX_NETWORK_DISABLED, undefined);
+    assert.equal(env.KEEP, 'kept');
+  }
+});
+
+test('a worker handing off starts no update, and one resumed carries on', async t => {
+  const f = await fixture(t);
+  f.updates.pause();
+  await f.updates.check();
+  assert.deepEqual(f.calls, []);
+  f.updates.resume();
+  await f.updates.check();
+  assert.equal(f.calls.length, 2);
+});
+
+test('a routing call waits for an update of its CLI, then runs; cancelled, it stops waiting', async t => {
+  const f = await fixture(t);
+  const { flags } = toolUpdatePaths(f.stateDir);
+  await mkdir(flags, { recursive: true });
+  // The worker that took the update is gone, but the installer it started still runs: the CLI is still held.
+  await writeFile(join(flags, 'codex.update'), `999999999 ${process.pid}`);
+  let ran = false;
+  const waiting = afterUpdating(f.stateDir, 'codex', new AbortController().signal, async () => { ran = true; return 'routed'; }, 20);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(ran, false, 'nothing runs the CLI while it is being replaced');
+  assert.equal(await unlessUpdating(f.stateDir, 'codex', async () => 'probed'), undefined, 'a probe reads nothing then either');
+  await rm(join(flags, 'codex.update'));
+  assert.equal(await waiting, 'routed');
+  await writeFile(join(flags, 'codex.update'), String(process.pid));
+  const controller = new AbortController();
+  const cancelled = afterUpdating(f.stateDir, 'codex', controller.signal, async () => 'never', 20);
+  controller.abort(new Error('Routing was cancelled.'));
+  await assert.rejects(cancelled, /cancelled/);
+  assert.deepEqual((await readdir(flags)).filter(name => name.includes('.probe-')), [], 'a waiting call leaves nothing behind');
 });

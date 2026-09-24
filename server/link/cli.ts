@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import { userInfo } from 'node:os';
 import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -110,6 +111,9 @@ export async function runLinkCommand(args: string[]): Promise<void> {
 async function runService(action: string | undefined, stateDir: string, port: number): Promise<void> {
   if (action === 'install') {
     const running = await runningTower(stateDir);
+    // The service runs as this account, with its home, on 127.0.0.1. A Tower started another way would come back as a
+    // different one: reading other sessions, or no longer reachable from other devices. That is refused, not changed.
+    if (running && !running.service) refuseTakeover(running);
     await installVersion(stateDir, APP_VERSION, line => console.log(line), packageRoot());
     await useVersion(stateDir, APP_VERSION);
     const version = await currentVersion(stateDir) ?? APP_VERSION;
@@ -134,14 +138,24 @@ async function runService(action: string | undefined, stateDir: string, port: nu
   } else throw new Error(USAGE);
 }
 
+export function refuseTakeover(running: { pid: number; bindHost?: string; command?: OwnerCommand }): void {
+  const home = running.command?.env?.HOME;
+  if (home && resolve(home) !== resolve(userInfo().homedir)) {
+    throw new Error(`The Tower running now (pid ${running.pid}) uses ${home} as its home, but the service would use ${userInfo().homedir} and read other sessions. Start Tower with this account's home, then run this command again. Nothing was changed.`);
+  }
+  if (running.bindHost && running.bindHost !== '127.0.0.1') {
+    throw new Error(`The Tower running now (pid ${running.pid}) listens on ${running.bindHost}, but the service listens on 127.0.0.1 only, so other devices would lose it. Nothing was changed; keep running Tower yourself for that.`);
+  }
+}
+
 /** The Tower that holds this state folder, confirmed by its process: another Tower on the same port is never used. */
-async function runningTower(stateDir: string): Promise<{ base: string; port: number; version: string; pid: number; service: boolean; command?: OwnerCommand } | undefined> {
+async function runningTower(stateDir: string): Promise<{ base: string; port: number; version: string; pid: number; service: boolean; bindHost?: string; command?: OwnerCommand } | undefined> {
   for (const owner of await lockOwners(stateDir)) {
     const base = `http://127.0.0.1:${owner.port}`;
     const health = await fetch(`${base}/api/health`, { signal: AbortSignal.timeout(1500) })
-      .then(response => response.json() as Promise<{ ok?: boolean; application?: string; pid?: number; version?: string; service?: boolean }>).catch(() => undefined);
+      .then(response => response.json() as Promise<{ ok?: boolean; application?: string; pid?: number; version?: string; service?: boolean; bindHost?: string }>).catch(() => undefined);
     if (health?.ok && health.application === HEALTH_APPLICATION_ID && health.pid === owner.pid && health.version) {
-      return { base, port: owner.port, version: health.version, pid: owner.pid, service: health.service === true, ...(owner.command ? { command: owner.command } : {}) };
+      return { base, port: owner.port, version: health.version, pid: owner.pid, service: health.service === true, ...(typeof health.bindHost === 'string' ? { bindHost: health.bindHost } : {}), ...(owner.command ? { command: owner.command } : {}) };
     }
   }
   return undefined;
@@ -236,9 +250,11 @@ export async function takeOver(stateDir: string, running: { pid: number; port: n
   const expected = running.command ? running.version : version;
   let seen: WebState | undefined;
   const back = refused === undefined ? await until(async () => { const web = seen = await steps.read(running.port); return web && web.pid !== running.pid && (!expected || web.version === expected) ? web : undefined; }, 60_000) : undefined;
-  if (back) throw new Error(`The background service did not take over: ${failure}. It was stopped, and ${how}; Tower ${back.version} answers on port ${running.port} again (pid ${back.pid}). See ${log}.`);
+  // The service stays set up and would start at the next login or boot; that is said, with how to remove it.
+  const remains = 'The service is still set up and starts again at the next login or boot unless you run `agent-session-tower service uninstall`.';
+  if (back) throw new Error(`The background service did not take over: ${failure}. It was stopped, and ${how}; Tower ${back.version} answers on port ${running.port} again (pid ${back.pid}). ${remains} See ${log}.`);
   const instead = seen && seen.pid !== running.pid ? `Tower ${seen.version} answers on port ${running.port} instead of ${expected}` : `nothing answers on port ${running.port} after a minute`;
-  throw new Error(`The background service did not take over: ${failure}. It was stopped, and ${how}, but ${refused !== undefined ? `that could not be started (${refused})` : instead}. See ${log}, and start Tower yourself if it does not come up.`);
+  throw new Error(`The background service did not take over: ${failure}. It was stopped, and ${how}, but ${refused !== undefined ? `that could not be started (${refused})` : instead}. ${remains} See ${log}, and start Tower yourself if it does not come up.`);
 }
 function portFree(port: number): Promise<boolean> {
   return new Promise(resolve => {

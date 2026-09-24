@@ -387,7 +387,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   const runs = new RunManager({ stateDir, getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true),
     openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }), trustWorkspace });
   // Only the Tower on the account's own state folder keeps its Claude Code and Codex current, so two never update one install.
-  const tools = resolve(stateDir) === resolve(defaultStateDir()) && autoUpdateEnabled() ? new ToolUpdates({ stateDir, env: process.env, hold: provider => runs.holdProvider(provider) }) : undefined;
+  const tools = resolve(stateDir) === resolve(defaultStateDir()) && autoUpdateEnabled() ? new ToolUpdates({ stateDir, env: process.env,
+    // npm replaces files as it goes: then no session of that CLI may be working anywhere, in Tower's terminals included.
+    hold: (provider, quiet) => quiet && sessions.list().some(session => session.provider === provider && session.status === 'working') ? undefined : runs.holdProvider(provider) }) : undefined;
   try {
     await sessions.start();
     await runs.start();
@@ -466,8 +468,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
       onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || Boolean(tools?.busy()), holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); },
-      quiesce: async () => { slack.pause(); triggers.pause(); github.pause(); await Promise.all([slack.flush(), triggers.flush(), github.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush()]); },
-      resume: () => { slack.resume(); triggers.resume(); github.resume(); },
+      quiesce: async () => { tools?.pause(); slack.pause(); triggers.pause(); github.pause(); await Promise.all([slack.flush(), triggers.flush(), github.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush()]); },
+      resume: () => { tools?.resume(); slack.resume(); triggers.resume(); github.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
       onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     // A parent terminal or Tower shutdown must not interrupt provider work.

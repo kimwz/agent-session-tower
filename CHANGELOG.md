@@ -15,7 +15,7 @@ format, and saved browser preferences are the compatibility surface.
   - **Claude Code and Codex.** Every three hours, a Claude Code or Codex behind its latest release is updated by the Tower on your default state folder:
     - Claude Code's own installer is used for its native install.
     - npm is used for a global npm install. It reinstalls the previous version if the CLI no longer starts afterwards.
-    - An update starts only while no run of that CLI is starting or running in Tower, and new runs wait for it.
+    - An update starts only while no run or routing call of that CLI is under way in Tower, and new ones wait for it. A global npm install is also left until no conversation of that CLI is working anywhere, in a terminal included.
     - Other installs are left alone and shown as such.
   - **Where to see it.**
     - The sidebar shows each CLI's version and its update state.
@@ -23,6 +23,7 @@ format, and saved browser preferences are the compatibility surface.
     - The header shows a failed Tower update and when it is tried again.
   - **A Tower you started yourself** (a checkout, or npx) does not replace itself. When a newer release is out, the header offers the `service install` command. That command now takes over from the running Tower, restarting only its web server, and afterwards Tower stays current.
   - `TOWER_AUTO_UPDATE=off` turns this off, for development instances.
+
 ## [1.32.0] - 2026-09-25
 
 ### Added
