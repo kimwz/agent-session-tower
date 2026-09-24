@@ -59,7 +59,7 @@ Subagent records without an independently resumable session ID are viewable thro
 
 ### Tool approvals
 
-Every turn you start from Tower runs in the provider's automatic approval mode. This covers the chat, new sessions and Auto Prompt, on this computer and on joined computers. Claude Code starts with `--permission-mode auto`, where its classifier decides which actions go ahead. Codex hands approval requests to its automatic reviewer (Approve for me), which judges sandbox escalations; the sandbox itself stays as configured.
+Every turn you start from Tower, or that your agents hand off through Tower's tools, runs in the provider's automatic approval mode. This covers the chat, new sessions and Auto Prompt, on this computer and on joined computers. Claude Code starts with `--permission-mode auto`, where its classifier decides which actions go ahead. Codex hands approval requests to its automatic reviewer (Approve for me), which judges sandbox escalations; the sandbox itself stays as configured.
 - Tower never bypasses permissions or turns approvals off: the provider's own automatic mode decides.
 - Codex keeps the automatic reviewer with the thread. Later requests in that session use it too, including requests sent from the Codex app. A turn forwarded to an open Codex desktop session asks the app for the automatic reviewer the same way.
 - Where the automatic mode is not available, the turn still runs, the chat says so at the top of its output, and approvals wait for you. For example, Claude Code's auto mode may not be offered for your plan or model, and an older Codex may not support automatic review.
