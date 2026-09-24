@@ -91,13 +91,24 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
     if (!found || !visibleSessions(current).has(found.id)) throw notFound();
     return found;
   };
-  /** Checked again right before answering: the list may have changed while the request waited. */
-  const stillVisible = async (id: string) => { await prepare(); session(id); };
-  const run = (id: string) => {
+  /**
+   * A decision about one conversation looks at its folders again now, not at an earlier look that a
+   * re-pointed symlink could have made stale. Used before acting on it and again right before answering.
+   */
+  const confirm = async (id: string): Promise<Session> => {
+    const found = session(id);
+    const chain: string[] = [];
+    for (let current: Session | undefined = found, depth = 0; current && depth < 32; current = current.parentId ? backend.session?.(current.parentId) : undefined, depth++) chain.push(current.cwd);
+    await exclusions.prepare(chain, { fresh: true });
+    return session(id);
+  };
+  const stillVisible = async (id: string) => { await prepare(); await confirm(id); };
+  const run = async (id: string) => {
     const current = scope();
     const snapshot = backend.snapshot();
     const found = snapshot.runs.find(item => item.id === id);
     if (!found || !remoteSessionIds(snapshot.sessions, current).has(found.sessionId)) throw notFound();
+    await confirm(found.sessionId);
     return found;
   };
   const folderAllowed = async (cwd: string) => {
@@ -153,7 +164,7 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
     if (method === 'GET' && path === '/api/events') return events(req, res, principal, url.searchParams.get('patch') === '1');
     const detail = path.match(/^\/api\/sessions\/([^/]+)$/);
     if (method === 'GET' && detail) {
-      const found = session(detail[1]);
+      const found = await confirm(detail[1]);
       const beforeValue = url.searchParams.get('before');
       const before = beforeValue === null ? undefined : Number(beforeValue);
       const pageSize = Number(url.searchParams.get('limit') || 100);
@@ -169,7 +180,7 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
       const { metadata, content, sessionId } = await backend.attachment(attachment[1]).catch(() => { throw notFound(); });
       // A worker too old to say whose file this is cannot prove it is shared.
       if (!sessionId) throw notFound();
-      session(sessionId);
+      await confirm(sessionId);
       const inline = isImageAttachment(metadata.mimeType);
       res.writeHead(200, {
         'Content-Type': inline ? metadata.mimeType : 'application/octet-stream', 'Content-Length': content.length, 'Cache-Control': 'no-store',
@@ -201,7 +212,7 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
     }
     const message = path.match(/^\/api\/sessions\/([^/]+)\/messages$/);
     if (message) {
-      const found = session(message[1]);
+      const found = await confirm(message[1]);
       const body = parseMessage(await readJson(req, ATTACHMENT_BODY_BYTES));
       const created = await backend.enqueue(found.id, body.prompt, body.attachments, context(principal, requestId(req)));
       await stillVisible(found.id);
@@ -209,7 +220,7 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
     }
     const title = path.match(/^\/api\/sessions\/([^/]+)\/title$/);
     if (title) {
-      const found = session(title[1]);
+      const found = await confirm(title[1]);
       const value = normalizeSessionTitle((await readJson(req)).title);
       if (!backend.setTitle) throw httpError(503, '제목을 저장할 수 없습니다.');
       const updated = await backend.setTitle(found.id, value);
@@ -219,7 +230,7 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
     }
     const closed = path.match(/^\/api\/sessions\/([^/]+)\/(close|reopen)$/);
     if (closed) {
-      const found = session(closed[1]);
+      const found = await confirm(closed[1]);
       await readJson(req);
       if (!backend.setClosed) throw httpError(503, '세션 표시 상태를 저장할 수 없습니다.');
       const updated = await backend.setClosed(found.id, closed[2] === 'close');
@@ -229,7 +240,7 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
     }
     const approval = url.pathname.match(/^\/api\/runs\/([^/]+)\/approvals\/([^/]+)$/);
     if (approval) {
-      const found = run(decodeURIComponent(approval[1]));
+      const found = await run(decodeURIComponent(approval[1]));
       const response = approvalResponse(await readJson(req));
       if (response === undefined) throw httpError(400, '승인 응답 형식이 올바르지 않습니다. 실행 내용은 변경할 수 없습니다.');
       if (!backend.respondToApproval) throw httpError(503, '이 실행기의 승인 요청을 처리할 수 없습니다.');
@@ -239,7 +250,7 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
     }
     const runAction = path.match(/^\/api\/runs\/([^/]+)\/(steer|cancel|dismiss)$/);
     if (runAction) {
-      const found = run(runAction[1]);
+      const found = await run(runAction[1]);
       const body = await readJson(req);
       if (runAction[2] === 'steer') {
         if (Object.keys(body).length) throw httpError(400, '끼워넣기 요청의 내용은 변경할 수 없습니다.');
@@ -270,7 +281,11 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
       const job = backend.getAutoPrompt?.(autoPrompt[1]);
       if (!job || !remoteJobVisible(job, current, visibleSessions(current), principal.controllerId)) throw notFound();
       if (!backend.cancelAutoPrompt) throw httpError(503, 'Auto Prompt를 현재 사용할 수 없습니다.');
-      return json(res, 200, { job: remoteJob(await backend.cancelAutoPrompt(job.id), principal.controllerId, current.matcher.revision) });
+      const cancelled = await backend.cancelAutoPrompt(job.id);
+      await prepare();
+      const after = scope();
+      if (!remoteJobVisible(cancelled, after, visibleSessions(after), principal.controllerId)) throw notFound();
+      return json(res, 200, { job: remoteJob(cancelled, principal.controllerId, after.matcher.revision) });
     }
     if (path === '/api/groups') {
       // Pins and screen hiding belong to whoever is looking; a controller keeps its own. Only the name is shared.

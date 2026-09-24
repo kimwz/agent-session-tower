@@ -73,6 +73,7 @@ export class RemoteExclusionStore extends EventEmitter {
   private folders: ExcludedFolder[] = [];
   /** Every location an excluded folder is known by: as entered, as resolved when saved, and as it resolves now. */
   private roots: string[] = [];
+  private rootsAt = 0;
   private currentRevision = 0;
   /** Set when the saved list cannot be read: remote sharing then hides everything until it can be. */
   private unreadable?: string;
@@ -125,7 +126,7 @@ export class RemoteExclusionStore extends EventEmitter {
     const folders = (value.folders as ExcludedFolder[]).map(item => ({ path: item.path, canonical: item.canonical }));
     const roots = await rootsOf(folders);
     const changed = revision !== this.currentRevision || JSON.stringify(folders) !== JSON.stringify(this.folders) || this.unreadable !== undefined;
-    this.folders = folders; this.roots = roots; this.currentRevision = revision; this.unreadable = undefined;
+    this.folders = folders; this.roots = roots; this.rootsAt = Date.now(); this.currentRevision = revision; this.unreadable = undefined;
     if (changed) this.emit('change');
   }
 
@@ -168,13 +169,18 @@ export class RemoteExclusionStore extends EventEmitter {
     });
   }
 
-  /** Resolves where these paths really are, so `matcher()` can answer for them without waiting. */
-  async prepare(paths: Iterable<string>): Promise<void> {
+  /**
+   * Resolves where these paths really are, so `matcher()` can answer for them without waiting. `fresh`
+   * resolves them again now, for a decision about one particular folder that must not rest on an older look.
+   */
+  async prepare(paths: Iterable<string>, options: { fresh?: boolean } = {}): Promise<void> {
     if (!this.roots.length) return;
     const now = Date.now();
+    // An excluded folder that is a symlink can be pointed elsewhere; follow where it points now.
+    if (options.fresh || now - this.rootsAt > this.recheckMs) await this.follow();
     const pending = [...new Set([...paths].filter(validFolderPath).map(normalize))].filter(path => {
       const known = this.resolved.get(path);
-      return !known || now - known.at > this.recheckMs;
+      return options.fresh || !known || now - known.at > this.recheckMs;
     });
     for (let index = 0; index < pending.length; index += 16) {
       await Promise.all(pending.slice(index, index + 16).map(async path => { this.remember(path, await canonicalPath(path)); }));
@@ -185,10 +191,18 @@ export class RemoteExclusionStore extends EventEmitter {
   async excludesNow(path: string): Promise<boolean> {
     if (!this.roots.length) return false;
     if (!validFolderPath(path)) return true;
+    await this.follow();
     const normalized = normalize(path);
     const canonical = await canonicalPath(normalized);
     this.remember(normalized, canonical);
     return canonical === undefined || this.matches(normalized, canonical);
+  }
+
+  private async follow(): Promise<void> {
+    const folders = this.folders;
+    const roots = await rootsOf(folders);
+    // Only if the list did not change meanwhile; a change brings its own roots.
+    if (folders === this.folders && !this.unreadable) { this.roots = roots; this.rootsAt = Date.now(); }
   }
 
   matcher(): ExclusionMatcher {
@@ -245,6 +259,7 @@ export class RemoteExclusionStore extends EventEmitter {
       await writePrivateJson(this.path, `${JSON.stringify({ version: 1, revision, folders: next })}\n`);
       this.folders = next;
       this.roots = roots;
+      this.rootsAt = Date.now();
       this.currentRevision = revision;
       this.emit('change');
       return this.list();

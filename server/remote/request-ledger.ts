@@ -57,7 +57,10 @@ export class RemoteRequestLedger {
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
     if (!Array.isArray(saved)) throw new Error('Saved remote request records are invalid.');
     for (const value of saved as Entry[]) {
-      if (value && typeof value.key === 'string' && typeof value.fingerprint === 'string' && Number.isFinite(value.at)) this.entries.set(value.key, { ...value, issued: Number.isFinite(value.issued) ? value.issued : value.at });
+      if (!value || typeof value.key !== 'string' || typeof value.fingerprint !== 'string' || !Number.isFinite(value.at)) continue;
+      // Records from before the issue time was kept still carry it inside their request ID.
+      const issued = Number.isFinite(value.issued) ? value.issued : remoteRequestTime(value.key.split('\n').at(-1) ?? '') ?? value.at;
+      this.entries.set(value.key, { ...value, issued });
     }
     this.prune();
   }
@@ -107,9 +110,10 @@ export class RemoteRequestLedger {
     try { value = await execute(); }
     catch (error) {
       if (refusedBeforeAdmission(error)) {
-        // Nothing ran, so the same ID may be sent again.
+        // Nothing ran, so the same ID may be sent again; the controller is told so.
         this.entries.delete(key);
         await this.save().catch(() => {});
+        if (error && typeof error === 'object' && !(error as { disposition?: string }).disposition) Object.assign(error, { disposition: 'not-admitted' });
       }
       throw error;
     }

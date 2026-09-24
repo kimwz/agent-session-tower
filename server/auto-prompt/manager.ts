@@ -21,7 +21,7 @@ interface AutoPromptOptions {
   runs: Pick<RunManager, 'list' | 'create' | 'enqueue'>;
   model?: typeof runAutoPromptModel;
   /** What a remote controller's request may route into: never an excluded folder, never a coordinator conversation. */
-  remote?: { prepare(paths: Iterable<string>): Promise<void>; matcher(): ExclusionMatcher; coordinators(): ReadonlySet<string> };
+  remote?: { prepare(paths: Iterable<string>, options?: { fresh?: boolean }): Promise<void>; matcher(): ExclusionMatcher; coordinators(): ReadonlySet<string> };
 }
 interface Entry { job: AutoPromptJob; fingerprint: string; staged: Attachment[] }
 interface Directory { id: string; cwd: string; title: string; sessions: Session[] }
@@ -374,6 +374,8 @@ export class AutoPromptManager extends EventEmitter {
       decision = { action: 'create', cwd, reason: `${decision.reason} 요청한 승인 검토 설정을 적용하기 위해 새 세션을 생성합니다.` };
     }
     await this.options.refresh(); active();
+    // The final choice for a remote request looks at its folder again now, not at an earlier look.
+    if (job.origin?.controllerId) { await this.options.remote?.prepare([cwd], { fresh: true }); active(); }
     await this.checkDirectory(cwd, directories(await this.snapshotFor(job.origin))); active();
     const validate = () => {
       const current = this.snapshotNow(job.origin);

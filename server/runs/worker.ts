@@ -385,7 +385,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const context = await runnerContext({ stateDir, runs, sessions, exclusions });
     // Remote requests route without excluded folders and without any coordinator conversation, Slack or GitHub.
     let coordinators = (): ReadonlySet<string> => new Set();
-    const autoPrompts = new AutoPromptManager({ stateDir, runs, remote: { prepare: paths => exclusions.prepare(paths), matcher: () => exclusions.matcher(), coordinators: () => coordinators() }, ...context });
+    const autoPrompts = new AutoPromptManager({ stateDir, runs, remote: { prepare: (paths, options) => exclusions.prepare(paths, options), matcher: () => exclusions.matcher(), coordinators: () => coordinators() }, ...context });
     await autoPrompts.start();
     const slack = new SlackService({ stateDir, runs, autoPrompts, refresh: context.refresh });
     // GitHub coordinators use a trigger's credentials; the trigger engine starts right after.

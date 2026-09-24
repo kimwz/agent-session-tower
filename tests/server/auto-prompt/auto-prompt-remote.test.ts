@@ -44,7 +44,7 @@ async function fixture(t: TestContext) {
   const manager = new AutoPromptManager({ stateDir: join(directory, 'state'), snapshot: () => structuredClone(current), refresh: async () => { await exclusions.reload(); }, runs,
     detail: async id => { const found = current.sessions.find(item => item.id === id); return found ? { session: found, hasMore: false, messages: [] } : undefined; },
     model: async input => { calls.push(input); return respond(input); },
-    remote: { prepare: paths => exclusions.prepare(paths), matcher: () => exclusions.matcher(), coordinators: () => coordinators } });
+    remote: { prepare: (paths, options) => exclusions.prepare(paths, options), matcher: () => exclusions.matcher(), coordinators: () => coordinators } });
   await manager.start();
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
   const finished = (id: string) => until(() => { const job = manager.get(id); return job && ['completed', 'error', 'cancelled'].includes(job.status) ? job : undefined; });

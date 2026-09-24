@@ -135,3 +135,29 @@ test('a path whose real location cannot be determined counts as excluded', async
     assert.equal(store.matcher().excludes(join(locked, 'inside')), true);
   } finally { await chmod(locked, 0o700); }
 });
+
+test('a decision about one folder looks again now, even right after a symlink was pointed somewhere else', async t => {
+  const f = await fixture(t);
+  const store = await f.open();
+  await store.add(join(f.work, 'secret'));
+  const link = join(f.work, 'current');
+  await symlink(join(f.work, 'open'), link);
+  await store.prepare([link]);
+  assert.equal(store.matcher().excludes(link), false);
+  await rm(link);
+  await symlink(join(f.work, 'secret'), link);
+  await store.prepare([link], { fresh: true });
+  assert.equal(store.matcher().excludes(link), true, 'no wait for the regular recheck');
+});
+
+test('an excluded symlink keeps covering wherever it is pointed next', async t => {
+  const f = await fixture(t);
+  const store = await f.open();
+  const link = join(f.work, 'private-link');
+  await symlink(join(f.work, 'secret'), link);
+  await store.add(link);
+  assert.equal(await store.excludesNow(join(f.work, 'open')), false);
+  await rm(link);
+  await symlink(join(f.work, 'open'), link);
+  assert.equal(await store.excludesNow(join(f.work, 'open')), true);
+});

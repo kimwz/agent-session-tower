@@ -132,7 +132,7 @@ test('a worker keeps following the exclusion list the web process saves after it
   await exclusions.start();
   const autoPrompts = new AutoPromptManager({ stateDir, runs, snapshot: () => ({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'x', version: 'x', updatedAt: now }),
     detail: async () => undefined, refresh: async () => {}, model: async () => ({ directoryId: 'd1', reason: 'fits' }),
-    remote: { prepare: paths => exclusions.prepare(paths), matcher: () => exclusions.matcher(), coordinators: () => new Set() } });
+    remote: { prepare: (paths, options) => exclusions.prepare(paths, options), matcher: () => exclusions.matcher(), coordinators: () => new Set() } });
   await autoPrompts.start();
   const ledger = new RemoteRequestLedger(stateDir);
   await ledger.start();

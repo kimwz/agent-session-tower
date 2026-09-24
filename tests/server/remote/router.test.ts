@@ -14,7 +14,7 @@ const CONTROLLER = 'controllera1b2c3d4e5f6';
 const REQUEST_ID = '0199a2b3-c4d5-7123-8abc-0123456789ab';
 const now = new Date().toISOString();
 
-async function fixture(t: TestContext, options: { coordinators?: string[] | null; beforeDetail?: () => Promise<void>; job?: (job: AutoPromptJob) => AutoPromptJob } = {}) {
+async function fixture(t: TestContext, options: { coordinators?: string[] | null; beforeDetail?: () => Promise<void>; job?: (job: AutoPromptJob) => AutoPromptJob; beforeCancel?: () => Promise<void> } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-router-')));
   const open = join(root, 'open'), secret = join(root, 'secret');
   await mkdir(join(secret, 'deep'), { recursive: true });
@@ -32,7 +32,9 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
   const runs: Run[] = [{ id: 'run-open', sessionId: 'codex:open', prompt: 'p', status: 'running', createdAt: now, output: '' },
     { id: 'run-secret', sessionId: sessions[1].id, prompt: 'p', status: 'running', createdAt: now, output: '' }];
   const jobs: AutoPromptJob[] = [{ id: '0199a2b3-c4d5-7123-8abc-000000000001', provider: 'codex', prompt: 'x', routerModel: 'r', status: 'routing', createdAt: now, updatedAt: now,
-    origin: { kind: 'owner', controllerId: 'controllerffffffffffff' } }];
+    origin: { kind: 'owner', controllerId: 'controllerffffffffffff' } },
+    { id: '0199a2b3-c4d5-7123-8abc-000000000002', provider: 'codex', prompt: 'routing into the open folder', routerModel: 'r', status: 'routing', createdAt: now, updatedAt: now, cwd: open,
+      origin: { kind: 'owner', controllerId: CONTROLLER } }];
   const calls: Array<{ method: string; args: unknown[] }> = [];
   const listeners = new Set<() => void>();
   const snapshot = (): Snapshot => ({ sessions, runs, providers: [], autoPrompts: jobs, groups: [{ cwd: open, title: 'Open', pinned: true }, { cwd: secret, title: 'Secret', pinned: true }],
@@ -51,6 +53,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
       return options.job ? options.job(job) : job;
     },
     getAutoPrompt: id => jobs.find(job => job.id === id),
+    cancelAutoPrompt: async id => { await options.beforeCancel?.(); return { ...jobs.find(job => job.id === id)!, status: 'cancelled' }; },
     setGroup: async patch => { calls.push({ method: 'setGroup', args: [patch] }); return { cwd: patch.cwd, title: patch.title ?? '', pinned: true, hidden: true }; },
     attachment: async id => ({ metadata: { id, name: 'shot.png', mimeType: 'image/png', size: 4 }, content: Buffer.from('png!'), sessionId: id === '11111111-1111-4111-8111-111111111111' ? 'codex:open' : sessions[1].id }),
     cancel: async id => { calls.push({ method: 'cancel', args: [id] }); },
@@ -186,6 +189,15 @@ test('a folder excluded while a request waits is not in its answer, and a retry 
   const f = await fixture(t, { beforeDetail: async () => { await exclude?.(); } });
   exclude = async () => { await f.exclusions.add(f.open); };
   assert.equal((await f.call('/api/sessions/codex:open')).status, 404, 'the conversation is not sent after its folder was excluded mid-request');
+});
+
+test('cancelling an Auto Prompt whose folder was excluded meanwhile answers not found', async t => {
+  let exclude: (() => Promise<void>) | undefined;
+  const f = await fixture(t, { beforeCancel: async () => { await exclude?.(); } });
+  exclude = async () => { await f.exclusions.add(f.open); };
+  const response = await f.call('/api/auto-prompts/0199a2b3-c4d5-7123-8abc-000000000002/cancel', { body: {} });
+  assert.equal(response.status, 404);
+  assert.equal(response.text.includes('routing into the open folder'), false);
 });
 
 test('a retried Auto Prompt that ended up in a folder excluded since answers not found', async t => {

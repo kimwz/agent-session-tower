@@ -137,3 +137,22 @@ test('a full ledger refuses new remote requests instead of forgetting ones that 
   assert.deepEqual(await ledger.once(CONTROLLER, 'enqueue', first, {}, execute, record, result => result.kind === 'run' ? { runId: result.runId } : undefined), { runId: 'run-1' });
   assert.equal(runs, 2, 'the first request was not run again');
 });
+
+test('records saved before the issue time was kept still use the time inside their request ID', async t => {
+  let now = Date.parse('2026-09-24T00:00:00.000Z');
+  const f = await fixture(t, () => now);
+  const id = requestId(now + 12 * 60 * 60 * 1000);
+  await writeFile(join(f.stateDir, 'remote-requests.json'), JSON.stringify([{ key: `${CONTROLLER}\nenqueue\n${id}`, fingerprint: requestFingerprint({}), at: now, result: { kind: 'run', runId: 'run-1' } }]), { mode: 0o600 });
+  now += REMOTE_REQUEST_RETENTION_MS + 60_000;
+  const ledger = await f.open();
+  let runs = 0;
+  assert.deepEqual(await ledger.once(CONTROLLER, 'enqueue', id, {}, async () => ({ runId: `new-${++runs}` }), record, result => result.kind === 'run' ? { runId: result.runId } : undefined), { runId: 'run-1' });
+  assert.equal(runs, 0);
+});
+
+test('a refusal that came before anything ran tells the controller it is safe to send again', async t => {
+  const f = await fixture(t);
+  const ledger = await f.open();
+  await assert.rejects(ledger.once(CONTROLLER, 'enqueue', requestId(Date.now()), {}, async () => { throw new RunError('Install the codex CLI and ensure it is in PATH before sending instructions.', 503); }, record, () => undefined),
+    (error: Error & { disposition?: string }) => error.disposition === 'not-admitted');
+});
