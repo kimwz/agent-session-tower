@@ -234,3 +234,18 @@ test('changing the exclusion list ends the remote event stream, and the next one
   t.after(() => second.destroy());
   assert.equal(second.frames.join('').includes('codex:open'), false);
 });
+
+test('an Auto Prompt answer looks at its folder again now, even right after a symlink was pointed at an excluded folder', async t => {
+  let link = '';
+  const f = await fixture(t, { job: job => ({ ...job, status: 'completed', decision: { action: 'create', cwd: link, reason: 'fits' } }) });
+  const { symlink, rm: remove } = await import('node:fs/promises');
+  link = join(f.root, 'current');
+  await symlink(f.open, link);
+  // Looked at once while the link still pointed at a shared folder.
+  await f.exclusions.prepare([link]);
+  assert.equal(f.exclusions.matcher().excludes(link), false);
+  await remove(link);
+  await symlink(f.secret, link);
+  const response = await f.call('/api/auto-prompts', { body: { requestId: '0199a2b3-c4d5-7123-8abc-000000000003', provider: 'codex', prompt: 'go' } });
+  assert.equal(response.status, 404, 'no wait for the regular recheck');
+});

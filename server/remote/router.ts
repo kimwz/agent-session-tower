@@ -8,7 +8,7 @@ import { SnapshotStream } from '../http/snapshot-stream.js';
 import { SseClient } from '../http/sse-client.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
-import type { RunOrigin, Session } from '../../shared/types.js';
+import type { AutoPromptJob, RunOrigin, Session } from '../../shared/types.js';
 import type { RemoteExclusionStore } from './exclusions.js';
 import { remoteJob, remoteJobVisible, remotePage, remoteRun, remoteSession, remoteSessionIds, remoteSnapshot, type RemoteScope } from './visibility.js';
 
@@ -103,6 +103,13 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
     return session(id);
   };
   const stillVisible = async (id: string) => { await prepare(); await confirm(id); };
+  /** The same fresh look for an Auto Prompt job: every folder and conversation it touched. */
+  const jobVisible = async (job: AutoPromptJob, principal: RemotePrincipal): Promise<RemoteScope | undefined> => {
+    const sessions = [job.decision?.sessionId, job.sessionId].flatMap(id => { const found = id ? backend.session?.(id) : undefined; return found ? [found.cwd] : []; });
+    await exclusions.prepare([job.cwd, job.decision?.cwd, ...sessions].filter((path): path is string => Boolean(path)), { fresh: true });
+    const current = scope();
+    return remoteJobVisible(job, current, visibleSessions(current), principal.controllerId) ? current : undefined;
+  };
   const run = async (id: string) => {
     const current = scope();
     const snapshot = backend.snapshot();
@@ -193,9 +200,9 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
     }
     const autoPrompt = path.match(/^\/api\/auto-prompts\/([a-f\d-]+)(\/cancel)?$/i);
     if (method === 'GET' && autoPrompt && !autoPrompt[2] && UUID.test(autoPrompt[1])) {
-      const current = scope();
       const job = backend.getAutoPrompt?.(autoPrompt[1]);
-      if (!job || !remoteJobVisible(job, current, visibleSessions(current), principal.controllerId)) throw notFound();
+      const current = job && await jobVisible(job, principal);
+      if (!job || !current) throw notFound();
       return json(res, 200, { job: remoteJob(job, principal.controllerId, current.matcher.revision) });
     }
     if (method !== 'POST') throw notFound();
@@ -269,22 +276,19 @@ export function createRemoteRouter({ backend, exclusions, mutationsPerMinute = 6
       if (request.cwd) await listedFolder(request.cwd);
       if (!backend.startAutoPrompt) throw httpError(503, 'Auto Prompt를 현재 사용할 수 없습니다.');
       const job = await backend.startAutoPrompt(request, context(principal, request.requestId.toLowerCase()));
-      await prepare();
-      const current = scope();
       // A retry of a finished request answers with that job; it is shown only while everything it touched is shared.
-      if (!remoteJobVisible(job, current, visibleSessions(current), principal.controllerId)) throw notFound();
+      const current = await jobVisible(job, principal);
+      if (!current) throw notFound();
       return json(res, 202, { job: remoteJob(job, principal.controllerId, current.matcher.revision) });
     }
     if (autoPrompt && autoPrompt[2] && UUID.test(autoPrompt[1])) {
       if (Object.keys(await readJson(req)).length) throw httpError(400, '취소 요청 본문은 비워 두세요.');
-      const current = scope();
       const job = backend.getAutoPrompt?.(autoPrompt[1]);
-      if (!job || !remoteJobVisible(job, current, visibleSessions(current), principal.controllerId)) throw notFound();
+      if (!job || !await jobVisible(job, principal)) throw notFound();
       if (!backend.cancelAutoPrompt) throw httpError(503, 'Auto Prompt를 현재 사용할 수 없습니다.');
       const cancelled = await backend.cancelAutoPrompt(job.id);
-      await prepare();
-      const after = scope();
-      if (!remoteJobVisible(cancelled, after, visibleSessions(after), principal.controllerId)) throw notFound();
+      const after = await jobVisible(cancelled, principal);
+      if (!after) throw notFound();
       return json(res, 200, { job: remoteJob(cancelled, principal.controllerId, after.matcher.revision) });
     }
     if (path === '/api/groups') {
