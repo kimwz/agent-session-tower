@@ -1181,4 +1181,5 @@ export const english: Record<string, string> = {
   "Git 저장소가 아닙니다.": "Not a git repository.",
   "프로젝트 폴더와 작업(pull, push, refresh)을 지정하세요.": "Specify a project folder and an action (pull, push or refresh).",
   "Git 상태를 확인할 수 없습니다.": "Git status is unavailable.",
+  "다른 컴퓨터에서 보낸 턴이라 Tower 도구를 연결하지 않았습니다.": "This turn came from another computer, so Tower tools were not attached.",
 };

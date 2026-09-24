@@ -10,6 +10,8 @@ import { AttachmentStore, attachmentMetadata, type StoredAttachment } from '../s
 import { RunError, type RunAdmission, type RunManager } from '../runs/manager.js';
 import { parseRunOrigin } from '../runs/origin.js';
 import { runAutoPromptModel } from './native.js';
+import type { ExclusionMatcher } from '../remote/exclusions.js';
+import { remoteWorkingSnapshot } from '../remote/visibility.js';
 
 interface AutoPromptOptions {
   stateDir: string;
@@ -18,6 +20,8 @@ interface AutoPromptOptions {
   refresh(): Promise<void>;
   runs: Pick<RunManager, 'list' | 'create' | 'enqueue'>;
   model?: typeof runAutoPromptModel;
+  /** Folders excluded from remote sharing; remote requests never route into them. */
+  exclusions?: { prepare(paths: Iterable<string>): Promise<void>; matcher(): ExclusionMatcher };
 }
 interface Entry { job: AutoPromptJob; fingerprint: string; staged: Attachment[] }
 interface Directory { id: string; cwd: string; title: string; sessions: Session[] }
@@ -197,7 +201,7 @@ export class AutoPromptManager extends EventEmitter {
   }
 
   private async admit(input: AutoPromptRequest, fingerprint: string, origin: RunOrigin, untrustedInput: boolean, unattended: boolean): Promise<AutoPromptJob> {
-    const snapshot = this.options.snapshot();
+    const snapshot = await this.snapshotFor(origin);
     providerReady(snapshot, input.provider);
     const inventory = directories(snapshot);
     if (!inventory.length) throw new RunError('라우팅할 작업 폴더가 없습니다. 먼저 프로젝트 폴더를 추가하세요.');
@@ -205,7 +209,7 @@ export class AutoPromptManager extends EventEmitter {
     const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments });
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, staged: prepared.attachments, job: {
-      id: input.requestId, origin, ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
+      id: input.requestId, origin, ...(origin.controllerId ? { exclusionRevision: this.options.exclusions!.matcher().revision } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
       ...(input.provider === 'codex' && input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}),
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
       ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
@@ -294,7 +298,8 @@ export class AutoPromptManager extends EventEmitter {
     this.update(job, { status: 'routing', stage: job.cwd ? 'session' : 'directory' });
     await this.persist(); this.emit('change');
     await this.options.refresh(); active();
-    let snapshot = this.options.snapshot();
+    let snapshot = await this.snapshotFor(job.origin); active();
+    if (job.origin?.controllerId) this.update(job, { exclusionRevision: this.options.exclusions!.matcher().revision });
     providerReady(snapshot, job.provider);
     const inventory = directories(snapshot);
     const staged = await this.attachments.resolve(job.id, entry.staged); active();
@@ -323,7 +328,7 @@ export class AutoPromptManager extends EventEmitter {
     this.update(job, { cwd, stage: 'session' });
     await this.persist(); this.emit('change');
     await this.options.refresh(); active();
-    snapshot = this.options.snapshot();
+    snapshot = await this.snapshotFor(job.origin); active();
     await this.checkDirectory(cwd, directories(snapshot)); active();
     let decision: AutoPromptDecision;
     let expectedNativeId: string | undefined;
@@ -369,9 +374,9 @@ export class AutoPromptManager extends EventEmitter {
       decision = { action: 'create', cwd, reason: `${decision.reason} 요청한 승인 검토 설정을 적용하기 위해 새 세션을 생성합니다.` };
     }
     await this.options.refresh(); active();
-    await this.checkDirectory(cwd, directories(this.options.snapshot())); active();
+    await this.checkDirectory(cwd, directories(await this.snapshotFor(job.origin))); active();
     const validate = () => {
-      const current = this.options.snapshot();
+      const current = this.snapshotNow(job.origin);
       providerReady(current, job.provider);
       if (!directories(current).some(directory => directory.cwd === cwd)) throw new RunError('라우팅 중 프로젝트 폴더가 변경되었습니다. 다시 시도하세요.', 409);
       if (decision.action === 'resume') {
@@ -392,6 +397,25 @@ export class AutoPromptManager extends EventEmitter {
         ...(job.codexApprovalsReviewer ? { codexApprovalsReviewer: job.codexApprovalsReviewer } : {}) }, internal)).run;
     this.complete(entry, run);
     await this.persist(); this.emit('change');
+  }
+
+  /**
+   * The Tower state a request may route with. A remote controller's request sees neither excluded folders
+   * nor their sessions, so neither its candidates nor the router's explanation can come from them.
+   */
+  private async snapshotFor(origin: RunOrigin | undefined): Promise<Snapshot> {
+    if (origin?.controllerId) {
+      if (!this.options.exclusions) throw new RunError('원격 공유 제외 목록을 확인할 수 없어 실행하지 않았습니다.', 503);
+      const snapshot = this.options.snapshot();
+      await this.options.exclusions.prepare([...snapshot.sessions.map(session => session.cwd), ...(snapshot.groups ?? []).map(group => group.cwd)]);
+    }
+    return this.snapshotNow(origin);
+  }
+  private snapshotNow(origin: RunOrigin | undefined): Snapshot {
+    const snapshot = this.options.snapshot();
+    if (!origin?.controllerId) return snapshot;
+    if (!this.options.exclusions) throw new RunError('원격 공유 제외 목록을 확인할 수 없어 실행하지 않았습니다.', 503);
+    return remoteWorkingSnapshot(snapshot, { matcher: this.options.exclusions.matcher(), coordinators: new Set() });
   }
 
   private complete(entry: Entry, run: Run): void {
@@ -444,5 +468,6 @@ function validEntry(value: unknown): value is Entry {
     && typeof job.createdAt === 'string' && typeof job.updatedAt === 'string'
     && ['queued', 'routing', 'dispatching', 'completed', 'error', 'cancelled'].includes(String(job.status))
     && (job.cwd === undefined || typeof job.cwd === 'string' && isAbsolute(job.cwd) && job.cwd.length <= 4096)
-    && (job.codexApprovalsReviewer === undefined || ['user', 'auto_review'].includes(String(job.codexApprovalsReviewer)));
+    && (job.codexApprovalsReviewer === undefined || ['user', 'auto_review'].includes(String(job.codexApprovalsReviewer)))
+    && (job.exclusionRevision === undefined || Number.isSafeInteger(job.exclusionRevision));
 }

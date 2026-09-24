@@ -16,6 +16,6 @@ export interface RunTools {
   servers?: SessionMcpServers;
   required: boolean;
   /** For an owner turn: whether Tower's own tools are attached, and if not, why. */
-  towerTools?: 'attached' | 'external-input' | 'not-owner-session';
+  towerTools?: 'attached' | 'external-input' | 'not-owner-session' | 'remote';
 }
 export const NO_RUN_TOOLS: RunTools = { required: false };

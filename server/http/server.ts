@@ -2,11 +2,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
+import { ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus, parseAutoPrompt, parseCreateSession, parseMessage, readJson, UUID } from './requests.js';
+import type { RequestContext } from './request-context.js';
+import type { RemoteExclusionStore } from '../remote/exclusions.js';
 import { normalizeProjectGroupPatch } from '../stores/project-groups.js';
 import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
-import { isImageAttachment, MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
-import { requestedEffort, requestedModel } from '../providers/models.js';
-import { requestedApprovalsReviewer } from '../providers/approvals.js';
+import { isImageAttachment } from '../../shared/attachments.js';
 import { SseClient } from './sse-client.js';
 import { publicSnapshot } from './public-snapshot.js';
 import { SnapshotStream } from './snapshot-stream.js';
@@ -31,12 +32,17 @@ export interface Backend {
   setClosed?(id: string, closed: boolean): Promise<Session | undefined>;
   setGroup?(patch: ProjectGroupPatch): Promise<ProjectGroup>;
   repositoryAction?(cwd: string, action: RepositoryAction): Promise<RepositoryStatus>;
-  createSession?(input: CreateSessionRequest): Promise<{ session: Session; run: Run }>;
-  startAutoPrompt?(input: AutoPromptRequest): Promise<AutoPromptJob>;
+  createSession?(input: CreateSessionRequest, context?: RequestContext): Promise<{ session: Session; run: Run }>;
+  startAutoPrompt?(input: AutoPromptRequest, context?: RequestContext): Promise<AutoPromptJob>;
   getAutoPrompt?(id: string): AutoPromptJob | undefined;
   cancelAutoPrompt?(id: string): Promise<AutoPromptJob>;
-  enqueue(id: string, prompt: string, attachments?: MessageAttachments): Promise<Run>;
-  attachment?(id: string): Promise<{ metadata: Attachment; content: Buffer }>;
+  enqueue(id: string, prompt: string, attachments?: MessageAttachments, context?: RequestContext): Promise<Run>;
+  /** `sessionId` names the conversation the file belongs to; absent from workers that predate it. */
+  attachment?(id: string): Promise<{ metadata: Attachment; content: Buffer; sessionId?: string }>;
+  /** The session with this Tower or native ID, resolved the same way requests about it are. */
+  session?(id: string): Session | undefined;
+  /** Coordinator conversations (Slack, GitHub) that stay on this machine. Undefined while unknown. */
+  coordinators?(): ReadonlySet<string> | undefined;
   cancel(id: string): Promise<void>;
   steerRun?(id: string): Promise<Run>;
   respondToApproval?(runId: string, approvalId: string, response: RunApprovalResponse): Promise<Run>;
@@ -50,6 +56,8 @@ export interface HttpOptions {
   remote?: { origins: ReadonlySet<string> };
   auth?: AuthStore;
   workspaceTerminals?: WorkspaceTerminalBackend;
+  /** The list of folders never shared with remote controllers; managed only from this machine's own browser. */
+  exclusions?: RemoteExclusionStore;
 }
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -60,7 +68,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals() }: HttpOptions) {
+export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -251,34 +259,12 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         return json(res, 200, { ok: true });
       }
       if (req.method === 'POST' && path === '/api/auto-prompts') {
-        const body = await readJson(req, Math.ceil(MAX_TOTAL_ATTACHMENT_BYTES / 3) * 4 + 256 * 1024);
-        if (Object.keys(body).some(key => !['requestId', 'provider', 'cwd', 'prompt', 'attachments', 'codexApprovalsReviewer', 'model', 'effort'].includes(key))) {
-          return json(res, 400, { error: 'Auto Prompt 요청에는 폴더, 도구, 프롬프트와 첨부 파일만 지정할 수 있습니다.' });
-        }
-        if (typeof body.requestId !== 'string' || !/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(body.requestId)) {
-          return json(res, 400, { error: 'Auto Prompt 요청 ID가 올바르지 않습니다.' });
-        }
-        if (body.provider !== 'claude' && body.provider !== 'codex') return json(res, 400, { error: 'Claude 또는 Codex를 선택하세요.' });
-        if (body.cwd !== undefined && (typeof body.cwd !== 'string' || !body.cwd.startsWith('/') || body.cwd.length > 4096 || body.cwd.includes('\0'))) {
-          return json(res, 400, { error: '목록에서 작업 폴더를 선택하거나 Auto를 선택하세요.' });
-        }
-        if (body.attachments !== undefined && !Array.isArray(body.attachments)) return json(res, 400, { error: '첨부 파일 목록 형식이 올바르지 않습니다.' });
-        const attachments = body.attachments as AutoPromptRequest['attachments'];
-        if ((attachments?.length || 0) > MAX_ATTACHMENTS) return json(res, 413, { error: `첨부 파일은 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.` });
-        if (typeof body.prompt !== 'string' || (!body.prompt.trim() && !attachments?.length) || body.prompt.length > 32_000) {
-          return json(res, 400, { error: '메시지나 첨부 파일을 추가하세요. 메시지는 32,000자 이하여야 합니다.' });
-        }
-        const reviewer = requestedApprovalsReviewer(body.codexApprovalsReviewer);
+        const request = parseAutoPrompt(await readJson(req, ATTACHMENT_BODY_BYTES));
         if (!backend.startAutoPrompt) return json(res, 503, { error: 'Auto Prompt를 현재 사용할 수 없습니다.' });
-        const model = requestedModel(body.model);
-        const effort = requestedEffort(body.effort, body.provider);
-        const job = await backend.startAutoPrompt({ ...(model ? { model } : {}), ...(effort ? { effort } : {}), requestId: body.requestId, provider: body.provider, prompt: body.prompt,
-          ...(body.cwd !== undefined ? { cwd: body.cwd as string } : {}), ...(attachments ? { attachments } : {}),
-          ...(reviewer && body.provider === 'codex' ? { codexApprovalsReviewer: reviewer } : {}) });
-        return json(res, 202, { job });
+        return json(res, 202, { job: await backend.startAutoPrompt(request) });
       }
       const autoPromptMatch = url.pathname.match(/^\/api\/auto-prompts\/([a-f\d-]+)(\/cancel)?$/i);
-      if (autoPromptMatch && /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(autoPromptMatch[1])) {
+      if (autoPromptMatch && UUID.test(autoPromptMatch[1])) {
         const id = autoPromptMatch[1];
         if (req.method === 'GET' && !autoPromptMatch[2]) {
           const job = backend.getAutoPrompt?.(id);
@@ -294,6 +280,17 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         const patch = normalizeProjectGroupPatch(await readJson(req));
         if (!backend.setGroup) return json(res, 503, { error: '폴더 그룹을 저장할 수 없습니다.' });
         return json(res, 200, { group: await backend.setGroup(patch) });
+      }
+      // Only this machine's own browser decides what stays out of remote sharing; remote links never reach here.
+      if (path === '/api/remote/exclusions' && (req.method === 'GET' || req.method === 'POST')) {
+        if (!exclusions) return json(res, 503, { error: '원격 공유 제외 목록을 사용할 수 없습니다.' });
+        if (req.method === 'POST') {
+          const body = await readJson(req, 16 * 1024);
+          const keys = Object.keys(body);
+          if (keys.length !== 1 || !['add', 'remove'].includes(keys[0])) return json(res, 400, { error: '추가하거나 제거할 폴더 하나를 지정하세요.' });
+          if (keys[0] === 'add') await exclusions.add(body.add); else await exclusions.remove(body.remove);
+        }
+        return json(res, 200, { folders: exclusions.list(), revision: exclusions.revision });
       }
       if (req.method === 'POST' && path === '/api/repositories') {
         const body = await readJson(req, 8192);
@@ -326,18 +323,9 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         return;
       }
       if (req.method === 'POST' && path === '/api/sessions') {
-        const body = await readJson(req);
-        if (body.provider !== 'claude' && body.provider !== 'codex') return json(res, 400, { error: 'Claude 또는 Codex를 선택하세요.' });
-        if (typeof body.cwd !== 'string' || !body.cwd.trim()) return json(res, 400, { error: '작업 폴더의 절대 경로를 입력하세요.' });
-        if (typeof body.prompt !== 'string' || !body.prompt.trim() || body.prompt.length > 32_000) return json(res, 400, { error: '메시지는 1자 이상, 32,000자 이하여야 합니다.' });
-        const title = body.title === undefined ? undefined : normalizeSessionTitle(body.title);
+        const input = parseCreateSession(await readJson(req));
         if (!backend.createSession) return json(res, 503, { error: '새 세션을 생성할 수 없습니다.' });
-        const model = requestedModel(body.model);
-        const effort = requestedEffort(body.effort, body.provider);
-        // Like the model override, an unusable value fails before admission; only a Codex thread has a reviewer.
-        const reviewer = requestedApprovalsReviewer(body.codexApprovalsReviewer);
-        const result = await backend.createSession({ provider: body.provider, cwd: body.cwd, prompt: body.prompt.trim(), ...(title ? { title } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}),
-          ...(reviewer && body.provider === 'codex' ? { codexApprovalsReviewer: reviewer } : {}) });
+        const result = await backend.createSession(input);
         return json(res, 202, { ...result, session: publicSession(result.session) });
       }
       const detailMatch = path.match(/^\/api\/sessions\/([^/]+)$/);
@@ -370,16 +358,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       }
       const messageMatch = path.match(/^\/api\/sessions\/([^/]+)\/messages$/);
       if (req.method === 'POST' && messageMatch) {
-        const body = await readJson(req, Math.ceil(MAX_TOTAL_ATTACHMENT_BYTES / 3) * 4 + 256 * 1024);
-        if ((body.attachments !== undefined && !Array.isArray(body.attachments)) || (body.attachmentIds !== undefined && !Array.isArray(body.attachmentIds))) return json(res, 400, { error: '첨부 파일 목록 형식이 올바르지 않습니다.' });
-        const attachments = body.attachments as MessageAttachments['attachments'];
-        const attachmentIds = body.attachmentIds as MessageAttachments['attachmentIds'];
-        const count = (attachments?.length || 0) + (attachmentIds?.length || 0);
-        if (count > MAX_ATTACHMENTS) return json(res, 413, { error: `첨부 파일은 최대 ${MAX_ATTACHMENTS}개까지 보낼 수 있습니다.` });
-        if (typeof body.prompt !== 'string' || (!body.prompt.trim() && !count) || body.prompt.length > 32_000) return json(res, 400, { error: '메시지나 첨부 파일을 추가하세요. 메시지는 32,000자 이하여야 합니다.' });
-        const model = requestedModel(body.model);
-        const effort = requestedEffort(body.effort);
-        const run = await backend.enqueue(messageMatch[1], body.prompt.trim(), { attachments, attachmentIds, ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
+        const message = parseMessage(await readJson(req, ATTACHMENT_BODY_BYTES));
+        const run = await backend.enqueue(messageMatch[1], message.prompt, message.attachments);
         return json(res, 202, { run });
       }
       // Provider request IDs are opaque and may contain an encoded slash.
@@ -422,8 +402,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       res.end(req.method === 'HEAD' ? undefined : asset.content);
     } catch (error) {
       const message = error instanceof Error ? error.message : '요청을 처리하지 못했습니다.';
-      const status = typeof error === 'object' && error && 'statusCode' in error ? Number(error.statusCode) : /not found|unknown session|찾을 수 없/i.test(message) ? 404 : /busy|already|resum|subagent|queue|재개|대기열|CLI|executable/i.test(message) ? 409 : 500;
-      if (!res.headersSent) json(res, status, { error: message });
+      const disposition = errorDisposition(error);
+      if (!res.headersSent) json(res, errorStatus(error), { error: message, ...(disposition ? { disposition } : {}) });
       else res.end();
     }
   });
@@ -444,38 +424,4 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
   };
   server.on('close', dispose);
   return { server, dispose };
-}
-
-/** Accept one unambiguous response envelope; provider code validates its pending schema. */
-function approvalResponse(body: Record<string, unknown>): RunApprovalResponse | undefined {
-  const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
-  const keys = Object.keys(body);
-  if (keys.length === 1 && (body.decision === 'allow' || body.decision === 'deny')) return body.decision;
-  if (keys.length === 1 && record(body.answers) && Object.values(body.answers).every(answer => record(answer)
-    && Object.keys(answer).length === 1 && Array.isArray(answer.answers) && answer.answers.every(value => typeof value === 'string'))) {
-    return body as Extract<RunApprovalResponse, { answers: unknown }>;
-  }
-  if (keys.length === 2 && keys.includes('action') && keys.includes('content')
-    && (body.action === 'accept' || body.action === 'decline' || body.action === 'cancel')
-    && (body.content === null || record(body.content)) && (body.action === 'accept' || body.content === null)) {
-    return body as Extract<RunApprovalResponse, { action: unknown }>;
-  }
-  return undefined;
-}
-
-async function readJson(req: IncomingMessage, maximum = 128 * 1024): Promise<Record<string, unknown>> {
-  let size = 0;
-  const chunks: Buffer[] = [];
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > maximum) throw Object.assign(new Error('요청 본문이 너무 큽니다.'), { statusCode: 413 });
-    chunks.push(chunk);
-  }
-  try {
-    const data: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
-    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error();
-    return data as Record<string, unknown>;
-  } catch {
-    throw Object.assign(new Error('올바른 JSON 형식이 아닙니다.'), { statusCode: 400 });
-  }
 }

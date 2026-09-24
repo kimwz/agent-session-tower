@@ -25,6 +25,8 @@ import { GitHubCoordinator } from '../triggers/github-coordinator.js';
 import { TowerApi } from '../api/tower-api.js';
 import { CapabilityRegistry, handleMcpRequest } from '../api/mcp.js';
 import { runToolResolver } from '../api/run-tools.js';
+import { RemoteExclusionStore } from '../remote/exclusions.js';
+import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
 import { MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
 const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory']);
@@ -58,6 +60,8 @@ export interface RunnerHostOptions {
   /** The proof a predecessor gave this worker when it started it. */
   handoffNonce?: string;
   capabilities?: CapabilityRegistry;
+  /** Makes a remote controller's retried request run once. */
+  ledger?: RemoteRequestLedger;
 }
 
 /** Only these read state; every other request is refused while the worker hands off, never half-accepted. */
@@ -88,8 +92,20 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       nativeIds: Object.fromEntries(sessions.map(session => [session.id, options.runs.nativeSessionId(session.id)])),
       settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [], version: APP_VERSION,
       capabilities: [...RUNNER_CAPABILITIES], ...(options.handoffNonce ? { handoff: options.handoffNonce } : {}),
-      ...(options.triggers ? { triggers: options.triggers.overview() } : {}) };
+      ...(options.triggers ? { triggers: options.triggers.overview() } : {}),
+      coordinators: [...new Set([...(options.slack?.coordinatorSessionIds() ?? []), ...(options.github?.coordinatorSessionIds() ?? [])])] };
   };
+  const coordinator = (sessionId: string) => Boolean(options.slack?.coordinatorSessionIds().includes(sessionId) || options.github?.sessionWorkflow(sessionId));
+  /** A paired controller's request: refused for coordinator conversations, and run once per request ID. */
+  const remote = <T>(admitted: RunAdmission, operation: string, content: unknown, sessionId: string | undefined, execute: () => Promise<T>,
+    record: (value: T) => RemoteResult, replay: (result: RemoteResult) => T | undefined): Promise<T> => {
+    const controllerId = admitted.origin?.controllerId;
+    if (!controllerId) return execute();
+    if (sessionId && coordinator(options.runs.getSession(sessionId)?.id ?? sessionId)) throw Object.assign(new Error('Not found.'), { statusCode: 404 });
+    if (!options.ledger || !admitted.requestId) throw Object.assign(new Error('원격 요청에는 요청 ID가 필요합니다.'), { statusCode: 400 });
+    return options.ledger.once(controllerId, operation, admitted.requestId, content, execute, record, replay);
+  };
+  const findRun = (id: string) => options.runs.list().find(run => run.id === id);
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
     if (draining && !READS_DURING_HANDOFF.has(method)) {
@@ -102,9 +118,22 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         handoff = { successor: parseSuccessor(args[0], paths.stateDir), requestedAt: handoff?.requestedAt ?? Date.now(), held: handoff?.held, retryAt: handoff?.retryAt };
         return { accepted: true };
       }
-      case 'create': return options.runs.create(args[0] as CreateSessionRequest, admission(args[1]));
+      case 'create': {
+        const admitted = admission(args[1]);
+        return remote(admitted, 'create', args[0], undefined, () => options.runs.create(args[0] as CreateSessionRequest, admitted),
+          value => ({ kind: 'session', sessionId: value.session.id, runId: value.run.id }),
+          result => {
+            if (result.kind !== 'session') return undefined;
+            const session = options.runs.getSession(result.sessionId), run = findRun(result.runId);
+            return session && run ? { session, run } : undefined;
+          });
+      }
       case 'enqueue': {
         const admitted = admission(args[3]);
+        if (admitted.origin?.controllerId) {
+          return remote(admitted, 'enqueue', [args[0], args[1], args[2]], args[0] as string, () => options.runs.enqueue(args[0] as string, args[1] as string, args[2] as MessageAttachments, admitted),
+            value => ({ kind: 'run', runId: value.id }), result => result.kind === 'run' ? findRun(result.runId) : undefined);
+        }
         // Only the owner's own message may carry Slack send approval; the origin decides, never a correlation ID.
         let prompt = options.slack && admitted.origin?.kind === 'owner'
           ? await options.slack.ownerChat(args[0] as string, args[1] as string) : args[1] as string;
@@ -118,13 +147,19 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'sessionHistory': return sessionHistory(options.sessions, args);
       case 'attachment': {
         const attachment = await options.runs.attachment(args[0] as string);
-        return { metadata: attachment.metadata, content: attachment.content.toString('base64') };
+        return { metadata: attachment.metadata, content: attachment.content.toString('base64'), sessionId: attachment.sessionId };
       }
       case 'terminalCreate': if (options.terminals) return options.terminals.create(args[0] as string, args[1], args[2]); break;
       case 'terminalInput': if (options.terminals) return options.terminals.input(args[0] as string, args[1]); break;
       case 'terminalResize': if (options.terminals) return options.terminals.resize(args[0] as string, args[1], args[2]); break;
       case 'terminalClose': if (options.terminals) return options.terminals.close(args[0] as string); break;
-      case 'submitAutoPrompt': if (options.autoPrompts) { await context?.refresh(); return options.autoPrompts.submit(args[0] as AutoPromptRequest, { origin: admission(args[1]).origin }); } break;
+      case 'submitAutoPrompt': if (options.autoPrompts) {
+        const admitted = admission(args[1]);
+        const autoPrompts = options.autoPrompts;
+        const request = args[0] as AutoPromptRequest;
+        return remote(admitted, 'autoPrompt', request, undefined, async () => { await context?.refresh(); return autoPrompts.submit(request, { origin: admitted.origin }); },
+          value => ({ kind: 'autoPrompt', jobId: value.id }), result => result.kind === 'autoPrompt' ? autoPrompts.get(result.jobId) : undefined);
+      } break;
       case 'cancelAutoPrompt': if (options.autoPrompts) return options.autoPrompts.cancel(args[0] as string); break;
       case 'slackOverview': if (options.slack) return options.slack.overview(); break;
       case 'slackMutate': if (options.slack) {
@@ -295,15 +330,16 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
  * turn's agent asked for. Trigger and Slack origins are assigned inside the worker, never over RPC.
  */
 function admission(value: unknown): RunAdmission {
-  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown } : {};
+  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown } : {};
   const origin = input.origin === undefined ? { kind: 'owner' as const } : parseRunOrigin(input.origin);
   if (!origin || (origin.kind !== 'owner' && origin.kind !== 'agent')) throw Object.assign(new Error('The web connection can only admit owner or agent work.'), { statusCode: 400 });
-  return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin };
+  if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-f\d-]{36}$/i.test(input.requestId))) throw Object.assign(new Error('Invalid request ID.'), { statusCode: 400 });
+  return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin, ...(typeof input.requestId === 'string' ? { requestId: input.requestId.toLowerCase() } : {}) };
 }
 
 
 
-async function runnerContext({ stateDir, runs, sessions, slack }: Pick<RunnerHostOptions, 'stateDir' | 'runs' | 'sessions' | 'slack'>) {
+async function runnerContext({ stateDir, runs, sessions, slack, exclusions }: Pick<RunnerHostOptions, 'stateDir' | 'runs' | 'sessions' | 'slack'> & { exclusions?: RemoteExclusionStore }) {
   let titles = new SessionTitleStore(stateDir);
   let closed = new ClosedSessionStore(stateDir);
   let groups = new ProjectGroupStore(stateDir);
@@ -322,7 +358,7 @@ async function runnerContext({ stateDir, runs, sessions, slack }: Pick<RunnerHos
   const snapshot = (): Snapshot => ({ sessions: visibleSessions(),
     runs: runs.list(), groups: groups.list(), providers, scanning: false, hostname: hostname(), version: APP_VERSION, updatedAt: new Date().toISOString() });
   return { snapshot,
-    refresh: async () => { await Promise.all([sessions.refresh(true), metadata()]); },
+    refresh: async () => { await Promise.all([sessions.refresh(true), metadata(), exclusions?.reload()]); },
     detail: async (id: string) => { const session = runs.getSession(id); if (!session) return undefined; const history = await sessions.detail(runs.nativeSessionId(id)); return { ...(history ?? { messages: [], hasMore: false }), session: closed.apply(titles.apply(session)) }; },
   };
 }
@@ -339,8 +375,13 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   try {
     await sessions.start();
     await runs.start();
-    const context = await runnerContext({ stateDir, runs, sessions });
-    const autoPrompts = new AutoPromptManager({ stateDir, runs, ...context });
+    // The web process saves the remote-sharing exclusion list; this copy follows it on every refresh.
+    const exclusions = new RemoteExclusionStore(stateDir);
+    await exclusions.start();
+    const ledger = new RemoteRequestLedger(stateDir);
+    await ledger.start();
+    const context = await runnerContext({ stateDir, runs, sessions, exclusions });
+    const autoPrompts = new AutoPromptManager({ stateDir, runs, exclusions, ...context });
     await autoPrompts.start();
     const slack = new SlackService({ stateDir, runs, autoPrompts, refresh: context.refresh });
     // GitHub coordinators use a trigger's credentials; the trigger engine starts right after.
@@ -350,7 +391,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const capabilities = new CapabilityRegistry(capability => capability.kind === 'slack-workflow' || capability.kind === 'github-workflow'
       || runs.list().some(run => run.id === capability.runId && (run.status === 'running' || run.status === 'queued')));
     runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, github, capabilities }));
-    const visible = await runnerContext({ stateDir, runs, sessions, slack });
+    const visible = await runnerContext({ stateDir, runs, sessions, slack, exclusions });
     autoPrompts.updateContext(visible);
     await slack.start();
     // Sessions created before provenance existed are classified once from surviving ledger links.
@@ -394,10 +435,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       },
       sessions: { list: () => visible.snapshot().sessions, read: async (id, limit) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), undefined, limit))?.messages ?? [] : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
-    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, api, capabilities, releaseStateLock: release, handoffNonce,
+    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, api, capabilities, ledger, releaseStateLock: release, handoffNonce,
       onIdle: async () => { triggers.close(); await triggers.settle(); github.close(); slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight(), holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); },
-      quiesce: async () => { slack.pause(); triggers.pause(); github.pause(); await Promise.all([slack.flush(), triggers.flush(), github.flush(), runs.flushState(), autoPrompts.flush()]); },
+      quiesce: async () => { slack.pause(); triggers.pause(); github.pause(); await Promise.all([slack.flush(), triggers.flush(), github.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush()]); },
       resume: () => { slack.resume(); triggers.resume(); github.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
       onHandedOff: () => { triggers.close(); github.close(); slack.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });

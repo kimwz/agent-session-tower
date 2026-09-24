@@ -139,16 +139,24 @@ export class DurableRunManager extends EventEmitter {
     if (internal.origin && internal.origin.kind !== 'owner' && !this.supports('origins')) {
       throw Object.assign(new Error('The execution worker is outdated and cannot keep who started this work. It was not submitted; retry after the worker updates.'), { statusCode: 409 });
     }
+    // An older worker would drop the controller and treat remote work as local work, folders excluded from sharing included.
+    if (internal.origin?.controllerId && !this.supports('remoteOrigins')) {
+      throw Object.assign(new Error('The execution worker on this computer has not updated yet, so it cannot accept remote work. Nothing was submitted.'), { statusCode: 503, disposition: 'not-admitted' });
+    }
+  }
+  /** Coordinator conversations the worker reports; undefined while the attached worker cannot say. */
+  coordinators(): ReadonlySet<string> | undefined {
+    return this.supports('remoteOrigins') && this.snapshot?.coordinators ? new Set(this.snapshot.coordinators) : undefined;
   }
   async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
     internal.validate?.();
     this.requireOrigins(internal);
-    return this.call('create', [input, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}) }]) as Promise<{ session: Session; run: Run }>;
+    return this.call('create', [input, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) }]) as Promise<{ session: Session; run: Run }>;
   }
   async enqueue(id: string, prompt: string, attachments: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
     internal.validate?.();
     this.requireOrigins(internal);
-    return this.call('enqueue', [id, prompt, attachments, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}) }]) as Promise<Run>;
+    return this.call('enqueue', [id, prompt, attachments, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) }]) as Promise<Run>;
   }
   async steer(id: string): Promise<Run> { return this.call('steer', [id]) as Promise<Run>; }
   async cancel(id: string): Promise<void> { await this.call('cancel', [id]); }
@@ -165,25 +173,28 @@ export class DurableRunManager extends EventEmitter {
   async slackOverview(): Promise<SlackPublicStatus> { return this.call('slackOverview', []) as Promise<SlackPublicStatus>; }
   async slackMutate(action: string, body: Record<string, unknown>): Promise<SlackPublicStatus> { return this.call('slackMutate', [action, body]) as Promise<SlackPublicStatus>; }
   getAutoPrompt(id: string): AutoPromptJob | undefined { return this.autoPromptList().find(job => job.id === id.toLowerCase()); }
-  async submitAutoPrompt(input: AutoPromptRequest, internal: Pick<RunAdmission, 'origin'> = {}): Promise<AutoPromptJob> {
+  async submitAutoPrompt(input: AutoPromptRequest, internal: Pick<RunAdmission, 'origin' | 'requestId'> = {}): Promise<AutoPromptJob> {
     this.requireOrigins(internal);
-    return this.call('submitAutoPrompt', [input, ...(internal.origin ? [{ origin: internal.origin }] : [])]) as Promise<AutoPromptJob>;
+    const admitted = { ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) };
+    return this.call('submitAutoPrompt', [input, ...(Object.keys(admitted).length ? [admitted] : [])]) as Promise<AutoPromptJob>;
   }
+
   async cancelAutoPrompt(id: string): Promise<AutoPromptJob> { return this.call('cancelAutoPrompt', [id]) as Promise<AutoPromptJob>; }
   async sessionHistory(nativeId: string, before?: number, limit?: number): Promise<SessionHistoryPage | undefined> {
     return await this.call('sessionHistory', [nativeId, before, limit]) as SessionHistoryPage | undefined;
   }
-  async attachment(id: string): Promise<{ metadata: Attachment; content: Buffer }> {
-    const result = await this.call('attachment', [id]) as { metadata: Attachment; content: string };
-    return { metadata: result.metadata, content: Buffer.from(result.content, 'base64') };
+  async attachment(id: string): Promise<{ metadata: Attachment; content: Buffer; sessionId?: string }> {
+    const result = await this.call('attachment', [id]) as { metadata: Attachment; content: string; sessionId?: unknown };
+    return { metadata: result.metadata, content: Buffer.from(result.content, 'base64'), ...(typeof result.sessionId === 'string' ? { sessionId: result.sessionId } : {}) };
   }
+
 
   private async credential(): Promise<string> {
     if (this.closed || !this.paths) throw Object.assign(new Error('Runner connection is closed.'), { statusCode: 503 });
     let file;
     try { file = await open(this.paths.token, constants.O_RDONLY | constants.O_NOFOLLOW); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw Object.assign(new Error('The execution worker is not running.'), { statusCode: 503 });
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw Object.assign(new Error('The execution worker is not running.'), { statusCode: 503, disposition: 'not-admitted' });
       throw error;
     }
     let token: string;
@@ -229,8 +240,11 @@ export class DurableRunManager extends EventEmitter {
         res.on('error', reject);
         res.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as RunnerReply); } catch { reject(new Error('Invalid runner response.')); } });
       });
-      req.setTimeout(60_000, () => req.destroy(new Error('Runner response timed out. The request was not retried; check its state before resending.')));
-      req.on('error', error => reject(Object.assign(error, { statusCode: 503 })));
+      let sent = false;
+      req.setTimeout(60_000, () => req.destroy(Object.assign(new Error('Runner response timed out. The request was not retried; check its state before resending.'), { disposition: 'uncertain' })));
+      req.on('finish', () => { sent = true; });
+      // Before the request left, nothing ran. After it, the worker may have acted.
+      req.on('error', error => reject(Object.assign(error, { statusCode: 503, disposition: (error as { disposition?: string }).disposition ?? (sent ? 'uncertain' : 'not-admitted') })));
       req.end(body);
     });
     const incompatible = () => Object.assign(new Error('Runner identity changed or is incompatible. Restart Tower to reconnect; requests were not retried.'), { incompatible: true, statusCode: 503 });

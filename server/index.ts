@@ -25,6 +25,8 @@ import { ProviderCapabilities } from './providers/capabilities.js';
 import { RepositoryMonitor, watchedRepositoryPaths } from './repositories/monitor.js';
 import { installAgentGuidance } from './agent-guidance/install.js';
 import { overlapsRepository } from '../shared/repositories.js';
+import { RemoteExclusionStore } from './remote/exclusions.js';
+import type { RequestContext } from './http/request-context.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
@@ -131,9 +133,12 @@ async function main() {
   const dismissedRuns = new DismissedRunStore(stateDir);
   const closedSessions = new ClosedSessionStore(stateDir);
   const groups = new ProjectGroupStore(stateDir);
+  const exclusions = new RemoteExclusionStore(stateDir);
   const runs = new DurableRunManager({ stateDir });
   // Load persisted history before shutdown or an HTTP request can touch the runner.
-  try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
+  try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await exclusions.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
+  /** Local browser requests are the owner's; a remote controller's carry its own origin and request ID. */
+  const admit = (context?: RequestContext) => ({ origin: context?.origin ?? OWNER, ...(context?.requestId ? { requestId: context.requestId } : {}) });
   // The worker has indexed native sessions before it answers, so the session list is complete here.
   const history = nativeHistory(runs);
   const listeners = new Set<() => void>();
@@ -168,8 +173,10 @@ async function main() {
     return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
   };
   const { server, dispose } = createMonitorServer({ port, clientDir,
-    auth, workspaceTerminals: new TerminalHostClient({ stateDir, legacy: runs.terminals }), remote: access.remote ? { origins: access.origins } : undefined, backend: {
+    auth, exclusions, workspaceTerminals: new TerminalHostClient({ stateDir, legacy: runs.terminals }), remote: access.remote ? { origins: access.origins } : undefined, backend: {
     snapshot, detail,
+    session: id => { const found = runs.getSession(id); return found && closedSessions.apply(titles.apply(found)); },
+    coordinators: () => runs.coordinators(),
     setTitle: async (id, title) => {
       const session = runs.getSession(id);
       if (!session) return undefined;
@@ -184,18 +191,18 @@ async function main() {
       changed();
       return titles.apply(updated);
     },
-    createSession: async input => { await repositories.prepareRun(input.cwd); return runs.create(input, { origin: OWNER }); },
-    startAutoPrompt: input => runs.submitAutoPrompt(input, { origin: OWNER }),
+    createSession: async (input, context) => { await repositories.prepareRun(input.cwd); return runs.create(input, admit(context)); },
+    startAutoPrompt: (input, context) => runs.submitAutoPrompt(input, admit(context)),
     getAutoPrompt: id => runs.getAutoPrompt(id),
     cancelAutoPrompt: id => runs.cancelAutoPrompt(id),
     slackOverview: () => runs.slackOverview(),
     api: (operation, input) => runs.api(operation, input),
     slackMutate: (action, body) => runs.slackMutate(action, body),
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
-    enqueue: async (id, prompt, attachments) => {
+    enqueue: async (id, prompt, attachments, context) => {
       const cwd = runs.getSession(id)?.cwd;
       if (cwd) await repositories.prepareRun(cwd);
-      return runs.enqueue(id, prompt, attachments, { origin: OWNER });
+      return runs.enqueue(id, prompt, attachments, admit(context));
     },
     repositoryAction: (cwd, action) => repositories.act(cwd, action),
     attachment: id => runs.attachment(id), cancel: id => runs.cancel(id), steerRun: id => runs.steer(id),
@@ -234,7 +241,7 @@ async function main() {
     dispose();
     server.closeAllConnections();
     server.close();
-    try { await finishCleanup([auth.flush(), stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), runs.close()]); } finally { await releaseLock(); }
+    try { await finishCleanup([auth.flush(), stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), runs.close()]); } finally { await releaseLock(); }
   };
   const onSignal = () => { void shutdown().catch(error => { console.error(`Agent Session Tower shutdown: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }); };
   process.once('SIGINT', onSignal);

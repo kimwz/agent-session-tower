@@ -68,6 +68,8 @@ export interface RunAdmission {
   createFolder?: boolean;
   /** Pre-answer the native folder trust prompt. Only for folders the owner chose. */
   trustWorkspace?: boolean;
+  /** A remote controller's ID for this request; the worker runs a retry with the same ID only once. */
+  requestId?: string;
 }
 
 const MAX_OUTPUT = 64_000;
@@ -238,8 +240,8 @@ export class RunManager extends EventEmitter {
     ...(run.contextUsage ? { contextUsage: { ...run.contextUsage } } : {}),
     ...(run.approvals ? { approvals: structuredClone(run.approvals) } : {}) })); }
   async attachment(id: string) {
-    const { metadata, content } = await this.attachments.read(id);
-    return { metadata, content };
+    const { metadata, content, sessionId } = await this.attachments.read(id);
+    return { metadata, content, sessionId };
   }
   settledRunIds(): ReadonlySet<string> { return new Set(this.settledRuns); }
 

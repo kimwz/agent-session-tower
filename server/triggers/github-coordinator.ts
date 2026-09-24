@@ -178,6 +178,12 @@ export class GitHubCoordinator extends EventEmitter {
     const status = workflow.status === 'completed' || workflow.status === 'ignored' ? 'completed' : workflow.status === 'error' || workflow.status === 'reply-uncertain' ? 'error' : 'running';
     return { status, ...(workflow.sessionId ? { sessionId: workflow.sessionId } : {}), ...(workflow.runId ? { runId: workflow.runId } : {}), ...(workflow.error ? { error: workflow.error } : {}) };
   }
+  /** Every coordinator conversation, including those still waiting for their first session. */
+  coordinatorSessionIds(): string[] {
+    const runs = this.options.runs.list();
+    const workflows = this.automation.list().filter(item => item.mode === 'conversation');
+    return [...new Set(workflows.flatMap(item => item.sessionId ? [item.sessionId] : runs.filter(run => run.autoPromptId === item.id).map(run => run.sessionId)))];
+  }
   /** The conversation a coordinator session belongs to. */
   sessionWorkflow(sessionId: string): string | undefined {
     const runs = this.options.runs.list();

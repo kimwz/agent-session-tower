@@ -22,6 +22,8 @@ function toolServer(stateDir: string, mode: '--tower-mcp' | '--slack-mcp', extra
 export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry }) {
   return (run: Run, session: Session): RunTools => {
     const origin = run.origin;
+    // Checked first: remote work never receives Tower's or a coordinator's tools, whatever conversation it lands in.
+    if (origin?.controllerId) return { required: false, towerTools: 'remote' };
     const slack = options.slack?.sessionMcp(session.id)?.tower_slack;
     if (slack) {
       const workflowId = slack.args.at(-1)!;

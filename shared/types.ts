@@ -114,6 +114,11 @@ export interface RunOrigin {
   eventId?: string;
   /** For an agent origin: the owner run whose tool call started this work. */
   runId?: string;
+  /**
+   * Set when the work came from a paired controller over a remote link, or from an agent that such work
+   * started. Remote work never selects a folder this machine excludes from remote sharing.
+   */
+  controllerId?: string;
 }
 export interface Run {
   id: string;
@@ -122,7 +127,7 @@ export interface Run {
   /** Started with no one watching; the provider's automatic approval mode decides. */
   unattended?: boolean;
   /** For a turn the owner started: whether Tower's tools reached it, and if not, why. */
-  towerTools?: 'attached' | 'desktop-app' | 'external-input' | 'not-owner-session';
+  towerTools?: 'attached' | 'desktop-app' | 'external-input' | 'not-owner-session' | 'remote';
   prompt: string;
   status: 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
   createdAt: string;
@@ -202,6 +207,8 @@ export interface AutoPromptDecision {
 }
 export interface AutoPromptJob {
   origin?: RunOrigin;
+  /** For remote work: the remote-sharing exclusion revision its candidates were filtered with. */
+  exclusionRevision?: number;
   unattended?: boolean;
   /** The request carries external content, so it may only start a new session. */
   untrustedInput?: boolean;

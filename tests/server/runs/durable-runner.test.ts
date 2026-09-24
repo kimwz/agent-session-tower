@@ -265,6 +265,7 @@ test('only the owner’s own message can approve a Slack send; agent work and co
   const slack = {
     sessionMcp: () => undefined,
     ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return `${message} [owner receipt]`; },
+    coordinatorSessionIds: () => [],
   } as unknown as SlackService;
   const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, slack });
   t.after(() => host.close());
@@ -376,7 +377,7 @@ test('a web Auto Prompt is admitted as the owner’s request but never read as S
   await f.host.close();
   const ownerMessages: string[] = [];
   const submitted: unknown[] = [];
-  const slack = { sessionMcp: () => undefined, ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return message; } } as unknown as SlackService;
+  const slack = { sessionMcp: () => undefined, coordinatorSessionIds: () => [], ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return message; } } as unknown as SlackService;
   const { EventEmitter } = await import('node:events');
   const autoPrompts = Object.assign(new EventEmitter(), {
     list: () => [], updateContext: () => {}, cancel: async () => { throw new Error('unused'); },

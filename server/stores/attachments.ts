@@ -10,7 +10,8 @@ const MIME = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/;
 const digest = (content: Buffer) => createHash('sha256').update(content).digest('hex');
 const invalid = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 
-export interface StoredAttachment { metadata: Attachment; path: string; content: Buffer }
+/** `sessionId` is the conversation the file was attached in. */
+export interface StoredAttachment { metadata: Attachment; path: string; content: Buffer; sessionId: string }
 interface Manifest extends Attachment { sessionId: string; sha256: string }
 export interface PreparedAttachments { attachments: Attachment[]; createdIds: string[] }
 
@@ -119,7 +120,7 @@ export class AttachmentStore {
       const content = await this.readFile(path, MAX_ATTACHMENT_BYTES);
       if (content.length !== metadata.size || digest(content) !== manifest.sha256
         || (isImageAttachment(metadata.mimeType) && (rasterMime(content) !== metadata.mimeType || content.length > MAX_IMAGE_ATTACHMENT_BYTES))) throw new Error();
-      return { metadata, path, content };
+      return { metadata, path, content, sessionId: manifest.sessionId };
     } catch { throw invalid('첨부 파일을 찾을 수 없거나 내용이 변경되었습니다. 파일을 다시 첨부하세요.', 404); }
   }
 
