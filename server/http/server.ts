@@ -264,7 +264,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         const names = new Map(links && !('error' in links) ? links.node.list().map(item => [item.id, item.name]) : []);
         const shells = (await workspaceTerminals.list?.()) ?? [];
         return json(res, 200, { terminals: shells.filter(shell => shell.cwd === cwd && !shell.exited)
-          .map(shell => ({ id: shell.id, openedAt: shell.openedAt, ...(shell.opener === 'local' ? {} : { openedBy: names.get(shell.opener) ?? shell.opener }) })) });
+          .map(shell => ({ id: shell.id, openedAt: shell.openedAt, origin: shell.opener === 'local' ? 'self' : 'controller', ...(names.has(shell.opener) ? { openedBy: names.get(shell.opener) } : {}) })) });
       }
       if (req.method === 'POST' && path === '/api/workspace/terminals') {
         const body = await readJson(req);

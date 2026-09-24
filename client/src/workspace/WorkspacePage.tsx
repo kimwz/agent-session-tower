@@ -7,12 +7,12 @@ import { WorkspaceEditor } from './WorkspaceEditor';
 import { WorkspaceTerminal } from './WorkspaceTerminal';
 import { WorkspaceFileTree } from './WorkspaceFileTree';
 import { nodePath, splitScopedId, workspacePath } from '../remote/scope';
-import { hostNames } from '../remote/hosts';
 
 type Document = { path: string; content: string; revision: string | null; saved: string };
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
-export function WorkspacePage({ cwd, initialTool, toolRequest, onClose, registerGuard }: { cwd: string; initialTool: string; toolRequest?: number; onClose?: () => void; registerGuard?: (guard: () => boolean) => void }) {
+/** `machine` names the joined computer a scoped `cwd` belongs to. */
+export function WorkspacePage({ cwd, machine: machineName, initialTool, toolRequest, onClose, registerGuard }: { cwd: string; machine?: string; initialTool: string; toolRequest?: number; onClose?: () => void; registerGuard?: (guard: () => boolean) => void }) {
   const { language, setLanguage } = useI18n();
   const [token, setToken] = useState('');
   const [explorerVisible, setExplorerVisible] = useState(() => !window.matchMedia('(max-width: 680px)').matches);
@@ -49,7 +49,7 @@ export function WorkspacePage({ cwd, initialTool, toolRequest, onClose, register
   };
   // Paths and bodies name the folder as its own computer knows it.
   const { node, id: folderPath } = splitScopedId(cwd);
-  const machine = node ? hostNames.get(node) ?? t('연결된 컴퓨터') : undefined;
+  const machine = node ? machineName ?? t('연결된 컴퓨터') : undefined;
   const post = (path: string, body: object) => api(nodePath(node, path), { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify({ ...body, cwd: folderPath }) });
   const save = useCallback(async () => {
     const current = documentRef.current;

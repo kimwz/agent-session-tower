@@ -93,7 +93,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
   const scope = (): RemoteScope => {
     const coordinators = backend.coordinators?.();
     // A worker that cannot name its coordinator conversations cannot keep them private; serve nothing.
-    if (!coordinators) throw Object.assign(httpError(503, '이 컴퓨터의 실행 작업자가 업데이트를 기다리고 있습니다. 잠시 후 다시 시도하세요.'), { disposition: 'not-admitted' });
+    if (!coordinators) throw Object.assign(httpError(503, '그 컴퓨터의 실행 작업자가 업데이트를 기다리고 있습니다. 잠시 후 다시 시도하세요.'), { disposition: 'not-admitted' });
     return { matcher: exclusions.matcher(), coordinators };
   };
   const view = (principal: RemotePrincipal) => remoteSnapshot(publicSnapshot(backend.snapshot()), scope(), principal.controllerId);
@@ -224,31 +224,42 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       res.end(method === 'HEAD' ? undefined : content);
       return;
     }
+    // Workspace answers are checked against the sharing list again once they are ready: it may have changed
+    // while a folder or file was being read.
     if (method === 'GET' && path === '/api/workspace/tree') {
-      const cwd = await sharedPath(url.searchParams.get('cwd'), url.searchParams.get('path') ?? '');
-      const listed = await listWorkspaceTree(cwd, url.searchParams.get('path') ?? '', backend.snapshot());
-      // Excluded folders inside a shared one are left out of its listing.
-      const hidden = await Promise.all(listed.entries.map(entry => exclusions.excludesNow(join(cwd, entry.path))));
-      return json(res, 200, { entries: listed.entries.filter((_, index) => !hidden[index]) });
+      const at = url.searchParams.get('path') ?? '';
+      const cwd = await sharedPath(url.searchParams.get('cwd'), at);
+      const shared = async (entry: string) => !await exclusions.excludesNow(join(cwd, entry));
+      // Excluded folders inside a shared one are left out of its listing, and do not count toward its limit.
+      const listed = await listWorkspaceTree(cwd, at, backend.snapshot(), shared);
+      await sharedPath(cwd, at);
+      const kept = await Promise.all(listed.entries.map(entry => shared(entry.path)));
+      return json(res, 200, { entries: listed.entries.filter((_, index) => kept[index]) });
     }
     if (method === 'GET' && path === '/api/workspace/file') {
       const cwd = await sharedPath(url.searchParams.get('cwd'), url.searchParams.get('path'));
-      return json(res, 200, await readWorkspaceFile(cwd, url.searchParams.get('path'), backend.snapshot()));
+      const file = await readWorkspaceFile(cwd, url.searchParams.get('path'), backend.snapshot());
+      await sharedPath(cwd, url.searchParams.get('path'));
+      return json(res, 200, file);
     }
     const terminal = path.match(/^\/api\/workspace\/terminals\/([0-9a-f-]{36})\/(events|input|resize|close)$/);
     if (method === 'GET' && path === '/api/workspace/terminals') {
       const cwd = await sharedPath(url.searchParams.get('cwd'), '');
       const root = await realpath(cwd).catch(() => cwd);
       const shells = (await terminals?.list?.()) ?? [];
-      return json(res, 200, { terminals: shells.filter(item => item.cwd === root && !item.exited).map(item => ({ id: item.id, openedAt: item.openedAt, ...(item.opener === principal.controllerId ? {} : { openedBy: item.opener === 'local' ? 'local' : 'other' }) })) });
+      await sharedPath(cwd, '');
+      // Another controller is not named: which computers control this one is not a controller's business.
+      return json(res, 200, { terminals: shells.filter(item => item.cwd === root && !item.exited).map(item => ({ id: item.id, openedAt: item.openedAt,
+        origin: item.opener === principal.controllerId ? 'self' : item.opener === 'local' ? 'computer' : 'controller' })) });
     }
     if (method === 'GET' && terminal?.[2] === 'events') {
       if (!terminals) throw notFound();
-      await shell(terminal[1]);
       const cursor = req.headers['last-event-id'];
       if (Array.isArray(cursor)) throw httpError(400, '터미널 출력 위치가 올바르지 않습니다.');
+      // Registered before the check, so a change to the sharing list from here on ends this stream.
       shellStreams.add(res);
       res.once('close', () => shellStreams.delete(res));
+      await shell(terminal[1]);
       await terminals.attach(terminal[1], res, cursor);
       return;
     }
@@ -284,7 +295,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       const id = requestId(req);
       const cwd = await sharedPath(body.cwd, '');
       // A shell a controller opens must be one every controller can find and this computer can close.
-      if (await terminals.list() === undefined) throw Object.assign(httpError(503, '이 컴퓨터의 터미널 호스트가 이전 버전입니다. 열린 터미널을 모두 닫으면 새 버전으로 바뀝니다.'), { disposition: 'not-admitted' });
+      if (await terminals.list() === undefined) throw Object.assign(httpError(503, '그 컴퓨터의 터미널 호스트가 이전 버전이라 여기서 터미널을 열 수 없습니다. 그 컴퓨터에서 열린 터미널이 모두 닫히면 새 버전으로 바뀝니다.'), { disposition: 'not-admitted' });
       const root = await assertWorkspace(cwd, backend.snapshot());
       return json(res, 200, await terminals.create(root, body.cols, body.rows, { opener: principal.controllerId, requestId: id }));
     }

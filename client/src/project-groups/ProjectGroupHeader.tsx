@@ -32,6 +32,8 @@ export type ProjectGroupHeaderData = {
   /** Files and terminals need only a connection, not a computer ready for new work. */
   workspaceDisabled?: boolean;
   workspaceNote?: string;
+  /** The joined computer the folder is on. */
+  machine?: string;
 };
 
 function GroupTitleDialog({ data, onClose }: { data: ProjectGroupHeaderData; onClose: () => void }) {
@@ -93,7 +95,7 @@ export function ProjectGroupHeader({ data }: { data: ProjectGroupHeaderData }) {
       <div className="project-group-title"><Folder size={16} aria-hidden="true" /><strong title={data.name}><bdi dir="ltr">{projectGroupDisplayTitle(data.name)}</bdi></strong><button className="project-group-action nodrag nopan" aria-label={t("{0} 그룹 제목 편집", { 0: data.name })} title={t("그룹 제목 편집")} disabled={disabled} onClick={() => setEditing(true)}><Pencil size={13} /></button></div>
       <div className="project-group-location"><div className="project-group-path folder-tail" title={folder.id}><bdi dir="ltr">{folder.id}</bdi></div>{data.repository && data.onRepositoryAction && <RepositorySync status={data.repository} busy={data.active > 0} disabled={data.disabled} onAction={data.onRepositoryAction} />}</div>
       <div className="project-group-bottom"><span>{data.count}{t("개 세션")}{data.active > 0 && t(" · {0}개 작업 중", { 0: data.active })}</span><div className="project-group-actions nodrag nopan">
-        <WorkspaceActions cwd={data.path} token={data.token || ''} disabled={(data.workspaceDisabled ?? data.disabled) || data.saving || !actionable} note={data.workspaceNote} />
+        <WorkspaceActions cwd={data.path} token={data.token || ''} disabled={(data.workspaceDisabled ?? data.disabled) || data.saving || !actionable} note={data.workspaceNote} machine={data.machine} />
         <button className={`project-group-action ${data.pinned ? 'pinned' : ''}`} aria-label={t("{0} 그룹 {1}", { 0: data.name, 1: data.pinned ? t("고정 해제") : t("고정") })} aria-pressed={data.pinned} title={data.pinned ? t("그룹 고정 해제") : t("세션이 없어도 그룹 유지")} disabled={viewDisabled} onClick={() => { void data.onUpdate({ cwd: data.path, pinned: !data.pinned }); }}>{data.saving && !editing ? <LoaderCircle size={14} className="spin" /> : <Pin size={14} />}</button>
         <button className={`project-group-action ${data.hidden ? 'is-hidden' : ''}`} aria-label={data.hidden ? t("{0} 폴더 숨김 해제", { 0: data.name }) : t("{0} 폴더 숨기기", { 0: data.name })} aria-pressed={data.hidden} title={data.hidden ? t("폴더 숨김 해제") : t("폴더와 세션을 캔버스에서 숨기기")} disabled={viewDisabled} onClick={() => { void data.onUpdate({ cwd: data.path, hidden: !data.hidden }); }}>{data.hidden ? <EyeOff size={15} /> : <Eye size={15} />}</button>
         <button className="project-group-action" aria-label={t("{0} 폴더에 새 세션", { 0: data.name })} title={t("이 폴더에 새 세션")} disabled={data.disabled || !actionable} onClick={() => data.onCreate(data.path)}><Plus size={17} /></button>

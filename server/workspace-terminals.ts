@@ -65,6 +65,8 @@ export class WorkspaceTerminals {
   private readonly terminals = new Map<string, Terminal>();
   /** Creations in progress or done, by opener and request ID. */
   private readonly requests = new Map<string, Promise<{ id: string }>>();
+  /** Requests whose shell was closed since; sent again, they open nothing. The oldest are forgotten first. */
+  private readonly closedRequests = new Set<string>();
   private pending = 0;
   private disposed = false;
   private readonly heartbeat: ReturnType<typeof setInterval>;
@@ -78,6 +80,7 @@ export class WorkspaceTerminals {
   create(cwd: string, cols: unknown, rows: unknown, owner: TerminalOwner = { opener: 'local' }): Promise<{ id: string }> {
     if (!owner.requestId) return this.start(cwd, cols, rows, owner);
     const key = `${owner.opener}\u0000${owner.requestId}`;
+    if (this.closedRequests.has(key)) return Promise.reject(failure('이 요청으로 연 터미널은 이미 닫혔습니다. 새 터미널을 여세요.', 410));
     const known = this.requests.get(key);
     if (known) return known;
     const started = this.start(cwd, cols, rows, owner);
@@ -171,7 +174,11 @@ export class WorkspaceTerminals {
   close(id: string): void {
     const terminal = this.get(id);
     this.terminals.delete(id);
-    if (terminal.request) this.requests.delete(terminal.request);
+    if (terminal.request) {
+      this.requests.delete(terminal.request);
+      this.closedRequests.add(terminal.request);
+      if (this.closedRequests.size > 1000) this.closedRequests.delete(this.closedRequests.values().next().value!);
+    }
     if (terminal.expiry) clearTimeout(terminal.expiry);
     for (const subscription of terminal.subscriptions) subscription.dispose();
     if (terminal.exitCode === undefined) { try { terminal.pty.kill(); } catch { /* Already gone. */ } }

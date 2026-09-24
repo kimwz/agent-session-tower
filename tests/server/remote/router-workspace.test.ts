@@ -1,7 +1,7 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, get } from 'node:http';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -84,6 +84,36 @@ test('a controller browses and edits files in a shared folder, never inside an e
   assert.equal((await f.call('/api/workspace/directory', { body: { cwd: f.open, path: 'secret/more' } })).status, 404);
 });
 
+test('no other way into an excluded folder: links, another spelling, parent steps or depth', async t => {
+  const f = await fixture(t);
+  await symlink(f.secret, join(f.open, 'shortcut'));
+  const deep = join(f.open, 'a', 'b', 'hidden');
+  await mkdir(deep, { recursive: true });
+  await writeFile(join(deep, 'notes.txt'), 'private');
+  await writeFile(join(f.open, 'a', 'b', 'visible.txt'), 'shared');
+  await f.exclusions.add(deep);
+  const names = async (path: string) => ((await f.call(f.query('/api/workspace/tree', { cwd: f.open, path }))).json.entries as Array<{ name: string }>).map(entry => entry.name);
+  assert.deepEqual(await names(''), ['a', 'readme.md'], 'neither the excluded folder nor a link into it is listed');
+  assert.deepEqual(await names('a/b'), ['visible.txt'], 'an excluded folder deep inside is left out too');
+  for (const path of ['shortcut/keys.txt', 'SECRET/keys.txt', 'a/../secret/keys.txt', `${f.secret}/keys.txt`, 'a/b/hidden/notes.txt']) {
+    const answer = await f.call(f.query('/api/workspace/file', { cwd: f.open, path }));
+    assert.ok([400, 403, 404].includes(answer.status), `${path} answered ${answer.status}`);
+    assert.notEqual(answer.json?.content, 'private');
+  }
+});
+
+test('entries of excluded folders do not count toward the listing limit', async t => {
+  const f = await fixture(t);
+  const crowded = join(f.open, 'crowded');
+  await mkdir(crowded);
+  await Promise.all(Array.from({ length: 2000 }, (_, index) => writeFile(join(crowded, `file-${index}.txt`), '')));
+  await mkdir(join(crowded, 'private'));
+  await f.exclusions.add(join(crowded, 'private'));
+  const listed = await f.call(f.query('/api/workspace/tree', { cwd: f.open, path: 'crowded' }));
+  assert.equal(listed.status, 200);
+  assert.equal(listed.json.entries.length, 2000);
+});
+
 test('shells in a shared folder are shared by every controller; excluded folders and unknown shells are not', async t => {
   const f = await fixture(t);
   const local = await f.shells.create(f.open, 80, 24);
@@ -97,7 +127,8 @@ test('shells in a shared folder are shared by every controller; excluded folders
   assert.equal((await f.call('/api/workspace/terminals', { body: { cwd: f.open, cols: 80, rows: 24 }, headers })).json.id, opened.json.id);
   assert.equal((await f.call('/api/workspace/terminals', { body: { cwd: f.secret, cols: 80, rows: 24 }, headers: { 'x-tower-request-id': requestIds() } })).status, 404);
   const listed = await f.call(f.query('/api/workspace/terminals', { cwd: f.open }));
-  assert.deepEqual(listed.json.terminals.map((item: { id: string; openedBy?: string }) => [item.id, item.openedBy]).sort(), [[local.id, 'local'], [opened.json.id, undefined], [other.id, 'other']].sort());
+  assert.deepEqual(listed.json.terminals.map((item: { id: string; origin: string; openedBy?: string }) => [item.id, item.origin, item.openedBy]).sort(),
+    [[local.id, 'computer', undefined], [opened.json.id, 'self', undefined], [other.id, 'controller', undefined]].sort(), 'another controller is not named');
   assert.equal((await f.call(`/api/workspace/terminals/${local.id}/input`, { body: { data: 'ls\r' } })).status, 200, 'a shell opened on that computer can be joined');
   assert.deepEqual(f.ptys[0].written, ['ls\r']);
   assert.equal((await f.call(`/api/workspace/terminals/${f.shells.list().find(item => item.cwd === f.secret)!.id}/input`, { body: { data: 'cat keys.txt\r' } })).status, 404);

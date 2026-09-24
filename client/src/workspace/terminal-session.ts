@@ -27,6 +27,21 @@ export async function workspaceTerminalSession(cwd: string, resume: (id: string)
   try { return await operation; } finally { if (pending.get(cwd) === operation) pending.delete(cwd); }
 }
 
+const requestPrefix = 'agent-monitor.workspace-terminal-request:';
+/**
+ * The request ID that opens a slot's shell on another computer. It is kept, across reloads too, until its answer
+ * is known, so a shell whose answer was lost is the one a new try gets back.
+ */
+export function terminalRequest(slot: string, create: () => string): { id: string; reused: boolean } {
+  try { const saved = storage()?.getItem(requestPrefix + slot) ?? null; if (validId(saved)) return { id: saved, reused: true }; } catch { /* In-memory only. */ }
+  const id = create();
+  try { storage()?.setItem(requestPrefix + slot, id); } catch { /* In-memory only. */ }
+  return { id, reused: false };
+}
+export function settleTerminalRequest(slot: string): void {
+  try { storage()?.removeItem(requestPrefix + slot); } catch { /* Storage may be disabled. */ }
+}
+
 /** The shell a slot reconnects to, if it has one. */
 export function savedWorkspaceTerminal(slot: string): string | undefined {
   const known = ids.get(slot);

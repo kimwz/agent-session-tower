@@ -162,7 +162,7 @@ test('files and terminals of a joined computer open while it is connected and ru
   assert.equal(here.workspace, true);
   assert.equal(ready.workspace, true);
   assert.equal(workspaceNote(ready), undefined);
-  assert.equal(view({ features: ['workspace'], streaming: false })[1].workspace, true, 'a computer whose worker is away still serves its files');
+  assert.equal(view({ features: ['read', 'workspace'], streaming: false })[1].workspace, true, 'files open while its sessions are still arriving');
   const old = view({ features: ['read', 'work'] })[1];
   assert.equal(old.workspace, false);
   assert.match(workspaceNote(old)!, /studio의 Tower를 업데이트하면 파일과 터미널을/);

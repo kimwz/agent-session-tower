@@ -3,16 +3,21 @@ import { Terminal } from '@xterm/xterm';
 import { Maximize2, Minimize2, Plus, Users, X } from 'lucide-react';
 import { FitAddon } from '@xterm/addon-fit';
 import { isTerminalReport, terminalInputChunks } from './terminal-input';
-import { bindWorkspaceTerminal, workspaceTerminalSession, forgetWorkspaceTerminal, MAX_TERMINAL_TABS, nextTerminalTab, readTerminalTabs, saveTerminalTabs, savedWorkspaceTerminal, terminalSlot, type TerminalTab } from './terminal-session';
-import { api, ApiError, relativeTime } from '../common/lib';
-import { localPart, nodeHeaders, nodeOf, nodePath, settleRequest, workspacePath } from '../remote/scope';
+import { bindWorkspaceTerminal, workspaceTerminalSession, forgetWorkspaceTerminal, MAX_TERMINAL_TABS, nextTerminalTab, readTerminalTabs, saveTerminalTabs, savedWorkspaceTerminal, settleTerminalRequest, terminalRequest, terminalSlot, type TerminalTab } from './terminal-session';
+import { absoluteTime, api, ApiError, relativeTime } from '../common/lib';
+import { localPart, nodeHeaders, nodeOf, nodePath, refusedBeforeRunning, requestId, workspacePath } from '../remote/scope';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 
-interface TerminalControls { close(): Promise<void>; restart(): void }
-/** A shell in this folder; `openedBy` is absent for one this page's computer opened for this controller. */
-interface SharedShell { id: string; openedAt: string; openedBy?: string }
-interface TerminalState { starting: boolean; exited: boolean }
+/** `fresh`: start a new shell if the tab's shell is gone; otherwise only reach the one it has again. */
+interface TerminalControls { close(): Promise<void>; restart(fresh: boolean): void }
+/**
+ * A shell in this folder, and who opened it as this page sees it: this computer (`self`), the computer it runs on
+ * (`computer`), or a controlling computer (`controller`, named when known).
+ */
+interface SharedShell { id: string; openedAt: string; origin: 'self' | 'computer' | 'controller'; openedBy?: string }
+/** `lost`: the tab could not reach its shell, which may still be running. */
+interface TerminalState { starting: boolean; exited: boolean; lost?: boolean }
 
 /** `machine` names the joined computer a scoped `cwd` belongs to; its shells run there and other controllers can join them. */
 export function WorkspaceTerminal({ cwd, machine, token, maximized, onToggleMaximized }: { cwd: string; machine?: string; token: string; maximized: boolean; onToggleMaximized: () => void }) {
@@ -62,12 +67,15 @@ export function WorkspaceTerminal({ cwd, machine, token, maximized, onToggleMaxi
     try { await api(nodePath(node, `/api/workspace/terminals/${encodeURIComponent(shell.id)}/close`), { method: 'POST', headers: nodeHeaders(node, { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }), body: '{}' }); }
     catch (value) { if (!(value instanceof ApiError) || ![404, 409].includes(value.status)) { setError(value instanceof Error ? value.message : String(value)); return; } }
     setEnding(''); setShared(list => list?.filter(item => item.id !== shell.id) ?? null);
+    // The row that had focus is gone; focus moves on to the next one, or back to the list's button.
+    window.setTimeout(() => (sharedMenu.current?.querySelector<HTMLButtonElement>('.workspace-terminal-shared-menu button:not(:disabled)') ?? sharedToggle.current)?.focus());
   };
-  const opener = (shell: SharedShell) => shell.openedBy === 'local' ? t('그 컴퓨터에서 연 터미널') : shell.openedBy === 'other' ? t('다른 제어 컴퓨터가 연 터미널')
-    : shell.openedBy ? t('{0}이(가) 연 터미널', { 0: shell.openedBy }) : t('이 컴퓨터에서 연 터미널');
+  const opener = (shell: SharedShell) => shell.origin === 'self' ? t('이 컴퓨터에서 연 터미널') : shell.origin === 'computer' ? t('그 컴퓨터에서 연 터미널')
+    : shell.openedBy ? t('{0}이(가) 연 터미널', { 0: shell.openedBy }) : t('다른 제어 컴퓨터가 연 터미널');
   // Closing a tab is the explicit stop action for its shell; a failed close keeps the tab. A tab that joined a
   // shell opened elsewhere only leaves it, and the shell stays open for whoever uses it.
   const close = async (tab: TerminalTab) => {
+    settleTerminalRequest(terminalSlot(cwd, tab));
     if (tab.joined) {
       const slot = terminalSlot(cwd, tab);
       const id = savedWorkspaceTerminal(slot);
@@ -103,7 +111,7 @@ export function WorkspaceTerminal({ cwd, machine, token, maximized, onToggleMaxi
       {tabs.map(tab => {
         const label = t('터미널 {0}', { 0: tab.number });
         const state = states[tab.key];
-        const leave = tab.joined ? t('{0}에서 나가기 (터미널은 계속 열려 있습니다)', { 0: label }) : t('{0} 닫기', { 0: label });
+        const leave = tab.joined ? t('{0}에서 나가기 (터미널은 계속 열려 있습니다)', { 0: label }) : t('{0} 닫기 (터미널이 끝납니다)', { 0: label });
         return <div key={tab.key} className={`workspace-terminal-tab${tab.key === active ? ' active' : ''}${state?.exited ? ' exited' : ''}`}>
           <button ref={element => { if (element) tabButtons.current.set(tab.key, element); else tabButtons.current.delete(tab.key); }} role="tab" id={`workspace-terminal-tab-${tab.key}`} aria-selected={tab.key === active} aria-controls={`workspace-terminal-panel-${tab.key}`} tabIndex={tab.key === active ? 0 : -1}
             title={tab.joined ? t('다른 곳에서 연 터미널입니다') : undefined}
@@ -117,16 +125,16 @@ export function WorkspaceTerminal({ cwd, machine, token, maximized, onToggleMaxi
       <button ref={sharedToggle} aria-expanded={shared !== null} aria-controls={shared ? sharedId : undefined} title={t('이 폴더에 열려 있는 다른 터미널에 들어가거나 끝냅니다')} onClick={() => { if (shared) hideShared(); else void showShared(); }}><Users size={14} />{t('열린 터미널')}</button>
       {shared && <div id={sharedId} className="workspace-terminal-shared-menu" role="group" aria-label={t('열린 터미널')}>{shared.length ? <ul>{shared.map(shell => {
         const who = opener(shell);
-        return <li key={shell.id}><span><strong>{who}</strong><small>{relativeTime(shell.openedAt)}</small></span>
+        return <li key={shell.id}><span><strong>{who}</strong><small title={absoluteTime(shell.openedAt)}>{relativeTime(shell.openedAt)}</small></span>
           {ending === shell.id
             ? <><button className="danger" onClick={() => { void end(shell); }}>{t('모두에게서 끝내기')}</button><button onClick={() => setEnding('')}>{t('취소')}</button></>
             : <><button disabled={full} title={full ? t('터미널 탭은 최대 {0}개까지 열 수 있습니다.', { 0: MAX_TERMINAL_TABS }) : undefined} onClick={() => add(shell.id)}>{t('들어가기')}</button>
-              <button aria-label={t('{0} 끝내기', { 0: who })} title={t('이 터미널을 끝냅니다')} onClick={() => setEnding(shell.id)}><X size={12} /></button></>}
+              <button aria-label={t('이 터미널 끝내기: {0}', { 0: who })} title={t('이 터미널을 끝냅니다')} onClick={() => setEnding(shell.id)}><X size={12} /></button></>}
         </li>;
       })}</ul> : <p>{t('다른 곳에서 연 터미널이 없습니다.')}</p>}</div>}
     </div>
     <span>{machine ? t('명령은 {0}에서 실행됩니다', { 0: machine }) : t('명령은 Tower 서버에서 실행됩니다')}</span>
-    {current?.exited && <button onClick={() => controls.current.get(active)?.restart()}>{t('새 터미널')}</button>}
+    {current?.exited && <button onClick={() => controls.current.get(active)?.restart(!current.lost)}>{current.lost ? t('다시 연결') : t('새 터미널')}</button>}
     <button aria-label={maximized ? t('터미널 최대화 해제') : t('터미널 최대화')} title={maximized ? t('터미널 최대화 해제') : t('터미널 최대화')} aria-pressed={maximized} onClick={onToggleMaximized}>{maximized ? <Minimize2 size={15} /> : <Maximize2 size={15} />}</button>
   </div>
   {error && <p role="alert" className="workspace-error">{translateMessage(error)}</p>}
@@ -144,20 +152,19 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
   report.current = onState;
   const owned = useRef(onOwned);
   owned.current = onOwned;
-  // A tab that joined a shell opened elsewhere never starts one by itself.
+  // A tab that joined a shell opened elsewhere starts one only when asked to after that shell is gone.
   const joined = useRef(Boolean(tab.joined));
+  const fresh = useRef(false);
   const visible = useRef(active);
   visible.current = active;
   const [error, setError] = useState('');
   const [exited, setExited] = useState(false);
+  const [lost, setLost] = useState(false);
   const [starting, setStarting] = useState(true);
   const [generation, setGeneration] = useState(0);
   const slot = terminalSlot(cwd, tab);
-  useImperativeHandle(ref, () => ({ close: () => closeSession.current(), restart: () => {
-    if (joined.current) { joined.current = false; owned.current(); }
-    setGeneration(value => value + 1);
-  } }), []);
-  useEffect(() => { report.current({ starting, exited }); }, [starting, exited]);
+  useImperativeHandle(ref, () => ({ close: () => closeSession.current(), restart: value => { fresh.current = value; setGeneration(current => current + 1); } }), []);
+  useEffect(() => { report.current({ starting, exited, lost }); }, [starting, exited, lost]);
   useEffect(() => {
     if (!active || !terminalRef.current || !host.current?.clientWidth) return;
     terminalRef.current.fit.fit(); terminalRef.current.terminal.focus();
@@ -180,13 +187,16 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
     const terminal = new Terminal({ cursorBlink: true, fontSize: 13, fontFamily: 'ui-monospace, monospace', theme: { background: '#0c1420', foreground: '#dce6f3' } });
     const fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(host.current); fit.fit();
     terminalRef.current = { terminal, fit };
-    setError(''); setExited(false); setStarting(true);
+    setError(''); setExited(false); setLost(false); setStarting(true);
+    const asked = fresh.current;
+    fresh.current = false;
+    let failedOpens = 0;
     let requestToken = token;
     const node = nodeOf(cwd);
-    /** `once` names a request another computer must run only once, even when it is sent again later. */
+    /** `once` is the ID of a request another computer must run only once, even when it is sent again later. */
     const postPath = async <T,>(path: string, body: object, once?: string): Promise<T> => {
       // Another computer runs a request once per request ID, including when it is sent again below.
-      const extra = nodeHeaders(node, {}, once, once && localPart(cwd));
+      const extra = once ? { 'X-Tower-Request-Id': once } : nodeHeaders(node, {});
       const send = () => api<T>(nodePath(node, path), { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: requestToken, ...extra }, body: JSON.stringify(body) });
       try { return await send(); }
       catch (error) {
@@ -211,12 +221,15 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
     void workspaceTerminalSession(slot,
       saved => postPath(`/api/workspace/terminals/${encodeURIComponent(saved)}/resize`, { cols: terminal.cols, rows: terminal.rows }),
       async () => {
-        if (joined.current) throw Object.assign(new Error(t('이 터미널은 닫혔습니다. 새 터미널을 열 수 있습니다.')), { status: 404 });
-        created = true;
-        // A shell whose answer was lost is the one a new try gets back, not a second shell.
-        const once = `terminal:${slot}`;
-        try { const { id } = await postPath<{ id: string }>('/api/workspace/terminals', { cwd: localPart(cwd), cols: terminal.cols, rows: terminal.rows }, once); settleRequest(node, once); return id; }
-        catch (error) { settleRequest(node, once, error); throw error; }
+        if (joined.current && !asked) throw Object.assign(new Error(t('이 터미널은 닫혔습니다. 새 터미널을 열 수 있습니다.')), { status: 404 });
+        // From here the tab has a shell of its own, and closing it ends that shell.
+        if (joined.current) { joined.current = false; owned.current(); }
+        // A shell whose answer was lost is the one a new try gets back, even after a reload, not a second shell.
+        const once = node ? terminalRequest(slot, () => requestId()) : undefined;
+        // Only a request never sent before is sure to get a shell with no history to replay.
+        created = !once?.reused;
+        try { const { id } = await postPath<{ id: string }>('/api/workspace/terminals', { cwd: localPart(cwd), cols: terminal.cols, rows: terminal.rows }, once?.id); settleTerminalRequest(slot); return id; }
+        catch (error) { if (refusedBeforeRunning(error)) settleTerminalRequest(slot); throw error; }
       },
     ).then(result => {
       id = result;
@@ -225,9 +238,13 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
       // Before listening again, check the shell is still there: a closed one ends this tab instead of retrying forever.
       const retry = () => {
         if (disposed || closed) return;
-        postPath(`/api/workspace/terminals/${encodeURIComponent(id)}/resize`, { cols: terminal.cols, rows: terminal.rows }).then(() => { if (!disposed && !closed) listen(); }, error => {
+        postPath(`/api/workspace/terminals/${encodeURIComponent(id)}/resize`, { cols: terminal.cols, rows: terminal.rows }).then(() => {
+          // A new stream replays the shell's output from the start; the screen starts over so nothing shows twice.
+          if (!disposed && !closed) { terminal.reset(); listen(); }
+        }, error => {
+          if (disposed || closed) return;
           if (error instanceof ApiError && [404, 409].includes(error.status)) { terminal.writeln(`\r\n${t('터미널이 더 이상 없습니다.')}`); finish(); }
-          else if (!disposed && !closed) reconnect = setTimeout(retry, 5000);
+          else reconnect = setTimeout(retry, 5000);
         });
       };
       const listen = () => {
@@ -241,16 +258,25 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
         current.onerror = () => {
           if (disposed || closed) return;
           setError(t('터미널 연결이 끊겼습니다. 다시 연결하는 중입니다.'));
-          // The browser gives up on an answer that is not a stream (another computer away, for example); try again.
-          if (current.readyState === EventSource.CLOSED) reconnect = setTimeout(retry, 3000);
+          // The browser gives up on an answer that is not a stream (another computer away, for example); try again,
+          // less often, and say so when it keeps failing although the shell is there.
+          if (current.readyState !== EventSource.CLOSED) return;
+          if (++failedOpens >= 3) setError(t('터미널에 다시 연결하지 못했습니다. 이 터미널을 보는 창이 너무 많거나 그 컴퓨터에 닿지 않습니다. 계속 다시 시도합니다.'));
+          reconnect = setTimeout(retry, Math.min(3000 * failedOpens, 30_000));
         };
         current.onopen = () => {
+          failedOpens = 0;
           // A new shell has no history on its first connection; every reconnect replays some.
           if (created) created = false; else replayUntil = Date.now() + 500;
           void api<{ token: string }>('/api/bootstrap').then(fresh => { requestToken = fresh.token; if (!disposed) { setError(''); flush(); if (visible.current) terminal.focus(); } }).catch(fail); };
       };
       listen();
-    }).catch(value => { closed = true; terminal.options.disableStdin = true; fail(value); if (!disposed) { setStarting(false); setExited(true); } });
+    }).catch(value => {
+      closed = true; terminal.options.disableStdin = true; fail(value);
+      // Without an answer that the shell is gone, it may still be running: the tab offers to reach it again.
+      const status = (value as { status?: number }).status;
+      if (!disposed) { setStarting(false); setExited(true); setLost(status === undefined || status >= 500); }
+    });
     return () => { disposed = true; clearTimeout(timer); clearTimeout(reconnect); input.dispose(); resize.dispose(); observer.disconnect(); stream?.close(); terminal.dispose(); if (terminalRef.current?.terminal === terminal) terminalRef.current = undefined; };
   }, [cwd, slot, token, generation]);
   return <div className="workspace-terminal-panel" role="tabpanel" id={`workspace-terminal-panel-${tab.key}`} aria-labelledby={`workspace-terminal-tab-${tab.key}`} hidden={!active}>

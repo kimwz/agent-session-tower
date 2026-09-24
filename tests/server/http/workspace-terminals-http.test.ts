@@ -131,7 +131,7 @@ test('this Tower lists the shells in a folder, naming the computer that opened o
   const own = await workspaceTerminals.create(root, 80, 24);
   const remote = await workspaceTerminals.create(root, 80, 24, { opener: 'controllerabc' });
   await workspaceTerminals.create(dir, 80, 24);
-  const listed = await (await fetch(`${base}/api/workspace/terminals?${new URLSearchParams({ cwd })}`)).json() as { terminals: Array<{ id: string; openedBy?: string }> };
-  assert.deepEqual(listed.terminals.map(item => [item.id, item.openedBy]), [[own.id, undefined], [remote.id, 'Studio Mac']]);
+  const listed = await (await fetch(`${base}/api/workspace/terminals?${new URLSearchParams({ cwd })}`)).json() as { terminals: Array<{ id: string; origin: string; openedBy?: string }> };
+  assert.deepEqual(listed.terminals.map(item => [item.id, item.origin, item.openedBy]), [[own.id, 'self', undefined], [remote.id, 'controller', 'Studio Mac']]);
   assert.equal((await fetch(`${base}/api/workspace/terminals?${new URLSearchParams({ cwd: dir })}`)).status, 403, 'only folders Tower lists');
 });

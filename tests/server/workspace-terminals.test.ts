@@ -153,8 +153,9 @@ test('each shell knows its folder and who opened it, and a controller’s repeat
   assert.deepEqual(listed.map(item => [item.id, item.cwd, item.opener, item.exited]), [[own.id, '/work/app', 'local', false], [remote.id, '/work/app', 'controller-a', false], [other.id, '/work/app', 'controller-b', false]]);
   assert.ok(listed.every(item => !Number.isNaN(Date.parse(item.openedAt))));
   terminals.close(remote.id);
-  const reopened = await terminals.create('/work/app', 80, 24, { opener: 'controller-a', requestId: 'r1' });
-  assert.notEqual(reopened.id, remote.id, 'a closed shell is not handed out again');
+  await assert.rejects(terminals.create('/work/app', 80, 24, { opener: 'controller-a', requestId: 'r1' }), { statusCode: 410 },
+    'a request whose shell was closed meanwhile (by another window, say) opens nothing when it arrives again');
+  assert.equal(ptys.length, 3);
   terminals.dispose();
 });
 

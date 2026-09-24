@@ -36,9 +36,9 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
   async list(): Promise<TerminalSummary[] | undefined> {
     try { return await this.call('list') as TerminalSummary[]; }
     catch (error) {
-      const status = (error as { statusCode?: number }).statusCode;
-      if (status === 503) return [];
-      if (status === 400) return undefined;
+      const value = error as { statusCode?: number; hostAbsent?: boolean };
+      if (value.hostAbsent) return [];
+      if (value.statusCode === 400) return undefined;
       throw error;
     }
   }

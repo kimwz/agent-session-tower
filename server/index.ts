@@ -250,9 +250,8 @@ async function main() {
   const remoteRouter = createRemoteRouter({ backend, exclusions, terminals: workspaceTerminals });
   const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname });
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
-    // What this computer can do for a controller depends on the worker it runs with right now; files and
-    // terminals do not need the worker.
-    features: () => [...runs.coordinators() ? ['read', ...(runs.supports('remoteOrigins') ? ['work'] : [])] : [], 'workspace'],
+    // What this computer can do for a controller depends on the worker it runs with right now.
+    features: () => runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : [])] : [],
     handle: (req, res, principal) => remoteRouter.handle(req, res, principal) });
   if (nodeLinks) {
     nodeLinks.on('disconnected', (controllerId: string) => remoteRouter.disconnect(controllerId));

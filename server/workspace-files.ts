@@ -102,7 +102,8 @@ async function readText(handle: FileHandle): Promise<Buffer> {
   return bytes;
 }
 
-export async function listWorkspaceTree(cwd: unknown, path: unknown, snapshot: Snapshot) {
+/** `include` leaves entries out before they are counted, so entries nobody may see never fill the listing. */
+export async function listWorkspaceTree(cwd: unknown, path: unknown, snapshot: Snapshot, include?: (path: string) => boolean | Promise<boolean>) {
   try {
     const root = await assertWorkspace(cwd, snapshot);
     const local = subpath(path, true);
@@ -111,10 +112,16 @@ export async function listWorkspaceTree(cwd: unknown, path: unknown, snapshot: S
     const entries: Array<{ name: string; path: string; type: 'file' | 'directory' }> = [];
     const directory = await opendir(target);
     let count = 0;
+    let scanned = 0;
     for await (const entry of directory) {
+      const entryPath = local ? `${local}/${entry.name}` : entry.name;
+      if (++scanned > MAX_TREE_ENTRIES * 10 || (include && !await include(entryPath))) {
+        if (scanned > MAX_TREE_ENTRIES * 10) throw failure('Directory contains too many entries to display (maximum 2000).', 413);
+        continue;
+      }
       if (++count > MAX_TREE_ENTRIES) throw failure('Directory contains too many entries to display (maximum 2000).', 413);
       if (entry.isFile() || entry.isDirectory()) {
-        entries.push({ name: entry.name, path: local ? `${local}/${entry.name}` : entry.name, type: entry.isDirectory() ? 'directory' : 'file' });
+        entries.push({ name: entry.name, path: entryPath, type: entry.isDirectory() ? 'directory' : 'file' });
       }
     }
     await checkedPath(root, local);
@@ -170,8 +177,10 @@ export async function saveWorkspaceFile(body: Record<string, unknown>, snapshot:
         if (creating) {
           const present = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK).catch(error => { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; });
           if (present) {
-            try { await checkHandle(present, root, local); if ((await readText(present)).equals(bytes)) return unchanged; }
-            finally { await present.close(); }
+            // Only the very content this save would write counts as done; a folder, another file, or one that
+            // cannot be read as text means the name is taken.
+            const same = await checkHandle(present, root, local).then(() => readText(present)).then(existing => existing.equals(bytes), () => false).finally(() => present.close());
+            if (same) return unchanged;
             throw failure('A file or directory already exists at this path.', 409);
           }
         } else {

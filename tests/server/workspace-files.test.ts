@@ -35,6 +35,11 @@ test('workspace files list, read, save and create within a known directory', asy
   const fresh = await saveWorkspaceFile({ cwd, path: 'src/new/new.ts', content: 'export {};\n', revision: null }, snapshot);
   assert.equal((await readWorkspaceFile(cwd, fresh.path, snapshot)).revision, fresh.revision);
   await assert.rejects(createWorkspaceDirectory({ cwd, path: 'src/new' }, snapshot), { statusCode: 409 });
+  assert.equal((await saveWorkspaceFile({ cwd, path: 'src/new/new.ts', content: 'export {};\n', revision: null }, snapshot)).revision, fresh.revision,
+    'a new file sent again after its answer was lost is already there');
+  for (const [path, content] of [['src/new', ''], ['src/new/new.ts', 'other']]) {
+    await assert.rejects(saveWorkspaceFile({ cwd, path, content, revision: null }, snapshot), { statusCode: 409, message: /already exists/ }, `a new file named ${path} takes a name in use`);
+  }
 });
 
 test('workspace validation and relative paths reject unlisted directories and traversal', async t => {

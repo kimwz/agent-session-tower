@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { bindWorkspaceTerminal, savedWorkspaceTerminal, workspaceTerminalSession, forgetWorkspaceTerminal, MAX_TERMINAL_TABS, nextTerminalTab, readTerminalTabs, saveTerminalTabs, terminalSlot } from '../../../client/src/workspace/terminal-session.js';
+import { bindWorkspaceTerminal, savedWorkspaceTerminal, settleTerminalRequest, terminalRequest, workspaceTerminalSession, forgetWorkspaceTerminal, MAX_TERMINAL_TABS, nextTerminalTab, readTerminalTabs, saveTerminalTabs, terminalSlot } from '../../../client/src/workspace/terminal-session.js';
 import { workspacePath } from '../../../client/src/remote/scope.js';
 
 const firstId = '10000000-0000-4000-8000-000000000001';
@@ -105,6 +105,24 @@ test('a tab joining a shell opened elsewhere reconnects to it instead of startin
   bindWorkspaceTerminal(slot, 'not-an-id');
   assert.equal(savedWorkspaceTerminal(slot), secondId, 'only a shell ID can be joined');
   forgetWorkspaceTerminal(slot, secondId);
+});
+
+test('the request that opens a tab’s shell on another computer is kept across reloads until its answer is known', async t => {
+  const values = new Map<string, string>();
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { sessionStorage: {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
+    removeItem: (key: string) => { values.delete(key); },
+  } } });
+  t.after(() => { if (previous) Object.defineProperty(globalThis, 'window', previous); else Reflect.deleteProperty(globalThis, 'window'); });
+  const slot = terminalSlot('@remote/fixture', { key: 'main', number: 1 });
+  let made = 0;
+  const create = () => [firstId, secondId][made++];
+  assert.deepEqual(terminalRequest(slot, create), { id: firstId, reused: false });
+  assert.deepEqual(terminalRequest(slot, create), { id: firstId, reused: true }, 'after a lost answer, and after a reload, the same request goes again');
+  settleTerminalRequest(slot);
+  assert.deepEqual(terminalRequest(slot, create), { id: secondId, reused: false }, 'once answered, the next shell is a new request');
 });
 
 test('workspace requests for another computer’s folder go to that computer with its own path', () => {

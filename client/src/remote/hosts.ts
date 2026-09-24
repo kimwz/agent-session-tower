@@ -87,6 +87,3 @@ export function combinedView(local: Snapshot | null, nodes: ReadonlyMap<string, 
 }
 
 export const hostOf = (hosts: readonly Host[], node: string | undefined): Host | undefined => hosts.find(host => host.node === node);
-
-/** Names of joined computers, kept by the page for views opened outside it (such as the workspace). */
-export const hostNames = new Map<string, string>();

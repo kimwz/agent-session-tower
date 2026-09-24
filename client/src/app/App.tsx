@@ -33,7 +33,7 @@ import { SessionRow } from '../sessions/SessionRow';
 import { reconcileApprovalDecisions } from '../chat/chat-approvals';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { connectSnapshotStream, NodeSnapshotStore, SnapshotStore } from './snapshot-stream';
-import { combinedView, hostNames, hostOf, hostProblem, workspaceNote } from '../remote/hosts';
+import { combinedView, hostOf, hostProblem, workspaceNote } from '../remote/hosts';
 import { localPart, nodeOf, nodePath, pathFor, splitScopedId } from '../remote/scope';
 
 type StatusFilter = 'all' | SessionStatus;
@@ -60,7 +60,6 @@ function TowerApp() {
   const [nodeSnapshots, setNodeSnapshots] = useState<ReadonlyMap<string, Snapshot>>(() => new Map());
   const [nodeStore] = useState(() => new NodeSnapshotStore(setNodeSnapshots));
   const { view, hosts, complete: hostsComplete } = useMemo(() => combinedView(snapshot, nodeSnapshots), [snapshot, nodeSnapshots]);
-  useEffect(() => { hostNames.clear(); for (const host of hosts) if (host.node) hostNames.set(host.node, host.name); }, [hosts]);
   const [machine, setMachine] = useState<'all' | 'local' | string>('all');
   const [connection, setConnection] = useState<'connecting' | 'connected' | 'offline'>('connecting');
   const [requestedSlackId, setSelectedSlackId] = useState<string | null | undefined>(undefined);
