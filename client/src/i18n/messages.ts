@@ -1412,4 +1412,5 @@ export const english: Record<string, string> = {
   "보낸 메시지 전체 보기": "Show your whole message",
   "보낸 위치로 이동": "Go to where you sent it",
   "백그라운드 작업": "Background task",
+  "백그라운드 작업 접기": "Collapse background tasks",
 };

@@ -331,7 +331,7 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
   const page = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
   const history = await sessions.detail(nativeId, page(before), page(limit));
   if (!history) return undefined;
-  return { messages: history.messages, hasMore: history.hasMore, ...(history.nextBefore !== undefined ? { nextBefore: history.nextBefore } : {}) };
+  return { messages: history.messages, hasMore: history.hasMore, ...(history.nextBefore !== undefined ? { nextBefore: history.nextBefore } : {}), ...(history.previousUser ? { previousUser: history.previousUser } : {}) };
 }
 
 /**

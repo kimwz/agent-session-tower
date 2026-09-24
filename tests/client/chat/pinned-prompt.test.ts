@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { Message } from '../../../client/src/chat/Message.js';
-import { pinnedMessageId } from '../../../client/src/chat/PinnedPrompt.js';
+import { BEFORE_PAGE, pinnedMessageId } from '../../../client/src/chat/PinnedPrompt.js';
+import { ChatTranscript } from '../../../client/src/chat/ChatTranscript.js';
 import { getLanguage, setLanguage } from '../../../client/src/i18n/i18n.js';
 import type { ChatMessage } from '../../../shared/types.js';
 
@@ -19,13 +20,22 @@ function chat(messages: Array<{ id: string; top: number; height: number }>, scro
 test('the message pinned at the top is your last one that has gone out of sight above what you are reading', () => {
   const messages = [{ id: 'first', top: 0, height: 80 }, { id: 'second', top: 2000, height: 80 }];
   assert.equal(pinnedMessageId(chat(messages, 0)), undefined, 'nothing is pinned while the message itself shows');
-  assert.equal(pinnedMessageId(chat(messages, 30)), undefined, 'a message still readable at the top is not pinned');
-  assert.equal(pinnedMessageId(chat(messages, 60)), 'first', 'one showing only a sliver is');
+  assert.equal(pinnedMessageId(chat(messages, 30)), undefined, 'a message still readable below the pinned strip is not pinned');
+  assert.equal(pinnedMessageId(chat(messages, 60)), 'first', 'one showing only under the strip is');
   assert.equal(pinnedMessageId(chat(messages, 500)), 'first');
-  assert.equal(pinnedMessageId(chat(messages, 1990)), 'first', 'until the next message reaches the top');
-  assert.equal(pinnedMessageId(chat(messages, 2020)), undefined, 'the next message showing replaces it');
+  assert.equal(pinnedMessageId(chat(messages, 1950)), 'first', 'until the next message reaches the strip');
+  assert.equal(pinnedMessageId(chat(messages, 1970)), undefined, 'the next message in the strip is never covered by the one before it');
+  assert.equal(pinnedMessageId(chat(messages, 1988)), undefined, 'where going back to a message puts it, the bar gives way');
   assert.equal(pinnedMessageId(chat(messages, 5000)), 'second');
   assert.equal(pinnedMessageId(chat([], 5000)), undefined);
+});
+
+test('what the loaded page starts with is pinned to your message from before the page', () => {
+  const messages = [{ id: 'later', top: 3000, height: 80 }];
+  assert.equal(pinnedMessageId(chat(messages, 500), true), BEFORE_PAGE);
+  assert.equal(pinnedMessageId(chat([], 500), true), BEFORE_PAGE, 'a page of work alone still has its message');
+  assert.equal(pinnedMessageId(chat(messages, 2990), true), undefined, 'not over a message of yours on the page');
+  assert.equal(pinnedMessageId(chat(messages, 500), false), undefined, 'nothing when the page starts the conversation');
 });
 
 test('your messages are marked for pinning, and a background task notice is labelled as one', () => {
@@ -38,5 +48,26 @@ test('your messages are marked for pinning, and a background task notice is labe
     assert.doesNotMatch(renderToStaticMarkup(createElement(Message, { message: agent })), /data-user-message/);
     const notice: ChatMessage = { id: 'n1', role: 'system', toolName: 'Background task', text: '**completed** · Checks finished', timestamp: user.timestamp };
     assert.match(renderToStaticMarkup(createElement(Message, { message: notice })), /백그라운드 작업/);
+    // Native tool names stay exactly as the agent's tools are called.
+    for (const toolName of ['Edit', 'Agent', 'Cron']) {
+      assert.match(renderToStaticMarkup(createElement(Message, { message: { ...notice, id: toolName, role: 'tool', toolName } })), new RegExp(`<strong>${toolName}</strong>`));
+    }
+  } finally { setLanguage(language); }
+});
+
+test('a notice an older worker still sends as your message reads as a notice, and notices alone are labelled as such', () => {
+  const language = getLanguage();
+  try {
+    setLanguage('ko');
+    const at = '2026-09-24T00:00:00.000Z';
+    const raw = '<task-notification>\n<task-id>b1</task-id>\n<status>failed</status>\n<summary>Background command "deploy" failed</summary>\n</task-notification>';
+    const html = renderToStaticMarkup(createElement(ChatTranscript, { messages: [
+      { id: 'a1', role: 'assistant', text: 'Working on it', timestamp: at },
+      { id: 'n1', role: 'user', text: raw, timestamp: at },
+      { id: 'a2', role: 'assistant', text: 'Done', timestamp: at },
+    ] }));
+    assert.doesNotMatch(html, /data-user-message/);
+    assert.doesNotMatch(html, /task-notification/);
+    assert.match(html, /<strong>백그라운드 작업<\/strong>/, 'a group of notices alone is named for them');
   } finally { setLanguage(language); }
 });

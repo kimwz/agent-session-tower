@@ -124,3 +124,18 @@ test('an older response with the same ordered messages retains the array while u
   assert.equal(merged.hasMore, false);
   assert.equal(merged.nextBefore, undefined);
 });
+
+test('the message before the loaded window is the one before its earliest page', () => {
+  const session = { id: 'claude:s', messageCount: 10 } as SessionDetail['session'];
+  const message = (id: string, role: 'user' | 'assistant' = 'assistant') => ({ id, role, text: id, timestamp: '2026-09-24T00:00:00.000Z' });
+  const first: SessionDetail = { session, messages: [message('m5'), message('m6')], hasMore: true, nextBefore: 50, previousUser: message('u4', 'user') };
+  const older: SessionDetail = { session, messages: [message('m3'), message('m4')], hasMore: true, nextBefore: 30, previousUser: message('u2', 'user') };
+  const window = prependOlderPage(first, older, 50)!;
+  assert.equal(window.previousUser?.id, 'u2');
+  // A refresh of the latest page keeps the earlier boundary of the window.
+  const refreshed = mergeLatestPage(window, { ...first, messages: [message('m6'), message('m7')], session: { ...session, messageCount: 11 } });
+  assert.equal(refreshed.previousUser?.id, 'u2');
+  assert.equal(refreshed.nextBefore, 30);
+  const start = prependOlderPage(window, { session, messages: [message('m1')], hasMore: false }, 30)!;
+  assert.equal(start.previousUser, undefined);
+});

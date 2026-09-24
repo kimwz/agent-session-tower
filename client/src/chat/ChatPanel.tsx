@@ -236,13 +236,13 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
       {contextBanner}
     </header>
     <div className="chat-scroll" ref={scroller} onScroll={() => { const el = scroller.current; if (!el) return; const near = el.scrollHeight - el.scrollTop - el.clientHeight < 100; followRef.current = near; setFollowing(near); }}>
-      {detail && <PinnedPrompt key={sessionId} scroller={scroller} messages={detail.messages} runMatches={runProjection.matches} />}
+      {detail && <PinnedPrompt key={sessionId} scroller={scroller} messages={detail.messages} previousUser={detail.previousUser} runMatches={runProjection.matches} />}
       {loading && !detail ? <div className="chat-loading"><LoaderCircle className="spin" size={22} /><span>{t("대화 기록을 불러오는 중")}</span></div> : <>
         {loadError && <div className="chat-load-error"><TriangleAlert size={18} /><p>{translateMessage(loadError)}</p><button className="secondary-button" onClick={() => setRetry(value => value + 1)}><RefreshCw size={13} />{t("다시 불러오기")}</button></div>}
         {detail?.hasMore && <button className="load-older" onClick={() => { void loadOlder(); }} disabled={loadingOlder}>{loadingOlder ? <LoaderCircle className="spin" size={13} /> : <ArrowUp size={13} />}{loadingOlder ? t("불러오는 중…") : t("이전 대화 불러오기")}</button>}
         {detail?.resetToLatest && <p className="muted" role="status">{t("대화가 갱신되어 최근 내용부터 표시합니다.")}{detail.hasMore && t(" 앞선 내용은 ‘이전 대화 불러오기’에서 확인할 수 있습니다.")}</p>}
         {detail && !detail.hasMore && detail.messages.length > 0 && <div className="conversation-start"><span>{t("세션 시작")}</span><time>{absoluteTime(detail.session.createdAt)}</time></div>}
-        {detail && <ChatTranscript key={sessionId} messages={detail.messages} runMatches={runProjection.matches} />}
+        {detail && <div className="chat-transcript"><ChatTranscript key={sessionId} messages={detail.messages} runMatches={runProjection.matches} /></div>}
         {detail && detail.messages.length === 0 && !loadError && <div className="empty-chat"><MessageSquare size={27} /><h3>{t("대화가 시작될 자리")}</h3><p>{t("이 세션에 첫 요청을 보내거나")}<br />{t("에이전트의 활동을 기다리세요.")}</p></div>}
       </>}
     </div>

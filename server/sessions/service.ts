@@ -181,7 +181,44 @@ export class SessionService extends EventEmitter {
       // Without this, a >32 MB metadata line returns the same empty page forever.
       if (droppingOversizedLine && messageCount < count) nextBefore = position;
       const hasMore = nextBefore > historyStart;
-      return { session: { ...state.session }, messages: collected.reverse().flat(), hasMore, nextBefore: hasMore ? nextBefore : undefined };
+      const previousUser = hasMore ? await this.previousUser(file, state, nextBefore, historyStart) : undefined;
+      return { session: { ...state.session }, messages: collected.reverse().flat(), hasMore, nextBefore: hasMore ? nextBefore : undefined, ...(previousUser ? { previousUser } : {}) };
     } finally { await file.close(); }
+  }
+
+  /**
+   * Your last message before `from`, which what follows answers: the chat keeps it in view even when a long piece of
+   * work pushed it off the page. Looked for within a bounded read, like a page.
+   */
+  private async previousUser(file: Awaited<ReturnType<typeof open>>, state: RecordState, from: number, historyStart: number): Promise<ChatMessage | undefined> {
+    const userOn = (line: Buffer, start: number): ChatMessage | undefined => {
+      try {
+        const row = JSON.parse(line.toString('utf8'));
+        return ownHistory(state, row, start) ? parseMessages(state.session.provider, row, start, state.session.createdAt).filter(message => message.role === 'user').at(-1) : undefined;
+      } catch { return undefined; }
+    };
+    let position = from;
+    let tail = Buffer.alloc(0);
+    for (let scanned = 0; position > historyStart && scanned < 32 * 1024 * 1024;) {
+      const length = Math.min(CHUNK, position - historyStart);
+      const start = position - length;
+      const chunk = Buffer.allocUnsafe(length);
+      const { bytesRead } = await file.read(chunk, 0, length, start);
+      if (!bytesRead) return undefined;
+      const data = Buffer.concat([chunk.subarray(0, bytesRead), tail]);
+      let end = data.length;
+      for (let newline = data.lastIndexOf(10, end - 1); newline !== -1; newline = end > 0 ? data.lastIndexOf(10, end - 1) : -1) {
+        const found = userOn(data.subarray(newline + 1, end), start + newline + 1);
+        if (found) return found;
+        end = newline;
+      }
+      // The part before the first line break continues in the chunk before; a line too long to be chat is given up on.
+      tail = data.subarray(0, end);
+      if (tail.length > MAX_LINE) return undefined;
+      position = start;
+      scanned += bytesRead;
+      if (position === historyStart) return userOn(tail, historyStart);
+    }
+    return undefined;
   }
 }

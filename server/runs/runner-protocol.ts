@@ -13,7 +13,7 @@ export const MAX_RPC_BYTES = 40 * 1024 * 1024;
 export const RUNNER_CAPABILITIES = ['sessionHistory', 'origins', 'handoff', 'triggers', 'toolCapabilities', 'remoteOrigins', 'remoteTriggers'] as const;
 export type RunnerCapability = typeof RUNNER_CAPABILITIES[number];
 /** One page of a native conversation, read by the worker that already indexes native history. */
-export type SessionHistoryPage = Pick<SessionDetail, 'messages' | 'hasMore' | 'nextBefore'>;
+export type SessionHistoryPage = Pick<SessionDetail, 'messages' | 'hasMore' | 'nextBefore' | 'previousUser'>;
 export interface RunnerSnapshot {
   instance: string;
   revision: number;

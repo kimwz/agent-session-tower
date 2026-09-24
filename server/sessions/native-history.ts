@@ -28,7 +28,7 @@ export function nativeHistory(runner: Runner, createIndex: () => SessionService 
     get indexing() { return indexing; },
     read: async (nativeId, before, limit) => {
       const detail = await index.detail(nativeId, before, limit);
-      return detail && { messages: detail.messages, hasMore: detail.hasMore, ...(detail.nextBefore !== undefined ? { nextBefore: detail.nextBefore } : {}) };
+      return detail && { messages: detail.messages, hasMore: detail.hasMore, ...(detail.nextBefore !== undefined ? { nextBefore: detail.nextBefore } : {}), ...(detail.previousUser ? { previousUser: detail.previousUser } : {}) };
     },
     start: async () => { try { await index.start(); } finally { indexing = false; } },
     stop: () => index.stop(),

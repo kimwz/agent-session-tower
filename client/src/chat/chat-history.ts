@@ -25,11 +25,15 @@ export function mergeLatestPage(previous: ChatHistory | null, next: SessionDetai
     return { ...next, messages: stableMessages(previous.messages, incoming), resetToLatest: true };
   }
   incoming.forEach(message => messages.set(message.id, message));
+  const nextBefore = previous.nextBefore === undefined ? undefined : Math.min(previous.nextBefore, next.nextBefore ?? previous.nextBefore);
+  // The message before the window is the one before its earliest page.
+  const previousUser = nextBefore === undefined ? undefined : nextBefore === previous.nextBefore ? previous.previousUser : next.previousUser;
   return {
     ...next,
     messages: stableMessages(previous.messages, [...messages.values()]),
     hasMore: previous.hasMore && next.hasMore,
-    nextBefore: previous.nextBefore === undefined ? undefined : Math.min(previous.nextBefore, next.nextBefore ?? previous.nextBefore),
+    nextBefore,
+    previousUser,
     resetToLatest: previous.resetToLatest,
   };
 }
@@ -48,6 +52,7 @@ export function prependOlderPage(previous: ChatHistory | null, older: SessionDet
     messages: stableMessages(previous.messages, [...incoming, ...previous.messages.filter(message => !seen.has(message.id))]),
     hasMore: older.hasMore,
     nextBefore: older.nextBefore,
+    previousUser: older.previousUser,
     resetToLatest: previous.resetToLatest && older.hasMore,
   };
 }

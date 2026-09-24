@@ -467,6 +467,49 @@ test('a background task notice Claude Code writes as a user turn reads as a noti
   assert.equal(parseMessages('claude', { ...row, origin: undefined, message: { role: 'user', content: 'Please explain <task-notification> tags' } })[0]?.role, 'user');
 });
 
+test('a notice without tags reads as written, a failed task is marked, and a row carrying a tool result is never taken for a notice', () => {
+  const base = { type: 'user', uuid: 'n', origin: { kind: 'task-notification' }, timestamp: '2026-09-24T00:00:00.000Z' };
+  assert.deepEqual(parseMessages('claude', { ...base, message: { role: 'user', content: '2 background agents were stopped by the user.' } })[0],
+    { id: 'n:0', role: 'system', toolName: 'Background task', text: '2 background agents were stopped by the user.', timestamp: base.timestamp });
+  const failed = parseMessages('claude', { ...base, message: { role: 'user', content: '<task-notification>\n<status>failed</status>\n<summary>Deploy failed</summary>\n</task-notification>' } })[0];
+  assert.equal(failed.isError, true);
+  const mixed = parseMessages('claude', { ...base, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }, { type: 'text', text: '<task-notification><summary>x</summary></task-notification>' }] } });
+  assert.deepEqual(mixed.map(message => message.role), ['tool', 'user']);
+});
+
+test('a notice leaves the title, the latest message and your latest request as they were', async (t) => {
+  const { service, claude } = await fixture(t);
+  const at = (minutes: number) => new Date(Date.parse('2026-09-24T00:00:00.000Z') + minutes * 60_000).toISOString();
+  await writeFile(claude, lines([
+    { type: 'user', uuid: 'u1', sessionId: rootId, cwd: '/work/project', timestamp: at(0), message: { role: 'user', content: 'Ship the fix' } },
+    { type: 'assistant', uuid: 'a1', sessionId: rootId, timestamp: at(1), message: { role: 'assistant', content: [{ type: 'text', text: 'Shipping it.' }] } },
+    { type: 'user', uuid: 'n1', sessionId: rootId, origin: { kind: 'task-notification' }, timestamp: at(5), message: { role: 'user', content: '<task-notification>\n<status>completed</status>\n<summary>Build done</summary>\n</task-notification>' } },
+  ]));
+  await service.refresh();
+  const session = service.get(`claude:${rootId}`)!;
+  assert.equal(session.title, 'Ship the fix');
+  assert.equal(session.lastMessage, 'Shipping it.');
+  assert.equal(session.lastRequestAt, at(0), 'a notice is not a request of yours, so a scheduled continuation is not superseded by it');
+});
+
+test('a page of history names your message from before it, found however far back it is', async (t) => {
+  const { service, claude } = await fixture(t);
+  const at = (minutes: number) => new Date(Date.parse('2026-09-24T00:00:00.000Z') + minutes * 60_000).toISOString();
+  const work = Array.from({ length: 30 }, (_, index) => ({ type: 'assistant', uuid: `w${index}`, sessionId: rootId, timestamp: at(2 + index), message: { role: 'assistant', content: [{ type: 'text', text: `Step ${index}` }] } }));
+  await writeFile(claude, lines([
+    { type: 'user', uuid: 'u0', sessionId: rootId, cwd: '/work/project', timestamp: at(0), message: { role: 'user', content: 'First request' } },
+    { type: 'user', uuid: 'u1', sessionId: rootId, timestamp: at(1), message: { role: 'user', content: 'Second request' } },
+    ...work,
+  ]));
+  await service.refresh();
+  const latest = (await service.detail(`claude:${rootId}`, undefined, 5))!;
+  assert.deepEqual(latest.messages.map(message => message.text), ['Step 25', 'Step 26', 'Step 27', 'Step 28', 'Step 29']);
+  assert.equal(latest.previousUser?.text, 'Second request');
+  const first = (await service.detail(`claude:${rootId}`, undefined, 40))!;
+  assert.equal(first.hasMore, false);
+  assert.equal(first.previousUser, undefined, 'a page that starts the conversation has nothing before it');
+});
+
 test('chat extraction omits injected setup and internal reasoning but retains visible commentary', () => {
   assert.deepEqual(parseMessages('codex', codexMessage('user', '# AGENTS.md instructions\nInternal setup')), []);
   assert.deepEqual(parseMessages('codex', row('response_item', { type: 'reasoning', summary: [{ text: 'Private reasoning' }] })), []);

@@ -1,4 +1,5 @@
-import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
+import { translate as t, useI18n } from '../i18n/i18n';
+import { TASK_NOTICE } from '../../../shared/task-notification';
 import { memo, useState } from 'react';
 import { ChevronDown, Terminal } from 'lucide-react';
 import type { ChatMessage } from '../../../shared/types';
@@ -10,7 +11,7 @@ import type { ChatRunMatch } from './chat-runs';
 export const Message = memo(function Message({ message, runMatch }: { message: ChatMessage; runMatch?: ChatRunMatch }) {
   useI18n();
   const [expanded, setExpanded] = useState(false);
-  if (message.role === 'tool' || message.role === 'system') return <details className={`tool-message ${message.isError ? 'tool-error' : ''}`} open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}><summary><Terminal size={13} /><strong>{message.toolName ? translateMessage(message.toolName) : message.role === 'system' ? t("세션 정보") : t("도구 실행")}</strong><span>{cleanPreview(message.text, 110)}</span><ChevronDown size={13} /></summary>{expanded && <div><Markdown>{message.text}</Markdown></div>}</details>;
+  if (message.role === 'tool' || message.role === 'system') return <details className={`tool-message ${message.isError ? 'tool-error' : ''}`} open={expanded} onToggle={event => setExpanded(event.currentTarget.open)}><summary><Terminal size={13} /><strong>{message.toolName === TASK_NOTICE ? t("백그라운드 작업") : message.toolName || (message.role === 'system' ? t("세션 정보") : t("도구 실행"))}</strong><span>{cleanPreview(message.text, 110)}</span><ChevronDown size={13} /></summary>{expanded && <div><Markdown>{message.text}</Markdown></div>}</details>;
   const text = runMatch?.text ?? message.text;
   const long = message.role === 'user' && text.length > 2400;
   // Marked so the chat can keep the latest of your messages in view while you read what followed it.

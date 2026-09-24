@@ -1,4 +1,5 @@
 import { parseExecLaunch, promptDigest, type ExecLaunch } from './exec-lineage.js';
+import { isTaskNotification, taskNotice, TASK_NOTICE } from '../../shared/task-notification.js';
 import { open, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { ChatMessage, Provider, Session } from '../../shared/types.js';
@@ -69,16 +70,11 @@ function latestTime(previous: string | undefined, candidate: string | undefined)
 function isInjectedUser(value: string): boolean {
   return /^(?:# AGENTS\.md instructions|<environment_context>|<recommended_plugins>|<INSTRUCTIONS>|<system-reminder>|\[Request interrupted by user)/.test(value.trim());
 }
-/**
- * What a `<task-notification>` says, for reading: its status and summary, and what the task reported. The file paths,
- * ids and the instruction meant for the agent are left out. Undefined for anything else.
- */
-function taskNotification(row: Json, blocks: Json[]): string | undefined {
-  const raw = blocks.filter(block => block?.type === 'text').map(block => text(block.text)).join('\n').trim();
-  if (row.origin?.kind !== 'task-notification' && !raw.startsWith('<task-notification>')) return undefined;
-  const tag = (name: string) => raw.match(new RegExp(`<${name}>([\\s\\S]*?)</${name}>`))?.[1]?.trim() ?? '';
-  const [status, summary] = [tag('status'), tag('summary')];
-  return text([status && summary ? `**${status}** · ${summary}` : status || summary, tag('event'), tag('result')].filter(Boolean).join('\n\n'));
+/** A background task's notice: a user row of text alone, marked by Claude Code or tagged. Undefined for anything else. */
+function taskNotification(row: Json, blocks: Json[]): { text: string; failed: boolean } | undefined {
+  if (!blocks.length || !blocks.every(block => block?.type === 'text')) return undefined;
+  const raw = blocks.map(block => text(block.text)).join('\n').trim();
+  return row.origin?.kind === 'task-notification' || isTaskNotification(raw) ? taskNotice(raw) : undefined;
 }
 function printJson(value: unknown): string {
   if (typeof value === 'string') return text(value);
@@ -120,7 +116,7 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
   const blocks: Json[] = Array.isArray(value.content) ? value.content : [{ type: 'text', text: value.content }];
   // Claude Code writes a background task's end into the conversation as a user turn; it is Claude Code's own notice.
   const notice = value.role === 'user' ? taskNotification(row, blocks) : undefined;
-  if (notice !== undefined) return notice ? [{ id: `${id}:0`, role: 'system', toolName: 'Background task', text: notice, timestamp }] : [];
+  if (notice) return notice.text ? [{ id: `${id}:0`, role: 'system', toolName: TASK_NOTICE, text: text(notice.text), timestamp, ...(notice.failed ? { isError: true } : {}) }] : [];
   const messages: ChatMessage[] = [];
   let prose = '';
   const flush = () => {

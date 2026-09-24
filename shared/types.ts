@@ -68,6 +68,8 @@ export interface SessionDetail {
   messages: ChatMessage[];
   hasMore: boolean;
   nextBefore?: number;
+  /** Your last message before this page, which the page's first messages answer; only when there is earlier history. */
+  previousUser?: ChatMessage;
 }
 export interface ProviderHealth {
   provider: Provider;

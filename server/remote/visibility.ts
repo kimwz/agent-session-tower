@@ -101,7 +101,7 @@ const MESSAGE_FIELDS = ['id', 'role', 'text', 'timestamp', 'toolName', 'isError'
 /** One page of a shared conversation. */
 export function remotePage(page: SessionDetail): SessionDetail {
   return { session: remoteSession(page.session), messages: page.messages.map(message => pick(message, MESSAGE_FIELDS) as ChatMessage), hasMore: page.hasMore,
-    ...(page.nextBefore !== undefined ? { nextBefore: page.nextBefore } : {}) };
+    ...(page.nextBefore !== undefined ? { nextBefore: page.nextBefore } : {}), ...(page.previousUser ? { previousUser: pick(page.previousUser, MESSAGE_FIELDS) as ChatMessage } : {}) };
 }
 
 /**
