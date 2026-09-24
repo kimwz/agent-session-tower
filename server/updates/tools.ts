@@ -1,0 +1,322 @@
+import { execFile, spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { appendFile, link, mkdir, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { delimiter, dirname, join, sep } from 'node:path';
+import { promisify } from 'node:util';
+import type { Provider } from '../../shared/types.js';
+import type { ToolUpdate, ToolUpdateReason } from '../../shared/link.js';
+import { findExecutable, providerDirectories, PROVIDERS } from '../providers/discovery.js';
+import { newerVersion, rootOnly, runtimePaths } from '../link/service.js';
+import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { failedAgain, parseRetry, retryDue, type RetryRecord } from './schedule.js';
+
+const run = promisify(execFile);
+const PACKAGES: Record<Provider, string> = { claude: '@anthropic-ai/claude-code', codex: '@openai/codex' };
+const VERSION = /(\d+\.\d+\.\d+)/;
+const MINUTE = 60_000;
+/** First look after the worker starts, then how often; a CLI busy in Tower is looked at again sooner. */
+const FIRST_MS = 10 * MINUTE;
+const EVERY_MS = 3 * 60 * MINUTE;
+const BUSY_MS = 10 * MINUTE;
+/** Claude Code's own installer swaps a link at the end, so stopping it leaves the previous version in place. */
+const NATIVE_TIMEOUT_MS = 30 * MINUTE;
+/** npm replaces files as it goes: it is never stopped, only reported as stuck after this long. */
+const NPM_STUCK_MS = 60 * MINUTE;
+/** A capability probe that started before an update claimed the CLI is waited for this long. */
+const PROBE_WAIT_MS = 2 * MINUTE;
+
+/** Turned off only for development and fixture instances; the product keeps everything current. */
+export function autoUpdateEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !['off', '0', 'false', 'no'].includes((env.TOWER_AUTO_UPDATE ?? '').trim().toLowerCase());
+}
+
+export function toolUpdatePaths(stateDir: string) {
+  const { root, logs } = runtimePaths(stateDir);
+  return { status: join(root, 'tool-updates.json'), flags: join(root, 'tool-updates'), log: join(logs, 'tool-update.log') };
+}
+
+/** What this computer keeps about each CLI; the retry record stays here. */
+export interface SavedToolUpdate extends ToolUpdate { retry?: RetryRecord }
+export type SavedToolUpdates = Partial<Record<Provider, SavedToolUpdate>>;
+
+const STATES = new Set(['current', 'updating', 'waiting', 'failed', 'broken', 'unsupported']);
+const METHODS = new Set(['native', 'npm', 'unsupported']);
+const REASONS = new Set(['not-updated', 'command-failed', 'stuck', 'install-method', 'not-root-only', 'no-npm', 'unreadable-version']);
+const release = (value: unknown) => typeof value === 'string' && /^\d+\.\d+\.\d+$/.test(value) ? value : undefined;
+const time = (value: unknown) => typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : undefined;
+
+export function parseToolUpdate(value: unknown): SavedToolUpdate | undefined {
+  const item = value as Partial<SavedToolUpdate> | undefined;
+  if (!item || typeof item !== 'object' || !METHODS.has(item.method as string) || !STATES.has(item.state as string) || !time(item.checkedAt)) return undefined;
+  const retry = parseRetry(item.retry);
+  return { method: item.method!, state: item.state!, checkedAt: item.checkedAt!,
+    ...(release(item.version) ? { version: item.version } : {}), ...(release(item.target) ? { target: item.target } : {}),
+    ...(time(item.updatedAt) ? { updatedAt: item.updatedAt } : {}), ...(time(item.nextAt) ? { nextAt: item.nextAt } : {}),
+    ...(REASONS.has(item.reason as string) ? { reason: item.reason } : {}), ...(retry ? { retry } : {}) };
+}
+
+export async function readToolUpdates(stateDir: string): Promise<SavedToolUpdates> {
+  const value = await readPrivateJson(toolUpdatePaths(stateDir).status).catch(() => undefined) as Record<string, unknown> | undefined;
+  const saved: SavedToolUpdates = {};
+  for (const provider of PROVIDERS) { const item = parseToolUpdate(value?.[provider]); if (item) saved[provider] = item; }
+  return saved;
+}
+
+/** The part another computer or the page is told: no retry bookkeeping. */
+export function publicToolUpdates(saved: SavedToolUpdates): Partial<Record<Provider, ToolUpdate>> {
+  const shown: Partial<Record<Provider, ToolUpdate>> = {};
+  for (const provider of PROVIDERS) { const item = saved[provider]; if (item) { const { retry: _, ...rest } = item; shown[provider] = rest; } }
+  return shown;
+}
+
+/** Where a CLI is installed, from the file its command resolves to. Only installs whose update is known are kept current. */
+export type Install = { method: 'native' } | { method: 'npm'; prefix: string } | { method: 'unsupported' };
+export function classifyInstall(provider: Provider, real: string): Install {
+  // Claude Code's installer keeps each version as its own file and points the command at one.
+  if (provider === 'claude' && /[/\\]claude[/\\]versions[/\\]\d+\.\d+\.\d+[^/\\]*$/.test(real)) return { method: 'native' };
+  const marker = `${sep}lib${sep}node_modules${sep}${PACKAGES[provider].split('/').join(sep)}${sep}`;
+  const at = real.indexOf(marker);
+  return at > 0 ? { method: 'npm', prefix: real.slice(0, at) } : { method: 'unsupported' };
+}
+
+function alive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+
+/**
+ * The CLI update and Tower's capability probe never run the same CLI at once. Each side leaves its own file first and
+ * only then looks for the other's, so they cannot both go ahead. Files of processes that are gone count for nothing.
+ */
+async function claimUpdate(flags: string, provider: Provider): Promise<(() => Promise<void>) | undefined> {
+  await mkdir(flags, { recursive: true, mode: 0o700 });
+  const file = join(flags, `${provider}.update`);
+  // Written aside and linked into place, so the file never exists without the process that holds it.
+  const staged = join(flags, `${provider}.update-${process.pid}-${randomUUID()}`);
+  await writeFile(staged, String(process.pid), { mode: 0o600, flag: 'wx' });
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await link(staged, file);
+        return () => rm(file, { force: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (alive(Number(await readFile(file, 'utf8').catch(() => '')))) return undefined;
+        await rm(file, { force: true });
+      }
+    }
+    return undefined;
+  } finally { await rm(staged, { force: true }); }
+}
+
+async function probing(flags: string, provider: Provider): Promise<boolean> {
+  const names = await readdir(flags).catch(() => [] as string[]);
+  return names.some(name => { const pid = Number(new RegExp(`^${provider}\\.probe-(\\d+)-`).exec(name)?.[1]); return pid > 0 && alive(pid); });
+}
+
+/** Runs a probe of `provider` unless its CLI is being updated right now; then there is nothing to read. */
+export async function unlessUpdating<T>(stateDir: string, provider: Provider, read: () => Promise<T>): Promise<T | undefined> {
+  const { flags } = toolUpdatePaths(stateDir);
+  await mkdir(flags, { recursive: true, mode: 0o700 });
+  const mine = join(flags, `${provider}.probe-${process.pid}-${randomUUID()}`);
+  await writeFile(mine, '', { mode: 0o600, flag: 'wx' });
+  try {
+    if (alive(Number(await readFile(join(flags, `${provider}.update`), 'utf8').catch(() => '')))) return undefined;
+    return await read();
+  } finally { await rm(mine, { force: true }); }
+}
+
+/** Only root can change the file a root process would run, or the folders on the way to it. */
+async function rootSafe(path: string): Promise<boolean> {
+  const real = await realpath(path).catch(() => undefined);
+  const info = real && await stat(real).catch(() => undefined);
+  return Boolean(real && info && info.isFile() && info.uid === 0 && (info.mode & 0o022) === 0 && await rootOnly(dirname(real)) && await rootOnly(dirname(path)));
+}
+
+export interface CommandResult { code: number | null; output: string }
+export interface ToolCommands {
+  version(executable: string, env: NodeJS.ProcessEnv): Promise<string | undefined>;
+  /** Runs an update in its own process group. `limit` either stops it (`kill`) or only reports it as stuck. */
+  update(file: string, args: string[], env: NodeJS.ProcessEnv, limit: { ms: number; kill: boolean; stuck?: () => void }): Promise<CommandResult>;
+  latest(pkg: string): Promise<string | undefined>;
+}
+
+export const nativeCommands: ToolCommands = {
+  version: async (executable, env) => {
+    try { return VERSION.exec((await run(executable, ['--version'], { env, timeout: 30_000, maxBuffer: 64 * 1024 })).stdout)?.[1]; } catch { return undefined; }
+  },
+  update: (file, args, env, limit) => new Promise(resolve => {
+    const child = spawn(file, args, { env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    const keep = (chunk: Buffer) => { output = (output + chunk.toString('utf8')).slice(-64 * 1024); };
+    child.stdout.on('data', keep); child.stderr.on('data', keep);
+    const signal = (name: NodeJS.Signals) => { try { if (child.pid) process.kill(-child.pid, name); } catch { /* Already gone. */ } };
+    const timer = setTimeout(() => {
+      if (!limit.kill) { limit.stuck?.(); return; }
+      signal('SIGTERM');
+      setTimeout(() => signal('SIGKILL'), 5000).unref();
+    }, limit.ms);
+    child.once('error', error => { clearTimeout(timer); resolve({ code: null, output: `${output}\n${error.message}` }); });
+    child.once('close', code => { clearTimeout(timer); resolve({ code, output }); });
+  }),
+  latest: async pkg => {
+    const response = await fetch(`https://registry.npmjs.org/-/package/${pkg.replace('/', '%2f')}/dist-tags`, { signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) return undefined;
+    return release(((await response.json()) as { latest?: unknown }).latest);
+  },
+};
+
+export interface ToolUpdatesOptions {
+  stateDir: string;
+  env: NodeJS.ProcessEnv;
+  /** Holds new launches of the CLI while none of its runs is starting or running; undefined when one is. */
+  hold(provider: Provider): (() => void) | undefined;
+  commands?: ToolCommands;
+  find?: (provider: Provider, env: NodeJS.ProcessEnv) => Promise<string | undefined>;
+  uid?: number;
+  node?: string;
+  now?: () => number;
+  firstMs?: number;
+  everyMs?: number;
+  probeWaitMs?: number;
+  onChange?: () => void;
+}
+
+/**
+ * Keeps this account's Claude Code and Codex at their latest release, from the worker that starts their turns. A CLI is
+ * updated only while Tower runs nothing of it, with new turns held until it is done; the turns then start with the new
+ * version. Only installs whose update is known are touched: Claude Code's own installer, which swaps versions
+ * atomically, and a global npm install, which npm replaces and which is never interrupted.
+ */
+export class ToolUpdates {
+  private timer?: ReturnType<typeof setTimeout>;
+  private running?: Promise<void>;
+  private stopped = false;
+  constructor(private readonly options: ToolUpdatesOptions) {}
+
+  private get commands(): ToolCommands { return this.options.commands ?? nativeCommands; }
+  private now(): number { return this.options.now?.() ?? Date.now(); }
+
+  start(): void { this.schedule(this.options.firstMs ?? FIRST_MS); }
+  busy(): boolean { return this.running !== undefined; }
+  async stop(): Promise<void> { this.stopped = true; clearTimeout(this.timer); await this.running; }
+
+  private schedule(ms: number): void {
+    clearTimeout(this.timer);
+    if (this.stopped) return;
+    this.timer = setTimeout(() => { void this.check(); }, Math.max(1000, ms));
+    this.timer.unref();
+  }
+
+  /** One look at both CLIs; the next look is sooner when one of them waits for Tower to be idle or for a retry. */
+  check(): Promise<void> {
+    if (this.running || this.stopped) return this.running ?? Promise.resolve();
+    this.running = (async () => {
+      let next = this.options.everyMs ?? EVERY_MS;
+      try {
+        const saved = await readToolUpdates(this.options.stateDir);
+        for (const provider of PROVIDERS) {
+          if (this.stopped) break;
+          const { status, againMs } = await this.one(provider, saved[provider], async status => {
+            saved[provider] = status; await this.save(saved);
+          }).catch(error => { this.log(`${provider}: ${(error as Error).message}`); return { status: saved[provider], againMs: undefined }; });
+          if (status) saved[provider] = status; else delete saved[provider];
+          await this.save(saved);
+          if (againMs !== undefined) next = Math.min(next, againMs);
+        }
+      } finally {
+        this.running = undefined;
+        this.schedule(next);
+      }
+    })();
+    return this.running;
+  }
+
+  private async save(saved: SavedToolUpdates): Promise<void> {
+    await mkdir(runtimePaths(this.options.stateDir).root, { recursive: true, mode: 0o700 });
+    await writePrivateJson(toolUpdatePaths(this.options.stateDir).status, JSON.stringify(saved));
+    this.options.onChange?.();
+  }
+
+  private log(line: string): void {
+    const { log } = toolUpdatePaths(this.options.stateDir);
+    void mkdir(dirname(log), { recursive: true, mode: 0o700 }).then(() => appendFile(log, `${new Date(this.now()).toISOString()} ${line}\n`, { mode: 0o600 })).catch(() => {});
+  }
+
+  private async one(provider: Provider, previous: SavedToolUpdate | undefined, progress: (status: SavedToolUpdate) => Promise<void>): Promise<{ status?: SavedToolUpdate; againMs?: number }> {
+    const env = this.options.env;
+    const executable = await (this.options.find ?? findExecutable)(provider, env);
+    // Not installed here: nothing is installed for it.
+    if (!executable) return {};
+    const now = this.now();
+    const real = await realpath(executable).catch(() => executable);
+    const install = classifyInstall(provider, real);
+    const node = this.options.node ?? process.execPath;
+    const root = (this.options.uid ?? process.getuid?.()) === 0;
+    // The update and version commands find the Node that runs Tower first: npm and the npm CLIs start with `env node`.
+    const folders = [dirname(node), ...providerDirectories(env)];
+    const path = root ? (await Promise.all(folders.map(async folder => await rootOnly(folder) ? folder : undefined))).filter(Boolean) as string[] : folders;
+    const run = { ...env, PATH: [...new Set(path)].join(delimiter), CI: '1', npm_config_update_notifier: 'false' };
+    const version = await this.commands.version(executable, run);
+    const target = await this.commands.latest(PACKAGES[provider]).catch(() => undefined) ?? previous?.target;
+    const base: SavedToolUpdate = { method: install.method, state: 'current', checkedAt: new Date(now).toISOString(),
+      ...(version ? { version } : {}), ...(target ? { target } : {}), ...(previous?.updatedAt ? { updatedAt: previous.updatedAt } : {}) };
+    const retrying = previous?.retry && target && previous.retry.version === target ? previous.retry : undefined;
+    if (!target || (version && !newerVersion(target, version))) return { status: base };
+    const refuse = (reason: ToolUpdateReason): { status: SavedToolUpdate } => ({ status: { ...base, state: 'unsupported', reason } });
+    if (install.method === 'unsupported') return refuse('install-method');
+    if (!version) return { status: { ...base, state: 'failed', reason: 'unreadable-version' } };
+    if (!retryDue(retrying, target, now)) return { status: { ...base, state: 'failed', ...(previous?.reason ? { reason: previous.reason } : {}), nextAt: retrying!.nextAt, retry: retrying }, againMs: Date.parse(retrying!.nextAt) - now };
+    let npm: string | undefined;
+    if (install.method === 'npm') {
+      npm = await npmCli(node, providerDirectories(env));
+      if (!npm) return refuse('no-npm');
+    }
+    // A process running as root runs nothing another account could have changed.
+    if (root && !(await rootSafe(executable) && await rootSafe(node) && (!npm || await rootSafe(npm)))) return refuse('not-root-only');
+    const waiting = { status: { ...base, state: 'waiting' as const, ...(retrying ? { retry: retrying } : {}) }, againMs: BUSY_MS };
+    const releaseHold = this.options.hold(provider);
+    if (!releaseHold) return waiting;
+    let releaseClaim: (() => Promise<void>) | undefined;
+    try {
+      const { flags } = toolUpdatePaths(this.options.stateDir);
+      releaseClaim = await claimUpdate(flags, provider);
+      if (!releaseClaim) return waiting;
+      for (const until = Date.now() + (this.options.probeWaitMs ?? PROBE_WAIT_MS); await probing(flags, provider) && Date.now() < until;) await new Promise(resolve => setTimeout(resolve, 200));
+      if (await probing(flags, provider)) return waiting;
+      const updating: SavedToolUpdate = { ...base, state: 'updating', ...(retrying ? { retry: retrying } : {}) };
+      await progress(updating);
+      this.log(`${provider}: ${version} -> ${target} (${install.method})`);
+      const stuck = () => { this.log(`${provider}: npm is still running after ${NPM_STUCK_MS / MINUTE} minutes`); void progress({ ...updating, reason: 'stuck' }); };
+      const result = install.method === 'native'
+        ? await this.commands.update(executable, ['update'], run, { ms: NATIVE_TIMEOUT_MS, kill: true })
+        : await this.commands.update(node, [npm!, 'install', '-g', '--prefix', (install as { prefix: string }).prefix, `${PACKAGES[provider]}@${target}`, '--no-audit', '--no-fund', '--loglevel=error'], run, { ms: NPM_STUCK_MS, kill: false, stuck });
+      this.log(`${provider}: exit ${result.code}\n${result.output.trim().slice(-4000)}`);
+      let after = await this.commands.version(executable, run);
+      const done = this.now();
+      if (after && !newerVersion(target, after)) return { status: { ...base, state: 'current', version: after, updatedAt: new Date(done).toISOString() } };
+      // A global npm install that no longer starts is put back to the version it had.
+      if (!after && install.method === 'npm') {
+        this.log(`${provider}: does not start after the update; reinstalling ${version}`);
+        const repaired = await this.commands.update(node, [npm!, 'install', '-g', '--prefix', install.prefix, `${PACKAGES[provider]}@${version}`, '--no-audit', '--no-fund', '--loglevel=error'], run, { ms: NPM_STUCK_MS, kill: false, stuck });
+        this.log(`${provider}: reinstall exit ${repaired.code}\n${repaired.output.trim().slice(-4000)}`);
+        after = await this.commands.version(executable, run);
+      }
+      const retry = failedAgain(retrying, target, done);
+      if (!after) return { status: { ...base, state: 'broken', reason: 'command-failed', retry, nextAt: retry.nextAt }, againMs: Date.parse(retry.nextAt) - done };
+      return { status: { ...base, version: after, state: 'failed', reason: result.code === 0 ? 'not-updated' : 'command-failed', retry, nextAt: retry.nextAt }, againMs: Date.parse(retry.nextAt) - done };
+    } finally {
+      await releaseClaim?.();
+      releaseHold();
+    }
+  }
+}
+
+/** npm's own script, run by Tower's Node: the one beside that Node first, else the first on the path. */
+async function npmCli(node: string, folders: string[]): Promise<string | undefined> {
+  for (const folder of [dirname(node), ...folders]) {
+    const real = await realpath(join(folder, 'npm')).catch(() => undefined);
+    if (real && /[/\\]node_modules[/\\]npm[/\\]bin[/\\]npm-cli\.js$/.test(real)) return real;
+  }
+  return undefined;
+}

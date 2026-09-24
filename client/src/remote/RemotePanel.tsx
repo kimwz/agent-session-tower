@@ -6,6 +6,7 @@ import type { TriggerAuditEntry } from '../../../shared/triggers';
 import { absoluteTime, api, copyText, relativeTime } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
 import { auditActionLabel } from '../triggers/trigger-helpers';
+import { NodeTools } from '../app/AutoUpdate';
 
 type Tab = 'nodes' | 'controllers' | 'exclusions';
 const TABS: Tab[] = ['nodes', 'controllers', 'exclusions'];
@@ -176,9 +177,10 @@ export function UpdateLine({ token, node, version, busy, run }: { token: string;
     // Running the previous version again, it came back whatever the helper saw.
     const back = update.code !== 'rollback-failed' || (node.status === 'connected' && node.version === update.previous);
     const reason = update.code === 'rollback-failed' && back ? t('새 버전으로 옮기지 못했습니다.') : update.code ? failures[update.code] : '';
+    const again = node.retryAt ? ` ${t('{0}에 자동으로 다시 시도합니다.', { 0: absoluteTime(node.retryAt) })}` : '';
     return <div className="remote-update failed"><p role="status">{back
       ? t('v{0}(으)로 업데이트하지 못해 v{1}(으)로 계속 실행 중입니다. {2}', { 0: update.version, 1: update.previous, 2: reason })
-      : t('v{0}(으)로 업데이트하지 못했고, {1} 그 컴퓨터에서 Tower를 확인하세요(기록: logs/update.log).', { 0: update.version, 1: reason })}</p>{back && ask(t('다시 시도'))}</div>;
+      : t('v{0}(으)로 업데이트하지 못했고, {1} 그 컴퓨터에서 Tower를 확인하세요(기록: logs/update.log).', { 0: update.version, 1: reason })}{again}</p>{back && ask(t('지금 다시 시도'))}</div>;
   }
   if (newer(node.version, version)) return <p className="remote-update">{t('이 Tower보다 새 버전입니다. 이 컴퓨터의 Tower를 업데이트하세요.')}</p>;
   if (!newer(version, node.version) || node.status !== 'connected') return null;
@@ -210,6 +212,7 @@ function NodeRow({ token, node, version, busy, run }: { token: string; node: Nod
         : <strong>{name}</strong>}
       <small>{status}{node.version ? ` · v${node.version}` : ''}{worker ? ` · ${t('작업 실행기 v{0} (진행 중인 작업이 끝나면 바뀜)', { 0: worker })}` : ''}{terminalHost ? ` · ${t('터미널 호스트 v{0} (열린 터미널이 모두 닫히면 바뀜)', { 0: terminalHost })}` : ''} · {t('지문')} {node.fingerprint}{node.status !== 'connected' && node.lastSeenAt ? ` · ${t('마지막 연결')} ${relativeTime(node.lastSeenAt)}` : ''}{lowDisk ? ` · ${t('디스크 여유 {0}GB', { 0: lowDisk })}` : ''}</small>
       <UpdateLine token={token} node={node} version={version} busy={busy} run={run} />
+      <NodeTools autoUpdate={node.report?.autoUpdate} />
     </div>
     {!editing && <button type="button" className="secondary-button" disabled={busy} onClick={() => setEditing(true)}>{t('이름 변경')}</button>}
     <button type="button" className="icon-button" aria-label={t('{0} 연결 해제', { 0: name })} title={t('연결 해제')} disabled={busy}

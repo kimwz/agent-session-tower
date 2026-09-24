@@ -15,13 +15,14 @@ test('the background service runs the current installed version with this state 
   const stateDir = '/Users/someone/.agent-session-tower & <test>';
   const plist = renderServicePlist(stateDir, { port: 8123, node: '/opt/homebrew/bin/node',
     environment: { PATH: '/Users/someone/project/node_modules/.bin:/Users/someone/.npm/_npx/abc/node_modules/.bin:/opt/node/lib/node_modules/npm/node_modules/@npmcli/run-script/lib/node-gyp-bin:/opt/homebrew/bin:/usr/bin',
-      HOME: '/Users/someone', CODEX_HOME: '/Users/someone/.codex', SECRET_TOKEN: 'never' } });
+      HOME: '/Users/someone', CODEX_HOME: '/Users/someone/.codex', TOWER_AUTO_UPDATE: 'off', SECRET_TOKEN: 'never' } });
   assert.match(plist, new RegExp(`<key>Label</key><string>${serviceLabel(stateDir).replace(/\./g, '\\.')}</string>`));
   const args = [...plist.matchAll(/^ {4}<string>(.*)<\/string>$/gm)].map(match => match[1]);
   assert.deepEqual(args, ['/opt/homebrew/bin/node', `${join(runtimePaths(stateDir).current, 'node_modules', 'agent-session-tower', 'bin', 'agent-session-tower.mjs').replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')}`,
     'run', '--no-open', '--port', '8123', '--state-dir', '/Users/someone/.agent-session-tower &amp; &lt;test&gt;']);
   assert.match(plist, /<key>PATH<\/key><string>\/opt\/homebrew\/bin:\/usr\/bin<\/string>/, 'npx and project tool folders are not kept for the service');
   assert.match(plist, /<key>CODEX_HOME<\/key>/);
+  assert.match(plist, /<key>TOWER_AUTO_UPDATE<\/key><string>off<\/string>/, 'automatic updates turned off stay off across restarts');
   assert.doesNotMatch(plist, /SECRET_TOKEN|never/, 'only the variables Tower needs are copied into the service');
   assert.match(plist, /<key>KeepAlive<\/key><dict><key>SuccessfulExit<\/key><false\/><\/dict>/);
   assert.match(plist, /<key>StandardOutPath<\/key><string>[^<]*\/logs\/tower\.log<\/string>/);

@@ -87,6 +87,10 @@ Project editor/terminal controls open a resizable workspace overlay on the same 
 
 A specific release can be run with `npx --yes github:kimwz/agent-session-tower#vx.y.z`.
 
+A Tower running as the background service moves to the new release by itself within about 30 minutes. It waits up to 15 minutes for the Release workflow to publish the package. To move it at once, ask its own web server: `POST /api/tower/update` with an empty JSON body (the latest release) or `{ "version": "x.y.z" }`, sending the page token from `/api/bootstrap` in `X-Agent-Monitor-Token`. Computers it controls follow it right after.
+
+Development and fixture instances should run with `TOWER_AUTO_UPDATE=off`. Tower from a checkout or npx never replaces itself; only the service does. Claude Code and Codex are updated only by the Tower on the default state directory.
+
 
 ### Web restart and execution worker
 

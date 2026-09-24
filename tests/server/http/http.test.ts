@@ -315,3 +315,25 @@ test('Tower operations are posted by name with the page token and reach the work
   assert.equal((await fetch(`${base}/api/v1/triggers.list`)).status, 404, 'operations are posted, never fetched');
   assert.deepEqual(calls, [['triggers.list', {}]]);
 });
+
+test('the owner can move a background-service Tower to a version or the latest release; the request is checked first', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'monitor-http-update-'));
+  await writeFile(join(dir, 'index.html'), '<!doctype html><title>Agent Session Tower</title>');
+  const asked: Array<string | undefined> = [];
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, service: true,
+    towerUpdate: async version => { asked.push(version); return { status: 202, body: { update: { version: version ?? '1.40.0' } } }; },
+    backend: { snapshot: () => ({ sessions: [], providers: [], runs: [], scanning: false, updatedAt: new Date().toISOString(), hostname: 'test', version: '1.39.0' }),
+      detail: async () => undefined, enqueue: async () => run, cancel: async () => {}, subscribe: () => () => {} } });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
+  assert.equal((await (await fetch(`${base}/api/health`)).json()).service, true);
+  const { token } = await (await fetch(`${base}/api/bootstrap`)).json();
+  const send = (body: unknown, headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }) =>
+    fetch(`${base}/api/tower/update`, { method: 'POST', headers, body: JSON.stringify(body) });
+  assert.equal((await send({}, { 'Content-Type': 'application/json' })).status, 403);
+  for (const body of [{ version: 'latest' }, { version: 1 }, { version: '1.40.0', force: true }]) assert.equal((await send(body)).status, 400);
+  assert.equal((await send({})).status, 202);
+  assert.equal((await send({ version: '1.40.1' })).status, 202);
+  assert.deepEqual(asked, [undefined, '1.40.1']);
+});

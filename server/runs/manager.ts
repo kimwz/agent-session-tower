@@ -98,6 +98,8 @@ export class RunManager extends EventEmitter {
   private readonly bridged = new Map<string, CodexBridgeRun>();
   private readonly stdio = new Map<string, CodexStdioRun>();
   private readonly reservedSessions = new Set<string>();
+  /** CLIs being updated: none of their runs start until the update is done. */
+  private readonly heldProviders = new Set<Provider>();
   private readonly admissions = new Set<string>();
   private readonly locallySettled = new Map<string, number>();
   private readonly settledRuns = new Set<string>();
@@ -646,6 +648,12 @@ export class RunManager extends EventEmitter {
             if (run.output !== reason) { run.output = reason; this.changed(); }
             continue;
           }
+          // Looked at in the same step as the reservation below, so an update's hold and a launch never cross.
+          if (this.heldProviders.has(session.provider)) {
+            const reason = `Waiting: ${session.provider === 'claude' ? 'Claude Code' : 'Codex'} is being updated to its latest version; this starts right after.`;
+            if (run.output !== reason) { run.output = reason; this.changed(); }
+            continue;
+          }
           this.reservedSessions.add(session.id);
           try {
             if (!creating && session.provider === 'codex' && await this.launchBridge(run, session)) continue;
@@ -1142,6 +1150,26 @@ export class RunManager extends EventEmitter {
   async flushState(): Promise<void> { this.persist(); await this.flush(); }
 
   /** True while any provider process, desktop turn or admission is still live, whatever the run status says. */
+  /**
+   * Holds new launches of `provider` while its CLI is updated, but only when none of its runs is starting or running;
+   * undefined when one is. Synchronous, so nothing launches between the look and the hold. Releasing it starts what
+   * waited.
+   */
+  holdProvider(provider: Provider): (() => void) | undefined {
+    const of = (sessionId: string) => (this.getSession(sessionId) ?? this.createdSessions.get(sessionId)?.session)?.provider ?? sessionId.split(':')[0];
+    const inFlight = [...this.reservedSessions].some(id => of(id) === provider)
+      || [...this.runs.values()].some(run => run.status === 'running' && of(run.sessionId) === provider);
+    if (inFlight || this.heldProviders.has(provider)) return undefined;
+    this.heldProviders.add(provider);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.heldProviders.delete(provider);
+      void this.pump();
+    };
+  }
+
   busy(): boolean { return this.owned.size + this.bridged.size + this.stdio.size + this.admissions.size + this.reservedSessions.size > 0 || this.pumping; }
 
   private async flush(): Promise<void> {

@@ -19,6 +19,9 @@ import { SessionTitleStore } from '../stores/session-titles.js';
 import { openCodexBridgeRun } from './codex-bridge.js';
 import { RunManager, type RunAdmission } from './manager.js';
 import { parseRunOrigin } from './origin.js';
+import { autoUpdateEnabled, ToolUpdates } from '../updates/tools.js';
+import { defaultStateDir } from '../state-dir.js';
+import { resolve } from 'node:path';
 import { parseSuccessor, spawnSuccessor, writeHandoff, type SuccessorCommand } from './handoff.js';
 import { REMOTE_FOLDER_REFUSED, TriggerService } from '../triggers/service.js';
 import { GitHubCoordinator } from '../triggers/github-coordinator.js';
@@ -381,9 +384,12 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   const terminals = new WorkspaceTerminals({ keepAliveOnDisconnect: true });
   const runs = new RunManager({ stateDir, getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true),
     openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }), trustWorkspace });
+  // Only the Tower on the account's own state folder keeps its Claude Code and Codex current, so two never update one install.
+  const tools = resolve(stateDir) === resolve(defaultStateDir()) && autoUpdateEnabled() ? new ToolUpdates({ stateDir, env: process.env, hold: provider => runs.holdProvider(provider) }) : undefined;
   try {
     await sessions.start();
     await runs.start();
+    tools?.start();
     // The web process saves the remote-sharing exclusion list; this copy follows it on every refresh.
     const exclusions = new RemoteExclusionStore(stateDir);
     await exclusions.start();
@@ -456,14 +462,14 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       sessions: { list: () => visible.snapshot().sessions, read: async (id, limit) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), undefined, limit))?.messages ?? [] : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
     await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
-      onIdle: async () => { triggers.close(); await triggers.settle(); github.close(); slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight(), holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); },
+      onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || Boolean(tools?.busy()), holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); },
       quiesce: async () => { slack.pause(); triggers.pause(); github.pause(); await Promise.all([slack.flush(), triggers.flush(), github.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush()]); },
       resume: () => { slack.resume(); triggers.resume(); github.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { triggers.close(); github.close(); slack.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});
-  } catch (error) { sessions.stop(); await release(); throw error; }
+  } catch (error) { void tools?.stop(); sessions.stop(); await release(); throw error; }
 }

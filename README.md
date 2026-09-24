@@ -52,6 +52,7 @@ The integrated terminal runs an interactive shell in that folder on the Tower se
 - **Organize your workspace.** Rename sessions and project groups, pin projects, drag nodes, search, filter, and hide or reopen sessions.
 - **Catch new activity.** Unread indicators help you find replies and results you have not opened yet.
 - **Access it remotely.** Open the web UI from another device on your LAN or VPN, with password-protected access to the machine running your agents.
+- **Stay up to date.** Installed as the background service (`agent-session-tower service install`), Tower keeps itself, Claude Code and Codex at their latest releases, and computers it controls follow it. Running agents and terminals are never interrupted. See [staying up to date](docs/usage.md#staying-up-to-date).
 
 Local use needs no Tower login, API key, database, or CLI hooks; the only provider files Tower writes are the guidance sections above. Remote use requires an account configured on the host. Your agents keep using their existing CLI accounts and model settings.
 

@@ -4,6 +4,25 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.33.0] - 2026-09-25
+
+### Added
+- **Tower, Claude Code and Codex keep themselves up to date.**
+  - **Tower.** Run as the background service, Tower checks for the latest release every 30 minutes and moves to it the way a joined computer's update always has. It installs the release beside the running version, then switches only the web server. If the new version does not come back, the previous one runs again.
+    - Running agents and terminals go on through it. The execution worker changes over the next time nothing is running.
+    - An update that failed is tried again after 1, 2, 4, 8 and 16 hours, then once a day, and a newer release at once.
+    - A computer this Tower controls follows it, and is asked again on the same schedule after a failure instead of waiting for you.
+  - **Claude Code and Codex.** Every three hours, a Claude Code or Codex behind its latest release is updated by the Tower on your default state folder:
+    - Claude Code's own installer is used for its native install.
+    - npm is used for a global npm install. It reinstalls the previous version if the CLI no longer starts afterwards.
+    - An update starts only while no run of that CLI is starting or running in Tower, and new runs wait for it.
+    - Other installs are left alone and shown as such.
+  - **Where to see it.**
+    - The sidebar shows each CLI's version and its update state.
+    - **Remote computers** shows the same for joined computers.
+    - The header shows a failed Tower update and when it is tried again.
+  - **A Tower you started yourself** (a checkout, or npx) does not replace itself. When a newer release is out, the header offers the `service install` command. That command now takes over from the running Tower, restarting only its web server, and afterwards Tower stays current.
+  - `TOWER_AUTO_UPDATE=off` turns this off, for development instances.
 ## [1.32.0] - 2026-09-25
 
 ### Added

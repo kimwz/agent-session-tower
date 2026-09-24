@@ -910,6 +910,28 @@ test("the owner's turn in a Slack conversation still requires Codex's automatic 
   assert.match(result.error ?? '', /did not confirm Auto approval review\. No message was submitted/);
 });
 
+test('an update of a CLI holds its new runs only while none of them is starting or running, and starts them once released', async t => {
+  const f = await fixture({ provider: 'claude' });
+  t.after(f.cleanup);
+  const release = f.manager.holdProvider('claude');
+  assert.ok(release);
+  assert.equal(f.manager.holdProvider('claude'), undefined, 'one update at a time');
+  const run = await f.manager.enqueue(f.session.id, 'Held for the update', {}, { origin: { kind: 'owner' } });
+  await until(() => f.manager.list().find(item => item.id === run.id)?.output.includes('is being updated') ? true : undefined);
+  assert.equal(f.launches.length, 0);
+  release!();
+  assert.equal((await finished(f.manager, run.id)).status, 'completed');
+  const busy = await fixture({ provider: 'claude', mode: 'hold' });
+  t.after(busy.cleanup);
+  const running = await busy.manager.enqueue(busy.session.id, 'Still working', {}, { origin: { kind: 'owner' } });
+  await until(() => busy.manager.list().find(item => item.id === running.id)?.status === 'running' ? true : undefined);
+  assert.equal(busy.manager.holdProvider('claude'), undefined, 'never under a running turn');
+  const other = busy.manager.holdProvider('codex');
+  assert.ok(other, 'another CLI is not affected');
+  other!();
+  await busy.manager.cancel(running.id);
+});
+
 test('a trigger set to wait for the owner starts Claude in its own mode', async t => {
   const f = await fixture({ provider: 'claude' });
   t.after(f.cleanup);

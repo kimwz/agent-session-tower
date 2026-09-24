@@ -31,6 +31,31 @@ agent-session-tower --help
 
 `doctor` checks for the provider commands and reports the session directories. The default port is `8000`; the default bind address is `127.0.0.1`.
 
+## Staying up to date
+
+Install Tower as the background service to keep it current by itself:
+
+```sh
+agent-session-tower service install --port 8000
+```
+
+The service starts at login on macOS, and at boot with systemd on Linux. Joining another computer's Tower installs it the same way. If you already started Tower yourself, `service install` stops only that web server, and the service takes over: running agents and terminals go on.
+
+- **Tower.** The service checks for the latest release every 30 minutes. It installs the release beside the running version, checks that it starts, and switches only the web server to it. It keeps the new version only once it answers again and has reconnected to any controlling computer; otherwise the previous version runs again. A version that failed is tried again after 1, 2, 4, 8 and 16 hours, then once a day; a newer release is tried at once. A computer another Tower controls follows that Tower's version instead of moving ahead of it.
+- **Claude Code and Codex.** The Tower on the default state directory checks every three hours whether each CLI is behind its latest npm release. Only these installs are updated:
+  - Claude Code's native install, with `claude update`. It keeps each version separately and switches between them atomically.
+  - A global npm install of Claude Code or Codex. npm reinstalls it in the same prefix and is never interrupted. If the CLI no longer starts afterwards, the previous version is put back.
+
+  An update starts only while Tower has no run of that CLI starting or running. New runs wait until it finishes; running terminals outside Tower are not held. When Tower runs as root, it updates only a CLI, Node and npm that only root can change. Other installs, such as Homebrew or a manual download, are left alone and shown as not updated automatically.
+- **What you see.**
+  - The sidebar shows each CLI's version, and whether it is updating, waiting, or failed with the next retry time.
+  - The header shows a Tower update that failed and when it runs again.
+  - For a Tower you started yourself, the header shows a button that copies the `service install` command for the new release.
+  - **Remote computers** shows the same for each joined computer.
+  - Details are in `logs/update.log` and `logs/tool-update.log` in the state directory.
+
+Set `TOWER_AUTO_UPDATE=off` in Tower's environment to turn all of this off, for example for a development instance. The service keeps the setting.
+
 ## The canvas
 
 Projects group sessions by their working folder. Open a session node to read its conversation. Subagents are grouped with their parent; independently forked sessions remain separate.

@@ -10,9 +10,10 @@ import { displayFingerprint, linkDirectory, linkId, type LinkIdentity } from './
 import { joinCommand, encodeJoinCode, type JoinCode } from './join-code.js';
 import { LINK_PATH, LINK_PROTOCOL, MAX_FRAME_BYTES, REMOVED_CLOSE_CODE, linkRequest, openControllerEnd, pairingProof, proofMatches } from './transport.js';
 import { advertisedAddresses } from './addresses.js';
-import type { HubStatus, NodeReport, NodeStatus, NodeSummary, UpdateStatus } from '../../shared/link.js';
+import type { AutoUpdateStatus, HubStatus, NodeReport, NodeStatus, NodeSummary, ToolUpdate, UpdateStatus } from '../../shared/link.js';
 import { newerVersion } from './service.js';
 import { updateActive } from './update.js';
+import { failedAgain, parseRetry, retryDue, type RetryRecord } from '../updates/schedule.js';
 
 export const DEFAULT_LINK_PORT = 8765;
 const INVITE_MS = 10 * 60_000;
@@ -39,11 +40,14 @@ interface NodeRecord {
   left?: true;
   /** The last code it joined with, so the page that showed the code can tell it was used. */
   invite?: string;
-  /**
-   * Versions this Tower saw fail on it. A computer reports only its last update, so with several controllers another
-   * one's failure would hide this one's; they are asked for again only when the owner says so, even after a restart.
-   */
+  /** Read only to carry over what older versions saved: versions that failed on it, asked for again on the schedule. */
   failedUpdates?: string[];
+  /**
+   * When the version that failed on it is asked for again (see updates/schedule), and which failure was counted. A
+   * computer reports only its last update, so this is kept here, even across restarts.
+   */
+  retry?: RetryRecord;
+  counted?: string;
 }
 interface InviteRecord { id: string; secret: string; expiresAt: number; claimedBy?: string }
 interface State { version: 1; settings: HubSettings; nodes: NodeRecord[]; removed: Array<{ pin: string; at: string }>; invites: InviteRecord[] }
@@ -66,7 +70,6 @@ export class ControllerLinks extends EventEmitter {
   private readonly reportedAt = new Map<string, number>();
 
   /** Updates of each computer seen cut short, by when they started: asked for again by itself only twice. */
-  private readonly interrupted = new Map<string, Set<string>>();
   private unauthenticated = 0;
   private readonly unauthenticatedFrom = new Map<string, number>();
   /** Set when the saved state could not be read: nothing is saved over it until the owner looks. */
@@ -148,7 +151,8 @@ export class ControllerLinks extends EventEmitter {
       return { id: node.id, name: live?.hello.name ?? node.name, ...(node.label ? { label: node.label } : {}), fingerprint: displayFingerprint(node.pin), status,
         ...(live?.hello.version ?? node.version ? { version: live?.hello.version ?? node.version } : {}), features: live?.hello.features ?? [],
         pairedAt: node.pairedAt, ...(node.lastSeenAt ? { lastSeenAt: node.lastSeenAt } : {}), ...(node.invite ? { invite: node.invite } : {}),
-        ...(this.reports.has(node.id) ? { report: this.shownReport(node.id, Boolean(live)) } : {}) };
+        ...(this.reports.has(node.id) ? { report: this.shownReport(node.id, Boolean(live)) } : {}),
+        ...(retryOf(node, this.options.version)?.version === this.options.version && node.retry ? { retryAt: node.retry.nextAt } : {}) };
     });
   }
 
@@ -166,7 +170,6 @@ export class ControllerLinks extends EventEmitter {
     if (!live.hello.features.includes('update')) throw Object.assign(new Error('그 컴퓨터는 Tower를 백그라운드 서비스로 실행하지 않아 여기서 업데이트할 수 없습니다.'), { statusCode: 409 });
     const code = await this.askUpdate(id, live);
     // Forgotten only once asked, so following the computer meanwhile does not ask a second time.
-    if (!code) { await this.failedUpdates(id, versions => versions.filter(version => version !== this.options.version)); this.interrupted.delete(id); }
     if (code === 'busy') throw Object.assign(new Error('그 컴퓨터가 다른 버전으로 업데이트하는 중입니다. 끝난 뒤 다시 시도하세요.'), { statusCode: 409 });
     if (code) throw Object.assign(new Error('그 컴퓨터가 업데이트 요청을 받지 않았습니다.'), { statusCode: 502 });
     this.watch(id, live);
@@ -192,7 +195,6 @@ export class ControllerLinks extends EventEmitter {
     // Its claimed invitation goes too, so it cannot finish joining again with the old code.
     this.reports.delete(id);
     this.reportedAt.delete(id);
-    this.interrupted.delete(id);
     await this.save({ ...this.state, nodes: this.state.nodes.filter(item => item.id !== id), invites: this.state.invites.filter(item => item.claimedBy !== node.pin),
       removed: [...this.state.removed.filter(item => item.pin !== node.pin), { pin: node.pin, at: new Date(this.now()).toISOString() }].slice(-200) });
     const live = this.connected.get(id);
@@ -380,7 +382,7 @@ export class ControllerLinks extends EventEmitter {
 
   /**
    * Reads what a joined computer reports about itself and, when it runs an older version as the background service,
-   * asks it to move to this one. An update that failed for this version is asked for again only by the owner.
+   * asks it to move to this one. An update that failed is asked for again on the retry schedule, and at once by the owner.
    */
   private async follow(id: string, live: Connected): Promise<void> {
     if (!live.hello.features.includes('status')) return;
@@ -390,22 +392,25 @@ export class ControllerLinks extends EventEmitter {
     // One report that did not come through does not end following an update under way.
     if (!report) { this.watch(id, live); return; }
     this.report(id, report);
-    // An update cut short (the computer restarted, say) did not fail; it may be asked for again.
     const update = report.update;
-    if (update?.stage === 'failed' && update.code !== 'interrupted') await this.failedUpdates(id, versions => [...new Set([...versions, update.version])].slice(-10));
-    if (update?.stage === 'failed' && update.code === 'interrupted' && update.version === this.options.version) this.interrupted.set(id, new Set([...this.interrupted.get(id) ?? [], update.startedAt]));
-    // A computer where the update keeps being cut short (its helper cannot start, say) waits for the owner.
-    const failed = this.state.nodes.find(node => node.id === id)?.failedUpdates?.includes(this.options.version) || (this.interrupted.get(id)?.size ?? 0) > 2;
-    if (live.hello.features.includes('update') && newerVersion(this.options.version, report.versions.web) && !updateActive(update) && !failed) await this.askUpdate(id, live);
+    // Every failure of this Tower's version, one cut short included, is counted once and pushes the next attempt out on
+    // the schedule. Another controller's version failing there is that controller's to try again.
+    if (update?.stage === 'failed' && update.version === this.options.version) await this.retries(id, node => node.counted === update.startedAt ? undefined
+      : { retry: failedAgain(retryOf(node, update.version), update.version, Date.parse(update.updatedAt) || this.now()), counted: update.startedAt });
+    const behind = newerVersion(this.options.version, report.versions.web);
+    // Moved on (by the owner, or to a newer version): what was scheduled for an older one no longer applies.
+    if (!behind) await this.retries(id, node => node.retry || node.failedUpdates ? { retry: undefined, failedUpdates: undefined } : undefined);
+    const node = this.state.nodes.find(item => item.id === id);
+    const due = retryDue(node && retryOf(node, this.options.version), this.options.version, this.now());
+    if (live.hello.features.includes('update') && behind && !updateActive(update) && due) await this.askUpdate(id, live);
     this.watch(id, live);
   }
 
-  private async failedUpdates(id: string, change: (versions: string[]) => string[]): Promise<void> {
+  private async retries(id: string, change: (node: NodeRecord) => Partial<NodeRecord> | undefined): Promise<void> {
     const node = this.state.nodes.find(item => item.id === id);
-    if (!node) return;
-    const next = change(node.failedUpdates ?? []);
-    if (JSON.stringify(next) === JSON.stringify(node.failedUpdates ?? [])) return;
-    await this.save({ ...this.state, nodes: this.state.nodes.map(item => item.id === id ? { ...item, ...(next.length ? { failedUpdates: next } : { failedUpdates: undefined }) } : item) }).catch(() => {});
+    const patch = node && change(node);
+    if (!patch) return;
+    await this.save({ ...this.state, nodes: this.state.nodes.map(item => item.id === id ? { ...item, ...patch, failedUpdates: undefined } : item) }).catch(() => {});
   }
 
   private watch(id: string, live: Connected): void {
@@ -464,6 +469,13 @@ export class ControllerLinks extends EventEmitter {
 }
 
 const STAGES = new Set(['installing', 'checking', 'switching', 'verifying', 'rolling-back', 'done', 'failed']);
+/** A version older versions of Tower saved as failed is due again once, then follows the schedule. */
+function retryOf(node: NodeRecord, version: string): RetryRecord | undefined {
+  const saved = parseRetry(node.retry);
+  if (saved) return saved;
+  return node.failedUpdates?.includes(version) ? { version, attempts: 1, nextAt: new Date(0).toISOString() } : undefined;
+}
+
 const FAILURES = new Set(['low-disk', 'install-failed', 'check-failed', 'switch-failed', 'start-failed', 'link-failed', 'rollback-failed', 'interrupted']);
 const RELEASE = /^\d+\.\d+\.\d+$/;
 const text = (value: unknown, pattern = /^[\w.:-]{1,40}$/) => typeof value === 'string' && pattern.test(value) ? value : undefined;
@@ -476,6 +488,29 @@ function parseUpdate(value: unknown): UpdateStatus | undefined {
   return { version: update.version!, previous: update.previous!, stage: update.stage!, startedAt: at(update.startedAt) ?? new Date(0).toISOString(), updatedAt: at(update.updatedAt) ?? new Date(0).toISOString(),
     ...(FAILURES.has(update.code as string) ? { code: update.code } : {}), ...(STAGES.has(update.failedStage as string) ? { failedStage: update.failedStage } : {}) };
 }
+const TOOL_METHODS = new Set(['native', 'npm', 'unsupported']);
+const TOOL_STATES = new Set(['current', 'updating', 'waiting', 'failed', 'broken', 'unsupported']);
+const TOOL_REASONS = new Set(['not-updated', 'command-failed', 'stuck', 'install-method', 'not-root-only', 'no-npm', 'unreadable-version']);
+function parseTool(value: unknown): ToolUpdate | undefined {
+  const tool = value as Partial<ToolUpdate> | undefined;
+  const at = (item: unknown) => typeof item === 'string' && !Number.isNaN(Date.parse(item)) ? new Date(item).toISOString() : undefined;
+  if (!tool || typeof tool !== 'object' || !TOOL_METHODS.has(tool.method as string) || !TOOL_STATES.has(tool.state as string) || !at(tool.checkedAt)) return undefined;
+  return { method: tool.method!, state: tool.state!, checkedAt: at(tool.checkedAt)!,
+    ...(text(tool.version, RELEASE) ? { version: tool.version } : {}), ...(text(tool.target, RELEASE) ? { target: tool.target } : {}),
+    ...(at(tool.updatedAt) ? { updatedAt: at(tool.updatedAt) } : {}), ...(at(tool.nextAt) ? { nextAt: at(tool.nextAt) } : {}),
+    ...(TOOL_REASONS.has(tool.reason as string) ? { reason: tool.reason } : {}) };
+}
+function parseAutoUpdate(value: unknown): AutoUpdateStatus | undefined {
+  const auto = value as Partial<AutoUpdateStatus> | undefined;
+  const tower = auto?.tower;
+  if (!auto || typeof auto !== 'object' || typeof auto.enabled !== 'boolean' || !tower || (tower.kind !== 'service' && tower.kind !== 'unmanaged')) return undefined;
+  const at = (item: unknown) => typeof item === 'string' && !Number.isNaN(Date.parse(item)) ? new Date(item).toISOString() : undefined;
+  const claude = parseTool(auto.tools?.claude);
+  const codex = parseTool(auto.tools?.codex);
+  return { enabled: auto.enabled, tower: { kind: tower.kind, ...(text(tower.latest, RELEASE) ? { latest: tower.latest } : {}), ...(at(tower.checkedAt) ? { checkedAt: at(tower.checkedAt) } : {}),
+    ...(at(tower.nextAt) ? { nextAt: at(tower.nextAt) } : {}), ...(tower.followsController === true ? { followsController: true } : {}) },
+    tools: { ...(claude ? { claude } : {}), ...(codex ? { codex } : {}) } };
+}
 function parseReport(value: unknown): NodeReport | undefined {
   const report = value as Partial<NodeReport> | undefined;
   const web = text(report?.versions?.web);
@@ -483,8 +518,10 @@ function parseReport(value: unknown): NodeReport | undefined {
   const worker = text(report.versions?.worker);
   const terminalHost = text(report.versions?.terminalHost);
   const update = parseUpdate(report.update);
+  const autoUpdate = parseAutoUpdate(report.autoUpdate);
   return { versions: { web, ...(worker ? { worker } : {}), ...(terminalHost ? { terminalHost } : {}) }, service: report.service, ...(update ? { update } : {}),
-    ...(typeof report.diskFree === 'number' && Number.isFinite(report.diskFree) && report.diskFree >= 0 ? { diskFree: report.diskFree } : {}) };
+    ...(typeof report.diskFree === 'number' && Number.isFinite(report.diskFree) && report.diskFree >= 0 ? { diskFree: report.diskFree } : {}),
+    ...(autoUpdate ? { autoUpdate } : {}) };
 }
 
 function parseHello(value: unknown): Hello | undefined {

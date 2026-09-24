@@ -1,4 +1,4 @@
-import type { RemoteNode } from './link.js';
+import type { AutoUpdateStatus, RemoteNode } from './link.js';
 import type { RepositoryStatus } from './repositories.js';
 import type { TriggerOverview } from './triggers.js';
 export type Provider = 'claude' | 'codex';
@@ -292,4 +292,6 @@ export interface Snapshot {
   controllerJoined?: { name: string; at: string };
   /** Computers joined to this Tower; each one's own snapshot arrives on the same event stream. */
   nodes?: RemoteNode[];
+  /** How this Tower keeps itself, Claude Code and Codex current. */
+  autoUpdate?: AutoUpdateStatus;
 }

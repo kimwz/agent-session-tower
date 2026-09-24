@@ -149,7 +149,7 @@ function serviceCommand(stateDir: string, options: { port: number; node?: string
   const env = options.environment ?? process.env;
   const path = userPath(env.PATH).join(':');
   const variables: Record<string, string> = { PATH: path || '/usr/bin:/bin', HOME: env.HOME ?? homedir(), TOWER_SERVICE_LOG: join(paths.logs, 'tower.log') };
-  for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'LANG', 'SHELL', 'USER', 'LOGNAME']) if (env[key]) variables[key] = env[key]!;
+  for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'LANG', 'SHELL', 'USER', 'LOGNAME', 'TOWER_AUTO_UPDATE']) if (env[key]) variables[key] = env[key]!;
   const argumentsList = [options.node ?? process.execPath, entryPoint(paths.current), 'run', '--no-open', '--port', String(options.port), '--state-dir', stateDir];
   return { argumentsList, variables, log: join(paths.logs, 'tower.log') };
 }
@@ -285,7 +285,8 @@ async function serviceEnvironment(manager: ServiceManager, env: NodeJS.ProcessEn
   const me = userInfo();
   // Only what the service uses is kept (it is saved for refreshService): no tokens or keys the shell happens to hold.
   const own: NodeJS.ProcessEnv = { PATH: userPath(env.PATH).join(':'), HOME: me.homedir, USER: me.username, LOGNAME: me.username, ...(me.shell ? { SHELL: me.shell } : {}) };
-  for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'LANG']) if (env[key]) own[key] = env[key];
+  // Turning automatic updates off is kept with the service, so a restart does not turn them on again.
+  for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'LANG', 'TOWER_AUTO_UPDATE']) if (env[key]) own[key] = env[key];
   if (manager !== 'systemd-system') return own;
   const kept: string[] = [];
   for (const folder of userPath(env.PATH)) if (await rootOnly(folder)) kept.push(folder);
@@ -399,6 +400,21 @@ export async function restartService(stateDir: string): Promise<void> {
   if (manager === 'launchd') await run('launchctl', ['kickstart', '-k', `gui/${process.getuid?.() ?? 501}/${serviceLabel(stateDir)}`], { timeout: 30_000 });
   else if (manager) await systemctl(manager, 'restart', serviceUnit(stateDir));
   else throw new Error('No service manager runs Tower here.');
+}
+
+/** Starts the installed service now, for one set up without starting it. */
+export async function startService(stateDir: string): Promise<void> {
+  const manager = await serviceManager();
+  if (manager === 'launchd') await run('launchctl', ['bootstrap', `gui/${process.getuid?.() ?? 501}`, servicePlist(stateDir)], { timeout: 30_000 });
+  else if (manager) await systemctl(manager, 'restart', serviceUnit(stateDir));
+  else throw new Error('No service manager runs Tower here.');
+}
+
+/** Stops the service's web without removing the service; the worker and terminal host go on. */
+export async function stopService(stateDir: string): Promise<void> {
+  const manager = await serviceManager();
+  if (manager === 'launchd') await run('launchctl', ['bootout', `gui/${process.getuid?.() ?? 501}`, servicePlist(stateDir)], { timeout: 30_000 }).catch(() => {});
+  else if (manager) await systemctl(manager, 'stop', serviceUnit(stateDir)).catch(() => {});
 }
 
 export async function uninstallService(stateDir: string): Promise<void> {

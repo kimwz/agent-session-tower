@@ -284,6 +284,8 @@ type CapabilityOptions = {
   intervalMs?: number;
   timeoutMs?: number;
   read?: (provider: ProviderHealth, signal: AbortSignal) => Promise<Capabilities>;
+  /** Runs a probe that starts the CLI unless its update is under way; undefined then, and the last reading stays. */
+  unlessUpdating?: <T>(provider: Provider, read: () => Promise<T>) => Promise<T | undefined>;
 };
 
 /** In-memory cache with one bounded read per provider, including on initial load. */
@@ -336,7 +338,11 @@ export class ProviderCapabilities {
         try {
           if (!provider.available || !provider.executable) capabilities = { usage: unavailable('not_supported') };
           else if (this.options.read) capabilities = await this.options.read(provider, signal);
-          else if (provider.provider === 'codex') capabilities = await readCodexCapabilities(provider.executable, this.options.env || process.env, signal);
+          else if (provider.provider === 'codex') {
+            const read = () => readCodexCapabilities(provider.executable!, this.options.env || process.env, signal);
+            const previous = this.providers.find(item => item.provider === 'codex');
+            capabilities = await (this.options.unlessUpdating ? this.options.unlessUpdating('codex', read) : read()) ?? { usage: previous?.usage ?? { status: 'loading', windows: [] } };
+          }
           else {
             const [usage, defaultEffort] = await Promise.all([readClaudeUsage({ env: this.options.env, signal }), readClaudeDefaultEffort(this.options.env || process.env)]);
             capabilities = { usage, models: CLAUDE_MODELS.map(copyModel), efforts: CLAUDE_EFFORTS.map(effort => ({ ...effort })), ...(defaultEffort ? { defaultEffort } : {}) };

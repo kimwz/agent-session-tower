@@ -10,6 +10,39 @@ export interface UpdateStatus {
   /** Why it failed, and the stage it failed in. */
   code?: UpdateFailure; failedStage?: UpdateStage;
 }
+/**
+ * How a Claude Code or Codex CLI is kept current. `native` is Claude Code's own installer; `npm` a global npm install.
+ * Other installs are left alone.
+ */
+export type ToolUpdateMethod = 'native' | 'npm' | 'unsupported';
+/**
+ * `waiting`: a newer version is out and is installed when no run of that CLI is starting or running in Tower, or at
+ * `nextAt` after a failed attempt. `broken`: the CLI no longer starts after an update and could not be put back.
+ */
+export type ToolUpdateState = 'current' | 'updating' | 'waiting' | 'failed' | 'broken' | 'unsupported';
+/** Why an automatic update did not happen or did not finish. Fixed codes, never command output or paths. */
+export type ToolUpdateReason = 'not-updated' | 'command-failed' | 'stuck' | 'install-method' | 'not-root-only' | 'no-npm' | 'unreadable-version';
+export interface ToolUpdate {
+  method: ToolUpdateMethod; state: ToolUpdateState; checkedAt: string;
+  version?: string; target?: string; updatedAt?: string; nextAt?: string; reason?: ToolUpdateReason;
+}
+/**
+ * How this Tower keeps itself, Claude Code and Codex current. A background service replaces itself with the latest
+ * release; one run another way (a checkout, npx) only reports it. A computer another Tower controls follows that one.
+ */
+export interface AutoUpdateStatus {
+  enabled: boolean;
+  tower: {
+    kind: 'service' | 'unmanaged'; latest?: string; checkedAt?: string;
+    /** When a version that failed to install is tried again. */
+    nextAt?: string;
+    /** It is paired with a controlling Tower and follows that one's version. */
+    followsController?: boolean;
+    /** Only in this computer's own page, for a Tower run by hand: the command that installs it as the service. */
+    serviceCommand?: string;
+  };
+  tools: { claude?: ToolUpdate; codex?: ToolUpdate };
+}
 /** What a joined computer reports about itself: structured facts only, never paths or log text. */
 export interface NodeReport {
   versions: { web: string; worker?: string; terminalHost?: string };
@@ -17,6 +50,7 @@ export interface NodeReport {
   service: boolean;
   update?: UpdateStatus;
   diskFree?: number;
+  autoUpdate?: AutoUpdateStatus;
 }
 /** A computer this one controls. */
 export interface NodeSummary {
@@ -26,6 +60,8 @@ export interface NodeSummary {
   invite?: string;
   /** Its last report, kept while it restarts for an update. */
   report?: NodeReport;
+  /** When this Tower asks it again for its version, after an update to it failed. */
+  retryAt?: string;
 }
 export type ControllerStatus = 'connected' | 'connecting' | 'offline' | 'expired' | 'refused' | 'removed';
 /** A computer that controls this one. */

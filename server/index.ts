@@ -38,8 +38,12 @@ import { RemoteNodes } from './link/nodes.js';
 import { RemoteAudit } from './remote/audit.js';
 import { NodeViewStore } from './link/views.js';
 import { newerVersion, refreshService } from './link/service.js';
-import { releasePublished } from './link/join-code.js';
+import { releasePackage, releasePublished } from './link/join-code.js';
 import { diskFree, handoffHeld, heldWorkerEntry, managedByService, runUpdateHelper, serviceSteps, updateActive, Updates } from './link/update.js';
+import { LatestReleases } from './updates/latest.js';
+import { TowerAutoUpdate } from './updates/tower.js';
+import { autoUpdateEnabled, publicToolUpdates, readToolUpdates, unlessUpdating } from './updates/tools.js';
+import type { AutoUpdateStatus } from '../shared/link.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
@@ -191,7 +195,24 @@ async function main() {
   const history = nativeHistory(runs);
   const listeners = new Set<() => void>();
   const changed = () => { for (const listener of listeners) listener(); };
-  const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed });
+  // The Codex probe starts the CLI, so it never runs while this account's Codex is being updated.
+  const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed, unlessUpdating: (provider, read) => unlessUpdating(stateDir, provider, read) });
+  // This Tower keeps itself current when it runs as the service; its worker keeps Claude Code and Codex current.
+  let pairedControllers = (): number => 0;
+  const latestReleases = new LatestReleases();
+  const towerUpdates = new TowerAutoUpdate({ stateDir, version: APP_VERSION, enabled: autoUpdateEnabled(), updates, controllers: () => pairedControllers(), latest: () => latestReleases.latest(), onChange: changed });
+  let toolUpdates: AutoUpdateStatus['tools'] = {};
+  const readTools = async () => {
+    const next = publicToolUpdates(await readToolUpdates(stateDir));
+    if (JSON.stringify(next) !== JSON.stringify(toolUpdates)) { toolUpdates = next; changed(); }
+  };
+  // This computer's own page also gets the command that makes a Tower run by hand keep itself current; controllers do not.
+  const autoUpdate = (local = false): AutoUpdateStatus => {
+    const tower = towerUpdates.status();
+    const serviceCommand = local && tower.kind === 'unmanaged' && tower.latest && newerVersion(tower.latest, APP_VERSION)
+      ? `npx --yes ${releasePackage(tower.latest)} service install --port ${port}${stateDir === defaultStateDir() ? '' : ` --state-dir '${stateDir.replace(/'/g, `'\\''`)}'`}` : undefined;
+    return { enabled: autoUpdateEnabled(), tower: { ...tower, ...(serviceCommand ? { serviceCommand } : {}) }, tools: toolUpdates };
+  };
   runs.on('change', changed);
   const repositories = new RepositoryMonitor({
     watched: () => watchedRepositoryPaths(runs.sessionList(), groups.list()),
@@ -221,6 +242,7 @@ async function main() {
       ...(controllers.length ? { controlledBy: controllers } : {}),
       ...(joined ? { controllerJoined: joined } : {}),
       ...(remoteNodes?.ready ? { nodes } : {}),
+      autoUpdate: autoUpdate(true),
       updatedAt: new Date().toISOString(),
     };
   };
@@ -298,7 +320,7 @@ async function main() {
         const [update, free, terminalHost] = await Promise.all([updates.status(), diskFree(stateDir), workspaceTerminals.hostVersion().catch(() => undefined)]);
         const worker = runs.runnerVersion();
         return { versions: { web: APP_VERSION, ...(worker ? { worker } : {}), ...(terminalHost ? { terminalHost } : {}) }, service: updates.managed,
-          ...(update ? { update } : {}), ...(free !== undefined ? { diskFree: free } : {}) };
+          ...(update ? { update } : {}), ...(free !== undefined ? { diskFree: free } : {}), autoUpdate: autoUpdate() };
       },
     } });
   if (nodeLinks) {
@@ -306,6 +328,7 @@ async function main() {
     controlledBy = () => nodeLinks.list().filter(item => item.status === 'connected').map(item => item.name);
     nodeLinks.on('change', changed);
     controllerName = id => nodeLinks.list().find(item => item.id === id)?.name;
+    pairedControllers = () => nodeLinks.list().filter(item => item.state === 'paired').length;
     nodeLinks.on('paired', (controllerId: string) => { remoteChanges.record({ controllerId, action: 'joined' }); changed(); });
     // Asked again while the same update is under way, it is the same update.
     nodeLinks.on('update', (controllerId: string, update: { version: string; startedAt: string }) => remoteChanges.record({ controllerId, action: 'update', detail: update.version }, `update:${update.startedAt}`));
@@ -325,7 +348,13 @@ async function main() {
   const { server, dispose } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes,
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })) } : { error: linkError },
-    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined });
+    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed,
+    towerUpdate: async version => {
+      if (!updates.managed) return { status: 409, body: { code: 'not-service', error: 'This Tower does not run as the background service, so it cannot replace itself.' } };
+      const answer = await towerUpdates.updateNow(version);
+      changed();
+      return answer;
+    } });
   await new Promise<void>((accept, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => { server.removeListener('error', reject); accept(); });
@@ -350,8 +379,12 @@ async function main() {
     await updates.prune(async () => [worker, await workspaceTerminals.hostVersion()]);
   };
   const pruneLater = () => { void prune().catch(error => console.error(`Old versions were not removed: ${error instanceof Error ? error.message : String(error)}`)); };
-  const pruning = [setTimeout(pruneLater, 60_000), setInterval(pruneLater, 60 * 60_000)];
+  const pruning = [setTimeout(pruneLater, 60_000), setInterval(pruneLater, 60 * 60_000),
+    // The worker writes how its CLI updates went; the page and controllers read it from here.
+    setInterval(() => { void readTools().catch(() => {}); }, 30_000)];
   for (const timer of pruning) timer.unref();
+  void readTools().catch(() => {});
+  void towerUpdates.start().catch(error => console.error(`Automatic updates are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   capabilities.start();
   repositories.start();
   // Links come up after the web server, so a joining computer never reaches a half-started Tower.
@@ -360,6 +393,7 @@ async function main() {
     if (closing) return;
     closing = true;
     for (const timer of pruning) clearTimeout(timer);
+    towerUpdates.stop();
     remoteNodes?.close();
     const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => { remoteRouter.dispose(); return nodeViews.flush(); });
     const stoppingCapabilities = capabilities.stop();

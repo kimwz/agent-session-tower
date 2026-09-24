@@ -66,6 +66,10 @@ export interface HttpOptions {
   links?: LinkRoutes | { error: string };
   /** Joined computers this page shows and works with through their links. */
   nodes?: RemoteNodes;
+  /** It runs as the background service's own install, which updates replace. */
+  service?: boolean;
+  /** Moves this Tower to a version (the latest release when none is given), when it runs as the background service. */
+  towerUpdate?: (version?: string) => Promise<{ status: number; body: unknown }>;
 }
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -76,7 +80,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes }: HttpOptions) {
+export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, towerUpdate, service }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -161,7 +165,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (req.method === 'GET' && path === '/api/health') return json(res, 200, {
         ok: true, application: HEALTH_APPLICATION_ID, pid: process.pid, version: APP_VERSION,
         bindHost: address && typeof address === 'object' ? address.address : undefined,
-        remoteAccess: Boolean(remote),
+        remoteAccess: Boolean(remote), service: Boolean(service),
       });
       const identity = await ownerIdentity(req);
       const sessionId = sessionCookie(req);
@@ -201,6 +205,15 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (!isOperationName(operation[1])) return json(res, 404, { error: 'Unknown Tower operation.' });
         if (!backend.api) return json(res, 503, { error: 'Tower operations are unavailable.' });
         return json(res, 200, { result: await backend.api(operation[1], await readJson(req, 1_000_000)) });
+      }
+      if (path === '/api/tower/update' && req.method === 'POST') {
+        if (!towerUpdate) return json(res, 503, { error: 'Updates are unavailable.' });
+        const body = await readJson(req, 1_000) as { version?: unknown };
+        if (!body || typeof body !== 'object' || Object.keys(body).some(key => key !== 'version') || (body.version !== undefined && (typeof body.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(body.version)))) {
+          return json(res, 400, { error: '버전은 x.y.z 형식이어야 합니다.' });
+        }
+        const answer = await towerUpdate(body.version as string | undefined);
+        return json(res, answer.status, answer.body);
       }
       if (path === '/api/slack' && req.method === 'GET') {
         if (!backend.slackOverview) return json(res, 503, { error: 'Slack 연동을 사용할 수 없습니다.' });
