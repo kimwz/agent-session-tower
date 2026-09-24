@@ -5,7 +5,11 @@ on:
   pull_request:
 jobs:
   check:
-    runs-on: macos-latest
+    # Tower runs on macOS and on Linux; both check the same way.
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

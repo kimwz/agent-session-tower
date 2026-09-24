@@ -54,7 +54,24 @@ export function decodeJoinCode(text: unknown): JoinCode {
 
 function invalidCode() { return Object.assign(new Error('Tower 연결 코드가 아닙니다. 다른 컴퓨터에서 코드 전체를 복사하세요.'), { statusCode: 400 }); }
 
-/** The command that joins a computer, installing the controller's Tower version first. */
-export function joinCommand(code: JoinCode): string {
-  return `npx --yes github:kimwz/agent-session-tower#v${code.version} join ${encodeJoinCode(code)}`;
+/** A released version's package as its release publishes it: built, so installing it needs no Git and no compiler. */
+export const releasePackage = (version: string) => `https://github.com/kimwz/agent-session-tower/releases/download/v${version}/agent-session-tower-${version}.tgz`;
+
+const published = new Map<string, true | number>();
+/** Whether a version's release package can be downloaded yet. Once it can, it stays so; a missing one is looked for again after a minute. */
+export async function releasePublished(version: string): Promise<boolean> {
+  const known = published.get(version);
+  if (known === true) return true;
+  if (typeof known === 'number' && Date.now() - known < 60_000) return false;
+  const found = await fetch(releasePackage(version), { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(3000) }).then(response => response.ok, () => false);
+  published.set(version, found || Date.now());
+  return found;
+}
+
+/**
+ * The command that joins a computer, installing the controller's Tower version first: its release's package once that
+ * is published (a release publishes it a few minutes after the version is tagged), its source until then.
+ */
+export function joinCommand(code: JoinCode, published = false): string {
+  return `npx --yes ${published ? releasePackage(code.version) : `github:kimwz/agent-session-tower#v${code.version}`} join ${encodeJoinCode(code)}`;
 }

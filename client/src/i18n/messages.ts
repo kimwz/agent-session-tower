@@ -1220,7 +1220,6 @@ export const english: Record<string, string> = {
   "제외 해제": "Share again",
   "제외할 폴더": "Folder to exclude",
   "지문": "fingerprint",
-  "추가할 컴퓨터의 터미널에서 아래 명령을 한 번 실행하세요. 같은 버전의 Tower가 설치되고, 로그인할 때마다 백그라운드에서 켜지며, 이 컴퓨터에 연결됩니다.": "Run this command once in a terminal on the computer you are adding. It installs the same version of Tower, starts it in the background at every login, and connects it to this computer.",
   "컴퓨터 추가": "Add a computer",
   "켜면 이 컴퓨터가 연결용 포트({0})를 엽니다. 이 화면의 주소(localhost)는 계속 이 컴퓨터에서만 열립니다.": "When on, this computer opens a connection port ({0}). This page (localhost) still opens only on this computer.",
   "포트 {0}에서 연결을 기다립니다. 같은 네트워크나 Tailscale로 이 컴퓨터에 닿을 수 있어야 합니다.": "Waiting for connections on port {0}. The other computer must reach this one on the same network or over Tailscale.",
@@ -1413,4 +1412,6 @@ export const english: Record<string, string> = {
   "수락함": "Accepted",
   "거절함": "Declined",
   "취소함": "Cancelled",
+  "추가할 컴퓨터(macOS 또는 Linux)의 터미널에서 아래 명령을 한 번 실행하세요. 같은 버전의 Tower가 설치되어 백그라운드에서 계속 실행되고, 이 컴퓨터에 연결됩니다. macOS에서는 로그인할 때, Linux에서는 컴퓨터가 켜질 때 시작합니다.": "Run this command once in a terminal on the computer you are adding (macOS or Linux). It installs the same version of Tower, keeps it running in the background, and connects it to this computer. It starts at login on macOS and when the computer starts on Linux.",
+  "그 컴퓨터에는 Node.js 22.13 이상이 필요하고, 쓸 Claude Code나 Codex에 로그인되어 있어야 합니다.": "That computer needs Node.js 22.13 or later, and a sign-in to the Claude Code or Codex it will use.",
 };

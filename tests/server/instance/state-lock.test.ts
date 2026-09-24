@@ -37,6 +37,21 @@ test('concurrent contenders recover a dead owner without removing the winning li
   assert.deepEqual(await readdir(stateDir), []);
 });
 
+test('a lock left from before a restart is taken over even when its pid now belongs to another process', async (t) => {
+  const stateDir = await fixture(t);
+  const lock = join(stateDir, '.instance-lock');
+  await mkdir(lock);
+  // This process's pid, but written by a process that started at another time.
+  await writeFile(join(lock, 'owner-11111111-1111-4111-8111-111111111111.json'), JSON.stringify({ pid: process.pid, port: 8000, started: 'another boot:1' }));
+  const release = await acquireStateLock(stateDir, 8001);
+  const [owner] = await readdir(lock);
+  const saved = JSON.parse(await readFile(join(lock, owner!), 'utf8'));
+  assert.equal(saved.port, 8001);
+  assert.ok(saved.started, 'the new owner records when it started');
+  await assert.rejects(acquireStateLock(stateDir, 8002), /already using/, 'the owner that really runs keeps it');
+  await release();
+});
+
 test('unknown lock contents are preserved instead of deleting an unverifiable owner', async (t) => {
   const stateDir = await fixture(t);
   const lock = join(stateDir, '.instance-lock');

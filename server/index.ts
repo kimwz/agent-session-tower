@@ -38,6 +38,7 @@ import { RemoteNodes } from './link/nodes.js';
 import { RemoteAudit } from './remote/audit.js';
 import { NodeViewStore } from './link/views.js';
 import { newerVersion } from './link/service.js';
+import { releasePublished } from './link/join-code.js';
 import { diskFree, handoffHeld, heldWorkerEntry, managedByService, runUpdateHelper, serviceSteps, Updates } from './link/update.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
@@ -270,7 +271,7 @@ async function main() {
   const remoteChanges = new RemoteAudit(stateDir, { name: id => controllerName(id) });
   await remoteChanges.start();
   const remoteRouter = createRemoteRouter({ backend, exclusions, terminals: workspaceTerminals, audit: remoteChanges });
-  const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname });
+  const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname, published: releasePublished });
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.

@@ -8,15 +8,19 @@ import { lockOwners } from '../instance/state-lock.js';
 import { defaultStateDir } from '../state-dir.js';
 import { decodeJoinCode } from './join-code.js';
 import { displayFingerprint, linkId } from './identity.js';
-import { currentVersion, installService, installVersion, newerVersion, serviceStatus, uninstallService, useVersion } from './service.js';
+import { currentVersion, installService, installVersion, newerVersion, serviceManager, serviceStatus, uninstallService, useVersion, type ServiceManager } from './service.js';
 
 const USAGE = `Usage:
   agent-session-tower join <code> [--state-dir <path>] [--port <number>] [--no-service]
   agent-session-tower service install|uninstall|status [--state-dir <path>] [--port <number>]
 
 join     Connects this computer to the Tower that made the code. Tower is installed and kept running in the
-         background (at login and after a crash) unless it already runs here or --no-service is given.
+         background (on macOS from login, on Linux with systemd from boot, and again after a crash) unless it
+         already runs here or --no-service is given.
 service  Sets up, removes or shows the background service without joining anything.`;
+
+const EVERY_START: Record<ServiceManager, string> = { launchd: 'whenever you log in', 'systemd-system': 'whenever this computer starts', 'systemd-user': 'whenever this computer starts' };
+const NEXT_START: Record<ServiceManager, string> = { launchd: 'from your next login', 'systemd-system': 'from the next time this computer starts', 'systemd-user': 'from the next time this computer starts' };
 
 /** The package this command runs from; `join` copies it instead of downloading the same version again. */
 const packageRoot = () => fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../..' : '../../..', import.meta.url));
@@ -50,23 +54,25 @@ export async function runLinkCommand(args: string[]): Promise<void> {
     if (links?.status === 404) throw new Error(`Tower ${running.version} is running here but cannot join other computers yet. Quit it, then run this command again.`);
     if (!links?.ok) throw new Error(((await links?.json().catch(() => ({})) ?? {}) as { error?: string }).error ?? 'The Tower running here did not answer. Try again in a moment.');
   }
-  if (!running && (!service || process.platform !== 'darwin')) {
+  const manager = service ? await serviceManager() : undefined;
+  if (!running && !manager) {
     throw new Error(!service ? 'Tower is not running here. Start it (agent-session-tower --no-open) and run this command again, or leave out --no-service.'
+      : process.platform === 'linux' ? 'This computer does not run systemd, so Tower cannot keep itself running here. Start it yourself (agent-session-tower --no-open), keep it running, and run this command again.'
       : 'Tower is not running here. On this system, start it with your service manager (agent-session-tower --no-open) and run this command again.');
   }
   if (!running && !await portFree(port)) throw new Error(`Port ${port} is used by another program on this computer. Run this command again with --port ${port + 1} (or another free port).`);
   // Coming back after a logout or restart without anyone at this computer needs the background service. When Tower
   // is not running, the service is (re)started with the requested port; a service that already runs is left alone.
-  const installed = process.platform === 'darwin' ? await serviceStatus(stateDir) : undefined;
-  if (service && installed && (!installed.installed || !installed.version || !running)) {
+  const installed = manager ? await serviceStatus(stateDir) : undefined;
+  if (manager && installed && (!installed.installed || !installed.version || !running)) {
     // Never older than what already runs here: an older web would take the worker back a version.
     const version = running && newerVersion(running.version, code.version) ? running.version : code.version;
     await installVersion(stateDir, version, line => console.log(line), packageRoot());
     await useVersion(stateDir, version);
-    await installService(stateDir, { port: running?.port ?? port });
+    await installService(stateDir, { port: running?.port ?? port, start: !running });
     const current = await currentVersion(stateDir) ?? version;
-    console.log(running ? `Tower ${current} will start in the background from your next login. The Tower running now keeps serving until then. (Use --no-service to leave the login service out.)`
-      : `Tower ${current} now starts in the background whenever you log in. Waiting for it to start…`);
+    console.log(running ? `Tower ${current} will start in the background ${NEXT_START[manager]}. The Tower running now keeps serving until then. (Use --no-service to leave the service out.)`
+      : `Tower ${current} now starts in the background ${EVERY_START[manager]}. Waiting for it to start…`);
   }
   if (!running) {
     running = await waitFor(() => runningTower(stateDir), 180_000);
@@ -86,7 +92,8 @@ export async function runLinkCommand(args: string[]): Promise<void> {
     : result.status === 'removed' ? `${name} did not accept this computer. Make a new code there and run the new command.`
     : 'Another computer answered at that address. Check the addresses in the code.');
   console.log(`Connected. ${name} can now see and control this computer. Folders you exclude in Tower (Remote computers → Sharing) stay private.`);
-  console.log('Tower runs while you are logged in to this computer. To keep it reachable, let it log in automatically and keep it from sleeping (System Settings → Energy).');
+  if (process.platform === 'darwin') console.log('Tower runs while you are logged in to this computer. To keep it reachable, let it log in automatically and keep it from sleeping (System Settings → Energy).');
+  else if (manager) console.log(`Tower runs in the background from boot (${manager === 'systemd-system' ? 'systemctl status' : 'systemctl --user status'} ${(await serviceStatus(stateDir)).file?.split('/').at(-1) ?? 'agent-session-tower.service'}); its log is ${resolve(stateDir, 'logs', 'tower.log')}.`);
   console.log('Work runs with this computer\'s own Claude Code and Codex sign-ins; sign in to them here if you have not yet.');
 }
 
@@ -95,13 +102,14 @@ async function runService(action: string | undefined, stateDir: string, port: nu
     await installVersion(stateDir, APP_VERSION, line => console.log(line), packageRoot());
     await useVersion(stateDir, APP_VERSION);
     await installService(stateDir, { port });
-    console.log(`Tower ${APP_VERSION} now starts in the background whenever you log in.`);
+    const manager = await serviceManager();
+    console.log(`Tower ${APP_VERSION} now starts in the background ${manager ? EVERY_START[manager] : ''}.`);
   } else if (action === 'uninstall') {
     await uninstallService(stateDir);
     console.log('The background service was removed. Running work continues; start Tower yourself to use it again.');
   } else if (action === 'status') {
     const status = await serviceStatus(stateDir);
-    console.log(status.installed ? `Installed (${status.loaded ? 'running' : 'not loaded'}), version ${status.version ?? 'unknown'}: ${status.plist}` : 'The background service is not installed.');
+    console.log(status.installed ? `Installed (${status.loaded ? 'running' : 'not loaded'}), version ${status.version ?? 'unknown'}: ${status.file}` : 'The background service is not installed.');
   } else throw new Error(USAGE);
 }
 

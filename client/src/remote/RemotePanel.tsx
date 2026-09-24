@@ -138,9 +138,10 @@ function Nodes({ token, overview, busy, run, invite, known, onInvite }: { token:
         : joined ? <div className="remote-joined-row"><p className="remote-joined" role="status"><Check size={14} />{t('{0}이(가) 연결되었습니다.', { 0: joined.label || joined.name })}</p>
           <button type="button" className="secondary-button" disabled={busy} onClick={onInvite}><Plus size={14} />{t('다른 컴퓨터 추가')}</button></div>
         : <div className="remote-command">
-          <p>{t('추가할 컴퓨터의 터미널에서 아래 명령을 한 번 실행하세요. 같은 버전의 Tower가 설치되고, 로그인할 때마다 백그라운드에서 켜지며, 이 컴퓨터에 연결됩니다.')}</p>
+          <p>{t('추가할 컴퓨터(macOS 또는 Linux)의 터미널에서 아래 명령을 한 번 실행하세요. 같은 버전의 Tower가 설치되어 백그라운드에서 계속 실행되고, 이 컴퓨터에 연결됩니다. macOS에서는 로그인할 때, Linux에서는 컴퓨터가 켜질 때 시작합니다.')}</p>
           <div className="remote-copy"><code>{invite.command}</code><button type="button" className="icon-button" aria-label={t('명령 복사')} onClick={() => void copy('command', invite.command)}>{copied === 'command' ? <Check size={15} /> : <Copy size={15} />}</button></div>
-          <p className="trigger-note">{t('그 컴퓨터에는 Node.js 22.13 이상과 Git이 필요하고, 쓸 Claude Code나 Codex에 로그인되어 있어야 합니다.')}</p>
+          <p className="trigger-note">{invite.command.includes(' github:') ? t('그 컴퓨터에는 Node.js 22.13 이상과 Git이 필요하고, 쓸 Claude Code나 Codex에 로그인되어 있어야 합니다.')
+            : t('그 컴퓨터에는 Node.js 22.13 이상이 필요하고, 쓸 Claude Code나 Codex에 로그인되어 있어야 합니다.')}</p>
           <p className="trigger-note">{t('그 컴퓨터에서 Tower가 이미 실행 중이면, 그 화면의 원격 컴퓨터 → 이 컴퓨터를 제어하는 Tower 탭에 이 코드를 붙여 넣어도 됩니다.')}</p>
           <div className="remote-copy"><code>{invite.code}</code><button type="button" className="icon-button" aria-label={t('코드 복사')} onClick={() => void copy('code', invite.code)}>{copied === 'code' ? <Check size={15} /> : <Copy size={15} />}</button></div>
           <p className="trigger-note"><LoaderCircle size={12} className="spin" /> {t('연결을 기다리는 중 · {0}분 {1}초 뒤 만료', { 0: Math.floor(Math.max(0, invite.expiresAt - now) / 60_000), 1: Math.floor(Math.max(0, invite.expiresAt - now) / 1000) % 60 })}</p>

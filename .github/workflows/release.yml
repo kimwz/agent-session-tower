@@ -18,6 +18,8 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: node scripts/release.mjs notes "$GITHUB_REF_NAME" > release-notes.md
-      - run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag
+      # The built package is attached, so another computer installs this version without Git or a compiler.
+      - run: npm pack --ignore-scripts
+      - run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag "agent-session-tower-${GITHUB_REF_NAME#v}.tgz"
         env:
           GH_TOKEN: ${{ github.token }}

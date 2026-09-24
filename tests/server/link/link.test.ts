@@ -46,7 +46,9 @@ async function computer(t: TestContext, name: string, options: { pingMs?: number
   t.after(async () => { await self.stop(); await rm(stateDir, { recursive: true, force: true }); });
   return self;
 }
-const connected = (controller: ControllerLinks, name: string) => until(() => controller.list().find(node => node.name === name && node.status === 'connected'), 5000);
+// A code lists every address this computer has, a .local name among them; where that name does not resolve, trying it
+// can take seconds.
+const connected = (controller: ControllerLinks, name: string) => until(() => controller.list().find(node => node.name === name && node.status === 'connected'), 20_000);
 
 test('a computer joins with a code; each side then knows the other and requests reach the joined computer', async t => {
   const a = await computer(t, 'computer-a');
@@ -203,7 +205,8 @@ test('a joining computer refuses to connect when another computer answers in pla
   await a.listen();
   const invite = decodeJoinCode((await a.controller.invite()).code);
   await b.node.join(encodeJoinCode({ ...invite, pin: randomBytes(32).toString('base64url') }));
-  const refused = await until(() => b.node.list().find(item => item.status === 'refused'), 5000);
+  // Every address in the code is tried (see `connected`).
+  const refused = await until(() => b.node.list().find(item => item.status === 'refused'), 20_000);
   assert.match(refused.error ?? '', /다른 컴퓨터가 응답/);
   assert.deepEqual(a.controller.list(), []);
 });

@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readlink, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readlink, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { renderServicePlist, runtimePaths, serviceLabel, currentVersion, useVersion, installVersion } from '../../../server/link/service.js';
+import { renderServicePlist, renderServiceUnit, runtimePaths, serviceLabel, serviceUnit, currentVersion, useVersion, installVersion, versionDirectory, entryPoint } from '../../../server/link/service.js';
 import { runLinkCommand } from '../../../server/link/cli.js';
-import { encodeJoinCode } from '../../../server/link/join-code.js';
+import { encodeJoinCode, joinCommand, releasePackage } from '../../../server/link/join-code.js';
 import { linkId } from '../../../server/link/identity.js';
 import { defaultStateDir } from '../../../server/state-dir.js';
 import { HEALTH_APPLICATION_ID } from '../../../shared/app-identity.js';
@@ -31,6 +31,59 @@ test('each state folder has its own service; the default one keeps the plain nam
   assert.equal(serviceLabel(defaultStateDir()), 'io.github.kimwz.agent-session-tower');
   assert.match(serviceLabel('/tmp/a'), /^io\.github\.kimwz\.agent-session-tower\.[0-9a-f]{8}$/);
   assert.notEqual(serviceLabel('/tmp/a'), serviceLabel('/tmp/b'));
+});
+
+test('on Linux, systemd runs the same command, and stopping or restarting it ends only the web process', () => {
+  const stateDir = '/home/some one/.agent-monitor 100%';
+  const environment = { PATH: '/home/some one/.npm/_npx/abc/node_modules/.bin:/usr/local/bin:/usr/bin', HOME: '/home/some one', LANG: 'ko_KR.UTF-8', SECRET_TOKEN: 'never' };
+  const unit = renderServiceUnit(stateDir, 'systemd-user', { port: 8000, node: '/usr/bin/node', environment });
+  const exec = unit.match(/^ExecStart=(.*)$/m)![1];
+  assert.equal(exec, `"/usr/bin/node" "/home/some one/.agent-monitor 100%%/runtime/current/node_modules/agent-session-tower/bin/agent-session-tower.mjs" "run" "--no-open" "--port" "8000" "--state-dir" "/home/some one/.agent-monitor 100%%"`,
+    'every argument is quoted, and % is not read as a specifier');
+  assert.match(unit, /^Environment="PATH=\/usr\/local\/bin:\/usr\/bin"$/m, 'npx folders are left out');
+  assert.match(unit, /^Environment="LANG=ko_KR\.UTF-8"$/m);
+  assert.doesNotMatch(unit, /SECRET_TOKEN|never/);
+  assert.match(unit, /^KillMode=process$/m, 'the worker, terminal host, agents and shells outlive a restart of the web');
+  assert.match(unit, /^Restart=on-failure$/m);
+  assert.match(unit, /^WantedBy=default\.target$/m);
+  assert.match(unit, /^StandardOutput=journal$/m, 'a log folder with spaces cannot be appended to directly');
+  const system = renderServiceUnit('/root/.agent-monitor', 'systemd-system', { port: 8000, node: '/usr/bin/node', environment: { PATH: '/usr/bin', HOME: '/root' } });
+  assert.match(system, /^WantedBy=multi-user\.target$/m, 'as root it starts at boot, before anyone logs in');
+  assert.match(system, /^StandardOutput=append:\/root\/\.agent-monitor\/logs\/tower\.log$/m);
+  assert.match(system, /^WorkingDirectory=\/root$/m);
+  assert.equal(serviceUnit(defaultStateDir()), 'agent-session-tower.service');
+  assert.match(serviceUnit('/tmp/a'), /^agent-session-tower-[0-9a-f]{8}\.service$/);
+});
+
+test('a version is installed from its release’s built package, waiting for it to be published, and from source only after that', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-install-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const tried: string[] = [];
+  const waits: number[] = [];
+  let publishedAfter = 2;
+  const npm = async (args: string[]) => {
+    const source = args.at(-1)!;
+    tried.push(source);
+    if (source === releasePackage('1.30.0') && publishedAfter-- > 0) throw Object.assign(new Error('Command failed'), { stderr: 'npm error 404 Not Found - GET https://github.com/…' });
+    const prefix = args[args.indexOf('--prefix') + 1];
+    await mkdir(join(prefix, 'node_modules', 'agent-session-tower', 'bin'), { recursive: true });
+    await writeFile(join(prefix, 'node_modules', 'agent-session-tower', 'bin', 'agent-session-tower.mjs'), '');
+  };
+  await installVersion(stateDir, '1.30.0', () => {}, undefined, { waitMs: 60_000, npm, sleep: async ms => { waits.push(ms); } });
+  assert.deepEqual(tried, [releasePackage('1.30.0'), releasePackage('1.30.0'), releasePackage('1.30.0')]);
+  assert.equal(waits.length, 2, 'an unpublished package is waited for');
+  assert.ok(await readFile(entryPoint(versionDirectory(stateDir, '1.30.0')), 'utf8').then(() => true));
+  tried.length = 0;
+  const broken = async (args: string[]) => {
+    if (args.at(-1)!.startsWith('https://')) { tried.push(args.at(-1)!); throw Object.assign(new Error('Command failed'), { stderr: 'npm error code ECONNRESET' }); }
+    return npm(args);
+  };
+  await installVersion(stateDir, '1.31.0', () => {}, undefined, { waitMs: 60_000, npm: broken, sleep: async () => { throw new Error('no wait for a download that failed another way'); } });
+  assert.deepEqual(tried, [releasePackage('1.31.0'), 'github:kimwz/agent-session-tower#v1.31.0'], 'any other failure goes to the source at once');
+  const code = { v: 1 as const, name: 'computer-a', pin: Buffer.alloc(32, 1).toString('base64url'), addresses: ['ws://127.0.0.1:9/tower-link'],
+    inviteId: '00000000-0000-4000-8000-000000000000', secret: Buffer.alloc(32, 2).toString('base64url'), expiresAt: Date.now() + 60_000, version: '1.30.0' };
+  assert.match(joinCommand(code, true), /^npx --yes https:\/\/github\.com\/kimwz\/agent-session-tower\/releases\/download\/v1\.30\.0\/agent-session-tower-1\.30\.0\.tgz join tower-link:/);
+  assert.match(joinCommand(code), /^npx --yes github:kimwz\/agent-session-tower#v1\.30\.0 join tower-link:/, 'until the release publishes its package');
 });
 
 test('the installed version is switched in one step and read back', async t => {

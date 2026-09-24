@@ -80,8 +80,11 @@
   },
   "dependencies": {
     "croner": "10.0.1",
-    "node-pty": "^1.1.0",
     "ws": "^8.21.3",
     "zod": "4.6.5"
+  },
+  "optionalDependencies": {
+    "@lydell/node-pty": "1.2.0-beta.15",
+    "node-pty": "^1.1.0"
   }
 }

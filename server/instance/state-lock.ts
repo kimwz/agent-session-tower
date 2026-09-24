@@ -1,8 +1,10 @@
 import { mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { processStart } from './process-start.js';
 
-interface Owner { pid: number; port: number; createdAt: string }
+/** `started` tells the owner apart from a later process given the same pid, as after a restart. */
+interface Owner { pid: number; port: number; createdAt: string; started?: string }
 
 export class MonitorAlreadyRunning extends Error {
   constructor(public readonly owner: Owner, stateDir: string) {
@@ -13,6 +15,13 @@ export class MonitorAlreadyRunning extends Error {
 function isAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; }
   catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
+}
+/** Whether the owner still runs: its pid lives and, when the start time is known, belongs to the same process. */
+async function ownerRunning(owner: Owner): Promise<boolean> {
+  if (!isAlive(owner.pid)) return false;
+  if (!owner.started) return true;
+  const now = await processStart(owner.pid);
+  return now === undefined || now === owner.started;
 }
 
 /**
@@ -27,7 +36,8 @@ export async function acquireStateLock(stateDir: string, port: number): Promise<
   const marker = `owner-${nonce}.json`;
   const prepared = join(stateDir, `.instance-lock-${process.pid}-${nonce}`);
   await mkdir(prepared, { mode: 0o700 });
-  await writeFile(join(prepared, marker), JSON.stringify({ pid: process.pid, port, createdAt: new Date().toISOString() } satisfies Owner), { mode: 0o600, flag: 'wx' });
+  const started = await processStart(process.pid);
+  await writeFile(join(prepared, marker), JSON.stringify({ pid: process.pid, port, createdAt: new Date().toISOString(), ...(started ? { started } : {}) } satisfies Owner), { mode: 0o600, flag: 'wx' });
   let acquired = false;
   try {
     for (let attempts = 0; attempts < 8; attempts++) {
@@ -51,7 +61,7 @@ export async function acquireStateLock(stateDir: string, port: number): Promise<
           throw new Error(`Cannot read the Agent Session Tower lock at ${lock}. Inspect it before removing it.`);
         }
         if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error(`Invalid Agent Session Tower owner at ${lock}. Inspect it before removing it.`);
-        if (isAlive(owner.pid)) {
+        if (await ownerRunning(owner)) {
           throw new MonitorAlreadyRunning(owner, stateDir);
         }
         // Another process may already have removed this exact stale marker.
@@ -98,7 +108,7 @@ export async function lockOwners(stateDir: string): Promise<Array<{ pid: number;
   const owners: Array<{ pid: number; port: number }> = [];
   for (const name of names.filter(item => /^owner-[\da-f-]{36}\.json$/.test(item))) {
     const owner = await readFile(join(lock, name), 'utf8').then(text => JSON.parse(text) as Owner).catch(() => undefined);
-    if (owner && Number.isSafeInteger(owner.pid) && owner.pid > 0 && Number.isInteger(owner.port) && owner.port > 0 && isAlive(owner.pid)) owners.push({ pid: owner.pid, port: owner.port });
+    if (owner && Number.isSafeInteger(owner.pid) && owner.pid > 0 && Number.isInteger(owner.port) && owner.port > 0 && await ownerRunning(owner)) owners.push({ pid: owner.pid, port: owner.port });
   }
   return owners;
 }

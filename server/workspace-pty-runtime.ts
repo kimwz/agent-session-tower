@@ -4,12 +4,15 @@ import { access, chmod, cp, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { constants, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import type { TerminalSpawnOptions, WorkspacePty } from './workspace-terminals.js';
 
 const require = createRequire(import.meta.url);
-let loading: Promise<typeof import('node-pty')> | undefined;
+/** What Tower uses of node-pty and its prebuilt twin. Typed here, since either package may be absent where Tower is built. */
+export interface PtyModule { spawn(file: string, args: string[], options: TerminalSpawnOptions): WorkspacePty }
+let loading: Promise<PtyModule> | undefined;
 
 /** Native PTY assets need real paths, even when Tower runs as a single executable. */
-export function loadWorkspacePty(): Promise<typeof import('node-pty')> {
+export function loadWorkspacePty(): Promise<PtyModule> {
   return loading ??= load().catch(error => { loading = undefined; throw error; });
 }
 
@@ -20,7 +23,7 @@ async function privateRuntime(): Promise<string> {
   return directory;
 }
 
-async function load(): Promise<typeof import('node-pty')> {
+async function load(): Promise<PtyModule> {
   if (isSea()) {
     const directory = await privateRuntime();
     const files = JSON.parse(getAsset('pty/manifest.json', 'utf8')) as string[];
@@ -33,7 +36,16 @@ async function load(): Promise<typeof import('node-pty')> {
     }
     return require(join(directory, 'lib/index.js'));
   }
-  const entry = require.resolve('node-pty');
+  // node-pty is built where it is installed; where it could not be (Linux without a compiler), the same library with
+  // prebuilt binaries takes its place.
+  try { return await installed('node-pty'); }
+  catch (error) {
+    try { return await installed('@lydell/node-pty'); } catch { throw error; }
+  }
+}
+
+async function installed(name: string): Promise<PtyModule> {
+  const entry = require.resolve(name);
   if (process.platform === 'darwin') {
     // Some npm distributions omit the executable bit on the macOS helper.
     // Keep read-only/global installations untouched; prepare a private copy.

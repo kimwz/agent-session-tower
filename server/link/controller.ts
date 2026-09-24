@@ -76,7 +76,12 @@ export class ControllerLinks extends EventEmitter {
   private closed = false;
   private loaded = false;
 
-  constructor(private readonly options: { stateDir: string; identity: LinkIdentity; version: string; hostname: () => string; now?: () => number; pingMs?: number; refreshMs?: number; updatePollMs?: number }) {
+  /**
+   * `published` tells whether a version's release package can be downloaded yet; the join command installs it when it
+   * can, and builds from source otherwise.
+   */
+  constructor(private readonly options: { stateDir: string; identity: LinkIdentity; version: string; hostname: () => string; now?: () => number; pingMs?: number; refreshMs?: number; updatePollMs?: number;
+    published?: (version: string) => Promise<boolean> }) {
     super();
     this.path = join(linkDirectory(options.stateDir), 'controller.json');
   }
@@ -133,7 +138,7 @@ export class ControllerLinks extends EventEmitter {
     const now = this.now();
     await this.save({ ...this.state, invites: [...this.state.invites.filter(item => item.expiresAt + CLAIM_GRACE_MS > now), invite] });
     const code: JoinCode = { v: 1, name: this.options.hostname(), pin: this.options.identity.pin, addresses: addresses.slice(0, 8), inviteId: invite.id, secret: invite.secret, expiresAt: invite.expiresAt, version: this.options.version };
-    return { id: invite.id, code: encodeJoinCode(code), command: joinCommand(code), expiresAt: invite.expiresAt };
+    return { id: invite.id, code: encodeJoinCode(code), command: joinCommand(code, await this.options.published?.(code.version).catch(() => false) ?? false), expiresAt: invite.expiresAt };
   }
 
   list(): NodeSummary[] {

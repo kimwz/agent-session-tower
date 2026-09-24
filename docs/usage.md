@@ -51,7 +51,7 @@ Tower reads native history directly from:
 
 Custom `CLAUDE_CONFIG_DIR` and `CODEX_HOME` locations are supported. CLI credentials stay on the host machine. Account usage uses native Codex account APIs and the existing Claude Code OAuth credential; credentials are not sent to the browser or copied into Tower's state directory.
 
-Status combines native lifecycle events, live process signals, and recent log activity. Some CLI versions provide fewer signals, so a status may be inferred; the UI's status explanation distinguishes this. macOS is the verified platform. Linux has not been verified. Windows is not currently supported.
+Status combines native lifecycle events, live process signals, and recent log activity. Some CLI versions provide fewer signals, so a status may be inferred; the UI's status explanation distinguishes this. macOS and Linux (with systemd for the background service) are verified; the test suite runs on both. Windows is not currently supported.
 
 Sending a request continues the same native session. Claude sessions resume through the CLI. Codex sessions use the existing local app server when available, or an app-server process started by Tower when the session is no longer owned by another writer. Busy sessions queue requests; unavailable app-server connections may leave them waiting until the original session is released. Tower keeps one active request per session; independent sessions can run concurrently.
 

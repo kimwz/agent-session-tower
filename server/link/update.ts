@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import type { UpdateFailure, UpdateStage, UpdateStatus } from '../../shared/link.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { currentVersion, entryPoint, installVersion, newerVersion, pointCurrent, runtimePaths, serviceLabel, versionDirectory } from './service.js';
+import { processStart } from '../instance/process-start.js';
+import { currentVersion, entryPoint, installVersion, newerVersion, pointCurrent, RELEASE_WAIT_MS, restartService, runtimePaths, versionDirectory } from './service.js';
 
 const run = promisify(execFile);
 /** A new version that does not answer by then is given up on, and the previous one is started again. */
@@ -79,11 +80,7 @@ export async function managedByService(stateDir: string, entry: string | undefin
 function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
 }
-/** When a process started, as the system tells it; a pid given to another process later starts at another time. */
-async function startedAt(pid: number): Promise<string | undefined> {
-  // Read the same way whatever language and time zone the reader runs with.
-  try { return (await run('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 5000, env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } })).stdout.trim() || undefined; } catch { return undefined; }
-}
+const startedAt = processStart;
 /** The lock's owner: its pid and when it started. However long the computer slept, a live helper still owns it. */
 async function lockOwner(stateDir: string): Promise<{ pid: number; started?: string } | undefined> {
   const [pid, ...started] = (await readFile(updatePaths(stateDir).lock, 'utf8').catch(() => '')).split(' ');
@@ -267,13 +264,13 @@ export function serviceSteps(stateDir: string, port: number): UpdateHelperSteps 
   };
   return {
     free: () => diskFree(stateDir),
-    install: version => installVersion(stateDir, version, line => console.log(line)),
+    install: version => installVersion(stateDir, version, line => console.log(line), undefined, { waitMs: RELEASE_WAIT_MS }),
     check: async (directory, version) => {
       const { stdout } = await run(process.execPath, [entryPoint(directory), '--version'], { timeout: 60_000 });
       if (stdout.trim() !== version) throw new Error(`The installed version reports ${stdout.trim().slice(0, 40) || 'nothing'}.`);
     },
     point: version => pointCurrent(stateDir, version),
-    restart: async () => { await run('launchctl', ['kickstart', '-k', `gui/${process.getuid?.() ?? 501}/${serviceLabel(stateDir)}`], { timeout: 30_000 }); },
+    restart: () => restartService(stateDir),
     health: () => read<{ version: string; pid: number }>('/api/health'),
     // The new version answers these the way the helper's own version reads them; anything else counts as no answer.
     controllers: async () => {
