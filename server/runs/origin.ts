@@ -54,6 +54,9 @@ export function sessionOriginOf(origin: RunOrigin | undefined, untrustedInput: b
   return { ...rest, untrustedInput };
 }
 
+/** Work nobody typed into Tower: Slack coordination and delegation, and trigger runs. */
+export function automatedOrigin(origin: RunOrigin | undefined): boolean { return origin?.kind === 'slack' || origin?.kind === 'trigger'; }
+
 /** Runs without a recorded origin compare as unknown. */
 export function sameOrigin(a: RunOrigin | undefined, b: RunOrigin | undefined): boolean {
   const left = a ?? { kind: 'unknown' as const };

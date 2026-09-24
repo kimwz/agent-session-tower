@@ -6,8 +6,6 @@ import type { Provider, ProviderHealth, Run, Session } from '../../../shared/typ
 import { ProviderIcon } from '../common/Icons';
 import { api, providerLabels } from '../common/lib';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
-import { codexApprovalsRequest, readCodexApprovalsChoice, type CodexApprovalsChoice } from './codex-approvals-preference';
-import { CodexApprovalsSelect } from './CodexApprovalsSelect';
 import { EffortPicker, ModelPicker, supportedEffort } from '../chat/ModelPicker';
 import { hostProblem, type Host } from '../remote/hosts';
 import { localPart, nodeHeaders, nodeOf, nodePath, scopeRun, scopeSession, settleRequest } from '../remote/scope';
@@ -42,7 +40,6 @@ export function NewSessionDialog({ providers: localProviders, hosts = [], projec
   const [prompt, setPrompt] = useState('');
   const [model, setModel] = useState<string>();
   const [effort, setEffort] = useState<string>();
-  const [approvals, setApprovals] = useState<CodexApprovalsChoice>(readCodexApprovalsChoice);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [folderError, setFolderError] = useState('');
@@ -87,7 +84,7 @@ export function NewSessionDialog({ providers: localProviders, hosts = [], projec
     dialog.current?.focus();
     try {
       const body = JSON.stringify({ provider, cwd: cwd.trim(), prompt: prompt.trim(), ...(title.trim() ? { title: title.trim() } : {}),
-        ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...codexApprovalsRequest(provider, approvals) });
+        ...(model ? { model } : {}), ...(effort ? { effort } : {}) });
       // Sending the same session again after an unknown outcome reuses its request ID, so it starts at most once.
       const result = await api<{ session: Session; run: Run }>(nodePath(machine, '/api/sessions'), {
         method: 'POST', headers: nodeHeaders(machine, { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, 'new-session', body), body,
@@ -184,12 +181,6 @@ export function NewSessionDialog({ providers: localProviders, hosts = [], projec
           <EffortPicker provider={providerHealth} model={model || providerHealth?.defaultModel} value={effort} disabled={submitting} onChange={setEffort} />
         </div>
       </div>
-
-      {provider === 'codex' && <div className="new-session-field">
-        <label htmlFor={`${id}-approvals`}>{t("승인 검토")}</label>
-        <CodexApprovalsSelect id={`${id}-approvals`} value={approvals} disabled={submitting} onChange={setApprovals} />
-        <p className="new-session-help">{t("이 선택은 새 대화와 함께 저장되며 나중에 Codex에서 바꿀 수 있습니다.")}</p>
-      </div>}
 
       <div className="new-session-field">
         <label htmlFor={`${id}-title`}>{t("세션 이름")}{' '}<span>{t("선택")}</span></label>

@@ -23,6 +23,11 @@ export interface CodexStdioOptions {
   effort?: string;
   /** Explicit requirements are confirmed before submitting either a new or resumed turn. */
   approvalsReviewer?: CodexApprovalsReviewer;
+  /**
+   * The reviewer is what the owner wants rather than a condition of the turn: if Codex does not confirm it, the
+   * output says so and the turn goes ahead with the thread's own reviewer.
+   */
+  approvalsReviewerPreferred?: boolean;
   prompt: string;
   imagePaths?: readonly string[];
   spawnProcess?: SpawnProcess;
@@ -176,10 +181,11 @@ class StdioRun implements CodexStdioRun {
       ...(this.options.model ? { model: this.options.model } : {}),
     });
     if (this.result) return;
-    // Auto approval review is an execution requirement, not a preference. Older
-    // providers that ignore it must not receive the user's task under another mode.
+    // For unattended work, auto approval review is an execution requirement, not a preference. Older
+    // providers that ignore it must not receive the task under another mode.
     if (this.options.approvalsReviewer === 'auto_review' && resumed?.approvalsReviewer !== 'auto_review') {
-      throw new Error('Codex did not confirm Auto approval review. No message was submitted. Update Codex and retry.');
+      if (!this.options.approvalsReviewerPreferred) throw new Error('Codex did not confirm Auto approval review. No message was submitted. Update Codex and retry.');
+      this.options.onOutput('[Tower] Codex did not confirm Auto approval review. Approval requests will wait for you in Tower.\n');
     }
     const id = resumed?.thread?.id;
     if (typeof id !== 'string' || !UUID.test(id) || (this.options.threadId && id !== this.options.threadId)) {

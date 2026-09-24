@@ -25,7 +25,7 @@ createInterface({ input: process.stdin }).on('line', line => {
   appendFileSync(process.env.PROMPTS, JSON.stringify(message.message.content[0].text) + '\\n');
   const turn = readFileSync(process.env.PROMPTS, 'utf8').trim().split('\\n').length - 1;
   const turns = JSON.parse(process.env.TURNS);
-  send({ type: 'system', subtype: 'init', session_id: id, permissionMode: 'default' });
+  send({ type: 'system', subtype: 'init', session_id: id, permissionMode: process.argv.includes('--permission-mode') ? process.argv[process.argv.indexOf('--permission-mode') + 1] : 'default' });
   for (const frame of turns[Math.min(turn, turns.length - 1)]) send(frame);
   send({ type: 'result', is_error: false, result: 'done' });
 });

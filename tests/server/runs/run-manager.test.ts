@@ -52,7 +52,7 @@ function processPrompt() {
   if (mode === 'fail') { process.stderr.write('authentication expired'); process.exit(2); return; }
   if (mode === 'hold') { setTimeout(() => send({type:'item.completed',item:{type:'agent_message',text:'too late'}}), 20000); return; }
   if (provider === 'claude') {
-    send({type:'system',subtype:'init',session_id: mode === 'mismatch' ? '${ID2}' : id, ...(process.env.FIXTURE_PERMISSION_MODE ? {permissionMode: process.env.FIXTURE_PERMISSION_MODE === 'none' ? undefined : process.env.FIXTURE_PERMISSION_MODE} : {permissionMode: 'default'})});
+    send({type:'system',subtype:'init',session_id: mode === 'mismatch' ? '${ID2}' : id, ...(process.env.FIXTURE_PERMISSION_MODE ? {permissionMode: process.env.FIXTURE_PERMISSION_MODE === 'none' ? undefined : process.env.FIXTURE_PERMISSION_MODE} : {permissionMode: process.argv.includes('--permission-mode') ? process.argv[process.argv.indexOf('--permission-mode') + 1] : 'default'})});
     if (process.env.FIXTURE_CONTEXT_FRAMES) { for (const frame of JSON.parse(process.env.FIXTURE_CONTEXT_FRAMES)) send(frame); return; }
     send({type:'stream_event',event:{type:'message_start'}});
     send({type:'stream_event',event:{type:'content_block_delta',delta:{type:'text_delta',text:'Hello '}}});
@@ -855,6 +855,65 @@ test('an unattended Claude run continues only in automatic mode or a mode that a
       if (expected === 'error') assert.match(result.error ?? '', /unexpected permission mode/);
     } finally { await f.cleanup(); }
   });
+});
+
+test("the owner's Claude turns always start in automatic mode, and say so when Claude falls back", async t => {
+  const replies: string[] = [];
+  for (const [mode, note] of [
+    ['auto', undefined],
+    ['default', /^\[Tower\] Claude did not start in automatic permission mode \(default\)\. Approval requests will wait for you in Tower\.\n/],
+    ['acceptEdits', /^\[Tower\] Claude did not start in automatic permission mode \(acceptEdits\)\.\n/],
+  ] as const) await t.test(mode, async () => {
+    const f = await fixture({ provider: 'claude', permissionMode: mode });
+    try {
+      const run = await f.manager.enqueue(f.session.id, 'Owner work', {}, { origin: { kind: 'owner' } });
+      const result = await finished(f.manager, run.id);
+      assert.equal(result.status, 'completed');
+      const args = f.launches[0].args;
+      assert.equal(args[args.indexOf('--permission-mode') + 1], 'auto');
+      if (note) assert.match(result.output, note); else assert.doesNotMatch(result.output, /\[Tower\]/);
+      replies.push(note ? result.output.replace(note, '') : result.output);
+    } finally { await f.cleanup(); }
+  });
+  // The note comes before Claude's own reply and never replaces it.
+  assert.ok(replies[0]);
+  assert.deepEqual(replies, [replies[0], replies[0], replies[0]]);
+});
+
+test("Tower's note never hides a reply Claude gives only as its result", async t => {
+  const f = await fixture({ provider: 'claude', permissionMode: 'default', contextFrames: [{ type: 'result', is_error: false, result: 'Only the result' }] });
+  t.after(f.cleanup);
+  const run = await f.manager.enqueue(f.session.id, 'Owner work', {}, { origin: { kind: 'owner' } });
+  const result = await finished(f.manager, run.id);
+  assert.equal(result.status, 'completed');
+  assert.match(result.output, /\(default\)\. Approval requests will wait for you in Tower\.\nOnly the result$/);
+});
+
+test('a trigger set to wait for the owner starts Claude in its own mode', async t => {
+  const f = await fixture({ provider: 'claude' });
+  t.after(f.cleanup);
+  const run = await f.manager.enqueue(f.session.id, 'Scheduled check', {}, { origin: { kind: 'trigger', triggerId: 'daily' } });
+  const result = await finished(f.manager, run.id);
+  assert.equal(result.status, 'completed');
+  assert.equal(f.launches[0].args.includes('--permission-mode'), false);
+  assert.doesNotMatch(result.output, /\[Tower\]/);
+});
+
+test("a bridged Codex turn asks the desktop app for the automatic reviewer for Tower's own turns only", async t => {
+  const starts: CodexBridgeOptions[] = [];
+  const f = await fixture({ openCodexBridge: async options => {
+    let resolve!: () => void;
+    const done = new Promise<void>(accept => { resolve = accept; });
+    return { start: async () => { starts.push(options); options.onStarted(`turn-${options.runId}`); options.onFinished({ status: 'completed' }); resolve(); },
+      cancel: async () => {}, close: () => {}, done };
+  } });
+  t.after(f.cleanup);
+  const owner = await f.manager.enqueue(f.session.id, 'From the owner', {}, { origin: { kind: 'owner' } });
+  await finished(f.manager, owner.id);
+  const trigger = await f.manager.enqueue(f.session.id, 'From a trigger', {}, { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
+  await finished(f.manager, trigger.id);
+  assert.deepEqual(starts.map(start => [start.prompt, start.approvalsReviewer]), [['From the owner', 'auto_review'], ['From a trigger', undefined]]);
+  assert.equal(f.launches.length, 0);
 });
 
 test('a tool capability reaches Claude through a private file that is gone when the turn ends, never through argv', async t => {

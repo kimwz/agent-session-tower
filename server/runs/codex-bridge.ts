@@ -19,6 +19,8 @@ export interface CodexBridgeOptions {
   imagePaths?: readonly string[];
   model?: string;
   effort?: string;
+  /** Asked of the desktop app for this thread's turns from now on; if it is refused, the turn goes ahead as the app has it. */
+  approvalsReviewer?: 'auto_review';
   onStarted(turnId: string): void;
   onOutput(text: string): void;
   onFinished(result: Result): void;
@@ -156,6 +158,8 @@ class BridgeRun implements CodexBridgeRun {
   private timer?: ReturnType<typeof setTimeout>;
   private missingSince?: number;
   private previousTurnIds = new Set<string>();
+  /** Shown once the turn has started, since starting clears the run's output. */
+  private reviewerNotice?: string;
   private early = new Map<string, { events: Notice[]; size: number }>();
   private output = new Map<string, string>();
   private completedItems = new Set<string>();
@@ -212,6 +216,12 @@ class BridgeRun implements CodexBridgeRun {
         await this.rpc.request('thread/settings/update', { threadId: this.options.threadId,
           ...(this.options.model ? { model: this.options.model } : {}), ...(this.options.effort ? { effort: this.options.effort } : {}) });
       } catch { throw new Error('Codex could not apply the selected model or reasoning effort. No message was submitted.'); }
+      if (this.cancelRequested || this.settled) { this.finish({ status: 'cancelled' }); return; }
+    }
+    // The app keeps the reviewer for the thread's later turns too. Its approvals otherwise stay with the app.
+    if (this.options.approvalsReviewer) {
+      try { await this.rpc.request('thread/settings/update', { threadId: this.options.threadId, approvalsReviewer: this.options.approvalsReviewer }, false); }
+      catch { this.reviewerNotice = '[Tower] The Codex app did not accept Auto approval review. Approval requests will wait for you in the Codex app.\n'; }
       if (this.cancelRequested || this.settled) { this.finish({ status: 'cancelled' }); return; }
     }
     this.submitted = true;
@@ -386,6 +396,7 @@ class BridgeRun implements CodexBridgeRun {
     this.turnId = id;
     this.resolveTurnKnown();
     this.options.onStarted(id);
+    if (this.reviewerNotice) this.options.onOutput(this.reviewerNotice);
     const events = this.early.get(id)?.events || [];
     this.early.clear();
     for (const event of events) this.notice(event);

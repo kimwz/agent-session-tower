@@ -79,30 +79,61 @@ test('new-session model is persisted and passed as a native override', async t =
   assert.equal(f.manager.list().length, count);
 });
 
-test('a chosen approval reviewer reaches the new Codex conversation only, and never a resume', async t => {
+test("Tower's own Codex turns hand approvals to the automatic reviewer, new or resumed, whatever a page asks", async t => {
   const f = await fixture(t);
   const threadParams = async () => JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8')).threadParams;
-  const accepted = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Create with auto review', codexApprovalsReviewer: 'auto_review' });
-  assert.equal(accepted.run.codexApprovalsReviewer, 'auto_review');
+  const owner = { origin: { kind: 'owner' as const } };
+  const accepted = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Create', codexApprovalsReviewer: 'user' }, owner);
+  assert.equal(accepted.run.codexApprovalsReviewer, undefined);
   assert.equal((await finished(f.manager, accepted.run.id)).status, 'completed');
   assert.equal((await threadParams()).approvalsReviewer, 'auto_review');
-  const resumed = await f.manager.enqueue(accepted.session.id, 'continue in the same conversation');
+  const resumed = await f.manager.enqueue(accepted.session.id, 'continue in the same conversation', {}, owner);
   assert.equal((await finished(f.manager, resumed.id)).status, 'completed');
-  assert.equal((await threadParams()).approvalsReviewer, undefined, 'Codex keeps the choice with the thread');
-  const untouched = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Create with the Codex default' });
-  assert.equal((await finished(f.manager, untouched.run.id)).status, 'completed');
-  assert.equal((await threadParams()).approvalsReviewer, undefined);
+  assert.equal((await threadParams()).approvalsReviewer, 'auto_review');
+  const unrecorded = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'No recorded origin' });
+  assert.equal((await finished(f.manager, unrecorded.run.id)).status, 'completed');
+  assert.equal((await threadParams()).approvalsReviewer, 'auto_review');
   const claude = await f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Claude ignores it', codexApprovalsReviewer: 'auto_review' });
   assert.equal(claude.run.codexApprovalsReviewer, undefined);
   await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Invalid reviewer', codexApprovalsReviewer: 'always' as 'user' }), { statusCode: 400 });
 });
 
+test('a trigger keeps the reviewer it chose for a new Codex conversation, and never sends one on resume', async t => {
+  const f = await fixture(t);
+  const threadParams = async () => JSON.parse(await readFile(join(f.directory, 'received.json'), 'utf8')).threadParams;
+  const trigger = { origin: { kind: 'trigger' as const, triggerId: 'daily' } };
+  const chosen = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Scheduled', codexApprovalsReviewer: 'user' }, trigger);
+  assert.equal(chosen.run.codexApprovalsReviewer, 'user');
+  assert.equal((await finished(f.manager, chosen.run.id)).status, 'completed');
+  assert.equal((await threadParams()).approvalsReviewer, 'user');
+  const resumed = await f.manager.enqueue(chosen.session.id, 'continue in the same conversation', {}, trigger);
+  assert.equal((await finished(f.manager, resumed.id)).status, 'completed');
+  assert.equal((await threadParams()).approvalsReviewer, undefined, 'Codex keeps the choice with the thread');
+  const untouched = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Scheduled with the Codex default' }, trigger);
+  assert.equal((await finished(f.manager, untouched.run.id)).status, 'completed');
+  assert.equal((await threadParams()).approvalsReviewer, undefined);
+});
+
+test("a Codex that does not confirm the automatic reviewer still runs the owner's turn, never unattended work", async t => {
+  const f = await fixture(t, 'old-reviewer');
+  const owner = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Create' }, { origin: { kind: 'owner' } });
+  const done = await finished(f.manager, owner.run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /^\[Tower\] Codex did not confirm Auto approval review\. Approval requests will wait for you in Tower\.\n/);
+  const trigger = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Scheduled', codexApprovalsReviewer: 'auto_review' },
+    { origin: { kind: 'trigger', triggerId: 'daily' }, unattended: true });
+  const refused = await finished(f.manager, trigger.run.id);
+  assert.equal(refused.status, 'error');
+  assert.match(refused.error ?? '', /did not confirm Auto approval review\. No message was submitted/);
+});
+
 test('a queued creation keeps its approval reviewer across a Tower restart', async t => {
   const f = await fixture(t, 'hold-before-id', 1);
-  const holding = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'hold', codexApprovalsReviewer: 'user' });
+  const trigger = { origin: { kind: 'trigger' as const, triggerId: 'daily' } };
+  const holding = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'hold', codexApprovalsReviewer: 'user' }, trigger);
   await until(() => f.manager.list().find(run => run.id === holding.run.id && run.status === 'running'));
-  const queued = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'queued', codexApprovalsReviewer: 'auto_review' });
-  const claude = await f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'queued claude', codexApprovalsReviewer: 'auto_review' });
+  const queued = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'queued', codexApprovalsReviewer: 'auto_review' }, trigger);
+  const claude = await f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'queued claude', codexApprovalsReviewer: 'auto_review' }, trigger);
   await f.manager.close();
   const restarted = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {},
     findExecutable: async () => { throw new Error('Restart verification must not launch providers'); } });

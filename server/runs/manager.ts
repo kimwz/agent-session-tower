@@ -21,7 +21,7 @@ import { findExecutable, providerDirectories, PROVIDERS } from '../providers/dis
 import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
-import { parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
+import { automatedOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
 import { WakeupTracker, type Wakeup } from './wakeup.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
@@ -334,8 +334,11 @@ export class RunManager extends EventEmitter {
     if (!PROVIDERS.includes(input.provider)) throw new RunError('Claude 또는 Codex를 선택하세요.');
     const model = requestedModel(input.model);
     const effort = requestedEffort(input.effort, input.provider);
-    // Only a Codex thread has an approvals reviewer; Claude keeps its own permission flow.
-    const approvalsReviewer = input.provider === 'codex' ? requestedApprovalsReviewer(input.codexApprovalsReviewer) : undefined;
+    // Only a Codex thread has an approvals reviewer. Tower's own turns always use the automatic one (see
+    // launchCodex), so a reviewer is kept only for the triggers and Slack work that choose it; one sent by an
+    // older page is still checked, then left out.
+    const requestedReviewer = input.provider === 'codex' ? requestedApprovalsReviewer(input.codexApprovalsReviewer) : undefined;
+    const approvalsReviewer = automatedOrigin(internal.origin) ? requestedReviewer : undefined;
     if (typeof input.cwd !== 'string' || input.cwd.includes('\0') || input.cwd.length > 4096) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
     const cwd = input.cwd === '~' || input.cwd.startsWith('~/') ? join(homedir(), input.cwd.slice(1)) : input.cwd;
     if (!isAbsolute(cwd)) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
@@ -676,6 +679,7 @@ export class RunManager extends EventEmitter {
     let started = false;
     const bridge = await this.options.openCodexBridge({
       threadId: session.nativeId, runId: run.id, prompt: attachmentPrompt(run.prompt, attachments),
+      ...(automated(run) ? {} : { approvalsReviewer: 'auto_review' as const }),
       ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
       ...(attachments.length ? { imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) } : {}),
       onStarted: () => {
@@ -742,11 +746,17 @@ export class RunManager extends EventEmitter {
     const tools = this.runTools(run, session);
     const mcpServers = tools.servers;
     if (tools.towerTools) run.towerTools = tools.towerTools;
+    // Tower's own turns hand approvals to Codex's automatic reviewer, in new and resumed threads alike; if Codex does
+    // not confirm it, the turn still runs and approvals wait in Tower. Triggers and Slack keep the reviewer their
+    // setting chose when the thread started, and Slack's tools require the automatic one.
+    const owner = !automated(run);
+    const approvalsReviewer = mcpServers?.tower_slack || owner ? 'auto_review' as const : creating ? run.codexApprovalsReviewer : undefined;
     const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
       executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
       mcpServers,
-      ...(!creating ? { threadId: session.nativeId } : { ...(run.codexApprovalsReviewer ? { approvalsReviewer: run.codexApprovalsReviewer } : {}) }),
-      ...(mcpServers?.tower_slack ? { approvalsReviewer: 'auto_review' as const } : {}),
+      ...(!creating ? { threadId: session.nativeId } : {}),
+      ...(approvalsReviewer ? { approvalsReviewer } : {}),
+      ...(owner && !mcpServers?.tower_slack ? { approvalsReviewerPreferred: true } : {}),
       ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
       prompt: attachmentPrompt(run.prompt, attachments),
       imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path),
@@ -815,7 +825,7 @@ export class RunManager extends EventEmitter {
     if (tools.towerTools) run.towerTools = tools.towerTools;
     // A capability in a tool server's environment would be visible in the process list as an argument,
     // so such a configuration goes to a private file that lives only as long as the turn.
-    if (run.unattended) args.push('--permission-mode', 'auto');
+    if (automaticApprovals(run)) args.push('--permission-mode', 'auto');
     for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
     const prompt = attachmentPrompt(run.prompt, attachments);
     const input = {
@@ -866,6 +876,10 @@ export class RunManager extends EventEmitter {
     let sawSessionId = false;
     let sawPartial = false;
     let messageHasPartial = false;
+    // What Claude itself put in the output, apart from Tower's notes: its final result is shown only if nothing was.
+    let shown = false;
+    const show = (text: string) => { shown = true; this.append(run, text); };
+    let modeNoted = false;
     let contextInput: { model: string; usedTokens: number } | undefined;
     let identitySaved: Promise<void> = Promise.resolve();
     const wakeups = new WakeupTracker(MAX_PROMPT);
@@ -889,7 +903,7 @@ export class RunManager extends EventEmitter {
     const parseEventLine = (line: string): void => {
       if (!line.trim()) return;
       let event: Record<string, any>;
-      try { event = JSON.parse(line); } catch { this.append(run, line + '\n'); return; }
+      try { event = JSON.parse(line); } catch { show(line + '\n'); return; }
       if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error('Expected a provider event object.');
       if (owned.claude?.handle(event)) {
         if (event.type === 'user' && event.isReplay) sawCompletion = false;
@@ -910,16 +924,19 @@ export class RunManager extends EventEmitter {
         });
       }
       if (actualId === session.nativeId) sawSessionId = true;
-      // Claude reports the mode it actually runs in before doing anything. An unattended run continues only in
-      // automatic mode, or in a mode that asks the owner; any other or missing mode is stopped.
-      if (actualId && run.unattended && event.permissionMode !== 'auto') {
-        if (OWNER_APPROVAL_MODES.has(String(event.permissionMode))) {
-          this.append(run, `[Tower] Claude did not start in automatic permission mode (${String(event.permissionMode)}). Approval requests will wait for you in Tower.\n`);
-        } else {
-          streamError = `Claude started in an unexpected permission mode (${event.permissionMode === undefined ? 'not reported' : String(event.permissionMode)}). The unattended run was stopped before doing anything.`;
+      // Claude reports the mode it actually runs in before doing anything, for example the one it falls back to
+      // where automatic mode is not available. An unattended run continues only in automatic mode, or in a mode
+      // that asks the owner; any other or missing mode is stopped. The owner's own turns go on and say so.
+      if (actualId && automaticApprovals(run) && event.permissionMode !== 'auto') {
+        const mode = event.permissionMode === undefined ? 'not reported' : String(event.permissionMode);
+        const asksOwner = OWNER_APPROVAL_MODES.has(mode);
+        if (!asksOwner && run.unattended) {
+          streamError = `Claude started in an unexpected permission mode (${mode}). The unattended run was stopped before doing anything.`;
           this.stopOwned(run.id, owned);
           return;
         }
+        if (!modeNoted) this.append(run, `[Tower] Claude did not start in automatic permission mode (${mode}).${asksOwner ? ' Approval requests will wait for you in Tower.' : ''}\n`);
+        modeNoted = true;
       }
       if (actualId && actualId !== session.nativeId) {
         streamError = creating ? 'The provider did not confirm the new conversation ID. The task was stopped.' : 'The provider opened a different conversation instead of resuming the requested session. The task was stopped.';
@@ -941,13 +958,13 @@ export class RunManager extends EventEmitter {
         if (event.event?.type === 'message_start') messageHasPartial = false;
         const delta = event.event?.delta;
         if (delta?.type === 'text_delta' && typeof delta.text === 'string') {
-          this.append(run, delta.text); sawPartial = true; messageHasPartial = true;
+          show(delta.text); sawPartial = true; messageHasPartial = true;
         }
-        if (event.event?.type === 'message_stop' && messageHasPartial) this.append(run, '\n\n');
+        if (event.event?.type === 'message_stop' && messageHasPartial) show('\n\n');
       } else if (event.type === 'assistant') {
         for (const block of event.message?.content ?? []) {
-          if (block.type === 'text' && !messageHasPartial) this.append(run, String(block.text) + '\n\n');
-          if (block.type === 'tool_use') this.append(run, `[${block.name}]\n`);
+          if (block.type === 'text' && !messageHasPartial) show(String(block.text) + '\n\n');
+          if (block.type === 'tool_use') show(`[${block.name}]\n`);
         }
         messageHasPartial = false;
       } else if (event.type === 'result') {
@@ -965,9 +982,9 @@ export class RunManager extends EventEmitter {
         if (event.is_error && event.permission_denials?.length) {
           const denied = [...new Set(event.permission_denials.map((denial: any) => denial.tool_name ?? 'tool'))].join(', ');
           streamError = `Permission was denied for: ${denied}. The instruction could not complete with the current permissions.`;
-          this.append(run, `\n${streamError}\n`);
+          show(`\n${streamError}\n`);
         }
-        if (!sawPartial && !run.output && event.result) this.append(run, String(event.result));
+        if (!sawPartial && !shown && event.result) show(String(event.result));
       }
     };
     const parseLine = (line: string): void => {
@@ -1146,7 +1163,8 @@ async function privateMcpConfig(mcpServers: NonNullable<RunTools['servers']>): P
     return { path, remove };
   } catch (error) { remove(); throw error; }
 }
-/** Work nobody typed into Tower: Slack coordination and delegation, and trigger runs. */
-function automated(run: Run): boolean { return run.origin?.kind === 'slack' || run.origin?.kind === 'trigger'; }
+function automated(run: Run): boolean { return automatedOrigin(run.origin); }
+/** Tower's own turns always run in the provider's automatic approval mode; triggers and Slack follow their setting. */
+function automaticApprovals(run: Run): boolean { return run.unattended === true || !automated(run); }
 /** Modes at least as careful as asking the owner. Anything else is not what an unattended run asked for. */
 const OWNER_APPROVAL_MODES = new Set(['default', 'manual', 'plan', 'dontAsk']);

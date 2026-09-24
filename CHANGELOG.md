@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.31.0] - 2026-09-24
+
+### Changed
+- **Claude and Codex approve automatically in every turn Tower runs for you.** Claude Code runs in its auto mode, where a classifier decides which actions go ahead, and Codex hands approval requests to its automatic reviewer (Approve for me). This covers the chat, new conversations and Auto Prompt, on this computer and on joined computers, so a remote computer no longer stops to ask about each command.
+  - The **승인 검토** choice is gone from the new conversation and Auto Prompt windows.
+  - It also applies when Tower continues a conversation started elsewhere. A Codex conversation keeps the automatic reviewer for its later turns, including ones in the Codex app.
+  - Where the automatic mode is not available, the turn still runs, the chat says so, and approval requests wait in Tower as before. This happens when Claude Code's auto mode is not offered for the plan or model, or with an older Codex.
+  - Triggers and Slack keep their own **승인** setting.
+
 ## [1.30.1] - 2026-09-24
 
 ### Fixed

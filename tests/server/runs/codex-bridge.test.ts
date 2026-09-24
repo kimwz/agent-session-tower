@@ -99,11 +99,11 @@ class Fake {
   }
 }
 
-async function open(fake: Fake, runId = 'monitor-run', imagePaths?: string[], model?: string, effort?: string) {
+async function open(fake: Fake, runId = 'monitor-run', imagePaths?: string[], model?: string, effort?: string, extra: Partial<CodexBridgeOptions> = {}) {
   const started: string[] = [];
   const output: string[] = [];
   const finished: Parameters<CodexBridgeOptions['onFinished']>[0][] = [];
-  const bridge = await openCodexBridgeRun({ codexHome: fake.codexHome, threadId: 'thread', runId, prompt: 'Exact prompt: $(never execute)\n새 요청', imagePaths, model, effort, onStarted: id => { started.push(id); }, onOutput: text => { output.push(text); }, onFinished: result => { finished.push(result); } });
+  const bridge = await openCodexBridgeRun({ codexHome: fake.codexHome, threadId: 'thread', runId, prompt: 'Exact prompt: $(never execute)\n새 요청', imagePaths, model, effort, ...extra, onStarted: id => { started.push(id); }, onOutput: text => { output.push(text); }, onFinished: result => { finished.push(result); } });
   assert.ok(bridge);
   return { bridge, started, output, finished };
 }
@@ -133,6 +133,36 @@ test('explicit effort is applied with the thread settings before queue admission
   assert.ok(methods.indexOf('thread/settings/update') < methods.indexOf('thread/queue/add'));
   assert.deepEqual(fake.requests.find(request => request.method === 'thread/settings/update')?.params, { threadId: 'thread', effort: 'high' });
   fake.complete(fake.turns[0], 'used explicit effort'); await run.bridge.done;
+});
+
+test('the automatic reviewer is set on the desktop thread before queue admission', async t => {
+  const fake = await fixture(t, (request, fake) => {
+    if (request.method === 'thread/settings/update') { fake.reply(request, {}); return true; }
+  });
+  const run = await open(fake, 'auto-review', undefined, 'native-model', undefined, { approvalsReviewer: 'auto_review' });
+  t.after(() => run.bridge.close());
+  await run.bridge.start();
+  const methods = fake.requests.map(request => request.method);
+  const updates = fake.requests.filter(request => request.method === 'thread/settings/update').map(request => request.params);
+  assert.deepEqual(updates, [{ threadId: 'thread', model: 'native-model' }, { threadId: 'thread', approvalsReviewer: 'auto_review' }]);
+  assert.ok(methods.lastIndexOf('thread/settings/update') < methods.indexOf('thread/queue/add'));
+  fake.complete(fake.turns[0], 'reviewed automatically'); await run.bridge.done;
+  assert.equal(run.output.join(''), 'reviewed automatically\n\n');
+});
+
+test('a desktop app that refuses the automatic reviewer still gets the prompt, and the turn says so once it starts', async t => {
+  const fake = await fixture(t, (request, fake) => {
+    if (request.method === 'thread/settings/update') { fake.error(request, 'unknown field approvalsReviewer'); return true; }
+  });
+  const run = await open(fake, 'auto-review-refused', undefined, undefined, undefined, { approvalsReviewer: 'auto_review' });
+  t.after(() => run.bridge.close());
+  await run.bridge.start();
+  assert.equal(fake.queue.length + fake.turns.length, 1);
+  await until(() => run.started.length === 1 ? true : undefined);
+  fake.complete(fake.turns[0], 'asked the app'); await run.bridge.done;
+  assert.equal(run.finished[0].status, 'completed');
+  assert.match(run.output[0], /^\[Tower\] The Codex app did not accept Auto approval review\. Approval requests will wait for you in the Codex app\.\n$/);
+  assert.match(run.output.join(''), /asked the app/);
 });
 
 test('model update rejection or connection loss never admits the prompt', async t => {

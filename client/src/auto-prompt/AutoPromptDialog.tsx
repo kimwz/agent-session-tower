@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, ChevronDown, Folder, LoaderCircle, Monitor, Paperclip, Send, ShieldCheck, Sparkles, Square, TriangleAlert, X } from 'lucide-react';
+import { Check, ChevronDown, Folder, LoaderCircle, Monitor, Paperclip, Send, Sparkles, Square, TriangleAlert, X } from 'lucide-react';
 import type { AutoPromptJob, Provider, ProviderHealth, Session } from '../../../shared/types';
 import { MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../../shared/attachments';
 import { DraftAttachments } from '../chat/ChatAttachments';
@@ -10,8 +10,6 @@ import { autoPromptPending, createAutoPromptAttempt, newerAutoPromptJob, type Au
 import { api, providerLabels, sessionTitle } from '../common/lib';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
-import { codexApprovalsRequest, readCodexApprovalsChoice, type CodexApprovalsChoice } from '../sessions/codex-approvals-preference';
-import { CodexApprovalsSelect } from '../sessions/CodexApprovalsSelect';
 import { EffortPicker, ModelPicker, supportedEffort } from '../chat/ModelPicker';
 import { hostProblem, type Host } from '../remote/hosts';
 import { localPart, nodeOf, pathFor, requestId, scopeJob } from '../remote/scope';
@@ -61,7 +59,6 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
   const [provider, setProvider] = useState<Provider>('claude');
   const [model, setModel] = useState<string>();
   const [effort, setEffort] = useState<string>();
-  const [approvals, setApprovals] = useState<CodexApprovalsChoice>(readCodexApprovalsChoice);
   const [cwd, setCwd] = useState('');
   const [prompt, setPrompt] = useState('');
   const [attachments, setAttachments] = useState<DraftAttachment[]>([]);
@@ -191,7 +188,7 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
         const prepared = await prepareDraftAttachments(attachments);
         seenTerminalId.current = '';
         attempt.current = createAutoPromptAttempt({ requestId: requestId(), provider, ...(cwd ? { cwd } : {}), prompt, ...prepared,
-          ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...codexApprovalsRequest(provider, approvals) }, undefined, machine);
+          ...(model ? { model } : {}), ...(effort ? { effort } : {}) }, undefined, machine);
         setAttemptId(attempt.current.id);
         setPreparing(false);
       }
@@ -270,7 +267,6 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
         })}
       </div>
     </div>
-    {provider === 'codex' && <div className="auto-prompt-selectors"><label className="auto-prompt-approvals"><ShieldCheck size={16} aria-hidden="true" /><span>{t('승인 검토')}</span><CodexApprovalsSelect value={approvals} disabled={locked} onChange={setApprovals} /></label></div>}
     <form className={`composer auto-prompt-composer ${locked ? 'disabled' : ''} ${dragging ? 'composer-dragging' : ''}`} aria-busy={preparing || submitting || pending} onSubmit={event => { event.preventDefault(); void submit(); }}
       onDragOver={event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = locked ? 'none' : 'copy'; if (!locked) setDragging(true); } }}
       onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}

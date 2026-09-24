@@ -131,7 +131,10 @@ export interface Run {
   /** Set only in a controller's page, for an item of a joined computer: that computer's id. Servers never send it. */
   node?: string;
   origin?: RunOrigin;
-  /** Started with no one watching; the provider's automatic approval mode decides. */
+  /**
+   * Trigger work set to approve automatically. Tower's own turns always run in the provider's automatic approval
+   * mode; this marks the automated work that does too.
+   */
   unattended?: boolean;
   /** For a turn the owner started: whether Tower's tools reached it, and if not, why. */
   towerTools?: 'attached' | 'desktop-app' | 'external-input' | 'not-owner-session' | 'remote';
@@ -145,6 +148,7 @@ export interface Run {
   attachments?: Attachment[];
   model?: string;
   effort?: string;
+  /** The reviewer a trigger or Slack thread started with. Tower's own turns always use the automatic one. */
   codexApprovalsReviewer?: CodexApprovalsReviewer;
   autoPromptId?: string;
   contextUsage?: SessionContextUsage & { model: string; updatedAt: string };
@@ -197,6 +201,7 @@ export interface CreateSessionRequest {
   title?: string;
   model?: string;
   effort?: string;
+  /** Kept for triggers and Slack. Tower's own turns always use Codex's automatic reviewer, whatever a page sends. */
   codexApprovalsReviewer?: CodexApprovalsReviewer;
   attachments?: AttachmentInput[];
 }
@@ -209,6 +214,7 @@ export interface AutoPromptRequest {
   provider: Provider;
   cwd?: string;
   prompt: string;
+  /** Kept for triggers and Slack. Tower's own turns always use Codex's automatic reviewer, whatever a page sends. */
   codexApprovalsReviewer?: CodexApprovalsReviewer;
   attachments?: AttachmentInput[];
 }
@@ -235,6 +241,7 @@ export interface AutoPromptJob {
   provider: Provider;
   cwd?: string;
   prompt: string;
+  /** The reviewer a trigger or Slack thread started with. Tower's own turns always use the automatic one. */
   codexApprovalsReviewer?: CodexApprovalsReviewer;
   routerModel: string;
   status: 'queued' | 'routing' | 'dispatching' | 'completed' | 'error' | 'cancelled';

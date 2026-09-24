@@ -116,10 +116,23 @@ test('Auto selects among every directory including closed sessions and empty pin
   assert.equal((f.dispatches[0].input as CreateSessionRequest).provider, 'claude');
 });
 
-test('an explicit Codex reviewer creates a configured thread even when routing selects an existing continuation', async t => {
+test("Tower's own Auto Prompts leave out a requested Codex reviewer and continue the chosen conversation", async t => {
   const f = await fixture(t);
   for (const codexApprovalsReviewer of ['auto_review', 'user'] as const) {
-    const accepted = await f.manager.submit(request(f.cwd, { codexApprovalsReviewer }));
+    const accepted = await f.manager.submit(request(f.cwd, { codexApprovalsReviewer }), { origin: { kind: 'owner' } });
+    const job = await f.finished(accepted.id);
+    assert.equal(job.status, 'completed');
+    assert.equal(job.codexApprovalsReviewer, undefined);
+    assert.equal(job.decision?.action, 'resume');
+    assert.equal(f.dispatches.at(-1)!.action, 'resume');
+  }
+});
+
+test("a trigger's explicit Codex reviewer creates a configured thread even when routing selects an existing continuation", async t => {
+  const f = await fixture(t);
+  const origin = { kind: 'trigger' as const, triggerId: 'daily' };
+  for (const codexApprovalsReviewer of ['auto_review', 'user'] as const) {
+    const accepted = await f.manager.submit(request(f.cwd, { codexApprovalsReviewer }), { origin });
     const job = await f.finished(accepted.id);
     assert.equal(job.status, 'completed');
     assert.equal(job.decision?.action, 'create');
@@ -129,23 +142,27 @@ test('an explicit Codex reviewer creates a configured thread even when routing s
     assert.equal((dispatch.input as CreateSessionRequest).codexApprovalsReviewer, codexApprovalsReviewer);
     assert.equal((dispatch.input as CreateSessionRequest).cwd, f.cwd);
   }
-  const ordinary = await f.manager.submit(request(f.cwd));
+  const ordinary = await f.manager.submit(request(f.cwd), { origin });
   assert.equal((await f.finished(ordinary.id)).decision?.action, 'resume');
   assert.equal(f.dispatches.at(-1)!.action, 'resume');
 });
 
-test('a new session created by Auto Prompt uses the chosen approval reviewer, and Claude never carries it', async t => {
+test('a new session created by Auto Prompt carries a reviewer only for triggers and Slack, and Claude never carries it', async t => {
   const f = await fixture(t);
   f.respond(async () => create());
-  const chosen = await f.manager.submit(request(f.cwd, { codexApprovalsReviewer: 'auto_review' }));
+  const trigger = { origin: { kind: 'trigger' as const, triggerId: 'daily' } };
+  const chosen = await f.manager.submit(request(f.cwd, { codexApprovalsReviewer: 'auto_review' }), trigger);
   assert.equal((await f.finished(chosen.id)).status, 'completed');
   assert.equal((f.dispatches[0].input as CreateSessionRequest).codexApprovalsReviewer, 'auto_review');
-  const claude = await f.manager.submit(request(f.cwd, { provider: 'claude', codexApprovalsReviewer: 'auto_review' }));
+  const claude = await f.manager.submit(request(f.cwd, { provider: 'claude', codexApprovalsReviewer: 'auto_review' }), trigger);
   assert.equal((await f.finished(claude.id)).status, 'completed');
   assert.equal((f.dispatches[1].input as CreateSessionRequest).codexApprovalsReviewer, undefined);
+  const owner = await f.manager.submit(request(f.cwd, { codexApprovalsReviewer: 'user' }), { origin: { kind: 'owner' } });
+  assert.equal((await f.finished(owner.id)).status, 'completed');
+  assert.equal((f.dispatches[2].input as CreateSessionRequest).codexApprovalsReviewer, undefined);
   const plain = await f.manager.submit(request(f.cwd));
   assert.equal((await f.finished(plain.id)).status, 'completed');
-  assert.equal((f.dispatches[2].input as CreateSessionRequest).codexApprovalsReviewer, undefined);
+  assert.equal((f.dispatches[3].input as CreateSessionRequest).codexApprovalsReviewer, undefined);
   await assert.rejects(f.manager.submit(request(f.cwd, { codexApprovalsReviewer: 'always' as 'user' })), { statusCode: 400 });
 });
 
