@@ -40,24 +40,23 @@ export function terminalRequest(slot: string, create: () => string): { id: strin
   return { id, reused: false };
 }
 /**
- * Records how a try of a slot's request ended. `done` (it succeeded, or it is known to have run) forgets it.
- * `refused` forgets it only if no earlier try may have run it; `unknown` marks it as possibly run, and from then on
- * the same request is sent until one answer settles it.
+ * Forgets a slot's request once the shell it asked for is known: it opened, or it ran and was closed since, or the
+ * tab is closed. Any other answer, a refusal too, keeps it: the other computer remembers only requests that opened
+ * a shell, so sending the same request again never opens a second one and never loses one.
  */
-export function settleTerminalRequest(slot: string, outcome: 'done' | 'refused' | 'unknown' = 'done'): void {
-  const saved = savedRequest(slot);
-  if (outcome === 'unknown') { if (saved) keepRequest(slot, { ...saved, uncertain: true }); return; }
-  if (outcome === 'refused' && saved?.uncertain) return;
+export function settleTerminalRequest(slot: string): void {
   try { storage()?.removeItem(requestPrefix + slot); } catch { /* Storage may be disabled. */ }
 }
-function savedRequest(slot: string): { id: string; uncertain?: true } | undefined {
+function savedRequest(slot: string): { id: string } | undefined {
   try {
-    const saved = JSON.parse(storage()?.getItem(requestPrefix + slot) ?? 'null') as { id?: unknown; uncertain?: unknown } | null;
-    return saved && typeof saved.id === 'string' && validId(saved.id) ? { id: saved.id, ...(saved.uncertain === true ? { uncertain: true as const } : {}) } : undefined;
+    const saved = storage()?.getItem(requestPrefix + slot) ?? null;
+    if (validId(saved)) return { id: saved };
+    const parsed = JSON.parse(saved ?? 'null') as { id?: unknown } | null;
+    return parsed && typeof parsed.id === 'string' && validId(parsed.id) ? { id: parsed.id } : undefined;
   } catch { return undefined; }
 }
-function keepRequest(slot: string, request: { id: string; uncertain?: true }): void {
-  try { storage()?.setItem(requestPrefix + slot, JSON.stringify(request)); } catch { /* In-memory only. */ }
+function keepRequest(slot: string, request: { id: string }): void {
+  try { storage()?.setItem(requestPrefix + slot, request.id); } catch { /* In-memory only. */ }
 }
 
 /** The shell a slot reconnects to, if it has one. */

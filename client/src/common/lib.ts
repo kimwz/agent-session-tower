@@ -47,7 +47,9 @@ export async function copyText(value: string): Promise<boolean> {
 export class ApiError extends Error {
   /** Set by the server when it knows whether the request ran: `not-admitted` is safe to send again. */
   disposition?: string;
-  constructor(message: string, readonly status: number, disposition?: string) { super(message); this.name = 'ApiError'; if (disposition) this.disposition = disposition; }
+  /** What kind of failure it was, when the server says (`node-offline`: the other computer is away). */
+  code?: string;
+  constructor(message: string, readonly status: number, disposition?: string, code?: string) { super(message); this.name = 'ApiError'; if (disposition) this.disposition = disposition; if (code) this.code = code; }
 }
 export const AUTH_REQUIRED_EVENT = 'tower:auth-required';
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -56,8 +58,13 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     if (response.status === 401 && !path.startsWith('/api/auth/') && typeof window !== 'undefined') window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
     let message = t("요청을 처리하지 못했습니다 ({0})", { 0: response.status });
     let disposition: string | undefined;
-    try { const body = await response.json(); message = body.error || message; disposition = typeof body.disposition === 'string' ? body.disposition : undefined; } catch { /* non-JSON errors retain status */ }
-    throw new ApiError(message, response.status, disposition);
+    let code: string | undefined;
+    try {
+      const body = await response.json(); message = body.error || message;
+      disposition = typeof body.disposition === 'string' ? body.disposition : undefined;
+      code = typeof body.code === 'string' ? body.code : undefined;
+    } catch { /* non-JSON errors retain status */ }
+    throw new ApiError(message, response.status, disposition, code);
   }
   return response.json() as Promise<T>;
 }

@@ -5,7 +5,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { isTerminalReport, terminalInputChunks } from './terminal-input';
 import { bindWorkspaceTerminal, workspaceTerminalSession, forgetWorkspaceTerminal, MAX_TERMINAL_TABS, nextTerminalTab, readTerminalTabs, saveTerminalTabs, savedWorkspaceTerminal, settleTerminalRequest, terminalRequest, terminalSlot, type TerminalTab } from './terminal-session';
 import { absoluteTime, api, ApiError, relativeTime } from '../common/lib';
-import { localPart, nodeHeaders, nodeOf, nodePath, refusedBeforeRunning, requestId, workspacePath } from '../remote/scope';
+import { localPart, nodeHeaders, nodeOf, nodePath, requestId, workspacePath } from '../remote/scope';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 
@@ -230,8 +230,8 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
         created = !once?.reused;
         try { const { id } = await postPath<{ id: string }>('/api/workspace/terminals', { cwd: localPart(cwd), cols: terminal.cols, rows: terminal.rows }, once?.id); settleTerminalRequest(slot); return id; }
         catch (error) {
-          // 410: it ran, and its shell was closed since. A refusal after a try that may have run keeps the request.
-          settleTerminalRequest(slot, (error as { status?: number }).status === 410 ? 'done' : refusedBeforeRunning(error) ? 'refused' : 'unknown');
+          // 410: it ran, and its shell was closed since. Anything else keeps the request for the next try.
+          if ((error as { status?: number }).status === 410) settleTerminalRequest(slot);
           throw error;
         }
       },
@@ -280,10 +280,11 @@ function TerminalPane({ cwd, tab, token, active, onState, onOwned, ref }: { cwd:
       listen();
     }).catch(value => {
       closed = true; terminal.options.disableStdin = true; fail(value);
-      // Without an answer that the shell is gone, it may still be running: the tab offers to reach it again.
-      // A refusal that says nothing was done (an old terminal host, for example) is not a lost connection.
-      const { status, disposition } = value as { status?: number; disposition?: string };
-      if (!disposed) { setStarting(false); setExited(true); setLost(status === undefined || (status >= 500 && disposition !== 'not-admitted')); }
+      // Without an answer that the shell is gone, it may still be running: the tab offers to reach it again. A refusal
+      // from a computer that is there (an old terminal host, a shell that did not start) is not a lost connection.
+      const { status, disposition, code } = value as { status?: number; disposition?: string; code?: string };
+      const away = status === undefined || code === 'node-offline' || disposition === 'uncertain' || status === 504 || (status === 503 && !node);
+      if (!disposed) { setStarting(false); setExited(true); setLost(away); }
     });
     return () => { disposed = true; clearTimeout(timer); clearTimeout(reconnect); input.dispose(); resize.dispose(); observer.disconnect(); stream?.close(); terminal.dispose(); if (terminalRef.current?.terminal === terminal) terminalRef.current = undefined; };
   }, [cwd, slot, token, generation]);
