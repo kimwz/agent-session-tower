@@ -35,13 +35,16 @@ test('each state folder has its own service; the default one keeps the plain nam
 
 test('on Linux, systemd runs the same command, and stopping or restarting it ends only the web process', () => {
   const stateDir = '/home/some one/.agent-monitor 100%';
-  const environment = { PATH: '/home/some one/.npm/_npx/abc/node_modules/.bin:/usr/local/bin:/usr/bin', HOME: '/home/some one', LANG: 'ko_KR.UTF-8', SECRET_TOKEN: 'never' };
+  const environment = { PATH: '/home/some one/.npm/_npx/abc/node_modules/.bin:/usr/local/bin:/usr/bin', HOME: '/home/some one', LANG: 'ko_KR.UTF-8', CODEX_HOME: '/srv/codex$prod "a"', SECRET_TOKEN: 'never' };
   const unit = renderServiceUnit(stateDir, 'systemd-user', { port: 8000, node: '/usr/bin/node', environment });
   const exec = unit.match(/^ExecStart=(.*)$/m)![1];
   assert.equal(exec, `"/usr/bin/node" "/home/some one/.agent-monitor 100%%/runtime/current/node_modules/agent-session-tower/bin/agent-session-tower.mjs" "run" "--no-open" "--port" "8000" "--state-dir" "/home/some one/.agent-monitor 100%%"`,
     'every argument is quoted, and % is not read as a specifier');
   assert.match(unit, /^Environment="PATH=\/usr\/local\/bin:\/usr\/bin"$/m, 'npx folders are left out');
   assert.match(unit, /^Environment="LANG=ko_KR\.UTF-8"$/m);
+  assert.ok(unit.includes('Environment="CODEX_HOME=/srv/codex$prod \\"a\\""\n'), 'in Environment a $ is itself; only quotes are escaped');
+  assert.ok(renderServiceUnit('/srv/tower$1', 'systemd-system', { port: 8000, node: '/usr/bin/node', environment: { PATH: '/usr/bin', HOME: '/root' } }).includes('"--state-dir" "/srv/tower$$1"'),
+    'in ExecStart a $ would start a variable');
   assert.doesNotMatch(unit, /SECRET_TOKEN|never/);
   assert.match(unit, /^KillMode=process$/m, 'the worker, terminal host, agents and shells outlive a restart of the web');
   assert.match(unit, /^Restart=on-failure$/m);
@@ -50,7 +53,9 @@ test('on Linux, systemd runs the same command, and stopping or restarting it end
   const system = renderServiceUnit('/root/.agent-monitor', 'systemd-system', { port: 8000, node: '/usr/bin/node', environment: { PATH: '/usr/bin', HOME: '/root' } });
   assert.match(system, /^WantedBy=multi-user\.target$/m, 'as root it starts at boot, before anyone logs in');
   assert.match(system, /^StandardOutput=append:\/root\/\.agent-monitor\/logs\/tower\.log$/m);
-  assert.match(system, /^WorkingDirectory=\/root$/m);
+  assert.match(system, /^WorkingDirectory=-\/root$/m);
+  assert.match(system, /^OOMPolicy=continue$/m, 'an agent the kernel stops for memory does not stop Tower');
+  assert.throws(() => renderServiceUnit('/root/.agent-monitor', 'systemd-system', { port: 8000, node: '/usr/bin/node', environment: { PATH: '/usr/bin', HOME: '/root', LANG: 'x\ny' } }), /line break/);
   assert.equal(serviceUnit(defaultStateDir()), 'agent-session-tower.service');
   assert.match(serviceUnit('/tmp/a'), /^agent-session-tower-[0-9a-f]{8}\.service$/);
 });
@@ -64,7 +69,7 @@ test('a version is installed from its release’s built package, waiting for it 
   const npm = async (args: string[]) => {
     const source = args.at(-1)!;
     tried.push(source);
-    if (source === releasePackage('1.30.0') && publishedAfter-- > 0) throw Object.assign(new Error('Command failed'), { stderr: 'npm error 404 Not Found - GET https://github.com/…' });
+    if (source === releasePackage('1.30.0') && publishedAfter-- > 0) throw Object.assign(new Error('Command failed'), { stderr: `npm error 404 Not Found - GET ${source}` });
     const prefix = args[args.indexOf('--prefix') + 1];
     await mkdir(join(prefix, 'node_modules', 'agent-session-tower', 'bin'), { recursive: true });
     await writeFile(join(prefix, 'node_modules', 'agent-session-tower', 'bin', 'agent-session-tower.mjs'), '');

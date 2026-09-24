@@ -18,7 +18,7 @@ import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../
 import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
 import { WorkspaceTerminals, type WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import type { AuthStore } from '../auth/store.js';
-import { requestIdentity, sessionCookie, setSessionCookie } from './auth.js';
+import { ownerIdentity, sessionCookie, setSessionCookie } from './auth.js';
 import type { AuthStatus } from '../../shared/auth.js';
 import type { SlackPublicStatus } from '../../shared/slack.js';
 import { OPERATIONS, isOperationName } from '../../shared/api/operations.js';
@@ -163,7 +163,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         bindHost: address && typeof address === 'object' ? address.address : undefined,
         remoteAccess: Boolean(remote),
       });
-      const identity = requestIdentity(req);
+      const identity = await ownerIdentity(req);
       const sessionId = sessionCookie(req);
       const authenticated = identity.local || Boolean(auth?.session(sessionId, identity.ip));
       const authStatus = (signedIn = authenticated): AuthStatus => ({

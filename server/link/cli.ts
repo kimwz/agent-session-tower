@@ -8,7 +8,7 @@ import { lockOwners } from '../instance/state-lock.js';
 import { defaultStateDir } from '../state-dir.js';
 import { decodeJoinCode } from './join-code.js';
 import { displayFingerprint, linkId } from './identity.js';
-import { currentVersion, installService, installVersion, newerVersion, serviceManager, serviceStatus, uninstallService, useVersion, type ServiceManager } from './service.js';
+import { currentVersion, installService, installVersion, newerVersion, serviceManager, serviceStatus, START_YOURSELF, uninstallService, useVersion, type ServiceManager } from './service.js';
 
 const USAGE = `Usage:
   agent-session-tower join <code> [--state-dir <path>] [--port <number>] [--no-service]
@@ -56,9 +56,9 @@ export async function runLinkCommand(args: string[]): Promise<void> {
   }
   const manager = service ? await serviceManager() : undefined;
   if (!running && !manager) {
-    throw new Error(!service ? 'Tower is not running here. Start it (agent-session-tower --no-open) and run this command again, or leave out --no-service.'
-      : process.platform === 'linux' ? 'This computer does not run systemd, so Tower cannot keep itself running here. Start it yourself (agent-session-tower --no-open), keep it running, and run this command again.'
-      : 'Tower is not running here. On this system, start it with your service manager (agent-session-tower --no-open) and run this command again.');
+    throw new Error(!service ? `Tower is not running here. ${START_YOURSELF} Or leave out --no-service.`
+      : process.platform === 'linux' ? `This computer does not run systemd, so Tower cannot keep itself running here. ${START_YOURSELF}`
+      : `Tower is not running here. ${START_YOURSELF}`);
   }
   if (!running && !await portFree(port)) throw new Error(`Port ${port} is used by another program on this computer. Run this command again with --port ${port + 1} (or another free port).`);
   // Coming back after a logout or restart without anyone at this computer needs the background service. When Tower
@@ -93,7 +93,12 @@ export async function runLinkCommand(args: string[]): Promise<void> {
     : 'Another computer answered at that address. Check the addresses in the code.');
   console.log(`Connected. ${name} can now see and control this computer. Folders you exclude in Tower (Remote computers → Sharing) stay private.`);
   if (process.platform === 'darwin') console.log('Tower runs while you are logged in to this computer. To keep it reachable, let it log in automatically and keep it from sleeping (System Settings → Energy).');
-  else if (manager) console.log(`Tower runs in the background from boot (${manager === 'systemd-system' ? 'systemctl status' : 'systemctl --user status'} ${(await serviceStatus(stateDir)).file?.split('/').at(-1) ?? 'agent-session-tower.service'}); its log is ${resolve(stateDir, 'logs', 'tower.log')}.`);
+  else if (manager) {
+    console.log(`Tower runs in the background from boot (${manager === 'systemd-system' ? 'systemctl status' : 'systemctl --user status'} ${(await serviceStatus(stateDir)).file?.split('/').at(-1) ?? 'agent-session-tower.service'}); its log is ${resolve(stateDir, 'logs', 'tower.log')}.`);
+    if (manager === 'systemd-system') console.log(`Tower runs as root here, so ${name} can run anything on this computer as root. To give it less, remove this service and join from a regular account instead.`);
+    // WSL stops its Linux when nothing uses it, whatever systemd starts inside.
+    if (process.env.WSL_DISTRO_NAME) console.log('This Linux runs in WSL, which Windows stops when it is idle; Tower is reachable only while WSL runs.');
+  }
   console.log('Work runs with this computer\'s own Claude Code and Codex sign-ins; sign in to them here if you have not yet.');
 }
 

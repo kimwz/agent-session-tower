@@ -17,4 +17,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # Linux servers often have no compiler: terminals then use node-pty's prebuilt twin, which is what is checked here.
+      - if: runner.os == 'Linux'
+        run: rm -rf node_modules/node-pty
       - run: npm run check

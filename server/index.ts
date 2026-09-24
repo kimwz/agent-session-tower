@@ -37,7 +37,7 @@ import { runLinkCommand } from './link/cli.js';
 import { RemoteNodes } from './link/nodes.js';
 import { RemoteAudit } from './remote/audit.js';
 import { NodeViewStore } from './link/views.js';
-import { newerVersion } from './link/service.js';
+import { newerVersion, refreshService } from './link/service.js';
 import { releasePublished } from './link/join-code.js';
 import { diskFree, handoffHeld, heldWorkerEntry, managedByService, runUpdateHelper, serviceSteps, Updates } from './link/update.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
@@ -165,6 +165,9 @@ async function main() {
   const exclusions = new RemoteExclusionStore(stateDir);
   // Only the background service's own install is replaced by an update; an update left unfinished is settled first.
   const updates = new Updates({ stateDir, version: APP_VERSION, port, managed: await managedByService(stateDir, process.argv[1], Boolean(serviceLog)) });
+  // Started as the background service, this version writes the service the way it runs it best, for its next start.
+  if (updates.managed) void refreshService(stateDir).then(written => { if (written) console.log('  The background service settings were updated for the next start.'); },
+    error => console.error(`The background service settings were not updated: ${error instanceof Error ? error.message : String(error)}`));
   await updates.recover().catch(error => console.error(`The last update could not be settled: ${error instanceof Error ? error.message : String(error)}`));
   // While an update is tried, the worker stays the previous version's, and one that is needed is started from it.
   const runs = new DurableRunManager({ stateDir, handoffHeld: () => handoffHeld(stateDir), heldWorkerEntry: () => heldWorkerEntry(stateDir) });

@@ -1,7 +1,7 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { constants } from 'node:fs';
-import { access, cp, mkdir, readFile, readlink, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { access, cp, mkdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { homedir, userInfo } from 'node:os';
 import { basename, dirname, join, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
@@ -50,7 +50,8 @@ export async function installVersion(stateDir: string, version: string, log: (li
       for (;;) {
         const failure = await install(releasePackage(version)).then(() => undefined, error => error as Error);
         if (!failure) break;
-        const unpublished = /\b404\b|E404/.test(`${(failure as { stderr?: unknown }).stderr ?? ''} ${failure.message}`);
+        const output = `${(failure as { stderr?: unknown }).stderr ?? ''} ${failure.message}`;
+        const unpublished = /\b404\b/.test(output) && output.includes(releasePackage(version));
         if (unpublished && Date.now() < deadline) { await sleep(30_000); continue; }
         log(`The release's package could not be installed; building ${version} from its source (this takes a few minutes)…`);
         await install(`${REPOSITORY}#v${version}`);
@@ -130,19 +131,22 @@ export function serviceUnit(stateDir: string): string {
 export function serviceFile(stateDir: string, manager: ServiceManager): string {
   if (manager === 'launchd') return servicePlist(stateDir);
   if (manager === 'systemd-system') return join('/etc/systemd/system', serviceUnit(stateDir));
-  return join(process.env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'systemd', 'user', serviceUnit(stateDir));
+  return join(homedir(), '.config', 'systemd', 'user', serviceUnit(stateDir));
 }
 
 const xml = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-/** What the service starts, and with which environment: the user's PATH without npx's folders, and Tower's own variables. */
+/**
+ * What the service starts, and with which environment: the user's PATH without npx's folders (only absolute folders),
+ * who the user is (a service started by systemd has no login shell or name of its own), and Tower's own variables.
+ */
 function serviceCommand(stateDir: string, options: { port: number; node?: string; environment?: NodeJS.ProcessEnv }) {
   const paths = runtimePaths(stateDir);
   const env = options.environment ?? process.env;
   // npx and npm put their own and every parent folder's node_modules/.bin first; the service keeps the user's PATH.
-  const path = (env.PATH ?? '/usr/bin:/bin').split(':').filter(entry => entry && !/(^|\/)node_modules\/\.bin$|node-gyp-bin|\/_npx\//.test(entry)).join(':');
+  const path = (env.PATH ?? '/usr/bin:/bin').split(':').filter(entry => entry.startsWith('/') && !/(^|\/)node_modules\/\.bin$|node-gyp-bin|\/_npx\//.test(entry)).join(':');
   const variables: Record<string, string> = { PATH: path || '/usr/bin:/bin', HOME: env.HOME ?? homedir(), TOWER_SERVICE_LOG: join(paths.logs, 'tower.log') };
-  for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'LANG']) if (env[key]) variables[key] = env[key]!;
+  for (const key of ['CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'LANG', 'SHELL', 'USER', 'LOGNAME']) if (env[key]) variables[key] = env[key]!;
   const argumentsList = [options.node ?? process.execPath, entryPoint(paths.current), 'run', '--no-open', '--port', String(options.port), '--state-dir', stateDir];
   return { argumentsList, variables, log: join(paths.logs, 'tower.log') };
 }
@@ -173,8 +177,13 @@ ${Object.entries(variables).map(([key, value]) => `    <key>${xml(key)}</key><st
 `;
 }
 
-/** One value in a unit file, quoted: systemd reads `%` as a specifier, `$` as a variable, and `\\` and `"` as escapes. */
-const unitValue = (value: string) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%').replace(/\$/g, '$$$$').replace(/\n/g, ' ')}"`;
+/** One value in a unit file, quoted: systemd reads `%` as a specifier, and `\\` and `"` as escapes. */
+const unitValue = (value: string) => {
+  if (/[\n\r]/.test(value)) throw new Error(`A line break cannot be part of a service setting: ${JSON.stringify(value)}`);
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
+};
+/** An argument of ExecStart, where `$` also starts a variable (in Environment it does not). */
+const unitArgument = (value: string) => unitValue(value).replace(/\$/g, '$$$$');
 
 /**
  * The systemd unit that runs the installed `current` version with this state directory. Stopping or restarting it
@@ -190,12 +199,13 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=${argumentsList.map(unitValue).join(' ')}
+ExecStart=${argumentsList.map(unitArgument).join(' ')}
 ${Object.entries(variables).map(([key, value]) => `Environment=${unitValue(`${key}=${value}`)}`).join('\n')}
-WorkingDirectory=${variables.HOME.replace(/%/g, '%%')}
+WorkingDirectory=-${variables.HOME.replace(/%/g, '%%')}
 Restart=on-failure
 RestartSec=10
 KillMode=process
+OOMPolicy=continue
 StandardOutput=${output}
 StandardError=${output}
 
@@ -208,8 +218,14 @@ WantedBy=${manager === 'systemd-system' ? 'multi-user.target' : 'default.target'
  * systemctl for the service's manager. A user's manager is found through the runtime folder a login sets up; a shell
  * reached through su or sudo has none set, so the folder systemd keeps for that user is used.
  */
-const systemctl = (manager: 'systemd-system' | 'systemd-user', ...args: string[]) => run('systemctl', [...manager === 'systemd-user' ? ['--user'] : [], ...args], { timeout: 60_000,
-  env: manager === 'systemd-user' && !process.env.XDG_RUNTIME_DIR ? { ...process.env, XDG_RUNTIME_DIR: `/run/user/${process.getuid?.()}` } : process.env });
+const systemctl = async (manager: 'systemd-system' | 'systemd-user', ...args: string[]) => run('systemctl', [...manager === 'systemd-user' ? ['--user'] : [], ...args], { timeout: 60_000,
+  env: manager === 'systemd-user' ? { ...process.env, XDG_RUNTIME_DIR: await userRuntime() } : process.env });
+/** This user's runtime folder: the one set, if it is this user's (su without a dash keeps the previous user's), or systemd's own. */
+async function userRuntime(): Promise<string> {
+  const set = process.env.XDG_RUNTIME_DIR;
+  if (set && await stat(set).then(info => info.uid === process.getuid?.(), () => false)) return set;
+  return `/run/user/${process.getuid?.()}`;
+}
 const detail = (error: unknown) => String((error as { stderr?: unknown }).stderr || (error as Error).message).trim().split('\n')[0];
 
 /**
@@ -219,15 +235,17 @@ const detail = (error: unknown) => String((error as { stderr?: unknown }).stderr
  */
 export async function installService(stateDir: string, options: { port: number; node?: string; environment?: NodeJS.ProcessEnv; start?: boolean }): Promise<ServiceManager> {
   const manager = await serviceManager();
-  if (!manager) throw new Error(process.platform === 'linux'
-    ? 'This computer does not run systemd, so Tower cannot keep itself running here. Start it yourself (agent-session-tower --no-open), keep it running, and run this command again.'
-    : 'The background service is available on macOS and on Linux with systemd. Start Tower yourself (agent-session-tower --no-open) and run this command again.');
+  if (!manager) throw new Error(process.platform === 'linux' ? `This computer does not run systemd, so Tower cannot keep itself running here. ${START_YOURSELF}`
+    : `The background service is available on macOS and on Linux with systemd. ${START_YOURSELF}`);
   await mkdir(runtimePaths(stateDir).logs, { recursive: true, mode: 0o700 });
   const node = options.node ?? await stableNode();
+  const environment = await serviceEnvironment(manager, options.environment ?? process.env, node);
   const file = serviceFile(stateDir, manager);
+  // Kept, so a later version can write the same service again with what it knows then (see refreshService).
+  await writeFile(join(runtimePaths(stateDir).root, 'service.json'), JSON.stringify({ manager, port: options.port, node, environment }), { mode: 0o600 });
   if (manager === 'launchd') {
     await mkdir(dirname(file), { recursive: true });
-    await writeFile(file, renderServicePlist(stateDir, { ...options, node }), { mode: 0o644 });
+    await writeFile(file, renderServicePlist(stateDir, { port: options.port, node, environment }), { mode: 0o644 });
     const domain = `gui/${process.getuid?.() ?? 501}`;
     await run('launchctl', ['bootout', domain, file]).catch(() => {});
     if (options.start === false) return manager;
@@ -240,25 +258,72 @@ export async function installService(stateDir: string, options: { port: number; 
   // A user's services stop when the user logs out unless systemd keeps that user's manager running.
   if (manager === 'systemd-user') await keepUserServices();
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(file, renderServiceUnit(stateDir, manager, { ...options, node }), { mode: 0o644 });
+  await writeFile(file, renderServiceUnit(stateDir, manager, { port: options.port, node, environment }), { mode: 0o644 });
+  const status = `${manager === 'systemd-user' ? 'systemctl --user' : 'systemctl'} status ${serviceUnit(stateDir)}`;
   try {
     await systemctl(manager, 'daemon-reload');
     await systemctl(manager, 'enable', serviceUnit(stateDir));
     if (options.start !== false) await systemctl(manager, 'restart', serviceUnit(stateDir));
   } catch (error) {
-    throw new Error(`The background service is set up, but systemd did not start it (${detail(error)}).${manager === 'systemd-user' ? ' Log in to this computer directly (not through su or sudo) and run this command again, or run it as root.' : ''}`);
+    throw new Error(`The background service is set up, but systemd did not start it (${detail(error)}). See \`${status}\` and \`journalctl ${manager === 'systemd-user' ? '--user ' : ''}-u ${serviceUnit(stateDir)}\`.${manager === 'systemd-user' ? ' If you reached this account through su or sudo, log in to it directly and run this command again, or run it as root.' : ''}`);
   }
   return manager;
 }
 
-/** Lets this user's services run without anyone logged in, as they must on a computer nobody logs in to. */
+/** How to run Tower without a service, in the form that works where it was started through npx. */
+export const START_YOURSELF = 'Start Tower yourself (npx --yes github:kimwz/agent-session-tower --no-open, or agent-session-tower --no-open if it is installed), keep it running, and run this command again.';
+
+/**
+ * The environment the service is given. Who the user is comes from the system, not from variables sudo -E may have
+ * carried over. A service for the whole computer runs as root, so its PATH leaves out folders others may write to;
+ * the folder of the Node it runs stays, for npm.
+ */
+async function serviceEnvironment(manager: ServiceManager, env: NodeJS.ProcessEnv, node: string): Promise<NodeJS.ProcessEnv> {
+  const me = userInfo();
+  const own = { ...env, HOME: me.homedir, USER: me.username, LOGNAME: me.username, ...(me.shell ? { SHELL: me.shell } : {}) };
+  if (manager !== 'systemd-system') return own;
+  const kept: string[] = [];
+  for (const folder of (env.PATH ?? '').split(':')) {
+    if (folder.startsWith('/') && await stat(folder).then(info => info.isDirectory() && (info.mode & 0o022) === 0, () => false)) kept.push(folder);
+  }
+  if (!kept.includes(dirname(node))) kept.push(dirname(node));
+  return { ...own, PATH: kept.join(':') };
+}
+
+/**
+ * Writes the installed service again with what this version knows about running it, when that differs; it takes effect
+ * the next time the service starts. Started as the service, a new version keeps the service up to date this way.
+ */
+export async function refreshService(stateDir: string): Promise<boolean> {
+  const saved = await readFile(join(runtimePaths(stateDir).root, 'service.json'), 'utf8').then(text => JSON.parse(text) as { manager: ServiceManager; port: number; node: string; environment: NodeJS.ProcessEnv }, () => undefined);
+  if (!saved || saved.manager !== await serviceManager()) return false;
+  const file = serviceFile(stateDir, saved.manager);
+  const options = { port: saved.port, node: saved.node, environment: saved.environment };
+  const wanted = saved.manager === 'launchd' ? renderServicePlist(stateDir, options) : renderServiceUnit(stateDir, saved.manager, options);
+  if (await readFile(file, 'utf8').catch(() => undefined) === wanted) return false;
+  await writeFile(file, wanted, { mode: 0o644 });
+  if (saved.manager !== 'launchd') await systemctl(saved.manager, 'daemon-reload');
+  return true;
+}
+
+/**
+ * Lets this user's services run without anyone logged in, as they must on a computer nobody logs in to. Allowed for
+ * oneself, it is done at once; otherwise sudo is asked, with its password prompt when this runs in a terminal.
+ */
 async function keepUserServices(): Promise<void> {
-  const user = process.env.USER || process.env.LOGNAME || (await run('id', ['-un'])).stdout.trim();
+  const user = userInfo().username;
   const lingering = async () => (await run('loginctl', ['show-user', user, '--property=Linger']).then(result => result.stdout, () => '')).includes('Linger=yes');
-  if (await lingering()) return;
-  await run('loginctl', ['enable-linger', user]).catch(() => run('sudo', ['-n', 'loginctl', 'enable-linger', user])).catch(() => {});
-  if (await lingering()) return;
-  throw new Error(`Tower has to keep running while nobody is logged in here. Run \`sudo loginctl enable-linger ${user}\` once (or run this command as root), then run this command again.`);
+  if (!await lingering()) {
+    await run('loginctl', ['enable-linger', user]).catch(() => undefined);
+    if (!await lingering() && process.stdin.isTTY) {
+      console.log(`Tower has to keep running while nobody is logged in. Allowing that for ${user} needs sudo:`);
+      await new Promise<void>(resolve => spawn('sudo', ['loginctl', 'enable-linger', user], { stdio: 'inherit' }).once('close', () => resolve()).once('error', () => resolve()));
+    }
+    if (!await lingering()) throw new Error(`Tower has to keep running while nobody is logged in here. Run \`sudo loginctl enable-linger ${user}\` once (or run this command as root), then run this command again.`);
+  }
+  // The user's service manager starts a moment after lingering is allowed.
+  const bus = join(await userRuntime(), 'systemd', 'private');
+  for (let waited = 0; waited < 10_000 && !await access(bus).then(() => true, () => false); waited += 250) await new Promise(resolve => setTimeout(resolve, 250));
 }
 
 /**
@@ -267,6 +332,8 @@ async function keepUserServices(): Promise<void> {
  */
 async function stableNode(): Promise<string> {
   const actual = await realpath(process.execPath).catch(() => process.execPath);
+  // A snap keeps each revision in its own folder and removes old ones; its command stays in place.
+  if (/^\/snap\/node\/[^/]+\//.test(actual) && await access('/snap/bin/node').then(() => true, () => false)) return '/snap/bin/node';
   for (const candidate of ['/opt/homebrew/bin/node', '/usr/local/bin/node', '/usr/bin/node']) {
     if (await realpath(candidate).then(target => target === actual, () => false)) return candidate;
   }

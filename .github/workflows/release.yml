@@ -16,10 +16,12 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run check
+      # The version was checked before it was tagged. Its built package is published first, since joined computers wait
+      # for it to update; the checks run again after.
+      - run: npm run build
       - run: node scripts/release.mjs notes "$GITHUB_REF_NAME" > release-notes.md
-      # The built package is attached, so another computer installs this version without Git or a compiler.
       - run: npm pack --ignore-scripts
       - run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file release-notes.md --verify-tag "agent-session-tower-${GITHUB_REF_NAME#v}.tgz"
         env:
           GH_TOKEN: ${{ github.token }}
+      - run: npm run check
