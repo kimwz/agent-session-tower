@@ -20,8 +20,7 @@ const HOLD_MS = 15 * 60_000;
 const STABLE_MS = 60_000;
 /** Space an install needs, besides what the running work may still write. */
 const MIN_FREE_BYTES = 2 * 1024 ** 3;
-/** Longer than any helper runs; a lock older than this belongs to no helper, whatever process now has its pid. */
-const LOCK_MS = 45 * 60_000;
+
 const ACTIVE: ReadonlySet<UpdateStage> = new Set(['installing', 'checking', 'switching', 'verifying', 'rolling-back']);
 /** A helper that has not taken its lock this long after it was asked for did not start. */
 const STARTING_MS = 30_000;
@@ -80,25 +79,39 @@ export async function managedByService(stateDir: string, entry: string | undefin
 function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM'; }
 }
+/** When a process started, as the system tells it; a pid given to another process later starts at another time. */
+async function startedAt(pid: number): Promise<string | undefined> {
+  try { return (await run('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 5000 })).stdout.trim() || undefined; } catch { return undefined; }
+}
+/** The lock's owner: its pid and when it started. However long the computer slept, a live helper still owns it. */
+async function lockOwner(stateDir: string): Promise<{ pid: number; started?: string } | undefined> {
+  const [pid, ...started] = (await readFile(updatePaths(stateDir).lock, 'utf8').catch(() => '')).split(' ');
+  return Number(pid) > 0 && Number.isInteger(Number(pid)) ? { pid: Number(pid), ...(started.length ? { started: started.join(' ') } : {}) } : undefined;
+}
 async function helperRunning(stateDir: string): Promise<boolean> {
-  const { lock } = updatePaths(stateDir);
-  const [text, info] = await Promise.all([readFile(lock, 'utf8').catch(() => ''), stat(lock).catch(() => undefined)]);
-  const pid = Number(text);
-  // A helper touches its lock at every stage, so an old lock is left over even if its pid was given to another process.
-  return Number.isInteger(pid) && pid > 0 && !!info && Date.now() - info.mtimeMs < LOCK_MS && alive(pid);
+  const owner = await lockOwner(stateDir);
+  if (!owner || !alive(owner.pid)) return false;
+  if (!owner.started) return true;
+  const now = await startedAt(owner.pid);
+  return now === undefined || now === owner.started;
 }
 /**
- * Takes the helper lock. It is published whole, with its owner's pid in it, so another helper never sees it empty;
- * a lock whose owner is gone is taken over.
+ * Takes the helper lock. It is published whole, with its owner's pid and start time in it, so another helper never
+ * sees it empty; a lock whose owner is gone is taken over. Two helpers taking over the same stale lock at once
+ * can both publish; the one whose lock is no longer there a moment later stands down.
  */
 async function takeLock(stateDir: string): Promise<boolean> {
   const { lock } = updatePaths(stateDir);
   const temporary = `${lock}.${process.pid}`;
-  await writeFile(temporary, String(process.pid), { mode: 0o600 });
+  const mine = `${process.pid} ${await startedAt(process.pid) ?? ''}`.trim();
+  await writeFile(temporary, mine, { mode: 0o600 });
   try {
     for (let attempt = 0; attempt < 2; attempt++) {
-      try { await link(temporary, lock); return true; }
-      catch (error) {
+      try {
+        await link(temporary, lock);
+        await new Promise(resolve => setTimeout(resolve, 200));
+        return (await readFile(lock, 'utf8').catch(() => '')) === mine;
+      } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || await helperRunning(stateDir)) return false;
         await rm(lock, { force: true });
       }
@@ -171,13 +184,20 @@ export class Updates {
   async recover(): Promise<void> {
     const { stateDir, version } = this.options;
     const status = await readUpdateStatus(stateDir);
-    if (!status || await helperRunning(stateDir)) return;
-    if (updateActive(status) && status.version === version) { this.spawn(version, true); return; }
+    if (!this.options.managed || !status || await helperRunning(stateDir)) return;
+    if (updateActive(status) && status.version === version) {
+      // Held anew before the helper starts: however long the computer was off, this web must not take the worker.
+      await writeFile(updatePaths(stateDir).hold, JSON.stringify({ version }), { mode: 0o600 });
+      this.spawn(version, true);
+      return;
+    }
     // The previous version runs again: a hold left for an update is not needed by it.
     if (status.previous === version) await rm(updatePaths(stateDir).hold, { force: true });
     if (!updateActive(status)) return;
     const at = new Date(this.options.now?.() ?? Date.now()).toISOString();
-    await saveUpdateStatus(stateDir, { ...status, stage: 'failed', code: 'interrupted', failedStage: status.stage, updatedAt: at });
+    // Going back had brought the previous version up: the update failed for the reason already found.
+    const back = status.stage === 'rolling-back' && status.previous === version && status.code;
+    await saveUpdateStatus(stateDir, { ...status, stage: 'failed', code: back || 'interrupted', failedStage: status.failedStage ?? status.stage, updatedAt: at });
   }
 
   /**
@@ -193,7 +213,9 @@ export class Updates {
       const keep = new Set([this.options.version, await currentVersion(stateDir), status?.previous, ...await inUse()].filter(Boolean));
       const installed = await readdir(runtimePaths(stateDir).versions).catch(() => [] as string[]);
       // An install cut short leaves its staging folder behind; no helper runs now to finish it.
-      for (const name of installed) if ((RELEASE.test(name) && !keep.has(name)) || /^\d+\.\d+\.\d+\.installing-\d+$/.test(name)) await rm(versionDirectory(stateDir, name), { recursive: true, force: true });
+      // An install still under way (by a join or service command run by hand) keeps its staging folder.
+      const staging = (name: string) => { const pid = Number(/^\d+\.\d+\.\d+\.installing-(\d+)$/.exec(name)?.[1]); return pid > 0 && !alive(pid); };
+      for (const name of installed) if ((RELEASE.test(name) && !keep.has(name)) || staging(name)) await rm(versionDirectory(stateDir, name), { recursive: true, force: true });
     });
     this.queue = next.catch(() => {});
     return next;
@@ -316,22 +338,29 @@ export async function runUpdateHelper(stateDir: string, version: string, steps: 
       await set('verifying');
       const started = await wait(async () => { const health = await steps.health(); return health?.version === version && health.pid !== before ? health : undefined; }, START_MS);
       if (!started) return await back('start-failed', 'verifying');
-      // It must keep running as that same process: one that dies and is started again by launchd is not kept.
+      // It must keep running as that same process: one that dies and is started again by launchd is not kept. A
+      // busy computer may miss an answer or two; a different process, or a version, is decisive.
+      const same = async () => { const health = await steps.health(); return health ? health.version === version && health.pid === started.pid : undefined; };
       const until = steps.now() + STABLE_MS;
+      let missed = 0;
       while (steps.now() < until) {
         await steps.sleep(1000);
-        const health = await steps.health();
-        if (health?.version !== version || health.pid !== started.pid) return await back('start-failed', 'verifying');
+        const answer = await same();
+        if (answer === false || (answer === undefined && ++missed >= 3)) return await back('start-failed', 'verifying');
+        if (answer) missed = 0;
       }
       if (linked.length && !await wait(async () => (await steps.controllers())?.some(id => linked.includes(id)), LINK_MS)) return await back('link-failed', 'verifying');
-      await rm(paths.hold, { force: true });
+      if (await same() === false) return await back('start-failed', 'verifying');
+      // Kept before the hold goes: stopped in between, the hold only runs out, and nothing is checked again unheld.
       await set('done');
+      await rm(paths.hold, { force: true });
       return status;
     };
     // Started again by the new version after the helper was stopped: carry on from where it was.
     if (resume) {
       if (status.stage === 'rolling-back') return await back(status.code ?? 'interrupted', status.failedStage ?? 'verifying');
       if (status.stage === 'switching' || status.stage === 'verifying') return await verify(undefined, status.controllers ?? []);
+      await set('failed', { code: 'interrupted', failedStage: status.stage });
       return status;
     }
     await set('installing');

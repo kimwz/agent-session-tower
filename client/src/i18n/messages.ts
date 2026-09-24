@@ -1355,4 +1355,5 @@ export const english: Record<string, string> = {
   "이 Tower보다 이전 버전입니다. 그 컴퓨터에서 Tower를 한 번 직접 업데이트하세요. 백그라운드 서비스로 실행 중이면 그다음부터는 이 Tower를 따라 자동으로 업데이트됩니다.": "It runs an older version than this Tower. Update Tower on that computer once by hand; if it runs as the background service, it follows this Tower automatically from then on.",
   "이 Tower(v{0})보다 이전 버전입니다.": "It runs an older version than this Tower (v{0}).",
   "지금 업데이트": "Update now",
+  "새 버전으로 옮기지 못했습니다.": "It could not move to the new version.",
 };

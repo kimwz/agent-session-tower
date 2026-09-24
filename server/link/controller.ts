@@ -39,6 +39,11 @@ interface NodeRecord {
   left?: true;
   /** The last code it joined with, so the page that showed the code can tell it was used. */
   invite?: string;
+  /**
+   * Versions this Tower saw fail on it. A computer reports only its last update, so with several controllers another
+   * one's failure would hide this one's; they are asked for again only when the owner says so, even after a restart.
+   */
+  failedUpdates?: string[];
 }
 interface InviteRecord { id: string; secret: string; expiresAt: number; claimedBy?: string }
 interface State { version: 1; settings: HubSettings; nodes: NodeRecord[]; removed: Array<{ pin: string; at: string }>; invites: InviteRecord[] }
@@ -59,11 +64,9 @@ export class ControllerLinks extends EventEmitter {
   /** What each joined computer last reported, and when; kept while it restarts into a new version. */
   private readonly reports = new Map<string, NodeReport>();
   private readonly reportedAt = new Map<string, number>();
-  /**
-   * Versions this Tower saw fail on each computer. A computer reports only its last update, so with several
-   * controllers another one's failure would hide this one's; they are asked for again only when the owner says so.
-   */
-  private readonly failed = new Map<string, Set<string>>();
+
+  /** Updates of each computer seen cut short, by when they started: asked for again by itself only twice. */
+  private readonly interrupted = new Map<string, Set<string>>();
   private unauthenticated = 0;
   private readonly unauthenticatedFrom = new Map<string, number>();
   /** Set when the saved state could not be read: nothing is saved over it until the owner looks. */
@@ -156,8 +159,9 @@ export class ControllerLinks extends EventEmitter {
     const live = this.connected.get(id);
     if (!live) throw Object.assign(new Error('그 컴퓨터가 연결되어 있지 않습니다. 연결되면 다시 시도하세요.'), { statusCode: 409 });
     if (!live.hello.features.includes('update')) throw Object.assign(new Error('그 컴퓨터는 Tower를 백그라운드 서비스로 실행하지 않아 여기서 업데이트할 수 없습니다.'), { statusCode: 409 });
-    this.failed.get(id)?.delete(this.options.version);
     const code = await this.askUpdate(id, live);
+    // Forgotten only once asked, so following the computer meanwhile does not ask a second time.
+    if (!code) { await this.failedUpdates(id, versions => versions.filter(version => version !== this.options.version)); this.interrupted.delete(id); }
     if (code === 'busy') throw Object.assign(new Error('그 컴퓨터가 다른 버전으로 업데이트하는 중입니다. 끝난 뒤 다시 시도하세요.'), { statusCode: 409 });
     if (code) throw Object.assign(new Error('그 컴퓨터가 업데이트 요청을 받지 않았습니다.'), { statusCode: 502 });
     this.watch(id, live);
@@ -183,7 +187,7 @@ export class ControllerLinks extends EventEmitter {
     // Its claimed invitation goes too, so it cannot finish joining again with the old code.
     this.reports.delete(id);
     this.reportedAt.delete(id);
-    this.failed.delete(id);
+    this.interrupted.delete(id);
     await this.save({ ...this.state, nodes: this.state.nodes.filter(item => item.id !== id), invites: this.state.invites.filter(item => item.claimedBy !== node.pin),
       removed: [...this.state.removed.filter(item => item.pin !== node.pin), { pin: node.pin, at: new Date(this.now()).toISOString() }].slice(-200) });
     const live = this.connected.get(id);
@@ -383,10 +387,20 @@ export class ControllerLinks extends EventEmitter {
     this.report(id, report);
     // An update cut short (the computer restarted, say) did not fail; it may be asked for again.
     const update = report.update;
-    if (update?.stage === 'failed' && update.code !== 'interrupted') this.failed.set(id, new Set([...this.failed.get(id) ?? [], update.version]));
-    const failed = this.failed.get(id)?.has(this.options.version);
+    if (update?.stage === 'failed' && update.code !== 'interrupted') await this.failedUpdates(id, versions => [...new Set([...versions, update.version])].slice(-10));
+    if (update?.stage === 'failed' && update.code === 'interrupted' && update.version === this.options.version) this.interrupted.set(id, new Set([...this.interrupted.get(id) ?? [], update.startedAt]));
+    // A computer where the update keeps being cut short (its helper cannot start, say) waits for the owner.
+    const failed = this.state.nodes.find(node => node.id === id)?.failedUpdates?.includes(this.options.version) || (this.interrupted.get(id)?.size ?? 0) > 2;
     if (live.hello.features.includes('update') && newerVersion(this.options.version, report.versions.web) && !updateActive(update) && !failed) await this.askUpdate(id, live);
     this.watch(id, live);
+  }
+
+  private async failedUpdates(id: string, change: (versions: string[]) => string[]): Promise<void> {
+    const node = this.state.nodes.find(item => item.id === id);
+    if (!node) return;
+    const next = change(node.failedUpdates ?? []);
+    if (JSON.stringify(next) === JSON.stringify(node.failedUpdates ?? [])) return;
+    await this.save({ ...this.state, nodes: this.state.nodes.map(item => item.id === id ? { ...item, ...(next.length ? { failedUpdates: next } : { failedUpdates: undefined }) } : item) }).catch(() => {});
   }
 
   private watch(id: string, live: Connected): void {

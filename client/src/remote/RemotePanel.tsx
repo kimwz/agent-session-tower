@@ -153,7 +153,7 @@ export function UpdateLine({ token, node, version, busy, run }: { token: string;
   if (update?.stage === 'failed' && newer(update.version, node.version)) {
     // Running the previous version again, it came back whatever the helper saw.
     const back = update.code !== 'rollback-failed' || (node.status === 'connected' && node.version === update.previous);
-    const reason = update.code && (update.code !== 'rollback-failed' || !back) ? failures[update.code] : '';
+    const reason = update.code === 'rollback-failed' && back ? t('새 버전으로 옮기지 못했습니다.') : update.code ? failures[update.code] : '';
     return <div className="remote-update failed"><p role="status">{back
       ? t('v{0}(으)로 업데이트하지 못해 v{1}(으)로 계속 실행 중입니다. {2}', { 0: update.version, 1: update.previous, 2: reason })
       : t('v{0}(으)로 업데이트하지 못했고, {1} 그 컴퓨터에서 Tower를 확인하세요(기록: logs/update.log).', { 0: update.version, 1: reason })}</p>{back && ask(t('다시 시도'))}</div>;
@@ -174,9 +174,9 @@ function NodeRow({ token, node, version, busy, run }: { token: string; node: Nod
   const save = (event: FormEvent) => { event.preventDefault(); void run(() => post(token, `/api/link/nodes/${node.id}`, { label })).then(ok => { if (ok) setEditing(false); }); };
   const reported = node.report?.versions;
   // The worker takes the new version once no work is running; until then it differs, and that is expected.
-  const worker = reported?.worker && reported.worker !== reported.web ? reported.worker : undefined;
+  const worker = reported?.worker && newer(reported.web, reported.worker) ? reported.worker : undefined;
   // So does a terminal host that keeps open terminals; it moves once they are all closed.
-  const terminalHost = reported?.terminalHost && reported.terminalHost !== reported.web ? reported.terminalHost : undefined;
+  const terminalHost = reported?.terminalHost && newer(reported.web, reported.terminalHost) ? reported.terminalHost : undefined;
   const free = node.report?.diskFree;
   const lowDisk = free !== undefined && free < 2 * 1024 ** 3 ? (free / 1024 ** 3).toFixed(1) : undefined;
   return <li className="slack-rule-row remote-row">

@@ -137,6 +137,22 @@ test('a computer away in the middle of an update shows it as updating, until not
   assert.equal(a.controller.list()[0].report?.update, undefined);
 });
 
+test('an update that keeps being cut short is asked for again by itself only twice', async t => {
+  const asked: unknown[] = [];
+  let update: UpdateStatus | undefined;
+  const a = await computer(t, 'computer-a', { version: '1.25.0', refreshMs: 30, updatePollMs: 20 });
+  const b = await computer(t, 'computer-b', { version: '1.24.0', features: ['work', 'status', 'update'], update: {
+    // Its helper never starts: each request is reported as cut short right away.
+    request: async version => { asked.push(version); const at = new Date(Date.now() + asked.length).toISOString(); update = { version: String(version), previous: '1.24.0', stage: 'failed', code: 'interrupted', failedStage: 'installing', startedAt: at, updatedAt: at }; return { status: 202, body: { update } }; },
+    report: async () => ({ versions: { web: '1.24.0' }, service: true, ...(update ? { update } : {}) }),
+  } });
+  await a.listen();
+  await b.node.join((await a.controller.invite()).code);
+  await until(() => asked.length >= 3, 5000);
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.equal(asked.length, 3, 'the first request and two more, then the owner decides');
+});
+
 test('a joined computer that cannot update itself is never asked to', async t => {
   let asked = 0;
   const a = await computer(t, 'computer-a', { version: '1.25.0', refreshMs: 50 });

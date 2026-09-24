@@ -112,6 +112,16 @@ test('a new version that keeps being started again, or no space to install, is n
   assert.deepEqual(s.restarts, []);
 });
 
+test('a busy computer that misses an answer while it is watched is not taken for a failed start', async t => {
+  const state = await stateDir(t);
+  await requested(state);
+  const s = service(state);
+  let asked = 0;
+  const health = s.steps.health;
+  const status = await runUpdateHelper(state, '1.1.0', { ...s.steps, health: async () => ++asked % 20 === 0 ? undefined : health() });
+  assert.equal(status?.stage, 'done');
+});
+
 test('a switch that changed nothing leaves the running version as it is, without a restart', async t => {
   const state = await stateDir(t);
   await requested(state);
@@ -150,9 +160,8 @@ test('only one helper runs, and it only carries out the update that was asked fo
   await requested(state);
   await writeFile(updatePaths(state).lock, String(process.pid));
   assert.equal(await runUpdateHelper(state, '1.1.0', service(state).steps), undefined, 'another helper holds the lock');
-  const old = new Date(Date.now() - 50 * 60_000);
-  await utimes(updatePaths(state).lock, old, old);
-  assert.equal((await runUpdateHelper(state, '1.1.0', service(state).steps))?.stage, 'done', 'a lock older than any helper runs is left over, whoever has its pid now');
+  await writeFile(updatePaths(state).lock, `${process.pid} Thu Jan  1 00:00:00 1970`);
+  assert.equal((await runUpdateHelper(state, '1.1.0', service(state).steps))?.stage, 'done', 'a lock whose pid now belongs to a process started later is left over');
   await requested(state, '1.2.0');
   const other = await runUpdateHelper(state, '1.3.0', service(state).steps);
   assert.equal(other?.version, '1.2.0');
@@ -185,10 +194,12 @@ test('an update cut short by a restart is checked again from where it was, or se
   const save = (stage: UpdateStatus['stage'], extra = {}) => writeFile(updatePaths(state).status, JSON.stringify({ version: '1.1.0', previous: '1.0.0', stage, startedAt: '2026-09-24T00:00:00.000Z', updatedAt: '2026-09-24T00:00:00.000Z', ...extra }));
   await save('verifying', { controllers: ['controller-a'] });
   await writeFile(updatePaths(state).hold, '{}');
+  const long = new Date(Date.now() - 60 * 60_000);
+  await utimes(updatePaths(state).hold, long, long);
   const resumed: Array<[string, boolean]> = [];
   await new Updates({ stateDir: state, version: '1.1.0', port: 1, managed: true, spawnHelper: (version, resume) => resumed.push([version, resume]) }).recover();
   assert.deepEqual(resumed, [['1.1.0', true]], 'the new version running is not proof it works: a helper checks it');
-  assert.equal(existsSync(updatePaths(state).hold), true);
+  assert.equal(await handoffHeld(state), true, 'held anew, however long the computer was off');
   await pointCurrent(state, '1.1.0');
   const checked = service(state);
   const status = await runUpdateHelper(state, '1.1.0', { ...checked.steps, health: async () => ({ version: '1.1.0', pid: 7 }) }, true);
@@ -204,6 +215,15 @@ test('an update cut short by a restart is checked again from where it was, or se
   await writeFile(updatePaths(state).hold, '{}');
   await new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true }).recover();
   assert.equal(existsSync(updatePaths(state).hold), false, 'the previous version running needs no hold');
+  await save('rolling-back', { code: 'start-failed', failedStage: 'verifying' });
+  await new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: true }).recover();
+  assert.equal((await readUpdateStatus(state))?.code, 'start-failed', 'going back brought the previous version up: the reason found stays');
+  await save('installing');
+  await new Updates({ stateDir: state, version: '1.0.0', port: 1, managed: false }).recover();
+  assert.equal((await readUpdateStatus(state))?.stage, 'installing', 'a Tower not run as the service settles nothing');
+  await pointCurrent(state, '1.1.0');
+  const early = await runUpdateHelper(state, '1.1.0', service(state).steps, true);
+  assert.equal(early?.code, 'interrupted', 'resumed at a stage that never switched anything, it ends');
   const settled = await readUpdateStatus(state);
   assert.equal(settled?.stage, 'failed');
   assert.equal(settled?.code, 'interrupted');

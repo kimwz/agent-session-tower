@@ -36,6 +36,7 @@ import { NodeLinks } from './link/node.js';
 import { runLinkCommand } from './link/cli.js';
 import { RemoteNodes } from './link/nodes.js';
 import { NodeViewStore } from './link/views.js';
+import { newerVersion } from './link/service.js';
 import { diskFree, handoffHeld, heldWorkerEntry, managedByService, runUpdateHelper, serviceSteps, Updates } from './link/update.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
@@ -196,7 +197,8 @@ async function main() {
       runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning: history.indexing, hostname: hostname(), version: APP_VERSION,
       ...(runs.triggerOverview() ? { triggers: runs.triggerOverview() } : {}),
       ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}),
-      ...(runs.runnerVersion() && runs.runnerVersion() !== APP_VERSION ? { runnerUpdate: runs.supports('handoff') ? 'automatic' as const : 'manual' as const } : {}),
+      // Only an older worker is waiting to be replaced; a newer one left by an update that was undone stays as it is.
+      ...(runs.runnerVersion() && (runs.runnerVersion() === 'legacy' || newerVersion(APP_VERSION, runs.runnerVersion()!)) ? { runnerUpdate: runs.supports('handoff') ? 'automatic' as const : 'manual' as const } : {}),
       ...(controllers.length ? { controlledBy: controllers } : {}),
       ...(remoteNodes?.ready ? { nodes } : {}),
       updatedAt: new Date().toISOString(),
