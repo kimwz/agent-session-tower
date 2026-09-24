@@ -11,7 +11,7 @@ test('this computer’s owner reads what controlling computers changed here, by 
     { at: '2026-09-24T01:00:00.000Z', controllerId: 'a'.repeat(32), controller: 'Office Mac', action: 'repository', target: '/work/app', detail: 'pull' },
     { at: '2026-09-24T00:59:00.000Z', controllerId: 'b'.repeat(32), action: 'file', target: '/work/app/readme.md' },
   ] }));
-  assert.match(markup, /저장소 동기화<\/strong> · pull/);
+  assert.match(markup, /저장소 동기화<\/strong> · 가져오기/);
   assert.match(markup, /Office Mac/);
   assert.match(markup, /해제된 컴퓨터/, 'a computer no longer linked is still shown as one');
   assert.match(markup, /readme\.md/);
