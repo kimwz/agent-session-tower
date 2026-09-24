@@ -189,6 +189,7 @@ async function main() {
   const snapshot = (): Snapshot => {
     const all = runs.sessionList();
     const controllers = controlledBy();
+    const joined = controllerJoined();
     const nodes = remoteNodes?.list() ?? [];
     const managed = runs.list();
     return {
@@ -202,7 +203,7 @@ async function main() {
       // Only an older worker is waiting to be replaced; a newer one left by an update that was undone stays as it is.
       ...(runs.runnerVersion() && (runs.runnerVersion() === 'legacy' || newerVersion(APP_VERSION, runs.runnerVersion()!)) ? { runnerUpdate: runs.supports('handoff') ? 'automatic' as const : 'manual' as const } : {}),
       ...(controllers.length ? { controlledBy: controllers } : {}),
-      ...(controllerJoined() ? { controllerJoined: controllerJoined() } : {}),
+      ...(joined ? { controllerJoined: joined } : {}),
       ...(remoteNodes?.ready ? { nodes } : {}),
       updatedAt: new Date().toISOString(),
     };
@@ -262,8 +263,9 @@ async function main() {
     return undefined;
   });
   const workspaceTerminals = new TerminalHostClient({ stateDir, legacy: runs.terminals });
-  // What controlling computers change here is kept for this computer's owner to read.
-  const remoteChanges = new RemoteAudit(stateDir);
+  // What controlling computers change here is kept for this computer's owner to read, with each one's name then.
+  let controllerName = (_id: string): string | undefined => undefined;
+  const remoteChanges = new RemoteAudit(stateDir, { name: id => controllerName(id) });
   await remoteChanges.start();
   const remoteRouter = createRemoteRouter({ backend, exclusions, terminals: workspaceTerminals, audit: remoteChanges });
   const controllerLinks = identity && new ControllerLinks({ stateDir, identity, version: APP_VERSION, hostname });
@@ -285,11 +287,15 @@ async function main() {
     nodeLinks.on('disconnected', (controllerId: string) => remoteRouter.disconnect(controllerId));
     controlledBy = () => nodeLinks.list().filter(item => item.status === 'connected').map(item => item.name);
     nodeLinks.on('change', changed);
+    controllerName = id => nodeLinks.list().find(item => item.id === id)?.name;
     nodeLinks.on('paired', (controllerId: string) => { remoteChanges.record({ controllerId, action: 'joined' }); changed(); });
+    // Asked again while the same update is under way, it is the same update.
+    nodeLinks.on('update', (controllerId: string, update: { version: string; startedAt: string }) => remoteChanges.record({ controllerId, action: 'update', detail: update.version }, `update:${update.startedAt}`));
+    // Only while that computer still controls this one.
     controllerJoined = () => {
       const joined = remoteChanges.lastJoin();
-      const name = joined && nodeLinks.list().find(item => item.id === joined.controllerId)?.name;
-      return joined && name ? { name, at: joined.at } : undefined;
+      const controller = joined && nodeLinks.list().find(item => item.id === joined.controllerId);
+      return joined && controller?.state === 'paired' ? { name: controller.name, at: joined.at } : undefined;
     };
   }
   const nodeViews = new NodeViewStore(stateDir);
@@ -299,7 +305,8 @@ async function main() {
     remoteNodes.on('summary', changed);
   }
   const { server, dispose } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes,
-    auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges } : { error: linkError },
+    auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
+      sessionNames: () => new Map(snapshot().sessions.map(session => [session.id, session.customTitle || session.title])) } : { error: linkError },
     workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined });
   await new Promise<void>((accept, reject) => {
     server.once('error', reject);

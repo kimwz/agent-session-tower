@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type Keyboard
 import { createPortal } from 'react-dom';
 import { Check, Copy, FolderX, LoaderCircle, Monitor, Network, Plus, Radio, RefreshCw, Trash2, X } from 'lucide-react';
 import type { ControllerSummary, LinkInvite, LinkOverview, NodeSummary, RemoteAction, RemoteChange, UpdateFailure, UpdateStage } from '../../../shared/link';
+import type { TriggerAuditEntry } from '../../../shared/triggers';
 import { absoluteTime, api, copyText, relativeTime } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
+import { auditActionLabel } from '../triggers/trigger-helpers';
 
 type Tab = 'nodes' | 'controllers' | 'exclusions';
 const TABS: Tab[] = ['nodes', 'controllers', 'exclusions'];
@@ -15,24 +17,31 @@ const seenJoin = () => { try { return localStorage.getItem(SEEN_JOIN) ?? ''; } c
 /**
  * Remote computers: the ones this computer controls, the ones that control it, and what it never shares.
  * `controlledBy` names the computers controlling this one right now; `joined` is the latest that started to, shown
- * here once until it is seen.
+ * here until it is seen in any tab: dismissed, or its computer looked at.
  */
 export function RemoteButton({ token, projects, controlledBy = [], joined }: { token: string; projects: [string, string][]; controlledBy?: string[]; joined?: { name: string; at: string } }) {
   const { t } = useI18n();
   const [open, setOpen] = useState<Tab | null>(null);
   const [seen, setSeen] = useState(seenJoin);
+  useEffect(() => {
+    const follow = (event: StorageEvent) => { if (event.key === SEEN_JOIN) setSeen(event.newValue ?? ''); };
+    window.addEventListener('storage', follow);
+    return () => window.removeEventListener('storage', follow);
+  }, []);
   const label = controlledBy.length ? t('원격 컴퓨터 · {0}이(가) 이 컴퓨터를 제어하는 중', { 0: controlledBy.join(', ') }) : t('원격 컴퓨터');
   const notice = joined && joined.at > seen ? joined : undefined;
   const acknowledge = () => { if (!notice) return; try { localStorage.setItem(SEEN_JOIN, notice.at); } catch { /* Shown again next time. */ } setSeen(notice.at); };
-  return <span className="remote-anchor">
-    <button className={`icon-button remote-button ${controlledBy.length ? 'controlled' : ''}`} aria-label={label} title={label} disabled={!token} onClick={() => setOpen('nodes')}><Network size={18} /></button>
+  // With a notice showing, the panel opens on the computers controlling this one.
+  const show = (tab: Tab) => { acknowledge(); setOpen(tab); };
+  return <div className="remote-anchor">
+    <button className={`icon-button remote-button ${controlledBy.length ? 'controlled' : ''}`} aria-label={label} title={label} disabled={!token} onClick={() => show(notice ? 'controllers' : 'nodes')}><Network size={18} /></button>
     {notice && <div className="remote-join-notice" role="status">
-      <p>{t('{0}이(가) 이 컴퓨터를 제어하기 시작했습니다.', { 0: notice.name })}</p>
-      <div><button type="button" className="secondary-button" onClick={() => { acknowledge(); setOpen('controllers'); }}>{t('보기')}</button>
+      <p>{t('{0}이(가) 이 컴퓨터를 제어하기 시작했습니다.', { 0: notice.name })}<small><time dateTime={notice.at}>{absoluteTime(notice.at)}</time></small></p>
+      <div><button type="button" className="secondary-button" onClick={() => show('controllers')}>{t('보기')}</button>
         <button type="button" className="secondary-button" onClick={acknowledge}>{t('확인')}</button></div>
     </div>}
     {open && <RemotePanel token={token} projects={projects} initialTab={open} onClose={() => setOpen(null)} />}
-  </span>;
+  </div>;
 }
 
 export function RemotePanel({ token, projects, initialTab = 'nodes', onClose }: { token: string; projects: [string, string][]; initialTab?: Tab; onClose: () => void }) {
@@ -228,31 +237,45 @@ function Controllers({ token, overview, busy, run }: { token: string; overview: 
 }
 
 /** What controlling computers changed here, newest first: which computer, what, and what it touched. */
-export function RemoteChanges({ initial }: { initial?: Array<RemoteChange & { controller?: string }> }) {
+/** What a controlling computer can do to a trigger, as its change history names it. */
+const TRIGGER_CHANGES = new Set(['create', 'update', 'delete', 'enable', 'disable', 'run', 'revert', 'restore']);
+
+export function RemoteChanges({ initial }: { initial?: RemoteChange[] }) {
   const { t } = useI18n();
-  const [changes, setChanges] = useState<Array<RemoteChange & { controller?: string }> | undefined>(initial);
+  const [changes, setChanges] = useState<RemoteChange[] | undefined>(initial);
+  const [error, setError] = useState('');
   const [shown, setShown] = useState(20);
   useEffect(() => {
     if (initial) return;
     let current = true;
-    const load = () => { void api<{ changes: Array<RemoteChange & { controller?: string }> }>('/api/link/changes').then(value => { if (current) setChanges(value.changes); }, () => {}); };
+    const load = () => {
+      void api<{ changes: RemoteChange[] }>('/api/link/changes').then(value => { if (current) { setChanges(value.changes); setError(''); } },
+        cause => { if (current) setError(cause instanceof Error ? cause.message : String(cause)); });
+    };
     load();
     const timer = window.setInterval(load, 5000);
     return () => { current = false; window.clearInterval(timer); };
   }, [initial]);
-  const actions: Record<RemoteAction, string> = { joined: t('제어를 시작함'), session: t('새 세션'), message: t('메시지 보냄'), title: t('제목 변경'), close: t('세션 닫음'), reopen: t('세션 다시 엶'),
-    approval: t('승인 요청에 답함'), steer: t('요청 끼워넣음'), cancel: t('작업 중지'), dismiss: t('실패 기록 지움'), 'auto-prompt': t('Auto Prompt'), 'auto-prompt-cancel': t('Auto Prompt 취소'),
-    repository: t('저장소 동기화'), 'folder-name': t('폴더 이름 변경'), file: t('파일 저장'), directory: t('폴더 만듦'), 'terminal-open': t('터미널 엶'), 'terminal-close': t('터미널 끝냄'), trigger: t('트리거 변경') };
-  // What a repository sync or a trigger change did, in words.
-  const details: Record<string, string> = { pull: t('가져오기'), push: t('보내기'), create: t('만듦'), update: t('변경'), setEnabled: t('켜기·끄기'), delete: t('삭제'), restore: t('복원'), revert: t('되돌림'), run: t('지금 실행') };
-  if (!changes) return null;
+  const actions: Record<RemoteAction, string> = { joined: t('제어를 시작함'), update: t('업데이트 요청'), session: t('새 세션'), message: t('메시지 보냄'), title: t('제목 변경'), close: t('세션 닫음'),
+    reopen: t('세션 다시 엶'), approval: t('승인 요청에 답함'), steer: t('요청 끼워넣음'), cancel: t('작업 중지'), dismiss: t('실패 기록 지움'), 'auto-prompt': t('Auto Prompt'),
+    'auto-prompt-cancel': t('Auto Prompt 취소'), repository: t('저장소 동기화'), 'folder-name': t('폴더 이름 변경'), file: t('파일 저장'), directory: t('폴더 만듦'),
+    'terminal-open': t('터미널 엶'), 'terminal-close': t('터미널 끝냄'), trigger: t('트리거 변경') };
+  // What was done, in the words used where it is done.
+  const answers: Record<string, string> = { allow: t('허용'), deny: t('거부'), answers: t('답함'), accept: t('수락'), decline: t('거절'), cancel: t('취소') };
+  const detail = ({ action, detail: value }: RemoteChange) => !value ? '' : action === 'trigger' ? TRIGGER_CHANGES.has(value) ? auditActionLabel(value as TriggerAuditEntry['action'], t) : value
+    : action === 'repository' ? value === 'pull' ? t('받기') : value === 'push' ? t('푸시') : value : action === 'approval' ? answers[value] ?? value : value;
+  const heading = <h3>{t('최근 원격 변경')}</h3>;
+  if (!changes) return error ? <div className="remote-changes">{heading}<p role="alert" className="slack-error">{t('원격 변경 기록을 불러오지 못했습니다.')} {translateMessage(error)}</p></div> : null;
   return <div className="remote-changes">
-    <h3>{t('최근 원격 변경')}</h3>
-    {changes.length ? <><ol>{changes.slice(0, shown).map((change, index) => <li key={`${change.at}:${index}`}>
-      <span className="remote-change-what"><strong>{actions[change.action] ?? change.action}</strong>{change.detail ? ` · ${details[change.detail] ?? change.detail}` : ''}</span>
-      <span className="remote-change-target folder-tail" title={change.target}>{change.target && <bdi dir="ltr">{change.target}</bdi>}</span>
-      <small title={absoluteTime(change.at)}>{change.controller ?? t('해제된 컴퓨터')} · {relativeTime(change.at)}</small>
-    </li>)}</ol>
+    {heading}
+    {error && <p role="alert" className="slack-error">{t('원격 변경 기록을 불러오지 못했습니다.')} {translateMessage(error)}</p>}
+    {changes.length ? <><ol>{changes.slice(0, shown).map((change, index) => { const done = detail(change); return <li key={`${change.at}:${index}`}>
+      <span className="remote-change-what"><strong>{actions[change.action] ?? change.action}</strong>{done ? ` · ${done}` : ''}</span>
+      {/* A path shows its end; a title or a trigger's name its start. */}
+      {change.name || change.action === 'trigger' ? <span className="remote-change-target" title={change.name ?? change.target}>{change.name ?? change.target}</span>
+        : <span className="remote-change-target folder-tail" title={change.target}>{change.target && <bdi dir="ltr">{change.target}</bdi>}</span>}
+      <small>{change.controller ?? t('해제된 컴퓨터')} · <time dateTime={change.at} title={relativeTime(change.at)}>{absoluteTime(change.at)}</time></small>
+    </li>; })}</ol>
     {changes.length > shown && <button type="button" className="secondary-button" onClick={() => setShown(value => value + 50)}>{t('더 보기')}</button>}</>
       : <p className="trigger-note">{t('아직 다른 컴퓨터가 여기서 바꾼 것이 없습니다.')}</p>}
     <p className="trigger-note">{t('파일이나 메시지의 내용, 비밀 값은 기록하지 않습니다. 최근 1,000건까지 보관합니다.')}</p>

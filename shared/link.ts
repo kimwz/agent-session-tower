@@ -44,13 +44,22 @@ export interface LinkOverview {
   errors?: string[];
 }
 /** A change a controlling computer made on this one, as this computer's owner reads it. */
-export type RemoteAction = 'joined' | 'session' | 'message' | 'title' | 'close' | 'reopen' | 'approval' | 'steer' | 'cancel' | 'dismiss' | 'auto-prompt' | 'auto-prompt-cancel'
-  | 'repository' | 'folder-name' | 'file' | 'directory' | 'terminal-open' | 'terminal-close' | 'trigger';
+export type RemoteAction = 'joined' | 'update' | 'session' | 'message' | 'title' | 'close' | 'reopen' | 'approval' | 'steer' | 'cancel' | 'dismiss' | 'auto-prompt'
+  | 'auto-prompt-cancel' | 'repository' | 'folder-name' | 'file' | 'directory' | 'terminal-open' | 'terminal-close' | 'trigger';
 export interface RemoteChange {
   at: string; controllerId: string; action: RemoteAction;
-  /** What it touched: a conversation's title, a folder or file path, a trigger's name. Never content. */
+  /** The controlling computer's name: now, or when it made the change if it has been released since. */
+  controller?: string;
+  /** Where it happened: a folder or file path, or a trigger's name. Never content. */
   target?: string;
-  /** For a repository: pull, push or refresh; for a trigger: the operation. */
+  /** The conversation it was about, by id. Its title is looked up as the record is read here, never stored. */
+  session?: string;
+  /** That conversation's title now, while it still exists. */
+  name?: string;
+  /**
+   * What was done: pull or push; what was done to a trigger (as in its change history); allow, deny, answered,
+   * accept, decline or cancel for an approval; the version asked for by an update.
+   */
   detail?: string;
 }
 export interface LinkInvite { id: string; code: string; command: string; expiresAt: number }

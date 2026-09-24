@@ -14,6 +14,8 @@ export interface LinkRoutes {
   exclusions: RemoteExclusionStore;
   /** What controlling computers changed here. */
   changes?: RemoteAudit;
+  /** Conversations' titles here now, by id. */
+  sessionNames?: () => Map<string, string>;
 }
 
 /**
@@ -33,9 +35,15 @@ export async function handleLinkRoute(req: IncomingMessage, res: ServerResponse,
   });
   if (req.method === 'GET' && path === '/api/link') { json(res, 200, overview()); return true; }
   if (req.method === 'GET' && path === '/api/link/changes') {
-    // Named as this computer knows its controllers now; one removed since keeps the name it was last shown with.
+    // Named as this computer knows its controllers now, or as it did when the change was made; conversations by
+    // their title now.
     const names = new Map(links.node.list().map(item => [item.id, item.name]));
-    json(res, 200, { changes: (links.changes?.list() ?? []).map(change => ({ ...change, ...(names.has(change.controllerId) ? { controller: names.get(change.controllerId) } : {}) })) });
+    const titles = links.sessionNames?.() ?? new Map<string, string>();
+    json(res, 200, { changes: (links.changes?.list() ?? []).map(change => {
+      const controller = names.get(change.controllerId) ?? change.controller;
+      const name = change.session ? titles.get(change.session) : undefined;
+      return { ...change, ...(controller ? { controller } : {}), ...(name ? { name } : {}) };
+    }) });
     return true;
   }
   if (req.method !== 'POST') return false;

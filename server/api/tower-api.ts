@@ -288,7 +288,7 @@ export class TowerApi {
       case 'triggers.create': return { trigger: await triggers.create(value.trigger, actor, scope) };
       case 'triggers.update': return { trigger: await triggers.update(value.id, value.trigger, value.expectedRevision, actor, scope) };
       case 'triggers.setEnabled': return { trigger: await triggers.setEnabled(value.id, value.enabled, value.expectedRevision, actor, scope) };
-      case 'triggers.delete': await triggers.remove(value.id, value.expectedRevision, actor, scope); return { deleted: true };
+      case 'triggers.delete': { const removed = await triggers.remove(value.id, value.expectedRevision, actor, scope); return { deleted: true, trigger: { id: removed.id, name: removed.name } }; }
       case 'triggers.restore': return { trigger: await triggers.restore(value.id, actor, scope) };
       case 'triggers.revert': return { trigger: await triggers.revert(value.id, value.revision, value.expectedRevision, actor, scope) };
       case 'triggers.run': return { event: await triggers.run(value.id, actor, scope) };

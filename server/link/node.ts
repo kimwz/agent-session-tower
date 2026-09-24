@@ -271,7 +271,8 @@ export class NodeLinks extends EventEmitter {
         await this.save(this.records.map(item => item.id === id ? { id: item.id, pin: item.pin, name, addresses: item.addresses, state: 'paired' as const,
           pairedAt: item.pairedAt ?? new Date(this.now()).toISOString(), ...(item.lastConnectedAt ? { lastConnectedAt: item.lastConnectedAt } : {}), ...(item.lastAddress ? { lastAddress: item.lastAddress } : {}) } : item));
         this.emit('change');
-        this.emit('paired', id);
+        // Sent again after a lost answer, it is the same joining.
+        if (record.state !== 'paired') this.emit('paired', id);
         return json(200, { ok: true });
       }
       if (req.method === 'POST' && req.url === '/link/revoke') {
@@ -289,6 +290,8 @@ export class NodeLinks extends EventEmitter {
       if (req.method === 'POST' && req.url === '/link/update' && this.options.update) {
         const body = await readJson(req, 4096);
         const answer = await this.options.update.request(body.version);
+        const update = (answer.body as { update?: { version: string; startedAt: string } }).update;
+        if (answer.status === 202 && update) this.emit('update', id, update);
         return json(answer.status, answer.body);
       }
       await this.options.handle(req, res, { controllerId: id });

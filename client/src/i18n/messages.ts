@@ -1402,6 +1402,10 @@ export const english: Record<string, string> = {
   "해제된 컴퓨터": "A computer no longer linked",
   "아직 다른 컴퓨터가 여기서 바꾼 것이 없습니다.": "No other computer has changed anything here yet.",
   "파일이나 메시지의 내용, 비밀 값은 기록하지 않습니다. 최근 1,000건까지 보관합니다.": "The contents of files and messages, and secret values, are never recorded. The latest 1,000 changes are kept.",
-  "가져오기": "pull",
-  "켜기·끄기": "turned on or off",
+  "허용": "Allowed",
+  "거부": "Denied",
+  "답함": "Answered",
+  "수락": "Accepted",
+  "업데이트 요청": "Asked to update",
+  "원격 변경 기록을 불러오지 못했습니다.": "The record of remote changes could not be loaded.",
 };

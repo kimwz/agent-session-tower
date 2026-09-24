@@ -11,9 +11,10 @@ import { loadLinkIdentity } from '../../../server/link/identity.js';
 import { createRemoteAuthFixture } from '../../helpers/auth.js';
 import type { LinkInvite, LinkOverview } from '../../../shared/link.js';
 import type { Snapshot } from '../../../shared/types.js';
+import { RemoteAudit } from '../../../server/remote/audit.js';
 
 /** One Tower's web server with real link state in a temporary folder, and no providers. */
-async function tower(t: TestContext, name: string) {
+async function tower(t: TestContext, name: string, audit?: (stateDir: string) => Promise<{ changes: RemoteAudit; sessionNames: () => Map<string, string> }>) {
   const stateDir = await mkdtemp(join(tmpdir(), `tower-link-routes-${name}-`));
   const identity = await loadLinkIdentity(stateDir);
   const exclusions = new RemoteExclusionStore(stateDir);
@@ -28,8 +29,9 @@ async function tower(t: TestContext, name: string) {
   await controller.setHub({ bind: '127.0.0.1', port: 0 });
   const auth = await createRemoteAuthFixture(stateDir);
   const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: name, version: 'test', updatedAt: new Date().toISOString() };
+  const recorded = await audit?.(stateDir);
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: stateDir, exclusions, auth: auth.auth, remote: { origins: auth.origins },
-    links: { identity, hostname, controller, node, exclusions },
+    links: { identity, hostname, controller, node, exclusions, ...recorded },
     backend: { snapshot: () => snapshot, detail: async () => undefined, cancel: async () => {}, subscribe: () => () => {}, enqueue: async () => { throw new Error('unused'); } } });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -65,6 +67,8 @@ test('the Remote computers panel turns on joining, makes a code, and a second To
   assert.match(invite.command, /join tower-link:/);
   assert.ok(invite.expiresAt > Date.now());
 
+  let paired = 0;
+  b.node.on('paired', () => { paired++; });
   const joined = await b.post('/api/link/join', { code: `  ${invite.code}\n` });
   assert.equal(joined.status, 200);
   const node = await waitForNode(a, 'computer-b');
@@ -72,6 +76,7 @@ test('the Remote computers panel turns on joining, makes a code, and a second To
   assert.deepEqual(node.features, ['read', 'work']);
   const controller = await waitFor(async () => (await b.overview()).controllers.find(item => item.state === 'paired' && item.status === 'connected'));
   assert.equal(controller.name, 'computer-a');
+  assert.equal(paired, 1, 'one joining');
 
   const renamed = await (await a.post(`/api/link/nodes/${node.id}`, { label: '  Studio Mac  ' })).json() as LinkOverview;
   assert.equal(renamed.nodes[0].label, 'Studio Mac');
@@ -137,3 +142,16 @@ async function waitFor<T>(read: () => Promise<T | undefined>, timeout = 5000): P
 }
 const waitForNode = (a: Awaited<ReturnType<typeof tower>>, name: string) =>
   waitFor(async () => (await a.overview()).nodes.find(node => node.name === name && node.status === 'connected'));
+
+test('this computer’s owner reads its record of remote changes with names as known now, or as they were', async t => {
+  const b = await tower(t, 'computer-b', async stateDir => {
+    const changes = new RemoteAudit(stateDir, { name: () => 'Old Laptop' });
+    await changes.start();
+    changes.record({ controllerId: 'controllerffffffffffff', action: 'message', session: 'codex:s', target: '/work/app' });
+    changes.record({ controllerId: 'controllerffffffffffff', action: 'message', session: 'codex:gone', target: '/work/app' });
+    await changes.flush();
+    return { changes, sessionNames: () => new Map([['codex:s', 'Parser work']]) };
+  });
+  const { changes } = await (await fetch(`${b.base}/api/link/changes`)).json() as { changes: Array<{ controller?: string; name?: string; target?: string }> };
+  assert.deepEqual(changes.map(change => [change.controller, change.name, change.target]), [['Old Laptop', undefined, '/work/app'], ['Old Laptop', 'Parser work', '/work/app']]);
+});

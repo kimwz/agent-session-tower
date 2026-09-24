@@ -374,8 +374,9 @@ export class TriggerService extends EventEmitter {
     }, enabled ? 'grow' : 'settle');
   }
 
-  async remove(id: string, expectedRevision: number, actor: TriggerActor, scope?: TriggerScope): Promise<void> {
-    await this.commit(state => {
+  /** Returns what was deleted. */
+  async remove(id: string, expectedRevision: number, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
+    return this.commit(state => {
       const current = this.revisionOf(state, id, expectedRevision, scope);
       state.triggers = state.triggers.filter(trigger => trigger.id !== id);
       state.tombstones = [...state.tombstones, current].slice(-MAX_TOMBSTONES);
@@ -383,6 +384,7 @@ export class TriggerService extends EventEmitter {
       this.cancelQueued(state, id, 'The trigger was deleted before this ran.');
       state.cursors[id] = { anchorAt: this.now(), turnedOffAt: this.now() };
       this.log(state, actor, 'delete', current, current.revision, undefined, `Deleted ${this.describe(current)}`);
+      return structuredClone(current);
     }, 'settle');
   }
 

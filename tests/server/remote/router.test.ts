@@ -9,12 +9,14 @@ import type { Backend } from '../../../server/http/server.js';
 import type { RequestContext } from '../../../server/http/request-context.js';
 import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
 import { createRemoteRouter } from '../../../server/remote/router.js';
+import { RemoteAudit } from '../../../server/remote/audit.js';
 
 const CONTROLLER = 'controllera1b2c3d4e5f6';
 const REQUEST_ID = '0199a2b3-c4d5-7123-8abc-0123456789ab';
 const now = new Date().toISOString();
 
-async function fixture(t: TestContext, options: { coordinators?: string[] | null; beforeDetail?: () => Promise<void>; job?: (job: AutoPromptJob) => AutoPromptJob; beforeCancel?: () => Promise<void>; repositories?: boolean } = {}) {
+async function fixture(t: TestContext, options: { coordinators?: string[] | null; beforeDetail?: () => Promise<void>; job?: (job: AutoPromptJob) => AutoPromptJob; beforeCancel?: () => Promise<void>; repositories?: boolean;
+  whileCreating?: () => Promise<void>; pull?: boolean } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-remote-router-')));
   const open = join(root, 'open'), secret = join(root, 'secret');
   await mkdir(join(secret, 'deep'), { recursive: true });
@@ -47,7 +49,14 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     session: lookup,
     coordinators: () => coordinatorIds === null ? undefined : new Set(coordinatorIds ?? ['codex:coordinator']),
     enqueue: async (id, prompt, attachments, context) => { calls.push({ method: 'enqueue', args: [id, prompt, attachments, context] }); return { ...runs[0], id: 'run-new', sessionId: id, prompt }; },
-    createSession: async (input, context) => { calls.push({ method: 'createSession', args: [input, context] }); return { session: session('codex:new', input.cwd), run: { ...runs[0], id: 'run-created', sessionId: 'codex:new' } }; },
+    createSession: async (input, context) => {
+      calls.push({ method: 'createSession', args: [input, context] });
+      await options.whileCreating?.();
+      // Its title is its first message, as for any conversation not named.
+      const created = session('codex:new', input.cwd, { title: input.prompt });
+      if (!sessions.some(item => item.id === created.id)) sessions.push(created);
+      return { session: created, run: { ...runs[0], id: 'run-created', sessionId: 'codex:new' } };
+    },
     startAutoPrompt: async (input, context) => {
       calls.push({ method: 'startAutoPrompt', args: [input, context] });
       const job: AutoPromptJob = { ...jobs[0], id: input.requestId, origin: context?.origin, ...(input.cwd ? { cwd: input.cwd } : {}) };
@@ -64,10 +73,17 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
       if (operation === 'triggers.run') throw Object.assign(new Error('GitHub coordinator triggers are created, changed and run on that computer itself.'), { statusCode: 403 });
       return { answered: operation };
     },
-    ...(options.repositories ? { repositoryAction: async (cwd: string, action: string) => { calls.push({ method: 'repositoryAction', args: [cwd, action] }); return repository(cwd); } } : {}),
+    ...(options.repositories ? { repositoryAction: async (cwd: string, action: string) => {
+      calls.push({ method: 'repositoryAction', args: [cwd, action] });
+      const status = repository(cwd);
+      return options.pull ? { ...status, lastAction: { kind: 'pull' as const, ok: true, commits: 1, at: now } } : status;
+    } } : {}),
   };
-  const changes: unknown[] = [];
-  const router = createRemoteRouter({ backend, exclusions, audit: { record: change => changes.push(change) } });
+  const audit = new RemoteAudit(join(root, 'audit'));
+  await audit.start();
+  // What is recorded, oldest first, without the time.
+  const changes = () => audit.list().reverse().map(({ at: _, ...change }) => change);
+  const router = createRemoteRouter({ backend, exclusions, audit });
   const server = createServer((req, res) => { void router.handle(req, res, { controllerId: CONTROLLER }); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -150,18 +166,38 @@ test('each change a controlling computer makes is recorded for this computer’s
   const f = await fixture(t);
   await f.call('/api/snapshot');
   assert.equal((await f.call('/api/sessions', { body: { provider: 'codex', cwd: f.secret, prompt: 'no' }, headers: { 'x-tower-request-id': REQUEST_ID } })).status, 404);
-  assert.deepEqual(f.changes, [], 'reading and refused changes leave no record');
-  assert.equal((await f.call('/api/sessions', { body: { provider: 'codex', cwd: f.open, prompt: 'Look into the parser' }, headers: { 'x-tower-request-id': REQUEST_ID } })).status, 202);
+  assert.deepEqual(f.changes(), [], 'reading and refused changes leave no record');
+  const started = () => f.call('/api/sessions', { body: { provider: 'codex', cwd: f.open, prompt: 'Deploy with token sk-live-SECRET123' }, headers: { 'x-tower-request-id': REQUEST_ID } });
+  assert.equal((await started()).status, 202);
+  assert.equal((await started()).status, 202, 'sent again after a lost answer');
+  assert.equal((await f.call('/api/sessions/codex:new/messages', { body: { prompt: 'and then this' }, headers: { 'x-tower-request-id': '0199a2b3-c4d5-7123-8abc-0123456789ac' } })).status, 202);
   assert.equal((await f.call('/api/groups', { body: { cwd: f.open, title: 'Parser' } })).status, 200);
-  assert.deepEqual(f.changes, [{ controllerId: CONTROLLER, action: 'session', target: f.open }, { controllerId: CONTROLLER, action: 'folder-name', target: f.open }]);
-  assert.ok(!JSON.stringify(f.changes).includes('Look into the parser'), 'what was asked is not kept, only that a session started there');
+  assert.deepEqual(f.changes(), [{ controllerId: CONTROLLER, action: 'session', session: 'codex:new', target: f.open }, { controllerId: CONTROLLER, action: 'message', session: 'codex:new', target: f.open },
+    { controllerId: CONTROLLER, action: 'folder-name', target: f.open }], 'the same request is one change');
+  assert.ok(!JSON.stringify(f.changes()).includes('SECRET123'), 'what was asked is not kept, nor a title made from it');
+  assert.equal((await f.call('/api/v1/triggers.setEnabled', { body: { id: 't1', enabled: false, expectedRevision: 1 }, headers: { 'x-tower-request-id': '0199a2b3-c4d5-7123-8abc-0123456789ad' } })).status, 200);
+  assert.deepEqual(f.changes().at(-1), { controllerId: CONTROLLER, action: 'trigger', target: 't1', detail: 'disable' });
+});
+
+test('a change made is recorded even when its folder stops being shared before it is answered, and a failed pull is not', async t => {
+  let exclude = async () => {};
+  const f = await fixture(t, { whileCreating: () => exclude(), repositories: true });
+  exclude = async () => { await f.exclusions.add(f.open); };
+  assert.equal((await f.call('/api/sessions', { body: { provider: 'codex', cwd: f.open, prompt: 'go' }, headers: { 'x-tower-request-id': REQUEST_ID } })).status, 404);
+  assert.deepEqual(f.changes().map(change => change.action), ['session']);
+  await f.exclusions.remove(f.open);
+  assert.equal((await f.call('/api/repositories', { body: { cwd: f.open, action: 'pull' } })).status, 200);
+  assert.deepEqual(f.changes().map(change => change.action), ['session'], 'the pull failed, so nothing changed');
+  const pulled = await fixture(t, { repositories: true, pull: true });
+  assert.equal((await pulled.call('/api/repositories', { body: { cwd: pulled.open, action: 'pull' } })).status, 200);
+  assert.deepEqual(pulled.changes(), [{ controllerId: CONTROLLER, action: 'repository', target: pulled.open, detail: 'pull' }]);
 });
 
 test('local management and routes not listed for remote controllers do not exist for them', async t => {
   const f = await fixture(t);
   for (const [path, method] of [['/api/auth/overview', 'GET'], ['/api/auth/credentials', 'POST'], ['/api/remote/exclusions', 'GET'], ['/api/remote/exclusions', 'POST'],
     ['/api/workspace/tree?cwd=/', 'GET'], ['/api/workspace/terminals', 'POST'], ['/api/bootstrap', 'GET'], ['/api/health', 'GET'],
-    ['/api/v1/secrets.create', 'POST'], ['/api/v1/triggers.updateSettings', 'POST'], ['/api/v1/sessions.list', 'POST'], ['/api/v1/triggers.list', 'GET'], ['/api/slack', 'GET'], ['/', 'GET'], ['/api/link/controllers', 'GET']] as const) {
+    ['/api/v1/secrets.create', 'POST'], ['/api/v1/triggers.updateSettings', 'POST'], ['/api/v1/sessions.list', 'POST'], ['/api/v1/triggers.list', 'GET'], ['/api/slack', 'GET'], ['/', 'GET'], ['/api/link/controllers', 'GET'], ['/api/link/changes', 'GET']] as const) {
     const response = await f.call(path, { method, ...(method === 'POST' ? { body: {} } : {}) });
     assert.equal(response.status, 404, `${method} ${path}`);
   }
