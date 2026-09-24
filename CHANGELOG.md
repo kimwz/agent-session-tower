@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.21.0] - 2026-09-24
+
+### Added
+- **Branch sync on the canvas.** A project folder that is a git repository shows how many commits its branch is behind (↓) or ahead of (↑) its upstream. Tower fetches pinned folders and folders used in the last week every five minutes, without touching `FETCH_HEAD`, the index lock or credentials prompts. Open the badge to see the details and to pull (fast-forward only) or push (to the tracked branch, never forced).
+- **Up to date before work starts.** When you start a session or send a request, Tower first fast-forwards the folder's branch if that cannot lose anything: the branch is only behind, no tracked file has uncommitted changes, and no agent is working in the folder. The badge says when it did. Diverged branches and uncommitted work are left for you or an agent to resolve.
+- **Shared ground rules for every agent.** On start, Tower adds a marked section to the global `~/.claude/CLAUDE.md` (importing `~/.agent-monitor/agent-guidance.md`) and `~/.codex/AGENTS.md` (or `AGENTS.override.md` when that is in use): fetch and fast-forward before changing a repository, work in a separate worktree when another agent shares the folder and remove it afterwards, and never leave commits unpushed without saying so. A new installation sets this up by itself. Everything outside the section stays as it is, symbolic links to a dotfiles repository are followed, providers that are not set up get nothing, and a file containing `<!-- agent-session-tower:off -->` is left alone.
+
 ## [1.20.1] - 2026-09-24
 
 ### Changed
