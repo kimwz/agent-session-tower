@@ -82,7 +82,7 @@ test('limits pending work and does not grant sessions when audit persistence fai
     await assert.rejects(f.store.login('192.0.2.11', 'admin', 'password-test-123'), /not running/);
   } finally { await f.cleanup(); }
 });
-test('sessions expire after twelve hours with proactive revocation and never survive restart', async context => {
+test('sessions expire after seven days with proactive revocation and never survive restart', async context => {
   const f = await fixture();
   context.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: new Date('2026-01-01T00:00:00Z') });
   try {
@@ -91,7 +91,7 @@ test('sessions expire after twelve hours with proactive revocation and never sur
     assert.ok(login.sessionId);
     const revoked: string[] = [];
     f.store.onRevoke(token => revoked.push(token));
-    context.mock.timers.tick(12 * 60 * 60 * 1000 - 1);
+    context.mock.timers.tick(7 * 24 * 60 * 60 * 1000 - 1);
     assert.equal(f.store.session(login.sessionId, '192.0.2.1'), true);
     assert.deepEqual(revoked, []);
     context.mock.timers.tick(1);

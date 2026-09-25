@@ -7,7 +7,7 @@ import type { AuthOverview, BlockedIp, LoginAttempt } from '../../shared/auth.js
 
 const LIMIT = 5;
 const HISTORY = 1000;
-const SESSION_MS = 12 * 60 * 60 * 1000;
+export const SESSION_MS = 7 * 24 * 60 * 60 * 1000;
 const KDF = { N: 131072, r: 8, p: 1, maxmem: 192 * 1024 * 1024 };
 interface Credentials { version: 1; username: string; algorithm: 'scrypt'; salt: string; hash: string; N: number; r: number; p: number }
 interface Security { version: 1; attempts: LoginAttempt[]; failures: Record<string, number>; blockedIps: BlockedIp[] }

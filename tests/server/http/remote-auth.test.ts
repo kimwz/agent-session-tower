@@ -120,7 +120,7 @@ test('remote form login, permanent IP blocks, local account management, and stre
     const response = await login();
     assert.equal(response.status, 200);
     const header = response.headers['set-cookie']![0];
-    assert.match(header, /HttpOnly/); assert.match(header, /SameSite=Strict/); assert.match(header, /Max-Age=43200/);
+    assert.match(header, /HttpOnly/); assert.match(header, /SameSite=Strict/); assert.match(header, /Max-Age=604800/);
     cookie = header.split(';')[0];
     assert.doesNotMatch(response.body, /unique-remote-password|scrypt/);
     assert.equal(JSON.parse(response.body).authenticated, true);

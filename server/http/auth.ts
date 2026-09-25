@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Socket } from 'node:net';
 import { endianness } from 'node:os';
-import { canonicalIp, isLoopbackAddress } from '../auth/store.js';
+import { SESSION_MS, canonicalIp, isLoopbackAddress } from '../auth/store.js';
 
 export const SESSION_COOKIE = 'tower_session';
 
@@ -103,5 +103,5 @@ export function sessionCookie(req: IncomingMessage): string {
 
 export function setSessionCookie(req: IncomingMessage, res: ServerResponse, sessionId: string, secureOrigin: boolean): void {
   const secure = ('encrypted' in req.socket && req.socket.encrypted) || secureOrigin;
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${sessionId}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${sessionId ? 12 * 60 * 60 : 0}${secure ? '; Secure' : ''}`);
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${sessionId}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${sessionId ? SESSION_MS / 1000 : 0}${secure ? '; Secure' : ''}`);
 }
