@@ -57,8 +57,8 @@ export function auditActionLabel(action: TriggerAuditEntry['action'], t: (key: s
 }
 
 /** The kind of trigger in one or two words. */
-export function kindLabel(kind: SourceKind | 'slack', t: (key: string) => string): string {
-  return t(kind === 'schedule' ? '예약 실행' : kind === 'http' ? 'HTTP 응답' : kind === 'github' ? 'GitHub 이슈' : 'Slack 멘션');
+export function kindLabel(kind: SourceKind | 'slack' | 'public', t: (key: string) => string): string {
+  return t(kind === 'schedule' ? '예약 실행' : kind === 'http' ? 'HTTP 응답' : kind === 'github' ? 'GitHub 이슈' : kind === 'public' ? '공개 에이전트' : 'Slack 멘션');
 }
 
 /** When a trigger looks, and at what. */

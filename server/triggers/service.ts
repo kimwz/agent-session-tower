@@ -160,6 +160,8 @@ export class TriggerService extends EventEmitter {
   private readonly now: () => number;
 
   constructor(private readonly options: { stateDir: string; executor: TriggerExecutor; now?: () => number; slack?: () => SlackProjection | undefined; tickMs?: number;
+    /** Public agents appear among triggers; their settings and history stay in their own files. */
+    publicAgents?: () => SlackProjection[];
     limits?: { acceptBytes?: number; maxBytes?: number; requestsPerMinute?: number };
     /** Ports this Tower listens on; HTTP triggers may never call them. */
     ownPorts?: () => Promise<number[]>;
@@ -254,6 +256,7 @@ export class TriggerService extends EventEmitter {
     const slack = this.options.slack?.();
     const summaries: TriggerSummary[] = [];
     if (slack) summaries.push({ id: slack.id, name: slack.name, enabled: slack.enabled, kind: 'slack', revision: 0, updatedAt: slack.updatedAt, updatedBy: { kind: 'owner', via: 'ui' }, ...(slack.error ? { error: slack.error } : {}) });
+    for (const agent of this.options.publicAgents?.() ?? []) summaries.push({ id: agent.id, name: agent.name, enabled: agent.enabled, kind: 'public', revision: 0, updatedAt: agent.updatedAt, updatedBy: { kind: 'owner', via: 'ui' } });
     for (const trigger of this.state.triggers) {
       const cursor = this.state.cursors[trigger.id];
       const last = [...this.state.events].reverse().find(event => event.triggerId === trigger.id);

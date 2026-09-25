@@ -6,6 +6,7 @@ import { request, type ServerResponse, type ClientRequest } from 'node:http';
 import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import type { SlackPublicStatus } from '../../shared/slack.js';
+import type { PublicAgentOverview, PublicConversationView, PublicVisitorState } from '../../shared/public-agents.js';
 import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunApprovalResponse, Session } from '../../shared/types.js';
 import type { RunAdmission } from './manager.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
@@ -192,6 +193,17 @@ export class DurableRunManager extends EventEmitter {
   }
   async slackOverview(): Promise<SlackPublicStatus> { return this.call('slackOverview', []) as Promise<SlackPublicStatus>; }
   async slackMutate(action: string, body: Record<string, unknown>): Promise<SlackPublicStatus> { return this.call('slackMutate', [action, body]) as Promise<SlackPublicStatus>; }
+  /** Public agents run in the worker; an older worker has none yet. */
+  private requirePublicAgents(): void {
+    if (!this.supports('publicAgents')) throw Object.assign(new Error('The execution worker has not updated yet. Public agents become available once it hands over to the new version.'), { statusCode: 503 });
+  }
+  async publicAgentsOverview(): Promise<Omit<PublicAgentOverview, 'listener'>> { this.requirePublicAgents(); return this.call('publicAgentsOverview', []) as Promise<Omit<PublicAgentOverview, 'listener'>>; }
+  async publicAgentsConversation(agentId: string, conversationId: string): Promise<PublicConversationView> { this.requirePublicAgents(); return this.call('publicAgentsConversation', [agentId, conversationId]) as Promise<PublicConversationView>; }
+  async publicAgentsMutate(action: string, body: Record<string, unknown>): Promise<Omit<PublicAgentOverview, 'listener'>> { this.requirePublicAgents(); return this.call('publicAgentsMutate', [action, body]) as Promise<Omit<PublicAgentOverview, 'listener'>>; }
+  async publicVisit(action: string, slug: string, input: { token?: string; ip: string; password?: unknown; text?: unknown }): Promise<{ state: PublicVisitorState; token?: string }> {
+    if (!this.supports('publicAgents')) throw Object.assign(new Error('not_found'), { statusCode: 404 });
+    return this.call('publicVisit', [action, slug, input]) as Promise<{ state: PublicVisitorState; token?: string }>;
+  }
   getAutoPrompt(id: string): AutoPromptJob | undefined { return this.autoPromptList().find(job => job.id === id.toLowerCase()); }
   async submitAutoPrompt(input: AutoPromptRequest, internal: Pick<RunAdmission, 'origin' | 'requestId'> = {}): Promise<AutoPromptJob> {
     this.requireOrigins(internal);

@@ -21,6 +21,7 @@ import type { AuthStore } from '../auth/store.js';
 import { ownerIdentity, sessionCookie, setSessionCookie } from './auth.js';
 import type { AuthStatus } from '../../shared/auth.js';
 import type { SlackPublicStatus } from '../../shared/slack.js';
+import type { PublicAgentOverview, PublicConversationView } from '../../shared/public-agents.js';
 import { OPERATIONS, isOperationName } from '../../shared/api/operations.js';
 import type { RepositoryAction, RepositoryStatus } from '../../shared/repositories.js';
 
@@ -30,6 +31,12 @@ export interface Backend {
   api?(operation: string, input: unknown, context?: RequestContext): Promise<unknown>;
   slackOverview?(): Promise<SlackPublicStatus>;
   slackMutate?(action: string, body: Record<string, unknown>): Promise<SlackPublicStatus>;
+  /** Public agents: managed only from this Tower's own pages, never by a controlling computer. */
+  publicAgents?: {
+    overview(): Promise<PublicAgentOverview>;
+    conversation(agentId: string, conversationId: string): Promise<PublicConversationView>;
+    mutate(action: string, body: Record<string, unknown>): Promise<PublicAgentOverview>;
+  };
   snapshot(): Snapshot;
   detail(id: string, before?: number, limit?: number): Promise<SessionDetail | undefined>;
   setTitle?(id: string, title: string): Promise<Session | undefined>;
@@ -226,6 +233,21 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (!backend.slackMutate) return json(res, 503, { error: 'Slack 연동을 사용할 수 없습니다.' });
         const body = await readJson(req, 1_000_000);
         return json(res, 200, await backend.slackMutate(slackAction[1], body));
+      }
+      if (path === '/api/public-agents' && req.method === 'GET') {
+        if (!backend.publicAgents) return json(res, 503, { error: '공개 에이전트를 사용할 수 없습니다.' });
+        return json(res, 200, await backend.publicAgents.overview());
+      }
+      if (path === '/api/public-agents/conversation' && req.method === 'GET') {
+        if (!backend.publicAgents) return json(res, 503, { error: '공개 에이전트를 사용할 수 없습니다.' });
+        const agent = url.searchParams.get('agent'), conversation = url.searchParams.get('id');
+        if (!agent || !UUID.test(agent) || !conversation || !UUID.test(conversation)) return json(res, 400, { error: '대화를 지정하세요.' });
+        return json(res, 200, await backend.publicAgents.conversation(agent, conversation));
+      }
+      const publicAction = path.match(/^\/api\/public-agents\/(create|update|password|rotate|delete|reset|delete-conversation|listener)$/);
+      if (publicAction && req.method === 'POST') {
+        if (!backend.publicAgents) return json(res, 503, { error: '공개 에이전트를 사용할 수 없습니다.' });
+        return json(res, 200, await backend.publicAgents.mutate(publicAction[1], await readJson(req, 100_000)));
       }
       if (login) {
         if (identity.local) return json(res, 200, authStatus(true));

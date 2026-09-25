@@ -292,7 +292,7 @@ export interface TriggerSummary {
   id: string;
   name: string;
   enabled: boolean;
-  kind: TriggerSource['kind'] | 'slack';
+  kind: TriggerSource['kind'] | 'slack' | 'public';
   revision: number;
   nextRunAt?: string;
   lastEvent?: Pick<TriggerEvent, 'id' | 'status' | 'occurredAt' | 'error' | 'reason'>;

@@ -38,7 +38,7 @@ export function monitorItems(slack: SlackWorkflow[], triggers: TriggerEvent[], l
 
 /** The lane appears once Slack is connected or any trigger exists or has run. */
 export function monitorVisible(slackConnected: boolean, overview: TriggerOverview | undefined): boolean {
-  return slackConnected || !!overview?.triggers.some(item => item.kind !== 'slack') || !!overview?.recent.length;
+  return slackConnected || !!overview?.triggers.some(item => item.kind !== 'slack' && item.kind !== 'public') || !!overview?.recent.length;
 }
 
 /** Where the lane was left; the Slack monitor's saved place carries over once, into the lane's own key. */

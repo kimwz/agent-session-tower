@@ -104,3 +104,16 @@
 }
 .slack-head .trigger-computer { display: flex; flex-direction: row; flex: none; align-items: center; gap: 6px; margin-left: auto; font-size: 12px; color: var(--muted); }
 .trigger-computer select { max-width: 200px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); font: inherit; }
+
+/* Public agents */
+.public-agent-detail { display: grid; gap: 16px; min-width: 0; }
+.public-agent-detail .trigger-editor-head h3 { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.public-agent-detail .trigger-editor-head .secondary-button, .public-agent-actions .secondary-button { display: inline-flex; align-items: center; gap: 5px; }
+.public-agent-link { display: flex; align-items: center; gap: 8px; margin: 0; min-width: 0; }
+.public-agent-link code { flex: 1; min-width: 0; overflow-wrap: anywhere; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
+.public-agent-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.public-agent-actions input { flex: 1; min-width: 180px; }
+.public-agent-messages { display: grid; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; max-height: 420px; overflow: auto; }
+.public-agent-messages li { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
+.public-agent-messages li.visitor { border-color: #5278a9; }
+.public-agent-messages p { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }

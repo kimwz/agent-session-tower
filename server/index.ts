@@ -46,6 +46,7 @@ import { autoUpdateEnabled, publicToolUpdates, readToolUpdates, unlessUpdating }
 import type { AutoUpdateStatus } from '../shared/link.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
+import { PublicListener } from './public-agents/listener.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
 
 /** Every request this web server admits comes from the owner's browser session. */
@@ -260,6 +261,8 @@ async function main() {
     const page = await history.read(runs.nativeSessionId(id), before, limit);
     return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
   };
+  // Visitor pages of public agents, on their own port bound to this computer only; a tunnel publishes them.
+  const publicListener = new PublicListener({ stateDir, backend: runs, reservedPorts: () => [port] });
   const backend: Backend = {
     snapshot, detail,
     session: id => { const found = runs.getSession(id); return found && closedSessions.apply(titles.apply(found)); },
@@ -287,6 +290,15 @@ async function main() {
     slackOverview: () => runs.slackOverview(),
     api: (operation, input, context) => runs.api(operation, input, context && admit(context)),
     slackMutate: (action, body) => runs.slackMutate(action, body),
+    publicAgents: {
+      overview: async () => ({ ...await runs.publicAgentsOverview(), listener: publicListener.status() }),
+      conversation: (agentId, conversationId) => runs.publicAgentsConversation(agentId, conversationId),
+      mutate: async (action, body) => {
+        // Where the pages are served belongs to this web process; everything else to the worker.
+        if (action === 'listener') { await publicListener.configure(body); return { ...await runs.publicAgentsOverview().catch(() => ({ agents: [] })), listener: publicListener.status() }; }
+        return { ...await runs.publicAgentsMutate(action, body), listener: publicListener.status() };
+      },
+    },
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
     enqueue: async (id, prompt, attachments, context) => {
       const cwd = runs.getSession(id)?.cwd;
@@ -395,6 +407,8 @@ async function main() {
   void towerUpdates.start().catch(error => console.error(`Automatic updates are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   capabilities.start();
   repositories.start();
+  await publicListener.start().catch(error => console.error(`Public agent pages are unavailable: ${error instanceof Error ? error.message : String(error)}`));
+  if (publicListener.status().listening) console.log(`  Public agent pages: http://127.0.0.1:${publicListener.status().port}${publicListener.status().publicUrl ? ` (${publicListener.status().publicUrl})` : ''}\n`);
   // Links come up after the web server, so a joining computer never reaches a half-started Tower.
   await Promise.all([controllerLinks?.start(), nodeLinks?.start()]).catch(error => console.error(`Remote computers are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   const shutdown = async () => {
@@ -406,12 +420,13 @@ async function main() {
     const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => { remoteRouter.dispose(); return nodeViews.flush(); });
     const stoppingCapabilities = capabilities.stop();
     const stoppingRepositories = repositories.stop();
+    const stoppingPublic = publicListener.close();
     history.stop();
     auth.close();
     dispose();
     server.closeAllConnections();
     server.close();
-    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), runs.close()]); } finally { await releaseLock(); }
+    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingPublic, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), runs.close()]); } finally { await releaseLock(); }
   };
   const onSignal = () => { void shutdown().catch(error => { console.error(`Agent Session Tower shutdown: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }); };
   process.once('SIGINT', onSignal);

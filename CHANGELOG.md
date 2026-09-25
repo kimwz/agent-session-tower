@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.36.0] - 2026-09-25
+
+### Added
+- **Public agents: let people outside request work within a scope you set.** In **Triggers → Add trigger → Public agents** you describe what may be requested, choose one project folder and the agent that does the work, and get an unguessable address, optionally protected by a password. Visitors chat with an intake agent that helps them shape one request. When they confirm it, a reviewer checks it against your scope, the work runs in that folder as a new unattended session, and the visitor gets a reviewed summary of the result, for example a published link or a pull request.
+  - **The intake agent knows only your scope.** It runs with no tools at all: no files, commands, web or Tower tools. It sees only your scope text and the conversation, so there is nothing internal it could reveal.
+  - **Every request is reviewed before it runs.** The reviewer sees only your scope and the final request, never the conversation around it, and anything short of a clear yes is refused. The visitor sees the reason.
+  - **Results are reviewed before visitors see them.** The project agent ends its work with a summary for the visitor. A second review removes paths, code, credentials, internal addresses and anything outside the request. The raw output never leaves Tower.
+  - **Conversations are shared or per visitor.** You choose whether everyone with the address shares one conversation or each browser gets its own, which visitors can start over. The intake agent's conversation is compacted when it reaches half of its context, so it can go on indefinitely. You can read and reset any conversation from the panel.
+  - **They are served apart from Tower.** Public pages have their own port, bound to this computer only, and serve nothing but visitor pages. Publish that port on its own subdomain with a tunnel such as Cloudflare Tunnel, without the login that protects Tower. Tower's pages and API are never reachable on it. Sign-in attempts, new visitors, messages and requests are limited per agent and per visitor address, so one visitor's failed passwords never lock out anyone else or Tower itself.
+  - The work runs with automatic approvals and no Tower tools, like trigger runs. It starts only while the agent is on. Changing or removing the password signs every visitor out, and a new address shuts the old one.
+
 ## [1.35.0] - 2026-09-25
 
 ### Added

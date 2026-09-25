@@ -25,6 +25,7 @@ import { resolve } from 'node:path';
 import { parseSuccessor, spawnSuccessor, writeHandoff, type SuccessorCommand } from './handoff.js';
 import { REMOTE_FOLDER_REFUSED, TriggerService } from '../triggers/service.js';
 import { GitHubCoordinator } from '../triggers/github-coordinator.js';
+import { PUBLIC_TRIGGER_PREFIX, PublicAgentService } from '../public-agents/service.js';
 import { TowerApi } from '../api/tower-api.js';
 import { CapabilityRegistry, handleMcpRequest } from '../api/mcp.js';
 import { runToolResolver } from '../api/run-tools.js';
@@ -33,7 +34,7 @@ import { remoteTriggerLaunch } from '../remote/visibility.js';
 import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
 import { MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
-const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory']);
+const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation']);
 
 export interface RunnerHostOptions {
   stateDir: string;
@@ -44,6 +45,8 @@ export interface RunnerHostOptions {
   /** Coordinator conversations for GitHub issue events. */
   github?: GitHubCoordinator;
   triggers?: TriggerService;
+  /** Pages the owner published for outside visitors. */
+  publicAgents?: PublicAgentService;
   api?: TowerApi;
   terminals?: WorkspaceTerminals;
   idleMs?: number;
@@ -183,6 +186,16 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         return options.api.call(args[0], args[1], controllerId ? { kind: 'owner', via: 'remote', controllerId } : { kind: 'owner', via: 'ui' }, admitted?.requestId);
       } break;
       case 'slackTool': if (options.slack) return options.slack.tool(args[0] as string, args[1] as string, args[2] as Record<string, unknown>); break;
+      case 'publicAgentsOverview': if (options.publicAgents) return options.publicAgents.overview(); break;
+      case 'publicAgentsConversation': if (options.publicAgents) return options.publicAgents.conversation(args[0] as string, args[1] as string); break;
+      case 'publicAgentsMutate': if (options.publicAgents) return options.publicAgents.mutate(args[0] as string, args[1] as Record<string, unknown>); break;
+      // A visitor's request, passed on by the public listener: the slug, the visitor's cookie token and address.
+      case 'publicVisit': if (options.publicAgents) {
+        const action = args[0];
+        if (action !== 'state' && action !== 'login' && action !== 'message' && action !== 'reset') break;
+        const input = args[2] && typeof args[2] === 'object' ? args[2] as Record<string, unknown> : {};
+        return options.publicAgents.visit(action, String(args[1]), { ip: typeof input.ip === 'string' ? input.ip : 'unknown', token: typeof input.token === 'string' ? input.token : undefined, password: input.password, text: input.text });
+      } break;
     }
     throw Object.assign(new Error('Unknown runner operation.'), { statusCode: 400 });
   };
@@ -249,6 +262,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   options.sessions.on('change', changed);
   options.autoPrompts?.on('change', changed);
   options.triggers?.on('change', changed);
+  options.publicAgents?.on('change', changed);
   let idleTimer: ReturnType<typeof setInterval> | undefined;
   let handoffTimer: ReturnType<typeof setInterval> | undefined;
   // Status alone is not enough: a cancelled turn may still be closing its provider process.
@@ -295,7 +309,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     closing = true;
     if (idleTimer) clearInterval(idleTimer);
     if (handoffTimer) clearInterval(handoffTimer);
-    options.runs.off('change', changed); options.sessions.off('change', changed); options.autoPrompts?.off('change', changed); options.triggers?.off('change', changed);
+    options.runs.off('change', changed); options.sessions.off('change', changed); options.autoPrompts?.off('change', changed); options.triggers?.off('change', changed); options.publicAgents?.off('change', changed);
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
     await unlink(paths.socket).catch(() => {});
@@ -319,6 +333,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (options.slack?.hasActive()) return;
         if (options.github?.hasPending() || options.github?.inFlight()) return;
         if (options.triggers?.hasActive() || options.triggers?.inFlight()) return;
+        if (options.publicAgents?.hasActive() || options.publicAgents?.inFlight()) return;
         // A Claude Code or Codex update keeps the worker: closing would hold its lock until npm ends, keeping a new web out.
         if (options.inFlight?.()) return;
         // Stop accepting requests and finish writes before releasing the worker lock.
@@ -427,7 +442,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // Ports seen once stay blocked, so a web restart never opens a moment when Tower can call itself.
     const towerPorts = new Set<number>();
     const ownPorts = async () => { for (const port of await lockedPorts(stateDir)) towerPorts.add(port); return [...towerPorts]; };
-    const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), ownPorts,
+    const publicAgents = new PublicAgentService({ stateDir, runs });
+    await publicAgents.start();
+    const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), publicAgents: () => publicAgents.projection(), ownPorts,
       // A trigger set up from a controlling computer checks the sharing list as it is when it runs.
       sharing: { check: async path => { await exclusions.reload(); return exclusions.excludesNow(path); }, now: path => exclusions.matcher().excludes(path) }, executor: {
       submitAutoPrompt: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); },
@@ -450,6 +467,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const remoteLaunch = remoteTriggerLaunch(exclusions, runs);
     runs.setLaunchGate(run => {
       if (run.origin?.kind !== 'trigger' || !run.origin.triggerId) return undefined;
+      // A public agent's work starts only while that agent still exists and is on.
+      if (run.origin.triggerId.startsWith(PUBLIC_TRIGGER_PREFIX)) return publicAgents.launchAllowed(run.origin.triggerId.slice(PUBLIC_TRIGGER_PREFIX.length)) ? undefined : 'The public agent was turned off or deleted before this run started, so it did not run.';
       if (!(run.origin.workflowId && run.autoPromptId !== run.origin.workflowId) && !triggers.launchAllowed(run.origin.triggerId, run.origin.eventId)) return 'The trigger was turned off before this run started, so it did not run.';
       // Once more as the provider is about to start: a trigger set up remotely never works in a folder kept from sharing.
       return remoteLaunch.refused(run) ? REMOTE_FOLDER_REFUSED : undefined;
@@ -467,13 +486,13 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       },
       sessions: { list: () => visible.snapshot().sessions, read: async (id, limit) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), undefined, limit))?.messages ?? [] : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
-    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
-      onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || Boolean(tools?.busy()), holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); },
-      quiesce: async () => { tools?.pause(); slack.pause(); triggers.pause(); github.pause(); await Promise.all([slack.flush(), triggers.flush(), github.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush()]); },
-      resume: () => { tools?.resume(); slack.resume(); triggers.resume(); github.resume(); },
+    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
+      onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || Boolean(tools?.busy()), holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); },
+      quiesce: async () => { tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); await Promise.all([slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush()]); },
+      resume: () => { tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});
