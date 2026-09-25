@@ -5,6 +5,16 @@ import { applySnapshotPatch, type SnapshotPatch } from '../../../shared/snapshot
 export const RECONCILE_MS = 3000;
 /** Minimum spacing between reconnects that recover a stream from a patch it could not apply. */
 export const RESYNC_MS = 1000;
+/** The server sends a heartbeat every 15 seconds; this long without any frame means the connection died silently. */
+export const STALE_MS = 40_000;
+/** How often a live connection is checked for silence. */
+const WATCHDOG_MS = 5000;
+/** Returning to the page after this long without a frame reconnects at once instead of waiting for the watchdog. */
+export const WAKE_STALE_MS = 20_000;
+/** Reconnects the browser gave up on are retried with a growing wait, up to this. */
+export const MAX_RETRY_MS = 15_000;
+/** `EventSource.CLOSED`: the browser will not reconnect on its own. */
+const CLOSED = 2;
 
 type Show = (update: Snapshot | ((current: Snapshot | null) => Snapshot | null)) => void;
 interface Timers {
@@ -135,7 +145,8 @@ export class NodeSnapshotStore {
 }
 
 export interface SnapshotEventSource {
-  addEventListener(type: 'snapshot' | 'patch' | 'node', listener: (event: MessageEvent<string>) => void): void;
+  addEventListener(type: 'snapshot' | 'patch' | 'node' | 'heartbeat', listener: (event: MessageEvent<string>) => void): void;
+  readonly readyState: number;
   onopen: ((event: Event) => void) | null;
   onerror: ((event: Event) => void) | null;
   close(): void;
@@ -143,29 +154,51 @@ export interface SnapshotEventSource {
 export interface SnapshotStreamHandlers {
   onFrame(): void;
   onOpen(): void;
-  onError(): void;
+  /** `retrying` is true when the browser gave up on the connection and this stream reconnects it later. */
+  onError(retrying: boolean): void;
   /** A complete snapshot could not be read. */
   onUnreadable(): void;
 }
 
-/** Connects `store` to the server's snapshot events and returns a disconnect function. */
+export interface SnapshotConnection {
+  (): void;
+  /**
+   * The page became usable again (shown, restored or back online). A mobile browser suspends a hidden page and
+   * often drops its connection without telling it, so a connection that has been quiet reconnects at once.
+   */
+  wake(): void;
+}
+
+/**
+ * Connects `store` to the server's snapshot events and returns a disconnect function.
+ * The browser reconnects a dropped stream by itself only while it keeps trying; this also reconnects one it gave up on
+ * (a proxy answering in its place, or a server restart), one that went silent, and one a suspended page lost.
+ */
 export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotStreamHandlers,
-  open: (url: string) => SnapshotEventSource = url => new EventSource(url), timers: Timers = realTimers, nodes?: NodeSnapshotStore): () => void {
+  open: (url: string) => SnapshotEventSource = url => new EventSource(url), timers: Timers = realTimers, nodes?: NodeSnapshotStore): SnapshotConnection {
   let source: SnapshotEventSource | undefined;
   let closed = false;
   let lastResync = -Infinity;
-  let resyncTimer: unknown;
+  let lastFrame = timers.now();
+  let failures = 0;
+  let restartTimer: unknown;
+  let watchdog: unknown;
+  const heard = () => { lastFrame = timers.now(); };
   const connect = () => {
+    heard();
     const current = source = open(nodes ? '/api/events?patch=1&nodes=1' : '/api/events?patch=1');
     current.addEventListener('snapshot', event => {
       if (current !== source) return;
+      heard();
       let snapshot: Snapshot;
       try { snapshot = JSON.parse(event.data) as Snapshot; } catch { handlers.onUnreadable(); return; }
+      failures = 0;
       store.complete(Number(event.lastEventId), snapshot);
       handlers.onFrame();
     });
     current.addEventListener('patch', event => {
       if (current !== source) return;
+      heard();
       let applied = false;
       try { applied = store.patch(Number(event.lastEventId), JSON.parse(event.data) as SnapshotPatch); } catch { /* Unreadable patches resynchronize. */ }
       if (applied) handlers.onFrame();
@@ -173,32 +206,61 @@ export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotSt
     });
     current.addEventListener('node', event => {
       if (current !== source || !nodes) return;
+      heard();
       let applied = false;
       try { applied = nodes.frame(JSON.parse(event.data) as NodeFrame); } catch { /* Unreadable frames resynchronize. */ }
       if (!applied) resync();
     });
-    current.onopen = () => { if (current === source) { store.setConnected(true); handlers.onOpen(); } };
-    current.onerror = () => { if (current === source) { store.setConnected(false); handlers.onError(); } };
+    current.addEventListener('heartbeat', () => { if (current === source) heard(); });
+    current.onopen = () => { if (current === source) { heard(); store.setConnected(true); handlers.onOpen(); } };
+    current.onerror = () => {
+      if (current !== source) return;
+      store.setConnected(false);
+      const retrying = current.readyState === CLOSED;
+      handlers.onError(retrying);
+      if (retrying) restart(Math.min(MAX_RETRY_MS, 1000 * 2 ** failures++));
+    };
   };
   // A new connection always begins with a complete snapshot.
-  const resync = () => {
-    if (closed || resyncTimer !== undefined) return;
+  const restart = (wait: number) => {
+    if (closed) return;
+    if (restartTimer !== undefined) timers.clearTimeout(restartTimer);
     source?.close();
     source = undefined;
     store.setConnected(false);
-    const wait = Math.max(0, lastResync + RESYNC_MS - timers.now());
-    resyncTimer = timers.setTimeout(() => {
-      resyncTimer = undefined;
-      lastResync = timers.now();
+    restartTimer = timers.setTimeout(() => {
+      restartTimer = undefined;
       if (!closed) connect();
     }, wait);
   };
+  const resync = () => {
+    if (closed || restartTimer !== undefined) return;
+    const wait = Math.max(0, lastResync + RESYNC_MS - timers.now());
+    lastResync = timers.now() + wait;
+    restart(wait);
+  };
+  const watch = () => {
+    watchdog = timers.setTimeout(() => {
+      if (closed) return;
+      if (source && timers.now() - lastFrame > STALE_MS) restart(0);
+      watch();
+    }, WATCHDOG_MS);
+  };
   connect();
-  return () => {
+  watch();
+  const disconnect = () => {
     closed = true;
-    if (resyncTimer !== undefined) timers.clearTimeout(resyncTimer);
+    if (restartTimer !== undefined) timers.clearTimeout(restartTimer);
+    if (watchdog !== undefined) timers.clearTimeout(watchdog);
     source?.close();
     source = undefined;
     store.dispose();
   };
+  return Object.assign(disconnect, {
+    wake: () => {
+      if (closed) return;
+      const quiet = timers.now() - lastFrame > WAKE_STALE_MS;
+      if (!source || source.readyState === CLOSED || quiet) { failures = 0; restart(0); }
+    },
+  });
 }

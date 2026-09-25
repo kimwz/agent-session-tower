@@ -71,6 +71,13 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
 
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
+  // Messages that arrived while the connection was down, or a read that failed with it, are read again once it is back.
+  const wasConnected = useRef(connected);
+  useEffect(() => {
+    if (connected && !wasConnected.current) setRetry(value => value + 1);
+    wasConnected.current = connected;
+  }, [connected]);
+
   useEffect(() => {
     const controller = new AbortController();
     let timeout: number | undefined;

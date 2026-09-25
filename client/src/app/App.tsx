@@ -22,7 +22,7 @@ import type { RepositoryAction, RepositoryStatus } from '../../../shared/reposit
 import { Graph } from '../graph/Graph';
 import { BrandMark, ProviderIcon } from '../common/Icons';
 import { useMediaQuery } from '../common/use-media-query';
-import { api, outdatedRunner, providerLabels, sessionActivityAt, sessionTitle, sortSessions } from '../common/lib';
+import { api, outdatedRunner, providerLabels, recoverRefusedConnection, sessionActivityAt, sessionTitle, sortSessions } from '../common/lib';
 import { getMainSessionId, getMainSessions } from '../sessions/session-family';
 import { acknowledgeSession, conversationRevision, parseReadState, pruneReadState, readStateKey } from '../sessions/session-read-state';
 import { NewSessionDialog } from '../sessions/NewSessionDialog';
@@ -134,12 +134,21 @@ function TowerApp() {
       onFrame: () => { setConnection('connected'); setLoadError(''); },
       onUnreadable: () => setLoadError(t("세션 업데이트를 읽지 못했습니다. 새로고침해 주세요.")),
       onOpen: () => { setConnection('connected'); void api<{ token: string }>('/api/bootstrap').then(value => setToken(value.token)).catch(() => {}); },
-      onError: () => setConnection('offline'),
+      onError: retrying => { setConnection('offline'); if (retrying) void recoverRefusedConnection(); },
     }, undefined, undefined, nodeStore);
+    // Phones suspend a page in the background and drop its connection without saying so; coming back reconnects at once.
+    const wake = () => { if (!document.hidden) disconnect.wake(); };
+    const events = ['pageshow', 'online', 'focus'] as const;
+    document.addEventListener('visibilitychange', wake);
+    for (const name of events) window.addEventListener(name, wake);
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
     const onPop = () => { setSelectedId(readSelection()); setSelectedSlackId(undefined); setTriggerEventId(null); };
     window.addEventListener('popstate', onPop);
-    return () => { disconnect(); window.clearInterval(timer); window.removeEventListener('popstate', onPop); };
+    return () => {
+      disconnect(); window.clearInterval(timer); window.removeEventListener('popstate', onPop);
+      document.removeEventListener('visibilitychange', wake);
+      for (const name of events) window.removeEventListener(name, wake);
+    };
   }, [refresh, snapshots, nodeStore]);
 
   const selectSession = useCallback((id: string | null) => {

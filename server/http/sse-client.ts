@@ -1,3 +1,5 @@
+export const HEARTBEAT = 'event: heartbeat\ndata: 1\n\n';
+
 /** A write(false) already accepted the frame. Wait for drain and retain only the newest update. */
 export interface SseResponse {
   write(data: string): boolean;
@@ -38,8 +40,9 @@ export class SseClient {
     else this.write(patch ?? snapshot());
   }
 
+  /** A named event rather than a comment, which browsers never show the page: it tells the page the stream is alive. */
   heartbeat(): void {
-    if (!this.closed && !this.blocked) this.write(': heartbeat\n\n');
+    if (!this.closed && !this.blocked) this.write(HEARTBEAT);
   }
 
   end(): void {

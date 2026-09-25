@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
-import { SseClient } from '../../../server/http/sse-client.js';
+import { HEARTBEAT, SseClient } from '../../../server/http/sse-client.js';
 
 class Response extends EventEmitter {
   frames: string[] = [];
@@ -30,7 +30,7 @@ test('stalled SSE retains only the latest snapshot and delivers it on drain with
   assert.deepEqual(response.frames, ['initial', 'snapshot-9999']);
   response.emit('drain'); // A consumed write is never sent twice.
   client.heartbeat();
-  assert.deepEqual(response.frames, ['initial', 'snapshot-9999', ': heartbeat\n\n']);
+  assert.deepEqual(response.frames, ['initial', 'snapshot-9999', HEARTBEAT]);
   client.end();
 });
 
@@ -71,9 +71,9 @@ test('heartbeat backpressure also waits for drain before writing the latest snap
   const client = new SseClient(response, () => {});
   response.accepting = false;
   client.heartbeat(); client.snapshot('latest'); client.heartbeat();
-  assert.deepEqual(response.frames, [': heartbeat\n\n']);
+  assert.deepEqual(response.frames, [HEARTBEAT]);
   response.accepting = true; response.emit('drain');
-  assert.deepEqual(response.frames, [': heartbeat\n\n', 'latest']);
+  assert.deepEqual(response.frames, [HEARTBEAT, 'latest']);
   client.end();
 });
 

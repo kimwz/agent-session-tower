@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.34.3] - 2026-09-25
+
+### Fixed
+- **Tower reconnects by itself on a phone.** Coming back to Tower after switching apps or locking the screen reconnects at once, and the open conversation reads the messages it missed. A connection that went silent is replaced within about 40 seconds, and one the browser gave up on, such as during a Tower restart, is tried again with a growing wait instead of staying disconnected until you reload. When the login in front of Tower, such as Cloudflare Access, has expired, the page reloads to go through it. When Tower's own sign-in has ended, the login form appears.
+
 ## [1.34.2] - 2026-09-25
 
 ### Changed

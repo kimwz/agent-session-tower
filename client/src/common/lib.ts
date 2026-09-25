@@ -83,6 +83,29 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+const FRONT_LOGIN_RELOAD_KEY = 'agent-monitor.front-login-reload';
+/**
+ * After the live connection was refused, finds out why. A login in front of Tower (such as Cloudflare Access) whose
+ * session ran out answers with a redirect that only a full page load can follow, so the page reloads, at most once a
+ * minute. When Tower's own sign-in ended, the login form is shown.
+ */
+export async function recoverRefusedConnection(): Promise<void> {
+  if (typeof window === 'undefined' || document.hidden) return;
+  let response: Response;
+  try { response = await fetch('/api/auth/status', { redirect: 'manual', cache: 'no-store' }); } catch { return; }
+  if (response.type === 'opaqueredirect') {
+    let last = 0;
+    try { last = Number(window.sessionStorage.getItem(FRONT_LOGIN_RELOAD_KEY)) || 0; } catch { /* Without storage, the time guard still applies within this page. */ }
+    if (Date.now() - last < 60_000) return;
+    try { window.sessionStorage.setItem(FRONT_LOGIN_RELOAD_KEY, String(Date.now())); } catch { /* Reload anyway. */ }
+    window.location.reload();
+    return;
+  }
+  if (!response.ok) return;
+  const status = await response.json().catch(() => undefined) as { local?: boolean; authenticated?: boolean } | undefined;
+  if (status && !status.local && !status.authenticated) window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+}
+
 /**
  * The execution worker keeps its code until it idles, so requests can run on an older build than this page. A newer
  * worker (left by an update that was undone) is not waiting to be replaced.

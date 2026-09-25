@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { connectSnapshotStream, NodeSnapshotStore, RECONCILE_MS, RESYNC_MS, SnapshotStore, type SnapshotEventSource } from '../../../client/src/app/snapshot-stream.js';
+import { connectSnapshotStream, MAX_RETRY_MS, NodeSnapshotStore, RECONCILE_MS, RESYNC_MS, STALE_MS, SnapshotStore, WAKE_STALE_MS, type SnapshotEventSource } from '../../../client/src/app/snapshot-stream.js';
 import type { SnapshotPatch } from '../../../shared/snapshot-patch.js';
 import type { Session, Snapshot } from '../../../shared/types.js';
 
@@ -124,12 +124,15 @@ class FakeSource implements SnapshotEventSource {
   static opened: FakeSource[] = [];
   onopen: ((event: Event) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
+  readyState = 0;
   closed = false;
   private listeners = new Map<string, (event: MessageEvent<string>) => void>();
   constructor(readonly url: string) { FakeSource.opened.push(this); }
-  addEventListener(type: 'snapshot' | 'patch' | 'node', listener: (event: MessageEvent<string>) => void) { this.listeners.set(type, listener); }
-  close() { this.closed = true; }
-  emit(type: 'snapshot' | 'patch' | 'node', id: number, data: unknown) {
+  addEventListener(type: 'snapshot' | 'patch' | 'node' | 'heartbeat', listener: (event: MessageEvent<string>) => void) { this.listeners.set(type, listener); }
+  close() { this.closed = true; this.readyState = 2; }
+  /** The browser stopped trying: a proxy answered in Tower's place, or Tower refused the stream. */
+  giveUp() { this.readyState = 2; this.onerror?.(new Event('error')); }
+  emit(type: 'snapshot' | 'patch' | 'node' | 'heartbeat', id: number, data: unknown) {
     this.listeners.get(type)!({ data: typeof data === 'string' ? data : JSON.stringify(data), lastEventId: String(id) } as MessageEvent<string>);
   }
 }
@@ -188,4 +191,78 @@ test('joined computers’ frames keep their own streams on the same connection, 
   clock.advance(0);
   assert.equal(FakeSource.opened.length, 2);
   disconnect();
+});
+
+test('a connection the browser gave up on is reconnected with a growing wait that a complete snapshot resets', () => {
+  FakeSource.opened = [];
+  const clock = new Clock();
+  const store = new SnapshotStore(() => {}, clock);
+  const errors: boolean[] = [];
+  const disconnect = connectSnapshotStream(store, { onFrame: () => {}, onOpen: () => {}, onError: retrying => { errors.push(retrying); }, onUnreadable: () => {} },
+    url => new FakeSource(url), clock);
+  FakeSource.opened[0].onerror?.(new Event('error'));
+  clock.advance(MAX_RETRY_MS);
+  assert.equal(FakeSource.opened.length, 1, 'while the browser keeps trying, it reconnects by itself');
+  FakeSource.opened[0].giveUp();
+  assert.deepEqual(errors, [false, true]);
+  clock.advance(999);
+  assert.equal(FakeSource.opened.length, 1);
+  clock.advance(1);
+  assert.equal(FakeSource.opened.length, 2);
+  FakeSource.opened[1].giveUp();
+  clock.advance(1999);
+  assert.equal(FakeSource.opened.length, 2, 'each refusal waits longer');
+  clock.advance(1);
+  assert.equal(FakeSource.opened.length, 3);
+  for (let i = 0; i < 6; i++) { FakeSource.opened.at(-1)!.giveUp(); clock.advance(MAX_RETRY_MS); }
+  assert.equal(FakeSource.opened.length, 9, 'the wait stops growing');
+  FakeSource.opened.at(-1)!.emit('snapshot', 1, snapshot('Back'));
+  FakeSource.opened.at(-1)!.giveUp();
+  clock.advance(1000);
+  assert.equal(FakeSource.opened.length, 10, 'a connection that worked starts over from the shortest wait');
+  disconnect();
+  clock.advance(MAX_RETRY_MS);
+  assert.equal(FakeSource.opened.length, 10);
+});
+
+test('a connection that goes silent is replaced, while heartbeats keep a quiet one', () => {
+  FakeSource.opened = [];
+  const clock = new Clock();
+  const store = new SnapshotStore(() => {}, clock);
+  const disconnect = connectSnapshotStream(store, { onFrame: () => {}, onOpen: () => {}, onError: () => {}, onUnreadable: () => {} }, url => new FakeSource(url), clock);
+  const first = FakeSource.opened[0];
+  first.onopen?.(new Event('open'));
+  first.emit('snapshot', 1, snapshot('One'));
+  for (let i = 0; i < 8; i++) { clock.advance(15_000); first.emit('heartbeat', 0, '1'); }
+  assert.equal(FakeSource.opened.length, 1, 'heartbeats show it is alive');
+  clock.advance(STALE_MS + 5000);
+  assert.equal(first.closed, true);
+  assert.equal(FakeSource.opened.length, 2);
+  disconnect();
+});
+
+test('coming back to the page reconnects at once only when the connection may have been lost meanwhile', () => {
+  FakeSource.opened = [];
+  const clock = new Clock();
+  const store = new SnapshotStore(() => {}, clock);
+  const connection = connectSnapshotStream(store, { onFrame: () => {}, onOpen: () => {}, onError: () => {}, onUnreadable: () => {} }, url => new FakeSource(url), clock);
+  const first = FakeSource.opened[0];
+  first.emit('snapshot', 1, snapshot('One'));
+  connection.wake();
+  assert.equal(FakeSource.opened.length, 1, 'a connection that just spoke is kept');
+  // A suspended page runs no timers, so the watchdog never saw the silence.
+  clock.time += WAKE_STALE_MS + 1;
+  connection.wake();
+  clock.advance(0);
+  assert.equal(first.closed, true);
+  assert.equal(FakeSource.opened.length, 2);
+  FakeSource.opened[1].emit('snapshot', 2, snapshot('Two'));
+  FakeSource.opened[1].giveUp();
+  connection.wake();
+  clock.advance(0);
+  assert.equal(FakeSource.opened.length, 3, 'a connection the browser gave up on is not left waiting for its retry');
+  connection();
+  connection.wake();
+  clock.advance(0);
+  assert.equal(FakeSource.opened.length, 3);
 });
