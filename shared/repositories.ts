@@ -54,6 +54,14 @@ export function pushBlocker(status: RepositoryStatus): PushBlocker | undefined {
   return undefined;
 }
 
+/**
+ * What the buttons cannot settle safely: uncommitted edits to commit, or a branch that has both
+ * local and remote commits. An agent can review, commit, merge and publish these.
+ */
+export function repositoryNeedsAgent(status: RepositoryStatus): boolean {
+  return Boolean(status.branch && status.upstream && (status.changes || (status.ahead && status.behind)));
+}
+
 /** True when the folder `cwd` lies inside the working tree `root`. */
 export function insideRepository(root: string, cwd: string): boolean {
   return cwd === root || cwd.startsWith(root.endsWith('/') ? root : `${root}/`);

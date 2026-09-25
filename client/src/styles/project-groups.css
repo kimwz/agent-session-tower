@@ -41,5 +41,7 @@
 .repository-sync.out-of-sync { color:#f2c879; border-color:#6b5a35; background:#3a321f66; }
 .repository-sync.failed { color:#f3aaa2; border-color:#844c49; }
 .repository-dialog footer button { display:inline-flex; align-items:center; gap:6px; }
+.repository-dialog footer { flex-wrap:wrap; }
+.repository-dialog footer .repository-delegate { margin-right:auto; }
 .repository-summary { margin:0 0 6px; font-size:13px; line-height:1.6; color:#d4e1f2; overflow-wrap:anywhere; }
 .repository-dialog .repository-failed { color:#f0a59c; }

@@ -10,19 +10,26 @@ import { EffortPicker, ModelPicker, supportedEffort } from '../chat/ModelPicker'
 import { hostProblem, type Host } from '../remote/hosts';
 import { localPart, nodeHeaders, nodeOf, nodePath, scopeRun, scopeSession, settleRequest } from '../remote/scope';
 
+/** A request prepared elsewhere for the user to review and send. */
+export interface SessionDraft {
+  title: string;
+  prompt: string;
+}
+
 interface NewSessionDialogProps {
   providers: ProviderHealth[];
   /** Every computer this page can start work on; without joined computers only this one. */
   hosts?: Host[];
   projects: Array<[string, string]>;
   initialCwd?: string;
+  draft?: SessionDraft;
   token: string;
   connected: boolean;
   onClose: () => void;
   onCreated: (session: Session, run: Run) => void;
 }
 
-export function NewSessionDialog({ providers: localProviders, hosts = [], projects: allProjects, initialCwd, token, connected, onClose, onCreated }: NewSessionDialogProps) {
+export function NewSessionDialog({ providers: localProviders, hosts = [], projects: allProjects, initialCwd, draft, token, connected, onClose, onCreated }: NewSessionDialogProps) {
   useI18n();
   const id = useId();
   const dialog = useRef<HTMLDialogElement>(null);
@@ -36,8 +43,8 @@ export function NewSessionDialog({ providers: localProviders, hosts = [], projec
   const projects = allProjects.filter(([key]) => nodeOf(key) === machine).map(([key, label]): [string, string] => [localPart(key), label]);
   const [provider, setProvider] = useState<Provider>(() => providers.find(item => item.available)?.provider || 'claude');
   const [cwd, setCwd] = useState(initialCwd ? localPart(initialCwd) : projects[0]?.[0] || '');
-  const [title, setTitle] = useState('');
-  const [prompt, setPrompt] = useState('');
+  const [title, setTitle] = useState(draft?.title ?? '');
+  const [prompt, setPrompt] = useState(draft?.prompt ?? '');
   const [model, setModel] = useState<string>();
   const [effort, setEffort] = useState<string>();
   const [submitting, setSubmitting] = useState(false);

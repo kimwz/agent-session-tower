@@ -4,7 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { WorkspaceContext } from '../../../client/src/workspace/WorkspaceOverlay.js';
 import { ProjectGroupHeader, type ProjectGroupHeaderData } from '../../../client/src/project-groups/ProjectGroupHeader.js';
-import { repositoryOutOfSync } from '../../../client/src/project-groups/RepositorySync.js';
+import { repositoryAgentDraft, repositoryOutOfSync } from '../../../client/src/project-groups/RepositorySync.js';
 import type { RepositoryStatus } from '../../../shared/repositories.js';
 
 const data = (patch: Partial<ProjectGroupHeaderData> = {}): ProjectGroupHeaderData => ({
@@ -70,6 +70,13 @@ test('a branch level with its remote shows a quiet badge, and uncommitted edits 
   assert.match(markup, /class="repository-sync nodrag nopan"/);
   assert.equal(repositoryOutOfSync(repository({ upstream: undefined, ahead: 3 })), false);
   assert.doesNotMatch(header(), /repository-sync/);
+});
+
+test('handing a repository to an agent drafts a request that states where it stands and forbids destructive git', () => {
+  const draft = repositoryAgentDraft(repository({ behind: 2, changes: 3 }));
+  assert.equal(draft.title, 'Git 정리: main');
+  assert.match(draft.prompt, /현재 상태: main ↔ origin\/main: 2개 뒤처짐, 커밋하지 않은 파일 3개/);
+  assert.match(draft.prompt, /강제 푸시, reset --hard, 변경 사항 폐기는 하지 마세요/);
 });
 
 test('another computer’s folder shows its own path and offers that computer’s file tools', () => {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { overlapsRepository, pullBlocker, pushBlocker, type RepositoryStatus } from '../../shared/repositories.js';
+import { overlapsRepository, pullBlocker, pushBlocker, repositoryNeedsAgent, type RepositoryStatus } from '../../shared/repositories.js';
 
 const status = (patch: Partial<RepositoryStatus> = {}): RepositoryStatus => ({
   cwd: '/work/app', root: '/work/app', branch: 'main', upstream: 'origin/main', ahead: 0, behind: 0, changes: 0, checkedAt: '2026-09-24T00:00:00.000Z', ...patch,
@@ -22,6 +22,17 @@ test('pushing is offered only for local commits on a branch that is not behind',
   assert.equal(pushBlocker(status()), 'nothing');
   assert.equal(pushBlocker(status({ ahead: 2, behind: 1 })), 'behind');
   assert.equal(pushBlocker(status({ ahead: 2, upstream: undefined })), 'no-upstream');
+});
+
+test('an agent is offered for uncommitted edits or a diverged branch, never for what the buttons already handle', () => {
+  assert.equal(repositoryNeedsAgent(status({ changes: 2 })), true);
+  assert.equal(repositoryNeedsAgent(status({ behind: 3, changes: 1 })), true);
+  assert.equal(repositoryNeedsAgent(status({ ahead: 1, behind: 3 })), true);
+  assert.equal(repositoryNeedsAgent(status()), false);
+  assert.equal(repositoryNeedsAgent(status({ behind: 3 })), false);
+  assert.equal(repositoryNeedsAgent(status({ ahead: 2 })), false);
+  assert.equal(repositoryNeedsAgent(status({ changes: 2, upstream: undefined })), false);
+  assert.equal(repositoryNeedsAgent(status({ changes: 2, branch: undefined })), false);
 });
 
 test('work in the folder, below it, anywhere in its working tree or above it counts as touching the repository', () => {

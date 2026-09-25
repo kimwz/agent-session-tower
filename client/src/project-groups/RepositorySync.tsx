@@ -1,9 +1,10 @@
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowDown, ArrowUp, GitBranch, LoaderCircle, RefreshCw, X } from 'lucide-react';
-import { pullBlocker, pushBlocker, type PullBlocker, type PushBlocker, type RepositoryAction, type RepositoryStatus } from '../../../shared/repositories';
+import { ArrowDown, ArrowUp, Bot, GitBranch, LoaderCircle, RefreshCw, X } from 'lucide-react';
+import { pullBlocker, pushBlocker, repositoryNeedsAgent, type PullBlocker, type PushBlocker, type RepositoryAction, type RepositoryStatus } from '../../../shared/repositories';
 import { relativeTime } from '../common/lib';
+import type { SessionDraft } from '../sessions/NewSessionDialog';
 
 const pullReasons: Record<PullBlocker, string> = {
   detached: "브랜치가 체크아웃되어 있지 않습니다.",
@@ -37,6 +38,23 @@ export function repositoryOutOfSync(status: RepositoryStatus): boolean {
   return Boolean(status.upstream && (status.ahead || status.behind));
 }
 
+/** The request a new session starts with when the user hands the repository to an agent. */
+export function repositoryAgentDraft(status: RepositoryStatus): SessionDraft {
+  return {
+    title: t("Git 정리: {0}", { 0: status.branch || '' }),
+    prompt: [
+      t("이 저장소를 원격 브랜치와 동기화해 주세요."),
+      t("현재 상태: {0}", { 0: repositorySummary(status) }),
+      '',
+      t("1. git fetch 후 git status와 git diff로 커밋하지 않은 변경 사항과 로컬 커밋을 살펴보세요."),
+      t("2. 완성된 변경은 의미 단위로 나눠 커밋하세요. 미완성이거나 임시 파일, 비밀 정보로 보이는 변경은 커밋하지 말고 알려 주세요."),
+      t("3. 원격에 새 커밋이 있으면 받아서 합치세요. fast-forward가 안 되면 리베이스나 병합을 하고, 충돌을 판단하기 어려우면 멈추고 물어보세요."),
+      t("4. 푸시할 커밋이 있으면 원격 브랜치에 푸시하세요. 강제 푸시, reset --hard, 변경 사항 폐기는 하지 마세요."),
+      t("5. 끝나면 무엇을 커밋하고 받고 푸시했는지, 남은 문제가 있는지 알려 주세요."),
+    ].join('\n'),
+  };
+}
+
 function actionLabel(status: RepositoryStatus): string | undefined {
   const action = status.lastAction;
   if (!action) return undefined;
@@ -46,7 +64,7 @@ function actionLabel(status: RepositoryStatus): string | undefined {
   return t(action.kind === 'auto-pull' ? "작업 시작 전에 커밋 {0}개를 자동으로 받았습니다 ({1})." : "커밋 {0}개를 받았습니다 ({1}).", { 0: action.commits ?? 0, 1: when });
 }
 
-function RepositoryDialog({ status, busy, disabled, onAction, onClose }: { status: RepositoryStatus; busy: boolean; disabled: boolean; onAction: (action: RepositoryAction) => Promise<string | undefined>; onClose: () => void }) {
+function RepositoryDialog({ status, busy, disabled, onAction, onDelegate, onClose }: { status: RepositoryStatus; busy: boolean; disabled: boolean; onAction: (action: RepositoryAction) => Promise<string | undefined>; onDelegate?: (draft: SessionDraft) => void; onClose: () => void }) {
   useI18n();
   const id = useId();
   const dialog = useRef<HTMLDialogElement>(null);
@@ -86,6 +104,9 @@ function RepositoryDialog({ status, busy, disabled, onAction, onClose }: { statu
     {last && <p className={`group-title-help ${status.lastAction?.ok ? '' : 'repository-failed'}`}>{last}</p>}
     {error && <p className="group-title-error" role="alert">{translateMessage(error)}</p>}
     <footer>
+      {onDelegate && repositoryNeedsAgent(status) && <button type="button" className="secondary-button repository-delegate" disabled={disabled || !!pending || busy}
+        title={busy ? t("이 폴더에서 에이전트가 작업 중입니다.") : t("커밋, 받기, 푸시를 새 세션의 에이전트에게 맡깁니다.")}
+        onClick={() => { onDelegate(repositoryAgentDraft(status)); onClose(); }}><Bot size={14} />{t("에이전트에게 맡기기")}</button>}
       <button type="button" className="secondary-button" disabled={disabled || !!pending} onClick={() => void run('refresh')}>{pending === 'refresh' ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />}{t("다시 확인")}</button>
       <button type="button" className="group-title-save" disabled={disabled || !!pending || !!pullBlocked} title={pullBlocked ? t(pullReasons[pullBlocked]) : t("원격의 새 커밋을 fast-forward로 받습니다.")} onClick={() => void run('pull')}>{pending === 'pull' ? <LoaderCircle size={14} className="spin" /> : <ArrowDown size={14} />}{t("받기")}</button>
       <button type="button" className="group-title-save" disabled={disabled || !!pending || !!pushBlocked} title={pushBlocked ? t(pushReasons[pushBlocked]) : t("강제 푸시 없이 원격 브랜치에 푸시합니다.")} onClick={() => void run('push')}>{pending === 'push' ? <LoaderCircle size={14} className="spin" /> : <ArrowUp size={14} />}{t("푸시")}</button>
@@ -93,7 +114,7 @@ function RepositoryDialog({ status, busy, disabled, onAction, onClose }: { statu
   </dialog>, document.body);
 }
 
-export function RepositorySync({ status, busy, disabled, onAction }: { status: RepositoryStatus; busy: boolean; disabled: boolean; onAction: (cwd: string, action: RepositoryAction) => Promise<string | undefined> }) {
+export function RepositorySync({ status, busy, disabled, onAction, onDelegate }: { status: RepositoryStatus; busy: boolean; disabled: boolean; onAction: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; onDelegate?: (draft: SessionDraft) => void }) {
   useI18n();
   const [open, setOpen] = useState(false);
   const outOfSync = repositoryOutOfSync(status);
@@ -104,6 +125,6 @@ export function RepositorySync({ status, busy, disabled, onAction }: { status: R
       {status.behind > 0 && <span><ArrowDown size={10} aria-hidden="true" />{status.behind}</span>}
       {status.ahead > 0 && <span><ArrowUp size={10} aria-hidden="true" />{status.ahead}</span>}
     </button>
-    {open && <RepositoryDialog status={status} busy={busy} disabled={disabled} onAction={action => onAction(status.cwd, action)} onClose={() => setOpen(false)} />}
+    {open && <RepositoryDialog status={status} busy={busy} disabled={disabled} onAction={action => onAction(status.cwd, action)} onDelegate={onDelegate} onClose={() => setOpen(false)} />}
   </>;
 }

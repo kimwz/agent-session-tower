@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.35.0] - 2026-09-25
+
+### Added
+- **Hand a repository to an agent from Git sync.** When a folder has uncommitted changes, or its branch has both local and remote commits, the Git sync dialog offers **Hand to an agent**. It opens a new session for that folder with a prepared request: review the changes, commit finished work, bring in the remote's commits, push without force, and report what was done or what needs your decision. You choose the agent and send it. The button is unavailable while an agent is already working in the folder.
+
 ## [1.34.3] - 2026-09-25
 
 ### Fixed

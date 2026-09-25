@@ -25,7 +25,7 @@ import { useMediaQuery } from '../common/use-media-query';
 import { api, outdatedRunner, providerLabels, recoverRefusedConnection, sessionActivityAt, sessionTitle, sortSessions } from '../common/lib';
 import { getMainSessionId, getMainSessions } from '../sessions/session-family';
 import { acknowledgeSession, conversationRevision, parseReadState, pruneReadState, readStateKey } from '../sessions/session-read-state';
-import { NewSessionDialog } from '../sessions/NewSessionDialog';
+import { NewSessionDialog, type SessionDraft } from '../sessions/NewSessionDialog';
 import { AutoPromptDialog } from '../auto-prompt/AutoPromptDialog';
 import { canvasVisibleSessions, projectGroupChoices, visiblePinnedProjectGroups } from '../project-groups/project-groups';
 import { isAutoPromptShortcut, isNewSessionShortcut, isShowAllShortcut } from '../graph/canvas-shortcuts';
@@ -89,6 +89,7 @@ function TowerApp() {
   const [autoPromptCwd, setAutoPromptCwd] = useState<string>();
   const [autoPromptNode, setAutoPromptNode] = useState<string>();
   const [newSessionCwd, setNewSessionCwd] = useState<string>();
+  const [newSessionDraft, setNewSessionDraft] = useState<SessionDraft>();
   const [groupSaving, setGroupSaving] = useState<ReadonlySet<string>>(() => new Set());
   const [groupErrors, setGroupErrors] = useState<Record<string, string>>({});
   const groupInFlight = useRef(new Set<string>());
@@ -183,8 +184,8 @@ function TowerApp() {
     if (updated.node) return;
     snapshots.provisional(previous => previous ? { ...previous, sessions: previous.sessions.map(session => session.id === updated.id ? { ...session, customTitle: updated.customTitle } : session) } : previous);
   }, [snapshots]);
-  const openNewSession = useCallback((cwd?: string) => { setNewSessionCwd(cwd); setShowNewSession(true); }, []);
-  const closeNewSession = useCallback(() => { setShowNewSession(false); setNewSessionCwd(undefined); }, []);
+  const openNewSession = useCallback((cwd?: string, draft?: SessionDraft) => { setNewSessionCwd(cwd); setNewSessionDraft(draft); setShowNewSession(true); }, []);
+  const closeNewSession = useCallback(() => { setShowNewSession(false); setNewSessionCwd(undefined); setNewSessionDraft(undefined); }, []);
   const openAutoPrompt = useCallback((cwd?: string, node?: string) => { setAutoPromptCwd(cwd); setAutoPromptNode(node); setShowAutoPrompt(true); }, []);
   useEffect(() => {
     const inCanvasContext = (element: Element | null) => {
@@ -377,6 +378,6 @@ function TowerApp() {
         <GitHubReplyProposals token={token} sessionId={activeChatId} enabled={!selectedSession?.node && selectedSession?.launchedBy?.kind === 'trigger'} /></>} key={activeChatId} sessionId={activeChatId} session={selectedSession} allSessions={sessions} provider={(hostOf(hosts, nodeOf(activeChatId))?.providers ?? []).find(item => item.provider === (selectedSession?.provider || (localPart(activeChatId).startsWith('claude') ? 'claude' : 'codex')))} host={chatHost} runs={currentRuns} token={token} connected={connection === 'connected'} onClose={closeChat} onNavigate={onSelect} onSnapshotRefresh={refresh} onSessionUpdate={onSessionUpdate} onSessionClose={changeSessionClosed} sessionClosed={!!selectedMainSession?.closed} changingClosed={changingClosed} readRevision={showNewSession || showAutoPrompt || (sidebarIsDrawer && sidebarOpen) ? '' : revisions.get(activeChatId)} onRead={onConversationRead} /></Suspense>}
     </div>
     <AutoPromptDialog visible={showAutoPrompt} initialCwd={autoPromptCwd} initialNode={autoPromptNode === '' ? undefined : autoPromptNode ?? (autoPromptCwd ? undefined : selectedSession?.node)} providers={snapshot?.providers || []} hosts={hosts} projects={projects} sessions={sessions} jobs={view?.autoPrompts || []} token={token} connected={connection === 'connected'} onClose={closeAutoPrompt} onNavigate={openAutoPromptSession} onRefresh={refresh} />
-    {showNewSession && <NewSessionDialog providers={snapshot?.providers || []} hosts={hosts} projects={projects} initialCwd={newSessionCwd || selectedSession?.cwd || (project !== 'all' ? project : undefined)} token={token} connected={connection === 'connected'} onClose={closeNewSession} onCreated={sessionCreated} />}
+    {showNewSession && <NewSessionDialog providers={snapshot?.providers || []} hosts={hosts} projects={projects} initialCwd={newSessionCwd || selectedSession?.cwd || (project !== 'all' ? project : undefined)} draft={newSessionDraft} token={token} connected={connection === 'connected'} onClose={closeNewSession} onCreated={sessionCreated} />}
   </div>;
 }
