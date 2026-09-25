@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.34.1] - 2026-09-25
+## [1.34.2] - 2026-09-25
 
 ### Fixed
 - **Colors and the working-session border on Samsung Internet.** Tower now tells the browser that its pages are already dark. Samsung Internet's dark mode, and other browsers' automatic dark modes, no longer recolor the canvas, and the moving rainbow border around a working session shows again.
