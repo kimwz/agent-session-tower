@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.34.0] - 2026-09-25
+
+### Added
+- **Serve Tower at an HTTPS address from a tunnel or reverse proxy.** `--public-url https://tower.example.com` lets Tower answer requests for that address, for example from Cloudflare Tunnel, while it keeps listening only on localhost. Visitors from that address see the login page and sign in with the account set in local Account management. Direct localhost access still needs no login. Put the proxy's own login, such as Cloudflare Access, in front of it too. See [behind a reverse proxy or tunnel](docs/usage.md#behind-a-reverse-proxy-or-tunnel).
+
 ## [1.33.0] - 2026-09-25
 
 ### Added

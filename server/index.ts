@@ -61,6 +61,7 @@ Usage: agent-session-tower [run] [options]
   service <action>     install | uninstall | status: keep Tower running in the background (macOS)
   --port <number>      Listening port (default: 8000)
   --host <IPv4>        Bind address (default: 127.0.0.1; 0.0.0.0 for remote access)
+  --public-url <url>   Also accept requests for this origin from a reverse proxy or tunnel (repeatable)
   --no-open            Do not open the browser automatically
   --state-dir <path>   Managed task state (default: ~/${STATE_DIR_NAME})
   --help               Show this help
@@ -111,17 +112,19 @@ async function main() {
   let open = true;
   let stateDir = defaultStateDir();
   let command = 'run';
+  const publicUrls: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === 'run' || arg === 'doctor') command = arg;
     else if (arg === '--no-open') open = false;
     else if (arg === '--port') { if (!args[i + 1]) throw new Error('--port requires a number.'); port = Number(args[++i]); }
     else if (arg === '--host') { if (!args[i + 1]) throw new Error('--host requires an IPv4 address.'); host = args[++i]; }
+    else if (arg === '--public-url') { if (!args[i + 1]) throw new Error('--public-url requires a URL.'); publicUrls.push(args[++i]); }
     else if (arg === '--state-dir') { if (!args[i + 1]) throw new Error('--state-dir requires a path.'); stateDir = resolve(args[++i]); }
     else throw new Error(`Unknown option: ${arg}. Run with --help for usage.`);
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be between 1 and 65535.');
-  const access = networkAccess(host, port);
+  const access = networkAccess(host, port, undefined, publicUrls);
   const providers: ProviderHealth[] = await getProviderHealth();
   if (command === 'doctor') {
     for (const provider of providers) console.log(`${provider.available ? '✓' : '✗'} ${provider.provider}: ${provider.executable || provider.error || 'CLI not found'}`);
@@ -146,7 +149,7 @@ async function main() {
       const url = await existingServerUrl(error, { bindHost: host, remoteAccess: access.remote, probeHosts: access.probeHosts });
       if (url) {
         console.log(`Agent Session Tower is already running.\n${url}`);
-        printRemoteAccess(host, error.owner.port, stateDir);
+        printRemoteAccess(host, error.owner.port, stateDir, publicUrls);
         if (open) openBrowser(url);
         return;
       }
@@ -156,7 +159,8 @@ async function main() {
   const auth = new AuthStore(stateDir);
   try { await auth.start(); }
   catch (error) { auth.close(); await releaseLock(); throw error; }
-  if (!auth.configured() && access.remote && host !== '0.0.0.0') {
+  // Without a localhost listener, nobody could set the account this remote access needs.
+  if (!auth.configured() && access.remote && !host.startsWith('127.') && host !== '0.0.0.0') {
     auth.close(); await releaseLock();
     throw new Error('Configure an account first: start with --host 127.0.0.1 or --host 0.0.0.0, then open local Account management.');
   }
@@ -370,7 +374,7 @@ async function main() {
     throw error;
   });
   console.log(`\n  Agent Session Tower\n  ${access.browserUrl}\n`);
-  printRemoteAccess(host, port, stateDir);
+  printRemoteAccess(host, port, stateDir, publicUrls);
   if (!auth.configured()) console.log(`  Remote account not configured. Open http://localhost:${port} and select Account management in the expanded navigation.\n`);
   console.log('  Reading local Claude Code and Codex sessions…\n  Press Ctrl+C to stop the web server. Agent work continues independently.\n');
   if (open) openBrowser(access.browserUrl);
@@ -426,10 +430,11 @@ async function finishCleanup(operations: Promise<unknown>[]): Promise<void> {
   if (errors.length) throw new AggregateError(errors, errors.map(error => error instanceof Error ? error.message : String(error)).join('; '));
 }
 
-function printRemoteAccess(host: string, port: number, stateDir: string) {
-  const access = networkAccess(host, port);
+function printRemoteAccess(host: string, port: number, stateDir: string, publicUrls: string[]) {
+  const access = networkAccess(host, port, undefined, publicUrls);
   if (!access.remote) return;
-  console.log(`  Remote URLs:\n${access.urls.map(url => `  ${url}`).join('\n')}\n  Remote login: account configured in local Account management\n  Account state: ${join(stateDir, 'auth.json')}\n  ${host === '0.0.0.0' ? 'Direct localhost access does not require login.' : 'For local account management, stop and restart with --host 127.0.0.1 using the same state directory.'}\n`);
+  const localhost = host.startsWith('127.') || host === '0.0.0.0';
+  console.log(`  Remote URLs:\n${access.urls.map(url => `  ${url}`).join('\n')}\n  Remote login: account configured in local Account management\n  Account state: ${join(stateDir, 'auth.json')}\n  ${localhost ? 'Direct localhost access does not require login.' : 'For local account management, stop and restart with --host 127.0.0.1 using the same state directory.'}\n`);
 }
 
 function openBrowser(url: string) {

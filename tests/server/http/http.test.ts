@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createMonitorServer } from '../../../server/http/server.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
+import { networkAccess } from '../../../server/http/remote-access.js';
 import type { Session, Run, RunApprovalResponse, Snapshot } from '../../../shared/types.js';
 
 const session: Session = {
@@ -336,4 +337,32 @@ test('the owner can move a background-service Tower to a version or the latest r
   assert.equal((await send({})).status, 202);
   assert.equal((await send({ version: '1.40.1' })).status, 202);
   assert.deepEqual(asked, [undefined, '1.40.1']);
+});
+
+test('a tunnel serving a public URL reaches the login page, never the local owner bypass', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-http-public-url-'));
+  await writeFile(join(dir, 'index.html'), '<!doctype html><title>Agent Session Tower</title>');
+  const { auth } = await createRemoteAuthFixture(dir);
+  const { origins } = networkAccess('127.0.0.1', 0, {}, ['https://tower.example.com']);
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, auth, remote: { origins }, backend: {
+    snapshot: () => ({ sessions: [session], runs: [], providers: [], scanning: false, hostname: 'test', version: 'test', updatedAt: new Date().toISOString() }),
+    detail: async () => undefined, enqueue: async () => run, cancel: async () => {}, subscribe: () => () => {},
+  } });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = (server.address() as { port: number }).port;
+  t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
+  const get = (path: string, headers: Record<string, string>) => new Promise<{ status?: number; body: string }>((resolve, reject) => {
+    const req = request({ host: '127.0.0.1', port, path, headers }, res => {
+      let body = ''; res.setEncoding('utf8'); res.on('data', chunk => { body += chunk; }); res.on('end', () => resolve({ status: res.statusCode, body }));
+    });
+    req.on('error', reject); req.end();
+  });
+  // cloudflared keeps the public Host and adds forwarding headers, as a proxy in front of Tower must.
+  const tunnel = { Host: 'tower.example.com', 'X-Forwarded-For': '198.51.100.7', Origin: 'https://tower.example.com' };
+  assert.equal((await get('/', tunnel)).status, 200);
+  assert.equal((await get('/api/snapshot', tunnel)).status, 401);
+  assert.equal(JSON.parse((await get('/api/auth/status', tunnel)).body).local, false);
+  assert.equal((await get('/api/snapshot', { ...tunnel, Host: 'other.example.com' })).status, 403);
+  assert.equal((await get('/api/snapshot', { ...tunnel, Origin: 'http://tower.example.com' })).status, 403);
+  assert.equal((await get('/api/snapshot', { Host: `localhost:${port}` })).status, 200);
 });

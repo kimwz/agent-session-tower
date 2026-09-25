@@ -149,7 +149,17 @@ Five cumulative failed logins from the same IP permanently block that IP. A succ
 
 The client device must be able to reach the host and port. Tower does not create a tunnel or public URL. Direct access uses HTTP, which does not encrypt passwords or conversations; use an encrypted VPN or a separately secured HTTPS deployment. The host machine and Tower must stay running.
 
-Reverse-proxy configuration is not a built-in feature. Tower identifies clients by the socket address and does not trust forwarded IP values. Proxied clients therefore share the proxy's IP for blocking. Never expose Tower through a localhost proxy that rewrites the Host header to localhost and omits forwarding headers: such requests are indistinguishable from direct local administration. A proxy must preserve an explicitly allowed public Host and send forwarding headers so local bypass is disabled; public origins currently require server integration rather than a CLI option.
+### Behind a reverse proxy or tunnel
+
+To serve Tower at an HTTPS address such as a Cloudflare Tunnel hostname, keep it on localhost and name that address:
+
+```sh
+agent-session-tower --host 127.0.0.1 --port 8000 --public-url https://tower.example.com
+```
+
+Point the proxy at `http://127.0.0.1:8000`. Repeat `--public-url` for more addresses. Requests for that address sign in like any other device, and the account is set on `http://localhost:8000` as above. Put the proxy's own login (such as Cloudflare Access) in front as well: Tower's login page is otherwise reachable by anyone.
+
+Tower identifies clients by the socket address and does not trust forwarded IP values. Proxied clients therefore share the proxy's IP for blocking. Never expose Tower through a localhost proxy that rewrites the Host header to localhost and omits forwarding headers: such requests are indistinguishable from direct local administration. The proxy must keep the public Host and send forwarding headers such as `X-Forwarded-For` so local bypass is disabled; cloudflared and most proxies do both by default.
 
 Earlier versions generated a plaintext `access-password` file and used HTTP Basic authentication. That credential is no longer accepted or loaded. Set an account locally after upgrading. An existing legacy file is left untouched; it may be removed after confirming the new account works.
 
