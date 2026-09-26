@@ -1,6 +1,6 @@
 import type { ProviderHealth } from '../../../shared/types';
 import { ModelPicker } from '../chat/ModelPicker';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Slack, Plus, Trash2, X } from 'lucide-react';
 import { api } from '../common/lib';
@@ -19,7 +19,7 @@ export function SlackButton({ token, providers = [] }: { token: string; provider
   return <><button className="icon-button" aria-label={t('Slack 자동화')} title={t('Slack 자동화')} disabled={!token} onClick={() => setOpen(true)}><Slack size={18} /></button>{open && <SlackPanel providers={providers} token={token} onClose={() => setOpen(false)} />}</>;
 }
 
-export function SlackPanel({ token, onClose, providers = [] }: { token: string; onClose: () => void; providers?: ProviderHealth[] }) {
+export function SlackPanel({ token, onClose, providers = [], projects = [] }: { token: string; onClose: () => void; providers?: ProviderHealth[]; projects?: [string, string][] }) {
   const { t } = useI18n();
   const dialog = useRef<HTMLDialogElement>(null);
   const [overview, setOverview] = useState<SlackPublicStatus | null>(null);
@@ -93,27 +93,30 @@ export function SlackPanel({ token, onClose, providers = [] }: { token: string; 
       : current === 'activity' ? <section><SlackActivity events={overview.events} /></section>
       : <form id="slack-rules-form" onSubmit={event => { event.preventDefault(); save(); }}><fieldset disabled={busy} className="slack-rules">
         <div className="slack-rules-intro"><p>{t('위에서부터 확인하여 처음 일치하는 활성 지침으로 작업합니다. 저장한 지침만 적용됩니다.')}</p><div className="slack-actions"><button type="button" className="secondary-button" onClick={() => add({ name: '', enabled: false, condition: '', instructions: '', replyInstructions: '', provider: 'codex' })}><Plus size={14} />{t('지침 추가')}</button><button type="button" className="secondary-button" onClick={() => add({ name: 'Verse8 PR 리뷰', enabled: false, condition: 'Verse8 관련 GitHub PR의 리뷰를 요청하는 멘션', instructions: '요청한 PR과 변경 내용을 확인하고 리뷰를 수행하세요. 접근할 수 없거나 리뷰를 완료하지 못하면 완료했다고 말하지 마세요.', replyInstructions: '리뷰를 완료하고 지적 사항이 없으면 "확인 했습니다.", 리뷰 코멘트를 작성했다면 "코멘트 확인 부탁드립니다"를 답변 후보에 포함하세요. 후보를 1, 2, 3번으로 제안하고 사용자의 전송 승인을 기다리세요.', provider: 'codex' })}>{t('Verse8 PR 예시 추가')}</button></div></div>
-        {rules.length ? <SlackRules providers={providers} rules={rules} onChange={edit} expanded={expanded} onExpand={setExpanded} /> : <p className="slack-empty">{t('아직 지침이 없습니다. 지침을 추가하세요.')}</p>}
+        {rules.length ? <SlackRules providers={providers} projects={projects} rules={rules} onChange={edit} expanded={expanded} onExpand={setExpanded} /> : <p className="slack-empty">{t('아직 지침이 없습니다. 지침을 추가하세요.')}</p>}
       </fieldset></form>}
     </div>
     {overview && current === 'rules' && dirty && <footer className="slack-savebar"><span role="status">{t('저장하지 않은 변경 사항')}</span><button type="button" className="secondary-button" disabled={busy} onClick={discard}>{t('되돌리기')}</button><button form="slack-rules-form" className="primary-button" disabled={busy}>{t('지침 저장')}</button></footer>}
   </div></dialog>, document.body);
 }
 
-export function SlackRules({ rules, onChange, providers = [], expanded, onExpand, channel = 'slack', autoReview = true }: { rules: SlackRule[]; onChange: (rules: SlackRule[]) => void; providers?: ProviderHealth[]; expanded?: string | null; onExpand?: (id: string | null) => void;
+export function SlackRules({ rules, onChange, providers = [], projects = [], expanded, onExpand, channel = 'slack', autoReview = true }: { rules: SlackRule[]; onChange: (rules: SlackRule[]) => void; providers?: ProviderHealth[]; expanded?: string | null; onExpand?: (id: string | null) => void;
+  /** Folders offered for the working folder; any other absolute path can still be typed. */
+  projects?: [string, string][];
   /** GitHub coordinators use the same rules; only the words about where replies go differ. */
   channel?: 'slack' | 'github';
   /** Whether delegated Codex work is reviewed automatically; Slack always is. */
   autoReview?: boolean }) {
   const { t } = useI18n();
   const github = channel === 'github';
+  const folders = `${useId()}-folders`;
   const [local, setLocal] = useState<string | null>(rules.length === 1 ? rules[0].id : null);
   const open = expanded === undefined ? local : expanded;
   const setOpen = onExpand ?? setLocal;
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const update = (index: number, patch: Partial<SlackRule>) => onChange(rules.map((rule, i) => i === index ? { ...rule, ...patch } : rule));
   const move = (index: number, offset: number) => { const next = [...rules]; [next[index], next[index + offset]] = [next[index + offset], next[index]]; onChange(next); };
-  return <ol className="slack-rule-list">{rules.map((rule, index) => {
+  return <><ol className="slack-rule-list">{rules.map((rule, index) => {
     const isOpen = open === rule.id;
     const model = rule.model ? providers.find(provider => provider.provider === rule.provider)?.models?.find(item => item.id === rule.model)?.label ?? rule.model : undefined;
     return <li className={`slack-rule ${isOpen ? 'open' : ''} ${rule.enabled ? '' : 'disabled'}`} key={rule.id}>
@@ -144,11 +147,11 @@ export function SlackRules({ rules, onChange, providers = [], expanded, onExpand
         <fieldset className="slack-group"><legend>{t('실행')}</legend><div className="slack-rule-options">
           <label>{t('에이전트')}<select value={rule.provider} onChange={event => update(index, { provider: event.target.value as SlackRule['provider'], model: undefined })}><option value="codex">Codex</option><option value="claude">Claude</option></select>{rule.provider === 'codex' && <small>{autoReview ? t('승인 검토: 항상 Auto') : t('승인: Tower에서 직접')}</small>}</label>
           <label>{t('모델')}<ModelPicker provider={providers.find(provider => provider.provider === rule.provider)} value={rule.model} onChange={model => update(index, { model })} /></label>
-          <label className="wide">{t('작업 폴더 (선택)')}<input value={rule.cwd || ''} placeholder={t('비워 두면 Auto Prompt가 선택합니다')} onChange={event => update(index, { cwd: event.target.value || undefined })} /></label>
+          <label className="wide">{t('작업 폴더 (선택)')}<input list={folders} value={rule.cwd || ''} placeholder={t('비워 두면 Auto Prompt가 선택합니다')} onChange={event => update(index, { cwd: event.target.value || undefined })} /></label>
         </div></fieldset>
       </div>}
     </li>;
-  })}</ol>;
+  })}</ol><datalist id={folders}>{projects.map(([cwd, title]) => <option key={cwd} value={cwd}>{title}</option>)}</datalist></>;
 }
 
 export function SlackActivity({ events }: { events: SlackPublicStatus['events'] }) {

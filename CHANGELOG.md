@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.36.1] - 2026-09-26
+
+### Changed
+- **Pick a rule's working folder from your project folders.** In GitHub coordinator triggers and Slack automation rules, the working-folder field now lists Tower's project folders as you type, so you can find one by name or path instead of typing the whole path. Leaving it empty still lets Auto Prompt choose, and any other absolute path can still be entered.
+
 ## [1.36.0] - 2026-09-25
 
 ### Added

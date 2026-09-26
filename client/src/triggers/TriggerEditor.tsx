@@ -63,7 +63,7 @@ export function TriggerEditor({ trigger, kind, token, providers, projects, sessi
     <Section step={polled ? 3 : 2} title={t('무엇을 할까요')}>
       {source.kind === 'github' && !machine.node && <Choice label={t('처리 방식')} value={coordinator ? 'coordinator' : 'task'} onChange={setMode}
         options={[['task', t('이슈마다 작업 실행')], ['coordinator', t('코디네이터 (댓글은 승인 후 게시)')]]} />}
-      {coordinator ? <CoordinatorFields handler={coordinator} providers={providers} onChange={next => setInput({ ...input, handler: next })} />
+      {coordinator ? <CoordinatorFields handler={coordinator} providers={providers} projects={projects} onChange={next => setInput({ ...input, handler: next })} />
         : <TaskFields task={task} kind={source.kind} providers={providers} projects={projects} sessions={sessions} onChange={setTask} />}
     </Section>
     <AdvancedSettings input={input} onChange={setInput} />
@@ -123,12 +123,12 @@ function TaskFields({ task, kind, providers, projects, sessions, onChange }: { t
 const newRule = (): CoordinatorRule => ({ id: crypto.randomUUID(), name: '', enabled: true, condition: '', instructions: '', replyInstructions: '', provider: 'codex' });
 
 /** Rules a GitHub coordinator follows, in the same editor Slack uses. */
-function CoordinatorFields({ handler, providers, onChange }: { handler: CoordinatorHandler; providers: ProviderHealth[]; onChange: (handler: CoordinatorHandler) => void }) {
+function CoordinatorFields({ handler, providers, projects, onChange }: { handler: CoordinatorHandler; providers: ProviderHealth[]; projects: [string, string][]; onChange: (handler: CoordinatorHandler) => void }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState<string | null>(handler.rules.length === 1 ? handler.rules[0].id : null);
   return <>
     <p className="trigger-note">{t('이슈마다 대화를 하나 엽니다. 코디네이터는 첫 번째로 맞는 지침 하나만 따르고, 작업은 프로젝트 에이전트에게 맡기며, 댓글은 Tower에서 승인해야 게시됩니다.')}</p>
-    <SlackRules channel="github" autoReview={handler.approvals === 'auto'} rules={handler.rules} providers={providers} expanded={expanded} onExpand={setExpanded} onChange={rules => onChange({ ...handler, rules: rules as CoordinatorRule[] })} />
+    <SlackRules channel="github" autoReview={handler.approvals === 'auto'} rules={handler.rules} providers={providers} projects={projects} expanded={expanded} onExpand={setExpanded} onChange={rules => onChange({ ...handler, rules: rules as CoordinatorRule[] })} />
     {handler.rules.length < 20 && <button type="button" className="secondary-button trigger-add" onClick={() => { const rule = newRule(); onChange({ ...handler, rules: [...handler.rules, rule] }); setExpanded(rule.id); }}><Plus size={13} />{t('지침 추가')}</button>}
   </>;
 }
