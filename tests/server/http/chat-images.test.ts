@@ -25,6 +25,7 @@ test('conversation references receive signed URLs; generated result paths and re
   assert.deepEqual(chatImageReference(result[0].url.split('/').at(-1)!), { sessionId: session.id, path: image });
   await assert.doesNotReject(() => readChatImage(session, image));
   assert.throws(() => chatImageReference(result[0].url.split('/').at(-1)! + 'x'));
+  assert.equal(withChatImages({ ...page, messages: [{ ...page.messages[0], role: 'tool', toolName: 'exec' }] }).messages[0].images, undefined);
   const generated = session.filePath!.replace('/sessions/session.jsonl', '/generated_images/a/result.png');
   const sources = withChatImages({ ...page, messages: [{ ...page.messages[0], role: 'tool', text: `Generated images are saved as ${generated}` }] }).messages[0].images!;
   assert.equal(sources[0].source, generated);

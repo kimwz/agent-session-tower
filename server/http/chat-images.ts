@@ -36,7 +36,7 @@ export function withChatImages(page: SessionDetail): SessionDetail {
   return { ...page, messages: page.messages.map(message => {
     const sources = new Set<string>();
     // Markdown destinations, including angle-bracket paths containing spaces and ordinary image links.
-    for (const match of message.text.matchAll(/!?\[[^\]\n]*\]\(<?([^>\n]*?\.(?:png|jpe?g|gif|webp))>?(?:\s+"[^"\n]*")?\)/gi)) sources.add(match[1]);
+    if (message.role === 'assistant' || message.role === 'user') for (const match of message.text.matchAll(/!?\[[^\]\n]*\]\(<?([^>\n]*?\.(?:png|jpe?g|gif|webp))>?(?:\s+"[^"\n]*")?\)/gi)) sources.add(match[1]);
     // Codex image generation also reports its saved output in tool-result prose.
     if (message.role === 'tool') for (const match of message.text.matchAll(/\/[^\s"'<>`]*\/generated_images\/[^\s"'<>`]*\.(?:png|jpe?g|gif|webp)/gi)) sources.add(match[0]);
     const images = [...sources].slice(0, 20).flatMap(source => {
