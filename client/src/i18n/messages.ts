@@ -1,5 +1,6 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  "이미지 미리보기를 불러올 수 없습니다.": "Image preview could not be loaded.",
   "알림": "Notifications",
   "프로젝트 채팅의 작업이 끝나거나 트리거가 작업을 시작하면 알림을 보냅니다. 페이지를 닫아도 이 기기로 전달됩니다.": "Sends a notification when a task in a project chat finishes or a trigger starts work. It reaches this device even with the page closed.",
   "이 기기": "This device",

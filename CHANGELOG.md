@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.38.0] - 2026-09-26
+
+### Added
+- **See generated images in conversations.** Local Markdown image references and image file links now show previews you can open at full size. Codex generated-image paths in tool results appear above collapsed tool activity, including in existing conversations and on joined computers.
+- Image delivery uses authenticated, signed conversation references, validates raster file signatures and size, and respects project boundaries and remote folder exclusions. PNG, JPEG, GIF, and WebP files in the session project or Codex generated-image directory are supported.
+
 ## [1.37.1] - 2026-09-26
 
 ### Fixed

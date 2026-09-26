@@ -5,7 +5,8 @@ export type ChatHistory = SessionDetail & { resetToLatest?: boolean };
 function unchangedMessage(previous: ChatMessage | undefined, next: ChatMessage): boolean {
   return previous !== undefined && previous.id === next.id && previous.role === next.role
     && previous.text === next.text && previous.timestamp === next.timestamp
-    && previous.toolName === next.toolName && previous.isError === next.isError;
+    && previous.toolName === next.toolName && previous.isError === next.isError
+    && JSON.stringify(previous.images) === JSON.stringify(next.images);
 }
 
 function stableMessages(previous: ChatMessage[], next: ChatMessage[]): ChatMessage[] {

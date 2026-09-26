@@ -103,3 +103,7 @@ A web process that attaches to a worker from an older build asks it to hand off;
 Terminal shells run in a separate terminal host (`--terminal-host`) with its own lock in `<state-dir>/terminal-runtime/`, socket and credential. Replacing the worker never touches shells. The web starts the host when a shell is opened; the host exits after 30 seconds with no shell and no web request. Shells opened in a worker from before the terminal host remain reachable through that worker until closed.
 
 The first upgrade from an older in-process runner needs a handoff or a fully drained old server: its old SIGTERM handler still cancels work. Do not start a new worker against the same state files while the old runner is writing them. Test with fixtures; never kill the old process merely to test restart behavior.
+
+### Conversation image previews
+
+Conversation pages include signed image URLs for local Markdown image/file links and saved Codex generated-image paths in tool results. The web process serves PNG, JPEG, GIF, and WebP up to 20 MiB after checking authentication, the current session, canonical project/generated-image roots, and file signatures. Joined-computer requests additionally recheck session visibility and excluded folders. No external URL is fetched by the server. Image URLs are renewed when a conversation is fetched after web restart; native history is unchanged.

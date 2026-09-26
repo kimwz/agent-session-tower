@@ -96,7 +96,7 @@ export function scopeJob(node: string, job: AutoPromptJob): AutoPromptJob {
 export function scopeGroup(node: string, group: ProjectGroup): ProjectGroup { return { ...group, cwd: scopedId(node, group.cwd) }; }
 export function scopeRepository(node: string, status: RepositoryStatus): RepositoryStatus { return { ...status, cwd: scopedId(node, status.cwd) }; }
 export function scopeDetail(node: string | undefined, detail: SessionDetail): SessionDetail {
-  return node ? { ...detail, session: scopeSession(node, detail.session) } : detail;
+  return node ? { ...detail, session: scopeSession(node, detail.session), messages: detail.messages.map(message => ({ ...message, ...(message.images ? { images: message.images.map(image => ({ ...image, url: nodePath(node, image.url) })) } : {}) })) } : detail;
 }
 
 /** A joined computer's snapshot, named for this page. */

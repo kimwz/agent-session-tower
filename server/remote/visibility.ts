@@ -97,7 +97,7 @@ export function remoteRepository(status: RepositoryStatus): RepositoryStatus {
   return { ...pick(status, ['cwd', 'root', 'branch', 'upstream', 'ahead', 'behind', 'changes', 'checkedAt', 'fetchedAt'] as const),
     ...(status.lastAction ? { lastAction: pick(status.lastAction, ['kind', 'ok', 'commits', 'at'] as const) } : {}) };
 }
-const MESSAGE_FIELDS = ['id', 'role', 'text', 'timestamp', 'toolName', 'isError'] as const satisfies readonly (keyof ChatMessage)[];
+const MESSAGE_FIELDS = ['id', 'role', 'text', 'timestamp', 'toolName', 'isError', 'images'] as const satisfies readonly (keyof ChatMessage)[];
 /** One page of a shared conversation. */
 export function remotePage(page: SessionDetail): SessionDetail {
   return { session: remoteSession(page.session), messages: page.messages.map(message => pick(message, MESSAGE_FIELDS) as ChatMessage), hasMore: page.hasMore,

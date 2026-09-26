@@ -1,3 +1,5 @@
+import type { ChatMessage } from '../../../shared/types';
+import { ChatImage } from './ChatImages';
 import { translate as t, useI18n } from '../i18n/i18n';
 import { memo, useRef, useState, type ComponentPropsWithoutRef } from 'react';
 import ReactMarkdown from 'react-markdown';
@@ -17,7 +19,7 @@ function Link({ children, node: _, ...props }: ComponentPropsWithoutRef<'a'> & {
   if (remote && localOnlyAddress(props.href)) return <span className="markdown-local-link" title={t("{0}에서만 열 수 있는 주소입니다: {1}", { 0: remote, 1: props.href ?? '' })}>{children}</span>;
   return <a {...props} target="_blank" rel="noreferrer noopener">{children}</a>;
 }
-export const Markdown = memo(function Markdown({ children }: { children: string }) {
+export const Markdown = memo(function Markdown({ children, images }: { children: string; images?: ChatMessage['images'] }) {
   useI18n();
-  return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ pre: CodeBlock, a: Link, img: ({ alt }) => <span className="attachment-label">{t("[이미지:")}{' '}{alt || t("첨부 파일")}]</span> }}>{children}</ReactMarkdown></div>;
+  return <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ pre: CodeBlock, a: Link, img: ({ alt, src }) => { const image = images?.find(image => image.source === src || encodeURI(image.source) === src); return image ? <ChatImage key={image.url} image={image} alt={alt} /> : <span className="attachment-label">{t("[이미지:")}{' '}{alt || t("첨부 파일")}]</span>; } }}>{children}</ReactMarkdown></div>;
 });

@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { chatImageReference, readChatImage, sendChatImage, withChatImages } from './chat-images.js';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
@@ -414,6 +415,13 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (!backend.repositoryAction) return json(res, 503, { error: 'Git 상태를 확인할 수 없습니다.' });
         return json(res, 200, { repository: await backend.repositoryAction(body.cwd, body.action as RepositoryAction) });
       }
+      const chatImage = path.match(/^\/api\/chat-images\/([^/]+)$/);
+      if ((req.method === 'GET' || req.method === 'HEAD') && chatImage) {
+        const ref = chatImageReference(chatImage[1]);
+        const session = backend.session?.(ref.sessionId) ?? backend.snapshot().sessions.find(item => item.id === ref.sessionId);
+        if (!session) return json(res, 404, { error: '이미지를 찾을 수 없습니다.' });
+        return sendChatImage(res, await readChatImage(session, ref.path), req.method === 'HEAD');
+      }
       const attachmentMatch = path.match(/^\/api\/attachments\/([^/]+)$/);
       if ((req.method === 'GET' || req.method === 'HEAD') && attachmentMatch) {
         if (!backend.attachment) return json(res, 404, { error: '첨부 파일을 찾을 수 없습니다.' });
@@ -461,7 +469,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         }
         const detail = await backend.detail(detailMatch[1], before, limit);
         if (!detail) return json(res, 404, { error: '세션을 찾을 수 없습니다. 원본 기록이 이동되었을 수 있습니다.' });
-        return json(res, 200, { ...detail, session: publicSession(detail.session) });
+        return json(res, 200, { ...withChatImages(detail), session: publicSession(detail.session) });
       }
       const titleMatch = path.match(/^\/api\/sessions\/([^/]+)\/title$/);
       if (req.method === 'POST' && titleMatch) {

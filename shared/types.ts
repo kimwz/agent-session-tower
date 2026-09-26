@@ -60,6 +60,7 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'tool' | 'system';
   text: string;
   timestamp: string;
+  images?: { source: string; name: string; url: string }[];
   toolName?: string;
   isError?: boolean;
 }

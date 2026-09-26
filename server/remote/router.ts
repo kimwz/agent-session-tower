@@ -1,3 +1,4 @@
+import { chatImageReference, readChatImage, sendChatImage, withChatImages } from '../http/chat-images.js';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
 import type { Backend } from '../http/server.js';
@@ -228,7 +229,17 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       const page = await backend.detail(found.id, before, pageSize);
       if (!page) throw notFound();
       await stillVisible(found.id);
-      return json(res, 200, remotePage(page));
+      return json(res, 200, remotePage(withChatImages({ ...page, session: found })));
+    }
+    const chatImage = path.match(/^\/api\/chat-images\/([^/]+)$/);
+    if ((method === 'GET' || method === 'HEAD') && chatImage) {
+      const ref = chatImageReference(chatImage[1]);
+      const found = await confirm(ref.sessionId);
+      const image = await readChatImage(found, ref.path);
+      await exclusions.prepare([ref.path, image.path], { fresh: true });
+      await stillVisible(found.id);
+      if (scope().matcher.excludes(ref.path) || scope().matcher.excludes(image.path)) throw notFound();
+      return sendChatImage(res, image, method === 'HEAD');
     }
     const attachment = path.match(/^\/api\/attachments\/([^/]+)$/);
     if ((method === 'GET' || method === 'HEAD') && attachment) {
