@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.38.1] - 2026-09-26
+
+### Changed
+- **A new rainbow canvas icon for Tower.** The selected rainbow progress frame and canvas panels now identify Tower in the header, browser tab, installed app, and notifications. Icon URLs are refreshed so browsers can replace the previous mark.
+
 ## [1.38.0] - 2026-09-26
 
 ### Added

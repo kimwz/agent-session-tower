@@ -24,12 +24,12 @@
   white-space:nowrap
 }
 .brand-mark {
-  width:29px;
+  width:32px;
   height:32px;
   display:flex;
   color:#acc2e8
 }
-.brand-mark svg {
+.brand-mark img {
   width:100%;
   height:100%
 }

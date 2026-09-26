@@ -11,7 +11,7 @@ self.addEventListener('push', event => {
   event.waitUntil(self.registration.showNotification(message.title, {
     body: typeof message.body === 'string' ? message.body : '',
     tag: typeof message.tag === 'string' ? message.tag : undefined,
-    icon: '/icon-192.png', badge: '/icon-192.png', data: { url },
+    icon: '/icon-192.png?v=rainbow-1', badge: '/icon-192.png?v=rainbow-1', data: { url },
   }));
 });
 
