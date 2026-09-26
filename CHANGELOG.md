@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.38.2] - 2026-09-26
+
+### Fixed
+- **Sharper installed-app icons.** The PWA manifest no longer advertises the tab favicon's embedded 64px bitmap as a resolution-independent image. Installed apps now receive explicitly sized PNGs up to 1024px, exported directly from the selected original artwork; the Apple touch icon also uses 1024px. Refreshed manifest and icon URLs replace the previous references.
+
 ## [1.38.1] - 2026-09-26
 
 ### Changed

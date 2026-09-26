@@ -9,7 +9,7 @@ import type { NotificationOverview } from '../../../shared/notifications.js';
 
 test('the app shell installs without signing in, while notification settings need a signed-in page and its token', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-notifications-http-'));
-  for (const [name, content] of [['index.html', 'app'], ['manifest.webmanifest', '{}'], ['sw.js', '//'], ['icon-192.png', 'png'], ['secret.js', 'private']]) await writeFile(join(dir, name), content);
+  for (const [name, content] of [['index.html', 'app'], ['manifest.webmanifest', '{}'], ['sw.js', '//'], ['icon-192.png', 'png'], ['icon-1024.png', 'png'], ['secret.js', 'private']]) await writeFile(join(dir, name), content);
   const { auth, origins, cookie, fetch } = await createRemoteAuthFixture(dir);
   const calls: Array<[string, Record<string, unknown>]> = [];
   const overview: NotificationOverview = { publicKey: 'key', devices: [] };
@@ -25,6 +25,7 @@ test('the app shell installs without signing in, while notification settings nee
   assert.equal(manifest.headers.get('content-type'), 'application/manifest+json');
   assert.equal((await fetch(`${base}/sw.js`)).status, 200);
   assert.equal((await fetch(`${base}/icon-192.png`)).status, 200);
+  assert.equal((await fetch(`${base}/icon-1024.png?v=rainbow-2`)).status, 200);
   assert.equal((await fetch(`${base}/secret.js`)).status, 401);
   assert.equal((await fetch(`${base}/api/notifications`)).status, 401);
   assert.deepEqual(await (await fetch(`${base}/api/notifications`, { headers: { cookie } })).json(), overview);

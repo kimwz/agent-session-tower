@@ -94,7 +94,7 @@ const contentTypes: Record<string, string> = {
   '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.json': 'application/json', '.webmanifest': 'application/manifest+json',
 };
 /** What a browser fetches to install the page as an app and to show its notifications, before or without signing in. */
-const APP_SHELL = new Set(['/favicon.svg', '/manifest.webmanifest', '/sw.js', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png']);
+const APP_SHELL = new Set(['/favicon.svg', '/manifest.webmanifest', '/sw.js', '/icon-192.png', '/icon-512.png', '/icon-1024.png', '/apple-touch-icon.png']);
 function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'filePath'> {
   const { filePath: _, ...safe } = session;
   return safe;

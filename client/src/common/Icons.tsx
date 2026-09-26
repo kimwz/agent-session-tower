@@ -5,5 +5,5 @@ export function ProviderIcon({ provider, size = 18 }: { provider: Provider; size
     : <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m8 5-6 7 6 7m8-14 6 7-6 7M14 3l-4 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>;
 }
 export function BrandMark() {
-  return <img src="/icon-192.png?v=rainbow-1" width={32} height={32} alt="" aria-hidden="true" />;
+  return <img src="/icon-192.png?v=rainbow-2" width={32} height={32} alt="" aria-hidden="true" />;
 }
