@@ -4,8 +4,10 @@ export interface NotificationEvents {
   runCompleted: boolean;
   /** A trigger started work. */
   triggerStarted: boolean;
+  /** A conversation waits for your approval or your answer to its question. */
+  runWaiting: boolean;
 }
-export const DEFAULT_NOTIFICATION_EVENTS: NotificationEvents = { runCompleted: true, triggerStarted: true };
+export const DEFAULT_NOTIFICATION_EVENTS: NotificationEvents = { runCompleted: true, triggerStarted: true, runWaiting: true };
 export type NotificationLanguage = 'ko' | 'en';
 export interface NotificationDevice {
   /** SHA-256 of the push endpoint, hex; a page finds its own device by hashing its subscription's endpoint. */

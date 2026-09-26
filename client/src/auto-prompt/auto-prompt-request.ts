@@ -34,18 +34,23 @@ export function createAutoPromptAttempt(request: AutoPromptRequest, requestApi: 
   const named = (result: { job: AutoPromptJob }) => node ? { job: scopeJob(node, result.job) } : result;
   let inFlight: Promise<AutoPromptOutcome> | undefined;
   let completionTaken = false;
+  // Once one send could have been taken, a later refusal speaks only for itself, never for that earlier send.
+  let everUncertain = false;
   async function submit(token: string): Promise<AutoPromptOutcome> {
     try {
       return named(await requestApi<{ job: AutoPromptJob }>(nodePath(node, '/api/auto-prompts'), {
         method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body, signal: AbortSignal.timeout(20_000),
       }));
     } catch (error) {
+      // The server said it did not take the request (such as a worker that must update first): nothing to recover.
+      if (!everUncertain && error instanceof ApiError && error.disposition === 'not-admitted') return { error, uncertain: false };
       try {
         return named(await requestApi<{ job: AutoPromptJob }>(nodePath(node, `/api/auto-prompts/${encodeURIComponent(request.requestId)}`), { signal: AbortSignal.timeout(10_000) }));
       } catch (lookupError) {
         // A missing job alone does not prove that an interrupted POST was rejected.
-        const rejected = error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408
+        const rejected = !everUncertain && error instanceof ApiError && error.status >= 400 && error.status < 500 && error.status !== 408
           && lookupError instanceof ApiError && lookupError.status === 404;
+        if (!rejected) everUncertain = true;
         return { error, uncertain: !rejected };
       }
     }

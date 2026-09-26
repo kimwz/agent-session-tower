@@ -110,10 +110,12 @@ function plain(socket: TLSSocket): Duplex {
 }
 
 /** A request over an established link, with a deadline for the answer; the body is read whole. */
-export function linkRequest(session: ClientHttp2Session, method: string, path: string, body?: unknown, timeoutMs = 10_000): Promise<{ status: number; json: unknown }> {
+export function linkRequest(session: ClientHttp2Session, method: string, path: string, body?: unknown, timeoutMs = 10_000, options: { maxBytes?: number; signal?: AbortSignal } = {}): Promise<{ status: number; json: unknown }> {
+  const maxBytes = options.maxBytes ?? 1_000_000;
   return new Promise((resolve, reject) => {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     if (session.destroyed || session.closed) { reject(new Error('The link is closed.')); return; }
+    if (options.signal?.aborted) { reject(new Error('The request was cancelled.')); return; }
     const stream = session.request({ ':method': method, ':path': path, ...(payload ? { 'content-type': 'application/json', 'content-length': payload.length } : {}) });
     let settled = false;
     const fail = (error: Error) => { if (settled) return; settled = true; clearTimeout(timer); reject(error); };
@@ -121,7 +123,8 @@ export function linkRequest(session: ClientHttp2Session, method: string, path: s
     let status = 0;
     const chunks: Buffer[] = []; let size = 0;
     stream.on('response', headers => { status = Number(headers[':status']); });
-    stream.on('data', (chunk: Buffer) => { size += chunk.length; if (size > 1_000_000) { fail(new Error('The answer was too large.')); stream.close(http2.constants.NGHTTP2_CANCEL); } else chunks.push(chunk); });
+    stream.on('data', (chunk: Buffer) => { size += chunk.length; if (size > maxBytes) { fail(new Error('The answer was too large.')); stream.close(http2.constants.NGHTTP2_CANCEL); } else chunks.push(chunk); });
+    options.signal?.addEventListener('abort', () => { fail(new Error('The request was cancelled.')); stream.close(http2.constants.NGHTTP2_CANCEL); }, { once: true });
     stream.on('error', fail);
     stream.on('close', () => fail(new Error('The link closed before the answer arrived.')));
     stream.on('end', () => {

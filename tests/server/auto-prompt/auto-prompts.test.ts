@@ -525,3 +525,76 @@ test('a handoff flush saves routing state again and reports a failed save', asyn
   await f.manager.flush();
   assert.equal(JSON.parse(await readFile(path, 'utf8')).length, 1);
 });
+
+test('an accepted suggestion continues the named conversation without asking the router', async t => {
+  const f = await fixture(t);
+  f.session.status = 'working'; f.session.contextUsage = undefined;
+  const job = await f.finished((await f.manager.submit(request(f.cwd, { targetSessionId: f.session.id, prompt: 'Also handle the autosave case' }))).id);
+  assert.equal(job.status, 'completed');
+  assert.deepEqual(job.decision, { action: 'resume', cwd: f.cwd, sessionId: f.session.id, reason: '선택한 세션에서 이어갑니다.' });
+  assert.equal(f.calls.length, 0, 'the router is not asked');
+  assert.equal(f.dispatches[0].sessionId, f.session.id);
+  assert.equal(f.dispatches[0].input.prompt, 'Also handle the autosave case');
+});
+
+test('a named conversation must still be one the router itself could continue, or nothing runs', async t => {
+  for (const mode of ['closed', 'provider', 'directory', 'missing'] as const) await t.test(mode, async t => {
+    const f = await fixture(t);
+    f.current.groups!.push({ cwd: f.cwd, title: '', pinned: true });
+    if (mode === 'closed') f.session.closed = true;
+    if (mode === 'provider') f.session.provider = 'claude';
+    if (mode === 'directory') f.session.cwd = f.other;
+    const target = mode === 'missing' ? 'codex:22222222-2222-4222-8222-222222222222' : f.session.id;
+    const job = await f.finished((await f.manager.submit(request(f.cwd, { targetSessionId: target }))).id);
+    assert.equal(job.status, 'error'); assert.match(job.error ?? '', /이어갈 수 없습니다/);
+    assert.equal(f.dispatches.length, 0); assert.equal(f.calls.length, 0);
+  });
+});
+
+test('a named conversation needs its folder, excludes a new-session request, and is part of the request identity', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.manager.submit(request(undefined, { targetSessionId: f.session.id })), /함께 지정/);
+  await assert.rejects(f.manager.submit(request(f.cwd, { targetSessionId: f.session.id, sessionMode: 'new' })), /함께 지정/);
+  await assert.rejects(f.manager.submit(request(f.cwd, { targetSessionId: 'bad\nid' })), /함께 지정/);
+  const first = request(f.cwd, { targetSessionId: f.session.id });
+  await f.manager.submit(first);
+  await assert.rejects(f.manager.submit({ ...first, targetSessionId: 'codex:other' }), { statusCode: 409 });
+});
+
+test('external content can never name a conversation to continue', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.manager.submit(request(f.cwd, { targetSessionId: f.session.id }), { origin: { kind: 'slack', workflowId: randomUUID() }, untrustedInput: true }), /새 세션에서만/);
+  assert.equal(f.dispatches.length, 0);
+});
+
+test('work that names its place does not need the routing model, but asking the router still does', async t => {
+  const f = await fixture(t);
+  f.current.providers[0].models = [{ id: 'other-model', label: 'Other' }];
+  await assert.rejects(f.manager.submit(request(f.cwd)), { statusCode: 422 });
+  const created = await f.finished((await f.manager.submit(request(f.cwd, { sessionMode: 'new' }))).id);
+  assert.equal(created.decision?.action, 'create');
+  const continued = await f.finished((await f.manager.submit(request(f.cwd, { targetSessionId: f.session.id }))).id);
+  assert.equal(continued.decision?.action, 'resume');
+  assert.equal(f.calls.length, 0);
+});
+
+test('a saved request that names its conversation survives a restart and a corrupted one is refused', async t => {
+  const f = await fixture(t);
+  const job = await f.finished((await f.manager.submit(request(f.cwd, { targetSessionId: f.session.id }))).id);
+  await f.manager.close();
+  const saved = JSON.parse(await readFile(join(f.directory, 'auto-prompts.json'), 'utf8'));
+  assert.equal(saved[0].job.targetSessionId, f.session.id);
+  const reopened = new AutoPromptManager(f.options);
+  await reopened.start();
+  assert.equal(reopened.get(job.id)?.targetSessionId, f.session.id);
+  await reopened.close();
+  saved[0].job.sessionMode = 'new';
+  await writeFile(join(f.directory, 'auto-prompts.json'), JSON.stringify(saved));
+  await assert.rejects(new AutoPromptManager(f.options).start(), /invalid/);
+});
+
+test('a new conversation whose folder is still to be chosen asks the router and needs its model', async t => {
+  const f = await fixture(t);
+  f.current.providers[0].models = [{ id: 'other-model', label: 'Other' }];
+  await assert.rejects(f.manager.submit(request(undefined, { sessionMode: 'new' })), { statusCode: 422 });
+});

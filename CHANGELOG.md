@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.40.0] - 2026-09-26
+
+### Added
+- **Fast judgment (Jev).** A new **Fast judgment** button in the header takes an API key for a fast multiple-choice judgment service. Jev is the first such service. The two features below use it, and each can be turned off on its own. Without a key both stay off and Tower works as before. The key is stored only in this computer's state folder (owner-only file) and is never shown again, only its last four characters. **Check key** sends one made-up question, never your conversations. Features reach the service only through a provider-neutral decision interface (`server/decisions/`), so Jev can later be swapped for a similar API by adding one adapter.
+- **Auto Prompt suggests the project and conversation while you write.** Once a request is 30 characters long, Tower asks Jev at most every 5 seconds (only when the text changed) where it belongs. The answer appears under the text box as **Jev 추천 project › conversation**, or **› 새 세션** for a new conversation. Leave the checkbox on and **Send** goes straight to that conversation, or to a new one in that folder, without the usual routing. Turn it off to route as before. A suggestion never carries over to another tool, folder, computer or a new draft, and it does not change while a request is being sent. For a joined computer, Tower asks that computer for what it shares at that moment before sending anything of it. Each suggestion sends the request text plus the titles and last messages of the candidate projects and conversations.
+- **Waiting for your approval or answer** is a new notification kind, on by default and also for devices registered earlier. You get a push when a conversation waits for your approval or asks you a question, whoever started the work.
+
+### Changed
+- **Fewer pushes for turns that were only a step.** A finished turn is no longer announced when the conversation already continues: when the agent scheduled its own continuation, a message you queued runs next, or you already sent something after it. The final turn is announced as before, and failures always are. Messages inserted into a running turn are announced with that turn.
+- With **Notification filtering** on, Jev reads the request and the end of each finished turn. It skips the push only when both of its signals agree the turn is an intermediate step with nothing for you yet. Otherwise the push is titled **Task finished**, **Needs you** or **Blocked**. If the judgment fails or takes longer than 6 seconds, the turn is announced as before.
+
 ## [1.39.2] - 2026-09-26
 
 ### Fixed

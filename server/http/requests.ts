@@ -5,12 +5,15 @@ import { MAX_ATTACHMENTS, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attach
 import { requestedEffort, requestedModel } from '../providers/models.js';
 import { requestedApprovalsReviewer } from '../providers/approvals.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
+import { AUTO_PROMPT_SUGGESTION_MIN_CHARS, type AutoPromptSuggestionRequest } from '../../shared/decisions.js';
 
 /** Request bodies that carry attachments may hold the base64 form of the largest allowed upload. */
 export const ATTACHMENT_BODY_BYTES = Math.ceil(MAX_TOTAL_ATTACHMENT_BYTES / 3) * 4 + 256 * 1024;
 export const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 
 export const httpError = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
+/** A Tower session id as requests name it: `provider:nativeId`, or a scoped form; never control characters. */
+export const validTargetSessionId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\x00-\x1f\x7f]/.test(value);
 
 export async function readJson(req: IncomingMessage | Http2ServerRequest, maximum = 128 * 1024): Promise<Record<string, unknown>> {
   let size = 0;
@@ -74,13 +77,19 @@ export function parseMessage(body: Record<string, unknown>): MessageRequest {
 }
 
 export function parseAutoPrompt(body: Record<string, unknown>): AutoPromptRequest {
-  if (Object.keys(body).some(key => !['requestId', 'provider', 'cwd', 'prompt', 'attachments', 'codexApprovalsReviewer', 'model', 'effort'].includes(key))) {
+  if (Object.keys(body).some(key => !['requestId', 'provider', 'cwd', 'sessionMode', 'targetSessionId', 'prompt', 'attachments', 'codexApprovalsReviewer', 'model', 'effort'].includes(key))) {
     throw httpError(400, 'Auto Prompt 요청에는 폴더, 도구, 프롬프트와 첨부 파일만 지정할 수 있습니다.');
   }
   if (typeof body.requestId !== 'string' || !UUID.test(body.requestId)) throw httpError(400, 'Auto Prompt 요청 ID가 올바르지 않습니다.');
   if (body.provider !== 'claude' && body.provider !== 'codex') throw httpError(400, 'Claude 또는 Codex를 선택하세요.');
   if (body.cwd !== undefined && (typeof body.cwd !== 'string' || !body.cwd.startsWith('/') || body.cwd.length > 4096 || body.cwd.includes('\0'))) {
     throw httpError(400, '목록에서 작업 폴더를 선택하거나 Auto를 선택하세요.');
+  }
+  // A new conversation in the chosen folder, without asking the router (an accepted suggestion does this).
+  // A chosen place without asking the router (an accepted suggestion): a new conversation, or one to continue, in `cwd`.
+  if (body.sessionMode !== undefined && (body.sessionMode !== 'new' || body.cwd === undefined)) throw httpError(400, '새 세션 요청에는 작업 폴더가 필요합니다.');
+  if (body.targetSessionId !== undefined && (!validTargetSessionId(body.targetSessionId) || body.cwd === undefined || body.sessionMode !== undefined)) {
+    throw httpError(400, '이어갈 세션과 그 작업 폴더를 함께 지정하세요.');
   }
   if (body.attachments !== undefined && !Array.isArray(body.attachments)) throw httpError(400, '첨부 파일 목록 형식이 올바르지 않습니다.');
   const attachments = body.attachments as AutoPromptRequest['attachments'];
@@ -92,8 +101,22 @@ export function parseAutoPrompt(body: Record<string, unknown>): AutoPromptReques
   const model = requestedModel(body.model);
   const effort = requestedEffort(body.effort, body.provider);
   return { ...(model ? { model } : {}), ...(effort ? { effort } : {}), requestId: body.requestId, provider: body.provider, prompt: body.prompt,
-    ...(body.cwd !== undefined ? { cwd: body.cwd as string } : {}), ...(attachments ? { attachments } : {}),
+    ...(body.cwd !== undefined ? { cwd: body.cwd as string } : {}), ...(body.sessionMode === 'new' ? { sessionMode: 'new' as const } : {}),
+    ...(body.targetSessionId !== undefined ? { targetSessionId: body.targetSessionId as string } : {}), ...(attachments ? { attachments } : {}),
     ...(reviewer && body.provider === 'codex' ? { codexApprovalsReviewer: reviewer } : {}) };
+}
+
+export function parseAutoPromptSuggestion(body: Record<string, unknown>): AutoPromptSuggestionRequest {
+  if (Object.keys(body).some(key => !['prompt', 'provider', 'cwd', 'node'].includes(key))) throw httpError(400, '추천 요청에는 요청 내용, 도구, 폴더와 컴퓨터만 지정할 수 있습니다.');
+  if (typeof body.prompt !== 'string' || body.prompt.trim().length < AUTO_PROMPT_SUGGESTION_MIN_CHARS || body.prompt.length > 32_000) {
+    throw httpError(400, `추천은 ${AUTO_PROMPT_SUGGESTION_MIN_CHARS}자 이상, 32,000자 이하의 요청에만 받을 수 있습니다.`);
+  }
+  if (body.provider !== 'claude' && body.provider !== 'codex') throw httpError(400, 'Claude 또는 Codex를 선택하세요.');
+  if (body.cwd !== undefined && (typeof body.cwd !== 'string' || !body.cwd.startsWith('/') || body.cwd.length > 4096 || body.cwd.includes('\0'))) {
+    throw httpError(400, '목록에서 작업 폴더를 선택하거나 Auto를 선택하세요.');
+  }
+  if (body.node !== undefined && (typeof body.node !== 'string' || !/^[a-f0-9]{32}$/.test(body.node))) throw httpError(400, '연결된 컴퓨터가 아닙니다.');
+  return { prompt: body.prompt, provider: body.provider, ...(body.cwd !== undefined ? { cwd: body.cwd as string } : {}), ...(body.node !== undefined ? { node: body.node as string } : {}) };
 }
 
 /** The status a failure answers with: its own when it carries one, otherwise judged from the message. */

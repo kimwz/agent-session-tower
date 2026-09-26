@@ -53,7 +53,7 @@ export function NotificationPanel({ token, onClose }: { token: string; onClose: 
     : permission === 'denied' ? t('이 사이트의 알림이 브라우저 설정에서 차단되어 있습니다. 브라우저 설정에서 허용한 뒤 다시 시도하세요.') : '';
   return createPortal(<dialog ref={dialog} className="auth-dialog notification-dialog" aria-labelledby="notification-title" onCancel={onClose} onClick={event => { if (event.target === event.currentTarget) onClose(); }}><div className="auth-panel">
     <header><h2 id="notification-title">{t('알림')}</h2><div><button className="icon-button" aria-label={t('닫기')} onClick={onClose}><X size={20} /></button></div></header>
-    <p className="auth-hint">{t('프로젝트 채팅의 작업이 끝나거나 트리거가 작업을 시작하면 알림을 보냅니다. 페이지를 닫아도 이 기기로 전달됩니다.')}</p>
+    <p className="auth-hint">{t('프로젝트 채팅의 작업이 끝나거나, 대화가 승인·답변을 기다리거나, 트리거가 작업을 시작하면 알림을 보냅니다. 페이지를 닫아도 이 기기로 전달됩니다.')}</p>
     {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
     {notice && <p className="notification-notice" role="status">{notice}</p>}
     {!overview ? !error && <LoaderCircle className="spin" aria-label={t('연결 중')} /> : <>
@@ -61,7 +61,8 @@ export function NotificationPanel({ token, onClose }: { token: string; onClose: 
         {unavailable ? <p className="auth-hint">{unavailable}</p> : own ? <>
           <div className="notification-own"><span><BellRing size={15} />{t('알림 받는 중')} · {own.label}</span><button className="secondary-button" disabled={busy} onClick={() => void act(() => disablePush(token, overview.publicKey), t('이 기기의 알림을 껐습니다.'))}><BellOff size={14} />{t('끄기')}</button></div>
           <fieldset className="notification-events" disabled={busy}><legend>{t('받을 알림')}</legend>
-            <label><input type="checkbox" checked={own.events.runCompleted} onChange={event => setEvent('runCompleted', event.target.checked)} />{t('채팅 작업 완료')}<small>{t('프로젝트 채팅에서 보낸 요청이 끝나거나 오류로 멈췄을 때')}</small></label>
+            <label><input type="checkbox" checked={own.events.runCompleted} onChange={event => setEvent('runCompleted', event.target.checked)} />{t('채팅 작업 완료')}<small>{t('프로젝트 채팅에서 보낸 요청이 끝나거나 오류로 멈췄을 때. 다음 요청이 이어지는 중간 턴은 알리지 않습니다.')}</small></label>
+            <label><input type="checkbox" checked={own.events.runWaiting} onChange={event => setEvent('runWaiting', event.target.checked)} />{t('승인·답변 대기')}<small>{t('대화가 승인이나 질문에 대한 답을 기다릴 때')}</small></label>
             <label><input type="checkbox" checked={own.events.triggerStarted} onChange={event => setEvent('triggerStarted', event.target.checked)} />{t('트리거 작업 시작')}<small>{t('트리거가 실행되어 작업을 시작했을 때')}</small></label>
           </fieldset>
           <button className="secondary-button" disabled={busy} onClick={() => void act(() => notificationPost('/api/notifications/test', token, { id: own.id }), t('테스트 알림을 보냈습니다.'))}>{t('테스트 알림 보내기')}</button>

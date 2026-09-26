@@ -3,7 +3,8 @@ import type { ClientHttp2Session } from 'node:http2';
 import type { ProjectGroup, Snapshot } from '../../shared/types.js';
 import type { RemoteNode } from '../../shared/link.js';
 import type { ControllerLinks } from './controller.js';
-import { NodeMirrors } from './mirror.js';
+import { NodeMirrors, plausible } from './mirror.js';
+import { linkRequest } from './transport.js';
 import { updateActive } from './update.js';
 import type { NodeViewStore } from './views.js';
 
@@ -40,6 +41,18 @@ export class RemoteNodes extends EventEmitter {
     return snapshot && withViews(snapshot, this.views.of(id));
   }
 
+  /**
+   * What that computer shares at this moment, asked of it now rather than read from the followed copy, which can lag
+   * behind a change to its sharing list. Throws when it cannot answer.
+   */
+  async currentSnapshot(id: string, signal?: AbortSignal): Promise<Snapshot> {
+    const session = this.links.session(id);
+    if (!session) throw new Error('The joined computer is not connected.');
+    // As large as a followed frame may be: a busy computer's state is more than an ordinary answer.
+    const answer = await linkRequest(session, 'GET', '/api/snapshot', undefined, 8_000, { maxBytes: 32 * 1024 * 1024, signal });
+    if (answer.status !== 200 || !plausible(answer.json)) throw new Error('The joined computer did not return its state.');
+    return answer.json;
+  }
   session(id: string): ClientHttp2Session | undefined { return this.links.session(id); }
   known(id: string): boolean { return this.links.list().some(node => node.id === id); }
 

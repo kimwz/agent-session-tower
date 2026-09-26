@@ -663,3 +663,23 @@ test('with an outdated worker, trigger operations explain the pending update ins
   assert.equal(client.triggerOverview(), undefined);
   assert.ok(!legacy.methods.includes('api'));
 });
+
+test('an outdated worker is never given a request that names its place, since it would route it elsewhere', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-target-'));
+  const stateDir = join(directory, 'state');
+  const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
+  const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
+  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  await client.start();
+  assert.equal(client.supports('autoPromptTargets'), false);
+  const base = { provider: 'codex' as const, prompt: 'Continue', cwd: directory };
+  await assert.rejects(client.submitAutoPrompt({ ...base, requestId: '12345678-1234-4234-8234-123456789abd', targetSessionId: 'codex:legacy' }), { statusCode: 503, disposition: 'not-admitted' });
+  await assert.rejects(client.submitAutoPrompt({ ...base, requestId: '12345678-1234-4234-8234-123456789abe', sessionMode: 'new' }), { statusCode: 503, disposition: 'not-admitted' });
+  assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
+});
+
+test('the current worker says it takes requests that name their place', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = await f.connect();
+  assert.equal(client.supports('autoPromptTargets'), true);
+});

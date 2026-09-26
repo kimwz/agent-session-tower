@@ -110,3 +110,16 @@
   .auto-prompt-composer .composer-hint>span { display:none; }
   .auto-prompt-result { padding:15px; }
 }
+.auto-prompt-suggestion { display:flex; align-items:center; gap:9px; min-height:34px; padding:7px 11px; margin-top:12px; border:1px solid #3a557a; border-radius:7px; color:#cfe0f5; background:#152338; font-size:12px; line-height:1.5; cursor:pointer; }
+.auto-prompt-suggestion.off { border-color:#2c3c52; background:transparent; color:#8397b2; }
+.auto-prompt-suggestion.off .auto-prompt-suggestion-target { text-decoration:line-through; text-decoration-color:#5d7090; }
+.auto-prompt-suggestion.muted { color:#8fa3be; border-style:dashed; background:transparent; cursor:default; }
+.auto-prompt-suggestion>input { flex-shrink:0; margin:0; accent-color:#7fb0f0; }
+.auto-prompt-suggestion>svg { flex-shrink:0; }
+.auto-prompt-suggestion-label { display:inline-flex; align-items:center; gap:4px; flex-shrink:0; color:#f2c86b; font-weight:550; }
+.auto-prompt-suggestion.off .auto-prompt-suggestion-label { color:#8a7a55; }
+.auto-prompt-suggestion-target { display:flex; align-items:center; gap:4px; flex:1; min-width:0; }
+.auto-prompt-suggestion-target>strong { flex-shrink:0; max-width:45%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:550; }
+.auto-prompt-suggestion-target>svg { flex-shrink:0; color:#6f86a6; }
+.auto-prompt-suggestion-target>span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.auto-prompt-suggestion-target>span.new { color:#9fd9b8; }

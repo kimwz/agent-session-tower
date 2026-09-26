@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import { constants } from 'node:fs';
 import { mkdir, open, rename, stat, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
-import { basename, isAbsolute, join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import type { Attachment, AttachmentInput, AutoPromptDecision, AutoPromptJob, AutoPromptRequest, Run, RunOrigin, Session, SessionDetail, Snapshot } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { AttachmentStore, attachmentMetadata, type StoredAttachment } from '../stores/attachments.js';
@@ -12,6 +12,7 @@ import { ownerOrigin, parseRunOrigin } from '../runs/origin.js';
 import { runAutoPromptModel } from './native.js';
 import type { ExclusionMatcher } from '../remote/exclusions.js';
 import { remoteWorkingSnapshot } from '../remote/visibility.js';
+import { directories, eligible, type Directory } from './inventory.js';
 
 interface AutoPromptOptions {
   stateDir: string;
@@ -24,7 +25,6 @@ interface AutoPromptOptions {
   remote?: { prepare(paths: Iterable<string>, options?: { fresh?: boolean }): Promise<void>; matcher(): ExclusionMatcher; coordinators(): ReadonlySet<string> };
 }
 interface Entry { job: AutoPromptJob; fingerprint: string; staged: Attachment[] }
-interface Directory { id: string; cwd: string; title: string; sessions: Session[] }
 type Relation = 'continuation' | 'adjacent' | 'new';
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const TERMINAL = new Set<AutoPromptJob['status']>(['completed', 'error', 'cancelled']);
@@ -50,25 +50,9 @@ const SESSION_SCHEMA = { type: 'object', additionalProperties: false, required: 
 } };
 const object = (value: unknown): Record<string, unknown> | undefined => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
 const copy = <T>(value: T): T => structuredClone(value);
+const validTarget = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\x00-\x1f\x7f]/.test(value);
 const errorText = (error: unknown) => (error instanceof Error ? error.message : 'Auto Prompt 라우팅에 실패했습니다.').slice(0, 1500);
 
-function directories(snapshot: Snapshot): Directory[] {
-  const values = new Map<string, Directory>();
-  const titles = new Map(snapshot.groups?.map(group => [group.cwd, group.title]));
-  const add = (cwd: string) => {
-    if (!isAbsolute(cwd) || cwd.includes('\0') || cwd.length > 4096) return undefined;
-    let value = values.get(cwd);
-    if (!value) { value = { id: '', cwd, title: titles.get(cwd) || basename(cwd) || cwd, sessions: [] }; values.set(cwd, value); }
-    return value;
-  };
-  for (const session of snapshot.sessions) if (!session.isSubagent && !session.launchedByAgent && session.cwd) add(session.cwd)?.sessions.push(session);
-  for (const group of snapshot.groups || []) if (group.pinned || group.hidden) add(group.cwd);
-  return [...values.values()].sort((a, b) => a.cwd.localeCompare(b.cwd)).map((value, index) => ({ ...value, id: `d${index + 1}` }));
-}
-function eligible(session: Session, job: AutoPromptJob, cwd: string): boolean {
-  return session.provider === job.provider && session.cwd === cwd && !session.isSubagent && !session.launchedByAgent && !session.closed
-    && !session.creationPending && session.resumable && UUID.test(session.nativeId);
-}
 function pending(snapshot: Snapshot, sessionId: string): Run[] {
   return snapshot.runs.filter(run => run.sessionId === sessionId && (run.status === 'queued' || run.status === 'running'));
 }
@@ -86,10 +70,15 @@ function modelInput(value: unknown): string {
   if (result.length > MAX_INPUT) throw new RunError('라우팅에 필요한 프로젝트 정보가 너무 많습니다. 폴더를 직접 선택하거나 세션을 정리한 뒤 다시 시도하세요.', 413);
   return result;
 }
-function providerReady(snapshot: Snapshot, provider: AutoPromptJob['provider']): void {
+/**
+ * Whether the router is asked: not for work that names its place in full, a new conversation in a given folder or a
+ * conversation to continue. A new conversation without a folder (Slack, triggers) still has its folder routed.
+ */
+const routed = (request: Pick<AutoPromptRequest, 'cwd' | 'sessionMode' | 'targetSessionId'>) => !(request.cwd && (request.sessionMode === 'new' || request.targetSessionId !== undefined));
+function providerReady(snapshot: Snapshot, provider: AutoPromptJob['provider'], routing: boolean): void {
   const health = snapshot.providers.find(value => value.provider === provider);
   if (!health?.available) throw new RunError(`${provider === 'claude' ? 'Claude Code' : 'Codex'}를 사용할 수 없습니다. 설치와 로그인을 확인하세요.`, 422);
-  if (provider === 'codex' && health.models?.length && !health.models.some(model => model.id === MODELS.codex)) throw new RunError('선택한 Codex 계정에서 라우팅 모델 GPT Sol을 사용할 수 없습니다.', 422);
+  if (routing && provider === 'codex' && health.models?.length && !health.models.some(model => model.id === MODELS.codex)) throw new RunError('선택한 Codex 계정에서 라우팅 모델 GPT Sol을 사용할 수 없습니다.', 422);
 }
 function attachmentContext(attachments: StoredAttachment[]) {
   return attachments.map(({ metadata, content }) => ({ name: metadata.name, mimeType: metadata.mimeType, size: metadata.size,
@@ -173,6 +162,9 @@ export class AutoPromptManager extends EventEmitter {
     if (input.cwd !== undefined && (typeof input.cwd !== 'string' || !isAbsolute(input.cwd) || input.cwd.includes('\0') || input.cwd.length > 4096)) throw new RunError('목록에 있는 작업 폴더를 선택하세요.');
     if (input.codexApprovalsReviewer !== undefined && !['user', 'auto_review'].includes(input.codexApprovalsReviewer)) throw new RunError('승인 검토는 자동 검토 또는 직접 확인만 선택할 수 있습니다.');
     if (input.sessionMode !== undefined && input.sessionMode !== 'new') throw new RunError('올바른 세션 생성 모드를 선택하세요.');
+    if (input.targetSessionId !== undefined && (!validTarget(input.targetSessionId) || !input.cwd || input.sessionMode !== undefined)) throw new RunError('이어갈 세션과 그 작업 폴더를 함께 지정하세요.');
+    // External content never continues an existing conversation, even one named outright.
+    if (untrustedInput && input.targetSessionId !== undefined) throw new RunError('외부 입력 요청은 새 세션에서만 실행할 수 있습니다.');
     if (input.routingContext !== undefined && (typeof input.routingContext !== 'string' || input.routingContext.length > 32_000)) throw new RunError('라우팅 지침은 32,000자 이하여야 합니다.');
     requestedModel(input.model);
     requestedEffort(input.effort, input.provider);
@@ -180,6 +172,7 @@ export class AutoPromptManager extends EventEmitter {
     input.requestId = input.requestId.toLowerCase();
     const request = { provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: input.attachments ?? [],
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
+      ...(input.targetSessionId !== undefined ? { targetSessionId: input.targetSessionId } : {}),
       ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
       ...(input.model ? { model: input.model } : {}),
       ...(input.effort ? { effort: input.effort } : {}),
@@ -206,7 +199,7 @@ export class AutoPromptManager extends EventEmitter {
     const inventory = directories(snapshot);
     if (!inventory.length) throw new RunError('라우팅할 작업 폴더가 없습니다. 먼저 프로젝트 폴더를 추가하세요.');
     if (input.cwd) await this.checkDirectory(input.cwd, inventory);
-    providerReady(snapshot, input.provider);
+    providerReady(snapshot, input.provider, routed(input));
     const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments });
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, staged: prepared.attachments, job: {
@@ -214,6 +207,7 @@ export class AutoPromptManager extends EventEmitter {
       // The owner's own turns always use Codex's automatic reviewer; only other work keeps the one it chose.
       ...(input.provider === 'codex' && input.codexApprovalsReviewer && !ownerOrigin(origin) ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}),
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
+      ...(input.targetSessionId !== undefined ? { targetSessionId: input.targetSessionId } : {}),
       ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
       ...(input.model ? { model: input.model } : {}),
       ...(input.effort ? { effort: input.effort } : {}),
@@ -302,7 +296,7 @@ export class AutoPromptManager extends EventEmitter {
     await this.options.refresh(); active();
     let snapshot = await this.snapshotFor(job.origin); active();
     if (job.origin?.controllerId) this.update(job, { exclusionRevision: this.options.remote!.matcher().revision });
-    providerReady(snapshot, job.provider);
+    providerReady(snapshot, job.provider, routed(job));
     const inventory = directories(snapshot);
     const staged = await this.attachments.resolve(job.id, entry.staged); active();
     const request = { prompt: job.prompt, attachments: attachmentContext(staged) };
@@ -337,8 +331,15 @@ export class AutoPromptManager extends EventEmitter {
     let relation: Relation = 'new';
     if (job.sessionMode === 'new') {
       decision = { action: 'create', cwd, reason: '요청에 따라 독립된 새 세션을 생성합니다.' };
+    } else if (job.targetSessionId !== undefined) {
+      // The owner chose this conversation; it must still be one the router itself could have continued.
+      const selected = snapshot.sessions.find(session => session.id === job.targetSessionId);
+      if (!selected || !eligible(selected, job.provider, cwd)) throw new RunError('선택한 세션에서 이어갈 수 없습니다. 세션이 닫혔거나 다른 폴더·도구의 세션입니다. 실행하지 않았습니다.', 409);
+      expectedNativeId = selected.nativeId;
+      relation = 'continuation';
+      decision = { action: 'resume', cwd, sessionId: selected.id, reason: '선택한 세션에서 이어갑니다.' };
     } else {
-      const candidates = snapshot.sessions.filter(session => eligible(session, job, cwd!));
+      const candidates = snapshot.sessions.filter(session => eligible(session, job.provider, cwd!));
       const excerpts = new Map<string, unknown[]>();
       const recent = [...candidates].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 12);
       await Promise.all(recent.map(async session => {
@@ -381,11 +382,11 @@ export class AutoPromptManager extends EventEmitter {
     await this.checkDirectory(cwd, directories(await this.snapshotFor(job.origin))); active();
     const validate = () => {
       const current = this.snapshotNow(job.origin);
-      providerReady(current, job.provider);
+      providerReady(current, job.provider, routed(job));
       if (!directories(current).some(directory => directory.cwd === cwd)) throw new RunError('라우팅 중 프로젝트 폴더가 변경되었습니다. 다시 시도하세요.', 409);
       if (decision.action === 'resume') {
         const session = current.sessions.find(session => session.id === decision.sessionId);
-        if (!session || session.nativeId !== expectedNativeId || !eligible(session, job, cwd!) || (relation === 'adjacent' && !adjacentAllowed(session, current))) throw new RunError('라우팅 중 선택한 세션의 상태나 컨텍스트가 변경되었습니다. 실행하지 않았습니다. 다시 시도하세요.', 409);
+        if (!session || session.nativeId !== expectedNativeId || !eligible(session, job.provider, cwd!) || (relation === 'adjacent' && !adjacentAllowed(session, current))) throw new RunError('라우팅 중 선택한 세션의 상태나 컨텍스트가 변경되었습니다. 실행하지 않았습니다. 다시 시도하세요.', 409);
       }
     };
     validate(); active();
@@ -465,6 +466,7 @@ function validEntry(value: unknown): value is Entry {
     && Array.isArray(entry.staged) && entry.staged.length <= 10 && entry.staged.every(item => attachmentMetadata(item))
     && typeof job.id === 'string' && UUID.test(job.id) && ['claude', 'codex'].includes(String(job.provider))
     && (job.sessionMode === undefined || job.sessionMode === 'new')
+    && (job.targetSessionId === undefined || (validTarget(job.targetSessionId) && job.sessionMode === undefined && typeof job.cwd === 'string'))
     && (job.routingContext === undefined || typeof job.routingContext === 'string' && job.routingContext.length <= 32_000)
     && (job.model === undefined || validModelId(job.model))
     && (job.effort === undefined || validEffort(job.effort))

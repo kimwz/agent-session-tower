@@ -3,7 +3,7 @@ import { chatImageReference, readChatImage, sendChatImage, withChatImages } from
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
-import { ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus, parseAutoPrompt, parseCreateSession, parseMessage, readJson, UUID } from './requests.js';
+import { ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus, parseAutoPrompt, parseAutoPromptSuggestion, parseCreateSession, parseMessage, readJson, UUID } from './requests.js';
 import type { RequestContext } from './request-context.js';
 import type { RemoteExclusionStore } from '../remote/exclusions.js';
 import { handleLinkRoute, type LinkRoutes } from '../link/routes.js';
@@ -26,6 +26,7 @@ import type { PublicAgentOverview, PublicConversationView } from '../../shared/p
 import { OPERATIONS, isOperationName } from '../../shared/api/operations.js';
 import type { RepositoryAction, RepositoryStatus } from '../../shared/repositories.js';
 import type { NotificationOverview } from '../../shared/notifications.js';
+import type { AutoPromptSuggestionRequest, AutoPromptSuggestionResponse, DecisionOverview } from '../../shared/decisions.js';
 
 export interface Backend {
   /** Tower operations (see shared/api/operations.ts), run by the worker as the owner. */
@@ -87,7 +88,19 @@ export interface HttpOptions {
     remove(body: Record<string, unknown>): Promise<NotificationOverview>;
     test(body: Record<string, unknown>): Promise<NotificationOverview>;
   };
+  /** Fast multiple-choice judgments (such as Jev) and the features that use them; set up from the owner's pages. */
+  decisions?: {
+    overview(): DecisionOverview;
+    update(body: Record<string, unknown>): Promise<DecisionOverview>;
+    test(): Promise<DecisionOverview>;
+    /** `load` reads the state of the computer the draft is for, as it is right now: this one or a joined one. */
+    suggestAutoPrompt(input: AutoPromptSuggestionRequest, load: () => Promise<Snapshot>, signal: AbortSignal): Promise<AutoPromptSuggestionResponse>;
+  };
 }
+/** Suggestions follow the owner's typing; they change nothing, so they have their own budget apart from changes. */
+const SUGGESTION_PATH = '/api/auto-prompt-suggestions';
+const SUGGESTIONS_PER_MINUTE = 60;
+const SUGGESTIONS_AT_ONCE = 4;
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png',
@@ -99,7 +112,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, towerUpdate, service, notifications }: HttpOptions) {
+export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, towerUpdate, service, notifications, decisions }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -116,6 +129,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
     res.once('close', () => { active.delete(close); if (!active.size) streams.delete(id); });
   };
   const rates = new Map<string, { count: number; at: number }>();
+  const suggestions = { count: 0, at: 0, running: 0 };
   let scheduled: ReturnType<typeof setTimeout> | undefined;
   const json = (res: ServerResponse, status: number, body: unknown) => {
     res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -217,7 +231,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         // Reading Tower state is not a mutation; only changes count against the request budget.
         const read = path.match(/^\/api\/(?:nodes\/[a-f0-9]{32}\/)?v1\/([a-z]+\.[a-zA-Z]+)$/)?.[1];
         const readOnly = read !== undefined && isOperationName(read) && !OPERATIONS[read].write;
-        if (!login && !readOnly && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
+        if (!login && !readOnly && path !== SUGGESTION_PATH && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
           const key = req.socket.remoteAddress || 'local';
           const now = Date.now();
           const rate = rates.get(key);
@@ -276,6 +290,35 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (notificationAction && req.method === 'POST') {
         if (!notifications) return json(res, 503, { error: '알림을 사용할 수 없습니다.' });
         return json(res, 200, await notifications[notificationAction[1] as 'subscribe'](await readJson(req, 16 * 1024)));
+      }
+      if (path === '/api/decisions' && req.method === 'GET') {
+        if (!decisions) return json(res, 503, { error: '빠른 판단을 사용할 수 없습니다.' });
+        return json(res, 200, decisions.overview());
+      }
+      const decisionAction = path.match(/^\/api\/decisions\/(settings|test)$/);
+      if (decisionAction && req.method === 'POST') {
+        if (!decisions) return json(res, 503, { error: '빠른 판단을 사용할 수 없습니다.' });
+        const body = await readJson(req, 8 * 1024);
+        if (decisionAction[1] === 'settings') return json(res, 200, await decisions.update(body));
+        if (Object.keys(body).length) return json(res, 400, { error: '키 확인 요청 본문은 비워 두세요.' });
+        return json(res, 200, await decisions.test());
+      }
+      if (path === SUGGESTION_PATH && req.method === 'POST') {
+        const input = parseAutoPromptSuggestion(await readJson(req, 128 * 1024));
+        if (!decisions) return json(res, 200, { available: false });
+        const node = input.node;
+        if (node && !nodes?.known(node)) return json(res, 404, { error: '연결된 컴퓨터가 아닙니다.' });
+        // A joined computer is asked what it shares now before anything of it is sent out, never read from an older copy.
+        const now = Date.now();
+        if (now - suggestions.at > 60_000) { suggestions.at = now; suggestions.count = 0; }
+        if (++suggestions.count > SUGGESTIONS_PER_MINUTE || suggestions.running >= SUGGESTIONS_AT_ONCE) return json(res, 429, { error: '추천 요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+        // A page that moved on no longer waits for its answer.
+        const abandoned = new AbortController();
+        res.once('close', () => abandoned.abort());
+        const load = node ? () => nodes!.currentSnapshot(node, abandoned.signal) : async () => backend.snapshot();
+        suggestions.running++;
+        try { return json(res, 200, await decisions.suggestAutoPrompt(input, load, abandoned.signal)); }
+        finally { suggestions.running--; }
       }
       if (login) {
         if (identity.local) return json(res, 200, authStatus(true));

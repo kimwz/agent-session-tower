@@ -6,7 +6,7 @@ import type { Snapshot } from '../../shared/types.js';
 import type { ControllerLinks } from './controller.js';
 
 /** The shape the rest of this Tower relies on; another computer's frames are checked before they are used. */
-function plausible(value: unknown): value is Snapshot {
+export function plausible(value: unknown): value is Snapshot {
   const snapshot = value as Partial<Snapshot> | null;
   const list = (item: unknown) => item === undefined || Array.isArray(item);
   return !!snapshot && typeof snapshot === 'object' && Array.isArray(snapshot.sessions) && Array.isArray(snapshot.runs) && Array.isArray(snapshot.providers)

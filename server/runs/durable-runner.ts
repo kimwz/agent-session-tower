@@ -207,6 +207,10 @@ export class DurableRunManager extends EventEmitter {
   getAutoPrompt(id: string): AutoPromptJob | undefined { return this.autoPromptList().find(job => job.id === id.toLowerCase()); }
   async submitAutoPrompt(input: AutoPromptRequest, internal: Pick<RunAdmission, 'origin' | 'requestId'> = {}): Promise<AutoPromptJob> {
     this.requireOrigins(internal);
+    // An older worker would ignore a target it does not know and route the request somewhere else.
+    if ((input.targetSessionId !== undefined && !this.supports('autoPromptTargets')) || (input.sessionMode !== undefined && !this.supports('origins'))) {
+      throw Object.assign(new Error('실행 워커가 아직 업데이트되지 않아 추천한 곳으로 바로 보낼 수 없습니다. 추천을 끄고 보내거나, 진행 중인 작업이 끝나 워커가 교체된 뒤 다시 보내세요.'), { statusCode: 503, disposition: 'not-admitted' });
+    }
     const admitted = { ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) };
     return this.call('submitAutoPrompt', [input, ...(Object.keys(admitted).length ? [admitted] : [])]) as Promise<AutoPromptJob>;
   }

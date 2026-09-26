@@ -12,3 +12,13 @@
 .notification-devices li:last-child { border-bottom:none; }
 .notification-devices li > div { display:flex; flex-direction:column; gap:3px; min-width:0; font-size:13px; }
 .notification-devices small { color:#91a1b7; font-size:12px; overflow-wrap:anywhere; }
+.decision-dialog { width:min(560px, calc(100vw - 32px)); }
+.decision-dialog .secondary-button { display:inline-flex; align-items:center; gap:6px; }
+.decision-provider { display:flex; align-items:center; gap:10px; margin-bottom:12px; font-size:13px; color:#a8b8ce; }
+.decision-provider select { min-width:140px; }
+.decision-key { display:flex; align-items:center; gap:10px; margin-bottom:10px; font-size:13px; }
+.decision-key>span { display:inline-flex; align-items:center; gap:7px; flex:1; min-width:0; color:#9ee0ba; }
+.decision-key-form { display:flex; gap:8px; margin-bottom:16px; }
+.decision-key-form input { flex:1; min-width:0; }
+.decision-key-form input, .decision-provider select { min-height:36px; padding:8px 11px; border:1px solid #344255; border-radius:6px; color:#e4edf9; background:#0d131d; }
+.decision-key-form input:focus, .decision-provider select:focus-visible { outline:2px solid #91baff; outline-offset:2px; }

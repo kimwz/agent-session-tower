@@ -48,6 +48,9 @@ import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { PublicListener } from './public-agents/listener.js';
 import { NotificationService } from './notifications/service.js';
+import { judgeTurn } from './notifications/attention.js';
+import { DecisionService } from './decisions/service.js';
+import { autoPromptSuggestionResponse } from './auto-prompt/suggestion.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
 
 /** Every request this web server admits comes from the owner's browser session. */
@@ -262,12 +265,19 @@ async function main() {
     const page = await history.read(runs.nativeSessionId(id), before, limit);
     return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
   };
+  // Fast multiple-choice judgments (Jev, or whatever replaces it) for the web's own features; off without an API key.
+  const decisions = new DecisionService(stateDir);
+  await decisions.start().catch(error => console.error(`Fast judgment settings were not loaded: ${error instanceof Error ? error.message : String(error)}`));
   // Push notifications are sent from here: the web process sees every run the worker reports.
   const notifications = new NotificationService(stateDir, {
     runs: () => runs.list(),
     session: id => { const found = runs.getSession(id); return found && titles.apply(found); },
     project: session => groups.list().find(group => group.cwd === session.cwd)?.title || session.project,
     trigger: id => runs.triggerOverview()?.triggers.find(item => item.id === id)?.name,
+    attention: async (input, signal) => {
+      const engine = decisions.engine('attentionNotifications');
+      return engine ? judgeTurn(engine, input, signal) : undefined;
+    },
   });
   runs.on('change', () => notifications.changed());
   // Visitor pages of public agents, on their own port bound to this computer only; a tunnel publishes them.
@@ -378,6 +388,12 @@ async function main() {
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })) } : { error: linkError },
     workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications,
+    decisions: {
+      overview: () => decisions.overview(),
+      update: body => decisions.update(body),
+      test: () => decisions.test(),
+      suggestAutoPrompt: (input, load, signal) => autoPromptSuggestionResponse(decisions.engine('autoPromptSuggestions'), load, input, signal),
+    },
     towerUpdate: async version => {
       if (!updates.managed) return { status: 409, body: { code: 'not-service', error: 'This Tower does not run as the background service, so it cannot replace itself.' } };
       const answer = await towerUpdates.updateNow(version);
@@ -436,7 +452,7 @@ async function main() {
     dispose();
     server.closeAllConnections();
     server.close();
-    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingPublic, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), notifications.close(), runs.close()]); } finally { await releaseLock(); }
+    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingPublic, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), notifications.close(), decisions.close(), runs.close()]); } finally { await releaseLock(); }
   };
   const onSignal = () => { void shutdown().catch(error => { console.error(`Agent Session Tower shutdown: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }); };
   process.once('SIGINT', onSignal);

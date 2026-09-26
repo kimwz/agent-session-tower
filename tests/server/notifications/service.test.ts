@@ -64,7 +64,7 @@ test('devices subscribe, choose events, receive what they chose, and are forgott
   await service.subscribe({ subscription: phone, label: 'iPhone · Safari', language: 'ko' });
   const overview = await service.subscribe({ subscription: laptop, label: 'Mac · Chrome', language: 'en', events: { triggerStarted: false } });
   assert.deepEqual(overview.devices.map(device => [device.id, device.events]), [
-    [deviceId(phone.endpoint), { runCompleted: true, triggerStarted: true }], [deviceId(laptop.endpoint), { runCompleted: true, triggerStarted: false }]]);
+    [deviceId(phone.endpoint), { runCompleted: true, triggerStarted: true, runWaiting: true }], [deviceId(laptop.endpoint), { runCompleted: true, triggerStarted: false, runWaiting: true }]]);
   assert.ok(!JSON.stringify(overview).includes(phone.endpoint), 'endpoints and keys stay on the server');
   // Work that ended before the service started is not announced.
   service.check();

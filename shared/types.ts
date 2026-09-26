@@ -216,6 +216,8 @@ export interface CreateSessionRequest {
 }
 export interface AutoPromptRequest {
   sessionMode?: 'new';
+  /** Continue this conversation in `cwd` without asking the router (the owner accepted a suggestion). */
+  targetSessionId?: string;
   routingContext?: string;
   model?: string;
   effort?: string;
@@ -243,6 +245,7 @@ export interface AutoPromptJob {
   /** The request carries external content, so it may only start a new session. */
   untrustedInput?: boolean;
   sessionMode?: 'new';
+  targetSessionId?: string;
   routingContext?: string;
   model?: string;
   effort?: string;
