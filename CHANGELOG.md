@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.40.1] - 2026-09-26
+
+### Fixed
+- **Stopping Tower saves notification state before it exits.** While shutting down, the web waited for pushes still being decided with a timer that did not keep the process alive, so on some Node versions the process could exit before saving which pushes were handled. It now waits the full moment (at most 2 seconds) and saves; pushes still undecided then are taken up again on the next start. This also made the 1.40.0 checks fail on Node 22.
+- A check of Codex capability reading no longer fails on a busy machine: it gives the fake Codex CLI up to 8 seconds to start and still times only the abort.
+
 ## [1.40.0] - 2026-09-26
 
 ### Added

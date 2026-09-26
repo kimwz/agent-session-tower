@@ -130,7 +130,7 @@ createInterface({input:process.stdin}).on('line', line => {
   assert.deepEqual(requests.map(request => request.method), ['initialize', 'initialized', 'account/rateLimits/read', 'model/list', 'model/list', 'config/read']);
 });
 
-test('aborting an unresponsive Codex reader force-kills its child even when SIGTERM is ignored', { timeout: 6000 }, async t => {
+test('aborting an unresponsive Codex reader force-kills its child even when SIGTERM is ignored', { timeout: 15000 }, async t => {
   const directory = await mkdtemp(join(tmpdir(), 'tower-capability-abort-'));
   const executable = join(directory, 'codex');
   const pidFile = join(directory, 'pid');
@@ -145,7 +145,8 @@ setInterval(()=>{},1000);
   await chmod(executable, 0o700);
   const controller = new AbortController();
   const pending = readCodexCapabilities(executable, { ...process.env, PID_FILE: pidFile }, controller.signal);
-  for (let attempt = 0; attempt < 100 && !pid; attempt++) {
+  // A busy machine can take seconds to start the fake CLI; only the abort itself is timed.
+  for (let attempt = 0; attempt < 800 && !pid; attempt++) {
     try { pid = Number(await readFile(pidFile, 'utf8')); } catch { await new Promise(resolve => setTimeout(resolve, 10)); }
   }
   assert.ok(pid);

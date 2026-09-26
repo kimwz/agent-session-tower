@@ -326,7 +326,10 @@ export class NotificationService {
     if (this.timer) clearTimeout(this.timer);
     // Shutting down waits a moment for pushes being decided or sent. Any still going stay unhandled in the saved
     // state, so the next start takes them up again rather than losing them.
-    await Promise.race([Promise.allSettled([...this.processing]), new Promise(resolve => { setTimeout(resolve, CLOSE_WAIT_MS).unref?.(); })]);
+    // The wait keeps the process alive: shutdown must not end before the state below is saved.
+    let grace: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([Promise.allSettled([...this.processing]), new Promise(resolve => { grace = setTimeout(resolve, CLOSE_WAIT_MS); })]);
+    clearTimeout(grace);
     this.stopped = true;
     if (this.saved) await this.save().catch(() => {});
     await this.writes;
