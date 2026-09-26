@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.39.2] - 2026-09-26
+
+### Fixed
+- **Folders on the free-form canvas stay put.** A folder's top-left corner no longer moves when its sessions change. Before, the folder followed its top-left card, so it jumped whenever that card left the view, came back, or a new session was placed to its left. Now the cards shift inside the folder and keep their layout. New sessions are placed only to the right of and below the folder's first card. Dragging a card or a folder by hand works as before.
+
 ## [1.39.1] - 2026-09-26
 
 ### Fixed

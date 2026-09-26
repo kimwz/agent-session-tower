@@ -68,10 +68,12 @@ export function manualProjectBounds(layout: ManualGraphLayout, projectId: string
 }
 
 /**
- * Move each logical origin onto its visible frame without moving any card, so
- * a folder whose cards all leave the view stays where it was last seen.
+ * Line each logical origin up with its visible frame. A hand move keeps its
+ * cards where they were dropped and lets the frame follow; any other change
+ * keeps the folder's top-left corner and moves its cards up to it instead, so
+ * cards entering or leaving the view never push the folder around.
  */
-function anchorVisibleFrames(layout: ManualGraphLayout, visibleIds?: ReadonlySet<string>): ManualGraphLayout {
+function anchorVisibleFrames(layout: ManualGraphLayout, visibleIds?: ReadonlySet<string>, keep: 'cards' | 'frame' = 'cards'): ManualGraphLayout {
   const corners = new Map<string, GraphPosition>();
   for (const [id, agent] of Object.entries(layout.agents)) {
     if (visibleIds && !visibleIds.has(id)) continue;
@@ -85,6 +87,7 @@ function anchorVisibleFrames(layout: ManualGraphLayout, visibleIds?: ReadonlySet
     // Sub-pixel remainders from float drags are invisible; ignoring them keeps reconciliation idempotent.
     if (Math.abs(shift.x) < 0.01 && Math.abs(shift.y) < 0.01) continue;
     shifts.set(id, shift);
+    if (keep === 'frame') continue;
     const project = projects[id];
     projects = { ...projects, [id]: { ...project, position: { x: project.position.x + shift.x, y: project.position.y + shift.y } } };
   }
@@ -155,7 +158,7 @@ export function parseGraphPreferences(value: string | null): GraphPreferences {
       ...(hosts.length ? { hosts: Object.fromEntries(hosts) } : {}), anchoredFrames: true };
     // Older saves drew a folder without visible cards around all of its stored
     // cards. Anchor those origins there once so the upgrade moves nothing.
-    if (layout.anchoredFrames !== true) restored = anchorVisibleFrames(restored);
+    if (layout.anchoredFrames !== true) restored = anchorVisibleFrames(restored, undefined, 'cards');
     return { version: 1, mode: parsed.mode === 'manual' ? 'manual' : 'auto', layout: normalizeProjectSizes(restored) };
   } catch { return fallback; }
 }
@@ -246,6 +249,8 @@ function vacantAgentPosition(projectId: string, projects: Record<string, ManualP
       const column = distance - row;
       for (const offset of column ? [column, -column] : [0]) {
         const candidate = { x: preferred.x + offset * COLUMN_STEP, y: preferred.y + row * ROW_STEP };
+        // Nothing is placed left of the folder's first column, whose corner stays put.
+        if (candidate.x < Math.min(INSET, preferred.x)) continue;
         const absolute = { x: project.position.x + candidate.x, y: project.position.y + candidate.y };
         if (!occupied.some(other => overlaps(absolute, other))) return candidate;
       }
@@ -283,6 +288,10 @@ export function reconcileManualGraph(layout: ManualGraphLayout, allSessions: Ses
   }
   const groups = includePinnedProjectGroups(graphSessionGroups(seedSessions.filter(session => liveAgents.has(session.id)), Infinity, null), pinnedGroups);
   const visibleIds = new Set(seedSessions.map(session => session.id));
+  // Settle cards against the folder corners first, so title repair and new
+  // placements measure the frames that stay on screen.
+  const settled = anchorVisibleFrames({ ...layout, projects, agents }, visibleIds, 'frame');
+  if (settled.agents !== agents) agents = settled.agents;
   const visibleProjectIds = options.visibleProjectIds ?? new Set(groups.map(([path]) => graphProjectId(path)));
   if (options.repairHeaderWidths !== false && options.minimumProjectWidths) {
     projects = reconcileHeaderWidths(projects, agents, visibleIds, visibleProjectIds, options.minimumProjectWidths);
@@ -350,7 +359,7 @@ export function reconcileManualGraph(layout: ManualGraphLayout, allSessions: Ses
       projects = { ...projects, [projectId]: { ...projects[projectId], appliedHeaderWidth } };
     }
   }
-  return normalizeProjectSizes(anchorVisibleFrames(projects === layout.projects && agents === layout.agents ? layout : { ...layout, projects, agents }, visibleIds));
+  return normalizeProjectSizes(anchorVisibleFrames(projects === layout.projects && agents === layout.agents ? layout : { ...layout, projects, agents }, visibleIds, 'frame'));
 }
 
 /** React Flow moves use world coordinates, including the visible folder origin. */
