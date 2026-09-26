@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.40.2] - 2026-09-26
+
+### Fixed
+- **The release checks pass on Node 22 again.** The 1.40.0 and 1.40.1 packages were published, but the checks that run after publishing failed on Node 22: a Jev adapter test waited on a fake request that nothing kept alive, so the test process ended early. Tower itself is unchanged from 1.40.1.
+
 ## [1.40.1] - 2026-09-26
 
 ### Fixed
