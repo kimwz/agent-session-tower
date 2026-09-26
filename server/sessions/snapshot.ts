@@ -10,9 +10,11 @@ function latestTime(previous: string | undefined, candidate: string | undefined)
 export function projectSessionStates(sessions: readonly Session[], runs: readonly Run[], settledRunIds: ReadonlySet<string> = new Set()): Session[] {
   const latest = new Map<string, Run>();
   const running = new Set<string>();
+  const waiting = new Set<string>();
   const activity = new Map<string, { lastRequestAt?: string; lastCompletedAt?: string }>();
   for (const run of runs) {
     if (run.status === 'running') running.add(run.sessionId);
+    if (run.status === 'running' && run.backgroundWait) waiting.add(run.sessionId);
     const previous = latest.get(run.sessionId);
     if (!previous || run.createdAt >= previous.createdAt) latest.set(run.sessionId, run);
     const times = activity.get(run.sessionId) ?? {};
@@ -31,7 +33,7 @@ export function projectSessionStates(sessions: readonly Session[], runs: readonl
       lastRequestAt: latestTime(nativeSession.lastRequestAt, times.lastRequestAt),
       lastCompletedAt: latestTime(nativeSession.lastCompletedAt, times.lastCompletedAt),
     } : nativeSession;
-    if (running.has(session.id)) return { ...session, status: 'working', statusReason: 'Agent Session Tower에서 작업 중' };
+    if (running.has(session.id)) return { ...session, status: 'working', statusReason: waiting.has(session.id) ? '백그라운드 작업이 끝나기를 기다리는 중' : 'Agent Session Tower에서 작업 중' };
     const run = latest.get(session.id);
     // A queued cancellation says nothing about the independent CLI's current task.
     if (session.status !== 'working' || !run?.startedAt || !run.finishedAt || !settledRunIds.has(run.id) || !['cancelled', 'error'].includes(run.status)) return session;

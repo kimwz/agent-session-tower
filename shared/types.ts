@@ -164,6 +164,12 @@ export interface Run {
    * until `at` and then resumes the conversation with the agent's own prompt.
    */
   scheduled?: { at: string; afterRunId: string };
+  /**
+   * The turn has answered but background work it started (a background command, Monitor or agent) is still running
+   * inside the provider process. Tower keeps the turn open so the agent can pick up the results; `since` is when the
+   * wait began and `tasks` how many are still running (0 while Claude is about to take a finished one).
+   */
+  backgroundWait?: { since: string; tasks: number };
 }
 export interface RunApproval {
   id: string;

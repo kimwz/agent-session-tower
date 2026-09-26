@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.39.0] - 2026-09-26
+
+### Fixed
+- **Agents that say "I'll report when it finishes" now do.** When a Claude turn started background work (a command run in the background, a Monitor, or a background agent), Tower used to end the turn at Claude's first answer. That closed Claude's process, so the work was killed or its completion notice was lost, and the conversation looked finished with no result. Tower now keeps the turn open while that work runs. Claude takes each result in a follow-up turn of the same task, and the turn ends after that. While it waits, the conversation shows **Waiting for background work**.
+- If Claude has not taken a finished task's result within a minute, Tower hands Claude the notice itself, with the task's summary and output file.
+- A message you send while a turn only waits for background work is delivered to that conversation right away instead of waiting in the queue.
+- Background work still running after two hours ends the turn, as every turn ended before, and the turn is reported as an error rather than a success. **Stop** ends it at any time. Claude exiting before it took its results is also reported as an error.
+- A ScheduleWakeup that fires inside a turn kept open like this is no longer scheduled a second time.
+
 ## [1.38.2] - 2026-09-26
 
 ### Fixed

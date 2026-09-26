@@ -22,7 +22,8 @@ import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { automatedOrigin, ownerOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
-import { WakeupTracker, type Wakeup } from './wakeup.js';
+import { TOWER_NOTICE, WakeupTracker, type Wakeup } from './wakeup.js';
+import { BackgroundTaskTracker, messageText, type FinishedTask } from './background-tasks.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -47,6 +48,10 @@ interface RunnerOptions {
   trustWorkspace?: (provider: Provider, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
   /** Streamed output alone is saved at most this often; state changes are saved at once. */
   outputPersistMs?: number;
+  /** How long Claude may take to pick up a finished background task on its own before Tower hands it the notice. */
+  backgroundFollowUpMs?: number;
+  /** How long a turn that has answered stays open for background work still running before its input is closed. */
+  backgroundWaitMaxMs?: number;
 }
 interface OwnedProcess {
   child: ChildProcessWithoutNullStreams;
@@ -80,6 +85,14 @@ const MAX_QUEUED = 32;
 const FINISHED = new Set<Run['status']>(['completed', 'error', 'cancelled']);
 /** A scheduled continuation Tower was not running for is still delivered this long after its time. */
 const SCHEDULE_GRACE_MS = 60 * 60 * 1000;
+const BACKGROUND_FOLLOW_UP_MS = 60_000;
+const BACKGROUND_WAIT_MAX_MS = 2 * 60 * 60 * 1000;
+/** What Tower tells Claude when a finished background task did not start a follow-up turn by itself. */
+function backgroundNotice(finished: readonly FinishedTask[]): string {
+  const lines = finished.map(task => `- ${task.status}${task.summary ? `: ${task.summary}` : ''}${task.outputFile ? ` (output: ${task.outputFile})` : ''}`);
+  return `${TOWER_NOTICE} Background work you started in this conversation has finished${lines.length ? `:\n${lines.join('\n')}` : '.'}\n`
+    + 'Continue with what you planned to do once it finished, and report the result.';
+}
 const due = (run: Run, now = Date.now()) => !run.scheduled || Date.parse(run.scheduled.at) <= now;
 
 export class RunError extends Error {
@@ -228,6 +241,7 @@ export class RunManager extends EventEmitter {
         // A permission request belongs to a live process, never a restored run.
         delete run.approvals;
         delete run.canSteer;
+        delete run.backgroundWait;
         if (run.steering?.state === 'sending') run.steering.state = 'uncertain';
         const context = nativeContextObservation(run.contextUsage);
         if (context) run.contextUsage = context; else delete run.contextUsage;
@@ -464,7 +478,7 @@ export class RunManager extends EventEmitter {
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : undefined;
   }
 
-  async steer(runId: string): Promise<Run> {
+  async steer(runId: string, options: { whileWaiting?: boolean } = {}): Promise<Run> {
     const run = this.runs.get(runId);
     if (!run) throw new RunError('Task not found.', 404);
     if (run.steering) return this.list().find(item => item.id === runId)!;
@@ -478,12 +492,14 @@ export class RunManager extends EventEmitter {
       this.admissions.delete(run.id);
       const current = this.steeringTarget(run);
       this.admissions.add(run.id);
-      if (!current || current.target !== selected.target || current.adapter !== selected.adapter) throw new SteeringError('The active turn changed before delivery.', 'rejected');
+      if (!current || current.target !== selected.target || current.adapter !== selected.adapter || (options.whileWaiting && !current.target.backgroundWait)) throw new SteeringError('The active turn changed before delivery.', 'rejected');
       run.status = 'running'; run.startedAt = new Date().toISOString(); run.output = '';
       run.steering = { targetRunId: selected.target.id, state: 'sending', requestedAt: run.startedAt };
       this.changed();
       await this.flush();
       if (this.stopping || selected.target.status !== 'running' || !selected.adapter.canSteer?.()) throw new SteeringError('The active turn finished before delivery.', 'rejected');
+      // Saving yielded; an automatic insert goes only while the turn is still just waiting.
+      if (options.whileWaiting && !selected.target.backgroundWait) throw new SteeringError('The waiting turn resumed before delivery.', 'rejected');
       const prompt = attachmentPrompt(run.prompt, attachments);
       submitted = true;
       if (selected.adapter instanceof ClaudeControl) {
@@ -616,6 +632,7 @@ export class RunManager extends EventEmitter {
     try {
       if (![...this.runs.values()].some((run) => run.status === 'queued' && due(run))) return;
       await this.options.refreshSessions();
+      this.insertIntoWaitingTurns();
       for (const run of this.runs.values()) {
         if (this.stopping) break;
         // Independent conversations can run immediately. Only callers that
@@ -675,6 +692,21 @@ export class RunManager extends EventEmitter {
       }
       this.changed();
     } finally { this.pumping = false; }
+  }
+
+  /**
+   * A turn that has answered and only waits for its background work takes the owner's next message at once instead
+   * of holding it until that work ends. Only a session's oldest queued message goes, exactly like an explicit insert.
+   */
+  private insertIntoWaitingTurns(): void {
+    const seen = new Set<string>();
+    for (const run of this.runs.values()) {
+      if (run.status !== 'queued' || seen.has(run.sessionId)) continue;
+      seen.add(run.sessionId);
+      if (run.origin?.kind !== 'owner' || run.scheduled || !this.steeringTarget(run)?.target.backgroundWait) continue;
+      // steer reserves the run synchronously, so a later pass cannot insert it twice.
+      void this.steer(run.id, { whileWaiting: true }).catch(() => {});
+    }
   }
 
   private async launchBridge(run: Run, session: Session): Promise<boolean> {
@@ -890,6 +922,29 @@ export class RunManager extends EventEmitter {
     let contextInput: { model: string; usedTokens: number } | undefined;
     let identitySaved: Promise<void> = Promise.resolve();
     const wakeups = new WakeupTracker(MAX_PROMPT);
+    // A turn ends at its result, but background work it started keeps running in this process. Input stays open
+    // until that work has ended and Claude has taken each notice in a follow-up turn of this same run.
+    const tasks = new BackgroundTaskTracker();
+    const followUpMs = this.options.backgroundFollowUpMs ?? BACKGROUND_FOLLOW_UP_MS;
+    const waitMaxMs = this.options.backgroundWaitMaxMs ?? BACKGROUND_WAIT_MAX_MS;
+    let turnActive = true;
+    /** Tower handed Claude the notice itself and Claude has not yet replayed it. */
+    let noticeId: string | undefined;
+    let waitTimedOut = false;
+    let followUpTimer: ReturnType<typeof setTimeout> | undefined;
+    let waitTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearWaitTimers = () => {
+      if (followUpTimer) clearTimeout(followUpTimer);
+      if (waitTimer) clearTimeout(waitTimer);
+      followUpTimer = waitTimer = undefined;
+    };
+    const endWait = () => { if (run.backgroundWait) { delete run.backgroundWait; this.changed(); } };
+    const beginTurn = () => {
+      if (turnActive) return;
+      turnActive = true; clearWaitTimers(); endWait();
+      // Each turn reports its own completion and its own reply.
+      sawCompletion = false; shown = false; sawPartial = false; messageHasPartial = false;
+    };
     owned.claude = new ClaudeControl({
       write: message => new Promise<void>((resolve, reject) => {
         if (run.status !== 'running' || child.exitCode !== null || child.stdin.destroyed || child.stdin.writableEnded) { reject(new Error('Provider input is closed.')); return; }
@@ -904,8 +959,48 @@ export class RunManager extends EventEmitter {
       },
       onError: error => { streamError = error.message; this.stopOwned(run.id, owned); },
     });
+    const closeInput = () => { clearWaitTimers(); owned.claude?.close(); if (!child.stdin.writableEnded) child.stdin.end(); };
+    const idle = () => !turnActive && run.status === 'running' && child.exitCode === null && !child.stdin.writableEnded;
+    const arm = (timer: 'followUp' | 'wait', ms: number) => {
+      const handle = setTimeout(timer === 'followUp' ? followUp : waitLimit, ms);
+      handle.unref();
+      if (timer === 'followUp') followUpTimer = handle; else waitTimer = handle;
+    };
+    // Claude normally takes a finished task's notice by itself. If it has not, Tower hands it over as a message.
+    const followUp = () => {
+      followUpTimer = undefined;
+      if (!idle()) return;
+      if (run.approvals?.length) { arm('followUp', followUpMs); return; }
+      if (noticeId) { this.append(run, '\n[Tower] Claude has not answered the background work notice yet.\n'); return; }
+      const unread = tasks.takeUnread();
+      if (!unread.length) return;
+      noticeId = randomUUID();
+      this.append(run, '\n[Tower] Background work finished; asking Claude to continue.\n');
+      child.stdin.write(JSON.stringify({ type: 'user', uuid: noticeId, session_id: session.nativeId, parent_tool_use_id: null,
+        message: { role: 'user', content: [{ type: 'text', text: backgroundNotice(unread) }] } }) + '\n');
+      arm('followUp', followUpMs);
+    };
+    const waitLimit = () => {
+      waitTimer = undefined;
+      if (!idle()) return;
+      if (run.approvals?.length) { arm('wait', followUpMs); return; }
+      // Closing input is how every turn ended before; Claude ends what is left. Never reported as success.
+      waitTimedOut = true;
+      this.append(run, `\n[Tower] Background work was still running after ${Math.round(waitMaxMs / 60_000)} minutes; closing the turn.\n`);
+      closeInput();
+    };
     owned.finishInput = () => {
-      if (sawCompletion && !owned.claude?.hasPendingSteers()) { owned.claude?.close(); child.stdin.end(); }
+      if (!sawCompletion || turnActive || owned.claude?.hasPendingSteers() || child.stdin.writableEnded) return;
+      // A failed turn is not kept open for its background work.
+      if (streamError || (!tasks.outstanding && !noticeId)) { endWait(); closeInput(); return; }
+      if (tasks.unreadCount && !followUpTimer) arm('followUp', followUpMs);
+      if (!run.backgroundWait) {
+        run.backgroundWait = { since: new Date().toISOString(), tasks: tasks.runningCount };
+        this.append(run, tasks.runningCount ? `\n[Tower] Waiting for ${tasks.runningCount} background task${tasks.runningCount === 1 ? '' : 's'} before this turn ends.\n`
+          : '\n[Tower] Waiting for Claude to take the finished background work.\n');
+        arm('wait', waitMaxMs);
+      } else run.backgroundWait.tasks = tasks.runningCount;
+      this.changed();
     };
     const parseEventLine = (line: string): void => {
       if (!line.trim()) return;
@@ -913,7 +1008,7 @@ export class RunManager extends EventEmitter {
       try { event = JSON.parse(line); } catch { show(line + '\n'); return; }
       if (!event || typeof event !== 'object' || Array.isArray(event)) throw new Error('Expected a provider event object.');
       if (owned.claude?.handle(event)) {
-        if (event.type === 'user' && event.isReplay) sawCompletion = false;
+        if (event.type === 'user' && event.isReplay) { beginTurn(); sawCompletion = false; tasks.observeReplay(event); }
         return;
       }
       const actualId = event.type === 'system' && event.subtype === 'init' ? event.session_id : undefined;
@@ -951,6 +1046,14 @@ export class RunManager extends EventEmitter {
         return;
       }
       const mainContext = event.parent_tool_use_id == null && (event.session_id === undefined || event.session_id === session.nativeId);
+      // Anything the main conversation says after a result is a follow-up turn, typically Claude taking a task's notice.
+      if (mainContext && ['assistant', 'user', 'stream_event', 'result'].includes(event.type)) beginTurn();
+      if (mainContext && event.type === 'user' && event.isReplay) {
+        // Tower's own notice is taken once Claude replays it; the turn it starts must then reach its result.
+        if (noticeId && event.uuid === noticeId) noticeId = undefined;
+        else { tasks.observeReplay(event); wakeups.observeReplay(messageText(event)); }
+      }
+      if ((event.session_id === undefined || event.session_id === session.nativeId) && tasks.observe(event) && !turnActive) owned.finishInput?.();
       if (mainContext && event.type === 'system' && event.subtype === 'compact_boundary') contextInput = undefined;
       if (mainContext) wakeups.observe(event);
       if (mainContext && event.type === 'assistant' && !event.isMeta && !event.is_meta) {
@@ -982,7 +1085,7 @@ export class RunManager extends EventEmitter {
           this.changed();
         }
         sawCompletion = true;
-        owned.finishInput?.();
+        turnActive = false;
         if (event.is_error) streamError = (event.errors ?? [event.result ?? 'Claude Code could not complete this turn.']).join('\n');
         // A denied tool call (by the user or the auto mode classifier) is part of a turn that
         // still finished; Claude's own reply explains it. Only a failed turn is reported.
@@ -992,6 +1095,7 @@ export class RunManager extends EventEmitter {
           show(`\n${streamError}\n`);
         }
         if (!sawPartial && !shown && event.result) show(String(event.result));
+        owned.finishInput?.();
       }
     };
     const parseLine = (line: string): void => {
@@ -1014,6 +1118,8 @@ export class RunManager extends EventEmitter {
     child.on('error', (error: Error) => { streamError = errorMessage(error); });
     child.on('close', async (code: number | null, signal: NodeJS.Signals | null) => {
       if (buffer) parseLine(buffer);
+      clearWaitTimers();
+      delete run.backgroundWait;
       owned.claude?.close();
       // A newly bound UUID must be durable before this turn reports success.
       await identitySaved;
@@ -1026,6 +1132,8 @@ export class RunManager extends EventEmitter {
       if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
       if (run.status !== 'cancelled') {
         if (!streamError && code === 0 && (!sawCompletion || !sawSessionId)) streamError = 'The provider exited without confirming completion in the requested conversation.';
+        if (!streamError && waitTimedOut) streamError = 'The turn answered, but its background work did not finish within the time Tower waits; the work was ended with the turn.';
+        else if (!streamError && (tasks.outstanding || noticeId)) streamError = 'Claude Code exited before it took the results of background work it started in this turn.';
         if (streamError || code !== 0) this.fail(run, streamError ?? (stderr.trim() || `The provider exited ${signal ? `with signal ${signal}` : `with code ${code ?? 'unknown'}`}.`));
         else {
           run.status = 'completed'; run.finishedAt = new Date().toISOString();
@@ -1048,7 +1156,8 @@ export class RunManager extends EventEmitter {
   private scheduleContinuation(after: Run, wakeup: Wakeup): void {
     if (automated(after)) return;
     const live = [...this.runs.values()].filter(run => run.status === 'queued' || run.status === 'running');
-    if (live.some(run => run.sessionId === after.sessionId) || live.filter(run => run.scheduled).length >= MAX_QUEUED) return;
+    // An instruction inserted into the finished turn still mirrors it until the next change; it is part of that turn.
+    if (live.some(run => run.sessionId === after.sessionId && run.steering?.targetRunId !== after.id) || live.filter(run => run.scheduled).length >= MAX_QUEUED) return;
     const run: Run = { id: randomUUID(), sessionId: after.sessionId, origin: after.origin ?? { kind: 'unknown' }, prompt: wakeup.prompt, status: 'queued',
       createdAt: new Date().toISOString(), output: scheduledOutput, scheduled: { at: new Date(wakeup.at).toISOString(), afterRunId: after.id },
       ...(after.unattended ? { unattended: true } : {}), ...(after.model ? { model: after.model } : {}), ...(after.effort ? { effort: after.effort } : {}) };
