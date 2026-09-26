@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AuthStore, canonicalIp, isLoopbackAddress } from '../../../server/auth/store.js';
+import { AuthStore, canonicalIp, isLoopbackAddress, sessionKey } from '../../../server/auth/store.js';
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'tower-auth-'));
@@ -32,7 +32,7 @@ test('credentials are hashed and private; sessions bind IP and revoke on change'
     assert.equal(f.store.session(result.sessionId, '192.0.2.2'), false);
     const revoked: string[] = []; f.store.onRevoke(token => revoked.push(token));
     await f.store.setCredentials('admin', 'new-password-test');
-    assert.deepEqual(revoked, [result.sessionId]);
+    assert.deepEqual(revoked, [sessionKey(result.sessionId)]);
     assert.equal(f.store.session(result.sessionId, '192.0.2.1'), false);
   } finally { await f.cleanup(); }
 });
@@ -82,7 +82,7 @@ test('limits pending work and does not grant sessions when audit persistence fai
     await assert.rejects(f.store.login('192.0.2.11', 'admin', 'password-test-123'), /not running/);
   } finally { await f.cleanup(); }
 });
-test('sessions expire after seven days with proactive revocation and never survive restart', async context => {
+test('sessions expire after seven days with proactive revocation', async context => {
   const f = await fixture();
   context.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: new Date('2026-01-01T00:00:00Z') });
   try {
@@ -96,17 +96,46 @@ test('sessions expire after seven days with proactive revocation and never survi
     assert.deepEqual(revoked, []);
     context.mock.timers.tick(1);
     // The timer must notify stream consumers without waiting for another request.
-    assert.deepEqual(revoked, [login.sessionId]);
+    assert.deepEqual(revoked, [sessionKey(login.sessionId)]);
     assert.equal(f.store.session(login.sessionId, '192.0.2.1'), false);
     const fresh = await f.store.login('192.0.2.1', 'admin', 'password-test-123');
     assert.ok(fresh.sessionId);
     assert.equal(f.store.session(fresh.sessionId, '192.0.2.1'), true);
-    f.store.close();
-    const restarted = new AuthStore(f.dir);
-    await restarted.start();
-    try {
-      assert.equal(restarted.configured(), true);
-      assert.equal(restarted.session(fresh.sessionId, '192.0.2.1'), false);
-    } finally { restarted.close(); await restarted.flush(); }
   } finally { await f.cleanup(); context.mock.timers.reset(); }
+});
+test('sign-ins survive a restart until they expire, log out, or the password changes; only token digests are saved', async () => {
+  const f = await fixture();
+  const restart = async (store: AuthStore) => { store.close(); await store.flush(); const next = new AuthStore(f.dir); await next.start(); return next; };
+  let store = f.store;
+  try {
+    await store.setCredentials('admin', 'password-test-123');
+    const kept = (await store.login('192.0.2.1', 'admin', 'password-test-123')).sessionId!;
+    const leaving = (await store.login('192.0.2.2', 'admin', 'password-test-123')).sessionId!;
+    store.logout(leaving);
+    await store.flush();
+    const saved = await readFile(join(f.dir, 'auth-sessions.json'), 'utf8');
+    assert.ok(!saved.includes(kept) && saved.includes(sessionKey(kept)));
+    assert.equal((await stat(join(f.dir, 'auth-sessions.json'))).mode & 0o777, 0o600);
+    store = await restart(store);
+    assert.equal(store.session(kept, '192.0.2.1'), true);
+    assert.equal(store.session(kept, '192.0.2.9'), false);
+    assert.equal(store.session(leaving, '192.0.2.2'), false);
+    // An expired record is not restored.
+    const record = JSON.parse(await readFile(join(f.dir, 'auth-sessions.json'), 'utf8'));
+    await writeFile(join(f.dir, 'auth-sessions.json'), JSON.stringify({ ...record, sessions: record.sessions.map((entry: { expires: number }) => ({ ...entry, expires: Date.now() - 1 })) }));
+    const expired = new AuthStore(f.dir); await expired.start();
+    assert.equal(expired.session(kept, '192.0.2.1'), false);
+    expired.close(); await expired.flush();
+    await writeFile(join(f.dir, 'auth-sessions.json'), JSON.stringify(record));
+    store.close(); await store.flush();
+    store = new AuthStore(f.dir); await store.start();
+    assert.equal(store.session(kept, '192.0.2.1'), true);
+    await store.setCredentials('admin', 'new-password-test');
+    store = await restart(store);
+    assert.equal(store.session(kept, '192.0.2.1'), false);
+    // An unreadable file signs everyone out instead of stopping Tower.
+    await writeFile(join(f.dir, 'auth-sessions.json'), 'not json');
+    store = await restart(store);
+    assert.equal(store.configured(), true);
+  } finally { store.close(); await store.flush(); await rm(f.dir, { recursive: true, force: true }); }
 });

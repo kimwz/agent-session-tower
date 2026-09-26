@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.39.1] - 2026-09-26
+
+### Fixed
+- **Updating or restarting Tower no longer signs you out.** Remote sign-ins are now kept in the state directory, so they last their full 7 days across restarts and updates. Logging out, changing the password or blocking the IP still ends them at once. Only a digest of each sign-in is saved, never the sign-in itself.
+
 ## [1.39.0] - 2026-09-26
 
 ### Fixed

@@ -139,7 +139,7 @@ agent-session-tower --host 0.0.0.0 --port 8000
 
 Open `http://localhost:8000` on the server computer. Expand the navigation and select the **Account management** icon at the upper right to set an ID and a password (12–256 characters). Direct localhost access requires no login. Other devices see a login page; remote access stays unavailable until an account is configured. With `--state-dir`, the account and security records belong to that state directory.
 
-Use the network address printed in the terminal from your other device and sign in with the configured ID/password. Passwords are stored only as salted scrypt hashes. Login sessions last up to 7 days and end on logout, password change, IP block, or server restart. Ending a session also disconnects its live event and terminal-output streams.
+Use the network address printed in the terminal from your other device and sign in with the configured ID/password. Passwords are stored only as salted scrypt hashes. Login sessions last up to 7 days and end on logout, password change, or IP block; they survive Tower restarts and updates. Only a digest of each session token is saved, in `<state-dir>/auth-sessions.json`. Ending a session also disconnects its live event and terminal-output streams.
 
 Account management is available only through a direct localhost connection. It shows the latest 1,000 successful, failed, and blocked login attempts, with timestamps, entered IDs, and connection IPs. Local access without login does not create a login attempt.
 

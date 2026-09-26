@@ -18,7 +18,7 @@ import { SnapshotStream, type FrameFormat } from './snapshot-stream.js';
 import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
 import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
 import { WorkspaceTerminals, type WorkspaceTerminalBackend } from '../workspace-terminals.js';
-import type { AuthStore } from '../auth/store.js';
+import { sessionKey, type AuthStore } from '../auth/store.js';
 import { ownerIdentity, sessionCookie, setSessionCookie } from './auth.js';
 import type { AuthStatus } from '../../shared/auth.js';
 import type { SlackPublicStatus } from '../../shared/slack.js';
@@ -106,8 +106,10 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
     for (const close of streams.get(id) || []) close();
     streams.delete(id);
   });
-  const trackStream = (id: string, res: ServerResponse, close: () => void) => {
-    if (!id) return;
+  // Streams are filed under the sign-in's key, which is what revocation reports.
+  const trackStream = (sessionId: string, res: ServerResponse, close: () => void) => {
+    if (!sessionId) return;
+    const id = sessionKey(sessionId);
     const active = streams.get(id) || new Set<() => void>();
     active.add(close);
     streams.set(id, active);

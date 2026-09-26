@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
 import { mkdir, chmod } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { join } from 'node:path';
@@ -26,6 +26,8 @@ export function isLoopbackAddress(address: string): boolean {
   try { const ip = canonicalIp(address); return ip === '::1' || (isIP(ip) === 4 && ip.startsWith('127.')); }
   catch { return false; }
 }
+/** Sign-ins are kept and revoked by this digest; the token itself exists only in the browser's cookie. */
+export function sessionKey(token: string): string { return createHash('sha256').update(token).digest('hex'); }
 function derive(password: string, salt: string): Promise<Buffer> {
   return new Promise((resolve, reject) => scrypt(password, Buffer.from(salt, 'hex'), 64, KDF, (error, key) => error ? reject(error) : resolve(key)));
 }
@@ -38,7 +40,9 @@ async function optional(path: string): Promise<unknown> { try { return await rea
 export class AuthStore {
   private credentials?: Credentials;
   private security: Security = { version: 1, attempts: [], failures: {}, blockedIps: [] };
+  /** Keyed by `sessionKey(token)`, and saved in auth-sessions.json so a restart does not sign anyone out. */
   private sessions = new Map<string, { ip: string; expires: number; timer: ReturnType<typeof setTimeout> }>();
+  private sessionWrites: Promise<void> = Promise.resolve();
   private listeners = new Set<(sessionId: string) => void>();
   private queue: Promise<unknown> = Promise.resolve();
   private pending = 0;
@@ -67,6 +71,15 @@ export class AuthStore {
       for (const [ip, count] of Object.entries(security.failures)) if (count === LIMIT && !seen.has(ip)) throw new Error('Missing blocked IP record.');
       this.security = security as unknown as Security;
     }
+    // Saved sign-ins that cannot be read back are dropped; their owners sign in again.
+    const saved = await optional(join(this.stateDir, 'auth-sessions.json')).catch(() => undefined);
+    if (this.credentials && object(saved) && saved.version === 1 && Array.isArray(saved.sessions)) {
+      for (const entry of saved.sessions) {
+        if (!object(entry) || typeof entry.key !== 'string' || !/^[a-f0-9]{64}$/.test(entry.key) || !validIp(entry.ip) || typeof entry.expires !== 'number' || !Number.isFinite(entry.expires)) continue;
+        if (entry.expires <= Date.now() || entry.expires > Date.now() + SESSION_MS || this.security.blockedIps.some(blocked => blocked.ip === entry.ip)) continue;
+        this.remember(entry.key, entry.ip as string, entry.expires);
+      }
+    }
     this.started = true;
   }
   configured(): boolean { return !!this.credentials; }
@@ -90,7 +103,7 @@ export class AuthStore {
       const credentials: Credentials = { version: 1, username, algorithm: 'scrypt', salt, hash: (await derive(password, salt)).toString('hex'), N: KDF.N, r: KDF.r, p: KDF.p };
       await writePrivateJson(join(this.stateDir, 'auth.json'), JSON.stringify(credentials));
       this.credentials = credentials;
-      for (const token of this.sessions.keys()) this.logout(token);
+      this.revokeAll();
     });
   }
   login(ip: string, username: string, password: string): Promise<{ status: 'success' | 'failure' | 'blocked' | 'unconfigured'; sessionId?: string }> {
@@ -107,7 +120,7 @@ export class AuthStore {
           if (this.security.failures[ip] === LIMIT) {
             this.security.blockedIps.push({ ip, blockedAt: new Date().toISOString(), failures: LIMIT });
             result = 'blocked';
-            for (const [token, session] of this.sessions) if (session.ip === ip) this.logout(token);
+            for (const [key, session] of this.sessions) if (session.ip === ip) this.revoke(key);
           }
         }
       }
@@ -117,23 +130,42 @@ export class AuthStore {
       if (this.closed) throw new Error('Authentication store is closed.');
       if (result !== 'success') return { status: result };
       const token = randomBytes(32).toString('base64url');
-      const timer = setTimeout(() => this.logout(token), SESSION_MS);
-      timer.unref();
-      this.sessions.set(token, { ip, expires: Date.now() + SESSION_MS, timer });
+      this.remember(sessionKey(token), ip, Date.now() + SESSION_MS);
+      this.persistSessions();
       return { status: 'success', sessionId: token };
     });
   }
   session(token: string, ip: string): boolean {
-    const session = this.sessions.get(token);
+    if (!token) return false;
+    const key = sessionKey(token);
+    const session = this.sessions.get(key);
     if (!session || this.closed) return false;
-    if (session.expires <= Date.now()) { this.logout(token); return false; }
+    if (session.expires <= Date.now()) { this.revoke(key); return false; }
     return session.ip === canonicalIp(ip) && !this.security.blockedIps.some(entry => entry.ip === session.ip);
   }
-  logout(token: string): void {
-    const session = this.sessions.get(token);
+  logout(token: string): void { if (token) this.revoke(sessionKey(token)); }
+  private remember(key: string, ip: string, expires: number): void {
+    const timer = setTimeout(() => this.revoke(key), expires - Date.now());
+    timer.unref();
+    this.sessions.set(key, { ip, expires, timer });
+  }
+  /** Ends a sign-in; listeners receive its `sessionKey`. */
+  private revoke(key: string, persist = true): void {
+    const session = this.sessions.get(key);
     if (!session) return;
-    clearTimeout(session.timer); this.sessions.delete(token);
-    for (const listener of this.listeners) { try { listener(token); } catch { /* A disconnected consumer must not prevent revocation. */ } }
+    clearTimeout(session.timer); this.sessions.delete(key);
+    for (const listener of this.listeners) { try { listener(key); } catch { /* A disconnected consumer must not prevent revocation. */ } }
+    if (persist) this.persistSessions();
+  }
+  private revokeAll(persist = true): void {
+    for (const key of [...this.sessions.keys()]) this.revoke(key, false);
+    if (persist) this.persistSessions();
+  }
+  private persistSessions(): void {
+    if (this.closed) return;
+    const data = JSON.stringify({ version: 1, sessions: [...this.sessions].map(([key, session]) => ({ key, ip: session.ip, expires: session.expires })) });
+    this.sessionWrites = this.sessionWrites.then(() => writePrivateJson(join(this.stateDir, 'auth-sessions.json'), data))
+      .catch(error => console.error(`Sign-ins were not saved: ${error instanceof Error ? error.message : String(error)}`));
   }
   unblock(ip: string): Promise<void> {
     ip = canonicalIp(ip);
@@ -146,14 +178,15 @@ export class AuthStore {
   }
   overview(): AuthOverview { return { configured: this.configured(), username: this.username(), attempts: this.security.attempts.map(entry => ({ ...entry })), blockedIps: this.security.blockedIps.map(entry => ({ ...entry })), attemptLimit: LIMIT, historyLimit: HISTORY }; }
   onRevoke(listener: (sessionId: string) => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
-  close(): void { this.closed = true; for (const token of this.sessions.keys()) this.logout(token); }
-  async flush(): Promise<void> { await this.queue; }
+  /** Stops answering; saved sign-ins stay valid for the next start. */
+  close(): void { this.revokeAll(false); this.closed = true; }
+  async flush(): Promise<void> { await this.queue; await this.sessionWrites; }
   private async persistSecurity(): Promise<void> {
     try { await writePrivateJson(join(this.stateDir, 'auth-security.json'), JSON.stringify(this.security)); }
     catch (error) {
       // Never continue authenticating against failure counts that could disappear on restart.
       this.persistenceError = true;
-      for (const token of this.sessions.keys()) this.logout(token);
+      this.revokeAll();
       throw error;
     }
   }
