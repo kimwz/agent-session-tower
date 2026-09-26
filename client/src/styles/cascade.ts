@@ -27,6 +27,7 @@ import '@xterm/xterm/css/xterm.css';
 import './workspace-page.css';
 
 import "./auth.css";
+import "./notifications.css";
 
 import './slack.css';
 import './slack-canvas.css';

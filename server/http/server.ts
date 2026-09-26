@@ -24,6 +24,7 @@ import type { SlackPublicStatus } from '../../shared/slack.js';
 import type { PublicAgentOverview, PublicConversationView } from '../../shared/public-agents.js';
 import { OPERATIONS, isOperationName } from '../../shared/api/operations.js';
 import type { RepositoryAction, RepositoryStatus } from '../../shared/repositories.js';
+import type { NotificationOverview } from '../../shared/notifications.js';
 
 export interface Backend {
   /** Tower operations (see shared/api/operations.ts), run by the worker as the owner. */
@@ -77,17 +78,27 @@ export interface HttpOptions {
   service?: boolean;
   /** Moves this Tower to a version (the latest release when none is given), when it runs as the background service. */
   towerUpdate?: (version?: string) => Promise<{ status: number; body: unknown }>;
+  /** Push notifications to the owner's browsers; managed only from this Tower's own pages. */
+  notifications?: {
+    overview(): NotificationOverview;
+    subscribe(body: Record<string, unknown>): Promise<NotificationOverview>;
+    update(body: Record<string, unknown>): Promise<NotificationOverview>;
+    remove(body: Record<string, unknown>): Promise<NotificationOverview>;
+    test(body: Record<string, unknown>): Promise<NotificationOverview>;
+  };
 }
 const contentTypes: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png',
-  '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.json': 'application/json',
+  '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.json': 'application/json', '.webmanifest': 'application/manifest+json',
 };
+/** What a browser fetches to install the page as an app and to show its notifications, before or without signing in. */
+const APP_SHELL = new Set(['/favicon.svg', '/manifest.webmanifest', '/sw.js', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png']);
 function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'filePath'> {
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, towerUpdate, service }: HttpOptions) {
+export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, towerUpdate, service, notifications }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -182,7 +193,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         ...(signedIn && auth?.username() ? { username: auth.username() } : {}),
       });
       // Only the login shell and its static assets are public; all application data stays behind this gate.
-      const publicAsset = (req.method === 'GET' || req.method === 'HEAD') && (path === '/' || path === '/favicon.svg' || path.startsWith('/assets/'));
+      const publicAsset = (req.method === 'GET' || req.method === 'HEAD') && (path === '/' || APP_SHELL.has(path) || path.startsWith('/assets/'));
       if (req.method === 'GET' && path === '/api/auth/status') return json(res, 200, authStatus());
       const login = req.method === 'POST' && path === '/api/auth/login';
       if (!authenticated && !login && !publicAsset) return json(res, 401, { error: '로그인이 필요합니다.' });
@@ -248,6 +259,15 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (publicAction && req.method === 'POST') {
         if (!backend.publicAgents) return json(res, 503, { error: '공개 에이전트를 사용할 수 없습니다.' });
         return json(res, 200, await backend.publicAgents.mutate(publicAction[1], await readJson(req, 100_000)));
+      }
+      if (path === '/api/notifications' && req.method === 'GET') {
+        if (!notifications) return json(res, 503, { error: '알림을 사용할 수 없습니다.' });
+        return json(res, 200, notifications.overview());
+      }
+      const notificationAction = path.match(/^\/api\/notifications\/(subscribe|update|remove|test)$/);
+      if (notificationAction && req.method === 'POST') {
+        if (!notifications) return json(res, 503, { error: '알림을 사용할 수 없습니다.' });
+        return json(res, 200, await notifications[notificationAction[1] as 'subscribe'](await readJson(req, 16 * 1024)));
       }
       if (login) {
         if (identity.local) return json(res, 200, authStatus(true));

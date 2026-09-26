@@ -47,6 +47,7 @@ import type { AutoUpdateStatus } from '../shared/link.js';
 import type { Snapshot, ProviderHealth } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { PublicListener } from './public-agents/listener.js';
+import { NotificationService } from './notifications/service.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
 
 /** Every request this web server admits comes from the owner's browser session. */
@@ -261,6 +262,14 @@ async function main() {
     const page = await history.read(runs.nativeSessionId(id), before, limit);
     return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
   };
+  // Push notifications are sent from here: the web process sees every run the worker reports.
+  const notifications = new NotificationService(stateDir, {
+    runs: () => runs.list(),
+    session: id => { const found = runs.getSession(id); return found && titles.apply(found); },
+    project: session => groups.list().find(group => group.cwd === session.cwd)?.title || session.project,
+    trigger: id => runs.triggerOverview()?.triggers.find(item => item.id === id)?.name,
+  });
+  runs.on('change', () => notifications.changed());
   // Visitor pages of public agents, on their own port bound to this computer only; a tunnel publishes them.
   const publicListener = new PublicListener({ stateDir, backend: runs, reservedPorts: () => [port] });
   const backend: Backend = {
@@ -368,7 +377,7 @@ async function main() {
   const { server, dispose } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes,
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })) } : { error: linkError },
-    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed,
+    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications,
     towerUpdate: async version => {
       if (!updates.managed) return { status: 409, body: { code: 'not-service', error: 'This Tower does not run as the background service, so it cannot replace itself.' } };
       const answer = await towerUpdates.updateNow(version);
@@ -407,6 +416,7 @@ async function main() {
   void towerUpdates.start().catch(error => console.error(`Automatic updates are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   capabilities.start();
   repositories.start();
+  await notifications.start().catch(error => console.error(`Notifications are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   await publicListener.start().catch(error => console.error(`Public agent pages are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   if (publicListener.status().listening) console.log(`  Public agent pages: http://127.0.0.1:${publicListener.status().port}${publicListener.status().publicUrl ? ` (${publicListener.status().publicUrl})` : ''}\n`);
   // Links come up after the web server, so a joining computer never reaches a half-started Tower.
@@ -426,7 +436,7 @@ async function main() {
     dispose();
     server.closeAllConnections();
     server.close();
-    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingPublic, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), runs.close()]); } finally { await releaseLock(); }
+    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingPublic, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), notifications.close(), runs.close()]); } finally { await releaseLock(); }
   };
   const onSignal = () => { void shutdown().catch(error => { console.error(`Agent Session Tower shutdown: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }); };
   process.once('SIGINT', onSignal);

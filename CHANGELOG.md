@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.37.0] - 2026-09-26
+
+### Added
+- **Push notifications, and Tower as an installable app.** The bell in the header turns on notifications for the device you are using. They arrive even when Tower's page is closed, and clicking one opens the conversation it is about.
+  - **What you are told about:** a request you sent from a project chat finished or stopped with an error, with the project, the conversation and the start of the answer; and a trigger started work, with the trigger's name and project. Each device chooses which of the two it receives. It can send itself a test notification.
+  - **Nothing is missed during a restart.** Work that ends while Tower's web server is restarting is announced when it comes back, up to an hour later. Nothing is announced twice.
+  - **Install it as an app.** Tower can now be installed from the browser, or added to the Home Screen on a phone, and opens in its own window. iPhone and iPad deliver notifications only to Tower added to the Home Screen, so turn them on from there.
+  - Notifications need Tower opened over HTTPS, such as through a tunnel, or on localhost. Messages are end-to-end encrypted to each device with keys kept in the state directory. The list of devices is shown in the same panel, where any of them can be removed; a device the browser stops accepting is removed by itself.
+
 ## [1.36.1] - 2026-09-26
 
 ### Changed
