@@ -174,7 +174,12 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       } catch { /* Ignore malformed configured origins. */ }
     }
     if (!req.headers.host || !hosts.has(req.headers.host)) return json(res, 403, { error: '허용되지 않은 호스트입니다.' });
-    if (req.headers['sec-fetch-site'] === 'cross-site') return json(res, 403, { error: '다른 사이트에서의 접근은 허용되지 않습니다.' });
+    // Opening the page itself from elsewhere is allowed: a login in front of Tower (such as Cloudflare Access) redirects
+    // back from its own site, and links arrive from chat apps. That load carries no Tower session (SameSite=Strict),
+    // and the API stays same-site only.
+    const pageNavigation = (req.method === 'GET' || req.method === 'HEAD') && req.headers['sec-fetch-mode'] === 'navigate'
+      && req.headers['sec-fetch-dest'] === 'document' && !(req.url || '/').startsWith('/api/');
+    if (req.headers['sec-fetch-site'] === 'cross-site' && !pageNavigation) return json(res, 403, { error: '다른 사이트에서의 접근은 허용되지 않습니다.' });
     const origin = req.headers.origin;
     if (origin && !origins.has(origin)) return json(res, 403, { error: '허용되지 않은 출처입니다.' });
     try {

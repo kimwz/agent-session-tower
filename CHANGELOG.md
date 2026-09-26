@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.37.1] - 2026-09-26
+
+### Fixed
+- **Tower opens on the first try behind a login such as Cloudflare Access.** Coming back from that login, or following a link to Tower from another site, showed "다른 사이트에서의 접근은 허용되지 않습니다." until the page was opened again. Opening the page from elsewhere now works; Tower's API still refuses requests from other sites.
+
 ## [1.37.0] - 2026-09-26
 
 ### Added

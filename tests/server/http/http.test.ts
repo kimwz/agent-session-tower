@@ -106,6 +106,20 @@ test('local HTTP service protects session data and task mutations, and streams r
     assert.equal(status, 403);
     assert.equal((await fetch(`${base}/api/bootstrap`, { headers: { Origin: 'https://attacker.example' } })).status, 403);
     assert.equal((await fetch(`${base}/api/snapshot`, { headers: { 'Sec-Fetch-Site': 'cross-site' } })).status, 403);
+    // A login in front of Tower redirects back from its own site: the page opens, the API stays closed.
+    // fetch() sets its own Sec-Fetch-Mode, so these go out as a browser's navigation would.
+    const open = (path: string, dest = 'document', method = 'GET') => new Promise<{ status?: number; body: string }>((resolve, reject) => {
+      const req = request(`${base}${path}`, { method, headers: { 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': dest } }, res => {
+        let body = ''; res.on('data', chunk => { body += chunk; }); res.on('end', () => resolve({ status: res.statusCode, body }));
+      });
+      req.on('error', reject); req.end();
+    });
+    const page = await open('/?session=x');
+    assert.equal(page.status, 200);
+    assert.match(page.body, /Agent Session Tower/);
+    assert.equal((await open('/api/snapshot')).status, 403);
+    assert.equal((await open('/', 'iframe')).status, 403);
+    assert.equal((await open('/api/sessions', 'document', 'POST')).status, 403);
   });
   await t.test('requires per-process token and validates message size and JSON', async () => {
     const path = `${base}/api/sessions/${encodeURIComponent(session.id)}/messages`;
