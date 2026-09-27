@@ -22,6 +22,9 @@ interface Props {
 }
 
 /** The master's one conversation: what the owner asked, what the master did and said, and the work it handed out. */
+/** The last message whose sending was not confirmed (it may or may not have arrived), for as long as this tab lives. */
+let unconfirmed: { id: string; text: string } | undefined;
+
 export function MasterPanel({ token, room, tabId, sessionId, top, onClose, onEarlier, onOpenSession }: Props) {
   const words = useWords();
   const [text, setText] = useState('');
@@ -56,8 +59,12 @@ export function MasterPanel({ token, room, tabId, sessionId, top, onClose, onEar
     if (!value || sending) return;
     setSending(true); setError('');
     const { node, id } = sessionId ? splitScopedId(sessionId) : { node: undefined, id: undefined };
+    // Sent again after its answer was lost, the same message keeps its id, so the master takes it once.
+    const messageId = unconfirmed?.text === value ? unconfirmed.id : crypto.randomUUID();
+    unconfirmed = { id: messageId, text: value };
     try {
-      await post('/api/master/messages', token, { clientMessageId: crypto.randomUUID(), text: value, viewContext: { tabId, ...(id ? { sessionId: id } : {}), ...(node ? { node } : {}) } });
+      await post('/api/master/messages', token, { clientMessageId: messageId, text: value, viewContext: { tabId, ...(id ? { sessionId: id } : {}), ...(node ? { node } : {}) } });
+      unconfirmed = undefined;
       setText('');
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setSending(false); }

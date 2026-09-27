@@ -44,16 +44,18 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
 
   useEffect(() => {
     let cancelled = false;
-    // A Tower without the master answers 404: no button at all.
-    void fetch('/api/master', { cache: 'no-store' }).then(response => {
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    // A Tower without the master answers 404: no button at all. A first look that could not connect is tried again.
+    const probe = (wait: number) => void fetch('/api/master', { cache: 'no-store' }).then(response => {
       if (cancelled) return;
       if (response.status === 404) { setAbsent(true); return; }
       follow.current = followRoom(setRoom, (directive: MasterDirective) => {
         if (directive.tabId !== tab.current || directive.expiresAt < Date.now()) return;
         if (directive.kind === 'openSession') controlsRef.current.selectSession(scopedId(directive.node, directive.sessionId));
       });
-    }).catch(() => {});
-    return () => { cancelled = true; follow.current?.stop(); };
+    }).catch(() => { if (!cancelled) retry = setTimeout(() => probe(Math.min(wait * 2, 30_000)), wait); });
+    probe(2000);
+    return () => { cancelled = true; if (retry) clearTimeout(retry); follow.current?.stop(); };
   }, []);
 
   const lastOrder = room.entries.at(-1)?.order ?? -1;

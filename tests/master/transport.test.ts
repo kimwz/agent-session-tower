@@ -54,6 +54,59 @@ test('a page token the web no longer knows is refused before anything runs, so t
   assert.deepEqual(seen, ['a'.repeat(64), 'd'.repeat(64)]);
 });
 
+test('a stale page token refused after the new web already said who it is goes again with the new token', async t => {
+  const seen: string[] = [];
+  let port = 0;
+  const client = new TowerClient();
+  const web = createServer((req, res) => {
+    const token = String(req.headers['x-agent-monitor-token']);
+    seen.push(token);
+    if (token !== 'd'.repeat(64)) {
+      // The replacement web announces itself before the old token's refusal arrives.
+      client.setCredentials({ port, token: 'd'.repeat(64), callerSecret: 'b'.repeat(64) });
+      res.writeHead(403, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: '연결 인증이 만료되었습니다. 페이지를 새로고침하세요.' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' }).end('{}');
+  });
+  t.after(() => stop(web));
+  port = await listen(web);
+  client.setCredentials({ port, token: 'a'.repeat(64), callerSecret: 'b'.repeat(64) });
+  assert.equal((await client.call('POST', '/api/runs/r/steer', {}, { write: true })).state, 'succeeded');
+  assert.deepEqual(seen, ['a'.repeat(64), 'd'.repeat(64)]);
+});
+
+test('a change that finds no web in time comes back as not sent instead of failing the call', async () => {
+  const probe = createServer();
+  const port = await listen(probe);
+  await stop(probe);
+  const client = new TowerClient(200);
+  client.setCredentials({ port, token: 'a'.repeat(64), callerSecret: 'b'.repeat(64) });
+  const answer = await client.call('POST', '/api/sessions', {}, { write: true });
+  assert.equal(answer.state, 'not-admitted');
+  assert.equal((await new TowerClient(100).call('POST', '/api/sessions', {}, { write: true })).state, 'not-admitted', 'also when no web ever said who it is');
+});
+
+test('a change waiting for a web is not sent once it is stopped, even when the web then comes back', async t => {
+  const probe = createServer();
+  const port = await listen(probe);
+  await stop(probe);
+  const client = new TowerClient();
+  client.setCredentials({ port, token: 'a'.repeat(64), callerSecret: 'b'.repeat(64) });
+  const stopper = new AbortController();
+  const pending = client.call('POST', '/api/sessions', { prompt: 'x' }, { write: true, beforeSend: stopper.signal });
+  await new Promise(resolve => setTimeout(resolve, 150));
+  stopper.abort();
+  let calls = 0;
+  const web = createServer((_req, res) => { calls++; res.writeHead(202, { 'Content-Type': 'application/json' }).end('{}'); });
+  t.after(() => stop(web));
+  await listen(web, port);
+  client.setCredentials({ port, token: 'c'.repeat(64), callerSecret: 'b'.repeat(64) });
+  assert.equal((await pending).state, 'not-admitted');
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(calls, 0);
+});
+
 test('a change the server says it did not admit is sent once more; one cut off mid-way is not', async t => {
   let calls = 0;
   const web = createServer((req, res) => {

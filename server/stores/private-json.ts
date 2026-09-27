@@ -3,11 +3,11 @@ import { open, rename, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 
 /** Owner-only JSON documents in the state directory: no symlink follow, no partial file after a crash. */
-export async function readPrivateJson(path: string): Promise<unknown> {
+export async function readPrivateJson(path: string, maxBytes = 12_000_000): Promise<unknown> {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
     const info = await file.stat();
-    if (!info.isFile() || info.size > 12_000_000) throw new Error(`Saved state in ${path} is invalid or too large.`);
+    if (!info.isFile() || info.size > maxBytes) throw new Error(`Saved state in ${path} is invalid or too large.`);
     await file.chmod(0o600);
     return JSON.parse(await file.readFile('utf8'));
   } finally { await file.close(); }

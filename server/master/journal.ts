@@ -17,6 +17,8 @@ export interface InboxItem {
   state: 'queued' | 'processing' | 'answered' | 'failed' | 'cancelled';
   turnId?: string;
   retries: number;
+  /** A turn that failed is tried again, once, after this time. */
+  notBefore?: string;
   /** For events: the task it reports, so one ending is reported once. */
   taskId?: string;
 }
@@ -40,6 +42,8 @@ export interface CallRecord {
 export interface TaskRecord {
   id: string;
   entryId: string;
+  /** Where the task's card sits in the conversation, to update it after a restart when it is no longer in memory. */
+  entryOrder?: number;
   node?: string;
   sessionId?: string;
   runId?: string;

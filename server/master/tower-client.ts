@@ -36,31 +36,49 @@ export class TowerClient {
   private credentials?: WebCredentials;
   private waiters: Array<() => void> = [];
 
+  constructor(private readonly waitForWebMs = WAIT_FOR_WEB_MS) {}
+
   setCredentials(credentials: WebCredentials): void {
     this.credentials = credentials;
     for (const wake of this.waiters.splice(0)) wake();
   }
   hasCredentials(): boolean { return Boolean(this.credentials); }
 
-  /** Reads are repeated after a web restart; changes are sent at most once unless the web proves it never ran them. */
-  async call(method: 'GET' | 'POST', path: string, body?: unknown, options: { write: boolean; headers?: Record<string, string>; signal?: AbortSignal } = { write: method === 'POST' }): Promise<TowerResponse> {
-    const deadline = Date.now() + WAIT_FOR_WEB_MS;
+  /**
+   * Reads are repeated after a web restart; changes are sent at most once unless the web proves it never ran them.
+   * `signal` cancels the whole call (reads). `beforeSend` stops a change only while it has not gone out: waiting for a
+   * web, or before sending again what the server did not admit; a change already on its way is never cut off.
+   */
+  async call(method: 'GET' | 'POST', path: string, body?: unknown, options: { write: boolean; headers?: Record<string, string>; signal?: AbortSignal; beforeSend?: AbortSignal } = { write: method === 'POST' }): Promise<TowerResponse> {
+    const deadline = Date.now() + this.waitForWebMs;
+    const waiting = options.signal ?? options.beforeSend;
+    const stopped = () => !options.signal?.aborted && Boolean(options.beforeSend?.aborted);
+    const unsent = (error: string): TowerResponse => ({ status: 503, body: { error }, state: 'not-admitted' });
     let resentNotAdmitted = false;
     // A read that failed on a server that is up is tried twice more, not for the whole wait for a restarting web.
     let readRetries = 2;
     for (;;) {
-      const credentials = await this.waitForCredentials(deadline, options.signal);
+      let credentials: WebCredentials;
+      try { credentials = await this.waitForCredentials(deadline, waiting); }
+      catch (error) {
+        if (error instanceof NotSent) return unsent('Tower 웹 서버에 연결하지 못했습니다.');
+        if (stopped()) return unsent('중지되어 보내지 않았습니다.');
+        throw error;
+      }
+      if (stopped()) return unsent('중지되어 보내지 않았습니다.');
       try {
         const response = await this.send(credentials, method, path, body, options.headers, options.signal);
-        // A stale page token means this web never looked at the request: wait for the web that replaced it.
-        if (response.status === 403 && this.credentials === credentials && isTokenRefusal(response.body)) {
-          this.credentials = undefined;
+        // A stale page token means this web never looked at the request: send it to the web that replaced it, whose
+        // credentials may already be here.
+        if (response.status === 403 && isTokenRefusal(response.body)) {
+          if (this.credentials === credentials) this.credentials = undefined;
           if (Date.now() < deadline) continue;
           return { ...response, state: 'not-admitted' };
         }
         if (response.state === 'not-admitted' && !resentNotAdmitted && Date.now() < deadline) {
           resentNotAdmitted = true;
-          await delay(3000, options.signal);
+          try { await delay(3000, waiting); }
+          catch (error) { if (stopped()) return response; throw error; }
           continue;
         }
         if (!options.write && response.state === 'uncertain' && readRetries-- > 0) { await delay(1000, options.signal); continue; }
@@ -70,7 +88,7 @@ export class TowerClient {
         if (error instanceof NotSent) {
           if (this.credentials === credentials) this.credentials = undefined;
           if (Date.now() < deadline) continue;
-          return { status: 503, body: { error: 'Tower 웹 서버에 연결하지 못했습니다.' }, state: 'not-admitted' };
+          return unsent('Tower 웹 서버에 연결하지 못했습니다.');
         }
         if (!options.write && readRetries-- > 0) { await delay(1000, options.signal); continue; }
         return { status: 0, body: { error: error instanceof Error ? error.message : String(error) }, state: options.write ? 'uncertain' : 'failed' };
@@ -83,7 +101,7 @@ export class TowerClient {
    * the way calls do; the caller reads the response and reconnects when it ends.
    */
   async stream(path: string, signal: AbortSignal): Promise<IncomingMessage> {
-    const credentials = await this.waitForCredentials(Date.now() + WAIT_FOR_WEB_MS, signal);
+    const credentials = await this.waitForCredentials(Date.now() + this.waitForWebMs, signal);
     return new Promise((resolve, reject) => {
       const req = request({ host: '127.0.0.1', port: credentials.port, method: 'GET', path, signal, headers: { [MASTER_CALLER_HEADER]: credentials.callerSecret, Accept: 'text/event-stream' } }, res => {
         if (res.statusCode !== 200) { res.resume(); reject(new Error(`Tower stream answered ${res.statusCode}`)); return; }

@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { startMasterHost } from '../../server/master/host.js';
 import { MasterClient } from '../../server/master/client.js';
 import { masterPaths } from '../../server/master/paths.js';
+import { writePrivateJson } from '../../server/stores/private-json.js';
 import type { ModelCall } from '../../server/master/model-openai.js';
 import type { MasterCheckpoint, MasterOverview } from '../../shared/master.js';
 import { until } from '../helpers/until.js';
@@ -55,7 +57,11 @@ test('the master runs in its own host: the web relays its conversation live and 
   const resumed = await again.call('checkpoint') as MasterCheckpoint;
   assert.equal(resumed.epoch, checkpoint.epoch);
   assert.ok(resumed.entries.some(entry => entry.data.kind === 'master'));
-  // Idle, it steps aside when asked; then nothing answers and no version is in use.
+  // Idle (its answer saved), it steps aside when asked; then nothing answers and no version is in use.
+  for (let tries = 0; (await again.call('overview') as MasterOverview).state === 'thinking'; tries++) {
+    assert.ok(tries < 250, 'the turn did not end');
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
   assert.equal(await again.hostVersion() !== null, true);
   assert.equal(await again.call('shutdown'), true);
   const deadline = Date.now() + 5000;
@@ -84,4 +90,27 @@ test('the master stays removable: only three existing files reach into it', asyn
   assert.deepEqual(offenders, []);
   // server/http/server.ts takes the master only as an option and never imports it.
   assert.doesNotMatch(await readFile(join(root, 'server/http/server.ts'), 'utf8'), /from '\.\.\/master\//);
+});
+
+test('a web that starts while delegated work or a message still waits starts the master host itself, without waiting for a page', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-resume-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const paths = await masterPaths(stateDir);
+  await mkdir(paths.data, { recursive: true, mode: 0o700 });
+  const marker = join(stateDir, 'started');
+  // Stands in for the host: it only notes that it was started, and how.
+  const entry = join(stateDir, 'fake-host.mjs');
+  await writeFile(entry, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, process.argv.slice(2).join(' '));`);
+  const start = () => { const web = new MasterClient({ stateDir, credentials: () => undefined, hostEntry: entry, startupTimeoutMs: 300 }); web.start(); return web; };
+
+  const quiet = start();
+  await new Promise(resolve => setTimeout(resolve, 400));
+  quiet.dispose();
+  assert.equal(existsSync(marker), false, 'nothing waits, so no host is started');
+
+  await writePrivateJson(join(paths.data, 'tasks.json'), JSON.stringify({ items: [{ id: 'task-1', state: 'running' }] }));
+  const web = start();
+  t.after(() => web.dispose());
+  await until(() => existsSync(marker));
+  assert.match(await readFile(marker, 'utf8'), /--master-host/);
 });

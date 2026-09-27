@@ -22,6 +22,12 @@ const MAX_TOOL_OUTPUT = 12_000;
 const TASK_POLL_MS = 5_000;
 const TASK_UNKNOWN_MS = 30 * 60_000;
 const REMOTE_WRITES_PER_MINUTE = 30;
+const RETRY_MS = 5_000;
+/** Longest text kept in one conversation entry, so the conversation's files stay readable. */
+const MAX_ENTRY_TEXT = 32_000;
+const TIMED_OUT = '시간이 오래 걸려 여기서 멈췄습니다. 위 작업 기록을 확인해 주세요.';
+/** How Tower adds attached files to a request in a session's history (`attachmentPrompt`), once spaces are folded. */
+const ATTACHED = ' 첨부 파일 (사용자가 이번 메시지에 첨부한 로컬 파일):';
 
 const TOOLS: ModelTool[] = [
   { type: 'function', name: 'tower_api', description: 'Call one of Tower\'s HTTP routes (see Routes), exactly as the owner\'s pages do. For a joined computer pass node.',
@@ -48,6 +54,9 @@ export interface MasterServiceOptions {
   tower: TowerClient;
   model: ModelCall;
   taskPollMs?: number;
+  /** Tests shorten the turn limit and the wait before a failed turn is tried again. */
+  turnMs?: number;
+  retryMs?: number;
   /** What the owner's page sees, kept live: the status digest, quick queries and the task watcher read it. */
   live?: LiveState;
   readDb?: ReadDatabase;
@@ -78,6 +87,11 @@ export class MasterService {
     const interrupted = new Map<string, InboxItem[]>();
     for (const item of journal.inbox.filter(input => input.state === 'processing')) interrupted.set(item.turnId ?? item.id, [...(interrupted.get(item.turnId ?? item.id) ?? []), item]);
     for (const [turnId, items] of interrupted) {
+      // The answer was saved before its inputs were marked answered: a turn that has one is done, not interrupted.
+      if (room.recent(Number.MAX_SAFE_INTEGER).some(entry => entry.data.kind === 'master' && entry.data.final && entry.data.turnId === turnId)) {
+        for (const item of items) item.state = 'answered';
+        continue;
+      }
       const calls = journal.calls.filter(call => call.turnId === turnId);
       if (!calls.length && items.every(item => item.retries < 1)) {
         for (const item of items) { item.state = 'queued'; item.retries++; delete item.turnId; }
@@ -151,7 +165,8 @@ export class MasterService {
     if (this.closed || this.turn) return;
     const settings = this.options.settings.current();
     if (!settings.enabled || !this.options.settings.key()) return;
-    const queued = this.options.journal.inbox.filter(item => item.state === 'queued');
+    const now = Date.now();
+    const queued = this.options.journal.inbox.filter(item => item.state === 'queued' && !(item.notBefore && Date.parse(item.notBefore) > now));
     if (!queued.length) return;
     const owners = queued.filter(item => item.kind === 'owner');
     // Only inputs from the same kind of place share a turn, so what a turn may do follows every request in it.
@@ -178,17 +193,26 @@ export class MasterService {
         { type: 'message', role: 'user', content: inputs.map(item => item.kind === 'event' ? `[event] ${item.text}` : item.text).join('\n\n') },
       ];
       const started = Date.now();
+      const turnMs = this.options.turnMs ?? TURN_MS;
       let toolCalls = 0;
       for (let round = 0; round < MAX_ROUNDS && !final; round++) {
         // A stop pressed between steps (or before the first) ends the turn here.
         turn.abort.signal.throwIfAborted();
-        if (Date.now() - started > TURN_MS) { final = '시간이 오래 걸려 여기서 멈췄습니다. 위 작업 기록을 확인해 주세요.'; break; }
+        if (Date.now() - started > turnMs) { final = TIMED_OUT; break; }
         let draft = '';
         let lastDraft = 0;
-        const result = await model({ model: settings.model, effort: settings.effort, instructions: masterInstructions(Boolean(this.options.readDb)), input: items, tools: this.options.readDb ? TOOLS : TOOLS.filter(tool => tool.name !== 'tower_query') }, delta => {
-          draft += delta;
-          if (Date.now() - lastDraft > 150) { lastDraft = Date.now(); room.setDraft({ turnId, text: draft }); }
-        }, turn.abort.signal);
+        // The turn's time limit also ends a model answer that stalls.
+        const deadline = AbortSignal.timeout(Math.max(1, turnMs - (Date.now() - started)));
+        let result: Awaited<ReturnType<ModelCall>>;
+        try {
+          result = await model({ model: settings.model, effort: settings.effort, instructions: masterInstructions(Boolean(this.options.readDb)), input: items, tools: this.options.readDb ? TOOLS : TOOLS.filter(tool => tool.name !== 'tower_query') }, delta => {
+            draft += delta;
+            if (Date.now() - lastDraft > 150) { lastDraft = Date.now(); room.setDraft({ turnId, text: draft }); }
+          }, AbortSignal.any([turn.abort.signal, deadline]));
+        } catch (error) {
+          if (deadline.aborted && !turn.abort.signal.aborted) { final = TIMED_OUT; break; }
+          throw error;
+        }
         items.push(...result.output);
         const calls = result.output.filter(item => item.type === 'function_call');
         if (!calls.length) { final = result.text.trim() || '(답을 만들지 못했습니다.)'; break; }
@@ -204,15 +228,24 @@ export class MasterService {
         turn.abort.signal.throwIfAborted();
       }
       if (!final) final = '여러 단계를 거쳤지만 마지막 답을 만들지 못했습니다. 위 작업 기록을 확인해 주세요.';
-      room.add({ kind: 'master', text: this.hideText(final), turnId, final: true });
+      room.add({ kind: 'master', text: truncate(this.hideText(final), MAX_ENTRY_TEXT), turnId, final: true });
+      // On disk before the inputs count as answered: after a restart, a saved answer means the turn is done.
+      await room.flush();
       for (const item of inputs) item.state = 'answered';
     } catch (error) {
+      const message = truncate(this.hideText(error instanceof Error ? error.message : String(error)), 2000);
       if (turn.abort.signal.aborted) {
         for (const item of inputs) item.state = 'cancelled';
         room.add({ kind: 'event', text: '마스터가 생각을 멈췄습니다. 이미 보낸 작업은 그대로 진행됩니다.' });
+      } else if (!journal.calls.some(call => call.turnId === turnId) && inputs.every(item => item.retries < 1)) {
+        // A turn that changed nothing (a model error, a lost connection) is tried once more a little later.
+        const retryMs = this.options.retryMs ?? RETRY_MS;
+        for (const item of inputs) { item.state = 'queued'; item.retries++; delete item.turnId; item.notBefore = new Date(Date.now() + retryMs).toISOString(); }
+        room.add({ kind: 'error', text: `${message} — 잠시 뒤 한 번 더 해 봅니다.` });
+        setTimeout(() => this.pump(), retryMs + 10).unref();
       } else {
         for (const item of inputs) item.state = 'failed';
-        room.add({ kind: 'error', text: this.hideText(error instanceof Error ? error.message : String(error)) });
+        room.add({ kind: 'error', text: message });
       }
     } finally {
       room.setDraft(null);
@@ -298,13 +331,16 @@ export class MasterService {
       this.updateAction(record);
       return { error: '중지되어 보내지 않았습니다.' };
     }
-    // A change is not cut off by "stop thinking": it finishes and is recorded.
-    const response = await tower.call('POST', target.path, body, { write: true, headers });
+    // "Stop thinking" can still keep a change that is waiting for the web; once sent, it finishes and is recorded.
+    const response = await tower.call('POST', target.path, body, { write: true, headers, beforeSend: turn.abort.signal })
+      .catch((error: unknown): TowerResponse => ({ status: 0, body: { error: error instanceof Error ? error.message : String(error) }, state: 'uncertain' }));
     record.state = response.state;
-    record.summary = this.hideText(summary(response));
-    await journal.save('calls');
+    record.summary = summary(response, text => this.hideText(text));
+    // The work a change started is on disk before the change counts as done, so a restart in between still reports it.
+    const tracked = response.state === 'succeeded' ? this.track(target, given, response.body) : undefined;
+    await journal.save('tasks', 'calls');
     this.updateAction(record);
-    if (response.state === 'succeeded') await this.watch(target, given, response.body);
+    if (tracked) this.broadcastOverview();
     const answer = this.answer(target, response) as Record<string, unknown>;
     return response.state === 'uncertain' ? { ...answer, note: '결과를 알 수 없습니다. 다시 보내지 말고 상태를 확인하세요.' } : answer;
   }
@@ -377,7 +413,8 @@ export class MasterService {
     const detail = response.body as SessionDetail;
     const compact = {
       session: { id: detail.session?.id, title: detail.session?.customTitle || detail.session?.title, cwd: detail.session?.cwd, status: detail.session?.status, provider: detail.session?.provider },
-      messages: (detail.messages ?? []).filter(message => message.role === 'user' || message.role === 'assistant').map(message => ({ role: message.role, at: message.timestamp, text: truncate(message.text, 2000) })),
+      // Hidden whole before it is shortened, so a key at the cut is still recognised.
+      messages: (detail.messages ?? []).filter(message => message.role === 'user' || message.role === 'assistant').map(message => ({ role: message.role, at: message.timestamp, text: truncate(this.hideText(message.text), 2000) })),
       hasMore: detail.hasMore,
     };
     return this.answer(target, { ...response, body: compact });
@@ -393,9 +430,9 @@ export class MasterService {
     return { result: 'requested' };
   }
 
-  /** Starts watching work a successful call created, so its end is reported. */
-  private async watch(target: ApiTarget, body: Record<string, unknown> | undefined, answer: unknown): Promise<void> {
-    const value = (answer ?? {}) as { session?: { id?: string }; run?: { id?: string; sessionId?: string }; job?: { id?: string } };
+  /** Starts watching work a successful call created, so its end is reported. The caller saves the task. */
+  private track(target: ApiTarget, body: Record<string, unknown> | undefined, answer: unknown): TaskRecord | undefined {
+    const value = (answer ?? {}) as { session?: { id?: string }; run?: { id?: string; sessionId?: string }; job?: { id?: string }; result?: { job?: { id?: string } } };
     const prompt = typeof body?.prompt === 'string' ? body.prompt : '';
     const title = truncate(typeof body?.title === 'string' && body.title ? body.title : prompt || target.local, 80);
     let task: Omit<TaskRecord, 'id' | 'entryId' | 'createdAt' | 'state' | 'title'> | undefined;
@@ -403,12 +440,14 @@ export class MasterService {
     if (target.local === '/api/sessions' && value.session?.id) task = { sessionId: value.session.id, ...(value.run?.id ? { runId: value.run.id } : {}) };
     else if (message && value.run?.id) task = { sessionId: value.run.sessionId ?? decodeURIComponent(message[1]), runId: value.run.id };
     else if (target.local === '/api/auto-prompts' && value.job?.id) task = { jobId: value.job.id };
-    if (!task) return;
+    else if (target.local === '/api/v1/autoPrompt.submit' && value.result?.job?.id) task = { jobId: value.result.job.id };
+    if (!task) return undefined;
     const record: TaskRecord = { id: randomUUID(), entryId: '', ...task, ...(target.node ? { node: target.node } : {}), title, ...(prompt ? { prompt } : {}), state: 'running', createdAt: new Date().toISOString() };
-    record.entryId = this.options.room.add({ kind: 'task', title, state: 'running', ...(record.sessionId ? { sessionId: record.sessionId } : {}), ...(record.runId ? { runId: record.runId } : {}), ...(record.jobId ? { jobId: record.jobId } : {}), ...(record.node ? { node: record.node } : {}) }).id;
+    const entry = this.options.room.add({ kind: 'task', title, state: 'running', ...(record.sessionId ? { sessionId: record.sessionId } : {}), ...(record.runId ? { runId: record.runId } : {}), ...(record.jobId ? { jobId: record.jobId } : {}), ...(record.node ? { node: record.node } : {}) });
+    record.entryId = entry.id;
+    record.entryOrder = entry.order;
     this.options.journal.tasks.push(record);
-    await this.options.journal.save('tasks');
-    this.broadcastOverview();
+    return record;
   }
 
   /** Looks at the work being watched and reports what ended, once each. */
@@ -453,7 +492,7 @@ export class MasterService {
     const found = task.sessionId && ended !== 'unknown' ? await this.finalAnswer(task, run).catch(() => undefined) : undefined;
     const answer = found?.text !== undefined ? this.hideText(found.text) : undefined;
     const text = `Delegated work ended: "${task.title}" — ${ended}${task.sessionId ? ` (session ${task.sessionId}${task.node ? ` on node ${task.node}` : ''})` : ''}.`
-      + (answer ? `\nIts answer to your request:\n${truncate(answer, 3000)}` : run?.error ? `\nError: ${truncate(run.error, 500)}` : '\nIts answer could not be read; the owner can open the session.')
+      + (answer ? `\nIts answer to your request:\n${truncate(answer, 3000)}` : run?.error ? `\nError: ${truncate(this.hideText(run.error), 500)}` : '\nIts answer could not be read; the owner can open the session.')
       + (found?.followedBy ? '\n(The session received more messages after this; it may have moved on.)' : '');
     // One report per task, even if a restart makes this run twice: the inbox is written before the task is marked.
     if (!this.options.journal.inbox.some(item => item.taskId === task.id)) {
@@ -462,6 +501,8 @@ export class MasterService {
     task.state = ended;
     task.reportedAt = new Date().toISOString();
     await this.options.journal.save('inbox', 'tasks');
+    // A card from long ago is read back from its file first, so it does not stay "running" forever.
+    if (!this.options.room.get(task.entryId) && task.entryOrder !== undefined) await this.options.room.load(task.entryOrder).catch(() => {});
     const entry = this.options.room.get(task.entryId);
     if (entry?.data.kind === 'task') this.options.room.update(entry.id, { ...entry.data, state: ended, ...(task.sessionId ? { sessionId: task.sessionId } : {}), ...(task.runId ? { runId: task.runId } : {}), ...(answer ? { answer: truncate(answer, 600) } : {}) });
     this.broadcastOverview();
@@ -526,15 +567,19 @@ export class MasterService {
 
 function truncate(text: string, length: number): string { return text.length > length ? `${text.slice(0, length)}…` : text; }
 const normalize = (text: string) => text.replace(/\s+/g, ' ').trim();
-/** A history message is the run's request when it is the request's whole text (a native history may add attachments after it). */
+/**
+ * A history message is the run's request when it is the request's whole text, or that text followed by the list of
+ * attached files Tower adds. A longer request that merely starts the same way is another request.
+ */
 function sameRequest(message: string, prompt: string): boolean {
   const text = normalize(message);
-  return text === prompt || text.startsWith(`${prompt} `);
+  return text === prompt || text.startsWith(`${prompt}${ATTACHED}`);
 }
-function summary(response: TowerResponse): string {
+/** A short account of a call's result, secrets hidden before it is shortened. */
+function summary(response: TowerResponse, hide: (text: string) => string): string {
   const body = response.body as Record<string, unknown> | null;
   const error = body && typeof body === 'object' && typeof body.error === 'string' ? body.error : undefined;
-  return truncate(error ?? `HTTP ${response.status}`, 300);
+  return truncate(hide(error ?? `HTTP ${response.status}`), 300);
 }
 /** A time-ordered UUID, which a joined computer requires to run a new request at most once. */
 function uuidv7(now = Date.now()): string {

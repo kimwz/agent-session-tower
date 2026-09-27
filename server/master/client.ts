@@ -2,9 +2,11 @@ import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { request, type ClientRequest, type ServerResponse } from 'node:http';
+import { join } from 'node:path';
 import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import { APP_VERSION } from '../../shared/app-identity.js';
+import { readPrivateJson } from '../stores/private-json.js';
 import { MASTER_PROTOCOL, type MasterHostReply } from './host.js';
 import { masterPaths, type MasterPaths } from './paths.js';
 import type { WebCredentials } from './tower-client.js';
@@ -33,12 +35,29 @@ export class MasterClient {
 
   constructor(private readonly options: MasterClientOptions) {}
 
-  /** Keeps a running host told who this web is, so work it continues after a web restart can reach Tower. */
+  /**
+   * Keeps a running host told who this web is, so work it continues after a web restart can reach Tower. When no host
+   * runs but work was left waiting (the host or the computer stopped), it starts one, so the work goes on and its
+   * report comes without waiting for someone to open a page.
+   */
   start(): void {
     const tell = () => { void this.exchange('hello').catch(() => {}); };
     tell();
+    void this.pendingWork().then(pending => pending && !this.closed ? this.ensureHost() : undefined).catch(error => {
+      console.error(`Master could not resume waiting work: ${error instanceof Error ? error.message : String(error)}`);
+    });
     this.heartbeat = setInterval(tell, 15_000);
     this.heartbeat.unref();
+  }
+
+  /** Whether the master's records hold a message not yet answered or delegated work not yet reported. */
+  private async pendingWork(): Promise<boolean> {
+    const { data } = await this.hostPaths();
+    const waiting = async (name: string, states: string[]) => {
+      const saved = await readPrivateJson(join(data, name)).catch(() => undefined) as { items?: Array<{ state?: unknown }> } | undefined;
+      return Array.isArray(saved?.items) && saved.items.some(item => typeof item?.state === 'string' && states.includes(item.state));
+    };
+    return await waiting('inbox.json', ['queued', 'processing']) || await waiting('tasks.json', ['running']);
   }
 
   async call(method: string, args: Record<string, unknown> = {}): Promise<unknown> {

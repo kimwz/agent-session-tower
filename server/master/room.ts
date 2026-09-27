@@ -6,6 +6,8 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 const SEGMENT = 500;
 const BUFFERED = 2000;
+/** A file holds 500 entries of any allowed length (texts are at most 32,000 characters), so it may be large. */
+const SEGMENT_BYTES = 200_000_000;
 const segmentName = (index: number) => `${String(index).padStart(6, '0')}.json`;
 
 /**
@@ -70,6 +72,9 @@ export class MasterRoom {
 
   get(id: string): MasterEntry | undefined { return this.byId.get(id); }
 
+  /** Reads the file that holds entry `order`, so an older entry can be found and updated. */
+  async load(order: number): Promise<void> { if (order >= 0 && order < this.nextOrder) await this.segment(Math.floor(order / SEGMENT)); }
+
   setDraft(draft: MasterDraft | null): void {
     this.draft = draft;
     this.emit({ type: 'draft', seq: 0, draft });
@@ -133,7 +138,7 @@ export class MasterRoom {
     if (known) return known;
     let entries: MasterEntry[] = [];
     try {
-      const saved = await readPrivateJson(join(this.directory, segmentName(index))) as { entries?: unknown };
+      const saved = await readPrivateJson(join(this.directory, segmentName(index)), SEGMENT_BYTES) as { entries?: unknown };
       if (Array.isArray(saved?.entries)) entries = saved.entries.filter((entry): entry is MasterEntry => Boolean(entry && typeof entry === 'object' && typeof (entry as MasterEntry).id === 'string' && typeof (entry as MasterEntry).order === 'number'));
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     this.loaded.set(index, entries);

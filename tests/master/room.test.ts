@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MasterRoom } from '../../server/master/room.js';
+import { writePrivateJson } from '../../server/stores/private-json.js';
 import type { MasterStreamEvent } from '../../shared/master.js';
 
 test('the conversation is kept in order across restarts, and a changed entry replaces itself', async t => {
@@ -49,4 +50,37 @@ test('a page resumes live changes from its position in this run, and starts over
   assert.equal(room.since(epoch, room.position().seq + 5), undefined);
   assert.deepEqual(heard.map(event => event.seq), [1, 2, 3]);
   await room.flush();
+});
+
+test('a conversation file larger than other saved state still opens: 500 long messages are allowed', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-master-room-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await mkdir(join(dir, 'room'), { recursive: true, mode: 0o700 });
+  const text = '가'.repeat(30_000);
+  const entries = Array.from({ length: 150 }, (_, order) => ({ id: `e${order}`, order, at: new Date().toISOString(), revision: 1, data: { kind: 'owner', text } }));
+  await writePrivateJson(join(dir, 'room', '000000.json'), JSON.stringify({ entries }));
+  assert.ok((await stat(join(dir, 'room', '000000.json'))).size > 12_000_000);
+  const room = new MasterRoom(dir);
+  await room.start();
+  assert.equal(room.lastOrder(), 149);
+});
+
+test('an entry from an older file is read back and updated, so a card from long ago does not stay unfinished', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-master-room-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const first = new MasterRoom(dir);
+  await first.start();
+  const card = first.add({ kind: 'task', title: 'old work', state: 'running' });
+  for (let index = 0; index < 1100; index++) first.add({ kind: 'owner', text: `m${index}` });
+  await first.flush();
+  const again = new MasterRoom(dir);
+  await again.start();
+  assert.equal(again.get(card.id), undefined, 'only the latest files are read at start');
+  await again.load(card.order);
+  assert.ok(again.update(card.id, { kind: 'task', title: 'old work', state: 'completed' }));
+  await again.flush();
+  const third = new MasterRoom(dir);
+  await third.start();
+  const page = await third.page(1, 1);
+  assert.equal(page.entries[0].data.kind === 'task' && page.entries[0].data.state, 'completed');
 });
