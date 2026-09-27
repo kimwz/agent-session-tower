@@ -8,6 +8,8 @@ export async function createRemoteAuthFixture(dir: string) {
   await auth.start();
   await auth.setCredentials('monitor', 'fixture-password-123');
   const result = await auth.login('127.0.0.1', 'monitor', 'fixture-password-123');
+  // Login returns before its session-file write; finish fixture setup before tests can remove its directory.
+  await auth.flush();
   assert.ok(result.sessionId);
   const cookie = `tower_session=${result.sessionId}`;
   const origins = new Set<string>();
