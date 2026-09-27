@@ -2,10 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import type { MasterEntry, MasterOverview, MasterTaskState, MasterViewContext } from '../../shared/master.js';
 import type { AutoPromptJob, ChatMessage, Run, SessionDetail, Snapshot } from '../../shared/types.js';
+import { statusDigest } from './digest.js';
 import { apiTarget, refusalFor, type ApiTarget, type TurnScope } from './guards.js';
 import { masterInstructions } from './instructions.js';
 import { fingerprint, type CallRecord, type InboxItem, type MasterJournal, type TaskRecord } from './journal.js';
 import type { ModelCall, ModelItem, ModelTool } from './model-openai.js';
+import type { LiveState } from './live-state.js';
+import { tablesFrom, type ReadDatabase, type Table } from './read-db.js';
 import type { MasterRoom } from './room.js';
 import { SecretVault } from './secrets.js';
 import type { MasterSettingsStore } from './settings.js';
@@ -28,6 +31,8 @@ const TOOLS: ModelTool[] = [
       body: { type: 'object', description: 'JSON body for POST.', additionalProperties: true },
       node: { type: 'string', description: '32-hex id of a joined computer, or omit for this computer.' },
     }, required: ['method', 'path'], additionalProperties: false } },
+  { type: 'function', name: 'tower_query', description: 'Run one read-only SQL SELECT over Tower\'s current state (see the tables in your instructions). The fastest way to look things up.',
+    parameters: { type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'], additionalProperties: false } },
   { type: 'function', name: 'session_read', description: 'Read the latest messages of a session (compact).',
     parameters: { type: 'object', properties: { sessionId: { type: 'string' }, node: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 60 } }, required: ['sessionId'], additionalProperties: false } },
   { type: 'function', name: 'show_session', description: 'Open a session in the tab the owner is talking from.',
@@ -43,6 +48,9 @@ export interface MasterServiceOptions {
   tower: TowerClient;
   model: ModelCall;
   taskPollMs?: number;
+  /** What the owner's page sees, kept live: the status digest, quick queries and the task watcher read it. */
+  live?: LiveState;
+  readDb?: ReadDatabase;
 }
 
 /**
@@ -163,8 +171,10 @@ export class MasterService {
     try {
       await journal.save('inbox');
       const settings = store.current();
+      const live = this.options.live;
+      const digest = live ? statusDigest(await live.fresh(), live.nodeSnapshots(), Date.now(), live.missing(), text => this.hideText(text)) : '';
       const items: ModelItem[] = [
-        { type: 'message', role: 'developer', content: this.context(inputs) },
+        { type: 'message', role: 'developer', content: [digest ? this.hideText(digest) : '', this.context(inputs)].filter(Boolean).join('\n\n') },
         { type: 'message', role: 'user', content: inputs.map(item => item.kind === 'event' ? `[event] ${item.text}` : item.text).join('\n\n') },
       ];
       const started = Date.now();
@@ -239,6 +249,7 @@ export class MasterService {
     try { args = JSON.parse(rawArguments) as Record<string, unknown>; }
     catch { return { error: '도구 인자가 JSON이 아닙니다.' }; }
     if (name === 'tower_api') return this.towerApi(args, turn);
+    if (name === 'tower_query') return this.towerQuery(args);
     if (name === 'session_read') return this.sessionRead(args, turn);
     if (name === 'show_session') return this.showSession(args, turn);
     return { error: `알 수 없는 도구: ${name}` };
@@ -340,6 +351,22 @@ export class MasterService {
     if (entry?.data.kind === 'action') this.options.room.update(entry.id, { ...entry.data, state: call.state, ...(call.summary ? { summary: call.summary } : {}) });
   }
 
+  /** A quick read-only SQL question over the live state; texts pass the same secret hiding as everything else. */
+  private async towerQuery(args: Record<string, unknown>): Promise<unknown> {
+    const { live, readDb, room, journal } = this.options;
+    if (!live || !readDb) return { error: '빠른 조회를 쓸 수 없습니다. tower_api로 조회하세요.' };
+    if (!await live.fresh()) return { error: 'Tower의 현재 상태를 받지 못했습니다. 잠시 뒤 다시 하거나 tower_api로 조회하세요.' };
+    const conversation: Table = { name: 'conversation', columns: ['order_no', 'at', 'kind', 'text'], rows: room.recent(200).map(entry => [entry.order, entry.at, entry.data.kind,
+      'text' in entry.data ? this.hideText(entry.data.text).slice(0, 500) : entry.data.kind === 'task' ? this.hideText(entry.data.title) : entry.data.kind === 'action' ? `${entry.data.method} ${entry.data.path} ${entry.data.state}` : null]) };
+    const delegated: Table = { name: 'delegated', columns: ['id', 'title', 'state', 'session_id', 'node', 'created_at'], rows: journal.tasks.map(task => [task.id, this.hideText(task.title), task.state, task.sessionId ?? null, task.node ?? null, task.createdAt]) };
+    const signature = `${live.version()}:${room.lastOrder()}:${journal.tasks.map(task => task.state).join(',')}`;
+    try {
+      const result = await readDb.query(String(args.sql ?? ''), signature, () => tablesFrom(live.snapshot(), live.nodeSnapshots(), text => this.hideText(text), [conversation, delegated]));
+      const missing = live.missing();
+      return { asOf: new Date().toISOString(), ...(missing.length ? { missingComputers: missing, note: 'These joined computers have no current data here; their rows are missing.' } : {}), ...result };
+    } catch (error) { return { error: (error as Error).message }; }
+  }
+
   private async sessionRead(args: Record<string, unknown>, turn: Turn): Promise<unknown> {
     const id = typeof args.sessionId === 'string' ? args.sessionId : '';
     if (!id) return { error: 'sessionId가 필요합니다.' };
@@ -391,11 +418,16 @@ export class MasterService {
     this.polling = true;
     try {
       const nodes = [...new Set(running.map(task => task.node ?? ''))];
+      // Following the live stream (as one more page would) instead of asking for whole snapshots every few seconds.
+      const local = await this.options.live?.fresh();
       for (const node of nodes) {
-        const path = node ? `/api/nodes/${node}/snapshot` : '/api/snapshot';
-        const response = await this.options.tower.call('GET', path, undefined, { write: false });
-        if (response.state !== 'succeeded') continue;
-        const snapshot = response.body as Snapshot;
+        let snapshot = node ? this.options.live?.node(node) : local;
+        if (!snapshot) {
+          const path = node ? `/api/nodes/${node}/snapshot` : '/api/snapshot';
+          const response = await this.options.tower.call('GET', path, undefined, { write: false });
+          if (response.state !== 'succeeded') continue;
+          snapshot = response.body as Snapshot;
+        }
         for (const task of running.filter(item => (item.node ?? '') === node)) await this.check(task, snapshot);
       }
     } catch (error) {

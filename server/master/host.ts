@@ -5,6 +5,8 @@ import { APP_VERSION } from '../../shared/app-identity.js';
 import type { MasterStreamEvent } from '../../shared/master.js';
 import { acquireStateLock, MonitorAlreadyRunning } from '../instance/state-lock.js';
 import { MasterJournal } from './journal.js';
+import { LiveState } from './live-state.js';
+import { ReadDatabase } from './read-db.js';
 import { openAiResponses, type ModelCall } from './model-openai.js';
 import { masterPaths } from './paths.js';
 import { MasterRoom } from './room.js';
@@ -43,6 +45,8 @@ export async function startMasterHost(options: MasterHostOptions) {
   const room = new MasterRoom(paths.data);
   const journal = new MasterJournal(paths.data);
   const tower = new TowerClient();
+  const live = new LiveState((path, signal) => tower.stream(path, signal));
+  const readDb = new ReadDatabase();
   let service: MasterService | undefined;
   let lastRequest = Date.now();
   let pending = 0;
@@ -141,6 +145,8 @@ export async function startMasterHost(options: MasterHostOptions) {
     await new Promise<void>(resolve => server.close(() => resolve()));
     await unlink(paths.socket).catch(() => {});
     await unlink(paths.token).catch(() => {});
+    live.close();
+    readDb.close();
     try { await service?.close(); } finally {
       await release();
       if (idle) options.onClosed?.();
@@ -151,7 +157,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     await settings.start();
     await room.start();
     await journal.start();
-    service = new MasterService({ settings, room, journal, tower, model: options.model ?? openAiResponses(() => settings.key()), ...(options.taskPollMs ? { taskPollMs: options.taskPollMs } : {}) });
+    service = new MasterService({ settings, room, journal, tower, live, readDb, model: options.model ?? openAiResponses(() => settings.key()), ...(options.taskPollMs ? { taskPollMs: options.taskPollMs } : {}) });
     await service.start();
     await unlink(paths.socket).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
     await unlink(paths.token).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });

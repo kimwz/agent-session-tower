@@ -1,4 +1,4 @@
-import { request } from 'node:http';
+import { request, type IncomingMessage } from 'node:http';
 import { REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
 import type { MasterCallState } from '../../shared/master.js';
 
@@ -76,6 +76,26 @@ export class TowerClient {
         return { status: 0, body: { error: error instanceof Error ? error.message : String(error) }, state: options.write ? 'uncertain' : 'failed' };
       }
     }
+  }
+
+  /**
+   * Opens a long-lived GET stream (the page's live event stream), as a page on this computer would. It waits for a web
+   * the way calls do; the caller reads the response and reconnects when it ends.
+   */
+  async stream(path: string, signal: AbortSignal): Promise<IncomingMessage> {
+    const credentials = await this.waitForCredentials(Date.now() + WAIT_FOR_WEB_MS, signal);
+    return new Promise((resolve, reject) => {
+      const req = request({ host: '127.0.0.1', port: credentials.port, method: 'GET', path, signal, headers: { [MASTER_CALLER_HEADER]: credentials.callerSecret, Accept: 'text/event-stream' } }, res => {
+        if (res.statusCode !== 200) { res.resume(); reject(new Error(`Tower stream answered ${res.statusCode}`)); return; }
+        resolve(res);
+      });
+      req.on('error', error => {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ECONNREFUSED' && this.credentials === credentials) this.credentials = undefined;
+        reject(error);
+      });
+      req.end();
+    });
   }
 
   private async waitForCredentials(deadline: number, signal?: AbortSignal): Promise<WebCredentials> {

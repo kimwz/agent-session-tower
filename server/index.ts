@@ -15,6 +15,7 @@ import { runRunnerWorker } from './runs/worker.js';
 import { runTerminalHost } from './terminals/host.js';
 import { TerminalHostClient } from './terminals/client.js';
 import { runMasterHost } from './master/host.js';
+import { runMasterQuery } from './master/query-process.js';
 import { MasterClient } from './master/client.js';
 import { masterRoutes } from './master/routes.js';
 import type { WebCredentials } from './master/tower-client.js';
@@ -116,6 +117,10 @@ async function main() {
   if (args[0] === '--terminal-host') {
     if (args.length !== 2 || !args[1]) throw new Error('Terminal host requires a state directory.');
     await runTerminalHost(resolve(args[1]));
+    return;
+  }
+  if (args[0] === '--master-query') {
+    await runMasterQuery();
     return;
   }
   if (args[0] === '--master-host') {
