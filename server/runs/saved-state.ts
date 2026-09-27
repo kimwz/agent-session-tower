@@ -49,6 +49,7 @@ export function isSavedSchedule(value: unknown, run: Partial<Run>): boolean {
   const scheduled = value as Partial<NonNullable<Run['scheduled']>>;
   return typeof scheduled.at === 'string' && Number.isFinite(Date.parse(scheduled.at))
     && typeof scheduled.afterRunId === 'string' && UUID.test(scheduled.afterRunId) && scheduled.afterRunId !== run.id
+    && (scheduled.backgroundRecoveryAttempt === undefined || (Number.isInteger(scheduled.backgroundRecoveryAttempt) && scheduled.backgroundRecoveryAttempt >= 1 && scheduled.backgroundRecoveryAttempt <= 3))
     && run.steering === undefined && !run.attachments?.length;
 }
 

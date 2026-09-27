@@ -290,7 +290,7 @@ test('Claude does not persist subagent, unconfirmed, compacted, mismatched-model
     { frames: [contextAssistant, { ...contextResult, modelUsage: { 'claude-opus-5[1m]': { contextWindow: 1_000_000 }, 'claude-opus-5[200k]': { contextWindow: 200_000 } } }] },
     { frames: [contextAssistant, { ...contextResult, modelUsage: { 'claude-opus-5-5[1m]': { contextWindow: 1_000_000 } } }] },
     { frames: [contextAssistant, { ...contextResult, modelUsage: { 'claude-opus-5': { contextWindow: '200000' } } }] },
-    { frames: [contextAssistant, { ...contextResult, parent_tool_use_id: 'child-tool' }] },
+    { frames: [contextAssistant, { ...contextResult, parent_tool_use_id: 'child-tool' }, { type: 'result', is_error: false, result: 'Parent done' }] },
   ];
   for (const entry of cases) {
     const f = await fixture({ provider: 'claude', mode: entry.mode, contextFrames: entry.frames }); t.after(f.cleanup);

@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { isSavedRun } from '../../../server/runs/saved-state.js';
 import { BackgroundTaskTracker } from '../../../server/runs/background-tasks.js';
 import { RunManager } from '../../../server/runs/manager.js';
 import { WakeupTracker } from '../../../server/runs/wakeup.js';
@@ -16,12 +17,13 @@ const SESSION = `claude:${ID}`;
 // A background task outlives the turn that started it. The fixture plays Claude: the first message gets `first`
 // and a result, then `later` frames are sent on their own timers; any further message gets `reply` and a result.
 const PROVIDER = `
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 const send = event => process.stdout.write(JSON.stringify(event) + '\\n');
 const log = entry => appendFileSync(process.env.LOG, JSON.stringify(entry) + '\\n');
 const id = process.argv.slice(2).find(value => /^20000000-/.test(value));
-const script = JSON.parse(process.env.SCRIPT);
+let script = JSON.parse(process.env.SCRIPT);
+if (script.recovered && readFileSync(process.env.LOG, 'utf8').includes('user')) script = script.recovered;
 let turns = 0;
 createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line);
@@ -31,8 +33,8 @@ createInterface({ input: process.stdin }).on('line', line => {
   if (turns++ === 0) {
     send({ type: 'system', subtype: 'init', session_id: id, permissionMode: 'auto' });
     for (const frame of script.first) send({ session_id: id, ...frame });
-    send({ type: 'result', session_id: id, is_error: false, result: 'first done' });
-    for (const step of script.later ?? []) setTimeout(() => { for (const frame of step.frames ?? []) send({ session_id: id, ...frame }); if (step.exit) process.exit(0); }, step.at);
+    if (!script.noResult) send({ type: 'result', session_id: id, is_error: false, result: 'first done' });
+    for (const step of script.later ?? []) setTimeout(() => { for (const frame of step.frames ?? []) send({ session_id: id, ...frame }); if (step.exit) { if (step.stderr) process.stderr.write(step.stderr); process.exit(step.code ?? 0); } }, step.at);
     return;
   }
   setTimeout(() => {
@@ -51,7 +53,7 @@ const takes = (taskId: string) => ({ type: 'user', isReplay: true, parent_tool_u
   message: { role: 'user', content: `<task-notification>\n<task-id>${taskId}</task-id>\n<status>completed</status>\n</task-notification>` } });
 const result = { type: 'result', is_error: false, result: 'follow-up done' };
 
-async function fixture(script: Record<string, unknown>, options: { followUpMs?: number; waitMaxMs?: number } = {}) {
+async function fixture(script: Record<string, unknown>, options: { followUpMs?: number; waitMaxMs?: number; recoveryMs?: number } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-background-'));
   const provider = join(directory, 'provider.mjs');
   const log = join(directory, 'provider.log');
@@ -61,6 +63,7 @@ async function fixture(script: Record<string, unknown>, options: { followUpMs?: 
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
   const manager = new RunManager({ getSession: id => id === SESSION ? session : undefined, refreshSessions: async () => {}, stateDir: join(directory, 'state'), pollMs: 20,
     findExecutable: async provider => `/fixture/${provider}`, env: { LOG: log, SCRIPT: JSON.stringify(script) },
+    backgroundRecoveryMs: options.recoveryMs ?? 100,
     backgroundFollowUpMs: options.followUpMs ?? 5000, backgroundWaitMaxMs: options.waitMaxMs ?? 30_000,
     spawnProcess: (_file, args, spawnOptions) => spawn(process.execPath, [provider, ...args], spawnOptions) });
   await manager.start();
@@ -285,4 +288,114 @@ test("a wakeup is dropped only when Claude's own timer delivered it in the kept-
   assert.ok(loop.pending);
   loop.observeReplay('Loop instructions');
   assert.equal(loop.pending, undefined);
+});
+
+
+test('a task start arriving after the result keeps input open', async t => {
+  const { manager, cleanup } = await fixture({ first: [says('Waiting for review.')], later: [
+    { at: 40, frames: [started('late')] },
+    { at: 400, frames: [notified('late'), takes('late'), says('Review complete.'), result] },
+  ] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Review');
+  assert.equal((await until(() => find(manager, run.id).backgroundWait)).tasks, 1);
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /Review complete/);
+});
+
+test('a subagent result cannot close the parent input', async t => {
+  const { manager, cleanup } = await fixture({ noResult: true,
+    first: [{ ...result, parent_tool_use_id: 'agent-tool' }],
+    later: [{ at: 500, frames: [says('Parent finished.'), result] }] });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Delegate');
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.match(done.output, /Parent finished/);
+});
+
+test('unexpected exit before a result resumes proven unfinished work with the same owner authority', async t => {
+  const { manager, entries, cleanup } = await fixture({ noResult: true, first: [started('review'), says('Waiting.')],
+    later: [{ at: 50, exit: true, code: 1, stderr: 'fixture unexpected exit' }],
+    recovered: { first: [says('Read the existing review. Work completed.')] } });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Review', { model: 'opus', effort: 'high' }, { origin: { kind: 'owner' } });
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'error');
+  assert.match(done.error!, /fixture unexpected exit/);
+  assert.match(done.output, /code=1.*result=false.*inputClosedByTower=false/);
+  const recovery = await until(() => manager.list().find(item => item.scheduled?.afterRunId === run.id));
+  assert.deepEqual([recovery.origin, recovery.model, recovery.effort, recovery.scheduled?.backgroundRecoveryAttempt], [{ kind: 'owner' }, 'opus', 'high', 1]);
+  assert.equal((await settled(manager, recovery.id)).status, 'completed');
+  assert.match((await entries())[1].user!, /First inspect existing output files/);
+});
+
+test('repeated unexpected exits stop after three persisted recovery attempts', async t => {
+  const { manager, cleanup } = await fixture({ noResult: true, first: [started('review')], later: [{ at: 20, exit: true, code: 1 }] }, { recoveryMs: 10 });
+  t.after(cleanup);
+  await manager.enqueue(SESSION, 'Review', {}, { origin: { kind: 'owner' } });
+  const last = await until(() => manager.list().find(run => run.scheduled?.backgroundRecoveryAttempt === 3 && run.status === 'error'), 10_000);
+  assert.match(last.output, /stopped after three attempts/);
+  assert.equal(manager.list().length, 4);
+  assert.equal(manager.list().some(run => run.status === 'queued' || run.status === 'running'), false);
+});
+
+test('owner cancellation and a background wait timeout never schedule recovery', async t => {
+  for (const stop of [false, true]) {
+    const { manager, cleanup } = await fixture({ first: [started('review')] }, { waitMaxMs: stop ? 30_000 : 50 });
+    t.after(cleanup);
+    const run = await manager.enqueue(SESSION, 'Review', {}, { origin: { kind: 'owner' } });
+    await until(() => find(manager, run.id).backgroundWait);
+    if (stop) await manager.cancel(run.id);
+    await settled(manager, run.id);
+    assert.equal(manager.list().length, 1);
+  }
+});
+
+test('a newer owner instruction supersedes queued recovery', async t => {
+  const { manager, cleanup } = await fixture({ first: [started('review')], later: [{ at: 30, exit: true }], recovered: { first: [says('New request handled.')] } }, { recoveryMs: 60_000 });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Review', {}, { origin: { kind: 'owner' } });
+  await settled(manager, run.id);
+  const recovery = manager.list().find(item => item.scheduled)!;
+  assert.ok(recovery);
+  const newer = await manager.enqueue(SESSION, 'Different instruction', {}, { origin: { kind: 'owner' } });
+  assert.equal(find(manager, recovery.id).status, 'cancelled');
+  assert.equal((await settled(manager, newer.id)).status, 'completed');
+});
+
+
+test('recovery attempt limits survive saved-state validation', () => {
+  const run = { id: '30000000-0000-4000-8000-000000000001', sessionId: SESSION, prompt: 'Resume', status: 'queued',
+    createdAt: new Date().toISOString(), output: '', scheduled: { at: new Date().toISOString(),
+      afterRunId: '30000000-0000-4000-8000-000000000002', backgroundRecoveryAttempt: 3 } };
+  assert.equal(isSavedRun(JSON.parse(JSON.stringify(run))), true);
+  for (const attempt of [0, 4, -1, 1.5, '1']) {
+    assert.equal(isSavedRun({ ...run, scheduled: { ...run.scheduled, backgroundRecoveryAttempt: attempt } }), false);
+  }
+});
+
+test('an explicit provider error or a pending approval is never retried', async t => {
+  for (const script of [
+    { first: [started('review'), { ...result, is_error: true, errors: ['Access refused'] }], noResult: true },
+    { first: [started('review'), { type: 'control_request', request_id: 'approve', request: { subtype: 'can_use_tool', tool_name: 'Bash', input: { command: 'fixture' } } }], noResult: true, later: [{ at: 100, exit: true, code: 1 }] },
+  ]) {
+    const { manager, cleanup } = await fixture(script);
+    t.after(cleanup);
+    const run = await manager.enqueue(SESSION, 'Review', {}, { origin: { kind: 'owner' } });
+    assert.equal((await settled(manager, run.id)).status, 'error');
+    assert.equal(manager.list().length, 1);
+  }
+});
+
+
+test('a repeated result is not evidence that Claude consumed a pending task notice', async t => {
+  const { manager, entries, cleanup } = await fixture({ first: [started('review')],
+    later: [{ at: 50, frames: [notified('review'), result] }], reply: [says('Read the review.')] }, { followUpMs: 100 });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Review');
+  assert.equal((await settled(manager, run.id)).status, 'completed');
+  assert.match((await entries())[1].user!, /Background work you started/);
+  assert.match(find(manager, run.id).output, /Read the review/);
 });

@@ -53,6 +53,8 @@ interface RunnerOptions {
   backgroundFollowUpMs?: number;
   /** How long a turn that has answered stays open for background work still running before its input is closed. */
   backgroundWaitMaxMs?: number;
+  /** Delay before resuming a provider that exited with unfinished background work. */
+  backgroundRecoveryMs?: number;
 }
 interface OwnedProcess {
   child: ChildProcessWithoutNullStreams;
@@ -946,6 +948,9 @@ export class RunManager extends EventEmitter {
     let waitTimedOut = false;
     let followUpTimer: ReturnType<typeof setTimeout> | undefined;
     let waitTimer: ReturnType<typeof setTimeout> | undefined;
+    let finishTimer: ReturnType<typeof setTimeout> | undefined;
+    let inputClosedByTower = false;
+    const clearFinishTimer = () => { if (finishTimer) clearTimeout(finishTimer); finishTimer = undefined; };
     const clearWaitTimers = () => {
       if (followUpTimer) clearTimeout(followUpTimer);
       if (waitTimer) clearTimeout(waitTimer);
@@ -954,6 +959,7 @@ export class RunManager extends EventEmitter {
     const endWait = () => { if (run.backgroundWait) { delete run.backgroundWait; this.changed(); } };
     const beginTurn = () => {
       if (turnActive) return;
+      clearFinishTimer();
       turnActive = true; clearWaitTimers(); endWait(); tasks.observeTurnStart(); owned.claude?.setTurnIdle(false);
       // Each turn reports its own completion and its own reply.
       sawCompletion = false; shown = false; sawPartial = false; messageHasPartial = false;
@@ -972,7 +978,7 @@ export class RunManager extends EventEmitter {
       },
       onError: error => { streamError = error.message; this.stopOwned(run.id, owned); },
     });
-    const closeInput = () => { clearWaitTimers(); owned.claude?.close(); if (!child.stdin.writableEnded) child.stdin.end(); };
+    const closeInput = () => { inputClosedByTower = true; clearFinishTimer(); clearWaitTimers(); owned.claude?.close(); if (!child.stdin.writableEnded) child.stdin.end(); };
     const idle = () => !turnActive && run.status === 'running' && child.exitCode === null && !child.stdin.writableEnded;
     const arm = (timer: 'followUp' | 'wait', ms: number) => {
       const handle = setTimeout(timer === 'followUp' ? followUp : waitLimit, ms);
@@ -1005,7 +1011,18 @@ export class RunManager extends EventEmitter {
     owned.finishInput = () => {
       if (!sawCompletion || turnActive || owned.claude?.hasPendingSteers() || child.stdin.writableEnded) return;
       // A failed turn is not kept open for its background work.
-      if (streamError || (!tasks.outstanding && !noticeId)) { endWait(); closeInput(); return; }
+      if (streamError) { endWait(); closeInput(); return; }
+      if (!tasks.outstanding && !noticeId) {
+        // Task bookends can follow a result, even in the next stdout chunk. Recheck after they drain.
+        if (!finishTimer) finishTimer = setTimeout(() => {
+          finishTimer = undefined;
+          if (!idle() || owned.claude?.hasPendingSteers()) return;
+          if (tasks.outstanding || noticeId) { owned.finishInput?.(); return; }
+          endWait(); closeInput();
+        }, 250);
+        return;
+      }
+      clearFinishTimer();
       if (tasks.unreadCount && !followUpTimer) arm('followUp', followUpMs);
       if (!run.backgroundWait) {
         run.backgroundWait = { since: new Date().toISOString(), tasks: tasks.runningCount };
@@ -1060,7 +1077,7 @@ export class RunManager extends EventEmitter {
       }
       const mainContext = event.parent_tool_use_id == null && (event.session_id === undefined || event.session_id === session.nativeId);
       // Anything the main conversation says after a result is a follow-up turn, typically Claude taking a task's notice.
-      if (mainContext && ['assistant', 'user', 'stream_event', 'result'].includes(event.type)) beginTurn();
+      if (mainContext && ['assistant', 'user', 'stream_event'].includes(event.type)) beginTurn();
       if (mainContext && event.type === 'user' && event.isReplay) {
         // Tower's own notice is taken once Claude replays it; the turn it starts must then reach its result.
         if (noticeId && event.uuid === noticeId) noticeId = undefined;
@@ -1092,7 +1109,7 @@ export class RunManager extends EventEmitter {
           if (block.type === 'tool_use') show(`[${block.name}]\n`);
         }
         messageHasPartial = false;
-      } else if (event.type === 'result') {
+      } else if (event.type === 'result' && mainContext) {
         const capacity = contextInput && mainContext ? modelContextWindow(event.modelUsage, contextInput.model) : undefined;
         if (contextInput && contextCapacity(capacity) && sawSessionId && !streamError) {
           run.contextUsage = { ...contextInput, contextWindow: capacity, usedPercent: contextInput.usedTokens / capacity * 100,
@@ -1134,7 +1151,9 @@ export class RunManager extends EventEmitter {
     child.on('error', (error: Error) => { streamError = errorMessage(error); });
     child.on('close', async (code: number | null, signal: NodeJS.Signals | null) => {
       if (buffer) parseLine(buffer);
-      clearWaitTimers();
+      clearFinishTimer(); clearWaitTimers();
+      const pendingApproval = !!run.approvals?.length;
+      const pendingSteer = owned.claude?.hasPendingSteers();
       delete run.backgroundWait;
       owned.claude?.close();
       // A newly bound UUID must be durable before this turn reports success.
@@ -1147,10 +1166,23 @@ export class RunManager extends EventEmitter {
       this.locallySettled.set(session.id, Date.now());
       if (this.locallySettled.size > 1000) this.locallySettled.delete(this.locallySettled.keys().next().value!);
       if (run.status !== 'cancelled') {
+        const recover = !streamError && !waitTimedOut && sawSessionId && (tasks.outstanding > 0 || !!noticeId)
+          && !pendingApproval && !pendingSteer && !this.stopping && run.origin?.kind === 'owner';
+        if (tasks.outstanding || noticeId) this.append(run, `\n[Tower] Provider exit: code=${code ?? 'none'}, signal=${signal ?? 'none'}, result=${sawCompletion}, inputClosedByTower=${inputClosedByTower}, runningTasks=${tasks.runningCount}, unreadTasks=${tasks.unreadCount}.\n`);
         if (!streamError && code === 0 && (!sawCompletion || !sawSessionId)) streamError = 'The provider exited without confirming completion in the requested conversation.';
         if (!streamError && waitTimedOut) streamError = 'The turn answered, but its background work did not finish within the time Tower waits; the work was ended with the turn.';
         else if (!streamError && (tasks.outstanding || noticeId)) streamError = 'Claude Code exited before it took the results of background work it started in this turn.';
-        if (streamError || code !== 0) this.fail(run, streamError ?? (stderr.trim() || `The provider exited ${signal ? `with signal ${signal}` : `with code ${code ?? 'unknown'}`}.`));
+        if (streamError || code !== 0) {
+          const detail = `The provider exited ${signal ? `with signal ${signal}` : `with code ${code ?? 'unknown'}`}.`;
+          this.fail(run, [streamError, detail, stderr.trim()].filter(Boolean).join('\n'));
+          if (recover) {
+            const attempt = (run.scheduled?.backgroundRecoveryAttempt ?? 0) + 1;
+            if (attempt <= 3) {
+              this.scheduleContinuation(run, { at: Date.now() + (this.options.backgroundRecoveryMs ?? 15_000) * attempt,
+                prompt: `${TOWER_NOTICE} The previous Claude process exited while background work still had pending results. Resume the unfinished work in this conversation. First inspect existing output files, task records, and running processes: the delegated work may still be running or may already have finished. Do not start it again or repeat completed actions without checking. Continue through the result and report it. If work is still running, wait using a foreground blocking tool call instead of ending with a promise to return.` }, attempt);
+            } else this.append(run, '\n[Tower] Automatic background recovery stopped after three attempts.\n');
+          }
+        }
         else {
           run.status = 'completed'; run.finishedAt = new Date().toISOString();
           const wakeup = wakeups.pending;
@@ -1169,16 +1201,21 @@ export class RunManager extends EventEmitter {
    * Queues the agent's own continuation with the authority of the turn that scheduled it. Slack and trigger
    * work follows its event's lifecycle, so an agent there does not schedule more of it.
    */
-  private scheduleContinuation(after: Run, wakeup: Wakeup): void {
+  private scheduleContinuation(after: Run, wakeup: Wakeup, backgroundRecoveryAttempt?: number): void {
     if (automated(after)) return;
     const live = [...this.runs.values()].filter(run => run.status === 'queued' || run.status === 'running');
     // An instruction inserted into the finished turn still mirrors it until the next change; it is part of that turn.
     if (live.some(run => run.sessionId === after.sessionId && run.steering?.targetRunId !== after.id) || live.filter(run => run.scheduled).length >= MAX_QUEUED) return;
     const run: Run = { id: randomUUID(), sessionId: after.sessionId, origin: after.origin ?? { kind: 'unknown' }, prompt: wakeup.prompt, status: 'queued',
-      createdAt: new Date().toISOString(), output: scheduledOutput, scheduled: { at: new Date(wakeup.at).toISOString(), afterRunId: after.id },
+      createdAt: new Date().toISOString(), output: scheduledOutput, scheduled: { at: new Date(wakeup.at).toISOString(), afterRunId: after.id, ...(backgroundRecoveryAttempt ? { backgroundRecoveryAttempt } : {}) },
       ...(after.unattended ? { unattended: true } : {}), ...(after.model ? { model: after.model } : {}), ...(after.effort ? { effort: after.effort } : {}) };
+    if (backgroundRecoveryAttempt) {
+      run.output = 'Tower will resume unfinished background work after an unexpected provider exit.';
+      this.append(after, `\n[Tower] Scheduled background recovery ${backgroundRecoveryAttempt}/3.\n`);
+    }
     this.runs.set(run.id, run);
     this.prune();
+    this.changed();
   }
 
   private supersede(run: Run, reason: string): void {

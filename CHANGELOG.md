@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.45.1] - 2026-09-27
+
+### Fixed
+- **Recover unfinished background work when Claude exits early.** If an owner-started Claude process exits with background results still outstanding, Tower resumes the same conversation after a short delay, asking it to inspect existing output and running work before doing anything again. Recovery is limited to three attempts, saved across worker restarts. An explicit stop, a newer instruction, a pending approval, uncertain instruction delivery, provider-reported failure, or the background wait limit does not trigger recovery. Slack and trigger runs retain their existing lifecycle.
+- A result now gets a short drain period before Tower closes Claude's input, so a background-task start arriving just after it can keep the process open. A subagent's result cannot finish its parent, and a repeated result cannot count as having read a background notice.
+- Early-exit errors retain the process exit code, signal, and stderr. The run also records whether Tower closed input and how many background results were outstanding, instead of hiding those details behind a generic background-work error.
+
 ## [1.45.0] - 2026-09-27
 
 ### Added

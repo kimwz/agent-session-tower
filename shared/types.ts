@@ -165,9 +165,10 @@ export interface Run {
   /**
    * A continuation the agent scheduled for itself (Claude's ScheduleWakeup) in the turn `afterRunId`. The native
    * wakeup lives only inside the provider process, which ends with Tower's turn, so Tower keeps the run queued
-   * until `at` and then resumes the conversation with the agent's own prompt.
+   * until `at` and then resumes the conversation with the agent's own prompt. Background recovery uses the same
+   * queue; its persisted attempt count limits retries after unexpected provider exits.
    */
-  scheduled?: { at: string; afterRunId: string };
+  scheduled?: { at: string; afterRunId: string; backgroundRecoveryAttempt?: number };
   /**
    * The turn has answered but background work it started (a background command, Monitor or agent) is still running
    * inside the provider process. Tower keeps the turn open so the agent can pick up the results; `since` is when the
