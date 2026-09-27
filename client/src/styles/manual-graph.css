@@ -34,38 +34,16 @@
 .agent-outcome.needsOwner { --outcome:#ffa24c; }
 .agent-outcome.blocked { --outcome:#ff6b6b; }
 .agent-outcome.progress { --outcome:#76b6ff; }
-/* Top left of a card: an unread mark, kept apart from the outcome so it reads at a glance. */
+/* Top left of a card: a plain N marks new activity, apart from the outcome at the top right. */
 .agent-unread {
   position:absolute;
-  top:10px;
-  left:10px;
-  display:flex;
-  align-items:center;
-  gap:5px;
-  padding:2px 7px 2px 2px;
-  border:1px solid #76b6ff5c;
-  border-radius:999px;
-  background:#76b6ff1f;
-  color:#b8d8ff;
-  font-size:10px;
-  font-weight:600;
-  line-height:14px;
-  white-space:nowrap;
-  pointer-events:none;
-}
-.agent-unread b {
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  width:14px;
-  height:14px;
-  border-radius:50%;
-  background:#e5484d;
-  color:#fff;
-  font-size:9px;
+  top:9px;
+  left:13px;
+  color:#4ade80;
+  font-size:15px;
   font-weight:800;
-  line-height:1;
-  box-shadow:0 0 0 2px #e5484d2e;
+  line-height:18px;
+  pointer-events:none;
 }
 .agent-card.has-unread:not(.selected) { border-color:#37618e; }
 .manual-layout .agent-card { cursor:grab; height:202px; min-height:202px; }
