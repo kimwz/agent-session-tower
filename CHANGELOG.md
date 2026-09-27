@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.46.0] - 2026-09-27
+
+### Added
+- **The master answers quick questions without waiting.** While its room is in use, the master follows the same live updates a page receives, and every turn starts from a short summary of what is working, what waits for you, and what finished in the last 30 minutes. Questions such as "what is running?" are answered from that summary in one step, instead of fetching a whole snapshot that could be cut short.
+- **Read-only lookups.** For anything the summary leaves out, the master asks one read-only SQL query over the current sessions, requests, triggers, and joined computers. Queries can only read, return at most 500 rows, and are stopped after 2 seconds; they run in a separate process that also ends if its parent does. Secrets are hidden before anything is shortened or stored.
+- A joined computer that has not sent current data yet is named in the summary, so its work is never silently left out. Work the master hands to a conversation is followed on the live updates instead of repeated polling.
+
 ## [1.45.1] - 2026-09-27
 
 ### Fixed
