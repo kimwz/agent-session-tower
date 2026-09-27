@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.44.0] - 2026-09-27
+
+### Added
+- **Master agent: tell Tower what to do in plain words.** A round button at the bottom left (or **Shift+M**) opens one conversation with the master agent. It does what Tower's own pages do, through the same routes they use: it looks up sessions and runs, starts sessions and sends them messages, runs Auto Prompt, and changes triggers, folders, git, files, terminals, joined computers, Slack, public agents, notifications and settings. Work it hands to a session is tracked, and when that session finishes the master tells you what came of it. It can also open a session on your screen.
+  - Save an OpenAI API key in the panel's settings (gear icon) to turn it on. It uses `gpt-6-luna` with low reasoning by default; both can be changed there.
+  - It does whatever you ask, without confirmation steps. Its settings offer optional limits: only report when finished work comes back, computers it may only read from, and a cap on irreversible changes per request. All are off by default.
+  - Keys and tokens you paste, or that a page returns, reach Tower as references and never the model (on by default). Account management and Tower updates still need a request typed on this computer, as on Tower's own pages.
+  - It runs in its own background process, so restarting or updating Tower's web server does not interrupt it. What it keeps is in `master/` in the state directory.
+  - **생각 멈춤** stops its thinking. Changes it already sent finish and are recorded. A change whose outcome is unknown is never sent a second time.
+  - Voice conversation (GPT-Live), fast lookups in a read-only database and opening other panels on your screen come in later releases. The design is in [#3](https://github.com/kimwz/agent-session-tower/issues/3).
+
 ## [1.43.0] - 2026-09-27
 
 ### Changed
