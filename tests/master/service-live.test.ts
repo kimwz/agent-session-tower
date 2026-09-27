@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { LiveState } from '../../server/master/live-state.js';
 import { MasterJournal } from '../../server/master/journal.js';
 import type { ModelCall, ModelItem, ModelRequest } from '../../server/master/model-openai.js';
-import { ReadDatabase } from '../../server/master/read-db.js';
+import { lookupsSupported, ReadDatabase } from '../../server/master/read-db.js';
 import { MasterRoom } from '../../server/master/room.js';
 import { MasterService } from '../../server/master/service.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
@@ -19,7 +19,7 @@ const session = (id: string, status: Session['status']): Session => ({ id, nativ
   status, statusReason: '', createdAt: '2026-09-27T00:00:00Z', updatedAt: '2026-09-27T00:00:00Z', lastRequestAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true });
 const say = (text: string): ModelItem => ({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
 
-test('each turn starts from the live Tower status, and quick lookups answer from it without asking for whole snapshots', async t => {
+test('each turn starts from the live Tower status, and quick lookups answer from it without asking for whole snapshots', { skip: !lookupsSupported() && 'this Node.js has no SQLite authorizer' }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-master-live-'));
   const state: Snapshot = { sessions: [session('a', 'working'), session('b', 'idle')], runs: [], providers: [], scanning: false, hostname: 'here', version: '1.46.0', updatedAt: '' };
   const paths: string[] = [];
@@ -61,4 +61,37 @@ test('each turn starts from the live Tower status, and quick lookups answer from
   assert.equal(requests.length, 2);
   assert.ok(!paths.includes('/api/snapshot'), 'no whole snapshot was fetched');
   assert.equal(paths.filter(path => path.startsWith('/api/events')).length, 1, 'one live stream, like one more page');
+});
+
+test('without lookups (Node.js 22 has no SQLite authorizer) the master is not offered them and still starts from the live status', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-master-nolookup-'));
+  const state: Snapshot = { sessions: [session('a', 'working')], runs: [], providers: [], scanning: false, hostname: 'here', version: '1.46.1', updatedAt: '' };
+  const streams: ServerResponse[] = [];
+  const server = createServer((req, res) => {
+    if (req.url!.startsWith('/api/events')) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(`id: 1\nevent: snapshot\ndata: ${JSON.stringify(state)}\n\n`);
+      streams.push(res);
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'application/json' }).end('{}');
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const tower = new TowerClient();
+  tower.setCredentials({ port: (server.address() as { port: number }).port, token: 'a'.repeat(64), callerSecret: 'b'.repeat(64) });
+  const settings = new MasterSettingsStore(dir); await settings.start(); await settings.update({ apiKey: 'sk-test-0123456789abcdef' });
+  const room = new MasterRoom(dir); await room.start();
+  const journal = new MasterJournal(dir); await journal.start();
+  const live = new LiveState((path, signal) => tower.stream(path, signal));
+  const requests: ModelRequest[] = [];
+  const model: ModelCall = async request => { requests.push(request); return { output: [say('a 하나가 작업 중입니다.')], text: 'a 하나가 작업 중입니다.' }; };
+  const service = new MasterService({ settings, room, journal, tower, model, live, taskPollMs: 40 });
+  await service.start();
+  t.after(async () => { await service.close(); live.close(); for (const stream of streams) stream.end(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
+  await service.send({ clientMessageId: 'live-0002', text: '지금 뭐 돌아가?', local: true });
+  await until(() => room.recent(10).some(entry => entry.data.kind === 'master' && entry.data.text.includes('a 하나')), 15_000);
+  assert.equal(requests.length, 1);
+  assert.match(String(requests[0].input[0].content), /Working now \(1\):\n {2}- title a/);
+  assert.deepEqual(requests[0].tools.map(tool => tool.name), ['tower_api', 'session_read', 'show_session']);
+  assert.doesNotMatch(requests[0].instructions, /tower_query/);
 });

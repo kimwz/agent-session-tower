@@ -3,12 +3,15 @@ import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { createServer, type ServerResponse } from 'node:http';
 import { LiveState } from '../../server/master/live-state.js';
-import { ReadDatabase, tablesFrom } from '../../server/master/read-db.js';
+import { lookupsSupported, ReadDatabase, tablesFrom } from '../../server/master/read-db.js';
 import { statusDigest } from '../../server/master/digest.js';
 import { TowerClient } from '../../server/master/tower-client.js';
 import { diffSnapshots, indexSnapshot } from '../../shared/snapshot-patch.js';
 import type { Session, Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
+
+/** Lookups need SQLite's authorizer, which Node.js 22 lacks; there the master simply does not offer them. */
+const noLookups = !lookupsSupported() && 'this Node.js has no SQLite authorizer';
 
 const session = (id: string, status: Session['status'], extra: Partial<Session> = {}): Session => ({ id, nativeId: id, provider: 'claude', title: `title ${id}`, cwd: `/work/${id}`, project: `project-${id}`,
   status, statusReason: '', createdAt: '2026-09-27T00:00:00Z', updatedAt: '2026-09-27T00:00:00Z', lastMessage: `last ${id}`, messageCount: 3, isSubagent: false, resumable: true, ...extra });
@@ -57,7 +60,7 @@ test('the master follows the page\'s event stream: snapshots, patches and joined
   await until(() => live.snapshot()?.sessions.length === 1);
 });
 
-test('the quick-lookup database answers reads only: no writes, PRAGMA, ATTACH, recursion or second statements', async t => {
+test('the quick-lookup database answers reads only: no writes, PRAGMA, ATTACH, recursion or second statements', { skip: noLookups }, async t => {
   const db = new ReadDatabase();
   t.after(() => db.close());
   const tables = () => tablesFrom(snapshot([session('a', 'working'), session('b', 'idle', { customTitle: 'key sk-proj-ABCDEFGHIJKLMNOPQRSTUV' })]), new Map([[NODE, snapshot([session('n', 'working')])]]),
@@ -75,7 +78,7 @@ test('the quick-lookup database answers reads only: no writes, PRAGMA, ATTACH, r
   assert.equal((await db.query('SELECT count(*) AS n FROM sessions', 'v1', tables)).rows[0].n, 3, 'nothing was changed');
 });
 
-test('a query is cut at 500 rows, and one that runs too long is stopped without breaking the next', async t => {
+test('a query is cut at 500 rows, and one that runs too long is stopped without breaking the next', { skip: noLookups }, async t => {
   const db = new ReadDatabase();
   t.after(() => db.close());
   const many = () => tablesFrom(snapshot(Array.from({ length: 600 }, (_, index) => session(`s${index}`, 'idle'))), new Map(), text => text);
@@ -122,7 +125,7 @@ test('a first look waits a moment for joined computers, and says which ones have
   assert.match(statusDigest(live.snapshot(), live.nodeSnapshots(), Date.now(), live.missing()), /No current data yet from: Laptop/);
 });
 
-test('every text in the lookup database is hidden before it is stored, names and paths included, and sizes count bytes', async t => {
+test('every text in the lookup database is hidden before it is stored, names and paths included, and sizes count bytes', { skip: noLookups }, async t => {
   const db = new ReadDatabase();
   t.after(() => db.close());
   const key = 'sk-proj-ABCDEFGHIJKLMNOPQRSTUV';
@@ -146,7 +149,7 @@ test('the digest counts conversations that finished on their own, once each', ()
   assert.equal(digest.match(/title ran/g)?.length, 1);
 });
 
-test('a lookup process whose host was killed exits by itself', async () => {
+test('a lookup process whose host was killed exits by itself', { skip: noLookups }, async () => {
   const helper = spawn(process.execPath, ['--import', 'tsx', '-e', `
     const { ReadDatabase } = await import(${JSON.stringify(new URL('../../server/master/read-db.ts', import.meta.url).href)});
     const db = new ReadDatabase();
@@ -164,7 +167,7 @@ test('a lookup process whose host was killed exits by itself', async () => {
   await until(() => !alive(), 8000);
 });
 
-test('a lookup process stuck in a runaway query when its host is killed is ended by its CPU limit', async () => {
+test('a lookup process stuck in a runaway query when its host is killed is ended by its CPU limit', { skip: noLookups }, async () => {
   const helper = spawn(process.execPath, ['--import', 'tsx', '-e', `
     const { ReadDatabase, tablesFrom } = await import(${JSON.stringify(new URL('../../server/master/read-db.ts', import.meta.url).href)});
     const db = new ReadDatabase({ cpuLimitSeconds: 1 });
@@ -185,7 +188,7 @@ test('a lookup process stuck in a runaway query when its host is killed is ended
   await until(() => !alive(), 8000);
 });
 
-test('a key at the edge of a shortened text is hidden whole first, in the lookup database and in the digest', async t => {
+test('a key at the edge of a shortened text is hidden whole first, in the lookup database and in the digest', { skip: noLookups }, async t => {
   const db = new ReadDatabase();
   t.after(() => db.close());
   const key = 'AKIAABCDEFGHIJKLMNOP';

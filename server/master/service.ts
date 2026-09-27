@@ -185,7 +185,7 @@ export class MasterService {
         if (Date.now() - started > TURN_MS) { final = '시간이 오래 걸려 여기서 멈췄습니다. 위 작업 기록을 확인해 주세요.'; break; }
         let draft = '';
         let lastDraft = 0;
-        const result = await model({ model: settings.model, effort: settings.effort, instructions: masterInstructions(), input: items, tools: TOOLS }, delta => {
+        const result = await model({ model: settings.model, effort: settings.effort, instructions: masterInstructions(Boolean(this.options.readDb)), input: items, tools: this.options.readDb ? TOOLS : TOOLS.filter(tool => tool.name !== 'tower_query') }, delta => {
           draft += delta;
           if (Date.now() - lastDraft > 150) { lastDraft = Date.now(); room.setDraft({ turnId, text: draft }); }
         }, turn.abort.signal);

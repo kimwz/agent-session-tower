@@ -6,7 +6,7 @@ import type { MasterStreamEvent } from '../../shared/master.js';
 import { acquireStateLock, MonitorAlreadyRunning } from '../instance/state-lock.js';
 import { MasterJournal } from './journal.js';
 import { LiveState } from './live-state.js';
-import { ReadDatabase } from './read-db.js';
+import { lookupsSupported, ReadDatabase } from './read-db.js';
 import { openAiResponses, type ModelCall } from './model-openai.js';
 import { masterPaths } from './paths.js';
 import { MasterRoom } from './room.js';
@@ -46,7 +46,7 @@ export async function startMasterHost(options: MasterHostOptions) {
   const journal = new MasterJournal(paths.data);
   const tower = new TowerClient();
   const live = new LiveState((path, signal) => tower.stream(path, signal));
-  const readDb = new ReadDatabase();
+  const readDb = lookupsSupported() ? new ReadDatabase() : undefined;
   let service: MasterService | undefined;
   let lastRequest = Date.now();
   let pending = 0;
@@ -146,7 +146,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     await unlink(paths.socket).catch(() => {});
     await unlink(paths.token).catch(() => {});
     live.close();
-    readDb.close();
+    readDb?.close();
     try { await service?.close(); } finally {
       await release();
       if (idle) options.onClosed?.();

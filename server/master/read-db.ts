@@ -29,6 +29,18 @@ function loaderArgs(argv: readonly string[]): string[] {
 }
 
 /**
+ * Whether this Node.js has SQLite's authorizer, which keeps lookups read-only. Node.js 22 has none; the master then
+ * looks things up through its other tools.
+ */
+export function lookupsSupported(): boolean {
+  try {
+    const sqlite = process.getBuiltinModule('node:sqlite') as { DatabaseSync: { prototype: { setAuthorizer?: unknown } }; constants?: Record<string, number> };
+    return typeof sqlite.DatabaseSync.prototype.setAuthorizer === 'function'
+      && ['SQLITE_SELECT', 'SQLITE_READ', 'SQLITE_FUNCTION', 'SQLITE_OK', 'SQLITE_DENY'].every(name => typeof sqlite.constants?.[name] === 'number');
+  } catch { return false; }
+}
+
+/**
  * A read-only SQL view of what the owner's pages see, for the master's quick questions. The database lives in a
  * `--master-query` process, killed when a query runs too long (SQLite cannot be interrupted from JavaScript). It is
  * rebuilt from the live snapshot whenever that changed since the last query, so deletions and sharing changes need no
