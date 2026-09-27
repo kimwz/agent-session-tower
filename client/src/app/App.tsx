@@ -49,6 +49,7 @@ const editingControls = 'input, textarea, select, [contenteditable]:not([content
 const shortcutEditingControls = 'input:not([type="checkbox"]):not([type="radio"]), textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"]';
 
 const WorkspacePage = lazy(() => import('../workspace/WorkspacePage').then(module => ({ default: module.WorkspacePage })));
+const MasterDock = lazy(() => import('../master/MasterDock').then(module => ({ default: module.MasterDock })));
 export function App() {
   const params = new URLSearchParams(window.location.search);
   const cwd = params.get('workspace');
@@ -175,6 +176,8 @@ function TowerApp() {
     return () => navigator.serviceWorker.removeEventListener('message', onMessage);
   }, [selectSession]);
   const closeChat = useCallback(() => selectSession(null), [selectSession]);
+  // The master agent opens what it found through the page's own selection, never through its own state.
+  const masterControls = useMemo(() => ({ selectSession }), [selectSession]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
@@ -392,5 +395,6 @@ function TowerApp() {
     </div>
     <AutoPromptDialog visible={showAutoPrompt} initialCwd={autoPromptCwd} initialNode={autoPromptNode === '' ? undefined : autoPromptNode ?? (autoPromptCwd ? undefined : selectedSession?.node)} providers={snapshot?.providers || []} hosts={hosts} projects={projects} sessions={sessions} jobs={view?.autoPrompts || []} token={token} connected={connection === 'connected'} onClose={closeAutoPrompt} onNavigate={openAutoPromptSession} onRefresh={refresh} />
     {showNewSession && <NewSessionDialog providers={snapshot?.providers || []} hosts={hosts} projects={projects} initialCwd={newSessionCwd || selectedSession?.cwd || (project !== 'all' ? project : undefined)} draft={newSessionDraft} token={token} connected={connection === 'connected'} onClose={closeNewSession} onCreated={sessionCreated} />}
+    {token && <Suspense fallback={null}><MasterDock token={token} controls={masterControls} sessionId={activeChatId ?? null} /></Suspense>}
   </div>;
 }

@@ -3,6 +3,7 @@ import { stat, truncate } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { isSea } from 'node:sea';
 import { nativeHistory } from './sessions/native-history.js';
 import { SessionTitleStore } from './stores/session-titles.js';
@@ -13,6 +14,10 @@ import { DurableRunManager } from './runs/durable-runner.js';
 import { runRunnerWorker } from './runs/worker.js';
 import { runTerminalHost } from './terminals/host.js';
 import { TerminalHostClient } from './terminals/client.js';
+import { runMasterHost } from './master/host.js';
+import { MasterClient } from './master/client.js';
+import { masterRoutes } from './master/routes.js';
+import type { WebCredentials } from './master/tower-client.js';
 import { startSlackMcp, startTowerMcp } from './slack/mcp-bridge.js';
 import { getProviderHealth } from './providers/discovery.js';
 import { createMonitorServer } from './http/server.js';
@@ -110,6 +115,11 @@ async function main() {
   if (args[0] === '--terminal-host') {
     if (args.length !== 2 || !args[1]) throw new Error('Terminal host requires a state directory.');
     await runTerminalHost(resolve(args[1]));
+    return;
+  }
+  if (args[0] === '--master-host') {
+    if (args.length !== 2 || !args[1]) throw new Error('Master host requires a state directory.');
+    await runMasterHost(resolve(args[1]));
     return;
   }
   if (args.includes('--help') || args.includes('-h')) { console.log(HELP); return; }
@@ -418,7 +428,11 @@ async function main() {
     remoteNodes = new RemoteNodes(controllerLinks, nodeViews);
     remoteNodes.on('summary', changed);
   }
-  const { server, dispose } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes,
+  // The master agent runs in its own process; this web only starts it, tells it how to reach this API, and relays.
+  let webCredentials: WebCredentials | undefined;
+  const masterCallerSecret = randomBytes(32).toString('hex');
+  const master = new MasterClient({ stateDir, credentials: () => webCredentials });
+  const { server, dispose, token: pageToken } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes, master: { callerSecret: masterCallerSecret, handle: masterRoutes(master) },
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })) } : { error: linkError },
     workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications,
@@ -455,18 +469,21 @@ async function main() {
     if ((error as NodeJS.ErrnoException).code === 'EADDRINUSE') throw new Error(`Port ${port} is already in use. Open http://localhost:${port} if Agent Session Tower is already running, or choose --port 8001.`);
     throw error;
   });
+  const listening = server.address();
+  webCredentials = { port: listening && typeof listening === 'object' ? listening.port : port, token: pageToken, callerSecret: masterCallerSecret };
+  master.start();
   console.log(`\n  Agent Session Tower\n  ${access.browserUrl}\n`);
   printRemoteAccess(host, port, stateDir, publicUrls);
   if (!auth.configured()) console.log(`  Remote account not configured. Open http://localhost:${port} and select Account management in the expanded navigation.\n`);
   console.log('  Reading local Claude Code and Codex sessions…\n  Press Ctrl+C to stop the web server. Agent work continues independently.\n');
   if (open) openBrowser(access.browserUrl);
   let closing = false;
-  // Versions an update left behind go once neither the worker nor the terminal host runs them.
-  // A version is in use while the worker or terminal host runs it; when either cannot be asked, nothing is removed.
+  // Versions an update left behind go once neither the worker nor the terminal or master host runs them.
+  // A version is in use while one of them runs it; when any cannot be asked, nothing is removed.
   const prune = async () => {
     const worker = runs.runnerVersion();
     if (!worker || worker === 'legacy') return;
-    await updates.prune(async () => [worker, await workspaceTerminals.hostVersion()]);
+    await updates.prune(async () => [worker, await workspaceTerminals.hostVersion(), await master.hostVersion()]);
   };
   const pruneLater = () => { void prune().catch(error => console.error(`Old versions were not removed: ${error instanceof Error ? error.message : String(error)}`)); };
   const pruning = [setTimeout(pruneLater, 60_000), setInterval(pruneLater, 60 * 60_000),
@@ -495,6 +512,8 @@ async function main() {
     const stoppingPublic = publicListener.close();
     history.stop();
     auth.close();
+    // The master host keeps running; this web only lets go of it.
+    master.dispose();
     dispose();
     server.closeAllConnections();
     server.close();

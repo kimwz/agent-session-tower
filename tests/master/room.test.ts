@@ -1,0 +1,52 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { MasterRoom } from '../../server/master/room.js';
+import type { MasterStreamEvent } from '../../shared/master.js';
+
+test('the conversation is kept in order across restarts, and a changed entry replaces itself', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-master-room-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const room = new MasterRoom(dir);
+  await room.start();
+  for (let index = 0; index < 520; index++) room.add({ kind: 'owner', text: `m${index}` });
+  const action = room.add({ kind: 'action', turnId: 't', method: 'POST', path: '/api/sessions', state: 'sending', write: true });
+  room.update(action.id, { kind: 'action', turnId: 't', method: 'POST', path: '/api/sessions', state: 'succeeded', write: true });
+  await room.flush();
+  assert.equal(((await stat(join(dir, 'room', '000000.json'))).mode & 0o777), 0o600);
+  const again = new MasterRoom(dir);
+  await again.start();
+  assert.equal(again.lastOrder(), 520);
+  const latest = await again.page(undefined, 3);
+  assert.deepEqual(latest.entries.map(entry => entry.order), [518, 519, 520]);
+  assert.equal(latest.hasMore, true);
+  assert.equal(latest.entries[2].revision, 2);
+  assert.equal(latest.entries[2].data.kind === 'action' && latest.entries[2].data.state, 'succeeded');
+  const across = await again.page(502, 5);
+  assert.deepEqual(across.entries.map(entry => entry.order), [497, 498, 499, 500, 501]);
+  const first = await again.page(2, 10);
+  assert.deepEqual(first.entries.map(entry => entry.order), [0, 1]);
+  assert.equal(first.hasMore, false);
+});
+
+test('a page resumes live changes from its position in this run, and starts over from a checkpoint otherwise', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-master-room-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const room = new MasterRoom(dir);
+  await room.start();
+  const heard: MasterStreamEvent[] = [];
+  const stop = room.subscribe(event => heard.push(event));
+  room.add({ kind: 'owner', text: 'a' });
+  const { epoch, seq } = room.position();
+  room.setDraft({ turnId: 't', text: 'thinking' });
+  room.add({ kind: 'master', text: 'b', turnId: 't', final: true });
+  stop();
+  assert.deepEqual(room.since(epoch, seq)!.map(event => event.type), ['draft', 'entry']);
+  assert.deepEqual(room.since(epoch, room.position().seq), []);
+  assert.equal(room.since('another-run', 0), undefined);
+  assert.equal(room.since(epoch, room.position().seq + 5), undefined);
+  assert.deepEqual(heard.map(event => event.seq), [1, 2, 3]);
+  await room.flush();
+});

@@ -96,6 +96,14 @@ export interface HttpOptions {
     /** `load` reads the state of the computer the draft is for, as it is right now: this one or a joined one. */
     suggestAutoPrompt(input: AutoPromptSuggestionRequest, load: () => Promise<Snapshot>, signal: AbortSignal): Promise<AutoPromptSuggestionResponse>;
   };
+  /**
+   * The master agent's `/api/master/*` routes, answered after the usual sign-in and page-token checks. Its own calls
+   * to this API carry `callerSecret`, which gives them a request budget apart from the owner's pages.
+   */
+  master?: {
+    callerSecret: string;
+    handle(req: IncomingMessage, res: ServerResponse, path: string, url: URL, identity: { local: boolean }): Promise<boolean>;
+  };
 }
 /** Suggestions follow the owner's typing; they change nothing, so they have their own budget apart from changes. */
 const SUGGESTION_PATH = '/api/auto-prompt-suggestions';
@@ -112,7 +120,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, towerUpdate, service, notifications, decisions }: HttpOptions) {
+export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, towerUpdate, service, notifications, decisions, master }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -232,12 +240,20 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         const read = path.match(/^\/api\/(?:nodes\/[a-f0-9]{32}\/)?v1\/([a-z]+\.[a-zA-Z]+)$/)?.[1];
         const readOnly = read !== undefined && isOperationName(read) && !OPERATIONS[read].write;
         if (!login && !readOnly && path !== SUGGESTION_PATH && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
-          const key = req.socket.remoteAddress || 'local';
+          // The master agent's own calls count apart, so they never use up the owner's budget (or the other way round).
+          const caller = req.headers['x-tower-master'];
+          const masterCall = Boolean(master && typeof caller === 'string' && caller.length === master.callerSecret.length && timingSafeEqual(Buffer.from(caller), Buffer.from(master.callerSecret)));
+          const key = masterCall ? '\0master' : req.socket.remoteAddress || 'local';
           const now = Date.now();
           const rate = rates.get(key);
           if (!rate || now - rate.at > 60_000) rates.set(key, { count: 1, at: now });
-          else if (++rate.count > 30) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+          else if (++rate.count > (masterCall ? 120 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
         }
+      }
+      if (master && path.startsWith('/api/master')) {
+        // A signed-out page loses the master's live stream too, like every other stream here.
+        if (!identity.local) trackStream(sessionId, res, () => res.destroy());
+        if (await master.handle(req, res, path, url, identity)) return;
       }
       const secureOrigin = origins.has(`https://${req.headers.host}`) && !origins.has(`http://${req.headers.host}`);
       const operation = path.match(/^\/api\/v1\/([a-z]+\.[a-zA-Z]+)$/);
@@ -605,5 +621,5 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
     clients.clear();
   };
   server.on('close', dispose);
-  return { server, dispose };
+  return { server, dispose, token };
 }
