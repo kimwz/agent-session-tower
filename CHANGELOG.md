@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.44.4] - 2026-09-27
+
+### Changed
+- **Unread cards show the same dot as the sidebar.** The green **N** from 1.44.3 is replaced by the blue dot that already marks unread conversations in the session list, still at the card's top left. Hovering it says 새 활동, and screen readers still announce it.
+
 ## [1.44.3] - 2026-09-27
 
 ### Changed
