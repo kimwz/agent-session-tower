@@ -9,7 +9,7 @@ const MAX_LENGTH = 4000;
  * answered from it in one step. It names its time; anything more is looked up with tower_query.
  */
 export function statusDigest(local: Snapshot | undefined, nodes: ReadonlyMap<string, Snapshot>, now = Date.now(), missing: readonly string[] = [], hide: (text: string) => string = text => text): string {
-  if (!local) return 'Tower status: not available right now (look it up with tower_query or tower_api).';
+  if (!local) return 'Tower status: not available right now (look it up with your tools).';
   const names = new Map((local.nodes ?? []).map(node => [node.id, node.label || node.name]));
   const computers: Array<[string, Snapshot]> = [['', local], ...nodes];
   const lines: string[] = [];
@@ -50,5 +50,5 @@ export function statusDigest(local: Snapshot | undefined, nodes: ReadonlyMap<str
   // Everything is hidden as a whole before the final cut, names of joined computers included.
   const head = hide(`Tower status at ${new Date(now).toISOString()} (live):\n${warning}`);
   const body = hide(lines.join('\n'));
-  return head.length + body.length > MAX_LENGTH ? `${head}${body.slice(0, Math.max(0, MAX_LENGTH - head.length))}\n… (cut; use tower_query for the rest)` : `${head}${body}`;
+  return head.length + body.length > MAX_LENGTH ? `${head}${body.slice(0, Math.max(0, MAX_LENGTH - head.length))}\n… (cut; look up the rest with your tools)` : `${head}${body}`;
 }

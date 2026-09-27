@@ -209,7 +209,7 @@ test('the warning about computers without data survives any cut of a long digest
   const digest = statusDigest(local, new Map(), Date.now(), [computers[59].id]);
   assert.ok(digest.length <= 4200);
   assert.match(digest, /No current data yet from: computer-59-/);
-  assert.match(digest, /cut; use tower_query/);
+  assert.match(digest, /cut; look up the rest/);
 });
 
 test('names of joined computers are hidden whole before the digest is cut', () => {
