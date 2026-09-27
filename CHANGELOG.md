@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.44.3] - 2026-09-27
+
+### Changed
+- **The unread mark is now just a green N.** The top-left badge from 1.44.2 dropped its **새 활동** text and outline, leaving a plain green **N**. Hovering it still says 새 활동, and screen readers still announce it.
+
 ## [1.44.2] - 2026-09-27
 
 ### Changed
