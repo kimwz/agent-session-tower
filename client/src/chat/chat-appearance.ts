@@ -34,12 +34,14 @@ export function useChatFontSize() {
       window.removeEventListener('storage', stored);
     };
   }, []);
-  const changeFontSize = (next: number) => {
-    const value = clamp(next, 11, 22);
-    setFontSize(value); savePreference(fontKey, value);
-    window.dispatchEvent(new CustomEvent(fontChangeEvent, { detail: value }));
-  };
-  return { fontSize, changeFontSize };
+  return { fontSize, changeFontSize: setChatFontSize };
+}
+
+/** Changes the chat text size for every open conversation in this browser, as the text size control does. */
+export function setChatFontSize(next: number): void {
+  const value = clamp(next, 11, 22);
+  savePreference(fontKey, value);
+  window.dispatchEvent(new CustomEvent(fontChangeEvent, { detail: value }));
 }
 
 export function useChatAppearance() {

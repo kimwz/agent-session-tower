@@ -30,7 +30,7 @@ export function TriggerButton({ token, overview, computers = [], targets, ...con
   const [publicAgents, setPublicAgents] = useState(false);
   const attention = overview?.storageError || overview?.triggers.some(item => item.paused || item.error || item.lastEvent?.status === 'error' || item.lastEvent?.status === 'uncertain');
   return <>
-    <button className={`icon-button trigger-button ${attention ? 'attention' : ''}`} aria-label={t('트리거')} title={t('트리거')} disabled={!token} onClick={() => setOpen(true)}><Zap size={18} /></button>
+    <button className={`icon-button trigger-button ${attention ? 'attention' : ''}`} data-master-panel="triggers" aria-label={t('트리거')} title={t('트리거')} disabled={!token} onClick={() => setOpen(true)}><Zap size={18} /></button>
     {open && <TriggerPanel {...context} token={token} overview={overview} computers={computers} targets={targets} onClose={() => setOpen(false)} onOpenSlack={() => { setOpen(false); setSlack(true); }} onOpenPublic={() => { setOpen(false); setPublicAgents(true); }} />}
     {slack && <SlackPanel providers={context.providers} projects={context.projects} token={token} onClose={() => setSlack(false)} />}
     {publicAgents && <PublicAgentsPanel token={token} providers={context.providers} projects={context.projects} onClose={() => setPublicAgents(false)} />}

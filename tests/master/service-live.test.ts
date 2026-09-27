@@ -92,6 +92,6 @@ test('without lookups (Node.js 22 has no SQLite authorizer) the master is not of
   await until(() => room.recent(10).some(entry => entry.data.kind === 'master' && entry.data.text.includes('a 하나')), 15_000);
   assert.equal(requests.length, 1);
   assert.match(String(requests[0].input[0].content), /Working now \(1\):\n {2}- title a/);
-  assert.deepEqual(requests[0].tools.map(tool => tool.name), ['tower_api', 'session_read', 'show_session']);
+  assert.deepEqual(requests[0].tools.map(tool => tool.name), ['tower_api', 'session_read', 'ui', 'browser_action', 'request_secret', 'terminal_read']);
   assert.doesNotMatch(requests[0].instructions, /tower_query/);
 });

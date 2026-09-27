@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { AlertTriangle, ArrowUp, Bot, Check, ChevronDown, ChevronRight, CircleDashed, ExternalLink, LoaderCircle, Settings, Square, X } from 'lucide-react';
-import type { MasterEntry, MasterOverview } from '../../../shared/master';
+import { AlertTriangle, ArrowUp, Bell, Bot, Check, ChevronDown, ChevronRight, CircleDashed, ExternalLink, KeyRound, LoaderCircle, Settings, Square, X } from 'lucide-react';
+import type { MasterCard, MasterEntry, MasterOverview, MasterScreenCommand } from '../../../shared/master';
+import type { NotificationOverview } from '../../../shared/notifications';
+import { api } from '../common/lib';
+import { enablePush, pushSupport } from '../notifications/push';
 import { Markdown } from '../chat/Markdown';
 import { scopedId, splitScopedId } from '../remote/scope';
 import type { RoomState } from './room-stream';
@@ -19,13 +22,15 @@ interface Props {
   onClose(): void;
   onEarlier(): Promise<void>;
   onOpenSession(id: string): void;
+  /** Does what an "open" card offers, with the page's own controls. */
+  onCommand(command: MasterScreenCommand): void;
 }
 
 /** The master's one conversation: what the owner asked, what the master did and said, and the work it handed out. */
 /** The last message whose sending was not confirmed (it may or may not have arrived), for as long as this tab lives. */
 let unconfirmed: { id: string; text: string } | undefined;
 
-export function MasterPanel({ token, room, tabId, sessionId, top, onClose, onEarlier, onOpenSession }: Props) {
+export function MasterPanel({ token, room, tabId, sessionId, top, onClose, onEarlier, onOpenSession, onCommand }: Props) {
   const words = useWords();
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
@@ -89,7 +94,7 @@ export function MasterPanel({ token, room, tabId, sessionId, top, onClose, onEar
       <div className="master-timeline" ref={scroller}>
         {room.hasMore && <button className="master-earlier" onClick={() => void onEarlier()}>{words('이전 대화 보기', 'Show earlier')}</button>}
         {!room.entries.length && !room.draft && <div className="master-empty"><Bot size={26} /><p>{words('Tower에서 하던 일을 말로 시켜 보세요. 예: "지금 작업 중인 세션 알려줘", "monitor에 세션 열어서 로그인 버그 고쳐줘".', 'Ask Tower in plain words. For example: "What is working right now?", "Open a session in monitor and fix the login bug."')}</p></div>}
-        <Timeline entries={room.entries} onOpenSession={onOpenSession} />
+        <Timeline entries={room.entries} token={token} onOpenSession={onOpenSession} onCommand={onCommand} />
         {room.draft?.text && <div className="master-message master"><Markdown>{room.draft.text}</Markdown><span className="master-cursor" /></div>}
         {thinking && !room.draft?.text && <div className="master-thinking"><LoaderCircle size={14} className="spin" />{words('생각하는 중', 'Thinking')}</div>}
       </div>
@@ -112,14 +117,16 @@ function stateLabel(overview: MasterOverview | undefined, words: (ko: string, en
 }
 
 /** Consecutive calls of one turn fold into one line; everything else is shown as it came. */
-function Timeline({ entries, onOpenSession }: { entries: MasterEntry[]; onOpenSession(id: string): void }) {
+interface EntryProps { token: string; onOpenSession(id: string): void; onCommand(command: MasterScreenCommand): void }
+
+function Timeline({ entries, ...props }: { entries: MasterEntry[] } & EntryProps) {
   const groups: Array<MasterEntry | MasterEntry[]> = [];
   for (const entry of entries) {
     const last = groups.at(-1);
     if (entry.data.kind === 'action' && Array.isArray(last) && last[0].data.kind === 'action' && last[0].data.turnId === entry.data.turnId) last.push(entry);
     else groups.push(entry.data.kind === 'action' ? [entry] : entry);
   }
-  return <>{groups.map(group => Array.isArray(group) ? <Actions key={group[0].id} entries={group} /> : <Entry key={group.id} entry={group} onOpenSession={onOpenSession} />)}</>;
+  return <>{groups.map(group => Array.isArray(group) ? <Actions key={group[0].id} entries={group} /> : <Entry key={group.id} entry={group} {...props} />)}</>;
 }
 
 function Actions({ entries }: { entries: MasterEntry[] }) {
@@ -146,7 +153,7 @@ function actionLabel(state: string, words: (ko: string, en: string) => string): 
     : state === 'uncertain' ? words('결과 불명', 'Outcome unknown') : words('처리 안 됨', 'Not run');
 }
 
-function Entry({ entry, onOpenSession }: { entry: MasterEntry; onOpenSession(id: string): void }) {
+function Entry({ entry, token, onOpenSession, onCommand }: { entry: MasterEntry } & EntryProps) {
   const words = useWords();
   const data = entry.data;
   if (data.kind === 'owner') return <div className="master-message owner">{showSecrets(data.text)}</div>;
@@ -161,7 +168,51 @@ function Entry({ entry, onOpenSession }: { entry: MasterEntry; onOpenSession(id:
       {data.answer && <p>{data.answer}</p>}
     </div>;
   }
+  if (data.kind === 'card') return <Card id={entry.id} card={data.card} token={token} onCommand={onCommand} />;
   return null;
+}
+
+/** What only the owner's own browser can do, pressed on the device that should do it. */
+function Card({ id, card, token, onCommand }: { id: string; card: MasterCard; token: string; onCommand(command: MasterScreenCommand): void }) {
+  const words = useWords();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [value, setValue] = useState('');
+  const answer = async (body: Record<string, unknown>) => { await post(`/api/master/cards/${id}`, token, body); };
+  const run = async (work: () => Promise<void>) => {
+    setBusy(true); setError('');
+    try { await work(); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setBusy(false); }
+  };
+  if (card.type === 'open') return <div className="master-card"><ExternalLink size={13} /><span>{card.label}</span><button className="secondary-button" onClick={() => onCommand(card.command)}>{words('열기', 'Open')}</button></div>;
+  if (card.type === 'push') {
+    const subscribe = () => run(async () => {
+      const support = pushSupport();
+      try {
+        if (support !== 'supported') throw new Error(support === 'insecure' ? words('알림은 https 주소나 이 컴퓨터(localhost)에서만 켤 수 있습니다.', 'Notifications need an https address or this computer (localhost).')
+          : support === 'install' ? words('이 기기에서는 홈 화면에 Tower를 추가한 뒤 켤 수 있습니다.', 'On this device, add Tower to the home screen first.') : words('이 브라우저는 알림을 지원하지 않습니다.', 'This browser does not support notifications.'));
+        const overview = await api<NotificationOverview>('/api/notifications');
+        await enablePush(token, overview.publicKey);
+        await answer({ result: 'subscribed' });
+      } catch (reason) {
+        const note = reason instanceof Error ? reason.message : String(reason);
+        await answer({ result: 'failed', note }).catch(() => {});
+        throw reason;
+      }
+    });
+    return <div className={`master-card ${card.state}`}><Bell size={13} />
+      <span>{card.state === 'subscribed' ? words('알림을 켰습니다.', 'Notifications are on.') : words('알림을 받을 기기에서 누르세요.', 'Press this on the device that should get notifications.')}{card.state === 'failed' && card.note ? ` (${card.note})` : ''}</span>
+      {card.state !== 'subscribed' && <button className="secondary-button" disabled={busy} onClick={() => void subscribe()}>{busy ? <LoaderCircle size={13} className="spin" /> : words('이 기기에서 알림 받기', 'Get notifications here')}</button>}
+      {error && <small role="alert">{error}</small>}
+    </div>;
+  }
+  if (card.state !== 'waiting') return <div className="master-card done"><KeyRound size={13} /><span>{card.purpose}: {card.state === 'provided' ? words('입력했습니다. 값은 마스터에게 보이지 않습니다.', 'Entered. The master never sees the value.') : words('취소했습니다.', 'Cancelled.')}</span></div>;
+  return <form className="master-card secret" onSubmit={event => { event.preventDefault(); if (value) void run(async () => { await answer({ value }); setValue(''); }); }}>
+    <KeyRound size={13} /><span>{card.purpose}</span>
+    <input type="password" autoComplete="off" value={value} onChange={event => setValue(event.target.value)} aria-label={card.purpose} placeholder={words('값 입력 (마스터에게 보이지 않음)', 'Value (the master never sees it)')} />
+    <button className="master-primary" disabled={busy || !value}>{busy ? <LoaderCircle size={13} className="spin" /> : words('보내기', 'Send')}</button>
+    <button type="button" className="secondary-button" disabled={busy} onClick={() => void run(() => answer({ dismiss: true }))}>{words('취소', 'Cancel')}</button>
+    {error && <small role="alert">{error}</small>}
+  </form>;
 }
 
 function taskLabel(state: string, words: (ko: string, en: string) => string): string {

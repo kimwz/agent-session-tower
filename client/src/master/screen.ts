@@ -1,0 +1,49 @@
+import type { MasterDirectiveResult, MasterFilter, MasterScreenCommand } from '../../../shared/master';
+import { setChatFontSize } from '../chat/chat-appearance';
+import { setLanguage } from '../i18n/i18n';
+import { scopedId } from '../remote/scope';
+
+/** What the master may do on the owner's screen: the page's own actions and setters, handed down. */
+export interface MasterControls {
+  selectSession(id: string | null): void;
+  openNewSession(cwd?: string, draft?: { title: string; prompt: string }): void;
+  openAutoPrompt(cwd?: string, node?: string): void;
+  showHelp(): void;
+  showSessions(): void;
+  filter(filter: MasterFilter): void;
+}
+
+export interface ScreenAnswer { result: MasterDirectiveResult; note?: string }
+
+/**
+ * Does a screen command the way the owner would: through the page's own controls, and for the header's panels by
+ * pressing their own buttons (marked `data-master-panel`), so everything they do on a press happens the same way.
+ */
+export function runScreenCommand(command: MasterScreenCommand, controls: MasterControls): ScreenAnswer {
+  switch (command.kind) {
+    case 'openSession': controls.selectSession(scopedId(command.node, command.sessionId)); break;
+    case 'close': controls.selectSession(null); break;
+    case 'filter': controls.filter(command.filter); break;
+    case 'preference':
+      if (command.language) setLanguage(command.language);
+      if (command.chatFontSize) setChatFontSize(command.chatFontSize);
+      break;
+    case 'openPanel': {
+      const cwd = command.cwd ? scopedId(command.node, command.cwd) : undefined;
+      if (command.panel === 'sessions') controls.showSessions();
+      else if (command.panel === 'help') controls.showHelp();
+      else if (command.panel === 'newSession') controls.openNewSession(cwd, command.title || command.prompt ? { title: command.title ?? '', prompt: command.prompt ?? '' } : undefined);
+      // Without a folder, Auto Prompt starts on the computer named, or on this one.
+      else if (command.panel === 'autoPrompt') controls.openAutoPrompt(cwd, cwd ? undefined : command.node ?? '');
+      else {
+        const button = document.querySelector<HTMLButtonElement>(`[data-master-panel="${command.panel}"]`);
+        if (!button || button.disabled) {
+          return { result: 'unavailable', note: command.panel === 'account' ? 'Account management opens only on a page of this computer itself.' : 'That panel cannot be opened on this page right now.' };
+        }
+        button.click();
+      }
+      break;
+    }
+  }
+  return { result: 'done' };
+}

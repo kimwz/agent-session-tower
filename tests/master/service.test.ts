@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage } from 'node:http';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MasterJournal } from '../../server/master/journal.js';
@@ -10,6 +10,7 @@ import { MasterRoom } from '../../server/master/room.js';
 import { MasterService } from '../../server/master/service.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/master/tower-client.js';
+import type { MasterDirective, MasterEntry } from '../../shared/master.js';
 import type { Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
 
@@ -55,7 +56,7 @@ const call = (name: string, args: unknown): ModelItem => ({ type: 'function_call
 const say = (text: string): ModelItem => ({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
 const toolOutputs = (request: ModelRequest) => request.input.filter(item => item.type === 'function_call_output').map(item => JSON.parse(String(item.output)) as Record<string, unknown>);
 
-interface Timing { towerPort?: number; waitForWebMs?: number; turnMs?: number; retryMs?: number }
+interface Timing { towerPort?: number; waitForWebMs?: number; turnMs?: number; retryMs?: number; ackMs?: number }
 async function master(t: test.TestContext, handle: Handler, steps: Step[], prepare?: (dir: string, journal: MasterJournal, room: MasterRoom) => Promise<void>, settingsPatch: Record<string, unknown> = {}, timing: Timing = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'tower-master-service-'));
   const tower = await fakeTower(t, dir, handle);
@@ -70,7 +71,7 @@ async function master(t: test.TestContext, handle: Handler, steps: Step[], prepa
   const client = new TowerClient(timing.waitForWebMs);
   client.setCredentials({ port: timing.towerPort ?? tower.port, token: TOKEN, callerSecret: SECRET });
   const script = scripted(steps);
-  const service = new MasterService({ settings, room, journal, tower: client, model: script.model, taskPollMs: 40, ...(timing.turnMs ? { turnMs: timing.turnMs } : {}), ...(timing.retryMs ? { retryMs: timing.retryMs } : {}) });
+  const service = new MasterService({ settings, room, journal, tower: client, model: script.model, taskPollMs: 40, ...(timing.turnMs ? { turnMs: timing.turnMs } : {}), ...(timing.retryMs ? { retryMs: timing.retryMs } : {}), ...(timing.ackMs ? { ackMs: timing.ackMs } : {}) });
   await service.start();
   // The service finishes its writes before its folder goes.
   t.after(async () => { await service.close(); await rm(dir, { recursive: true, force: true }); });
@@ -617,4 +618,132 @@ test('the work a change started is written before the change is recorded as done
   await service.send({ clientMessageId: 'message-0110', text: '문서 정리 맡겨', local: true });
   await said(/끝/);
   assert.match(await readFile(join(dir, 'tasks.json'), 'utf8'), /"jobId":"job-2"/);
+});
+
+/** Screen commands the room sent to pages, answered like a page would. */
+function screen(room: MasterRoom, answer?: (directive: MasterDirective) => { result: 'done' | 'unavailable' | 'failed'; note?: string } | undefined, service?: () => MasterService) {
+  const seen: MasterDirective[] = [];
+  room.subscribe(event => {
+    if (event.type !== 'directive') return;
+    seen.push(event.directive);
+    const reply = answer?.(event.directive);
+    if (reply) setTimeout(() => service!().ack(event.directive.id, reply.result, reply.note), 5);
+  });
+  return seen;
+}
+
+test('the master works the owner\'s screen in the tab they wrote from, and hears whether the page did it', async t => {
+  let answerOf: (directive: MasterDirective) => { result: 'done' | 'unavailable'; note?: string } = () => ({ result: 'done' });
+  const { service, room, said } = await master(t, () => ({ body: {} }), [
+    [call('ui', { action: 'openSession', sessionId: 'claude:s1' }), call('ui', { action: 'filter', filter: { reset: true, query: 'login', status: 'working' } }), call('ui', { action: 'openPanel', panel: 'account' })],
+    request => {
+      const outputs = toolOutputs(request);
+      assert.equal(outputs[0].result, 'done');
+      assert.equal(outputs[1].result, 'done');
+      assert.equal(outputs[2].result, 'unavailable');
+      assert.match(String(outputs[2].note), /this computer/);
+      return [call('ui', { action: 'setPreference', language: 'fr' })];
+    },
+    request => { assert.match(String(toolOutputs(request).at(-1)!.error), /language/); return [say('화면을 바꿨습니다.')]; },
+  ]);
+  const seen = screen(room, directive => answerOf(directive), () => service);
+  answerOf = directive => directive.kind === 'openPanel' ? { result: 'unavailable', note: 'Account management opens only on a page of this computer itself.' } : { result: 'done' };
+  await service.send({ clientMessageId: 'message-0201', text: '로그인 작업 중인 세션 보여줘', local: false, viewContext: { tabId: 'tab-a' } });
+  await said(/화면을 바꿨습니다/);
+  assert.deepEqual(seen.map(directive => [directive.kind, directive.tabId]), [['openSession', 'tab-a'], ['filter', 'tab-a'], ['openPanel', 'tab-a']]);
+  assert.deepEqual(seen[1].kind === 'filter' && seen[1].filter, { reset: true, query: 'login', status: 'working' });
+});
+
+test('a screen command no page confirms comes back as unconfirmed; with showing results off, opening becomes a card', async t => {
+  const quiet = await master(t, () => ({ body: {} }), [
+    [call('ui', { action: 'close' })],
+    request => { assert.equal(toolOutputs(request)[0].result, 'no-answer'); return [say('확인되지 않았습니다.')]; },
+  ], undefined, {}, { ackMs: 100 });
+  await quiet.service.send({ clientMessageId: 'message-0202', text: '대화 닫아', local: true, viewContext: { tabId: 'tab-b' } });
+  await quiet.said(/확인되지 않았습니다/);
+
+  const off = await master(t, () => ({ body: {} }), [
+    [call('ui', { action: 'openSession', sessionId: 'codex:s2', node: 'a'.repeat(32) })],
+    request => { assert.equal(toolOutputs(request)[0].result, 'card'); return [say('열기 버튼을 드렸습니다.')]; },
+  ], undefined, { showResults: false });
+  const seen = screen(off.room);
+  await off.service.send({ clientMessageId: 'message-0203', text: '그 세션 보여줘', local: true, viewContext: { tabId: 'tab-c' } });
+  await off.said(/열기 버튼/);
+  assert.equal(seen.length, 0, 'nothing is opened on the screen');
+  const card = off.room.recent(20).find(entry => entry.data.kind === 'card')!;
+  assert.deepEqual(card.data.kind === 'card' && card.data.card.type === 'open' && card.data.card.command, { kind: 'openSession', sessionId: 'codex:s2', node: 'a'.repeat(32) });
+});
+
+test('a secret typed into a card reaches Tower but never the model, the conversation or the records, and the card answers once', async t => {
+  const value = 'hunter2-correct-horse-battery';
+  const { service, room, dir, tower, script, said } = await master(t, seen => seen.method === 'POST' ? { body: { ok: true } } : { body: {} }, [
+    [call('request_secret', { purpose: 'Slack bot token' })],
+    [say('카드에 입력해 주세요.')],
+    request => {
+      const text = JSON.stringify(request.input);
+      assert.doesNotMatch(text, /hunter2/);
+      const reference = /\{\{secret:[a-f0-9]{16}\}\}/.exec(text)![0];
+      return [call('tower_api', { method: 'POST', path: '/api/slack/connect', body: { botToken: reference } })];
+    },
+    [say('연결했습니다.')],
+  ], undefined, { guards: { hideSecrets: false } });
+  await service.send({ clientMessageId: 'message-0204', text: 'Slack 연결해줘', local: true });
+  await said(/카드에 입력/);
+  const card = room.recent(20).find(entry => entry.data.kind === 'card')!;
+  const answered = await service.card(card.id, { value }, true);
+  assert.equal(answered.data.kind === 'card' && answered.data.card.type === 'secret' && answered.data.card.state, 'provided');
+  await said(/연결했습니다/);
+  assert.deepEqual((tower.seen.find(seen => seen.path === '/api/slack/connect')!.body as { botToken: string }).botToken, value);
+  assert.equal(script.requests.length, 4);
+  // Answered once: a second answer changes nothing and starts nothing.
+  await service.card(card.id, { value: 'another' }, true);
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.equal(script.requests.length, 4);
+  await service.close();
+  for (const name of ['inbox.json', 'calls.json', 'tasks.json']) assert.doesNotMatch(await readFile(join(dir, name), 'utf8').catch(() => ''), /hunter2/);
+  for (const name of await readdir(join(dir, 'room'))) assert.doesNotMatch(await readFile(join(dir, 'room', name), 'utf8'), /hunter2/);
+});
+
+test('a notifications card records how it went on the device that pressed it', async t => {
+  const { service, room, said } = await master(t, () => ({ body: {} }), [
+    [call('browser_action', { kind: 'push-subscribe' })],
+    [say('알림 카드를 드렸습니다.')],
+  ]);
+  await service.send({ clientMessageId: 'message-0205', text: '이 폰에서 알림 받게 해줘', local: true });
+  await said(/알림 카드/);
+  const card = room.recent(20).find(entry => entry.data.kind === 'card')!;
+  const failed = await service.card(card.id, { result: 'failed', note: 'permission denied' }, false);
+  assert.deepEqual(failed.data.kind === 'card' && failed.data.card, { type: 'push', state: 'failed', note: 'permission denied' });
+  const subscribed = await service.card(card.id, { result: 'subscribed' }, false);
+  assert.deepEqual(subscribed.data.kind === 'card' && subscribed.data.card, { type: 'push', state: 'subscribed' });
+  await assert.rejects(service.card(card.id.replace(/.$/, '0') === card.id ? card.id.replace(/.$/, '1') : card.id.replace(/.$/, '0'), { result: 'subscribed' }, false), /찾을 수 없습니다/);
+});
+
+test('a terminal\'s recent output reads as plain text, with secrets hidden before it is shortened', async t => {
+  const key = 'sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ012345';
+  const terminal = '0190f1c2-3d4e-7f00-8a00-00000000abcd';
+  const dir = await mkdtemp(join(tmpdir(), 'tower-master-terminal-'));
+  const web = createServer((req, res) => {
+    if (req.url === `/api/workspace/terminals/${terminal}/events`) {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      const frames = [`\u001b[32m$ npm test\u001b[0m\r\n`, `${'x'.repeat(4100)} OPENAI_API_KEY=${key}\r\n`, 'ok 12 tests\r\n'];
+      frames.forEach((data, index) => res.write(`id: ${index + 1}\nevent: output\ndata: ${JSON.stringify({ data })}\n\n`));
+      return;
+    }
+    res.writeHead(404).end('{}');
+  });
+  await new Promise<void>(resolve => web.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { web.closeAllConnections(); await new Promise<void>(resolve => web.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
+  const { service, said } = await master(t, () => ({ body: {} }), [
+    [call('terminal_read', { terminalId: terminal })],
+    request => {
+      const [output] = toolOutputs(request);
+      assert.doesNotMatch(JSON.stringify(output), /ABCDEFGHIJ|\\u001b/);
+      assert.match(String(output.output), /ok 12 tests$/m);
+      assert.ok(String(output.output).length <= 4001);
+      return [say('테스트가 통과했습니다.')];
+    },
+  ], undefined, {}, { towerPort: (web.address() as { port: number }).port });
+  await service.send({ clientMessageId: 'message-0206', text: '터미널에 뭐 떴어?', local: true });
+  await said(/통과했습니다/);
 });

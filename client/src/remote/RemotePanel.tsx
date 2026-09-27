@@ -35,7 +35,7 @@ export function RemoteButton({ token, projects, controlledBy = [], joined }: { t
   // With a notice showing, the panel opens on the computers controlling this one.
   const show = (tab: Tab) => { acknowledge(); setOpen(tab); };
   return <div className="remote-anchor">
-    <button className={`icon-button remote-button ${controlledBy.length ? 'controlled' : ''}`} aria-label={label} title={label} disabled={!token} onClick={() => show(notice ? 'controllers' : 'nodes')}><Network size={18} /></button>
+    <button className={`icon-button remote-button ${controlledBy.length ? 'controlled' : ''}`} data-master-panel="remote" aria-label={label} title={label} disabled={!token} onClick={() => show(notice ? 'controllers' : 'nodes')}><Network size={18} /></button>
     {notice && <div className="remote-join-notice" role="status">
       <p>{t('{0}이(가) 이 컴퓨터를 제어하기 시작했습니다.', { 0: notice.name })}<small><time dateTime={notice.at}>{absoluteTime(notice.at)}</time></small></p>
       <div><button type="button" className="secondary-button" onClick={() => show('controllers')}>{t('보기')}</button>

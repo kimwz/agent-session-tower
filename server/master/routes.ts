@@ -40,6 +40,14 @@ export function masterRoutes(client: MasterClient) {
       return true;
     }
     if (req.method === 'POST' && path === '/api/master/stop') { await call('stop'); return true; }
+    // The page says whether it did a screen command, and answers cards (a secret typed into one goes to the host only).
+    const answer = /^\/api\/master\/(directives|cards)\/([0-9a-f-]{36})$/.exec(path);
+    if (req.method === 'POST' && answer) {
+      const body = await readJson(req, 16 * 1024);
+      if (answer[1] === 'directives') await call('ack', { id: answer[2], result: body.result, note: body.note });
+      else await call('card', { id: answer[2], body, local: identity.local });
+      return true;
+    }
     if (req.method === 'POST' && path === '/api/master/settings') { await call('settings', { body: await readJson(req, 16 * 1024) }); return true; }
     json(res, 404, { error: '찾을 수 없습니다.' });
     return true;

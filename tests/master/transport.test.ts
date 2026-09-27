@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import { TowerClient } from '../../server/master/tower-client.js';
 import { openAiResponses } from '../../server/master/model-openai.js';
 import { createMonitorServer } from '../../server/http/server.js';
+import { masterRoutes } from '../../server/master/routes.js';
+import type { MasterClient } from '../../server/master/client.js';
 import { createRemoteAuthFixture } from '../helpers/auth.js';
 import type { Snapshot } from '../../shared/types.js';
 
@@ -212,4 +214,24 @@ test('signing a page out ends its live master stream, like every other stream', 
   auth.logout(cookie.slice('tower_session='.length));
   const ended = await Promise.race([reader.read().then(() => 'ended', () => 'ended'), new Promise(resolve => setTimeout(() => resolve('open'), 2000))]);
   assert.equal(ended, 'ended');
+});
+
+test('a page\'s answers to screen commands and cards reach the host, a card with whether the page is on this computer', async t => {
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  const client = { call: async (method: string, args: Record<string, unknown>) => { calls.push([method, args]); return { ok: true }; } } as unknown as MasterClient;
+  const handle = masterRoutes(client);
+  let local = true;
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url!, 'http://tower.invalid');
+    if (!await handle(req, res, url.pathname, url, { local })) res.writeHead(404).end();
+  });
+  t.after(() => stop(server));
+  const port = await listen(server);
+  const id = '0190f1c2-3d4e-7f00-8a00-000000000001';
+  const post = (path: string, body: unknown) => fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  assert.equal((await post(`/api/master/directives/${id}`, { result: 'done', note: 'ok' })).status, 200);
+  local = false;
+  assert.equal((await post(`/api/master/cards/${id}`, { value: 'x' })).status, 200);
+  assert.equal((await post('/api/master/cards/not-an-id', { value: 'x' })).status, 404);
+  assert.deepEqual(calls, [['ack', { id, result: 'done', note: 'ok' }], ['card', { id, body: { value: 'x' }, local: false }]]);
 });

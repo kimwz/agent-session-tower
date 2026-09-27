@@ -23,7 +23,7 @@ Folders, git, files, terminals
 - POST /api/groups {cwd, title?, pinned?, hidden?} — folder name, pin, hide.
 - POST /api/repositories {cwd, action:"refresh"|"pull"|"push"}
 - GET /api/workspace/tree?cwd=&path= · GET /api/workspace/file?cwd=&path= · POST /api/workspace/file {cwd, path, content, revision|null} · POST /api/workspace/directory {cwd, path}
-- GET /api/workspace/terminals?cwd= · POST /api/workspace/terminals {cwd, cols, rows} · POST /api/workspace/terminals/{id}/input {data} · POST /api/workspace/terminals/{id}/close {} (you cannot read a terminal's output)
+- GET /api/workspace/terminals?cwd= · POST /api/workspace/terminals {cwd, cols, rows} · POST /api/workspace/terminals/{id}/input {data} · POST /api/workspace/terminals/{id}/close {} (read a terminal's recent output with terminal_read)
 
 Other computers (joined to this one)
 - Any route above for a joined computer: pass node:"<32-hex id>" (it goes to /api/nodes/{node}/...). Their ids are in GET /api/link (nodes).

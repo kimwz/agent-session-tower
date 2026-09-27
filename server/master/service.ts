@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { APP_VERSION } from '../../shared/app-identity.js';
-import type { MasterEntry, MasterOverview, MasterTaskState, MasterViewContext } from '../../shared/master.js';
+import { MASTER_PANELS, type MasterCard, type MasterDirectiveResult, type MasterEntry, type MasterFilter, type MasterOverview, type MasterPanel, type MasterScreenCommand, type MasterTaskState, type MasterViewContext } from '../../shared/master.js';
 import type { AutoPromptJob, ChatMessage, Run, SessionDetail, Snapshot } from '../../shared/types.js';
 import { statusDigest } from './digest.js';
 import { apiTarget, refusalFor, type ApiTarget, type TurnScope } from './guards.js';
@@ -28,6 +28,12 @@ const MAX_ENTRY_TEXT = 32_000;
 const TIMED_OUT = '시간이 오래 걸려 여기서 멈췄습니다. 위 작업 기록을 확인해 주세요.';
 /** How Tower adds attached files to a request in a session's history (`attachmentPrompt`), once spaces are folded. */
 const ATTACHED = ' 첨부 파일 (사용자가 이번 메시지에 첨부한 로컬 파일):';
+/** How long a screen command waits for the page to say it was done. */
+const ACK_MS = 5_000;
+/** How long terminal_read listens: the terminal's kept output arrives at once, then new output for the rest. */
+const TERMINAL_READ_MS = 1_500;
+const TERMINAL_OUTPUT = 4_000;
+const NODE_ID = /^[a-f0-9]{32}$/;
 
 const TOOLS: ModelTool[] = [
   { type: 'function', name: 'tower_api', description: 'Call one of Tower\'s HTTP routes (see Routes), exactly as the owner\'s pages do. For a joined computer pass node.',
@@ -41,8 +47,30 @@ const TOOLS: ModelTool[] = [
     parameters: { type: 'object', properties: { sql: { type: 'string' } }, required: ['sql'], additionalProperties: false } },
   { type: 'function', name: 'session_read', description: 'Read the latest messages of a session (compact).',
     parameters: { type: 'object', properties: { sessionId: { type: 'string' }, node: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 60 } }, required: ['sessionId'], additionalProperties: false } },
-  { type: 'function', name: 'show_session', description: 'Open a session in the tab the owner is talking from.',
-    parameters: { type: 'object', properties: { sessionId: { type: 'string' }, node: { type: 'string' } }, required: ['sessionId'], additionalProperties: false } },
+  { type: 'function', name: 'ui', description: 'Do something on the owner\'s screen, in the tab they talk from, with the page\'s own controls. The result says whether the page did it.',
+    parameters: { type: 'object', properties: {
+      action: { type: 'string', enum: ['openSession', 'close', 'openPanel', 'filter', 'setPreference'], description: 'openSession: show a conversation. close: close the open conversation. openPanel: open one of the page\'s panels. filter: set the sidebar filters. setPreference: language or chat text size.' },
+      sessionId: { type: 'string' },
+      node: { type: 'string', description: '32-hex id of the joined computer the session, folder or Auto Prompt is on.' },
+      panel: { type: 'string', enum: [...MASTER_PANELS], description: 'sessions: the session list. newSession/autoPrompt open their dialogs (cwd, and for newSession title/prompt, prefill them).' },
+      cwd: { type: 'string' }, title: { type: 'string' }, prompt: { type: 'string' },
+      filter: { type: 'object', additionalProperties: false, properties: {
+        reset: { type: 'boolean', description: 'Clear the search and filters first.' }, query: { type: 'string' },
+        provider: { type: 'string', enum: ['all', 'claude', 'codex'] }, status: { type: 'string', enum: ['all', 'working', 'idle', 'completed', 'error'] },
+        period: { type: 'string', enum: ['1', '7', '30', 'all'], description: 'Days of activity shown.' },
+        project: { type: 'string', description: 'A folder (cwd); on a joined computer, give computer too.' },
+        computer: { type: 'string', description: '"all", "local" or a joined computer\'s id.' },
+        closed: { type: 'boolean', description: 'Show closed sessions instead of open ones.' }, showHidden: { type: 'boolean', description: 'Show hidden folders on the canvas.' },
+      } },
+      language: { type: 'string', enum: ['ko', 'en'] },
+      chatFontSize: { type: 'integer', minimum: 11, maximum: 22 },
+    }, required: ['action'], additionalProperties: false } },
+  { type: 'function', name: 'browser_action', description: 'Show a card the owner presses on the device that should do something only a browser can: push-subscribe turns on Tower\'s notifications on that device.',
+    parameters: { type: 'object', properties: { kind: { type: 'string', enum: ['push-subscribe'] } }, required: ['kind'], additionalProperties: false } },
+  { type: 'function', name: 'request_secret', description: 'Ask the owner to type a password, token or key into a card. You never see the value: a new message brings a reference like {{secret:…}} to use in a request body.',
+    parameters: { type: 'object', properties: { purpose: { type: 'string', description: 'What the value is for, shown on the card.' } }, required: ['purpose'], additionalProperties: false } },
+  { type: 'function', name: 'terminal_read', description: 'Read the recent output of a terminal (find terminals with GET /api/workspace/terminals?cwd=).',
+    parameters: { type: 'object', properties: { terminalId: { type: 'string' }, node: { type: 'string' } }, required: ['terminalId'], additionalProperties: false } },
 ];
 
 interface Turn { id: string; abort: AbortController; inputs: InboxItem[]; scope: TurnScope; tabId?: string }
@@ -57,6 +85,7 @@ export interface MasterServiceOptions {
   /** Tests shorten the turn limit and the wait before a failed turn is tried again. */
   turnMs?: number;
   retryMs?: number;
+  ackMs?: number;
   /** What the owner's page sees, kept live: the status digest, quick queries and the task watcher read it. */
   live?: LiveState;
   readDb?: ReadDatabase;
@@ -75,6 +104,10 @@ export class MasterService {
   /** Wakes the inbox when a failed turn's second try is due. */
   private wake?: ReturnType<typeof setTimeout>;
   private readonly remoteWrites = new Map<string, number[]>();
+  /** Screen commands waiting for their page to say what happened. */
+  private readonly acks = new Map<string, (answer: { result: MasterDirectiveResult; note?: string }) => void>();
+  /** The tab the owner last wrote from: screen commands of a turn without one go there. */
+  private lastTab?: string;
 
   constructor(private readonly options: MasterServiceOptions) {}
 
@@ -134,6 +167,7 @@ export class MasterService {
     if (existing) return existing;
     const text = settings.current().guards.hideSecrets ? this.vault.hide(input.text) : input.text;
     const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: input.clientMessageId, text, local: input.local, ...(input.viewContext ? { viewContext: input.viewContext } : {}), at: new Date().toISOString(), state: 'queued', retries: 0 };
+    if (input.viewContext?.tabId) this.lastTab = input.viewContext.tabId;
     const entry = room.add({ kind: 'owner', text, ...(input.viewContext?.tabId ? { clientId: input.viewContext.tabId } : {}) }, item.id);
     journal.inbox.push(item);
     await journal.save('inbox');
@@ -280,6 +314,7 @@ export class MasterService {
         if (data.kind === 'master') return `[${at} you] ${truncate(data.text, 1500)}`;
         if (data.kind === 'action') return `[${at} call] ${data.method} ${data.path}${data.node ? ` (node ${data.node})` : ''} → ${data.state}${data.summary ? `: ${truncate(data.summary, 200)}` : ''}`;
         if (data.kind === 'task') return `[${at} delegated] ${data.title} — ${data.state}${data.sessionId ? ` (session ${data.sessionId}${data.node ? ` on node ${data.node}` : ''})` : ''}`;
+        if (data.kind === 'card') return `[${at} card] ${cardLine(data.card)}`;
         return `[${at} ${data.kind}] ${truncate(data.text, 500)}`;
       });
     const running = this.options.journal.tasks.filter(task => task.state === 'running').map(task => `- ${task.title} (session ${task.sessionId ?? '?'}${task.node ? `, node ${task.node}` : ''})`);
@@ -296,7 +331,9 @@ export class MasterService {
     if (name === 'tower_api') return this.towerApi(args, turn);
     if (name === 'tower_query') return this.towerQuery(args);
     if (name === 'session_read') return this.sessionRead(args, turn);
-    if (name === 'show_session') return this.showSession(args, turn);
+    if (name === 'ui') return this.ui(args, turn);
+    if (name === 'browser_action' || name === 'request_secret') return this.showCard(name, args, turn);
+    if (name === 'terminal_read') return this.terminalRead(args, turn);
     return { error: `알 수 없는 도구: ${name}` };
   }
 
@@ -313,7 +350,8 @@ export class MasterService {
     if (refusal) return { error: refusal };
     const given = target.method === 'POST' ? (args.body && typeof args.body === 'object' ? args.body as Record<string, unknown> : {}) : undefined;
     let body: unknown = given;
-    if (body !== undefined && guards.hideSecrets) {
+    // References come only from values the owner gave (pasted, or typed into a secret card), whatever the settings.
+    if (body !== undefined) {
       try { body = this.vault.reveal(body); } catch (error) { return { error: (error as Error).message }; }
     }
     if (!target.write) {
@@ -405,7 +443,7 @@ export class MasterService {
     if (!live || !readDb) return { error: '빠른 조회를 쓸 수 없습니다. tower_api로 조회하세요.' };
     if (!await live.fresh()) return { error: 'Tower의 현재 상태를 받지 못했습니다. 잠시 뒤 다시 하거나 tower_api로 조회하세요.' };
     const conversation: Table = { name: 'conversation', columns: ['order_no', 'at', 'kind', 'text'], rows: room.recent(200).map(entry => [entry.order, entry.at, entry.data.kind,
-      'text' in entry.data ? this.hideText(entry.data.text).slice(0, 500) : entry.data.kind === 'task' ? this.hideText(entry.data.title) : entry.data.kind === 'action' ? `${entry.data.method} ${entry.data.path} ${entry.data.state}` : null]) };
+      'text' in entry.data ? this.hideText(entry.data.text).slice(0, 500) : entry.data.kind === 'task' ? this.hideText(entry.data.title) : entry.data.kind === 'action' ? `${entry.data.method} ${entry.data.path} ${entry.data.state}` : entry.data.kind === 'card' ? cardLine(entry.data.card) : null]) };
     const delegated: Table = { name: 'delegated', columns: ['id', 'title', 'state', 'session_id', 'node', 'created_at'], rows: journal.tasks.map(task => [task.id, this.hideText(task.title), task.state, task.sessionId ?? null, task.node ?? null, task.createdAt]) };
     const signature = `${live.version()}:${room.lastOrder()}:${journal.tasks.map(task => task.state).join(',')}`;
     try {
@@ -432,14 +470,123 @@ export class MasterService {
     return this.answer(target, { ...response, body: compact });
   }
 
-  private showSession(args: Record<string, unknown>, turn: Turn): unknown {
-    if (!this.options.settings.current().showResults) return { result: 'disabled', note: '설정에서 화면 열기가 꺼져 있습니다.' };
-    if (!turn.tabId) return { result: 'no-page', note: '소유자가 보고 있는 화면을 알 수 없습니다.' };
-    const sessionId = typeof args.sessionId === 'string' ? args.sessionId : '';
-    const node = typeof args.node === 'string' && /^[a-f0-9]{32}$/.test(args.node) ? args.node : undefined;
-    if (!sessionId) return { error: 'sessionId가 필요합니다.' };
-    this.options.room.broadcast({ type: 'directive', seq: 0, directive: { id: randomUUID(), kind: 'openSession', sessionId, ...(node ? { node } : {}), tabId: turn.tabId, expiresAt: Date.now() + 30_000 } });
-    return { result: 'requested' };
+  /**
+   * A screen command in the tab the owner talks from, done by the page with its own controls. With showing results
+   * turned off, opening something becomes a card the owner can press instead.
+   */
+  private async ui(args: Record<string, unknown>, turn: Turn): Promise<unknown> {
+    let command: MasterScreenCommand;
+    try { command = screenCommand(args); } catch (error) { return { error: (error as Error).message }; }
+    if (!this.options.settings.current().showResults && (command.kind === 'openSession' || command.kind === 'openPanel')) {
+      this.options.room.add({ kind: 'card', card: { type: 'open', label: truncate(this.hideText(openLabel(command)), 120), command } });
+      return { result: 'card', note: 'Opening things on the screen is off in the settings; the owner got a button to open it.' };
+    }
+    const tabId = turn.tabId ?? this.lastTab;
+    if (!tabId) return { result: 'no-page', note: 'No page of the owner is known to show it on.' };
+    const id = randomUUID();
+    const answer = await new Promise<{ result: MasterDirectiveResult; note?: string } | undefined>(resolve => {
+      const finish = (value: { result: MasterDirectiveResult; note?: string } | undefined) => {
+        clearTimeout(timer);
+        this.acks.delete(id);
+        turn.abort.signal.removeEventListener('abort', stopped);
+        resolve(value);
+      };
+      const stopped = () => finish(undefined);
+      const timer = setTimeout(() => finish(undefined), this.options.ackMs ?? ACK_MS);
+      this.acks.set(id, finish);
+      turn.abort.signal.addEventListener('abort', stopped, { once: true });
+      this.options.room.broadcast({ type: 'directive', seq: 0, directive: { ...command, id, tabId, expiresAt: Date.now() + 30_000 } });
+    });
+    return answer ? { result: answer.result, ...(answer.note ? { note: this.hideText(answer.note) } : {}) } : { result: 'no-answer', note: 'The page did not confirm; it may be closed or in the background.' };
+  }
+
+  /** The page's word on a screen command. */
+  ack(id: string, result: MasterDirectiveResult, note?: string): boolean {
+    const waiting = this.acks.get(id);
+    waiting?.({ result, ...(note ? { note: note.slice(0, 300) } : {}) });
+    return Boolean(waiting);
+  }
+
+  /** A card for what only the owner's browser can do, answered on the card itself. */
+  private showCard(name: 'browser_action' | 'request_secret', args: Record<string, unknown>, turn: Turn): unknown {
+    if (this.options.settings.current().guards.eventTurnsReadOnly && turn.scope.cause === 'event') return { error: '끝난 작업의 보고 중에는 조회만 합니다(설정에서 바꿀 수 있음).' };
+    if (name === 'browser_action') {
+      if (args.kind !== 'push-subscribe') return { error: 'push-subscribe만 쓸 수 있습니다.' };
+      this.options.room.add({ kind: 'card', card: { type: 'push', state: 'waiting' } });
+      return { result: 'card-shown', note: 'The owner presses the card on the device that should get notifications; the card shows how it went.' };
+    }
+    const purpose = typeof args.purpose === 'string' ? args.purpose.trim() : '';
+    if (!purpose || purpose.length > 200) return { error: '무엇에 쓸 값인지 200자 안으로 적어 주세요.' };
+    this.options.room.add({ kind: 'card', card: { type: 'secret', purpose: this.hideText(purpose), state: 'waiting' } });
+    return { result: 'card-shown', note: 'When the owner enters it, a new message brings a reference to use; tell them to type it into the card.' };
+  }
+
+  /**
+   * The owner's answer on a card. A secret is kept in memory only and reaches the model as a reference, in a new
+   * message from the owner; a card answers once.
+   */
+  async card(id: string, body: Record<string, unknown>, local: boolean): Promise<MasterEntry> {
+    const { room } = this.options;
+    const entry = room.get(id);
+    if (!entry || entry.data.kind !== 'card') throw Object.assign(new Error('카드를 찾을 수 없습니다.'), { statusCode: 404 });
+    const card = entry.data.card;
+    if (card.type === 'push') {
+      if (card.state === 'subscribed') return entry;
+      const state = body.result === 'subscribed' ? 'subscribed' : body.result === 'failed' ? 'failed' : undefined;
+      if (!state) throw Object.assign(new Error('결과가 올바르지 않습니다.'), { statusCode: 400 });
+      const note = typeof body.note === 'string' && body.note ? truncate(this.hideText(body.note), 300) : undefined;
+      return room.update(id, { kind: 'card', card: { type: 'push', state, ...(note ? { note } : {}) } }) ?? entry;
+    }
+    if (card.type === 'secret') {
+      if (card.state !== 'waiting') return entry;
+      if (body.dismiss === true) return room.update(id, { kind: 'card', card: { ...card, state: 'dismissed' } }) ?? entry;
+      const value = body.value;
+      if (typeof value !== 'string' || !value || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value)) throw Object.assign(new Error('값이 비었거나 올바르지 않습니다.'), { statusCode: 400 });
+      const updated = room.update(id, { kind: 'card', card: { ...card, state: 'provided' } }) ?? entry;
+      await this.send({ clientMessageId: `secret-${id}`, text: `비밀 값을 입력했습니다 (${card.purpose}): ${this.vault.reference(value)}`, local });
+      return updated;
+    }
+    throw Object.assign(new Error('이 카드에는 답할 것이 없습니다.'), { statusCode: 400 });
+  }
+
+  /** A terminal's recent output: what it kept, and what comes in a moment. Secrets are hidden before it is shortened. */
+  private async terminalRead(args: Record<string, unknown>, turn: Turn): Promise<unknown> {
+    const id = typeof args.terminalId === 'string' && /^[0-9a-f-]{36}$/.test(args.terminalId) ? args.terminalId : '';
+    if (!id) return { error: 'terminalId가 필요합니다. GET /api/workspace/terminals?cwd=로 찾으세요.' };
+    const node = typeof args.node === 'string' && args.node ? args.node : undefined;
+    if (node && !NODE_ID.test(node)) return { error: '연결된 컴퓨터 ID가 올바르지 않습니다.' };
+    const path = `${node ? `/api/nodes/${node}` : '/api'}/workspace/terminals/${id}/events`;
+    const listening = new AbortController();
+    const stop = () => listening.abort();
+    const timer = setTimeout(stop, TERMINAL_READ_MS);
+    turn.abort.signal.addEventListener('abort', stop, { once: true });
+    let output = '';
+    try {
+      const stream = await this.options.tower.stream(path, listening.signal);
+      await new Promise<void>(resolve => {
+        let buffer = '';
+        stream.setEncoding('utf8');
+        stream.on('data', (chunk: string) => {
+          buffer += chunk;
+          for (let end = buffer.indexOf('\n\n'); end >= 0; end = buffer.indexOf('\n\n')) {
+            const frame = buffer.slice(0, end);
+            buffer = buffer.slice(end + 2);
+            if (!/^event: output$/m.test(frame)) continue;
+            const data = /^data: (.*)$/m.exec(frame)?.[1];
+            try { const value = data ? JSON.parse(data) as { data?: unknown } : undefined; if (typeof value?.data === 'string') output += value.data; } catch { /* Not an output frame. */ }
+          }
+          if (output.length > 262_144) { output = output.slice(-131_072); }
+        });
+        stream.once('end', resolve); stream.once('close', resolve); stream.once('error', () => resolve());
+      });
+    } catch (error) {
+      if (!listening.signal.aborted) return { error: `터미널을 읽지 못했습니다: ${error instanceof Error ? error.message : String(error)}` };
+    } finally {
+      clearTimeout(timer);
+      turn.abort.signal.removeEventListener('abort', stop);
+    }
+    const text = this.hideText(plainTerminal(output));
+    return { terminalId: id, ...(node ? { node } : {}), output: text.length > TERMINAL_OUTPUT ? `…${text.slice(-TERMINAL_OUTPUT)}` : text, ...(text.trim() ? {} : { note: 'No output yet.' }) };
   }
 
   /** Starts watching work a successful call created, so its end is reported. The caller saves the task. */
@@ -603,4 +750,84 @@ function uuidv7(now = Date.now()): string {
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** A screen command from the model's arguments, checked field by field. */
+function screenCommand(args: Record<string, unknown>): MasterScreenCommand {
+  const refuse = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
+  const text = (value: unknown, max: number, name: string) => {
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string' || value.length > max) throw refuse(`${name}이(가) 올바르지 않습니다.`);
+    return value;
+  };
+  const node = (value: unknown) => {
+    const id = text(value, 32, 'node');
+    if (id && !NODE_ID.test(id)) throw refuse('연결된 컴퓨터 ID가 올바르지 않습니다.');
+    return id || undefined;
+  };
+  switch (args.action) {
+    case 'openSession': {
+      const sessionId = text(args.sessionId, 400, 'sessionId');
+      if (!sessionId) throw refuse('sessionId가 필요합니다.');
+      const where = node(args.node);
+      return { kind: 'openSession', sessionId, ...(where ? { node: where } : {}) };
+    }
+    case 'close': return { kind: 'close' };
+    case 'openPanel': {
+      if (!(MASTER_PANELS as readonly unknown[]).includes(args.panel)) throw refuse(`panel은 ${MASTER_PANELS.join(', ')} 중 하나입니다.`);
+      const cwd = text(args.cwd, 4096, 'cwd'), title = text(args.title, 200, 'title'), prompt = text(args.prompt, 8000, 'prompt'), where = node(args.node);
+      return { kind: 'openPanel', panel: args.panel as MasterPanel, ...(cwd ? { cwd } : {}), ...(where ? { node: where } : {}), ...(title ? { title } : {}), ...(prompt ? { prompt } : {}) };
+    }
+    case 'filter': {
+      const input = args.filter;
+      if (!input || typeof input !== 'object' || Array.isArray(input)) throw refuse('filter가 필요합니다.');
+      const filter: MasterFilter = {};
+      for (const [key, value] of Object.entries(input)) {
+        const one = (allowed: readonly string[]) => { if (typeof value !== 'string' || !allowed.includes(value)) throw refuse(`${key} 값이 올바르지 않습니다.`); return value; };
+        const flag = () => { if (typeof value !== 'boolean') throw refuse(`${key} 값이 올바르지 않습니다.`); return value; };
+        if (key === 'reset') filter.reset = flag();
+        else if (key === 'query') filter.query = text(value, 200, 'query') ?? '';
+        else if (key === 'provider') filter.provider = one(['all', 'claude', 'codex']) as MasterFilter['provider'];
+        else if (key === 'status') filter.status = one(['all', 'working', 'idle', 'completed', 'error']) as MasterFilter['status'];
+        else if (key === 'period') filter.period = one(['1', '7', '30', 'all']) as MasterFilter['period'];
+        else if (key === 'project') filter.project = text(value, 4096, 'project') ?? '';
+        else if (key === 'computer') { const computer = text(value, 32, 'computer'); if (computer !== 'all' && computer !== 'local' && !NODE_ID.test(computer ?? '')) throw refuse('computer 값이 올바르지 않습니다.'); filter.computer = computer; }
+        else if (key === 'closed') filter.closed = flag();
+        else if (key === 'showHidden') filter.showHidden = flag();
+        else throw refuse(`알 수 없는 필터: ${key}`);
+      }
+      return { kind: 'filter', filter };
+    }
+    case 'setPreference': {
+      const language = args.language === undefined ? undefined : args.language === 'ko' || args.language === 'en' ? args.language : null;
+      const size = args.chatFontSize === undefined ? undefined : Number.isInteger(args.chatFontSize) && (args.chatFontSize as number) >= 11 && (args.chatFontSize as number) <= 22 ? args.chatFontSize as number : null;
+      if (language === null || size === null || (language === undefined && size === undefined)) throw refuse('language(ko, en) 또는 chatFontSize(11–22)를 주세요.');
+      return { kind: 'preference', ...(language ? { language } : {}), ...(size !== undefined ? { chatFontSize: size } : {}) };
+    }
+  }
+  throw refuse('action은 openSession, close, openPanel, filter, setPreference 중 하나입니다.');
+}
+
+/** A card as the model reads it in the conversation. */
+function cardLine(card: MasterCard): string {
+  if (card.type === 'open') return `button for the owner to open: ${card.label}`;
+  if (card.type === 'push') return `notifications card: ${card.state}${card.note ? ` (${card.note})` : ''}`;
+  return `secret card for "${card.purpose}": ${card.state}`;
+}
+
+/** The button text of an "open" card. */
+function openLabel(command: MasterScreenCommand): string {
+  if (command.kind === 'openSession') return `세션 열기: ${command.sessionId}`;
+  if (command.kind === 'openPanel') return `열기: ${command.panel}${command.cwd ? ` (${command.cwd})` : ''}`;
+  return '열기';
+}
+
+/** A terminal's output as plain text: escape sequences removed, carriage returns as line ends. */
+function plainTerminal(output: string): string {
+  return output
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b[@-Z\\-_]/g, '')
+    .replace(/\r+\n/g, '\n').replace(/\r/g, '\n')
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
 }

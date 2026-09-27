@@ -37,7 +37,8 @@ import { reconcileApprovalDecisions } from '../chat/chat-approvals';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { connectSnapshotStream, NodeSnapshotStore, SnapshotStore } from './snapshot-stream';
 import { combinedView, hostOf, hostProblem, workspaceNote } from '../remote/hosts';
-import { localPart, nodeOf, nodePath, pathFor, splitScopedId } from '../remote/scope';
+import { localPart, nodeOf, nodePath, pathFor, scopedId, splitScopedId } from '../remote/scope';
+import type { MasterFilter } from '../../../shared/master';
 
 type StatusFilter = 'all' | SessionStatus;
 const readSelection = () => new URLSearchParams(window.location.search).get('session');
@@ -176,8 +177,6 @@ function TowerApp() {
     return () => navigator.serviceWorker.removeEventListener('message', onMessage);
   }, [selectSession]);
   const closeChat = useCallback(() => selectSession(null), [selectSession]);
-  // The master agent opens what it found through the page's own selection, never through its own state.
-  const masterControls = useMemo(() => ({ selectSession }), [selectSession]);
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
@@ -226,6 +225,28 @@ function TowerApp() {
     return () => window.removeEventListener('keydown', handler);
   }, [openAutoPrompt, openNewSession, showHelp, showNewSession, showAutoPrompt, sidebarIsDrawer, showSidebar, token, connection]);
   const closeAutoPrompt = useCallback(() => setShowAutoPrompt(false), []);
+  // The master agent works the page through its own controls and setters, never through state of its own.
+  const masterControls = useMemo(() => ({
+    selectSession,
+    openNewSession,
+    openAutoPrompt,
+    showHelp: () => setShowHelp(true),
+    showSessions: () => { if (sidebarIsDrawer) setShowSidebar(true); else setSidebarCollapsed(false); },
+    filter: (filter: MasterFilter) => {
+      if (filter.reset) { setQuery(''); setMachine('all'); setProvider('all'); setProject('all'); setStatus('all'); }
+      if (filter.query !== undefined) setQuery(filter.query);
+      if (filter.provider) setProvider(filter.provider);
+      if (filter.status) setStatus(filter.status);
+      if (filter.period) setPeriod(filter.period);
+      if (filter.computer) setMachine(filter.computer);
+      const node = filter.computer && filter.computer !== 'all' && filter.computer !== 'local' ? filter.computer : undefined;
+      // Choosing a computer resets the folder, as the computer menu does.
+      if (filter.project !== undefined) setProject(filter.project ? scopedId(node, filter.project) : 'all');
+      else if (filter.computer) setProject('all');
+      if (filter.closed !== undefined) setShowClosed(filter.closed);
+      if (filter.showHidden !== undefined) setShowHidden(filter.showHidden);
+    },
+  }), [selectSession, openNewSession, openAutoPrompt, sidebarIsDrawer]);
   const openAutoPromptSession = useCallback((id: string) => {
     selectSession(id);
     refresh();

@@ -11,7 +11,7 @@ const post = (path: string, token: string, body: unknown) => api<DecisionOvervie
 export function DecisionButton({ token }: { token: string }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
-  return <><button className={`icon-button ${open ? 'active' : ''}`} title={t('빠른 판단')} aria-label={t('빠른 판단')} aria-expanded={open} onClick={() => setOpen(true)}><BrainCircuit size={18} /></button>{open && <DecisionPanel token={token} onClose={() => setOpen(false)} />}</>;
+  return <><button className={`icon-button ${open ? 'active' : ''}`} data-master-panel="decisions" title={t('빠른 판단')} aria-label={t('빠른 판단')} aria-expanded={open} onClick={() => setOpen(true)}><BrainCircuit size={18} /></button>{open && <DecisionPanel token={token} onClose={() => setOpen(false)} />}</>;
 }
 
 /** The fast-judgment service (Jev today), its API key, and which Tower features use it. */

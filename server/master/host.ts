@@ -80,6 +80,14 @@ export async function startMasterHost(options: MasterHostOptions) {
         return master.send({ clientMessageId: args.clientMessageId, text: args.text, local: args.local === true, ...(args.viewContext && typeof args.viewContext === 'object' ? { viewContext: viewContext(args.viewContext) } : {}) });
       }
       case 'stop': return master.stop();
+      case 'ack': {
+        if (typeof args.id !== 'string' || !['done', 'unavailable', 'failed'].includes(String(args.result))) throw failure('화면 응답이 올바르지 않습니다.', 400);
+        return master.ack(args.id, args.result as 'done' | 'unavailable' | 'failed', typeof args.note === 'string' ? args.note : undefined);
+      }
+      case 'card': {
+        if (typeof args.id !== 'string' || !args.body || typeof args.body !== 'object') throw failure('카드 응답이 올바르지 않습니다.', 400);
+        return master.card(args.id, args.body as Record<string, unknown>, args.local === true);
+      }
       case 'settings': return master.updateSettings(args.body && typeof args.body === 'object' ? args.body as Record<string, unknown> : {});
       case 'shutdown': {
         if (master.busy()) return false;

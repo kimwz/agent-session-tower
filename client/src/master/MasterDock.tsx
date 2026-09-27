@@ -1,17 +1,15 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Bot, LoaderCircle } from 'lucide-react';
-import type { MasterDirective } from '../../../shared/master';
-import { scopedId } from '../remote/scope';
+import type { MasterDirective, MasterScreenCommand } from '../../../shared/master';
+import { post } from './api';
 import { followRoom, type RoomState } from './room-stream';
+import { runScreenCommand, type MasterControls } from './screen';
 import { useWords } from './strings';
 import './master.css';
 
 const MasterPanel = lazy(() => import('./MasterPanel').then(module => ({ default: module.MasterPanel })));
 
-/** What the dock may do on the owner's screen: the page's own actions, handed down, never new state. */
-export interface MasterControls {
-  selectSession(id: string | null): void;
-}
+export type { MasterControls } from './screen';
 
 const SEEN_KEY = 'tower.master.seen-order';
 const TAB_KEY = 'tower.master.tab';
@@ -41,6 +39,10 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   const controlsRef = useRef(controls);
   controlsRef.current = controls;
   const button = useRef<HTMLButtonElement>(null);
+  const tokenRef = useRef(token);
+  tokenRef.current = token;
+  /** Commands already done here, so one sent again after a reconnect is not done twice. */
+  const done = useRef(new Set<string>());
 
   useEffect(() => {
     let cancelled = false;
@@ -50,8 +52,12 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
       if (cancelled) return;
       if (response.status === 404) { setAbsent(true); return; }
       follow.current = followRoom(setRoom, (directive: MasterDirective) => {
-        if (directive.tabId !== tab.current || directive.expiresAt < Date.now()) return;
-        if (directive.kind === 'openSession') controlsRef.current.selectSession(scopedId(directive.node, directive.sessionId));
+        if (directive.tabId !== tab.current || directive.expiresAt < Date.now() || done.current.has(directive.id)) return;
+        done.current.add(directive.id);
+        let answer;
+        try { answer = runScreenCommand(directive, controlsRef.current); }
+        catch (error) { answer = { result: 'failed' as const, note: error instanceof Error ? error.message : String(error) }; }
+        void post(`/api/master/directives/${directive.id}`, tokenRef.current, answer).catch(() => {});
       });
     }).catch(() => { if (!cancelled) retry = setTimeout(() => probe(Math.min(wait * 2, 30_000)), wait); });
     probe(2000);
@@ -93,7 +99,8 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
       {!unread && (overview?.activeTasks ?? 0) > 0 && <span className="master-fab-tasks">{overview!.activeTasks}</span>}
     </button>
     {open && <Suspense fallback={<div className="master-panel"><LoaderCircle className="spin" size={18} /></div>}>
-      <MasterPanel token={token} room={room} tabId={tab.current} sessionId={sessionId} top={position.panelTop} onClose={close} onEarlier={() => follow.current?.earlier() ?? Promise.resolve()} onOpenSession={id => controlsRef.current.selectSession(id)} />
+      <MasterPanel token={token} room={room} tabId={tab.current} sessionId={sessionId} top={position.panelTop} onClose={close} onEarlier={() => follow.current?.earlier() ?? Promise.resolve()} onOpenSession={id => controlsRef.current.selectSession(id)}
+        onCommand={(command: MasterScreenCommand) => runScreenCommand(command, controlsRef.current)} />
     </Suspense>}
   </>;
 }

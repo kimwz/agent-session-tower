@@ -20,7 +20,7 @@ export function AccountButton() {
     catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }
-  return <><button className="icon-button" title={auth.status.local ? t('계정 관리') : t('로그아웃')} aria-label={auth.status.local ? t('계정 관리') : t('로그아웃')} disabled={busy} onClick={() => auth.status.local ? setOpen(true) : void logout()}>{auth.status.local ? <UserRoundCog size={18} /> : <LogOut size={18} />}</button>{error && <span role="alert">{translateMessage(error)}</span>}{open && <AccountPanel token={auth.status.token} onClose={() => setOpen(false)} onChanged={auth.refresh} />}</>;
+  return <><button className="icon-button" data-master-panel={auth.status.local ? 'account' : undefined} title={auth.status.local ? t('계정 관리') : t('로그아웃')} aria-label={auth.status.local ? t('계정 관리') : t('로그아웃')} disabled={busy} onClick={() => auth.status.local ? setOpen(true) : void logout()}>{auth.status.local ? <UserRoundCog size={18} /> : <LogOut size={18} />}</button>{error && <span role="alert">{translateMessage(error)}</span>}{open && <AccountPanel token={auth.status.token} onClose={() => setOpen(false)} onChanged={auth.refresh} />}</>;
 }
 export function AccountPanel({ token, onClose, onChanged }: { token: string; onClose: () => void; onChanged: () => Promise<void> }) {
   const { t } = useI18n();

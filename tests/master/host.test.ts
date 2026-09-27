@@ -88,6 +88,17 @@ test('the master stays removable: only three existing files reach into it', asyn
   };
   for (const folder of ['server', 'client/src', 'shared']) await walk(join(root, folder));
   assert.deepEqual(offenders, []);
+  // The header's panel buttons carry a marker the master presses them by; nothing else of theirs changed.
+  const marked: string[] = [];
+  const mark = async (directory: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) { if (entry.name !== 'master') await mark(path); continue; }
+      if (/\.tsx$/.test(entry.name) && (await readFile(path, 'utf8')).includes('data-master-panel')) marked.push(relative(root, path));
+    }
+  };
+  await mark(join(root, 'client/src'));
+  assert.deepEqual(marked.sort(), ['client/src/auth/AccountPanel.tsx', 'client/src/decisions/DecisionPanel.tsx', 'client/src/notifications/NotificationPanel.tsx', 'client/src/remote/RemotePanel.tsx', 'client/src/triggers/TriggerPanel.tsx']);
   // server/http/server.ts takes the master only as an option and never imports it.
   assert.doesNotMatch(await readFile(join(root, 'server/http/server.ts'), 'utf8'), /from '\.\.\/master\//);
 });

@@ -81,3 +81,11 @@
 @media (max-width:680px) {
   .master-panel { top:auto; left:0; right:0; bottom:0; width:100vw; height:min(88dvh, 100dvh - 40px); border-right:none; border-top:1px solid var(--line); border-radius:14px 14px 0 0; box-shadow:0 -8px 24px rgba(0,0,0,.4); }
 }
+
+/* Cards: what only the owner's own browser can do. */
+.master-card { align-self:stretch; display:flex; flex-wrap:wrap; align-items:center; gap:8px; border:1px solid var(--line); border-radius:9px; padding:8px 10px; background:var(--surface-raised); font-size:12.5px; color:var(--text); }
+.master-card > svg { color:var(--amber); }
+.master-card > span { flex:1 1 160px; min-width:0; }
+.master-card.secret input { flex:1 1 100%; min-width:0; }
+.master-card.subscribed > svg, .master-card.done > svg { color:var(--teal); }
+.master-card small[role="alert"] { flex-basis:100%; color:var(--danger); }

@@ -11,7 +11,7 @@ export function NotificationButton({ token }: { token: string }) {
   const [open, setOpen] = useState(false);
   // An allowed browser keeps its registration in the page's current language without being asked.
   useEffect(() => { void refreshPush(token).catch(() => {}); }, [token]);
-  return <><button className={`icon-button ${open ? 'active' : ''}`} title={t('알림')} aria-label={t('알림')} aria-expanded={open} onClick={() => setOpen(true)}><Bell size={18} /></button>{open && <NotificationPanel token={token} onClose={() => setOpen(false)} />}</>;
+  return <><button className={`icon-button ${open ? 'active' : ''}`} data-master-panel="notifications" title={t('알림')} aria-label={t('알림')} aria-expanded={open} onClick={() => setOpen(true)}><Bell size={18} /></button>{open && <NotificationPanel token={token} onClose={() => setOpen(false)} />}</>;
 }
 
 export function NotificationPanel({ token, onClose }: { token: string; onClose: () => void }) {

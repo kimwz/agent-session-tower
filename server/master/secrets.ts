@@ -72,6 +72,9 @@ export class SecretVault {
     return walk(value);
   }
 
+  /** A reference for a value the owner gave on purpose (a secret card), whatever its format. */
+  reference(value: string): string { return `{{secret:${this.keep(value)}}}`; }
+
   private keep(value: string): string {
     for (const [ref, known] of this.values) if (known.value === value) { known.at = Date.now(); return ref; }
     const ref = randomBytes(8).toString('hex');
