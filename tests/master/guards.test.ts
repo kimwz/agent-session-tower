@@ -67,8 +67,11 @@ test('keys the owner pastes reach the model only as references, and go back into
   const hidden = vault.hide(`use ${key} for jev_abcdefghijklmnopqrstuv too`);
   assert.doesNotMatch(hidden, /abcdefghijklmnop/);
   const ref = /\{\{secret:[a-f0-9]{16}\}\}/.exec(hidden)![0];
-  assert.deepEqual(vault.reveal({ apiKey: ref, nested: [ref] }), { apiKey: key, nested: [key] });
+  assert.deepEqual(vault.reveal({ apiKey: ref, secret: { name: 'Auth', value: [ref] }, code: ref }), { apiKey: key, secret: { name: 'Auth', value: [key] }, code: key });
   assert.throws(() => vault.reveal({ apiKey: '{{secret:0000000000000000}}' }), { statusCode: 400 });
+  // Only fields meant for secrets take one back: never a title or a prompt, where Tower keeps and shows it openly.
+  assert.throws(() => vault.reveal({ title: ref }), /비밀 칸/);
+  assert.throws(() => vault.reveal({ prompt: `use ${ref}` }), /비밀 칸/);
   // A join code is secret by nature, here and on a joined computer.
   const invite = vault.hideInResponse(`/api/nodes/${NODE}/link/invite`, { id: 'i', code: 'JOIN-CODE-123', command: 'tower join JOIN-CODE-123', expiresAt: 1 }) as Record<string, string>;
   assert.match(invite.code, /^\{\{secret:/);

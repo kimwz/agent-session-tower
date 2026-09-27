@@ -94,7 +94,7 @@ export function MasterPanel({ token, room, tabId, sessionId, top, onClose, onEar
       <div className="master-timeline" ref={scroller}>
         {room.hasMore && <button className="master-earlier" onClick={() => void onEarlier()}>{words('이전 대화 보기', 'Show earlier')}</button>}
         {!room.entries.length && !room.draft && <div className="master-empty"><Bot size={26} /><p>{words('Tower에서 하던 일을 말로 시켜 보세요. 예: "지금 작업 중인 세션 알려줘", "monitor에 세션 열어서 로그인 버그 고쳐줘".', 'Ask Tower in plain words. For example: "What is working right now?", "Open a session in monitor and fix the login bug."')}</p></div>}
-        <Timeline entries={room.entries} token={token} onOpenSession={onOpenSession} onCommand={onCommand} />
+        <Timeline entries={room.entries} token={token} tabId={tabId} onOpenSession={onOpenSession} onCommand={onCommand} />
         {room.draft?.text && <div className="master-message master"><Markdown>{room.draft.text}</Markdown><span className="master-cursor" /></div>}
         {thinking && !room.draft?.text && <div className="master-thinking"><LoaderCircle size={14} className="spin" />{words('생각하는 중', 'Thinking')}</div>}
       </div>
@@ -117,7 +117,7 @@ function stateLabel(overview: MasterOverview | undefined, words: (ko: string, en
 }
 
 /** Consecutive calls of one turn fold into one line; everything else is shown as it came. */
-interface EntryProps { token: string; onOpenSession(id: string): void; onCommand(command: MasterScreenCommand): void }
+interface EntryProps { token: string; tabId: string; onOpenSession(id: string): void; onCommand(command: MasterScreenCommand): void }
 
 function Timeline({ entries, ...props }: { entries: MasterEntry[] } & EntryProps) {
   const groups: Array<MasterEntry | MasterEntry[]> = [];
@@ -153,7 +153,7 @@ function actionLabel(state: string, words: (ko: string, en: string) => string): 
     : state === 'uncertain' ? words('결과 불명', 'Outcome unknown') : words('처리 안 됨', 'Not run');
 }
 
-function Entry({ entry, token, onOpenSession, onCommand }: { entry: MasterEntry } & EntryProps) {
+function Entry({ entry, token, tabId, onOpenSession, onCommand }: { entry: MasterEntry } & EntryProps) {
   const words = useWords();
   const data = entry.data;
   if (data.kind === 'owner') return <div className="master-message owner">{showSecrets(data.text)}</div>;
@@ -168,12 +168,12 @@ function Entry({ entry, token, onOpenSession, onCommand }: { entry: MasterEntry 
       {data.answer && <p>{data.answer}</p>}
     </div>;
   }
-  if (data.kind === 'card') return <Card id={entry.id} card={data.card} token={token} onCommand={onCommand} />;
+  if (data.kind === 'card') return <Card id={entry.id} card={data.card} token={token} tabId={tabId} onCommand={onCommand} />;
   return null;
 }
 
 /** What only the owner's own browser can do, pressed on the device that should do it. */
-function Card({ id, card, token, onCommand }: { id: string; card: MasterCard; token: string; onCommand(command: MasterScreenCommand): void }) {
+function Card({ id, card, token, tabId, onCommand }: { id: string; card: MasterCard; token: string; tabId: string; onCommand(command: MasterScreenCommand): void }) {
   const words = useWords();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -206,7 +206,7 @@ function Card({ id, card, token, onCommand }: { id: string; card: MasterCard; to
     </div>;
   }
   if (card.state !== 'waiting') return <div className="master-card done"><KeyRound size={13} /><span>{card.purpose}: {card.state === 'provided' ? words('입력했습니다. 값은 마스터에게 보이지 않습니다.', 'Entered. The master never sees the value.') : words('취소했습니다.', 'Cancelled.')}</span></div>;
-  return <form className="master-card secret" onSubmit={event => { event.preventDefault(); if (value) void run(async () => { await answer({ value }); setValue(''); }); }}>
+  return <form className="master-card secret" onSubmit={event => { event.preventDefault(); if (value) void run(async () => { await answer({ value, tabId }); setValue(''); }); }}>
     <KeyRound size={13} /><span>{card.purpose}</span>
     <input type="password" autoComplete="off" value={value} onChange={event => setValue(event.target.value)} aria-label={card.purpose} placeholder={words('값 입력 (마스터에게 보이지 않음)', 'Value (the master never sees it)')} />
     <button className="master-primary" disabled={busy || !value}>{busy ? <LoaderCircle size={13} className="spin" /> : words('보내기', 'Send')}</button>

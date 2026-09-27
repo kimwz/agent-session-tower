@@ -704,6 +704,38 @@ test('a secret typed into a card reaches Tower but never the model, the conversa
   for (const name of await readdir(join(dir, 'room'))) assert.doesNotMatch(await readFile(join(dir, 'room', name), 'utf8'), /hunter2/);
 });
 
+test('a secret from a card goes only into secret fields, is hidden when Tower echoes it, and later commands go to the tab that answered', async t => {
+  const value = 'correct-horse-battery-staple';
+  const { service, room, said, tower } = await master(t, seen => {
+    // A careless API that echoes what it was given.
+    if (seen.method === 'POST') return { body: { saved: seen.body } };
+    return { body: {} };
+  }, [
+    [call('request_secret', { purpose: 'API password' })],
+    [say('카드에 입력해 주세요.')],
+    request => {
+      const reference = /\{\{secret:[a-f0-9]{16}\}\}/.exec(JSON.stringify(request.input))![0];
+      return [call('tower_api', { method: 'POST', path: '/api/sessions/claude:s1/title', body: { title: reference } }), call('tower_api', { method: 'POST', path: '/api/public-agents/password', body: { id: 'a', password: reference } }), call('ui', { action: 'close' })];
+    },
+    request => {
+      const [title, password] = toolOutputs(request);
+      assert.match(String(title.error), /비밀 칸/);
+      assert.doesNotMatch(JSON.stringify(request.input), /correct-horse/);
+      assert.equal(password.state, 'succeeded');
+      return [say('저장했습니다.')];
+    },
+  ], undefined, { guards: { hideSecrets: false } });
+  const seen = screen(room, () => ({ result: 'done' }), () => service);
+  await service.send({ clientMessageId: 'message-0207', text: '비밀번호 바꿔줘', local: true, viewContext: { tabId: 'tab-asked' } });
+  await said(/카드에 입력/);
+  const card = room.recent(20).find(entry => entry.data.kind === 'card')!;
+  await service.card(card.id, { value, tabId: 'tab-answered' }, true);
+  await said(/저장했습니다/);
+  assert.equal(tower.seen.filter(entry => entry.path.endsWith('/title')).length, 0, 'the title was never sent');
+  assert.equal((tower.seen.find(entry => entry.path === '/api/public-agents/password')!.body as { password: string }).password, value);
+  assert.deepEqual(seen.map(directive => directive.tabId), ['tab-answered']);
+});
+
 test('a notifications card records how it went on the device that pressed it', async t => {
   const { service, room, said } = await master(t, () => ({ body: {} }), [
     [call('browser_action', { kind: 'push-subscribe' })],

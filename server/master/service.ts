@@ -397,7 +397,8 @@ export class MasterService {
 
   /** Text about to be kept (the conversation, records) or read by the model, with secrets replaced when that is on. */
   private hideText(text: string): string {
-    return this.options.settings.current().guards.hideSecrets ? this.vault.hide(text) : text;
+    // Values the owner typed into a secret card are hidden whatever the setting.
+    return this.options.settings.current().guards.hideSecrets ? this.vault.hide(text) : this.vault.redact(text);
   }
 
   /** How much work an irreversible change stops: closing a session also cancels its queued runs. Unknown when Tower cannot say. */
@@ -428,7 +429,7 @@ export class MasterService {
 
   private answer(target: ApiTarget, response: TowerResponse): Record<string, unknown> {
     const guards = this.options.settings.current().guards;
-    const body = guards.hideSecrets ? this.vault.hideInResponse(target.route, response.body) : response.body;
+    const body = guards.hideSecrets ? this.vault.hideInResponse(target.route, response.body) : this.vault.redactInResponse(response.body);
     return { status: response.status, state: response.state, body };
   }
 
@@ -543,7 +544,9 @@ export class MasterService {
       const value = body.value;
       if (typeof value !== 'string' || !value || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value)) throw Object.assign(new Error('값이 비었거나 올바르지 않습니다.'), { statusCode: 400 });
       const updated = room.update(id, { kind: 'card', card: { ...card, state: 'provided' } }) ?? entry;
-      await this.send({ clientMessageId: `secret-${id}`, text: `비밀 값을 입력했습니다 (${card.purpose}): ${this.vault.reference(value)}`, local });
+      // The tab that answered is where the owner is now: what follows is shown there.
+      const tabId = typeof body.tabId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(body.tabId) ? body.tabId : undefined;
+      await this.send({ clientMessageId: `secret-${id}`, text: `비밀 값을 입력했습니다 (${card.purpose}): ${this.vault.reference(value)}`, local, ...(tabId ? { viewContext: { tabId } } : {}) });
       return updated;
     }
     throw Object.assign(new Error('이 카드에는 답할 것이 없습니다.'), { statusCode: 400 });
