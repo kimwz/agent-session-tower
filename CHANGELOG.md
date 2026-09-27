@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.44.2] - 2026-09-27
+
+### Changed
+- **Unread conversations are easier to spot on the canvas.** The **새 활동** mark moved from under the outcome badge at a card's top right to its own badge at the top left, led by a red **N**. The outcome badge (**작업 완료** and the others) keeps the top right to itself.
+
 ## [1.44.1] - 2026-09-27
 
 ### Fixed
