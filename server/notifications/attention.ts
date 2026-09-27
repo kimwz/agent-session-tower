@@ -6,20 +6,25 @@ export interface TurnAttention {
   outcome: TurnOutcome;
   /** True only when the turn is clearly an intermediate step: then no push is sent. */
   quiet: boolean;
+  /** How likely each outcome was, as the judgment gave it. */
+  probabilities: Record<TurnOutcome, number>;
 }
 export interface TurnAttentionInput {
   /** The owner's request this turn works on (for a scheduled continuation, the request that started it). */
   request: string;
-  /** The end of what the agent wrote in this turn; its final answer is at the end. */
-  reply: string;
+  /** What the agent wrote during this turn, as Tower recorded it; its last message is at the end. */
+  output: string;
   conversation: string;
   project: string;
 }
 
-/** Both signals must agree before a push is skipped, so a real result is not lost to one uncertain answer. */
-const QUIET_PROGRESS = 0.5;
-const QUIET_INTERRUPT = 0.5;
-const OUTCOMES = { done: 'done', needs_owner: 'needsOwner', blocked: 'blocked', progress: 'progress' } as const;
+/**
+ * A push is skipped only when the turn's last message clearly says the agent is not done and carries on by itself.
+ * Measured on 59 of the owner's real turns (all worth a push) and on made-up intermediate ones that follow some
+ * narration: no real turn went above 0.50, and every intermediate one was at least 0.99.
+ */
+export const QUIET_CONTINUING = 0.8;
+const OUTCOMES = { finished: 'done', asks_owner: 'needsOwner', failed: 'blocked', continuing: 'progress' } as const;
 
 const tail = (value: string, length: number) => {
   const text = value.trim();
@@ -30,23 +35,31 @@ const head = (value: string, length: number) => {
   return text.length > length ? `${text.slice(0, length - 1)}…` : text;
 };
 
-/** Whether the owner should be told now that a conversation turn finished, and how it finished. */
+/**
+ * A turn's output as the judgment reads it: Tower writes each Claude tool call into it as `[ToolName]` and a line
+ * break; those marks are blanked and nothing else is removed, so a reply that quotes such a line keeps all its text.
+ */
+export function turnOutput(output: string): string {
+  return output.replace(/\[[A-Za-z0-9_:.-]{1,100}\]\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+/** Whether the owner should be told now that a conversation turn ended, and how it ended. */
 export async function judgeTurn(engine: DecisionEngine, input: TurnAttentionInput, signal?: AbortSignal): Promise<TurnAttention> {
-  const answers = await engine.decide({ signal, state: {
-    about: 'An AI coding agent finished one turn of work in a conversation with its owner. The owner is notified on their phone only when they need to look now.',
+  const { turn_end } = await engine.decide({ signal, state: {
+    about: 'An AI coding agent ended one turn of work in a conversation with its owner.',
     project: head(input.project, 200), conversation: head(input.conversation, 200),
     owner_request: head(input.request, 2000),
-    end_of_agent_output: tail(input.reply, 4000),
+    end_of_turn_output: tail(turnOutput(input.output), 4000),
   }, questions: {
-    outcome: { type: 'choice', instructions: 'How did this turn leave the work, judging by the end of the agent output?', options: {
-      done: 'The agent reports that the requested work is finished, or it fully answered the question. There is a result for the owner to look at.',
-      needs_owner: 'The agent asks the owner a question or needs a decision, approval, information, credentials or a manual step before it can continue.',
-      blocked: 'The agent could not finish: it reports an error, a failing check or a problem it could not resolve.',
-      progress: 'An intermediate update: the agent is still working, will continue by itself, waits for background work or a scheduled check, or only reports one step of a larger task. Nothing is needed from the owner yet.',
+    turn_end: { type: 'choice', instructions: 'The end_of_turn_output is the end of what the agent wrote during this turn, with its last message at the very end. How does that last message leave things for the owner?', options: {
+      finished: 'It reports the requested work as done or answers the question, possibly with notes, caveats, remaining steps or suggestions.',
+      asks_owner: 'It asks the owner to choose, approve, answer, confirm or do something.',
+      failed: 'It says the work could not be done or stopped on an error it could not fix.',
+      continuing: 'It says the work is not finished yet and that the agent itself will continue, or is waiting for something it started to finish, and it gives no result yet.',
     } },
-    owner_should_know: { type: 'yesNo', instructions: 'Should the owner be interrupted now to read or act on this turn?' },
   } });
-  const outcome = OUTCOMES[answers.outcome.choice as keyof typeof OUTCOMES] ?? 'done';
-  const quiet = outcome === 'progress' && answers.outcome.probabilities.progress >= QUIET_PROGRESS && answers.owner_should_know.yes < QUIET_INTERRUPT;
-  return { outcome: outcome === 'progress' && !quiet ? 'done' : outcome, quiet };
+  const probabilities = Object.fromEntries(Object.entries(OUTCOMES).map(([option, outcome]) => [outcome, turn_end.probabilities[option] ?? 0])) as Record<TurnOutcome, number>;
+  const quiet = probabilities.progress >= QUIET_CONTINUING;
+  const chosen = OUTCOMES[turn_end.choice as keyof typeof OUTCOMES] ?? 'done';
+  return { outcome: chosen === 'progress' && !quiet ? 'done' : chosen, quiet, probabilities };
 }

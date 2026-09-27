@@ -42,6 +42,13 @@ const B64URL = /^[A-Za-z0-9_-]+$/;
 
 export const deviceId = (endpoint: string) => createHash('sha256').update(endpoint).digest('hex');
 
+/** The value, or undefined once `ms` passed; the wait keeps the process alive and ends with the value. */
+function within<T>(value: Promise<T>, ms: number): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([value, new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), Math.max(0, ms)); })])
+    .finally(() => clearTimeout(timer));
+}
+
 /** A queued message the owner inserted into a running turn became part of it and ends with it. */
 const merged = (run: Run) => run.steering?.state === 'delivered';
 
@@ -248,12 +255,10 @@ export class NotificationService {
     if (this.context.attention) {
       const session = this.context.session(run.sessionId);
       const signal = AbortSignal.timeout(ATTENTION_MS);
-      const input: TurnAttentionInput = { request: turnRequest(run, this.context.runs()), reply: run.output,
+      // The turn's own output: nothing of another turn, and complete as soon as the turn ends.
+      const input: TurnAttentionInput = { request: turnRequest(run, this.context.runs()), output: run.output,
         conversation: session?.customTitle || session?.agentName || session?.title || '', project: session ? this.context.project(session) : '' };
-      judged = await Promise.race([
-        this.context.attention(input, signal).catch(() => undefined),
-        new Promise<undefined>(resolve => { setTimeout(() => resolve(undefined), ATTENTION_MS + 500).unref?.(); }),
-      ]);
+      judged = await within(this.context.attention(input, signal).catch(() => undefined), ATTENTION_MS + 500);
     }
     // The owner may have sent the next message while this was being judged.
     if (followedUp(run, this.context.runs())) return undefined;

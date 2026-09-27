@@ -5,7 +5,7 @@ import { createECDH, randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DecisionEngine } from '../../../server/decisions/engine.js';
-import { judgeTurn, type TurnAttention } from '../../../server/notifications/attention.js';
+import { judgeTurn, QUIET_CONTINUING, turnOutput, type TurnAttention } from '../../../server/notifications/attention.js';
 import { followedUp, notificationMessage, NotificationService, pendingEvents, turnRequest, type NotificationContext } from '../../../server/notifications/service.js';
 import type { Run, Session } from '../../../shared/types.js';
 
@@ -13,27 +13,37 @@ const at = (seconds: number) => new Date(Date.parse('2026-09-26T00:00:00Z') + se
 const run = (id: string, fields: Partial<Run>): Run => ({ id, sessionId: 's1', origin: { kind: 'owner' }, prompt: 'Fix the login bug', status: 'completed', createdAt: at(0), startedAt: at(1), finishedAt: at(10), output: 'Done.', ...fields });
 const session: Session = { id: 's1', nativeId: 'n1', provider: 'claude', title: 'Login bug', cwd: '/work/app', project: 'app', status: 'idle', statusReason: '',
   createdAt: at(0), updatedAt: at(0), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
-const answering = (outcome: string, progress: number, interrupt: number): DecisionEngine => ({ provider: 'jev', label: 'Jev', decide: async () => ({
-  outcome: { choice: outcome, confidence: 0.8, probabilities: { done: 0, needs_owner: 0, blocked: 0, progress, [outcome]: outcome === 'progress' ? progress : 0.9 } },
-  owner_should_know: { yes: interrupt },
+/** Answers the turn question with `choice`, giving `continuing` the probability named. */
+const answering = (choice: string, continuing: number): DecisionEngine => ({ provider: 'jev', label: 'Jev', decide: async () => ({
+  turn_end: { choice, confidence: 0.8, probabilities: { finished: 0, asks_owner: 0, failed: 0, continuing, ...(choice === 'continuing' ? {} : { [choice]: 1 - continuing }) } },
 }) as never });
+const input = { request: 'Deploy', output: '[Bash]\nBuild started; I will check back in 10 minutes.', conversation: 'Deploy', project: 'app' };
 
-test('a turn is skipped only when it is clearly an intermediate step by both signals', async () => {
-  const input = { request: 'Deploy', reply: 'Build started; I will check back in 10 minutes.', conversation: 'Deploy', project: 'app' };
-  assert.deepEqual(await judgeTurn(answering('progress', 0.8, 0.2), input), { outcome: 'progress', quiet: true });
-  assert.deepEqual(await judgeTurn(answering('progress', 0.8, 0.7), input), { outcome: 'done', quiet: false }, 'the owner should know: announce');
-  assert.deepEqual(await judgeTurn(answering('progress', 0.4, 0.1), input), { outcome: 'done', quiet: false }, 'unsure it is progress: announce');
-  assert.deepEqual(await judgeTurn(answering('needs_owner', 0.05, 0.9), input), { outcome: 'needsOwner', quiet: false });
-  assert.deepEqual(await judgeTurn(answering('blocked', 0.05, 0.9), input), { outcome: 'blocked', quiet: false });
+test('a turn is skipped only when its reply clearly says the agent carries on by itself', async () => {
+  assert.deepEqual(await judgeTurn(answering('continuing', 0.95), input), { outcome: 'progress', quiet: true, probabilities: { done: 0, needsOwner: 0, blocked: 0, progress: 0.95 } });
+  assert.deepEqual((await judgeTurn(answering('continuing', 0.7), input)).quiet, false, 'unsure it goes on: announce');
+  assert.deepEqual((await judgeTurn(answering('continuing', 0.7), input)).outcome, 'done');
+  assert.deepEqual(await judgeTurn(answering('asks_owner', 0.05), input), { outcome: 'needsOwner', quiet: false, probabilities: { done: 0, needsOwner: 0.95, blocked: 0, progress: 0.05 } });
+  assert.equal((await judgeTurn(answering('failed', 0.05), input)).outcome, 'blocked');
+  assert.equal((await judgeTurn(answering('finished', 0.5), input)).quiet, false, 'the highest a real finished turn reached when measured');
+  assert.equal((await judgeTurn(answering('continuing', QUIET_CONTINUING), input)).quiet, true, 'exactly the threshold is quiet');
+  assert.equal((await judgeTurn(answering('continuing', 0.79), input)).quiet, false);
 });
 
-test('the judgment sees the request and the end of the output, never more than it needs', async () => {
+test('the judgment sees the request and the end of this turn\'s own output, never more than it needs', async () => {
   let state: Record<string, string> = {};
-  const engine: DecisionEngine = { provider: 'jev', label: 'Jev', decide: async request => { state = request.state as Record<string, string>; return answering('done', 0, 1).decide(request); } };
-  await judgeTurn(engine, { request: 'r'.repeat(5000), reply: `${'early '.repeat(2000)}FINAL ANSWER`, conversation: 'c', project: 'p' });
+  const engine: DecisionEngine = { provider: 'jev', label: 'Jev', decide: async request => { state = request.state as Record<string, string>; return answering('finished', 0).decide(request); } };
+  await judgeTurn(engine, { ...input, request: 'r'.repeat(5000), output: `${'early '.repeat(2000)}[Bash]\nFINAL ANSWER` });
   assert.ok(state.owner_request.length <= 2000);
-  assert.ok(state.end_of_agent_output.length <= 4000);
-  assert.match(state.end_of_agent_output, /FINAL ANSWER$/);
+  assert.ok(state.end_of_turn_output.length <= 4000);
+  assert.match(state.end_of_turn_output, /FINAL ANSWER$/);
+  assert.doesNotMatch(state.end_of_turn_output, /\[Bash\]/);
+});
+
+test('tool call marks are blanked from the output and nothing else is removed, even a quoted bracket line', () => {
+  assert.equal(turnOutput('[Bash]\nRunning the checks now.[Bash]\n[Read]\nDeployed 1.40.4.\n[INFO]\nold log line, not this run.'),
+    'Running the checks now.\n\nDeployed 1.40.4.\n\nold log line, not this run.');
+  assert.equal(turnOutput('Nothing to blank [here] (link).'), 'Nothing to blank [here] (link).');
 });
 
 test('a turn that another turn of the same conversation continues is a step: a scheduled continuation or a message sent while it ran', () => {
@@ -129,7 +139,7 @@ test('a message the owner sends while a turn is being judged means they have see
   const turn = run('turn', {});
   let runs = [turn];
   let release!: () => void;
-  const attention = () => new Promise<TurnAttention>(resolve => { release = () => resolve({ outcome: 'done', quiet: false }); });
+  const attention = () => new Promise<TurnAttention>(resolve => { release = () => resolve({ outcome: 'done', quiet: false, probabilities: { done: 1, needsOwner: 0, blocked: 0, progress: 0 } }); });
   const { sent, notifications } = await service(t, () => runs, attention);
   await notifications.start();
   await settle();
@@ -202,7 +212,7 @@ test('an approval answered before its push was decided is not pushed', async t =
 test('after shutdown a judgment that finishes late neither pushes nor overwrites the saved state', async t => {
   const turn = run('turn', {});
   let release!: () => void;
-  const { dir, sent, notifications } = await service(t, () => [turn], () => new Promise<TurnAttention>(resolve => { release = () => resolve({ outcome: 'done', quiet: false }); }));
+  const { dir, sent, notifications } = await service(t, () => [turn], () => new Promise<TurnAttention>(resolve => { release = () => resolve({ outcome: 'done', quiet: false, probabilities: { done: 1, needsOwner: 0, blocked: 0, progress: 0 } }); }));
   await notifications.start();
   await settle();
   await notifications.close();
@@ -211,4 +221,16 @@ test('after shutdown a judgment that finishes late neither pushes nor overwrites
   await new Promise(resolve => setTimeout(resolve, 100));
   assert.equal(sent.length, 0);
   assert.equal(await readFile(join(dir, 'notifications.json'), 'utf8'), before);
+});
+
+test('the judgment receives this turn\'s own output and the request that started it', async t => {
+  const turn = run('turn', { prompt: 'Ship it', output: '[Bash]\nChecking the build now.[Bash]\nThe release is done.' });
+  const seen: Array<{ request: string; output: string }> = [];
+  const attention = async (input: { request: string; output: string }) => { seen.push({ request: input.request, output: input.output }); return { outcome: 'done', quiet: false, probabilities: { done: 1, needsOwner: 0, blocked: 0, progress: 0 } } as TurnAttention; };
+  const { sent, notifications } = await service(t, () => [turn], attention as never);
+  await notifications.start();
+  await settle();
+  await notifications.close();
+  assert.deepEqual(seen, [{ request: 'Ship it', output: turn.output }]);
+  assert.equal(sent.length, 1);
 });

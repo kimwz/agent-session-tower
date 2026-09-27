@@ -11,6 +11,28 @@ export interface DecisionFeatures {
 }
 export const DEFAULT_DECISION_FEATURES: DecisionFeatures = { autoPromptSuggestions: true, attentionNotifications: true };
 
+/** One judgment a feature made, kept in memory so the owner can see what the service answered and what Tower did. */
+export interface DecisionRecord {
+  at: string;
+  feature: keyof DecisionFeatures;
+  /** What it was about: a conversation title or the start of a draft. */
+  subject: string;
+  /** What Tower did with the answer, in the page's words (a key of DECISION_RESULTS). */
+  result: DecisionResult;
+  /** Each option's probability, rounded, as the service gave it. */
+  probabilities: Record<string, number>;
+  /** A detail worth knowing, such as the suggested place or why a judgment failed. */
+  detail?: string;
+  ms: number;
+}
+/**
+ * For notifications, the judgment itself: `notify` is a turn judged worth a push, which the owner's next message or
+ * the device settings can still stop; `quiet` is a turn judged an intermediate step, which is not pushed.
+ */
+export type DecisionResult = 'notify' | 'quiet' | 'suggested' | 'noSuggestion' | 'failed';
+/** How many recent judgments the settings page can show. */
+export const DECISION_RECORDS_KEPT = 40;
+
 /** What the settings page sees. The API key itself never leaves the server; only its last characters do. */
 export interface DecisionOverview {
   provider: DecisionProviderId;
@@ -19,6 +41,8 @@ export interface DecisionOverview {
   keyHint?: string;
   features: DecisionFeatures;
   providers: Array<{ id: DecisionProviderId; label: string }>;
+  /** Newest first. Absent from servers that predate it. */
+  recent?: DecisionRecord[];
 }
 
 /** An Auto Prompt draft gets suggestions once it is this long. */

@@ -22,3 +22,15 @@
 .decision-key-form input { flex:1; min-width:0; }
 .decision-key-form input, .decision-provider select { min-height:36px; padding:8px 11px; border:1px solid #344255; border-radius:6px; color:#e4edf9; background:#0d131d; }
 .decision-key-form input:focus, .decision-provider select:focus-visible { outline:2px solid #91baff; outline-offset:2px; }
+.decision-refresh { margin-left:6px; vertical-align:middle; }
+.decision-records { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; border:1px solid var(--line); border-radius:8px; max-height:340px; overflow:auto; }
+.decision-record { display:flex; flex-direction:column; gap:3px; padding:9px 12px; border-bottom:1px solid var(--line); font-size:12px; }
+.decision-record:last-child { border-bottom:none; }
+.decision-record>div { display:flex; align-items:baseline; gap:8px; }
+.decision-record>div>small { margin-left:auto; color:#8193ab; }
+.decision-record-result { color:#9ee0ba; }
+.decision-record.quiet .decision-record-result { color:#f2c86b; }
+.decision-record.failed .decision-record-result, .decision-record.noSuggestion .decision-record-result { color:#efb7b7; }
+.decision-record>p { margin:0; color:#cfdcee; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.decision-record small { color:#91a1b7; overflow-wrap:anywhere; }
+.decision-record-probabilities { font-variant-numeric:tabular-nums; }

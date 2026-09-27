@@ -276,7 +276,17 @@ async function main() {
     trigger: id => runs.triggerOverview()?.triggers.find(item => item.id === id)?.name,
     attention: async (input, signal) => {
       const engine = decisions.engine('attentionNotifications');
-      return engine ? judgeTurn(engine, input, signal) : undefined;
+      if (!engine) return undefined;
+      const started = performance.now();
+      const subject = input.conversation || input.request;
+      try {
+        const judged = await judgeTurn(engine, input, signal);
+        decisions.record({ feature: 'attentionNotifications', subject, result: judged.quiet ? 'quiet' : 'notify', probabilities: judged.probabilities, ms: performance.now() - started });
+        return judged;
+      } catch (error) {
+        decisions.record({ feature: 'attentionNotifications', subject, result: 'failed', probabilities: {}, detail: error instanceof Error ? error.message : String(error), ms: performance.now() - started });
+        throw error;
+      }
     },
   });
   runs.on('change', () => notifications.changed());
@@ -392,7 +402,17 @@ async function main() {
       overview: () => decisions.overview(),
       update: body => decisions.update(body),
       test: () => decisions.test(),
-      suggestAutoPrompt: (input, load, signal) => autoPromptSuggestionResponse(decisions.engine('autoPromptSuggestions'), load, input, signal),
+      suggestAutoPrompt: async (input, load, signal) => {
+        const started = performance.now();
+        const response = await autoPromptSuggestionResponse(decisions.engine('autoPromptSuggestions'), load, input, signal);
+        if (response.available && !signal.aborted) {
+          const found = response.suggestion;
+          decisions.record({ feature: 'autoPromptSuggestions', subject: input.prompt.trim(), result: response.error ? 'failed' : found ? 'suggested' : 'noSuggestion',
+            probabilities: found ? { project: found.projectConfidence, conversation: found.sessionConfidence } : {},
+            ...(response.error ? { detail: response.error } : found ? { detail: `${found.project} › ${found.sessionTitle ?? 'new'}` } : {}), ms: performance.now() - started });
+        }
+        return response;
+      },
     },
     towerUpdate: async version => {
       if (!updates.managed) return { status: 409, body: { code: 'not-service', error: 'This Tower does not run as the background service, so it cannot replace itself.' } };

@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { BrainCircuit, KeyRound, LoaderCircle, Trash2, X } from 'lucide-react';
-import type { DecisionFeatures, DecisionOverview } from '../../../shared/decisions';
+import { BrainCircuit, KeyRound, LoaderCircle, RefreshCw, Trash2, X } from 'lucide-react';
+import type { DecisionFeatures, DecisionOverview, DecisionRecord } from '../../../shared/decisions';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { api } from '../common/lib';
-import { translateMessage, useI18n } from '../i18n/i18n';
+import { locale, translate as t, translateMessage, useI18n } from '../i18n/i18n';
 
 const post = (path: string, token: string, body: unknown) => api<DecisionOverview>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(body) });
 
@@ -66,6 +66,25 @@ export function DecisionPanel({ token, onClose }: { token: string; onClose: () =
         </fieldset>
         <p className="auth-hint">{t('켜진 기능은 위 내용을 {0}로 보냅니다. API 키는 이 컴퓨터의 상태 폴더에만 저장되고 화면에 다시 표시되지 않습니다.', { 0: label })}</p>
       </section>
+      <section><h3>{t('최근 판단')} <span className="auth-count">{overview.recent?.length ?? 0}</span><button className="icon-button decision-refresh" title={t('새로고침')} aria-label={t('새로고침')} disabled={busy} onClick={() => void act(async () => api<DecisionOverview>('/api/decisions'))}><RefreshCw size={14} /></button></h3>
+        {overview.recent?.length ? <ul className="decision-records">{overview.recent.map(record => <DecisionRecordRow key={`${record.at}-${record.subject}`} record={record} />)}</ul>
+          : <p className="auth-empty">{t('아직 판단 기록이 없습니다. Tower를 다시 시작하면 기록이 비워집니다.')}</p>}
+      </section>
     </>}
   </div></dialog>, document.body);
+}
+
+const RESULT_LABELS: Record<DecisionRecord['result'], string> = { notify: '알릴 턴으로 판단', quiet: '중간 단계로 판단해 알리지 않음', suggested: '추천함', noSuggestion: '맞는 곳 없음', failed: '실패' };
+const PROBABILITY_LABELS: Record<string, string> = { done: '완료', needsOwner: '확인 필요', blocked: '막힘', progress: '계속 진행', project: '프로젝트', conversation: '세션' };
+
+/** One judgment: what it was about, what the service answered and what Tower did with it. */
+export function DecisionRecordRow({ record }: { record: DecisionRecord }) {
+  const time = new Date(record.at).toLocaleTimeString(locale(), { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  const probabilities = Object.entries(record.probabilities).map(([key, value]) => `${t(PROBABILITY_LABELS[key] ?? key)} ${value.toFixed(2)}`).join(' · ');
+  return <li className={`decision-record ${record.result}`}>
+    <div><strong>{t(record.feature === 'attentionNotifications' ? '알림' : '추천')}</strong><span className="decision-record-result">{t(RESULT_LABELS[record.result])}</span><small>{time} · {record.ms}ms</small></div>
+    <p title={record.subject}>{record.subject}</p>
+    {probabilities && <small className="decision-record-probabilities">{probabilities}</small>}
+    {record.detail && <small>{record.detail}</small>}
+  </li>;
 }

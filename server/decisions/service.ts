@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DECISION_PROVIDER_IDS, DEFAULT_DECISION_FEATURES, type DecisionFeatures, type DecisionOverview, type DecisionProviderId } from '../../shared/decisions.js';
+import { DECISION_PROVIDER_IDS, DECISION_RECORDS_KEPT, DEFAULT_DECISION_FEATURES, type DecisionFeatures, type DecisionOverview, type DecisionProviderId, type DecisionRecord } from '../../shared/decisions.js';
 import { httpError } from '../http/requests.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { DecisionError, type DecisionEngine } from './engine.js';
@@ -30,6 +30,8 @@ export class DecisionService {
   private saved: Saved = { provider: 'jev', features: { ...DEFAULT_DECISION_FEATURES } };
   private cached?: { key: string; provider: DecisionProviderId; engine: DecisionEngine };
   private writes: Promise<void> = Promise.resolve();
+  /** Recent judgments, newest first; memory only, so a restart starts an empty list. */
+  private recent: DecisionRecord[] = [];
   /** Each change reads, merges and saves before the next starts, so a removed key never comes back. */
   private changes: Promise<unknown> = Promise.resolve();
 
@@ -52,7 +54,13 @@ export class DecisionService {
   overview(): DecisionOverview {
     const { provider: id, apiKey, features } = this.saved;
     return { provider: id, label: this.providers[id].label, configured: Boolean(apiKey), ...(apiKey ? { keyHint: `…${apiKey.slice(-4)}` } : {}),
-      features: { ...features }, providers: DECISION_PROVIDER_IDS.map(item => ({ id: item, label: this.providers[item].label })) };
+      features: { ...features }, providers: DECISION_PROVIDER_IDS.map(item => ({ id: item, label: this.providers[item].label })), recent: this.recent.map(item => ({ ...item })) };
+  }
+
+  /** Keeps what a feature decided, for the settings page. Probabilities are rounded to two places. */
+  record(entry: Omit<DecisionRecord, 'at'> & { at?: string }): void {
+    const probabilities = Object.fromEntries(Object.entries(entry.probabilities).map(([key, value]) => [key, Math.round(value * 100) / 100]));
+    this.recent = [{ ...entry, at: entry.at ?? new Date().toISOString(), subject: entry.subject.slice(0, 120), probabilities, ms: Math.round(entry.ms) }, ...this.recent].slice(0, DECISION_RECORDS_KEPT);
   }
 
   /** The engine for one feature, or nothing when that feature should keep its usual behaviour. */

@@ -29,7 +29,7 @@ test('without an API key nothing uses fast judgments, and a saved key is never s
   await service.start();
   assert.equal(service.engine('autoPromptSuggestions'), undefined);
   assert.equal(service.engine('attentionNotifications'), undefined);
-  assert.deepEqual(service.overview(), { provider: 'jev', label: 'Jev', configured: false, features: { autoPromptSuggestions: true, attentionNotifications: true }, providers: [{ id: 'jev', label: 'Jev' }] });
+  assert.deepEqual(service.overview(), { provider: 'jev', label: 'Jev', configured: false, features: { autoPromptSuggestions: true, attentionNotifications: true }, providers: [{ id: 'jev', label: 'Jev' }], recent: [] });
   const overview = await service.update({ apiKey: '  tsk-abcdefgh1234  ' });
   assert.equal(overview.configured, true);
   assert.equal(overview.keyHint, '…1234');
@@ -98,7 +98,7 @@ test('a damaged settings file starts with suggestions off rather than failing', 
   await writeFile(join(dir, 'decisions.json'), JSON.stringify({ provider: 'gone', apiKey: 'no', features: { autoPromptSuggestions: 'maybe' } }), { mode: 0o600 });
   const service = new DecisionService(dir);
   await service.start();
-  assert.deepEqual(service.overview(), { provider: 'jev', label: 'Jev', configured: false, features: { autoPromptSuggestions: true, attentionNotifications: true }, providers: [{ id: 'jev', label: 'Jev' }] });
+  assert.deepEqual(service.overview(), { provider: 'jev', label: 'Jev', configured: false, features: { autoPromptSuggestions: true, attentionNotifications: true }, providers: [{ id: 'jev', label: 'Jev' }], recent: [] });
 });
 
 test('changes apply one at a time, so a deleted key never comes back through a change made at the same moment', async t => {
@@ -111,4 +111,15 @@ test('changes apply one at a time, so a deleted key never comes back through a c
   const reopened = new DecisionService((service as unknown as { stateDir: string }).stateDir);
   await reopened.start();
   assert.equal(reopened.overview().configured, false);
+});
+
+test('recent judgments are listed newest first, rounded, and only the latest ones are kept', async t => {
+  const service = new DecisionService(await directory(t));
+  await service.start();
+  for (let index = 0; index < 45; index++) service.record({ feature: 'attentionNotifications', subject: `turn ${index}`, result: 'notify', probabilities: { done: 0.123456, progress: 0.01 }, ms: 201.7 });
+  const recent = service.overview().recent!;
+  assert.equal(recent.length, 40);
+  assert.equal(recent[0].subject, 'turn 44');
+  assert.deepEqual(recent[0].probabilities, { done: 0.12, progress: 0.01 });
+  assert.equal(recent[0].ms, 202);
 });

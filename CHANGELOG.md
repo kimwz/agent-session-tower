@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.40.4] - 2026-09-27
+
+### Fixed
+- **Finished turns are pushed again with Notification filtering on.** Jev was asked whether a turn was "an intermediate update … or only one step of a larger task", and whether the owner should be interrupted now. On the owner's 59 most recent finished turns, all worth a push, it called 6 (10%) intermediate and no push was sent. Among them were release reports ending in "배포했습니다". The second question gave about the same low answer for every turn, so it could not tell them apart. Tower now asks one question about the end of the turn's own output, with the marks of tool calls removed: does its last message say the work is not finished and that the agent carries on by itself? A push is skipped only when that is at least 80% likely. On the same 59 turns none are skipped, and the highest answer was 0.50. Made-up replies such as "I'll check back when the build finishes", placed after some narration, all are skipped, and the lowest answer was 0.99.
+
+### Added
+- **Recent judgments** in the Fast judgment panel. It lists the last 40 judgments: what each was about, the probabilities the service gave, and how Tower judged it (worth a push, an intermediate step, suggested, nothing fits). The list is kept in memory and starts empty after a restart.
+
 ## [1.40.3] - 2026-09-27
 
 ### Fixed
