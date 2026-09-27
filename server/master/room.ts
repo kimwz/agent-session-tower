@@ -24,6 +24,8 @@ export class MasterRoom {
   private readonly buffer: MasterStreamEvent[] = [];
   private readonly listeners = new Set<(event: MasterStreamEvent) => void>();
   private writes: Promise<void> = Promise.resolve();
+  /** Files whose latest write failed; they are written again with the next change. */
+  private readonly unsaved = new Set<number>();
   private draft: MasterDraft | null = null;
   private readonly directory: string;
 
@@ -124,6 +126,16 @@ export class MasterRoom {
 
   flush(): Promise<void> { return this.writes; }
 
+  /** Waits until `entry` is on disk: its file is written once more if the last try failed, then a failure is an error. */
+  async saved(entry: MasterEntry): Promise<void> {
+    const index = Math.floor(entry.order / SEGMENT);
+    await this.writes;
+    if (!this.unsaved.has(index)) return;
+    this.persist(index);
+    await this.writes;
+    if (this.unsaved.has(index)) throw new Error('마스터 대화를 저장하지 못했습니다.');
+  }
+
   private emit(event: MasterStreamEvent): void {
     const numbered = { ...event, seq: ++this.seq } as MasterStreamEvent;
     this.buffer.push(numbered);
@@ -150,7 +162,11 @@ export class MasterRoom {
     const write = async () => {
       const entries = this.loaded.get(index) ?? [];
       await writePrivateJson(join(this.directory, segmentName(index)), JSON.stringify({ entries }));
+      this.unsaved.delete(index);
     };
-    this.writes = this.writes.then(write, write).catch(error => { console.error(`Master conversation was not saved: ${error instanceof Error ? error.message : String(error)}`); });
+    this.writes = this.writes.then(write, write).catch(error => {
+      this.unsaved.add(index);
+      console.error(`Master conversation was not saved: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 }

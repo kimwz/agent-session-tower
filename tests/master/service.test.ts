@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage } from 'node:http';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MasterJournal } from '../../server/master/journal.js';
@@ -571,4 +571,50 @@ test('a session\'s messages are hidden whole before they are shortened, so a key
   ]);
   await service.send({ clientMessageId: 'message-0108', text: '세션 읽어', local: true });
   await said(/읽었습니다/);
+});
+
+test('an answer that could not be saved does not mark its message answered, so a restart does not lose it', async t => {
+  const { service, dir, journal } = await master(t, () => ({ body: {} }), [
+    async () => {
+      // The conversation's file can no longer be written: a directory stands where it should go.
+      await rm(join(dir, 'room', '000000.json'), { force: true });
+      await mkdir(join(dir, 'room', '000000.json'));
+      return [say('답했지만 저장되지 않습니다.')];
+    },
+    [say('두 번째도 저장되지 않습니다.')],
+  ], undefined, {}, { retryMs: 50 });
+  await service.send({ clientMessageId: 'message-0109', text: '상태', local: true });
+  await until(() => journal.inbox[0].state === 'failed', 10_000);
+  assert.notEqual(journal.inbox[0].state, 'answered');
+});
+
+test('a second try that was due while the host was down still runs after the restart', async t => {
+  const { said, script, journal } = await master(t, () => ({ body: {} }), [[say('다시 시도해 답했습니다.')]], async (_dir, journal, room) => {
+    room.add({ kind: 'owner', text: '상태' }, 'in-10');
+    journal.inbox.push({ id: 'in-10', kind: 'owner', text: '상태', local: true, at: new Date().toISOString(), state: 'queued', retries: 1, notBefore: new Date(Date.now() + 200).toISOString() });
+    await journal.save('inbox');
+  });
+  await said(/다시 시도해 답했습니다/);
+  assert.equal(script.requests.length, 1);
+  await until(() => journal.inbox[0].state === 'answered');
+});
+
+test('the work a change started is written before the change is recorded as done', async t => {
+  let dir = '';
+  const { service, said, ...rest } = await master(t, async seen => {
+    if (seen.path === '/api/v1/autoPrompt.submit') {
+      // The next write of the call records fails, as if the host stopped right there.
+      await rm(join(dir, 'calls.json'), { force: true });
+      await mkdir(join(dir, 'calls.json'));
+      return { body: { result: { job: { id: 'job-2', status: 'queued' } } } };
+    }
+    return { body: snapshot([]) };
+  }, [
+    [call('tower_api', { method: 'POST', path: '/api/v1/autoPrompt.submit', body: { requestId: '0190f1c2-3d4e-7f00-8a00-000000000002', provider: 'claude', prompt: 'tidy the docs' } })],
+    [say('끝.')],
+  ]);
+  dir = rest.dir;
+  await service.send({ clientMessageId: 'message-0110', text: '문서 정리 맡겨', local: true });
+  await said(/끝/);
+  assert.match(await readFile(join(dir, 'tasks.json'), 'utf8'), /"jobId":"job-2"/);
 });

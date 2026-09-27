@@ -72,6 +72,8 @@ export class MasterService {
   private taskTimer?: ReturnType<typeof setInterval>;
   private polling = false;
   private closed = false;
+  /** Wakes the inbox when a failed turn's second try is due. */
+  private wake?: ReturnType<typeof setTimeout>;
   private readonly remoteWrites = new Map<string, number[]>();
 
   constructor(private readonly options: MasterServiceOptions) {}
@@ -157,6 +159,7 @@ export class MasterService {
   async close(): Promise<void> {
     this.closed = true;
     if (this.taskTimer) clearInterval(this.taskTimer);
+    if (this.wake) clearTimeout(this.wake);
     await this.options.journal.flush();
     await this.options.room.flush();
   }
@@ -166,8 +169,18 @@ export class MasterService {
     const settings = this.options.settings.current();
     if (!settings.enabled || !this.options.settings.key()) return;
     const now = Date.now();
-    const queued = this.options.journal.inbox.filter(item => item.state === 'queued' && !(item.notBefore && Date.parse(item.notBefore) > now));
-    if (!queued.length) return;
+    const waiting = this.options.journal.inbox.filter(item => item.state === 'queued');
+    const queued = waiting.filter(item => !(item.notBefore && Date.parse(item.notBefore) > now));
+    if (!queued.length) {
+      // A turn tried again later (also after a restart) is woken when it is due.
+      const due = Math.min(...waiting.map(item => Date.parse(item.notBefore ?? '')).filter(Number.isFinite));
+      if (Number.isFinite(due)) {
+        if (this.wake) clearTimeout(this.wake);
+        this.wake = setTimeout(() => { this.wake = undefined; this.pump(); }, Math.max(0, due - now) + 10);
+        this.wake.unref();
+      }
+      return;
+    }
     const owners = queued.filter(item => item.kind === 'owner');
     // Only inputs from the same kind of place share a turn, so what a turn may do follows every request in it.
     const batch = owners.length ? owners.filter(item => item.local === owners[0].local).slice(0, 10) : queued.slice(0, 10);
@@ -228,9 +241,9 @@ export class MasterService {
         turn.abort.signal.throwIfAborted();
       }
       if (!final) final = '여러 단계를 거쳤지만 마지막 답을 만들지 못했습니다. 위 작업 기록을 확인해 주세요.';
-      room.add({ kind: 'master', text: truncate(this.hideText(final), MAX_ENTRY_TEXT), turnId, final: true });
+      const answer = room.add({ kind: 'master', text: truncate(this.hideText(final), MAX_ENTRY_TEXT), turnId, final: true });
       // On disk before the inputs count as answered: after a restart, a saved answer means the turn is done.
-      await room.flush();
+      await room.saved(answer);
       for (const item of inputs) item.state = 'answered';
     } catch (error) {
       const message = truncate(this.hideText(error instanceof Error ? error.message : String(error)), 2000);
@@ -242,7 +255,6 @@ export class MasterService {
         const retryMs = this.options.retryMs ?? RETRY_MS;
         for (const item of inputs) { item.state = 'queued'; item.retries++; delete item.turnId; item.notBefore = new Date(Date.now() + retryMs).toISOString(); }
         room.add({ kind: 'error', text: `${message} — 잠시 뒤 한 번 더 해 봅니다.` });
-        setTimeout(() => this.pump(), retryMs + 10).unref();
       } else {
         for (const item of inputs) item.state = 'failed';
         room.add({ kind: 'error', text: message });

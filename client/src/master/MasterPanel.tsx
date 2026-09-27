@@ -64,7 +64,8 @@ export function MasterPanel({ token, room, tabId, sessionId, top, onClose, onEar
     unconfirmed = { id: messageId, text: value };
     try {
       await post('/api/master/messages', token, { clientMessageId: messageId, text: value, viewContext: { tabId, ...(id ? { sessionId: id } : {}), ...(node ? { node } : {}) } });
-      unconfirmed = undefined;
+      // Only this message's own id is let go: another may have been sent from a panel opened meanwhile.
+      if (unconfirmed?.id === messageId) unconfirmed = undefined;
       setText('');
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setSending(false); }
