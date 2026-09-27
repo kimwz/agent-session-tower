@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.45.0] - 2026-09-27
+
+### Added
+- **Jev inserts messages into conversations on joined computers too.** A message you send from this computer's page to a running conversation on a joined computer is now judged here, just as for a conversation on this computer. If it belongs to the work in progress, Jev inserts it into that turn over there. The joined computer needs 1.45.0 as well; an older one refuses the insert and the message waits for the turn to end, as before. Messages typed on the joined computer's own page are judged there, and a computer never judges what its controllers send it.
+
 ## [1.44.5] - 2026-09-27
 
 ### Fixed
