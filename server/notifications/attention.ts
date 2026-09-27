@@ -1,7 +1,8 @@
 import type { DecisionEngine } from '../decisions/engine.js';
+import type { SessionOutcome } from '../../shared/types.js';
 
 /** How a finished turn left things for the owner. `progress` is an intermediate step with nothing for them yet. */
-export type TurnOutcome = 'done' | 'needsOwner' | 'blocked' | 'progress';
+export type TurnOutcome = SessionOutcome;
 export interface TurnAttention {
   outcome: TurnOutcome;
   /** True only when the turn is clearly an intermediate step: then no push is sent. */

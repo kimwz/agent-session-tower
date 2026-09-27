@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.42.0] - 2026-09-27
+
+### Added
+- **Canvas cards show how a finished conversation ended.** Once a conversation stops working, Jev reads its last request and the agent's reply after it and marks the card at the top right: a green **작업 완료** when the work is done, an orange **확인 필요** when the agent asks you to choose, approve, answer or do something, a red **작업 끊김** when it failed or stopped, and a blue **이어서 진행 예정** when it says it carries on by itself. Working conversations look as before.
+  - A conversation that ended in an error, or whose last message is yours with no answer, is marked **작업 끊김** without asking Jev.
+  - Each turn is judged once, a few seconds after it ends, and remembered across restarts. The mark disappears as soon as the conversation moves on, until its new last turn is judged.
+  - Only conversations shown as their own cards that ended in the last three days are judged, at most the 40 most recent.
+  - Turn it off under **Fast judgment → 캔버스에 세션 상태 표시**. **Recent judgments** lists each one with its probabilities.
+
 ## [1.41.0] - 2026-09-27
 
 ### Added

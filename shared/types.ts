@@ -5,6 +5,8 @@ export type Provider = 'claude' | 'codex';
 /** Who reviews Codex approval requests. Absent keeps Codex's own configured reviewer. */
 export type CodexApprovalsReviewer = 'user' | 'auto_review';
 export type SessionStatus = 'working' | 'idle' | 'completed' | 'error';
+/** How a conversation's last turn left things for the owner. `progress`: the agent said it carries on by itself. */
+export type SessionOutcome = 'done' | 'needsOwner' | 'blocked' | 'progress';
 export interface Session {
   id: string;
   /** Set only in a controller's page, for an item of a joined computer: that computer's id. Servers never send it. */
@@ -47,6 +49,8 @@ export interface Session {
   filePath?: string;
   /** When a continuation the agent scheduled for itself resumes this conversation. */
   scheduledAt?: string;
+  /** A fast judgment of how its last turn ended; only while it is not working and that turn is still its last. */
+  outcome?: SessionOutcome;
 }
 export interface SessionContextUsage {
   usedTokens: number;

@@ -50,6 +50,7 @@ import { PublicListener } from './public-agents/listener.js';
 import { NotificationService } from './notifications/service.js';
 import { judgeTurn } from './notifications/attention.js';
 import { DecisionService } from './decisions/service.js';
+import { SessionOutcomes } from './sessions/outcomes.js';
 import { autoPromptSuggestionResponse } from './auto-prompt/suggestion.js';
 import { insertIfItBelongs } from './runs/steer-timing.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
@@ -237,6 +238,19 @@ async function main() {
   let controlledBy = (): string[] => [];
   let controllerJoined = (): { name: string; at: string } | undefined => undefined;
   let remoteNodes: RemoteNodes | undefined;
+  // Fast multiple-choice judgments (Jev, or whatever replaces it) for the web's own features; off without an API key.
+  const decisions = new DecisionService(stateDir);
+  await decisions.start().catch(error => console.error(`Fast judgment settings were not loaded: ${error instanceof Error ? error.message : String(error)}`));
+  // Sessions as the page sees them, before the judged outcome of their last turn is added.
+  const sessionViews = (all = runs.sessionList(), managed = runs.list()) => projectSessionStates(all, managed, runs.settledRunIds()).map(session => closedSessions.apply(titles.apply(session)));
+  const outcomes = new SessionOutcomes({
+    stateDir, engine: () => decisions.engine('sessionOutcomes'), sessions: () => sessionViews(),
+    history: async session => (await history.read(runs.nativeSessionId(session.id), undefined, 60))?.messages,
+    project: session => groups.list().find(group => group.cwd === session.cwd)?.title || session.project,
+    title: session => session.customTitle || session.title,
+    record: entry => decisions.record(entry), onChange: changed,
+  });
+  runs.on('change', () => outcomes.changed());
   const snapshot = (): Snapshot => {
     const all = runs.sessionList();
     const controllers = controlledBy();
@@ -244,7 +258,7 @@ async function main() {
     const nodes = remoteNodes?.list() ?? [];
     const managed = runs.list();
     return {
-      sessions: projectSessionStates(all, managed, runs.settledRunIds()).map(session => closedSessions.apply(titles.apply(session))),
+      sessions: sessionViews(all, managed).map(session => outcomes.apply(session)),
       groups: groups.list(),
       repositories: repositories.list(),
       providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider).length })),
@@ -273,9 +287,6 @@ async function main() {
     if (this.ids.size > 500) this.ids.delete(this.ids.values().next().value!);
     return true;
   } };
-  // Fast multiple-choice judgments (Jev, or whatever replaces it) for the web's own features; off without an API key.
-  const decisions = new DecisionService(stateDir);
-  await decisions.start().catch(error => console.error(`Fast judgment settings were not loaded: ${error instanceof Error ? error.message : String(error)}`));
   // Push notifications are sent from here: the web process sees every run the worker reports.
   const notifications = new NotificationService(stateDir, {
     runs: () => runs.list(),
@@ -413,7 +424,8 @@ async function main() {
     workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications,
     decisions: {
       overview: () => decisions.overview(),
-      update: body => decisions.update(body),
+      // Turning the key or the canvas outcomes on or off shows or hides them at once.
+      update: async body => { const overview = await decisions.update(body); outcomes.changed(); changed(); return overview; },
       test: () => decisions.test(),
       suggestAutoPrompt: async (input, load, signal) => {
         const started = performance.now();
@@ -465,6 +477,7 @@ async function main() {
   void towerUpdates.start().catch(error => console.error(`Automatic updates are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   capabilities.start();
   repositories.start();
+  await outcomes.start();
   await notifications.start().catch(error => console.error(`Notifications are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   await publicListener.start().catch(error => console.error(`Public agent pages are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   if (publicListener.status().listening) console.log(`  Public agent pages: http://127.0.0.1:${publicListener.status().port}${publicListener.status().publicUrl ? ` (${publicListener.status().publicUrl})` : ''}\n`);
@@ -485,7 +498,7 @@ async function main() {
     dispose();
     server.closeAllConnections();
     server.close();
-    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingPublic, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), notifications.close(), decisions.close(), runs.close()]); } finally { await releaseLock(); }
+    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingPublic, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), notifications.close(), outcomes.close(), decisions.close(), runs.close()]); } finally { await releaseLock(); }
   };
   const onSignal = () => { void shutdown().catch(error => { console.error(`Agent Session Tower shutdown: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }); };
   process.once('SIGINT', onSignal);

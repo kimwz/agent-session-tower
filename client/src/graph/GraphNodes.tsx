@@ -2,7 +2,7 @@ import { translate as t, useI18n } from '../i18n/i18n';
 import { memo, useId } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import { ArrowUpRight, Check, Clock, GitBranch, Monitor, Radio, Sparkles } from 'lucide-react';
-import type { ProviderHealth, Session } from '../../../shared/types';
+import type { ProviderHealth, Session, SessionOutcome } from '../../../shared/types';
 import type { NodeStatus } from '../../../shared/link';
 import { localPart } from '../remote/scope';
 import { SessionContextIcon } from '../sessions/SessionContextIcon';
@@ -28,16 +28,28 @@ function linkLabel(link: HostLink): string {
   return t("오프라인");
 }
 
+/** How a finished conversation's last turn ended, as the fast judgment read it. */
+export const outcomeLabels: Record<SessionOutcome, string> = {
+  get done() { return t("작업 완료"); },
+  get needsOwner() { return t("확인 필요"); },
+  get blocked() { return t("작업 끊김"); },
+  get progress() { return t("이어서 진행 예정"); },
+};
+
 export const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentData>>) {
   useI18n();
   const contextDescriptionId = useId();
   const session = data.session;
   const activityAt = sessionActivityAt(session);
   const state = sessionState(session);
+  const outcome = session.status !== 'working' ? session.outcome : undefined;
   return <>
-    <button className={`agent-card ${session.provider} ${session.status} ${data.selected ? 'selected' : ''} ${data.unread ? 'has-unread' : ''}${data.stale ? ' is-stale' : ''}`} onClick={() => data.onSelect(session.id)} aria-describedby={contextDescriptionId} aria-label={`${t("{0}: {1}, {2}{3}. 대화 열기", { 0: providerLabels[session.provider], 1: sessionTitle(session), 2: state.label, 3: data.unread ? t(", 새 활동") : t(", 확인함") })}${data.stale ? ` ${t("(마지막으로 본 상태)")}` : ''}`}>
+    <button className={`agent-card ${session.provider} ${session.status} ${data.selected ? 'selected' : ''} ${data.unread ? 'has-unread' : ''}${data.stale ? ' is-stale' : ''}`} onClick={() => data.onSelect(session.id)} aria-describedby={contextDescriptionId} aria-label={`${t("{0}: {1}, {2}{3}. 대화 열기", { 0: providerLabels[session.provider], 1: sessionTitle(session), 2: outcome ? `${state.label}, ${outcomeLabels[outcome]}` : state.label, 3: data.unread ? t(", 새 활동") : t(", 확인함") })}${data.stale ? ` ${t("(마지막으로 본 상태)")}` : ''}`}>
       {session.status === 'working' && !data.stale && <span className="agent-activity-border" aria-hidden="true" />}
-      {data.unread && <span className="agent-unread"><i />{t("새 활동")}</span>}
+      {(outcome || data.unread) && <span className="agent-card-flags">
+        {outcome && <span className={`agent-outcome ${outcome}`}><i />{outcomeLabels[outcome]}</span>}
+        {data.unread && <span className="agent-unread"><i />{t("새 활동")}</span>}
+      </span>}
       <div className="agent-card-top"><SessionContextIcon provider={session.provider} usage={session.contextUsage} descriptionId={contextDescriptionId} />{session.isSubagent && <span className="subagent-mark" title={t("하위 에이전트")}><GitBranch size={12} /></span>}</div>
       <div className="agent-card-title" title={sessionTitle(session)}>{sessionTitle(session)}</div>
       <div className="agent-card-bottom"><span className="agent-provider">{providerLabels[session.provider]}</span><span className={`agent-state ${state.key}`}>{state.key === 'scheduled' ? <Clock size={11} /> : state.key === 'completed' ? <Check size={11} /> : state.key === 'working' ? <Radio size={11} /> : <i />}{state.label}</span></div>

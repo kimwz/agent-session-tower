@@ -1,7 +1,40 @@
-.agent-unread {
+/* Top right of a card: how its last turn ended, then whether it has new activity. */
+.agent-card-flags {
   position:absolute;
   top:10px;
   right:10px;
+  display:flex;
+  flex-direction:column;
+  align-items:flex-end;
+  gap:5px;
+  pointer-events:none;
+}
+.agent-outcome {
+  display:flex;
+  align-items:center;
+  gap:5px;
+  padding:2px 7px 2px 6px;
+  border:1px solid color-mix(in srgb,var(--outcome) 38%,transparent);
+  border-radius:999px;
+  background:color-mix(in srgb,var(--outcome) 12%,transparent);
+  color:var(--outcome);
+  font-size:10px;
+  font-weight:600;
+  line-height:14px;
+  white-space:nowrap;
+}
+.agent-outcome i {
+  width:7px;
+  height:7px;
+  border-radius:50%;
+  background:var(--outcome);
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--outcome) 22%,transparent);
+}
+.agent-outcome.done { --outcome:#5fd38d; }
+.agent-outcome.needsOwner { --outcome:#ffa24c; }
+.agent-outcome.blocked { --outcome:#ff6b6b; }
+.agent-outcome.progress { --outcome:#76b6ff; }
+.agent-unread {
   display:flex;
   align-items:center;
   gap:4px;

@@ -1637,4 +1637,11 @@ export const english: Record<string, string> = {
   "끼워넣기": "Insert",
   "지금": "Now",
   "끝난 뒤": "After",
+  "작업 완료": "Done",
+  "작업 끊김": "Broken off",
+  "이어서 진행 예정": "Continues on its own",
+  "캔버스에 세션 상태 표시": "Show conversation outcomes on the canvas",
+  "끝난 세션의 마지막 요청과 답변을 보내, 작업 완료·확인 필요·작업 끊김을 카드 오른쪽 위에 색으로 표시합니다.": "Sends a finished conversation's last request and answer, and marks its card at the top right as done, needing you or broken off.",
+  "세션 상태": "Status",
+  "상태 표시": "Marked",
 };

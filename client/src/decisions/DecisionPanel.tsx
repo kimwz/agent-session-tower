@@ -64,6 +64,7 @@ export function DecisionPanel({ token, onClose }: { token: string; onClose: () =
           <label><input type="checkbox" checked={overview.features.autoPromptSuggestions} onChange={event => setFeature('autoPromptSuggestions', event.target.checked)} />{t('Auto Prompt 프로젝트·세션 추천')}<small>{t('요청을 30자 이상 쓰면 5초마다 요청 내용과 프로젝트·세션의 제목과 마지막 메시지를 보내 추천을 받습니다.')}</small></label>
           <label><input type="checkbox" checked={overview.features.attentionNotifications} onChange={event => setFeature('attentionNotifications', event.target.checked)} />{t('알림 선별')}<small>{t('끝난 턴의 요청과 마지막 답변을 보내, 중간 단계로 판단된 턴은 푸시하지 않습니다.')}</small></label>
           <label><input type="checkbox" checked={overview.features.steerTiming} onChange={event => setFeature('steerTiming', event.target.checked)} />{t('작업 중 보낸 메시지 끼워넣기')}<small>{t('작업 중인 대화에 보낸 메시지가 지금 작업에 속하면 바로 끼워 넣고, 별개의 요청이면 끝난 뒤 보냅니다. 판단할 때 지금 요청, 진행 상황 끝부분, 새 메시지를 보냅니다.')}</small></label>
+          <label><input type="checkbox" checked={overview.features.sessionOutcomes ?? true} onChange={event => setFeature('sessionOutcomes', event.target.checked)} />{t('캔버스에 세션 상태 표시')}<small>{t('끝난 세션의 마지막 요청과 답변을 보내, 작업 완료·확인 필요·작업 끊김을 카드 오른쪽 위에 색으로 표시합니다.')}</small></label>
         </fieldset>
         <p className="auth-hint">{t('켜진 기능은 위 내용을 {0}로 보냅니다. API 키는 이 컴퓨터의 상태 폴더에만 저장되고 화면에 다시 표시되지 않습니다.', { 0: label })}</p>
       </section>
@@ -76,9 +77,9 @@ export function DecisionPanel({ token, onClose }: { token: string; onClose: () =
 }
 
 const RESULT_LABELS: Record<DecisionRecord['result'], string> = { notify: '알릴 턴으로 판단', quiet: '중간 단계로 판단해 알리지 않음', suggested: '추천함', noSuggestion: '맞는 곳 없음',
-  inserted: '지금 작업에 끼워 넣음', waiting: '끝난 뒤 보내도록 대기', failed: '실패' };
+  inserted: '지금 작업에 끼워 넣음', waiting: '끝난 뒤 보내도록 대기', labeled: '상태 표시', failed: '실패' };
 const PROBABILITY_LABELS: Record<string, string> = { done: '완료', needsOwner: '확인 필요', blocked: '막힘', progress: '계속 진행', project: '프로젝트', conversation: '세션', now: '지금', after: '끝난 뒤' };
-const FEATURE_LABELS: Record<DecisionRecord['feature'], string> = { attentionNotifications: '알림', autoPromptSuggestions: '추천', steerTiming: '끼워넣기' };
+const FEATURE_LABELS: Record<DecisionRecord['feature'], string> = { attentionNotifications: '알림', autoPromptSuggestions: '추천', steerTiming: '끼워넣기', sessionOutcomes: '세션 상태' };
 
 /** One judgment: what it was about, what the service answered and what Tower did with it. */
 export function DecisionRecordRow({ record }: { record: DecisionRecord }) {

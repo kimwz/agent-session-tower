@@ -49,6 +49,16 @@ test('a working agent shows the live activity border that a completed one drops'
   assert.match(completed, /class="agent-state completed"/);
 });
 
+test('a finished card shows how its last turn ended at the top right, above any new-activity mark', () => {
+  const done = agent({ status: 'completed', outcome: 'done' }, { unread: true });
+  assert.match(done, /class="agent-card-flags"><span class="agent-outcome done"><i><\/i>작업 완료<\/span><span class="agent-unread">/);
+  assert.match(done, /aria-label="Claude Code: 리팩터링 계획 세우기, 완료, 작업 완료, 새 활동\. 대화 열기"/);
+  assert.match(agent({ status: 'idle', outcome: 'needsOwner' }), /class="agent-outcome needsOwner"><i><\/i>확인 필요</);
+  assert.match(agent({ status: 'error', outcome: 'blocked' }), /class="agent-outcome blocked"><i><\/i>작업 끊김</);
+  assert.doesNotMatch(agent({ status: 'working', outcome: 'done' }), /agent-outcome/, 'a working conversation keeps its live look only');
+  assert.doesNotMatch(agent({ status: 'idle' }), /agent-card-flags/);
+});
+
 test('a subagent card carries the branch mark and an empty conversation invites a first look', () => {
   assert.match(agent({ isSubagent: true }), /class="subagent-mark" title="하위 에이전트"/);
   assert.doesNotMatch(agent(), /subagent-mark/);
