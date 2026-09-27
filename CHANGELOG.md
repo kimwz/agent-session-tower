@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.44.5] - 2026-09-27
+
+### Fixed
+- **Inserting a message into a running Claude turn no longer fails while Claude is busy.** Claude takes an inserted message at its next step, after the tool call or reply it is writing. That can be minutes away. Tower gave up after 15 seconds and showed **전달 여부 확인 필요** for a message that Claude took later. Tower now waits while the turn runs and shows **끼워넣는 중** until Claude takes the message. The 15-second limit applies only after the turn has ended. This applies to **지금 끼워넣기** and to Jev's automatic inserts.
+- **Messages inserted into a running Claude turn now appear in the conversation.** Claude Code records them differently from ordinary messages, so the chat did not show them.
+
 ## [1.44.4] - 2026-09-27
 
 ### Changed
