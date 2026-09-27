@@ -58,7 +58,8 @@ export interface Backend {
   /** Coordinator conversations (Slack, GitHub) that stay on this machine. Undefined while unknown. */
   coordinators?(): ReadonlySet<string> | undefined;
   cancel(id: string): Promise<void>;
-  steerRun?(id: string): Promise<Run>;
+  /** `targetRunId` inserts only into that turn, or refuses. */
+  steerRun?(id: string, options?: { targetRunId?: string }): Promise<Run>;
   respondToApproval?(runId: string, approvalId: string, response: RunApprovalResponse): Promise<Run>;
   dismiss?(id: string): Promise<void>;
   subscribe(listener: () => void): () => void;
@@ -76,6 +77,8 @@ export interface HttpOptions {
   links?: LinkRoutes | { error: string };
   /** Joined computers this page shows and works with through their links. */
   nodes?: RemoteNodes;
+  /** A message this page sent to a joined computer's conversation, as that computer accepted it. */
+  onNodeMessage?(nodeId: string, run: Run): void;
   /** It runs as the background service's own install, which updates replace. */
   service?: boolean;
   /** Moves this Tower to a version (the latest release when none is given), when it runs as the background service. */
@@ -120,7 +123,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, towerUpdate, service, notifications, decisions, master }: HttpOptions) {
+export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, service, notifications, decisions, master }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -466,7 +469,9 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (!nodes.known(nodeRoute[1])) return json(res, 404, { error: '연결된 컴퓨터가 아닙니다.' });
         // A signed-in browser elsewhere loses its streams to other computers when it signs out, like its own.
         if (!identity.local) trackStream(sessionId, res, () => res.destroy());
-        return proxyToNode(req, res, nodes.session(nodeRoute[1]), `/api/${nodeRoute[2]}${url.search}`);
+        const message = req.method === 'POST' && onNodeMessage && /^sessions\/[^/]+\/messages$/.test(nodeRoute[2]);
+        return proxyToNode(req, res, nodes.session(nodeRoute[1]), `/api/${nodeRoute[2]}${url.search}`,
+          message ? (status, answer) => { const run = (answer as { run?: Run } | undefined)?.run; if (status < 300 && run && typeof run.id === 'string') onNodeMessage!(nodeRoute[1], run); } : undefined);
       }
       if (req.method === 'POST' && path === '/api/repositories') {
         const body = await readJson(req, 8192);

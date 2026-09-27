@@ -85,6 +85,20 @@ test('when another request is already inserting the message, how that insert end
   assert.match(stuck.records[0].detail ?? '', /not confirmed in time/);
 });
 
+test("a message this computer sent to a joined computer's conversation is judged here, and no other controller's", async () => {
+  const mine = queued({ origin: { kind: 'owner', controllerId: 'this-mac' } });
+  const sent = harness({ now: 0.95 });
+  sent.dependencies.sentBy = 'this-mac';
+  assert.equal(await insertIfItBelongs(sent.dependencies, mine), 'inserted');
+  assert.deepEqual(sent.steered, ['message→turn']);
+  const other = harness({ now: 0.95 });
+  other.dependencies.sentBy = 'this-mac';
+  assert.equal(await insertIfItBelongs(other.dependencies, queued({ origin: { kind: 'owner', controllerId: 'another-controller' } })), 'skipped');
+  assert.equal(await insertIfItBelongs(other.dependencies, queued({ id: 'local' })), 'skipped', 'a message typed on that computer itself is judged there');
+  // The joined computer never judges what its controllers send it.
+  assert.equal(await insertIfItBelongs(harness({ now: 0.95 }).dependencies, mine), 'skipped');
+});
+
 test('a message is judged once, and only when it was accepted just now, so a retried request never lands in a later turn', async () => {
   const once = harness({ now: 0.95 });
   assert.equal(await insertIfItBelongs(once.dependencies, queued()), 'inserted');

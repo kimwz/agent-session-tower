@@ -67,6 +67,7 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
     setGroup: async patch => { calls.push({ method: 'setGroup', args: [patch] }); return { cwd: patch.cwd, title: patch.title ?? '', pinned: true, hidden: true }; },
     attachment: async id => ({ metadata: { id, name: 'shot.png', mimeType: 'image/png', size: 4 }, content: Buffer.from('png!'), sessionId: id === '11111111-1111-4111-8111-111111111111' ? 'codex:open' : sessions[1].id }),
     cancel: async id => { calls.push({ method: 'cancel', args: [id] }); },
+    steerRun: async (id, steerOptions) => { calls.push({ method: 'steerRun', args: [id, steerOptions] }); return { ...runs.find(run => run.id === id)!, steering: { targetRunId: 'turn', state: 'sending', requestedAt: now } }; },
     api: async (operation, input, context) => {
       calls.push({ method: 'api', args: [operation, input, context] });
       if (operation === 'triggers.get') throw Object.assign(new Error(`Cannot read properties of undefined (reading '${(input as { id: string }).id}')`), { statusCode: 500 });
@@ -144,6 +145,18 @@ test('remote work carries the controller as its origin and a request ID, and is 
   const job = await f.call('/api/auto-prompts', { body: { requestId: REQUEST_ID, provider: 'codex', cwd: f.open, prompt: 'go' } });
   assert.equal(job.status, 202);
   assert.deepEqual(f.calls[2].args[1], { origin: { kind: 'owner', controllerId: CONTROLLER }, requestId: REQUEST_ID });
+});
+
+test('a controller inserts a message into the one turn it judged it against, and can change nothing else about it', async t => {
+  const f = await fixture(t);
+  assert.equal((await f.call('/api/runs/run-open/steer', { body: {} })).status, 200);
+  assert.equal((await f.call('/api/runs/run-open/steer', { body: { targetRunId: 'turn-1' } })).status, 200);
+  assert.deepEqual(f.calls.map(call => call.args), [['run-open', undefined], ['run-open', { targetRunId: 'turn-1' }]]);
+  for (const body of [{ prompt: 'changed' }, { targetRunId: '' }, { targetRunId: 7 }, { targetRunId: 'turn-1', prompt: 'changed' }]) {
+    assert.equal((await f.call('/api/runs/run-open/steer', { body })).status, 400);
+  }
+  assert.equal((await f.call('/api/runs/run-secret/steer', { body: { targetRunId: 'turn-1' } })).status, 404);
+  assert.equal(f.calls.length, 2);
 });
 
 test('a controlling computer uses this computer’s trigger operations as itself, and each change once', async t => {

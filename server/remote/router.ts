@@ -428,9 +428,11 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       const found = await run(runAction[1]);
       const body = await readJson(req);
       if (runAction[2] === 'steer') {
-        if (Object.keys(body).length) throw httpError(400, '끼워넣기 요청의 내용은 변경할 수 없습니다.');
+        // The only thing a controller may add is the one turn it judged the message against.
+        const keys = Object.keys(body);
+        if (keys.some(key => key !== 'targetRunId') || (keys.length && (typeof body.targetRunId !== 'string' || !body.targetRunId))) throw httpError(400, '끼워넣기 요청의 내용은 변경할 수 없습니다.');
         if (!backend.steerRun) throw httpError(503, '이 실행기는 요청 끼워넣기를 지원하지 않습니다.');
-        const steered = await backend.steerRun(found.id);
+        const steered = await backend.steerRun(found.id, keys.length ? { targetRunId: body.targetRunId as string } : undefined);
         note('steer', about(backend.session?.(found.sessionId)));
         await stillVisible(found.sessionId);
         return json(res, 200, { run: remoteRun(steered) });

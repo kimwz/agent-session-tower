@@ -82,7 +82,8 @@ async function tower(t: TestContext) {
   const listeners = new Set<() => void>();
   const read = () => { const list = nodes.list(); return { ...local, ...(list.length ? { nodes: list } : {}) }; };
   nodes.on('summary', () => { for (const listener of listeners) listener(); });
-  const { server, dispose } = createMonitorServer({ port: 0, clientDir: stateDir, nodes, backend: {
+  const sentToNodes: Array<{ node: string; run: Run }> = [];
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: stateDir, nodes, onNodeMessage: (node, run) => { sentToNodes.push({ node, run }); }, backend: {
     snapshot: read, detail: async () => undefined, cancel: async () => {}, subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },
     enqueue: async () => { throw new Error('unused'); } } });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -91,7 +92,7 @@ async function tower(t: TestContext) {
   const { token } = await (await fetch(`${base}/api/bootstrap`)).json() as { token: string };
   const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
     fetch(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token, ...headers }, body: JSON.stringify(body) });
-  return { stateDir, identity, controller, nodes, base, post, setLocal: (next: Snapshot) => { local = next; } };
+  return { stateDir, identity, controller, nodes, base, post, sentToNodes, setLocal: (next: Snapshot) => { local = next; } };
 }
 
 /** The page's event stream, as frames. */
@@ -160,6 +161,11 @@ test('requests for a joined computer pass through its link with only the headers
   assert.equal(sent.status, 202);
   assert.deepEqual(b.calls.at(-1)?.args.slice(0, 2), ['codex:shared', 'continue']);
   assert.deepEqual((b.calls.at(-1)?.args[2] as RequestContext).origin, { kind: 'owner', controllerId: a.identity.id });
+  // The message as that computer accepted it is handed on here, to be judged for inserting into its running turn.
+  await until(() => a.sentToNodes.length > 0, 5000);
+  assert.deepEqual(a.sentToNodes.map(({ node, run }) => [node, run.id, run.sessionId]), [[b.id, 'run-new', 'codex:shared']]);
+  await fetch(`${a.base}/api/nodes/${b.id}/sessions/codex:shared`);
+  assert.equal(a.sentToNodes.length, 1, 'only a sent message is handed on');
   const refused = await fetch(`${a.base}/api/nodes/${b.id}/refuse`);
   assert.equal(refused.status, 502, 'the other computer refusing is not this browser being signed out');
   assert.equal((await refused.json() as { code: string }).code, 'node-refused');

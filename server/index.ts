@@ -40,6 +40,7 @@ import { ControllerLinks } from './link/controller.js';
 import { NodeLinks } from './link/node.js';
 import { runLinkCommand } from './link/cli.js';
 import { RemoteNodes } from './link/nodes.js';
+import { linkRequest } from './link/transport.js';
 import { RemoteAudit } from './remote/audit.js';
 import { NodeViewStore } from './link/views.js';
 import { newerVersion, refreshService } from './link/service.js';
@@ -49,7 +50,7 @@ import { LatestReleases } from './updates/latest.js';
 import { TowerAutoUpdate } from './updates/tower.js';
 import { autoUpdateEnabled, publicToolUpdates, readToolUpdates, unlessUpdating } from './updates/tools.js';
 import type { AutoUpdateStatus } from '../shared/link.js';
-import type { Snapshot, ProviderHealth } from '../shared/types.js';
+import type { Snapshot, ProviderHealth, Run } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { PublicListener } from './public-agents/listener.js';
 import { NotificationService } from './notifications/service.js';
@@ -369,7 +370,7 @@ async function main() {
       return run;
     },
     repositoryAction: (cwd, action) => repositories.act(cwd, action),
-    attachment: id => runs.attachment(id), cancel: id => runs.cancel(id), steerRun: id => runs.steer(id),
+    attachment: id => runs.attachment(id), cancel: id => runs.cancel(id), steerRun: (id, options) => runs.steer(id, options),
     respondToApproval: (runId, approvalId, decision) => runs.respondToApproval(runId, approvalId, decision),
     dismiss: async id => {
       await dismissedRuns.dismiss(id, runs.list().find(run => run.id === id));
@@ -432,7 +433,27 @@ async function main() {
   let webCredentials: WebCredentials | undefined;
   const masterCallerSecret = randomBytes(32).toString('hex');
   const master = new MasterClient({ stateDir, credentials: () => webCredentials });
-  const { server, dispose, token: pageToken } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes, master: { callerSecret: masterCallerSecret, handle: masterRoutes(master) },
+  // A message this page sends to a joined computer's conversation is judged here, as one sent to a conversation on
+  // this computer would be, and inserted there into the turn it was judged against.
+  const insertRemote = (nodeId: string, run: Run) => {
+    const nodes = remoteNodes;
+    if (!nodes || !identity) return;
+    void insertIfItBelongs({ engine: () => decisions.engine('steerTiming'), canTarget: () => nodes.known(nodeId),
+      runs: () => nodes.snapshot(nodeId)?.runs ?? [],
+      steer: async (runId, targetRunId) => {
+        const session = nodes.session(nodeId);
+        if (!session) throw Object.assign(new Error('The joined computer is not connected.'), { disposition: 'rejected' });
+        let answer: { status: number; json: unknown };
+        try { answer = await linkRequest(session, 'POST', `/api/runs/${encodeURIComponent(runId)}/steer`, { targetRunId }, 30_000); }
+        catch (error) { throw Object.assign(new Error(`The joined computer did not confirm the insert: ${error instanceof Error ? error.message : String(error)}`), { disposition: 'uncertain' }); }
+        const body = (answer.json ?? {}) as { run?: Run; error?: string; disposition?: string };
+        if (answer.status === 200 && body.run) return body.run;
+        // A refusal (an older computer, a changed turn) leaves the message waiting; only a failure after it may have run is uncertain.
+        throw Object.assign(new Error(body.error || `The joined computer answered ${answer.status}.`), { disposition: body.disposition === 'uncertain' || (answer.status >= 500 && answer.status !== 503) ? 'uncertain' : 'rejected' });
+      },
+      record: entry => decisions.record(entry), claim: runId => judgedMessages.claim(`${nodeId}:${runId}`), sentBy: identity.id }, run).catch(() => {});
+  };
+  const { server, dispose, token: pageToken } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes, onNodeMessage: insertRemote, master: { callerSecret: masterCallerSecret, handle: masterRoutes(master) },
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })) } : { error: linkError },
     workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications,

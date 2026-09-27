@@ -34,7 +34,11 @@ const fail = (res: ServerResponse, status: number, error: string, code: string, 
  * computer decides what exists; this side only limits what crosses: a few request headers, known answer types,
  * sizes, and time without progress. A browser leaving ends the request, never the work it started.
  */
-export function proxyToNode(req: IncomingMessage, res: ServerResponse, session: ClientHttp2Session | undefined, path: string): Promise<void> {
+/** How much of a JSON answer is kept for `onAnswer`; a larger one is passed on without it. */
+const OBSERVED_BYTES = 1024 * 1024;
+
+export function proxyToNode(req: IncomingMessage, res: ServerResponse, session: ClientHttp2Session | undefined, path: string,
+  onAnswer?: (status: number, json: unknown) => void): Promise<void> {
   return new Promise(resolve => {
     if (!session || session.destroyed || session.closed) {
       fail(res, 503, OFFLINE, NODE_OFFLINE, 'not-admitted');
@@ -102,13 +106,21 @@ export function proxyToNode(req: IncomingMessage, res: ServerResponse, session: 
       }
       res.writeHead(status, out);
       let received = 0;
+      const observed: Buffer[] | undefined = onAnswer && /^application\/json/i.test(type) ? [] : undefined;
       stream.on('data', (chunk: Buffer) => {
         touch();
         received += chunk.length;
+        if (observed && received <= OBSERVED_BYTES) observed.push(chunk);
         if (received > MAX_ANSWER_BYTES) { stream.close(http2.constants.NGHTTP2_CANCEL); res.destroy(); finish(); return; }
         if (!res.write(chunk)) { stream.pause(); res.once('drain', () => stream.resume()); }
       });
-      stream.on('end', () => { res.end(); finish(); });
+      stream.on('end', () => {
+        res.end(); finish();
+        if (!observed || received > OBSERVED_BYTES) return;
+        let json: unknown;
+        try { json = JSON.parse(Buffer.concat(observed).toString('utf8')); } catch { return; }
+        onAnswer!(status, json);
+      });
     });
     stream.on('close', () => { if (!done) { if (!res.headersSent) fail(res, 502, lost, NODE_OFFLINE, 'uncertain'); else res.end(); finish(); } });
   });

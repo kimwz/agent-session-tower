@@ -65,6 +65,11 @@ export interface InsertDependencies {
   record(entry: Omit<DecisionRecord, 'at'>): void;
   /** True the first time a message is offered; each message is judged at most once. */
   claim(runId: string): boolean;
+  /**
+   * This computer's link ID, when the message went from its page to a joined computer's conversation. Only a message
+   * this computer sent there is judged here; that computer leaves messages from its controllers to them.
+   */
+  sentBy?: string;
   now?(): number;
   wait?(ms: number): Promise<void>;
 }
@@ -80,9 +85,11 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 export async function insertIfItBelongs(dependencies: InsertDependencies, queued: Run): Promise<InsertOutcome> {
   const engine = dependencies.engine();
   const now = dependencies.now?.() ?? Date.now();
-  // Only this computer's own page: a controlling computer retries a request with the same ID and gets the message
-  // back, and no record of an earlier judgment would survive a restart to stop judging it again.
-  if (!engine || !dependencies.canTarget() || queued.status !== 'queued' || queued.origin?.kind !== 'owner' || queued.origin.controllerId || queued.scheduled || queued.steering) return 'skipped';
+  // Only the page of the computer that judges: the one the owner uses, whether the conversation runs here or on a
+  // computer it joined. A computer controlled from elsewhere never judges its controllers' messages itself, since a
+  // controller retries a request with the same ID and gets the message back.
+  if (!engine || !dependencies.canTarget() || queued.status !== 'queued' || queued.origin?.kind !== 'owner' || queued.origin.controllerId !== dependencies.sentBy
+    || queued.scheduled || queued.steering) return 'skipped';
   if (!(now - Date.parse(queued.createdAt) <= FRESH_MS) || !dependencies.claim(queued.id)) return 'skipped';
   const runs = dependencies.runs();
   // The worker says whether this message could join the running turn at all (same origin, model and effort).
