@@ -22,7 +22,8 @@ import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { automatedOrigin, ownerOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
-import { TOWER_NOTICE, WakeupTracker, type Wakeup } from './wakeup.js';
+import { WakeupTracker, type Wakeup } from './wakeup.js';
+import { TOWER_NOTICE } from '../../shared/task-notification.js';
 import { BackgroundTaskTracker, messageText, type FinishedTask } from './background-tasks.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
@@ -941,7 +942,7 @@ export class RunManager extends EventEmitter {
     const endWait = () => { if (run.backgroundWait) { delete run.backgroundWait; this.changed(); } };
     const beginTurn = () => {
       if (turnActive) return;
-      turnActive = true; clearWaitTimers(); endWait();
+      turnActive = true; clearWaitTimers(); endWait(); tasks.observeTurnStart();
       // Each turn reports its own completion and its own reply.
       sawCompletion = false; shown = false; sawPartial = false; messageHasPartial = false;
     };
@@ -973,7 +974,7 @@ export class RunManager extends EventEmitter {
       if (run.approvals?.length) { arm('followUp', followUpMs); return; }
       if (noticeId) { this.append(run, '\n[Tower] Claude has not answered the background work notice yet.\n'); return; }
       const unread = tasks.takeUnread();
-      if (!unread.length) return;
+      if (!unread.length) { owned.finishInput?.(); return; }
       noticeId = randomUUID();
       this.append(run, '\n[Tower] Background work finished; asking Claude to continue.\n');
       child.stdin.write(JSON.stringify({ type: 'user', uuid: noticeId, session_id: session.nativeId, parent_tool_use_id: null,
@@ -1056,9 +1057,11 @@ export class RunManager extends EventEmitter {
       if ((event.session_id === undefined || event.session_id === session.nativeId) && tasks.observe(event) && !turnActive) owned.finishInput?.();
       if (mainContext && event.type === 'system' && event.subtype === 'compact_boundary') contextInput = undefined;
       if (mainContext) wakeups.observe(event);
+      if (mainContext && event.type === 'stream_event' && event.event?.type === 'message_start') tasks.observeReply(event.event.message?.id);
       if (mainContext && event.type === 'assistant' && !event.isMeta && !event.is_meta) {
         const model = event.message?.model;
         if (!String(model || '').includes('synthetic')) {
+          tasks.observeReply(event.message?.id);
           contextInput = undefined;
           const usedTokens = claudeInputTokens(event.message?.usage);
           if (validModelId(model) && usedTokens !== undefined) contextInput = { model, usedTokens };

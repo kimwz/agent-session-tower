@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isTaskNotification, taskNotice } from '../../shared/task-notification.js';
+import { isTaskNotification, taskNotice, TOWER_NOTICE } from '../../shared/task-notification.js';
 
 test('a background task notice keeps its status, summary and report, and leaves out paths, ids and the agent’s instruction', () => {
   const raw = '<task-notification>\n<task-id>b1</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<output-file>/private/tmp/b1.output</output-file>\n<status>completed</status>\n'
@@ -10,4 +10,13 @@ test('a background task notice keeps its status, summary and report, and leaves 
   assert.deepEqual(taskNotice(raw), { text: '**completed** · Agent "Review" finished\n\nTwo findings.', failed: false });
   assert.equal(taskNotice('<task-notification><status>killed</status></task-notification>').failed, true);
   assert.deepEqual(taskNotice('<task-notification>\nPlain words\n</task-notification>'), { text: 'Plain words', failed: false });
+});
+
+test("Tower's own hand-over of finished background work reads as a notice, without output paths or the instruction to Claude", () => {
+  const raw = `${TOWER_NOTICE} Background work you started in this conversation has finished:\n- completed: Background command "Run the checks" completed (exit code 0) (output: /private/tmp/b1.output)\n`
+    + '- killed (output: /private/tmp/b2.output)\nContinue with what you planned to do once it finished, and report the result.';
+  assert.equal(isTaskNotification(raw), true);
+  assert.deepEqual(taskNotice(raw), { text: '**completed** · Background command "Run the checks" completed (exit code 0)\n\n**killed**', failed: true });
+  assert.deepEqual(taskNotice(`${TOWER_NOTICE} Background work you started in this conversation has finished.\nContinue with what you planned.`),
+    { text: 'Background work you started in this conversation has finished.', failed: false });
 });

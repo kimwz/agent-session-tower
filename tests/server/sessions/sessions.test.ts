@@ -467,6 +467,14 @@ test('a background task notice Claude Code writes as a user turn reads as a noti
   assert.equal(parseMessages('claude', { ...row, origin: undefined, message: { role: 'user', content: 'Please explain <task-notification> tags' } })[0]?.role, 'user');
 });
 
+test("Tower's hand-over of finished background work reads as a notice, not as the owner speaking", () => {
+  const content = [{ type: 'text', text: '[Agent Session Tower] Background work you started in this conversation has finished:\n'
+    + '- completed: Background command "Run the checks" completed (exit code 0) (output: /private/tmp/b1.output)\nContinue with what you planned to do once it finished, and report the result.' }];
+  const row = { type: 'user', uuid: 'tower', timestamp: '2026-09-27T00:00:00.000Z', message: { role: 'user', content } };
+  assert.deepEqual(parseMessages('claude', row), [{ id: 'tower:0', role: 'system', toolName: 'Background task', timestamp: '2026-09-27T00:00:00.000Z',
+    text: '**completed** · Background command "Run the checks" completed (exit code 0)' }]);
+});
+
 test('a notice without tags reads as written, a failed task is marked, and a row carrying a tool result is never taken for a notice', () => {
   const base = { type: 'user', uuid: 'n', origin: { kind: 'task-notification' }, timestamp: '2026-09-24T00:00:00.000Z' };
   assert.deepEqual(parseMessages('claude', { ...base, message: { role: 'user', content: '2 background agents were stopped by the user.' } })[0],

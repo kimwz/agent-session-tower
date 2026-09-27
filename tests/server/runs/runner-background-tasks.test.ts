@@ -45,7 +45,7 @@ createInterface({ input: process.stdin }).on('line', line => {
 
 const started = (taskId: string, extra: Record<string, unknown> = {}) => ({ type: 'system', subtype: 'task_started', task_id: taskId, task_type: 'local_bash', description: 'Run the reviews', ...extra });
 const notified = (taskId: string, status = 'completed') => ({ type: 'system', subtype: 'task_notification', task_id: taskId, status, summary: 'Background command "Run the reviews" completed (exit code 0)', output_file: '/tmp/reviews.out' });
-const says = (text: string) => ({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+const says = (text: string, id?: string) => ({ type: 'assistant', message: { ...(id ? { id } : {}), content: [{ type: 'text', text }] } });
 // Claude replays each notice it takes into the conversation.
 const takes = (taskId: string) => ({ type: 'user', isReplay: true, parent_tool_use_id: null, uuid: `replay-${taskId}`,
   message: { role: 'user', content: `<task-notification>\n<task-id>${taskId}</task-id>\n<status>completed</status>\n</task-notification>` } });
@@ -148,6 +148,27 @@ test('when Claude does not pick up a finished task by itself, Tower hands it the
   assert.ok(log[2].end);
 });
 
+test('Claude taking a notice by itself in a turn of its own, without replaying it, gets no second notice from Tower', async t => {
+  const { manager, entries, cleanup } = await fixture({ first: [started('bash-1')],
+    later: [{ at: 100, frames: [notified('bash-1'), says('The checks passed.'), result] }] }, { followUpMs: 150 });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Run the checks', {}, { origin: { kind: 'owner' } });
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.doesNotMatch(done.output, /asking Claude to continue/);
+  assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Run the checks', 'end']);
+});
+
+test('a notice the turn under way may have taken ends the turn quietly when Claude starts no turn for it', async t => {
+  const { manager, entries, cleanup } = await fixture({ first: [started('bash-1'), notified('bash-1'), says('Almost done.', 'reply-1')] }, { followUpMs: 150 });
+  t.after(cleanup);
+  const run = await manager.enqueue(SESSION, 'Run the checks', {}, { origin: { kind: 'owner' } });
+  const done = await settled(manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.doesNotMatch(done.output, /asking Claude to continue/);
+  assert.deepEqual((await entries()).map(entry => entry.user ?? 'end'), ['Run the checks', 'end']);
+});
+
 test("Tower's notice holds the turn open until Claude takes it, even if another follow-up finishes first", async t => {
   const { manager, cleanup } = await fixture({ first: [started('bash-1')], replyDelay: 300, reply: [says('Summarised the reviews.')],
     later: [{ at: 100, frames: [notified('bash-1')] }, { at: 320, frames: [says('Something else.'), result] }] }, { followUpMs: 150 });
@@ -211,6 +232,35 @@ test('the tracker follows each task from start to the notice Claude takes', () =
   tracker.observe(notified('c'));
   tracker.observeReplay(takes('c'));
   assert.equal(tracker.outstanding, 0);
+});
+
+test('a model reply that starts after a task ended takes its notice; one starting right after the end settles it only with the next', () => {
+  let now = 0;
+  const tracker = new BackgroundTaskTracker({ now: () => now });
+  tracker.observe(started('a'));
+  tracker.observeReply('m1');
+  tracker.observe(notified('a'));
+  tracker.observeReply('m1');
+  assert.equal(tracker.unreadCount, 1, 'the reply under way when it ended did not take it');
+  now += 2000;
+  tracker.observeReply('m2');
+  assert.equal(tracker.unreadCount, 1, 'a reply this close may have been requested before the notice was queued');
+  tracker.observeReply('m3');
+  assert.equal(tracker.outstanding, 0);
+  tracker.observe(started('b'));
+  tracker.observe(notified('b'));
+  now += 60_000;
+  tracker.observeReply('m4');
+  assert.equal(tracker.outstanding, 0, 'a reply starting well after the end had it');
+  tracker.observe(started('c'));
+  tracker.observe(notified('c'));
+  now += 1000;
+  tracker.observeReply('m5');
+  assert.deepEqual(tracker.takeUnread(), [], 'Tower does not hand over a notice a reply may have taken');
+  tracker.observe(started('d'));
+  tracker.observe(notified('d'));
+  tracker.observeTurnStart();
+  assert.equal(tracker.outstanding, 0, 'a turn Claude starts by itself takes every queued notice');
 });
 
 test("a wakeup is dropped only when Claude's own timer delivered it in the kept-open process", () => {

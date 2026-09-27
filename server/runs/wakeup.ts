@@ -5,8 +5,6 @@
 import { isTaskNotification } from '../../shared/task-notification.js';
 
 type Message = Record<string, any>;
-/** How Tower's own messages to Claude begin; they are never a native wakeup. */
-export const TOWER_NOTICE = '[Agent Session Tower]';
 export interface Wakeup { at: number; prompt: string }
 
 const MIN_DELAY_S = 60;
@@ -66,7 +64,7 @@ export class WakeupTracker {
   observeReplay(text: string): void {
     if (!this.wakeup) return;
     const replayed = text.trim();
-    if (replayed === this.wakeup.raw || (this.wakeup.sentinel && this.now() >= this.wakeup.at - NATIVE_SLACK_MS && !isTaskNotification(replayed) && !replayed.startsWith(TOWER_NOTICE))) this.wakeup = undefined;
+    if (replayed === this.wakeup.raw || (this.wakeup.sentinel && this.now() >= this.wakeup.at - NATIVE_SLACK_MS && !isTaskNotification(replayed))) this.wakeup = undefined;
   }
 
   get pending(): Wakeup | undefined { return this.wakeup && { at: this.wakeup.at, prompt: this.wakeup.prompt }; }

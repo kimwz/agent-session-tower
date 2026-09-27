@@ -6,6 +6,8 @@
 type Message = Record<string, any>;
 export interface FinishedTask { status: string; summary?: string; outputFile?: string }
 
+/** Longer than a model request takes to start answering. */
+const UNSURE_MS = 15_000;
 const TERMINAL = new Set(['completed', 'failed', 'killed', 'stopped']);
 /** Teammates idle between assignments and never finish on their own. */
 const OPEN_ENDED_TYPES = new Set(['in_process_teammate']);
@@ -27,8 +29,17 @@ export class BackgroundTaskTracker {
   private readonly running = new Set<string>();
   /** Started in the foreground; followed only in case they move to the background. */
   private readonly foreground = new Set<string>();
-  /** Ended, but Claude has not yet taken the notice. */
-  private readonly unread = new Map<string, FinishedTask>();
+  /**
+   * Ended, but Claude has not yet taken the notice. `reply` numbers the model reply under way when it ended (or when
+   * that reply was found too close to tell); `unsure` marks a notice only such a close reply may have taken.
+   */
+  private readonly unread = new Map<string, { task: FinishedTask; endedAt: number; reply: number; unsure?: true }>();
+  /** Model replies of the main conversation seen so far, and the one under way. */
+  private replies = 0;
+  private reply?: string;
+  private readonly now: () => number;
+
+  constructor(options: { now?: () => number } = {}) { this.now = options.now ?? Date.now; }
 
   observe(event: Message): TaskChange {
     if (event?.type !== 'system') return undefined;
@@ -52,14 +63,35 @@ export class BackgroundTaskTracker {
     const finished: FinishedTask = { status, ...(summary ? { summary } : {}), ...(outputFile ? { outputFile } : {}) };
     // An update carrying only the status usually comes first; its notification adds the summary and output file.
     if (!this.running.delete(id)) {
-      if (event.subtype === 'task_notification' && this.unread.has(id)) this.unread.set(id, finished);
+      if (event.subtype === 'task_notification' && this.unread.has(id)) this.unread.set(id, { task: finished, endedAt: this.now(), reply: this.replies });
       return undefined;
     }
-    this.unread.set(id, finished);
+    this.unread.set(id, { task: finished, endedAt: this.now(), reply: this.replies });
     return 'ended';
   }
 
-  /** Claude replays each notice it takes into the conversation as a user message naming the task. */
+  /**
+   * Claude Code queues a finished task's notice and hands it to the next model request: one inside the turn under
+   * way, or a turn of its own. It may also drop a notice whose agent already reported by message. None of that is
+   * replayed, so Claude has had a notice once a main-conversation reply starts after the task ended. A reply that
+   * starts within `UNSURE_MS` of the end may have been requested before the notice was queued; the next one settles it.
+   */
+  observeReply(messageId: unknown): void {
+    if (typeof messageId === 'string' && messageId && messageId === this.reply) return;
+    this.reply = typeof messageId === 'string' ? messageId : undefined;
+    this.replies++;
+    const now = this.now();
+    for (const [id, entry] of this.unread) {
+      if (entry.reply >= this.replies) continue;
+      if (entry.unsure || now - entry.endedAt >= UNSURE_MS) this.unread.delete(id);
+      else this.unread.set(id, { ...entry, reply: this.replies, unsure: true });
+    }
+  }
+
+  /** Claude starting a turn by itself after its last one ended takes every notice queued by then. */
+  observeTurnStart(): void { this.unread.clear(); }
+
+  /** A notice Claude replays names its task. */
   observeReplay(event: Message): void {
     if (!this.unread.size) return;
     const replayed = messageText(event);
@@ -72,6 +104,13 @@ export class BackgroundTaskTracker {
   get outstanding(): number { return this.running.size + this.unread.size; }
   get unreadCount(): number { return this.unread.size; }
 
-  /** Ended tasks whose notice Claude has not taken; Tower hands them over itself, which counts as taken. */
-  takeUnread(): FinishedTask[] { const unread = [...this.unread.values()]; this.unread.clear(); return unread; }
+  /**
+   * Ended tasks whose notice Claude has not taken; Tower hands them over itself, which counts as taken. A notice a
+   * reply may have taken is not handed over again: Claude would have started a turn for it by now if it had not.
+   */
+  takeUnread(): FinishedTask[] {
+    const unread = [...this.unread.values()].filter(entry => !entry.unsure).map(entry => entry.task);
+    this.unread.clear();
+    return unread;
+  }
 }
