@@ -1,6 +1,6 @@
 import { translate as t, locale } from '../i18n/i18n';
 import type { Session, SessionStatus, Snapshot } from '../../../shared/types';
-export { sessionActivityAt, sortSessions } from '../../../shared/session-activity';
+export { sessionActivityAt, sessionStaysShown, sortSessions } from '../../../shared/session-activity';
 
 export const statusLabels: Record<SessionStatus, string> = {
   get working() { return t('작업 중'); },

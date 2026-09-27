@@ -24,7 +24,7 @@ import type { RepositoryAction, RepositoryStatus } from '../../../shared/reposit
 import { Graph } from '../graph/Graph';
 import { BrandMark, ProviderIcon } from '../common/Icons';
 import { useMediaQuery } from '../common/use-media-query';
-import { api, outdatedRunner, providerLabels, recoverRefusedConnection, sessionActivityAt, sessionTitle, sortSessions } from '../common/lib';
+import { api, outdatedRunner, providerLabels, recoverRefusedConnection, sessionActivityAt, sessionStaysShown, sessionTitle, sortSessions } from '../common/lib';
 import { getMainSessionId, getMainSessions } from '../sessions/session-family';
 import { acknowledgeSession, conversationRevision, parseReadState, pruneReadState, readStateKey } from '../sessions/session-read-state';
 import { NewSessionDialog, type SessionDraft } from '../sessions/NewSessionDialog';
@@ -308,7 +308,7 @@ function TowerApp() {
   const filtered = useMemo(() => {
     const term = query.toLocaleLowerCase().trim();
     const cutoff = period === 'all' ? 0 : now - Number(period) * 86_400_000;
-    return mainSessions.filter(session => onMachine(session) && (provider === 'all' || session.provider === provider) && (status === 'all' || session.status === status) && (project === 'all' || session.cwd === project) && (session.status === 'working' || session.activeProcess || +new Date(sessionActivityAt(session)) >= cutoff) && (!term || `${groupTitles.get(session.cwd) || ''} ${session.customTitle || ''} ${session.title} ${session.agentName || ''} ${session.project} ${session.cwd} ${session.nativeId} ${session.lastMessage}`.toLocaleLowerCase().includes(term))).sort(sortSessions);
+    return mainSessions.filter(session => onMachine(session) && (provider === 'all' || session.provider === provider) && (status === 'all' || session.status === status) && (project === 'all' || session.cwd === project) && (session.status === 'working' || session.activeProcess || sessionStaysShown(session) || +new Date(sessionActivityAt(session)) >= cutoff) && (!term || `${groupTitles.get(session.cwd) || ''} ${session.customTitle || ''} ${session.title} ${session.agentName || ''} ${session.project} ${session.cwd} ${session.nativeId} ${session.lastMessage}`.toLocaleLowerCase().includes(term))).sort(sortSessions);
   }, [mainSessions, onMachine, provider, status, project, period, query, now, groupTitles]);
   const finishedSlackIds = useMemo(() => finishedAutomationSessionIds(slack?.events || [], sessions, view?.runs || []), [slack?.events, sessions, view?.runs]);
   const canvasCandidates = useMemo(() => filtered.filter(session => !finishedSlackIds.has(session.id)), [filtered, finishedSlackIds]);

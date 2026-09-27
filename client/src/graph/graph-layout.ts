@@ -1,5 +1,5 @@
 import type { Session } from '../../../shared/types';
-import { sortSessions } from '../common/lib';
+import { sessionStaysShown, sortSessions } from '../common/lib';
 import { scopedId } from '../remote/scope';
 
 export function graphProjectKey(session: Session): string {
@@ -14,6 +14,8 @@ export function graphSessionGroups(sessions: Session[], limit: number, selectedI
   const visible = [...sessions].sort(sortSessions).slice(0, limit);
   const selected = sessions.find(session => session.id === selectedId);
   if (selected && !visible.some(session => session.id === selected.id)) visible.push(selected);
+  // Conversations that still need something are never pushed off by newer ones.
+  for (const session of sessions) if (sessionStaysShown(session) && !visible.includes(session)) visible.push(session);
   const groups = new Map<string, Session[]>();
   for (const session of visible.sort(sortSessions)) {
     const key = graphProjectKey(session);

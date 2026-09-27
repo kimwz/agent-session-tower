@@ -13,3 +13,11 @@ export function sortSessions(a: Session, b: Session) {
   const bTime = Date.parse(sessionActivityAt(b)) || 0;
   return bTime - aTime || a.id.localeCompare(b.id);
 }
+
+/**
+ * A conversation whose last turn was judged to end in anything but finished work: it waits for the owner, broke off,
+ * or said it carries on. It stays on the canvas however old it gets, until its work is done or the owner closes it.
+ */
+export function sessionStaysShown(session: Pick<Session, 'status' | 'outcome'>) {
+  return session.status !== 'working' && session.outcome !== undefined && session.outcome !== 'done';
+}

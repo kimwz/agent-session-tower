@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.43.0] - 2026-09-27
+
+### Changed
+- **Conversations that still need something stay on the canvas.** A conversation marked **확인 필요**, **작업 끊김** or **이어서 진행 예정** no longer disappears as it gets older. The sidebar's period filter keeps it, and newer conversations no longer push it off the canvas's card limit. It leaves as before once its last turn is marked **작업 완료**, or when you close it. This applies to conversations already marked, too.
+
 ## [1.42.0] - 2026-09-27
 
 ### Added

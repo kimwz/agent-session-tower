@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { ProjectGroup, Session } from '../../../shared/types.js';
 import { graphProjectId, graphSessionGroups } from '../../../client/src/graph/graph-layout.js';
+import { sessionStaysShown } from '../../../shared/session-activity.js';
 import { AGENT_HEIGHT, AGENT_WIDTH, defaultGraphPreferences, manualProjectBounds, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, reconcileManualGraph, setGraphLayoutMode, type ManualGraphLayout } from '../../../client/src/graph/graph-layout-preferences.js';
 
 function session(id: string, extra: Partial<Session> = {}): Session {
@@ -83,6 +84,20 @@ test('filters and newest cutoffs cannot prune manual placements or discard older
   assert.equal(reconcileManualGraph(initial, items), initial);
   assert.equal(Object.keys(initial.agents).length, 90);
   assert.deepEqual(manualSessionGroups([]), []);
+});
+
+test('a conversation that still needs something is never pushed off the canvas by newer ones', () => {
+  const items = Array.from({ length: 20 }, (_, index) => session(`session-${index}`, { status: 'completed', lastRequestAt: `2026-09-15T${String(index).padStart(2, '0')}:00:00.000Z` }));
+  items[0] = { ...items[0], outcome: 'needsOwner' };
+  items[1] = { ...items[1], outcome: 'blocked' };
+  items[2] = { ...items[2], outcome: 'done' };
+  const shown = graphSessionGroups(items, 8, null).flatMap(([, members]) => members.map(item => item.id));
+  assert.equal(shown.length, 10);
+  assert.ok(shown.includes('session-0') && shown.includes('session-1'));
+  assert.ok(!shown.includes('session-2'), 'finished work leaves as it always did');
+  assert.equal(sessionStaysShown({ status: 'working', outcome: 'needsOwner' }), false);
+  assert.equal(sessionStaysShown({ status: 'idle', outcome: 'progress' }), true);
+  assert.equal(sessionStaysShown({ status: 'idle' }), false);
 });
 
 test('authoritative removal prunes only vanished sessions and empty projects; partial scans preserve them', () => {
