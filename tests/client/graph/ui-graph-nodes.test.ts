@@ -37,9 +37,9 @@ test('an agent card names its provider, title and status in one screen-reader la
 test('an agent card with new activity is marked unread for both sighted and assisted readers', () => {
   const unread = agent({}, { unread: true });
   assert.match(unread, /class="agent-card claude working  has-unread"/);
-  assert.match(unread, /class="agent-unread" title="새 활동" aria-hidden="true">N</);
+  assert.match(unread, /<i class="unread-dot" title="새 활동" aria-hidden="true"><\/i>/);
   assert.match(unread, /, 새 활동\. 대화 열기"/);
-  assert.doesNotMatch(agent(), /agent-unread/);
+  assert.doesNotMatch(agent(), /unread-dot/);
 });
 
 test('a working agent shows the live activity border that a completed one drops', () => {
@@ -51,7 +51,7 @@ test('a working agent shows the live activity border that a completed one drops'
 
 test('a finished card shows how its last turn ended at the top right, apart from the top-left new-activity mark', () => {
   const done = agent({ status: 'completed', outcome: 'done' }, { unread: true });
-  assert.match(done, /class="agent-unread"[^>]*>N<\/span><span class="agent-card-flags"><span class="agent-outcome done"><i><\/i>작업 완료<\/span><\/span>/);
+  assert.match(done, /class="unread-dot"[^>]*><\/i><span class="agent-card-flags"><span class="agent-outcome done"><i><\/i>작업 완료<\/span><\/span>/);
   assert.match(done, /aria-label="Claude Code: 리팩터링 계획 세우기, 완료, 작업 완료, 새 활동\. 대화 열기"/);
   assert.match(agent({ status: 'idle', outcome: 'needsOwner' }), /class="agent-outcome needsOwner"><i><\/i>확인 필요</);
   assert.match(agent({ status: 'error', outcome: 'blocked' }), /class="agent-outcome blocked"><i><\/i>작업 끊김</);

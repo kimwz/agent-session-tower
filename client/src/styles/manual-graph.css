@@ -34,17 +34,8 @@
 .agent-outcome.needsOwner { --outcome:#ffa24c; }
 .agent-outcome.blocked { --outcome:#ff6b6b; }
 .agent-outcome.progress { --outcome:#76b6ff; }
-/* Top left of a card: a plain N marks new activity, apart from the outcome at the top right. */
-.agent-unread {
-  position:absolute;
-  top:9px;
-  left:13px;
-  color:#4ade80;
-  font-size:15px;
-  font-weight:800;
-  line-height:18px;
-  pointer-events:none;
-}
+/* Top left of a card: the sidebar's unread dot marks new activity, apart from the outcome at the top right. */
+.agent-card > .unread-dot { position:absolute; top:15px; left:15px; margin:0; }
 .agent-card.has-unread:not(.selected) { border-color:#37618e; }
 .manual-layout .agent-card { cursor:grab; height:202px; min-height:202px; }
 .manual-layout .react-flow__node.dragging .agent-card,
