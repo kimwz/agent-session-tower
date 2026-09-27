@@ -51,6 +51,7 @@ import { NotificationService } from './notifications/service.js';
 import { judgeTurn } from './notifications/attention.js';
 import { DecisionService } from './decisions/service.js';
 import { autoPromptSuggestionResponse } from './auto-prompt/suggestion.js';
+import { insertIfItBelongs } from './runs/steer-timing.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
 
 /** Every request this web server admits comes from the owner's browser session. */
@@ -265,6 +266,13 @@ async function main() {
     const page = await history.read(runs.nativeSessionId(id), before, limit);
     return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
   };
+  // A retried request returns the message it already queued; that message is judged once only.
+  const judgedMessages = { ids: new Set<string>(), claim(id: string) {
+    if (this.ids.has(id)) return false;
+    this.ids.add(id);
+    if (this.ids.size > 500) this.ids.delete(this.ids.values().next().value!);
+    return true;
+  } };
   // Fast multiple-choice judgments (Jev, or whatever replaces it) for the web's own features; off without an API key.
   const decisions = new DecisionService(stateDir);
   await decisions.start().catch(error => console.error(`Fast judgment settings were not loaded: ${error instanceof Error ? error.message : String(error)}`));
@@ -332,7 +340,12 @@ async function main() {
     enqueue: async (id, prompt, attachments, context) => {
       const cwd = runs.getSession(id)?.cwd;
       if (cwd) await repositories.prepareRun(cwd);
-      return runs.enqueue(id, prompt, attachments, admit(context));
+      const run = await runs.enqueue(id, prompt, attachments, admit(context));
+      // A message sent from this computer's page while the conversation works may belong to that work; the answer does
+      // not wait for the judgment. Requests from a controlling computer (with `context`) are left as they are.
+      if (!context) void insertIfItBelongs({ engine: () => decisions.engine('steerTiming'), canTarget: () => runs.supports('steerTargets'), runs: () => runs.list(),
+        steer: (runId, targetRunId) => runs.steer(runId, { targetRunId }), record: entry => decisions.record(entry), claim: runId => judgedMessages.claim(runId) }, run).catch(() => {});
+      return run;
     },
     repositoryAction: (cwd, action) => repositories.act(cwd, action),
     attachment: id => runs.attachment(id), cancel: id => runs.cancel(id), steerRun: id => runs.steer(id),

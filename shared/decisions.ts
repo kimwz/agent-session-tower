@@ -8,8 +8,10 @@ export interface DecisionFeatures {
   autoPromptSuggestions: boolean;
   /** Skip push notifications for turns that are only an intermediate step. */
   attentionNotifications: boolean;
+  /** Insert a message sent while a turn runs into that turn when it belongs to the work in progress. */
+  steerTiming: boolean;
 }
-export const DEFAULT_DECISION_FEATURES: DecisionFeatures = { autoPromptSuggestions: true, attentionNotifications: true };
+export const DEFAULT_DECISION_FEATURES: DecisionFeatures = { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true };
 
 /** One judgment a feature made, kept in memory so the owner can see what the service answered and what Tower did. */
 export interface DecisionRecord {
@@ -29,7 +31,7 @@ export interface DecisionRecord {
  * For notifications, the judgment itself: `notify` is a turn judged worth a push, which the owner's next message or
  * the device settings can still stop; `quiet` is a turn judged an intermediate step, which is not pushed.
  */
-export type DecisionResult = 'notify' | 'quiet' | 'suggested' | 'noSuggestion' | 'failed';
+export type DecisionResult = 'notify' | 'quiet' | 'suggested' | 'noSuggestion' | 'inserted' | 'waiting' | 'failed';
 /** How many recent judgments the settings page can show. */
 export const DECISION_RECORDS_KEPT = 40;
 

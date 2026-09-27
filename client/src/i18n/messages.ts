@@ -1630,4 +1630,11 @@ export const english: Record<string, string> = {
   "막힘": "Blocked",
   "계속 진행": "Continuing",
   "추천": "Suggestion",
+  "작업 중 보낸 메시지 끼워넣기": "Insert messages sent during work",
+  "작업 중인 대화에 보낸 메시지가 지금 작업에 속하면 바로 끼워 넣고, 별개의 요청이면 끝난 뒤 보냅니다. 판단할 때 지금 요청, 진행 상황 끝부분, 새 메시지를 보냅니다.": "A message sent to a conversation that is working goes into the current work at once when it belongs to it, and waits until the work ends when it is a separate request. The judgment sends the current request, the end of the progress so far and the new message.",
+  "지금 작업에 끼워 넣음": "Inserted into the current work",
+  "끝난 뒤 보내도록 대기": "Waiting until the work ends",
+  "끼워넣기": "Insert",
+  "지금": "Now",
+  "끝난 뒤": "After",
 };

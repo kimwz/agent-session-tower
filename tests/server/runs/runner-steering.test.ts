@@ -199,3 +199,14 @@ test('listing runs never re-enters tool resolution, even when the resolver reads
   for (let index = 0; index < 5; index++) assert.equal(f.manager.list().find(run => run.id === second.id)?.canSteer, true);
   assert.equal(resolutions, before, 'computing steering does not resolve tools');
 });
+
+test('an insert meant for one turn is refused once another turn runs, and the message keeps waiting', async t => {
+  const f = await fixture(t);
+  const { first, second } = await f.pair();
+  await assert.rejects(f.manager.steer(second.id, { targetRunId: 'some-other-turn' }), (error: unknown) => error instanceof SteeringError && error.disposition === 'rejected');
+  assert.equal(f.read(second.id).status, 'queued');
+  assert.deepEqual(f.inputs, []);
+  const delivered = await f.manager.steer(second.id, { targetRunId: first.id });
+  assert.equal(delivered.steering?.state, 'delivered');
+  assert.equal(delivered.steering?.targetRunId, first.id);
+});

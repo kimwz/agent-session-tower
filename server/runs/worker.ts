@@ -150,7 +150,11 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (options.github && admitted.origin?.kind === 'owner') prompt = await options.github.ownerChat(args[0] as string, prompt);
         return options.runs.enqueue(args[0] as string, prompt, args[2] as MessageAttachments, admitted);
       }
-      case 'steer': return options.runs.steer(args[0] as string);
+      case 'steer': {
+        const target = (args[1] as { targetRunId?: unknown } | undefined)?.targetRunId;
+        if (target !== undefined && (typeof target !== 'string' || !target || target.length > 200)) throw Object.assign(new Error('Invalid target turn.'), { statusCode: 400 });
+        return options.runs.steer(args[0] as string, target === undefined ? {} : { targetRunId: target });
+      }
       case 'cancel': return options.runs.cancel(args[0] as string);
       case 'respondToApproval': return options.runs.respondToApproval(args[0] as string, args[1] as string, args[2] as RunApprovalResponse);
       case 'sessionHistory': return sessionHistory(options.sessions, args);

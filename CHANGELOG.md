@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.41.0] - 2026-09-27
+
+### Added
+- **Jev decides whether a message sent during work goes in now or waits.** When you send a message to a conversation whose turn is running, Tower asks Jev whether it belongs to the work in progress or is a separate request. Belonging covers correcting, redirecting, stopping, adding a detail or a finishing step such as "then deploy it", and answering the agent. If it belongs, the message is inserted into that turn at once, exactly as **지금 끼워넣기** does. Otherwise it waits until the turn ends, as before. A message is inserted only when Jev is at least 60% sure it belongs, because a wrong insert cannot be taken back. On your own earlier messages and made-up ones, no separate request went above 0.43. The two messages you had inserted by hand scored 0.96 and 0.97.
+  - The insert goes only into the turn that was judged. If that turn ended or another began meanwhile, the message keeps waiting.
+  - An insert that cannot be confirmed is never sent again.
+  - Turn it off under **Fast judgment → 작업 중 보낸 메시지 끼워넣기**. **Recent judgments** shows each decision with its probabilities.
+  - It applies to messages sent from this computer's page. Messages to a joined computer's conversations are not judged.
+  - It starts working once the execution worker has moved to 1.41.0, which happens by itself when no work is running.
+
 ## [1.40.5] - 2026-09-27
 
 ### Changed

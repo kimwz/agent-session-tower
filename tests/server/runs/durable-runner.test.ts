@@ -683,3 +683,15 @@ test('the current worker says it takes requests that name their place', async t 
   const client = await f.connect();
   assert.equal(client.supports('autoPromptTargets'), true);
 });
+
+test('an outdated worker is never asked to insert into a chosen turn, since it would insert into any', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-steer-'));
+  const stateDir = join(directory, 'state');
+  const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
+  const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
+  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  await client.start();
+  assert.equal(client.supports('steerTargets'), false);
+  await assert.rejects(client.steer('queued-run', { targetRunId: 'turn' }), { statusCode: 503, disposition: 'not-admitted' });
+  assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
+});

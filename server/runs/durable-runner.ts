@@ -176,7 +176,12 @@ export class DurableRunManager extends EventEmitter {
     this.requireOrigins(internal);
     return this.call('enqueue', [id, prompt, attachments, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) }]) as Promise<Run>;
   }
-  async steer(id: string): Promise<Run> { return this.call('steer', [id]) as Promise<Run>; }
+  /** An older worker would ignore `targetRunId` and insert into whatever turn runs, so it is never sent one. */
+  async steer(id: string, options: { targetRunId?: string } = {}): Promise<Run> {
+    if (options.targetRunId === undefined) return this.call('steer', [id]) as Promise<Run>;
+    if (!this.supports('steerTargets')) throw Object.assign(new Error('The execution worker has not updated yet, so it cannot insert into a chosen turn.'), { statusCode: 503, disposition: 'not-admitted' });
+    return this.call('steer', [id, { targetRunId: options.targetRunId }]) as Promise<Run>;
+  }
   async cancel(id: string): Promise<void> { await this.call('cancel', [id]); }
   async respondToApproval(id: string, approvalId: string, decision: RunApprovalResponse): Promise<Run> {
     return this.call('respondToApproval', [id, approvalId, decision]) as Promise<Run>;

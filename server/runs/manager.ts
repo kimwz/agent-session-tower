@@ -479,12 +479,14 @@ export class RunManager extends EventEmitter {
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : undefined;
   }
 
-  async steer(runId: string, options: { whileWaiting?: boolean } = {}): Promise<Run> {
+  /** `targetRunId` inserts only into that turn: a decision made about one turn never lands in the next. */
+  async steer(runId: string, options: { whileWaiting?: boolean; targetRunId?: string } = {}): Promise<Run> {
     const run = this.runs.get(runId);
     if (!run) throw new RunError('Task not found.', 404);
     if (run.steering) return this.list().find(item => item.id === runId)!;
     const selected = this.steeringTarget(run);
     if (!selected) throw new RunError('This queued instruction cannot be inserted into an active Tower turn.', 409);
+    if (options.targetRunId !== undefined && selected.target.id !== options.targetRunId) throw new SteeringError('The active turn changed before delivery.', 'rejected');
     // Reserve synchronously before attachment reads so duplicate clicks cannot submit twice.
     this.admissions.add(run.id);
     let submitted = false;
