@@ -16,7 +16,7 @@
 .master-fab-tasks { background:var(--teal); color:#0b1c18; }
 
 .master-panel {
-  position:fixed; z-index:45; left:0; top:66px; bottom:0; width:min(420px, 100vw); display:flex; flex-direction:column;
+  position:fixed; z-index:45; left:0; top:var(--master-top, 66px); bottom:0; width:min(420px, 100vw); display:flex; flex-direction:column;
   background:var(--surface); border-right:1px solid var(--line); box-shadow:8px 0 24px rgba(0,0,0,.35); color:var(--text);
 }
 .master-header { display:flex; align-items:center; gap:8px; padding:10px 12px; border-bottom:1px solid var(--line); }

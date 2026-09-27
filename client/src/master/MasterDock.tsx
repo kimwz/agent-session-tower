@@ -84,24 +84,26 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   const thinking = overview?.state === 'thinking' || Boolean(room.draft);
   const attention = overview && (overview.state === 'unconfigured');
   return <>
-    <button ref={button} className={`master-fab ${thinking ? 'thinking' : ''} ${attention ? 'attention' : ''} ${open ? 'open' : ''}`} style={position} onClick={() => setOpen(value => !value)}
+    <button ref={button} className={`master-fab ${thinking ? 'thinking' : ''} ${attention ? 'attention' : ''} ${open ? 'open' : ''}`} style={fabStyle(position)} onClick={() => setOpen(value => !value)}
       aria-label={words('마스터 에이전트', 'Master agent')} title={`${words('마스터 에이전트', 'Master agent')} (Shift+M)`} aria-expanded={open} aria-keyshortcuts="Shift+M">
       {thinking ? <LoaderCircle size={22} className="spin" /> : <Bot size={22} />}
       {unread > 0 && <span className="master-fab-badge">{unread > 9 ? '9+' : unread}</span>}
       {!unread && (overview?.activeTasks ?? 0) > 0 && <span className="master-fab-tasks">{overview!.activeTasks}</span>}
     </button>
     {open && <Suspense fallback={<div className="master-panel"><LoaderCircle className="spin" size={18} /></div>}>
-      <MasterPanel token={token} room={room} tabId={tab.current} sessionId={sessionId} onClose={close} onEarlier={() => follow.current?.earlier() ?? Promise.resolve()} onOpenSession={id => controlsRef.current.selectSession(id)} />
+      <MasterPanel token={token} room={room} tabId={tab.current} sessionId={sessionId} top={position.panelTop} onClose={close} onEarlier={() => follow.current?.earlier() ?? Promise.resolve()} onOpenSession={id => controlsRef.current.selectSession(id)} />
     </Suspense>}
   </>;
 }
+
+function fabStyle({ panelTop: _, ...style }: React.CSSProperties & { panelTop?: number }): React.CSSProperties { return style; }
 
 /**
  * Keeps the button clear of what already sits at the bottom left: the expanded sidebar on wide screens and a
  * conversation's composer on phones. It measures them instead of changing their styles.
  */
-function useDockPosition(): React.CSSProperties {
-  const [style, setStyle] = useState<React.CSSProperties>({});
+function useDockPosition(): React.CSSProperties & { panelTop?: number } {
+  const [style, setStyle] = useState<React.CSSProperties & { panelTop?: number }>({});
   useEffect(() => {
     let frame = 0;
     const measure = () => {
@@ -113,7 +115,10 @@ function useDockPosition(): React.CSSProperties {
         const composer = window.innerWidth <= 680 ? document.querySelector('.composer-section') : null;
         const composerBox = composer?.getBoundingClientRect();
         const keyboard = window.visualViewport ? window.innerHeight - window.visualViewport.height > 120 : false;
+        const header = document.querySelector('.app-header')?.getBoundingClientRect();
         setStyle({
+          // The panel starts right under the page header, whatever its height at this width.
+          ...(header ? { panelTop: Math.max(0, Math.round(header.bottom)) } : {}),
           left: `calc(${docked ? Math.round(sidebarBox!.right) : 0}px + max(16px, env(safe-area-inset-left)))`,
           bottom: `calc(${composerBox && composerBox.height ? Math.round(window.innerHeight - composerBox.top) + 8 : 0}px + max(16px, env(safe-area-inset-bottom)))`,
           ...(keyboard ? { display: 'none' } : {}),

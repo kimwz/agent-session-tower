@@ -14,13 +14,15 @@ interface Props {
   room: RoomState;
   tabId: string;
   sessionId: string | null;
+  /** Where the page header ends, so the panel sits right under it. */
+  top?: number;
   onClose(): void;
   onEarlier(): Promise<void>;
   onOpenSession(id: string): void;
 }
 
 /** The master's one conversation: what the owner asked, what the master did and said, and the work it handed out. */
-export function MasterPanel({ token, room, tabId, sessionId, onClose, onEarlier, onOpenSession }: Props) {
+export function MasterPanel({ token, room, tabId, sessionId, top, onClose, onEarlier, onOpenSession }: Props) {
   const words = useWords();
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
@@ -67,7 +69,7 @@ export function MasterPanel({ token, room, tabId, sessionId, onClose, onEarlier,
 
   const configured = overview?.configured;
   const disabled = overview?.settings.enabled === false;
-  return <aside ref={panel} className="master-panel" role="dialog" aria-label={words('마스터 에이전트', 'Master agent')}>
+  return <aside ref={panel} className="master-panel" role="dialog" aria-label={words('마스터 에이전트', 'Master agent')} style={top !== undefined ? { '--master-top': `${top}px` } as React.CSSProperties : undefined}>
     <header className="master-header">
       <Bot size={17} />
       <h2>{words('마스터', 'Master')}</h2>
