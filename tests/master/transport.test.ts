@@ -107,7 +107,6 @@ test('the model stream gives text as it comes and the complete output at the end
 
 test('Tower\'s server gives the master routes only after sign-in, and the master\'s own calls their own budget', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-master-http-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
   const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'here', version: 't', updatedAt: '' };
   const backend = { snapshot: () => snapshot, detail: async () => undefined, enqueue: async () => { throw Object.assign(new Error('no session'), { statusCode: 404 }); }, cancel: async () => {}, subscribe: () => () => {} };
   const identities: boolean[] = [];
@@ -117,7 +116,8 @@ test('Tower\'s server gives the master routes only after sign-in, and the master
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ path }));
     return true;
   } } });
-  t.after(() => { dispose(); return stop(server); });
+  // One cleanup, in order: hooks run as registered, and a directory removed under a running server fails and leaves it open.
+  t.after(async () => { dispose(); await stop(server); await rm(dir, { recursive: true, force: true }); });
   const port = await listen(server);
   const base = `http://127.0.0.1:${port}`;
   assert.deepEqual(await (await fetch(`${base}/api/master`)).json(), { path: '/api/master' });
@@ -134,10 +134,10 @@ test('Tower\'s server gives the master routes only after sign-in, and the master
 
 test('without a master, Tower\'s server answers as before', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-master-http-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
   const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'here', version: 't', updatedAt: '' };
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, backend: { snapshot: () => snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('unused'); }, cancel: async () => {}, subscribe: () => () => {} } });
-  t.after(() => { dispose(); return stop(server); });
+  // One cleanup, in order: hooks run as registered, and a directory removed under a running server fails and leaves it open.
+  t.after(async () => { dispose(); await stop(server); await rm(dir, { recursive: true, force: true }); });
   const port = await listen(server);
   const answer = await fetch(`http://127.0.0.1:${port}/api/master`);
   assert.notEqual(answer.status, 200);
@@ -145,12 +145,12 @@ test('without a master, Tower\'s server answers as before', async t => {
 
 test('signing a page out ends its live master stream, like every other stream', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-master-http-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
   const { auth, origins, cookie, fetch: remoteFetch } = await createRemoteAuthFixture(dir);
   const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'here', version: 't', updatedAt: '' };
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, auth, remote: { origins }, backend: { snapshot: () => snapshot, detail: async () => undefined, enqueue: async () => { throw new Error('unused'); }, cancel: async () => {}, subscribe: () => () => {} },
     master: { callerSecret: 'e'.repeat(64), handle: async (_req, res) => { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.write(': connected\n\n'); return true; } } });
-  t.after(() => { dispose(); return stop(server); });
+  // One cleanup, in order: the sign-out's session write must end before its directory is removed.
+  t.after(async () => { dispose(); await stop(server); await auth.flush(); await rm(dir, { recursive: true, force: true }); });
   const port = await listen(server);
   const stream = await remoteFetch(`http://127.0.0.1:${port}/api/master/events`, { headers: { cookie } });
   assert.equal(stream.status, 200);
