@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.46.1] - 2026-09-28
+
+### Fixed
+- **The master's lookups need a Node.js with SQLite's authorizer, and are offered only there.** The authorizer is what keeps them read-only, and Node.js 22 has none, so on it every lookup from 1.46.0 failed and cost the master an extra step. On such a Node.js the master now looks things up through Tower's API, as before 1.46.0; the live status summary at the start of each turn works on every version. Lookups work on Node.js 24.10 or newer and in the standalone executables.
+
 ## [1.46.0] - 2026-09-27
 
 ### Added
