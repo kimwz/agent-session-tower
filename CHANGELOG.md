@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.40.3] - 2026-09-27
+
+### Fixed
+- **No more stray "Background work you started… has finished" requests in conversations.** Since 1.39.0, Tower sent Claude this reminder a minute after a turn ended whenever it had not seen Claude take a finished background task's result. Claude Code usually takes that result without showing it back to Tower: inside the turn under way, in a turn it starts by itself, or not at all when the agent already reported by message. Tower therefore reminded Claude of work it had already handled, sometimes several times in one conversation. Claude then answered the reminder, and the reminders appeared as your own messages. Tower now counts a result as taken once Claude starts a turn by itself or its next model reply begins after the task ended. It reminds Claude only when neither happened.
+- Tower's reminders, including ones already in conversations, now show as **Background task** notices with the task's status and summary, not as messages you sent.
+
 ## [1.40.2] - 2026-09-26
 
 ### Fixed
