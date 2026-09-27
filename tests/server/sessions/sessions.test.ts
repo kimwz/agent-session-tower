@@ -467,6 +467,17 @@ test('a background task notice Claude Code writes as a user turn reads as a noti
   assert.equal(parseMessages('claude', { ...row, origin: undefined, message: { role: 'user', content: 'Please explain <task-notification> tags' } })[0]?.role, 'user');
 });
 
+test('a message sent while Claude works reads as the owner speaking, though Claude Code writes it only as the command it took', () => {
+  const row = { type: 'attachment', uuid: 'queued', timestamp: '2026-09-27T10:21:55.026Z', attachment: { type: 'queued_command',
+    prompt: [{ type: 'text', text: 'Both run in the Korean region, so latency is fine.' }], source_uuid: 'run-1', commandMode: 'prompt' } };
+  assert.deepEqual(parseMessages('claude', row), [{ id: 'queued:0', role: 'user', text: 'Both run in the Korean region, so latency is fine.', timestamp: '2026-09-27T10:21:55.026Z' }]);
+  assert.equal(parseMessages('claude', { ...row, attachment: { ...row.attachment, prompt: 'As a plain string' } })[0]?.text, 'As a plain string');
+  // Claude Code's own queued notices and other attachments are not the owner speaking.
+  assert.deepEqual(parseMessages('claude', { ...row, attachment: { ...row.attachment, commandMode: 'task-notification' } }), []);
+  assert.deepEqual(parseMessages('claude', { ...row, attachment: { ...row.attachment, isMeta: true } }), []);
+  assert.deepEqual(parseMessages('claude', { ...row, attachment: { type: 'hook_success' } }), []);
+});
+
 test("Tower's hand-over of finished background work reads as a notice, not as the owner speaking", () => {
   const content = [{ type: 'text', text: '[Agent Session Tower] Background work you started in this conversation has finished:\n'
     + '- completed: Background command "Run the checks" completed (exit code 0) (output: /private/tmp/b1.output)\nContinue with what you planned to do once it finished, and report the result.' }];

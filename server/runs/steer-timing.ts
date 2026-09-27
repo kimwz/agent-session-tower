@@ -16,9 +16,12 @@ export const INSERT_NOW = 0.6;
 const JUDGMENT_MS = 6_000;
 /** Only a message accepted just now is judged; a retried request that returns an older one is left as it is. */
 export const FRESH_MS = 30_000;
-/** How long to follow an insert another request started before recording how it ended. */
-const SETTLE_MS = 15_000;
-const SETTLE_POLL_MS = 250;
+/**
+ * How long to follow an insert before recording how it ended. Claude confirms one only when it takes it at its next
+ * step, and a long reply or tool call can put that minutes away.
+ */
+const SETTLE_MS = 30 * 60_000;
+const SETTLE_POLL_MS = 1_000;
 
 export interface SteerTimingInput {
   /** What the running turn was asked to do. */

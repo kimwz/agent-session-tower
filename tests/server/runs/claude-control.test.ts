@@ -135,9 +135,24 @@ test('a steering write failure is uncertain and does not kill the running permis
   assert.equal(f.control.canSteer(), true); assert.deepEqual(f.errors, []);
 });
 
-test('steering timeout remains uncertain without cancelling the current turn', async t => {
+test('an instruction waits for its replay as long as the turn runs, since Claude takes it only at its next step', async t => {
+  const f = fixture(5000, 10); t.after(() => f.control.close()); f.initialize();
+  let settled = false;
+  const sent = f.control.steer({ ...f.input, uuid: 'steer-1' }).finally(() => { settled = true; });
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(settled, false, 'a long reply is not a lost instruction');
+  f.control.setTurnIdle(true); f.control.setTurnIdle(false);
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(settled, false, 'a turn that starts again takes it at its next step');
+  assert.equal(f.control.handle({ ...f.input, uuid: 'steer-1', isReplay: true }), true);
+  await sent;
+  assert.deepEqual(f.errors, []);
+});
+
+test('steering timeout after the turn ended remains uncertain without cancelling the running process', async t => {
   const f = fixture(5000, 10); t.after(() => f.control.close()); f.initialize();
   const rejection = assert.rejects(f.control.steer({ ...f.input, uuid: 'steer-1' }), { disposition: 'uncertain' });
+  f.control.setTurnIdle(true);
   await new Promise(resolve => setTimeout(resolve, 30)); await rejection;
   assert.equal(f.control.hasPendingSteers(), false);
   assert.equal(f.control.canSteer(), true); assert.deepEqual(f.errors, []);

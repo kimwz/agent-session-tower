@@ -110,6 +110,14 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
     }
     return [];
   }
+  // A message sent while Claude works is written only as the queued command Claude took at its next step.
+  const queued = row.type === 'attachment' && row.attachment?.type === 'queued_command' ? row.attachment : undefined;
+  if (queued) {
+    if (queued.isMeta || (queued.commandMode !== undefined && queued.commandMode !== 'prompt')) return [];
+    const blocks: Json[] = Array.isArray(queued.prompt) ? queued.prompt : [{ type: 'text', text: queued.prompt }];
+    const content = blocks.map(block => block?.type === 'text' ? text(block.text) : block?.type === 'image' ? '[Image attachment]' : '').filter(Boolean).join('\n').trim();
+    return content && !isInjectedUser(content) ? [{ id: `${String(row.uuid || byteOffset)}:0`, role: 'user', text: content, timestamp }] : [];
+  }
   if (!['user', 'assistant'].includes(row.type) || !row.message || row.isMeta) return [];
   const value = row.message;
   const id = String(row.uuid || value.id || byteOffset);

@@ -50,9 +50,9 @@ test('Claude result before steering replay keeps stdin open through the subseque
   assert.equal(input.priority, 'next');
   f.emit({ type: 'result', session_id: nativeId, is_error: false });
   assert.equal(f.child.stdin.writableEnded, false);
+  assert.equal((await pending).steering?.state, 'sending', 'answered once handed over');
   f.emit({ ...input, isReplay: true });
-  const inserted = await pending;
-  assert.equal(inserted.steering?.state, 'delivered');
+  await until(() => f.run(f.followup.id).steering?.state === 'delivered');
   assert.equal(f.child.stdin.writableEnded, false);
   f.emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'Updated direction' }] } });
   f.emit({ type: 'result', session_id: nativeId, is_error: false });
@@ -74,12 +74,28 @@ test('Claude replay and completion in one output chunk settle both runs without 
   assert.equal(f.launches(), 1);
 });
 
+test('a turn busy past the acknowledgment window keeps the instruction pending until Claude takes it', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  assert.equal((await f.manager.steer(f.followup.id)).steering?.state, 'sending');
+  const input = f.received.find(frame => frame.uuid === f.followup.id)!;
+  // Claude is still writing its reply; nothing arrives for a while.
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(f.run(f.followup.id).steering?.state, 'sending');
+  assert.equal(f.run(f.followup.id).status, 'running');
+  f.emit({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write' }] } });
+  f.emit({ ...input, isReplay: true });
+  await until(() => f.run(f.followup.id).steering?.state === 'delivered');
+  f.emit({ type: 'result', session_id: nativeId, is_error: false });
+  await until(() => f.run(f.first.id).status === 'completed');
+  assert.equal(f.run(f.followup.id).status, 'completed');
+});
+
 test('Claude process loss preserves uncertain delivery and never automatically requeues it', async t => {
   const f = await fixture(); t.after(f.cleanup);
-  const rejected = assert.rejects(f.manager.steer(f.followup.id), { disposition: 'uncertain' });
+  await f.manager.steer(f.followup.id);
   await until(() => f.received.some(frame => frame.uuid === f.followup.id));
-  f.exit(1); await rejected;
-  assert.equal(f.run(f.followup.id).steering?.state, 'uncertain');
+  f.exit(1);
+  await until(() => f.run(f.followup.id).steering?.state === 'uncertain');
   assert.equal(f.run(f.followup.id).status, 'error');
   await new Promise(resolve => setTimeout(resolve, 30));
   assert.equal(f.launches(), 1);

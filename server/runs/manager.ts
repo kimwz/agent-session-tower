@@ -506,27 +506,37 @@ export class RunManager extends EventEmitter {
       const prompt = attachmentPrompt(run.prompt, attachments);
       submitted = true;
       if (selected.adapter instanceof ClaudeControl) {
-        await selected.adapter.steer({ type: 'user', uuid: run.id, session_id: this.getSession(run.sessionId)!.nativeId, parent_tool_use_id: null,
+        const delivery = selected.adapter.steer({ type: 'user', uuid: run.id, session_id: this.getSession(run.sessionId)!.nativeId, parent_tool_use_id: null,
           message: { role: 'user', content: [{ type: 'text', text: prompt }, ...attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => ({
             type: 'image', source: { type: 'base64', media_type: item.metadata.mimeType, data: item.content.toString('base64') },
           }))] } });
-      } else await selected.adapter.steer!({ id: run.id, prompt, imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) });
-      run.steering!.state = 'delivered'; run.steering!.deliveredAt = new Date().toISOString();
-      this.changed(); await this.flush();
+        // Claude confirms only when it takes the instruction at its next step, which can be minutes away, so the
+        // answer is that it was handed over and the run records how it ends.
+        this.admissions.delete(run.id);
+        void delivery.then(() => this.settleSteer(run, selected.target.id), error => this.settleSteer(run, selected.target.id, error)).catch(() => {});
+        return this.list().find(item => item.id === runId)!;
+      }
+      await selected.adapter.steer!({ id: run.id, prompt, imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) });
+      await this.settleSteer(run, selected.target.id);
       return this.list().find(item => item.id === runId)!;
     } catch (error) {
-      if (!submitted || (error instanceof SteeringError && error.disposition === 'rejected')) {
-        if (run.steering) { delete run.steering; delete run.startedAt; run.status = 'queued'; }
-      } else {
-        run.steering!.state = 'uncertain'; run.status = 'error'; run.finishedAt = new Date().toISOString();
-        run.error = `Delivery could not be confirmed. Check the conversation before sending again. ${errorMessage(error)}`;
-      }
-      this.changed(); await this.flush();
+      await this.settleSteer(run, selected.target.id, error, !submitted);
       throw error;
-    } finally {
-      this.admissions.delete(run.id);
-      this.owned.get(selected.target.id)?.finishInput?.();
     }
+  }
+
+  /** Records how an instruction for a running turn ended, then lets that turn close if it has nothing left. */
+  private async settleSteer(run: Run, targetRunId: string, error?: unknown, unsent = false): Promise<void> {
+    this.admissions.delete(run.id);
+    if (!run.steering) { this.owned.get(targetRunId)?.finishInput?.(); return; }
+    if (error === undefined) { run.steering.state = 'delivered'; run.steering.deliveredAt = new Date().toISOString(); }
+    else if (unsent || (error instanceof SteeringError && error.disposition === 'rejected')) { delete run.steering; delete run.startedAt; run.status = 'queued'; }
+    else {
+      run.steering.state = 'uncertain'; run.status = 'error'; run.finishedAt = new Date().toISOString();
+      run.error = `Delivery could not be confirmed. Check the conversation before sending again. ${errorMessage(error)}`;
+    }
+    this.changed();
+    try { await this.flush(); } finally { this.owned.get(targetRunId)?.finishInput?.(); }
   }
 
   async cancel(runId: string): Promise<void> {
@@ -944,7 +954,7 @@ export class RunManager extends EventEmitter {
     const endWait = () => { if (run.backgroundWait) { delete run.backgroundWait; this.changed(); } };
     const beginTurn = () => {
       if (turnActive) return;
-      turnActive = true; clearWaitTimers(); endWait(); tasks.observeTurnStart();
+      turnActive = true; clearWaitTimers(); endWait(); tasks.observeTurnStart(); owned.claude?.setTurnIdle(false);
       // Each turn reports its own completion and its own reply.
       sawCompletion = false; shown = false; sawPartial = false; messageHasPartial = false;
     };
@@ -1091,6 +1101,7 @@ export class RunManager extends EventEmitter {
         }
         sawCompletion = true;
         turnActive = false;
+        owned.claude?.setTurnIdle(true);
         if (event.is_error) streamError = (event.errors ?? [event.result ?? 'Claude Code could not complete this turn.']).join('\n');
         // A denied tool call (by the user or the auto mode classifier) is part of a turn that
         // still finished; Claude's own reply explains it. Only a failed turn is reported.
