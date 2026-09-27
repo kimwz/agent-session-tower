@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.44.1] - 2026-09-27
+
+### Fixed
+- **The master panel starts right under the page header.** On wide screens it began 10 px below the header, leaving a strip of the sidebar showing above it. It now follows the header's actual height. On phones it still opens as a sheet from the bottom.
+
 ## [1.44.0] - 2026-09-27
 
 ### Added
