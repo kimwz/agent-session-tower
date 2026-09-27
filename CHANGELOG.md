@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.46.2] - 2026-09-28
+
+### Fixed
+- **"Stop thinking" now also stops a change that is still waiting for Tower's web server.** While the web restarts, the master holds changes it has not sent yet; after a stop they are no longer sent when the web comes back. A change that never reached a web is recorded as not sent, instead of staying "sending" and later reading as uncertain.
+- **Messages and reports are no longer repeated or lost when the master restarts at the wrong moment.** A message sent again after its answer was lost keeps its id, so it runs once. A turn's answer is saved before its message counts as answered, and work the master delegates is saved as watched before the change that started it counts as done. An answer that could not be saved leaves its message open.
+- **A turn that failed without changing anything is tried once more** a few seconds later, also across a restart, so a passing model error no longer drops a report of finished work. A model answer that stalls now ends at the turn's two-minute limit.
+- **Reports use the right answer.** A longer request in the session that merely begins like the delegated one is no longer taken for it; the same request with Tower's list of attached files still is. Auto Prompts sent through `/api/v1/autoPrompt.submit` are followed and reported too.
+- **Secrets are hidden before messages are shortened**, so part of a key at the cut can no longer reach the model.
+- **The master starts even after long conversations.** A conversation file over 12 MB no longer stops the master from starting, and delegated work from long ago no longer stays "running" after a restart.
+- When Tower starts while a message or delegated work is waiting, it starts the master itself instead of waiting for a page to be opened. The master button retries its first connection.
+
 ## [1.46.1] - 2026-09-28
 
 ### Fixed
