@@ -25,3 +25,9 @@
   .chat-panel .chat-context-row { gap: 6px; }
   .chat-context-row .session-family-nav { max-width: 46%; }
 }
+/* Archive sits next to close; give touch screens larger targets with a clear gap between them. */
+@media (max-width: 680px), (pointer: coarse) {
+  .chat-header-actions { gap: 12px; }
+  .chat-panel .chat-header-actions .icon-button { width: 36px; height: 36px; }
+  .chat-panel .chat-header-actions .icon-button svg { width: 20px; height: 20px; }
+}

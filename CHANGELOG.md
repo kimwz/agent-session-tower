@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.40.5] - 2026-09-27
+
+### Changed
+- **Archive and close are easier to tell apart by touch.** On phones and other touch screens, the conversation header's archive and close buttons are now 36 px instead of 26 px, with larger icons and a 12 px gap between them instead of 2 px, so closing the conversation no longer risks archiving the session.
+
 ## [1.40.4] - 2026-09-27
 
 ### Fixed
