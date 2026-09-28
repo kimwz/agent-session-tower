@@ -66,7 +66,6 @@ export interface VoiceSessionOptions {
   token: () => string;
   tabId: string;
   settings: () => MasterVoiceSettings;
-  panelOpen: () => boolean;
   viewContext: () => MasterViewContext | undefined;
   onView(view: VoiceView): void;
   /** Voice is off here: by the owner, because another tab took it, or because the host no longer has it. */
@@ -249,9 +248,6 @@ export class VoiceSession {
     this.audio.src = '/master-silence.wav';
     void this.audio.play().then(() => { if (!this.current) this.audio.pause(); }, () => {});
   }
-
-  /** Tells the master at once where this page stands (the master panel opened or closed). */
-  touch(): void { void this.presence(); }
 
   /** The host's word on voice: if it is no longer this tab's session, voice ends here. */
   status(voice: MasterVoiceStatus): void {
@@ -778,7 +774,7 @@ export class VoiceSession {
     if (this.over || !this.session) return;
     this.lastPresenceAt = Date.now();
     try {
-      const known = await post<boolean>('/api/master/voice/presence', this.options.token(), { session: this.session, listening: this.listening, panelOpen: this.options.panelOpen() });
+      const known = await post<boolean>('/api/master/voice/presence', this.options.token(), { session: this.session, listening: this.listening });
       if (known === false) this.end('replaced');
     } catch { /* Tried again in a few seconds. */ }
   }

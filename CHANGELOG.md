@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.67.0] - 2026-09-29
+
+### Changed
+- **Voice goes on with the master's chat closed.** While voice is on, the master's answers and news of finished work are read aloud, and what you say is still written down and sent when you finish, whether or not the master's conversation is open on the right. Before, closing it marked everything as not said aloud. The floating voice controls stay as they are, and reopening the conversation plays nothing twice.
+
 ## [1.66.0] - 2026-09-29
 
 ### Added

@@ -128,7 +128,7 @@ async function harness({ rate = 16_000, frame = 160, failTokens = 0 } = {}) {
   mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 1_000_000 });
   let view: View | undefined;
   const voice = new VoiceSession({
-    token: () => 'page-token', tabId: 'tab-1', panelOpen: () => true, viewContext: () => undefined,
+    token: () => 'page-token', tabId: 'tab-1', viewContext: () => undefined,
     settings: () => ({ voiceId: 'v', model: 'eleven_v3_conversational', endSilenceMs: 1_000, listenMinutes: 5, readReports: true, dailyDollars: 0 }),
     onView: next => { view = next; }, onEnded: () => {},
   });

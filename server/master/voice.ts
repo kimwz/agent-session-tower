@@ -79,7 +79,6 @@ interface Session {
   tabId: string;
   local: boolean;
   listening: boolean;
-  panelOpen: boolean;
   seenAt: number;
   activity?: { receivedAt: number; lastSpeechAt: number };
 }
@@ -209,7 +208,7 @@ export class MasterVoice {
     this.ready();
     this.endSession(this.session);
     const id = randomUUID();
-    this.session = { id, digest: hash(id), tabId: input.tabId, local: input.local, listening: true, panelOpen: true, seenAt: Date.now() };
+    this.session = { id, digest: hash(id), tabId: input.tabId, local: input.local, listening: true, seenAt: Date.now() };
     this.broadcast();
     this.deliver();
     return { session: id };
@@ -223,13 +222,16 @@ export class MasterVoice {
     return true;
   }
 
-  /** Where the page stands: listening or not, and whether the master is open there. Never takes voice back. */
-  voicePresence(input: { session: unknown; listening: unknown; panelOpen: unknown }): boolean {
+  /**
+   * Where the page stands: listening or not. Whether the master's conversation is open there does not matter: voice
+   * goes on with it closed. Never takes voice back.
+   */
+  voicePresence(input: { session: unknown; listening: unknown }): boolean {
     const session = this.current(input.session);
     if (!session) return false;
-    const listening = input.listening === true, panelOpen = input.panelOpen === true;
-    const changed = session.listening !== listening || session.panelOpen !== panelOpen || !this.alive(session);
-    Object.assign(session, { listening, panelOpen, seenAt: Date.now() });
+    const listening = input.listening === true;
+    const changed = session.listening !== listening || !this.alive(session);
+    Object.assign(session, { listening, seenAt: Date.now() });
     if (changed) { this.broadcast(); if (this.alive(session)) this.deliver(); }
     return true;
   }
@@ -333,8 +335,8 @@ export class MasterVoice {
   // ─── reading aloud ───────────────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * How an answer (or, `report`, news of finished work) is told: read aloud where voice is on with the master open,
-   * or marked as not said aloud when there is no such page (a report only while voice is on somewhere). Nothing when
+   * How an answer (or, `report`, news of finished work) is told: read aloud where voice is on, whether or not the
+   * master's conversation is open there, or marked as not said aloud when there is no such page (a report only while voice is on somewhere). Nothing when
    * reports are not read, or for a report with voice off.
    */
   speaks(report: boolean): 'pending' | 'unspoken' | undefined {
@@ -767,7 +769,8 @@ export class MasterVoice {
     return typeof session === 'string' && this.session?.id === session ? this.session : undefined;
   }
 
-  private alive(session: Session): boolean { return session.panelOpen && Date.now() - session.seenAt < this.timing.presenceMs; }
+  /** The voice page is still there (it tells so every few seconds). */
+  private alive(session: Session): boolean { return Date.now() - session.seenAt < this.timing.presenceMs; }
 
   /** Ends a session at once: its notices and what it was playing stop, and it gets no more of anything. */
   private endSession(session: Session | undefined): void {

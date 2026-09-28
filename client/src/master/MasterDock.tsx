@@ -48,7 +48,7 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   tokenRef.current = token;
   /** Commands already done here, until they expire, so one sent again after a reconnect is not done twice. */
   const done = useRef(new Map<string, number>());
-  // Voice lives here: closing the conversation does not turn it off (news is then not read aloud).
+  // Voice lives here: closing the conversation does not turn it off, and answers and news are still read aloud.
   const voiceRef = useRef<VoiceSession | null>(null);
   const [voiceView, setVoiceView] = useState<VoiceView | null>(null);
   const [voiceEnded, setVoiceEnded] = useState<{ reason: string; error?: string } | null>(null);
@@ -100,7 +100,7 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   const startVoice = useCallback(() => {
     if (voiceRef.current) return;
     const current: VoiceSession = new VoiceSession({
-      token: () => tokenRef.current, tabId: tab.current, settings: () => voiceSettings.current, panelOpen: () => masterOpenRef.current, viewContext: () => undefined,
+      token: () => tokenRef.current, tabId: tab.current, settings: () => voiceSettings.current, viewContext: () => undefined,
       onView: view => { if (voiceRef.current === current) setVoiceView(view); },
       onEnded: (reason, error) => {
         if (voiceRef.current !== current) return;
@@ -114,8 +114,6 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
     setVoiceView({ listening: false, capturing: false });
     void current.start().catch(() => { /* Shown through onEnded. */ });
   }, []);
-  // Whether the master is open here matters for reading news aloud: told at once.
-  useEffect(() => { voiceRef.current?.touch(); }, [masterOpen]);
   const unavailable = !VoiceSession.supported() ? words('음성은 https 주소나 이 컴퓨터(localhost)에서 마이크를 쓸 수 있을 때만 됩니다.', 'Voice needs an https address or this computer (localhost), and a microphone.')
     : overview && overview.version !== APP_VERSION ? words('마스터가 업데이트를 기다리는 중입니다. 잠시 뒤 음성을 쓸 수 있습니다.', 'The master is waiting to update; voice is available shortly.')
     : overview && !overview.voiceConfigured ? words('마스터 설정에 ElevenLabs API 키를 넣으면 음성을 쓸 수 있습니다.', 'Add an ElevenLabs API key in the master settings to use voice.')

@@ -23,7 +23,7 @@ export interface MasterVoiceSettings {
   endSilenceMs: number;
   /** Minutes without a request or a report after which listening turns off. */
   listenMinutes: number;
-  /** Read news of finished work aloud while voice is on in a tab with the master open. */
+  /** Read news of finished work aloud while voice is on in a tab, with the master's conversation open or closed. */
   readReports: boolean;
   /** Dollars of voice a day; 0 means no limit. */
   dailyDollars: number;

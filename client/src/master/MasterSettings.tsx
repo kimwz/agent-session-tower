@@ -57,7 +57,7 @@ export function MasterSettingsView({ token, overview, onNewSession }: { token: s
       <label className="master-field">{words('요청이 없으면 듣기 끄기 (분, 1–30)', 'Stop listening after no request for (minutes, 1–30)')}
         <input type="number" min={1} max={30} value={(settings.voice ?? DEFAULT_MASTER_VOICE).listenMinutes} disabled={busy} onChange={event => void voice({ listenMinutes: Math.max(1, Math.min(30, Math.floor(Number(event.target.value) || 5))) })} />
       </label>
-      <label className="master-toggle"><input type="checkbox" checked={(settings.voice ?? DEFAULT_MASTER_VOICE).readReports} disabled={busy} onChange={event => void voice({ readReports: event.target.checked })} />{words('음성을 켠 탭에서 마스터 창이 열려 있으면 맡긴 일 소식을 읽어 주고 다시 듣기', 'Read news of finished work aloud (and listen again) while voice is on with the master open')}</label>
+      <label className="master-toggle"><input type="checkbox" checked={(settings.voice ?? DEFAULT_MASTER_VOICE).readReports} disabled={busy} onChange={event => void voice({ readReports: event.target.checked })} />{words('음성을 켠 탭에서 맡긴 일 소식을 읽어 주고 다시 듣기 (마스터 창을 닫아도)', 'Read news of finished work aloud (and listen again) while voice is on, with the master open or closed')}</label>
       <label className="master-field">{words('하루 음성 비용 한도 ($, 0 = 없음)', 'Daily voice limit ($, 0 = none)')}
         <input type="number" min={0} max={1000} step={0.5} value={(settings.voice ?? DEFAULT_MASTER_VOICE).dailyDollars} disabled={busy} onChange={event => void voice({ dailyDollars: Math.max(0, Math.min(1000, Math.round((Number(event.target.value) || 0) * 100) / 100)) })} />
       </label>

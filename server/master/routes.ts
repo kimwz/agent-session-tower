@@ -53,7 +53,8 @@ export function masterRoutes(client: MasterClient, options: { turnEnd?: VoiceTur
       switch (voice[1]) {
         case 'on': await call('voiceOn', { tabId: body.tabId, local: identity.local }); break;
         case 'off': await call('voiceOff', { session: body.session }); break;
-        case 'presence': await call('voicePresence', { session: body.session, listening: body.listening, panelOpen: body.panelOpen }); break;
+        // `panelOpen: true` keeps a host from before 1.67 (still running while busy) reading aloud with the chat closed.
+        case 'presence': await call('voicePresence', { session: body.session, listening: body.listening, panelOpen: true }); break;
         case 'token': await call('voiceToken', { session: body.session }); break;
         case 'usage': await call('voiceUsage', { tokenId: body.tokenId, seconds: body.seconds }); break;
         case 'request': await call('voiceRequest', { session: body.session, clientMessageId: body.clientMessageId, text: body.text, local: identity.local }); break;

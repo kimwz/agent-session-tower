@@ -185,10 +185,10 @@ test('voice is one session at a time: a new one ends the one before, whose page 
   assert.throws(() => h.voice.voiceOn({ tabId: 'not-a-uuid', local: true }), { statusCode: 400 });
   const first = on(h);
   assert.equal(h.voice.status().session, digestOf(first));
-  assert.equal(h.voice.voicePresence({ session: first, listening: true, panelOpen: true }), true);
+  assert.equal(h.voice.voicePresence({ session: first, listening: true }), true);
   const second = on(h, randomUUID());
   assert.equal(h.voice.status().session, digestOf(second));
-  assert.equal(h.voice.voicePresence({ session: first, listening: true, panelOpen: true }), false, 'presence never takes voice back');
+  assert.equal(h.voice.voicePresence({ session: first, listening: true }), false, 'presence never takes voice back');
   assert.deepEqual(await request(h, first, '지금 뭐 돌아가?'), { stale: true });
   await assert.rejects(h.voice.voiceToken({ session: first }), { statusCode: 409 });
   assert.equal(h.voice.voiceActivity({ session: first, speaking: true }), false);
@@ -351,11 +351,13 @@ test('an answer to a spoken request is read aloud where voice is on and marked p
   const reportSay = await until(() => h.says().find(item => item.kind === 'report'));
   h.voice.voicePlayed({ session, id: reportSay.id, result: 'played' });
   await until(() => h.speakOf(report.id)?.state === 'played');
-  // Voice on, but the master closed: the report is marked as not said aloud.
-  h.voice.voicePresence({ session, listening: true, panelOpen: false });
+  // Voice on and the master's conversation closed (a page from before 1.67 still says so): still read aloud.
+  assert.equal(h.voice.voicePresence({ session, listening: true, panelOpen: false } as { session: string; listening: boolean }), true);
   await h.queueEvent('C ended');
-  const unheard = await masterEntry(h, /보고 C/);
-  assert.equal(h.speakOf(unheard.id)?.state, 'unspoken');
+  const closed = await masterEntry(h, /보고 C/);
+  const closedSay = await until(() => h.says().find(item => item.kind === 'report' && /보고 C/.test(item.text)));
+  h.voice.voicePlayed({ session, id: closedSay.id, result: 'played' });
+  await until(() => h.speakOf(closed.id)?.state === 'played');
   // Voice turned off: the report is only in the master's conversation.
   h.voice.voiceOff({ session });
   await h.queueEvent('B ended');
