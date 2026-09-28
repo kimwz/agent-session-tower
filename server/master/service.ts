@@ -202,8 +202,15 @@ export class MasterService {
 
   /** Work is waiting or running, so the host must stay. */
   busy(): boolean {
-    const { inbox, tasks } = this.options.journal;
-    return Boolean(this.turn) || this.polling || inbox.some(item => item.state === 'queued') || tasks.some(task => task.state === 'running');
+    return this.working() || this.options.journal.tasks.some(task => task.state === 'running');
+  }
+
+  /**
+   * Work only this host holds in memory: a turn, a check on delegated work, or a message about to become a turn. Work
+   * delegated to a session is not: it runs there, it is in the records, and a host of a newer build goes on watching it.
+   */
+  working(): boolean {
+    return Boolean(this.turn) || this.polling || this.options.journal.inbox.some(item => item.state === 'queued');
   }
 
   /** `spoken`: said aloud (shown so), not typed; `voice`: where a spoken request, or what followed from one, came from. */

@@ -143,7 +143,7 @@ export class MasterClient {
     this.streams.clear();
   }
 
-  /** Starts the host if none runs; replaces one of another version when it has nothing to do. */
+  /** Starts the host if none runs; replaces one of another version unless it is mid-turn (delegated work carries over). */
   private ensureHost(): Promise<void> {
     return this.starting ??= this.startHost().finally(() => { this.starting = undefined; });
   }

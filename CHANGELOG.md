@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.60.1] - 2026-09-28
+
+### Fixed
+- **An update reaches the master without waiting for delegated work.** After an update, the master kept running its old version for as long as any work it had handed to a session was still going, which could take hours. Until then the master panel's microphone stayed off with **마스터가 업데이트를 기다리는 중입니다**, and pictures waited. Work handed to a session runs in that session and is kept in the master's records, so the new version now takes over as soon as the master is not in the middle of answering. It goes on watching that work and reports when it ends, as before. An idle master with work still out keeps running to watch it, as before.
+
 ## [1.60.0] - 2026-09-28
 
 ### Changed

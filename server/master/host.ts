@@ -66,11 +66,13 @@ export async function startMasterHost(options: MasterHostOptions) {
     }
   };
   const busy = () => service!.busy();
+  // A host of another build steps aside unless it is in the middle of something only it holds.
+  const working = () => service!.working();
   const dispatch = async (method: string, args: Record<string, unknown>) => {
     const master = service!;
     const speech = voice!;
     switch (method) {
-      case 'ping': return { busy: busy(), streams: streams.size };
+      case 'ping': return { busy: working(), streams: streams.size };
       case 'hello': return true;
       case 'overview': return master.overview();
       case 'checkpoint': {
@@ -114,7 +116,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'voicePlayed': return speech.voicePlayed({ session: args.session, id: args.id, result: args.result });
       case 'voiceVoices': return speech.voiceVoices();
       case 'shutdown': {
-        if (busy()) return false;
+        if (working()) return false;
         setImmediate(() => { void close(true); });
         return true;
       }

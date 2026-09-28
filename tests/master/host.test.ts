@@ -71,6 +71,32 @@ test('the master runs in its own host: the web relays its conversation live and 
   }
 });
 
+test('delegated work still running keeps an idle host alive, yet a newer build may take it over', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-host-tasks-'));
+  const cleanup: Array<() => unknown> = [];
+  t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
+  const paths = await masterPaths(stateDir);
+  await mkdir(paths.data, { recursive: true, mode: 0o700 });
+  await writePrivateJson(join(paths.data, 'tasks.json'), JSON.stringify({ items: [{ id: 'task-1', entryId: 'entry-1', sessionId: 'claude:elsewhere', title: 'Work in another session', state: 'running', createdAt: new Date().toISOString() }] }));
+  const host = await startMasterHost({ stateDir, model: async () => ({ output: [], text: '' }), idleMs: 50 });
+  cleanup.push(() => host.close());
+  const client = new MasterClient({ stateDir, credentials: () => undefined });
+  cleanup.push(() => client.dispose());
+  assert.equal((await client.call('overview') as MasterOverview).activeTasks, 1);
+  // Past its idle time it stays, to watch the work and report its end.
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.notEqual(await client.hostVersion(), null);
+  // The work lives in its session and in the records, so the host steps aside for another build all the same.
+  assert.equal(await client.call('shutdown'), true);
+  const deadline = Date.now() + 5000;
+  while (await client.hostVersion().catch(() => 'error') !== null) {
+    assert.ok(Date.now() < deadline, 'the host did not step aside');
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  const saved = JSON.parse(await readFile(join(paths.data, 'tasks.json'), 'utf8')) as { items: Array<{ state: string }> };
+  assert.equal(saved.items[0]?.state, 'running', 'the next host takes the work up from the records');
+});
+
 test('the host answers a page\'s voice requests, refusing what is not its call, and shows voice use in its overview', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-host-voice-'));
   const cleanup: Array<() => unknown> = [];
