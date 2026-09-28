@@ -26,6 +26,8 @@ export class MasterRoom {
   private writes: Promise<void> = Promise.resolve();
   /** Files whose latest write failed; they are written again with the next change. */
   private readonly unsaved = new Set<number>();
+  /** Files with a write waiting that has not started. */
+  private readonly queued = new Set<number>();
   private draft: MasterDraft | null = null;
   private readonly directory: string;
 
@@ -159,7 +161,11 @@ export class MasterRoom {
   }
 
   private persist(index: number): void {
+    // A file already waiting to be written is written once, with everything changed until then.
+    if (this.queued.has(index)) return;
+    this.queued.add(index);
     const write = async () => {
+      this.queued.delete(index);
       const entries = this.loaded.get(index) ?? [];
       await writePrivateJson(join(this.directory, segmentName(index)), JSON.stringify({ entries }));
       this.unsaved.delete(index);

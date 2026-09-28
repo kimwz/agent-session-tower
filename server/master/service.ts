@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { APP_VERSION } from '../../shared/app-identity.js';
-import { MASTER_PANELS, type MasterCard, type MasterDirectiveResult, type MasterEntry, type MasterFilter, type MasterOverview, type MasterPanel, type MasterScreenCommand, type MasterTaskState, type MasterViewContext } from '../../shared/master.js';
+import { MASTER_PANELS, type MasterCard, type MasterDirectiveResult, type MasterEntry, type MasterFilter, type MasterOverview, type MasterPanel, type MasterScreenCommand, type MasterSpeak, type MasterTaskState, type MasterViewContext } from '../../shared/master.js';
 import type { AutoPromptJob, ChatMessage, Run, SessionDetail, Snapshot } from '../../shared/types.js';
 import { statusDigest } from './digest.js';
 import { apiTarget, refusalFor, type ApiTarget, type TurnScope } from './guards.js';
 import { masterInstructions } from './instructions.js';
-import { fingerprint, type CallRecord, type InboxItem, type MasterJournal, type TaskRecord } from './journal.js';
+import { fingerprint, type CallRecord, type InboxItem, type MasterJournal, type TaskRecord, type VoiceOrigin } from './journal.js';
 import type { ModelCall, ModelItem, ModelTool } from './model-openai.js';
 import type { LiveState } from './live-state.js';
 import { tablesFrom, type ReadDatabase, type Table } from './read-db.js';
@@ -13,6 +13,8 @@ import type { MasterRoom } from './room.js';
 import { SecretVault, SHORTEST_SECRET } from './secrets.js';
 import type { MasterSettingsStore } from './settings.js';
 import type { TowerClient, TowerResponse } from './tower-client.js';
+import type { MasterVoice, VoiceHooks } from './voice.js';
+import { VOICE_FIXED_TEXT } from './voice-text.js';
 
 const MAX_ROUNDS = 12;
 const MAX_TOOL_CALLS = 24;
@@ -34,12 +36,16 @@ const ACK_MS = 5_000;
 const TERMINAL_READ_MS = 1_500;
 const TERMINAL_OUTPUT = 4_000;
 const NODE_ID = /^[a-f0-9]{32}$/;
+/** A spoken request that takes this long hears that it is still being worked on; progress is told this often at most. */
+const STILL_WORKING_MS = 20_000;
+const PROGRESS_MS = 5_000;
+const VOICE_TURN = 'The owner said this request in a voice call: your first paragraph is read aloud, so make it one or two short spoken sentences, with details after.';
 /**
  * Everything the model is given that Tower does not hide: the standing instructions (with and without lookups) and
  * every text of the tools' descriptions, as the model reads them.
  */
 let fixedText: string | undefined;
-const FIXED_TEXT = () => fixedText ??= [masterInstructions(true), masterInstructions(false), ...texts(TOOLS)].join('\n');
+const FIXED_TEXT = () => fixedText ??= [masterInstructions(true), masterInstructions(false), ...texts(TOOLS), VOICE_TURN, VOICE_FIXED_TEXT].join('\n');
 function texts(value: unknown): string[] {
   if (typeof value === 'string') return [value];
   if (Array.isArray(value)) return value.flatMap(texts);
@@ -85,7 +91,13 @@ const TOOLS: ModelTool[] = [
     parameters: { type: 'object', properties: { terminalId: { type: 'string' }, node: { type: 'string' } }, required: ['terminalId'], additionalProperties: false } },
 ];
 
-interface Turn { id: string; abort: AbortController; inputs: InboxItem[]; scope: TurnScope; tabId?: string }
+interface Turn {
+  id: string; abort: AbortController; inputs: InboxItem[]; scope: TurnScope; tabId?: string;
+  /** A spoken request, or what follows from one: its changes are announced first and its answer is spoken. */
+  voice?: VoiceOrigin;
+  /** Why the turn ends here without asking the model again. */
+  halt?: string;
+}
 
 export interface MasterServiceOptions {
   settings: MasterSettingsStore;
@@ -120,6 +132,7 @@ export class MasterService {
   private readonly acks = new Map<string, (answer: { result: MasterDirectiveResult; note?: string }) => void>();
   /** The tab the owner last wrote from: screen commands of a turn without one go there. */
   private lastTab?: string;
+  private voice?: MasterVoice;
 
   constructor(private readonly options: MasterServiceOptions) {}
 
@@ -163,6 +176,42 @@ export class MasterService {
       state: !settings.enabled ? 'disabled' : !configured ? 'unconfigured' : this.turn ? 'thinking' : 'idle',
       activeTasks: this.options.journal.tasks.filter(task => task.state === 'running').length,
       lastOrder: this.options.room.lastOrder(),
+      ...(this.voice ? { voice: this.voice.status() } : {}),
+    };
+  }
+
+  /** The voice, once the host made it; it reaches the master through `voiceHooks`. */
+  setVoice(voice: MasterVoice): void { this.voice = voice; }
+
+  /** What the voice needs from the master: hiding, the inbox, and the conversation. */
+  voiceHooks(): VoiceHooks {
+    const { journal, room } = this.options;
+    return {
+      hide: text => this.hideText(text),
+      holdBack: () => this.vault.holdBack(),
+      partialEnd: text => this.vault.partialEnd(text),
+      delegate: async ({ key, text, local, tabId, origin }) => {
+        // One request per delegation, even when GPT-Live says it twice.
+        if (journal.inbox.some(item => item.clientMessageId === key)) return;
+        journal.inbox.push({ id: randomUUID(), kind: 'owner', clientMessageId: key, text, local, viewContext: { tabId }, at: new Date().toISOString(), state: 'queued', retries: 0, voice: origin });
+        this.lastTab = tabId;
+        await journal.save('inbox');
+        this.pump();
+      },
+      openRequest: attempt => [...journal.inbox].reverse().find(item => item.kind === 'owner' && item.voice?.attempt === attempt && (item.state === 'queued' || item.state === 'processing'))?.voice,
+      join: async (key, delegationId) => {
+        const item = journal.inbox.find(input => input.clientMessageId === key && input.voice);
+        if (!item?.voice || item.voice.delegationIds.includes(delegationId) || item.voice.delegationIds.length >= 20) return;
+        item.voice.delegationIds.push(delegationId);
+        await journal.save('inbox');
+      },
+      seed: () => room.recent(60).flatMap((entry): Array<{ role: 'user' | 'assistant'; text: string }> => {
+        const data = entry.data;
+        if (data.kind === 'owner') return [{ role: 'user' as const, text: data.text }];
+        if (data.kind === 'master' || data.kind === 'voice' || data.kind === 'event') return [{ role: 'assistant' as const, text: data.text }];
+        return [];
+      }),
+      connectedSince: () => this.options.tower.connectedSince(),
     };
   }
 
@@ -172,7 +221,7 @@ export class MasterService {
     return Boolean(this.turn) || this.polling || inbox.some(item => item.state === 'queued') || tasks.some(task => task.state === 'running');
   }
 
-  async send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean }): Promise<MasterEntry> {
+  async send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean; voice?: VoiceOrigin }): Promise<MasterEntry> {
     const { journal, room, settings } = this.options;
     // Only a digest of the page's message id is kept: it says nothing, whatever the page put in it.
     const messageKey = createHash('sha256').update(input.clientMessageId).digest('hex').slice(0, 32);
@@ -184,7 +233,7 @@ export class MasterService {
     const text = hide(input.text);
     // Where the owner is looking is kept and read by the model too: its names are hidden the same way.
     const viewContext = input.viewContext && Object.fromEntries(Object.entries(input.viewContext).map(([key, value]) => [key, typeof value === 'string' ? hide(value) : value])) as MasterViewContext;
-    const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: messageKey, text, local: input.local, ...(viewContext ? { viewContext } : {}), at: new Date().toISOString(), state: 'queued', retries: 0 };
+    const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: messageKey, text, local: input.local, ...(viewContext ? { viewContext } : {}), at: new Date().toISOString(), state: 'queued', retries: 0, ...(input.voice ? { voice: input.voice } : {}) };
     if (viewContext?.tabId) this.lastTab = viewContext.tabId;
     const entry = room.add({ kind: 'owner', text, ...(viewContext?.tabId ? { clientId: viewContext.tabId } : {}) }, item.id);
     journal.inbox.push(item);
@@ -238,8 +287,10 @@ export class MasterService {
       return;
     }
     const owners = queued.filter(item => item.kind === 'owner');
-    // Only inputs from the same kind of place share a turn, so what a turn may do follows every request in it.
-    const batch = owners.length ? owners.filter(item => item.local === owners[0].local).slice(0, 10) : queued.slice(0, 10);
+    const first = owners[0] ?? queued[0];
+    // Only inputs from the same kind of place share a turn, so what a turn may do follows every request in it. A
+    // spoken request (or what follows from one) has a turn of its own: its changes are announced, its answer spoken.
+    const batch = first.voice ? [first] : (owners.length ? owners.filter(item => item.local === first.local) : queued).filter(item => !item.voice).slice(0, 10);
     void this.run(batch);
   }
 
@@ -247,11 +298,15 @@ export class MasterService {
     const { journal, room, settings: store, model } = this.options;
     const turnId = randomUUID();
     const tabId = [...inputs].reverse().find(item => item.viewContext?.tabId)?.viewContext?.tabId;
-    const turn: Turn = { id: turnId, abort: new AbortController(), inputs, scope: { local: inputs.every(item => item.local), cause: inputs[0].kind === 'owner' ? 'owner' : 'event', irreversible: 0 }, ...(tabId ? { tabId } : {}) };
+    const voice = inputs.find(item => item.voice)?.voice;
+    const turn: Turn = { id: turnId, abort: new AbortController(), inputs, scope: { local: inputs.every(item => item.local), cause: inputs[0].kind === 'owner' ? 'owner' : 'event', irreversible: 0 }, ...(tabId ? { tabId } : {}), ...(voice ? { voice } : {}) };
     this.turn = turn;
     for (const item of inputs) { item.state = 'processing'; item.turnId = turnId; }
     this.broadcastOverview();
     let final = '';
+    // A spoken request that takes a while hears so once; its progress is told quietly as it goes.
+    const slow = voice && turn.scope.cause === 'owner' ? setTimeout(() => this.voice?.stillWorking(voice), STILL_WORKING_MS) : undefined;
+    let progressAt = 0;
     try {
       await journal.save('inbox');
       const settings = store.current();
@@ -279,10 +334,14 @@ export class MasterService {
         return next;
       };
 
-      const developer = [digest, this.context(inputs)].filter(Boolean).join('\n\n');
+      // Only what Tower itself says is the developer's; the conversation keeps its roles, and everything else read is data.
+      const developer = [`Now: ${new Date().toISOString()}`, voice && turn.scope.cause === 'owner' ? VOICE_TURN : ''].filter(Boolean).join('\n');
+      const data = [digest ? `[data] ${digest}` : '', this.context(inputs)].filter(Boolean).join('\n\n');
       const request = inputs.map(item => item.kind === 'event' ? `[event] ${item.text}` : item.text).join('\n\n');
       const items: ModelItem[] = [
         tell({ type: 'message', role: 'developer', content: '' }, () => developer),
+        ...this.history(inputs).map(message => tell({ type: 'message', role: message.role, content: '' }, () => message.text)),
+        ...(data ? [tell({ type: 'message', role: 'user', content: '' }, () => data)] : []),
         tell({ type: 'message', role: 'user', content: '' }, () => request),
       ];
       const started = Date.now();
@@ -312,8 +371,9 @@ export class MasterService {
         if (!calls.length) { final = result.text.trim() || '(답을 만들지 못했습니다.)'; break; }
         for (const call of calls) {
           // After "stop thinking", nothing more is sent; a change already on its way finishes and is recorded.
-          if (turn.abort.signal.aborted) break;
+          if (turn.abort.signal.aborted || turn.halt) break;
           toolCalls++;
+          if (voice && turn.scope.cause === 'owner' && Date.now() - progressAt >= PROGRESS_MS) { progressAt = Date.now(); this.voice?.progress(voice, progressLine(String(call.name), String(call.arguments ?? '{}'))); }
           const output = toolCalls > MAX_TOOL_CALLS
             ? { error: '이번 요청에서 부를 수 있는 도구 수를 넘었습니다. 지금까지 한 일을 소유자에게 보고하세요.' }
             : await this.tool(String(call.name), String(call.arguments ?? '{}'), turn).catch(error => ({ error: error instanceof Error ? error.message : String(error) }));
@@ -322,9 +382,12 @@ export class MasterService {
           items.push(tell({ type: 'function_call_output', call_id: String(call.call_id), output: '' }, () => output));
         }
         turn.abort.signal.throwIfAborted();
+        // A change that could not be announced (or was talked over) ends the turn with the reason, not another try.
+        if (turn.halt) { final = turn.halt; break; }
       }
       if (!final) final = '여러 단계를 거쳤지만 마지막 답을 만들지 못했습니다. 위 작업 기록을 확인해 주세요.';
-      const answer = room.add({ kind: 'master', text: truncate(this.hideText(final), MAX_ENTRY_TEXT), turnId, final: true });
+      const speak = this.speakFor(turn, true);
+      const answer = room.add({ kind: 'master', text: truncate(this.hideText(final), MAX_ENTRY_TEXT), turnId, final: true, ...(speak ? { speak } : {}) });
       // On disk before the inputs count as answered: after a restart, a saved answer means the turn is done.
       await room.saved(answer);
       for (const item of inputs) item.state = 'answered';
@@ -332,7 +395,8 @@ export class MasterService {
       const message = truncate(this.hideText(error instanceof Error ? error.message : String(error)), 2000);
       if (turn.abort.signal.aborted) {
         for (const item of inputs) item.state = 'cancelled';
-        room.add({ kind: 'event', text: '마스터가 생각을 멈췄습니다. 이미 보낸 작업은 그대로 진행됩니다.' });
+        const speak = this.speakFor(turn, false);
+        room.add({ kind: 'event', text: '마스터가 생각을 멈췄습니다. 이미 보낸 작업은 그대로 진행됩니다.', ...(speak ? { speak } : {}) });
       } else if (!journal.calls.some(call => call.turnId === turnId) && inputs.every(item => item.retries < 1)) {
         // A turn that changed nothing (a model error, a lost connection) is tried once more a little later.
         const retryMs = this.options.retryMs ?? RETRY_MS;
@@ -340,38 +404,60 @@ export class MasterService {
         room.add({ kind: 'error', text: `${message} — 잠시 뒤 한 번 더 해 봅니다.` });
       } else {
         for (const item of inputs) item.state = 'failed';
-        room.add({ kind: 'error', text: message });
+        const speak = this.speakFor(turn, false);
+        room.add({ kind: 'error', text: message, ...(speak ? { speak } : {}) });
       }
     } finally {
+      if (slow) clearTimeout(slow);
       room.setDraft(null);
       this.turn = undefined;
+      void this.voice?.deliver();
       await journal.save('inbox').catch(() => {});
       this.broadcastOverview();
       this.pump();
     }
   }
 
-  /** The conversation so far, as the model reads it. */
+  /**
+   * The conversation so far in its own roles: the owner's words as the owner's, the master's answers and what it said
+   * aloud as its own, and everything else (calls, work, cards, reports) as marked data from the owner's side.
+   */
+  private history(inputs: InboxItem[]): Array<{ role: 'user' | 'assistant'; text: string }> {
+    const messages: Array<{ role: 'user' | 'assistant'; data: boolean; lines: string[] }> = [];
+    for (const entry of this.options.room.recent(CONTEXT_ENTRIES)) {
+      if (inputs.some(input => input.id === entry.id)) continue;
+      const data = entry.data;
+      const at = entry.at.slice(11, 16);
+      const line = data.kind === 'owner' ? { role: 'user' as const, data: false, text: truncate(data.text, 1500) }
+        : data.kind === 'master' || data.kind === 'voice' ? { role: 'assistant' as const, data: false, text: truncate(data.text, 1500) }
+        : { role: 'user' as const, data: true, text: `[data ${at} ${data.kind === 'action' ? 'call' : data.kind === 'task' ? 'delegated' : data.kind}] ${
+          data.kind === 'action' ? `${data.method} ${data.path}${data.node ? ` (node ${data.node})` : ''} → ${data.state}${data.summary ? `: ${truncate(data.summary, 200)}` : ''}`
+          : data.kind === 'task' ? `${data.title} — ${data.state}${data.sessionId ? ` (session ${data.sessionId}${data.node ? ` on node ${data.node}` : ''})` : ''}`
+          : data.kind === 'card' ? cardLine(data.card) : truncate(data.text, 500)}` };
+      const last = messages.at(-1);
+      if (last && last.role === line.role && last.data === line.data) last.lines.push(line.text);
+      else messages.push({ role: line.role, data: line.data, lines: [line.text] });
+    }
+    return messages.map(message => ({ role: message.role, text: message.lines.join(message.data ? '\n' : '\n\n') }));
+  }
+
+  /** What the model reads as data before the request: where the owner is looking and the work still running. */
   private context(inputs: InboxItem[]): string {
     const view = [...inputs].reverse().find(item => item.viewContext)?.viewContext;
-    const lines = this.options.room.recent(CONTEXT_ENTRIES)
-      .filter(entry => !inputs.some(input => input.id === entry.id))
-      .map(entry => {
-        const data = entry.data;
-        const at = entry.at.slice(11, 16);
-        if (data.kind === 'owner') return `[${at} owner] ${truncate(data.text, 1500)}`;
-        if (data.kind === 'master') return `[${at} you] ${truncate(data.text, 1500)}`;
-        if (data.kind === 'action') return `[${at} call] ${data.method} ${data.path}${data.node ? ` (node ${data.node})` : ''} → ${data.state}${data.summary ? `: ${truncate(data.summary, 200)}` : ''}`;
-        if (data.kind === 'task') return `[${at} delegated] ${data.title} — ${data.state}${data.sessionId ? ` (session ${data.sessionId}${data.node ? ` on node ${data.node}` : ''})` : ''}`;
-        if (data.kind === 'card') return `[${at} card] ${cardLine(data.card)}`;
-        return `[${at} ${data.kind}] ${truncate(data.text, 500)}`;
-      });
     const running = this.options.journal.tasks.filter(task => task.state === 'running').map(task => `- ${task.title} (session ${task.sessionId ?? '?'}${task.node ? `, node ${task.node}` : ''})`);
-    // Hidden again with what is known now: an earlier line may hold a value the owner has since given on a card.
-    return this.hideText([`Now: ${new Date().toISOString()}`,
-      view ? `The owner is looking at: ${JSON.stringify(view)}` : '',
-      running.length ? `Work you delegated that is still running:\n${running.join('\n')}` : '',
-      lines.length ? `Conversation so far (oldest first):\n${lines.join('\n')}` : 'This is the start of the conversation.'].filter(Boolean).join('\n\n'));
+    return [view ? `[data] The owner is looking at: ${JSON.stringify(view)}` : '',
+      running.length ? `[data] Work you delegated that is still running:\n${running.join('\n')}` : ''].filter(Boolean).join('\n\n');
+  }
+
+  /**
+   * Whether an answer, a stop or a failure is to be told by voice: a spoken request's (its answer under its own
+   * delegation), and a report of finished work; only while a call is on or the last one ended on silence.
+   */
+  private speakFor(turn: Turn, answer: boolean): MasterSpeak | undefined {
+    if (!this.voice?.wantsSpeech()) return undefined;
+    if (turn.voice && turn.scope.cause === 'owner') return { state: 'pending', tries: 0, attempt: turn.voice.attempt, ...(turn.voice.delegationIds.length ? { delegationIds: [...turn.voice.delegationIds] } : {}) };
+    if (turn.voice || (answer && turn.scope.cause === 'event')) return { state: 'pending', tries: 0 };
+    return undefined;
   }
 
   private async tool(name: string, rawArguments: string, turn: Turn): Promise<unknown> {
@@ -420,9 +506,23 @@ export class MasterService {
     if (target.node) await this.paceRemote(target.node, turn.abort.signal);
     // A stop that came while this call was being prepared: nothing has gone out, so nothing does.
     if (turn.abort.signal.aborted) return { error: '중지되어 보내지 않았습니다.' };
+    // For a spoken request, an irreversible change is said aloud first, and goes only if the owner let it be said.
+    let notice: Awaited<ReturnType<MasterVoice['announce']>> | undefined;
+    if (target.irreversible && turn.voice) {
+      notice = this.voice ? await this.voice.announce(this.noticeText(target), turn.abort.signal) : { ok: false, reason: '음성으로 먼저 알릴 수 없어 되돌릴 수 없는 작업을 보내지 않았습니다.' };
+      if (!notice.ok) { turn.halt = notice.reason; return { error: notice.reason }; }
+    }
     if (target.irreversible) turn.scope.irreversible += affected;
     const headers: Record<string, string> = target.node ? { 'X-Tower-Request-Id': uuidv7() } : {};
     if (target.local === '/api/auto-prompts' && body && typeof body === 'object' && !(body as Record<string, unknown>).requestId) (body as Record<string, unknown>).requestId = randomUUID();
+    const heard = notice?.ok ? notice : undefined;
+    try { return await this.sendChange(target, body, given, print, headers, turn, heard); }
+    finally { heard?.done(); }
+  }
+
+  /** Sends a change once, recorded before it goes and after it answers; an announced change passes its gate first. */
+  private async sendChange(target: ApiTarget, body: unknown, given: Record<string, unknown> | undefined, print: string, headers: Record<string, string>, turn: Turn, heard: { signal: AbortSignal; check: () => Promise<boolean> } | undefined): Promise<unknown> {
+    const { journal, room, tower } = this.options;
     const entry = room.add({ kind: 'action', turnId: turn.id, method: target.method, path: target.path, ...(target.node ? { node: target.node } : {}), state: 'sending', write: true });
     const record: CallRecord = { id: randomUUID(), turnId: turn.id, inputIds: turn.inputs.map(item => item.id), method: target.method, path: target.path, ...(target.node ? { node: target.node } : {}), fingerprint: print, state: 'sending', at: new Date().toISOString(), entryId: entry.id };
     journal.calls.push(record);
@@ -435,18 +535,57 @@ export class MasterService {
       this.updateAction(record);
       return { error: '중지되어 보내지 않았습니다.' };
     }
-    // "Stop thinking" can still keep a change that is waiting for the web; once sent, it finishes and is recorded.
-    const response = await tower.call('POST', target.path, body, { write: true, headers, beforeSend: turn.abort.signal })
+    // "Stop thinking" can still keep a change that is waiting for the web; once sent, it finishes and is recorded. An
+    // announced change also stays unsent if the owner speaks, or the call ends, before it goes out.
+    let refused = false;
+    const gate = heard ? async () => { const ok = await heard.check(); refused = !ok; return ok; } : undefined;
+    const response = await tower.call('POST', target.path, body, { write: true, headers, beforeSend: heard ? AbortSignal.any([turn.abort.signal, heard.signal]) : turn.abort.signal, ...(gate ? { gate } : {}) })
       .catch((error: unknown): TowerResponse => ({ status: 0, body: { error: error instanceof Error ? error.message : String(error) }, state: 'uncertain' }));
     record.state = response.state;
     record.summary = summary(response, text => this.hideText(text));
     // The work a change started is on disk before the change counts as done, so a restart in between still reports it.
-    const tracked = response.state === 'succeeded' ? this.track(target, given, response.body) : undefined;
+    const tracked = response.state === 'succeeded' ? this.track(target, given, response.body, turn) : undefined;
     await journal.save('tasks', 'calls');
     this.updateAction(record);
     if (tracked) this.broadcastOverview();
+    if (heard && response.state === 'not-admitted' && (refused || heard.signal.aborted) && !turn.abort.signal.aborted) {
+      turn.halt = '안내 뒤 소유자가 말했거나 음성이 끊겨 보내지 않았습니다. 무엇을 원하는지 다시 들어 주세요.';
+      return { error: turn.halt };
+    }
     const answer = this.answer(target, response) as Record<string, unknown>;
     return response.state === 'uncertain' ? { ...answer, note: '결과를 알 수 없습니다. 다시 보내지 말고 상태를 확인하세요.' } : answer;
+  }
+
+  /** The sentence said before an irreversible change: what it changes, in the owner's words. */
+  private noticeText(target: ApiTarget): string {
+    const where = target.node ? '연결된 컴퓨터에서 ' : '';
+    const id = (pattern: RegExp) => { try { return decodeURIComponent(pattern.exec(target.local)?.[1] ?? ''); } catch { return ''; } };
+    const snapshot = target.node ? this.options.live?.node(target.node) : this.options.live?.snapshot();
+    const sessionName = (sessionId: string) => { const session = snapshot?.sessions.find(item => item.id === sessionId); return session ? `"${truncate(session.customTitle || session.title, 60)}" ` : ''; };
+    const runSession = (runId: string) => snapshot?.runs.find(run => run.id === runId)?.sessionId ?? '';
+    const local = target.local;
+    const change = /^\/api\/runs\/[^/]+\/cancel$/.test(local) ? `${sessionName(runSession(id(/^\/api\/runs\/([^/]+)\//)))}세션의 실행 중인 작업을 취소합니다`
+      : /^\/api\/auto-prompts\/[^/]+\/cancel$/.test(local) ? 'Auto Prompt 작업을 취소합니다'
+      : /^\/api\/sessions\/[^/]+\/close$/.test(local) ? `${sessionName(id(/^\/api\/sessions\/([^/]+)\//))}세션을 닫습니다`
+      : /\/terminals\/[^/]+\/close$/.test(local) ? '터미널을 닫습니다'
+      : /\/terminals\/[^/]+\/input$/.test(local) ? '터미널에 입력을 보냅니다'
+      : local === '/api/workspace/file' ? '파일을 저장합니다'
+      : local === '/api/repositories' ? '저장소를 바꿉니다'
+      : local.startsWith('/api/runs/') ? '승인 요청에 답합니다'
+      : local === '/api/tower/update' ? 'Tower를 업데이트합니다'
+      : local.startsWith('/api/link/') ? '컴퓨터 연결을 바꿉니다'
+      : local === '/api/remote/exclusions' ? '원격 제외 목록을 바꿉니다'
+      : local === '/api/slack/replies/approve' ? 'Slack 답장을 보냅니다'
+      : local.startsWith('/api/slack/') ? 'Slack 연결을 바꿉니다'
+      : local.startsWith('/api/public-agents/') ? '공개 에이전트를 바꿉니다'
+      : local === '/api/notifications/remove' ? '알림을 지웁니다'
+      : local === '/api/v1/triggers.delete' ? '트리거를 지웁니다'
+      : local === '/api/v1/triggers.run' ? '트리거를 실행합니다'
+      : local === '/api/v1/triggers.testHttp' ? '트리거 HTTP 요청을 보냅니다'
+      : local === '/api/v1/secrets.delete' ? '비밀 값을 지웁니다'
+      : local === '/api/v1/github.approveReply' ? 'GitHub 답글을 보냅니다'
+      : '되돌릴 수 없는 작업을 합니다';
+    return `${where}${change}.`;
   }
 
   /** Text about to be kept (the conversation, records) or read by the model, with secrets replaced when that is on. */
@@ -582,7 +721,8 @@ export class MasterService {
     }
     const purpose = typeof args.purpose === 'string' ? args.purpose.trim() : '';
     if (!purpose || purpose.length > 200) return { error: '무엇에 쓸 값인지 200자 안으로 적어 주세요.' };
-    this.options.room.add({ kind: 'card', card: { type: 'secret', purpose: this.hideText(purpose), state: 'waiting' } });
+    // A card asked for in a spoken request carries where it came from to the answer typed into it.
+    this.options.room.add({ kind: 'card', card: { type: 'secret', purpose: this.hideText(purpose), state: 'waiting', ...(turn.voice ? { voice: { attempt: turn.voice.attempt, key: turn.voice.key } } : {}) } });
     return { result: 'card-shown', note: 'When the owner enters it, a new message brings a reference to use; tell them to type it into the card.' };
   }
 
@@ -619,7 +759,7 @@ export class MasterService {
       const updated = room.update(id, { kind: 'card', card: { ...card, purpose, state: 'provided' } }) ?? entry;
       // The tab that answered is where the owner is now: what follows is shown there.
       const tabId = typeof body.tabId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(body.tabId) ? body.tabId : undefined;
-      await this.send({ clientMessageId: `secret-${id}`, text: `비밀 값을 입력했습니다 (${purpose}): ${reference}`, local, ...(tabId ? { viewContext: { tabId } } : {}) });
+      await this.send({ clientMessageId: `secret-${id}`, text: `비밀 값을 입력했습니다 (${purpose}): ${reference}`, local, ...(tabId ? { viewContext: { tabId } } : {}), ...(card.voice ? { voice: { attempt: card.voice.attempt, key: card.voice.key, delegationIds: [] } } : {}) });
       return updated;
     }
     throw Object.assign(new Error('이 카드에는 답할 것이 없습니다.'), { statusCode: 400 });
@@ -667,7 +807,7 @@ export class MasterService {
   }
 
   /** Starts watching work a successful call created, so its end is reported. The caller saves the task. */
-  private track(target: ApiTarget, body: Record<string, unknown> | undefined, answer: unknown): TaskRecord | undefined {
+  private track(target: ApiTarget, body: Record<string, unknown> | undefined, answer: unknown, turn: Turn): TaskRecord | undefined {
     const value = (answer ?? {}) as { session?: { id?: string }; run?: { id?: string; sessionId?: string }; job?: { id?: string }; result?: { job?: { id?: string } } };
     const prompt = typeof body?.prompt === 'string' ? body.prompt : '';
     const title = truncate(typeof body?.title === 'string' && body.title ? body.title : prompt || target.local, 80);
@@ -678,7 +818,7 @@ export class MasterService {
     else if (target.local === '/api/auto-prompts' && value.job?.id) task = { jobId: value.job.id };
     else if (target.local === '/api/v1/autoPrompt.submit' && value.result?.job?.id) task = { jobId: value.result.job.id };
     if (!task) return undefined;
-    const record: TaskRecord = { id: randomUUID(), entryId: '', ...task, ...(target.node ? { node: target.node } : {}), title, ...(prompt ? { prompt } : {}), state: 'running', createdAt: new Date().toISOString() };
+    const record: TaskRecord = { id: randomUUID(), entryId: '', ...task, ...(target.node ? { node: target.node } : {}), title, ...(prompt ? { prompt } : {}), state: 'running', createdAt: new Date().toISOString(), ...(turn.voice ? { voice: { attempt: turn.voice.attempt, key: turn.voice.key, delegationIds: [] } } : {}) };
     const entry = this.options.room.add({ kind: 'task', title, state: 'running', ...(record.sessionId ? { sessionId: record.sessionId } : {}), ...(record.runId ? { runId: record.runId } : {}), ...(record.jobId ? { jobId: record.jobId } : {}), ...(record.node ? { node: record.node } : {}) });
     record.entryId = entry.id;
     record.entryOrder = entry.order;
@@ -732,7 +872,7 @@ export class MasterService {
       + (found?.followedBy ? '\n(The session received more messages after this; it may have moved on.)' : '');
     // One report per task, even if a restart makes this run twice: the inbox is written before the task is marked.
     if (!this.options.journal.inbox.some(item => item.taskId === task.id)) {
-      this.options.journal.inbox.push({ id: randomUUID(), kind: 'event', text: this.hideText(text), local: false, at: new Date().toISOString(), state: 'queued', retries: 0, taskId: task.id });
+      this.options.journal.inbox.push({ id: randomUUID(), kind: 'event', text: this.hideText(text), local: false, at: new Date().toISOString(), state: 'queued', retries: 0, taskId: task.id, ...(task.voice ? { voice: task.voice } : {}) });
     }
     task.state = ended;
     task.reportedAt = new Date().toISOString();
@@ -810,6 +950,13 @@ const normalize = (text: string) => text.replace(/\s+/g, ' ').trim();
 function sameRequest(message: string, prompt: string): boolean {
   const text = normalize(message);
   return text === prompt || text.startsWith(`${prompt}${ATTACHED}`);
+}
+/** What a spoken request's turn is doing, told quietly to the voice model. */
+function progressLine(name: string, rawArguments: string): string {
+  let args: Record<string, unknown> = {};
+  try { args = JSON.parse(rawArguments) as Record<string, unknown>; } catch { /* Named only. */ }
+  const target = name === 'tower_api' && typeof args.path === 'string' ? ` ${String(args.method ?? '')} ${truncate(args.path, 120)}` : '';
+  return `Working on the owner's request: ${name}${target}.`;
 }
 /** A short account of a call's result, secrets hidden before it is shortened. */
 function summary(response: TowerResponse, hide: (text: string) => string): string {

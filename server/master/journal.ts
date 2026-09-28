@@ -3,6 +3,9 @@ import { basename, join } from 'node:path';
 import type { MasterCallState, MasterTaskState, MasterViewContext } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
+/** Where a request came from when the owner said it in a voice call; it follows everything that request leads to. */
+export interface VoiceOrigin { attempt: string; key: string; delegationIds: string[] }
+
 /** A message from the owner, or news of finished work, waiting for or given to a turn. */
 export interface InboxItem {
   id: string;
@@ -21,6 +24,8 @@ export interface InboxItem {
   notBefore?: string;
   /** For events: the task it reports, so one ending is reported once. */
   taskId?: string;
+  /** Said in a voice call, or following from something that was. */
+  voice?: VoiceOrigin;
 }
 
 /** A change the master sent to Tower. Saved before it is sent, so a restart can tell sent from unsent. */
@@ -55,6 +60,8 @@ export interface TaskRecord {
   createdAt: string;
   /** When the end was handed to the inbox; set before the event is queued, so it is never queued twice. */
   reportedAt?: string;
+  /** Started for a spoken request: its report is spoken too, and its changes are announced. */
+  voice?: VoiceOrigin;
 }
 
 const KEEP_INBOX = 300;

@@ -125,6 +125,22 @@ export class SecretVault {
     return Math.max(0, longest - 1);
   }
 
+  /**
+   * How many characters at the end of a text are the start of a value hidden everywhere that is not whole yet: text
+   * cut there (a request taken while the owner is still speaking) leaves them out.
+   */
+  partialEnd(text: string): number {
+    let longest = 0;
+    for (const kept of this.kept.values()) {
+      if (!HIDDEN_EVERYWHERE.has(kept.source) || kept.value.length < SHORTEST_SECRET) continue;
+      const value = kept.value;
+      for (let at = Math.max(0, text.length - value.length + 1); at < text.length && text.length - at > longest; at++) {
+        if (text.charCodeAt(at) === value.charCodeAt(0) && value.startsWith(text.slice(at))) { longest = text.length - at; break; }
+      }
+    }
+    return longest;
+  }
+
   /** `redact` over any JSON value, names of fields included. */
   redactInResponse(value: unknown): unknown {
     const walk = (item: unknown): unknown => typeof item === 'string' ? this.redact(item) : typeof item === 'number' ? this.redactNumber(item) : Array.isArray(item) ? item.map(walk)

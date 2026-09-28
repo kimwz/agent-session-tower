@@ -71,6 +71,28 @@ test('the master runs in its own host: the web relays its conversation live and 
   }
 });
 
+test('the host answers a page\'s voice requests, refusing what is not its call, and shows voice use in its overview', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-host-voice-'));
+  const cleanup: Array<() => unknown> = [];
+  t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
+  const host = await startMasterHost({ stateDir, model: async () => ({ output: [], text: '' }), idleMs: 60_000 });
+  cleanup.push(() => host.close());
+  const client = new MasterClient({ stateDir, credentials: () => undefined });
+  cleanup.push(() => client.dispose());
+  await client.call('settings', { body: { apiKey: 'sk-test-0123456789abcdef' } });
+  const overview = await client.call('overview') as MasterOverview;
+  assert.deepEqual(overview.voice?.today, { seconds: 0, dollars: 0 });
+  assert.deepEqual(overview.settings.voice, { voice: 'marin', silenceSeconds: 15, dailyMinutes: 0, autoWake: true });
+  const attemptId = '0190f1c2-3d4e-7f00-8a00-000000000003';
+  assert.equal(await client.call('voiceStop', { attemptId, reason: 'owner' }), false);
+  assert.equal(await client.call('voiceReady', { attemptId }), false);
+  assert.equal(await client.call('voiceActivity', { attemptId, speaking: true, playing: false }), false);
+  assert.equal(await client.call('voiceNotice', { noticeId: 'n', result: 'played' }), false);
+  await assert.rejects(client.call('voiceStart', { attemptId: 'x', sdp: 'v=0', tabId: attemptId, wake: false }), { statusCode: 400 });
+  await assert.rejects(client.call('settings', { body: { voice: { voice: 'nobody' } } }), { statusCode: 400 });
+  assert.equal(((await client.call('settings', { body: { voice: { silenceSeconds: 30 } } })) as MasterOverview).settings.voice.silenceSeconds, 30);
+});
+
 test('the master stays removable: only three existing files reach into it', async () => {
   const root = join(import.meta.dirname, '..', '..');
   const allowed = new Set(['server/index.ts', 'client/src/app/App.tsx']);

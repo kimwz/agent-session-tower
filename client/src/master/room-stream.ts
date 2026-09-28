@@ -1,4 +1,4 @@
-import type { MasterCheckpoint, MasterDirective, MasterDraft, MasterEntry, MasterOverview, MasterStreamEvent } from '../../../shared/master';
+import type { MasterCheckpoint, MasterDirective, MasterDraft, MasterEntry, MasterOverview, MasterStreamEvent, MasterVoiceStatus } from '../../../shared/master';
 import { api } from '../common/lib';
 
 export interface RoomState {
@@ -6,42 +6,56 @@ export interface RoomState {
   hasMore: boolean;
   draft?: MasterDraft;
   overview?: MasterOverview;
+  /** The voice call as the host sees it, kept current between overviews. */
+  voice?: MasterVoiceStatus;
   error?: string;
+}
+
+/** What a voice call in this page hears from the host besides the conversation. */
+export interface VoiceListener {
+  status(voice: MasterVoiceStatus): void;
+  notice(notice: { id: string; attempt: string; text: string }): void;
+  connected(up: boolean): void;
 }
 
 /**
  * Follows the master's conversation: a checkpoint first, then live changes after it. When the stream cannot continue
  * where it left off (the host restarted, or too much was missed) it starts again from a new checkpoint.
  */
-export function followRoom(onState: (state: RoomState) => void, onDirective: (directive: MasterDirective) => void): { stop(): void; earlier(): Promise<void> } {
+export function followRoom(onState: (state: RoomState) => void, onDirective: (directive: MasterDirective) => void, voiceListener?: VoiceListener): { stop(): void; earlier(): Promise<void> } {
   const entries = new Map<string, MasterEntry>();
   let hasMore = false;
   let draft: MasterDraft | undefined;
   let overview: MasterOverview | undefined;
+  let voice: MasterVoiceStatus | undefined;
   let epoch = '';
   let seq = -1;
   let source: EventSource | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
 
-  const publish = (error?: string) => onState({ entries: [...entries.values()].sort((a, b) => a.order - b.order), hasMore, ...(draft ? { draft } : {}), ...(overview ? { overview } : {}), ...(error ? { error } : {}) });
+  const publish = (error?: string) => onState({ entries: [...entries.values()].sort((a, b) => a.order - b.order), hasMore, ...(draft ? { draft } : {}), ...(overview ? { overview } : {}), ...(voice ? { voice } : {}), ...(error ? { error } : {}) });
+  const heard = (status: MasterVoiceStatus | undefined) => { if (!status) return; voice = status; voiceListener?.status(status); };
   const apply = (event: MasterStreamEvent) => {
     seq = Math.max(seq, event.seq);
     if (event.type === 'entry') {
       const known = entries.get(event.entry.id);
       if (!known || known.revision <= event.entry.revision) entries.set(event.entry.id, event.entry);
     } else if (event.type === 'draft') draft = event.draft ?? undefined;
-    else if (event.type === 'overview') overview = event.overview;
+    else if (event.type === 'overview') { overview = event.overview; heard(event.overview.voice); }
     else if (event.type === 'directive') { onDirective(event.directive); return; }
+    else if (event.type === 'voice') heard(event.voice);
+    else if (event.type === 'notice') { voiceListener?.notice(event.notice); return; }
     publish();
   };
   const connect = () => {
     if (stopped) return;
     source = new EventSource(`/api/master/events?${new URLSearchParams({ epoch, after: String(seq) })}`);
+    source.onopen = () => voiceListener?.connected(true);
     source.onmessage = message => { try { apply(JSON.parse(message.data) as MasterStreamEvent); } catch { /* ignore */ } };
     source.addEventListener('resync', () => { source?.close(); void checkpoint(); });
     // A dropped connection resumes where it left off; the host answers `resync` if it cannot.
-    source.onerror = () => { source?.close(); reconnect(); };
+    source.onerror = () => { source?.close(); voiceListener?.connected(false); reconnect(); };
   };
   const reconnect = () => { if (!stopped) { clearTimeout(retry); retry = setTimeout(connect, 2000); } };
   const schedule = () => { if (!stopped) { clearTimeout(retry); retry = setTimeout(() => void checkpoint(), 2000); } };
@@ -52,6 +66,7 @@ export function followRoom(onState: (state: RoomState) => void, onDirective: (di
       entries.clear();
       for (const entry of state.entries) entries.set(entry.id, entry);
       hasMore = state.hasMore; draft = state.draft; overview = state.overview; epoch = state.epoch; seq = state.seq;
+      heard(state.overview.voice);
       publish();
       connect();
     } catch (error) {

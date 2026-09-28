@@ -18,6 +18,13 @@ import { until } from '../helpers/until.js';
 const session = (id: string, status: Session['status']): Session => ({ id, nativeId: id, provider: 'claude', title: `title ${id}`, cwd: `/work/${id}`, project: `project-${id}`,
   status, statusReason: '', createdAt: '2026-09-27T00:00:00Z', updatedAt: '2026-09-27T00:00:00Z', lastRequestAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true });
 const say = (text: string): ModelItem => ({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
+/** The live status the turn starts from: data from the owner's side, never Tower's own instructions. */
+const statusOf = (request: { input: ModelItem[] }) => {
+  const found = request.input.find(item => item.role === 'user' && String(item.content).startsWith('[data] '));
+  assert.ok(found, 'the status is given as data');
+  assert.ok(!request.input.some(item => item.role === 'developer' && String(item.content).includes('Working now')));
+  return String(found.content);
+};
 
 test('each turn starts from the live Tower status, and quick lookups answer from it without asking for whole snapshots', { skip: !lookupsSupported() && 'this Node.js has no SQLite authorizer' }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-master-live-'));
@@ -44,7 +51,7 @@ test('each turn starts from the live Tower status, and quick lookups answer from
   const readDb = new ReadDatabase();
   const requests: ModelRequest[] = [];
   const steps: Array<(request: ModelRequest) => ModelItem[]> = [
-    request => { assert.match(String(request.input[0].content), /Working now \(1\):\n {2}- title a/); return [{ type: 'function_call', call_id: 'q1', name: 'tower_query', arguments: JSON.stringify({ sql: "SELECT id, status FROM sessions WHERE status = 'idle'" }) }]; },
+    request => { assert.match(statusOf(request), /Working now \(1\):\n {2}- title a/); return [{ type: 'function_call', call_id: 'q1', name: 'tower_query', arguments: JSON.stringify({ sql: "SELECT id, status FROM sessions WHERE status = 'idle'" }) }]; },
     request => {
       const output = JSON.parse(String(request.input.at(-1)!.output)) as { rows: Array<{ id: string }>; asOf: string };
       assert.deepEqual(output.rows.map(row => row.id), ['b']);
@@ -91,7 +98,7 @@ test('without lookups (Node.js 22 has no SQLite authorizer) the master is not of
   await service.send({ clientMessageId: 'live-0002', text: '지금 뭐 돌아가?', local: true });
   await until(() => room.recent(10).some(entry => entry.data.kind === 'master' && entry.data.text.includes('a 하나')), 15_000);
   assert.equal(requests.length, 1);
-  assert.match(String(requests[0].input[0].content), /Working now \(1\):\n {2}- title a/);
+  assert.match(statusOf(requests[0]), /Working now \(1\):\n {2}- title a/);
   assert.deepEqual(requests[0].tools.map(tool => tool.name), ['tower_api', 'session_read', 'ui', 'browser_action', 'request_secret', 'terminal_read']);
   assert.doesNotMatch(requests[0].instructions, /tower_query/);
 });

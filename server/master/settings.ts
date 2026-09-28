@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DEFAULT_MASTER_SETTINGS, MASTER_EFFORTS, type MasterEffort, type MasterGuards, type MasterSettings } from '../../shared/master.js';
+import { DEFAULT_MASTER_SETTINGS, DEFAULT_MASTER_VOICE, MASTER_EFFORTS, MASTER_VOICES, type MasterEffort, type MasterGuards, type MasterSettings, type MasterVoiceSettings } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 const invalid = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
@@ -27,11 +27,33 @@ function readGuards(value: unknown, fallback: MasterGuards): MasterGuards {
   return next;
 }
 
+function readVoice(value: unknown, fallback: MasterVoiceSettings): MasterVoiceSettings {
+  if (value === undefined) return fallback;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid('음성 설정이 올바르지 않습니다.');
+  const next = { ...fallback };
+  for (const [key, item] of Object.entries(value)) {
+    if (key === 'voice') {
+      if (!(MASTER_VOICES as readonly unknown[]).includes(item)) throw invalid('목소리가 올바르지 않습니다.');
+      next.voice = item as string;
+    } else if (key === 'silenceSeconds') {
+      if (typeof item !== 'number' || !Number.isInteger(item) || item < 0 || item > 600) throw invalid('침묵 시간이 올바르지 않습니다.');
+      next.silenceSeconds = item;
+    } else if (key === 'dailyMinutes') {
+      if (typeof item !== 'number' || !Number.isInteger(item) || item < 0 || item > 1440) throw invalid('하루 한도가 올바르지 않습니다.');
+      next.dailyMinutes = item;
+    } else if (key === 'autoWake') {
+      if (typeof item !== 'boolean') throw invalid('음성 설정이 올바르지 않습니다.');
+      next.autoWake = item;
+    } else throw invalid('음성 설정이 올바르지 않습니다.');
+  }
+  return next;
+}
+
 /** Parses a settings change against the current settings; unknown fields are refused. */
 export function mergeSettings(current: MasterSettings, value: unknown): MasterSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid('마스터 설정이 올바르지 않습니다.');
   const input = value as Record<string, unknown>;
-  const next: MasterSettings = { ...current, guards: { ...current.guards } };
+  const next: MasterSettings = { ...current, guards: { ...current.guards }, voice: { ...(current.voice ?? DEFAULT_MASTER_VOICE) } };
   for (const [key, item] of Object.entries(input)) {
     if (key === 'enabled' || key === 'showResults') {
       if (typeof item !== 'boolean') throw invalid('마스터 설정이 올바르지 않습니다.');
@@ -43,6 +65,7 @@ export function mergeSettings(current: MasterSettings, value: unknown): MasterSe
       if (!(MASTER_EFFORTS as readonly unknown[]).includes(item)) throw invalid('추론 수준이 올바르지 않습니다.');
       next.effort = item as MasterEffort;
     } else if (key === 'guards') next.guards = readGuards(item, next.guards);
+    else if (key === 'voice') next.voice = readVoice(item, next.voice);
     else throw invalid('마스터 설정이 올바르지 않습니다.');
   }
   return next;

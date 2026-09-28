@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { AlertTriangle, ArrowUp, Bell, Bot, Check, ChevronDown, ChevronRight, CircleDashed, ExternalLink, KeyRound, LoaderCircle, Settings, Square, X } from 'lucide-react';
-import type { MasterCard, MasterEntry, MasterOverview, MasterScreenCommand } from '../../../shared/master';
+import { AlertTriangle, ArrowUp, Bell, Bot, Check, ChevronDown, ChevronRight, CircleDashed, ExternalLink, KeyRound, LoaderCircle, Mic, Settings, Square, Volume2, VolumeX, X } from 'lucide-react';
+import type { MasterCard, MasterEntry, MasterOverview, MasterScreenCommand, MasterSpeak } from '../../../shared/master';
 import type { NotificationOverview } from '../../../shared/notifications';
 import { api } from '../common/lib';
 import { enablePush, pushSupport } from '../notifications/push';
@@ -10,6 +10,7 @@ import type { RoomState } from './room-stream';
 import { MasterSettingsView } from './MasterSettings';
 import { useWords } from './strings';
 import { post } from './api';
+import { VoiceBar, type VoiceControls } from './VoiceBar';
 
 
 interface Props {
@@ -17,6 +18,7 @@ interface Props {
   room: RoomState;
   tabId: string;
   sessionId: string | null;
+  voice: VoiceControls;
   /** Where the page header ends, so the panel sits right under it. */
   top?: number;
   onClose(): void;
@@ -30,7 +32,7 @@ interface Props {
 /** The last message whose sending was not confirmed (it may or may not have arrived), for as long as this tab lives. */
 let unconfirmed: { id: string; text: string } | undefined;
 
-export function MasterPanel({ token, room, tabId, sessionId, top, onClose, onEarlier, onOpenSession, onCommand }: Props) {
+export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose, onEarlier, onOpenSession, onCommand }: Props) {
   const words = useWords();
   const [text, setText] = useState('');
   const [sending, setSending] = useState(false);
@@ -99,8 +101,12 @@ export function MasterPanel({ token, room, tabId, sessionId, top, onClose, onEar
         {thinking && !room.draft?.text && <div className="master-thinking"><LoaderCircle size={14} className="spin" />{words('생각하는 중', 'Thinking')}</div>}
       </div>
       {(error || room.error) && <div className="master-error" role="alert"><AlertTriangle size={13} />{error || room.error}</div>}
+      <VoiceBar voice={voice} />
       <div className="master-composer">
         <textarea ref={input} value={text} rows={2} maxLength={32_000} disabled={disabled} placeholder={disabled ? words('마스터가 꺼져 있습니다', 'The master is turned off') : words('마스터에게 시킬 일', 'What should Tower do?')} onChange={event => setText(event.target.value)} onKeyDown={onKeyDown} aria-label={words('마스터에게 보낼 메시지', 'Message to the master')} />
+        {!voice.view && <button className="master-mic" onClick={voice.start} disabled={!voice.supported || disabled || !configured}
+          title={voice.supported ? words('말로 대화하기 (GPT-Live, 분당 $0.05)', 'Talk by voice (GPT-Live, $0.05/min)') : words('음성은 https 주소나 이 컴퓨터(localhost)에서만 쓸 수 있습니다', 'Voice needs an https address or this computer (localhost)')}
+          aria-label={words('음성 대화 시작', 'Start voice')}><Mic size={16} /></button>}
         {thinking ? <button className="master-stop" onClick={stop} title={words('생각 멈추기 (보낸 작업은 계속됩니다)', 'Stop thinking (work already sent continues)')}><Square size={14} />{words('생각 멈춤', 'Stop')}</button>
           : <button className="master-send" onClick={() => void send()} disabled={!text.trim() || sending || disabled} aria-label={words('보내기', 'Send')}>{sending ? <LoaderCircle size={15} className="spin" /> : <ArrowUp size={16} />}</button>}
       </div>
@@ -156,10 +162,11 @@ function actionLabel(state: string, words: (ko: string, en: string) => string): 
 function Entry({ entry, token, tabId, onOpenSession, onCommand }: { entry: MasterEntry } & EntryProps) {
   const words = useWords();
   const data = entry.data;
-  if (data.kind === 'owner') return <div className="master-message owner">{showSecrets(data.text)}</div>;
-  if (data.kind === 'master') return <div className="master-message master"><Markdown>{showSecrets(data.text)}</Markdown></div>;
-  if (data.kind === 'event') return <div className="master-event">{data.text}</div>;
-  if (data.kind === 'error') return <div className="master-event error"><AlertTriangle size={12} />{data.text}</div>;
+  if (data.kind === 'owner') return <div className={`master-message owner ${data.voice ? 'voice' : ''}`}>{data.voice && <Mic size={11} aria-label={words('말함', 'Said')} />}{showSecrets(data.text)}</div>;
+  if (data.kind === 'voice') return <div className="master-message master voice"><Volume2 size={11} aria-label={words('음성', 'Spoken')} />{showSecrets(data.text)}</div>;
+  if (data.kind === 'master') return <div className="master-message master"><Markdown>{showSecrets(data.text)}</Markdown><Spoken speak={data.speak} /></div>;
+  if (data.kind === 'event') return <div className="master-event">{data.text}<Spoken speak={data.speak} /></div>;
+  if (data.kind === 'error') return <div className="master-event error"><AlertTriangle size={12} />{data.text}<Spoken speak={data.speak} /></div>;
   if (data.kind === 'task') {
     const session = data.sessionId ? scopedId(data.node, data.sessionId) : undefined;
     return <div className={`master-task ${data.state}`}>
@@ -170,6 +177,13 @@ function Entry({ entry, token, tabId, onOpenSession, onCommand }: { entry: Maste
   }
   if (data.kind === 'card') return <Card id={entry.id} card={data.card} token={token} tabId={tabId} onCommand={onCommand} />;
   return null;
+}
+
+/** News the master could not tell by voice says so; it is all on the screen. */
+function Spoken({ speak }: { speak?: MasterSpeak }) {
+  const words = useWords();
+  if (speak?.state !== 'undelivered') return null;
+  return <small className="master-unspoken"><VolumeX size={11} />{words('음성으로 전하지 못함', 'Not said aloud')}</small>;
 }
 
 /** What only the owner's own browser can do, pressed on the device that should do it. */

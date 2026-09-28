@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
-import { KeyRound, LoaderCircle, Trash2 } from 'lucide-react';
-import { MASTER_EFFORTS, MASTER_MODELS, type MasterOverview, type MasterSettings } from '../../../shared/master';
+import { KeyRound, LoaderCircle, Mic, Trash2 } from 'lucide-react';
+import { DEFAULT_MASTER_VOICE, MASTER_EFFORTS, MASTER_MODELS, MASTER_VOICES, type MasterOverview, type MasterSettings, type MasterVoiceSettings } from '../../../shared/master';
 import type { LinkOverview } from '../../../shared/link';
 import { api } from '../common/lib';
 import { post } from './api';
 import { useWords } from './strings';
+import { voiceUsage } from './VoiceBar';
 
 /**
  * The master's settings. The OpenAI key turns it on. Everything else has a default that lets the master do whatever
@@ -29,6 +30,8 @@ export function MasterSettingsView({ token, overview, onDone }: { token: string;
     finally { setBusy(false); }
   };
   const guards = (patch: Partial<MasterSettings['guards']>) => save({ guards: patch });
+  const voice = (patch: Partial<MasterVoiceSettings>) => save({ voice: patch });
+  const number = (value: string, max: number) => Math.max(0, Math.min(max, Math.floor(Number(value) || 0)));
   if (!overview || !settings) return <div className="master-settings"><LoaderCircle className="spin" size={16} /></div>;
   return <div className="master-settings">
     <section>
@@ -53,6 +56,21 @@ export function MasterSettingsView({ token, overview, onDone }: { token: string;
         <select value={settings.effort} disabled={busy} onChange={event => void save({ effort: event.target.value })}>{MASTER_EFFORTS.map(effort => <option key={effort} value={effort}>{effort}</option>)}</select>
       </label>
       <label className="master-toggle"><input type="checkbox" checked={settings.showResults} disabled={busy} onChange={event => void save({ showResults: event.target.checked })} />{words('찾은 세션을 내 화면에 열기', 'Open what it finds on my screen')}</label>
+    </section>
+    <section>
+      <h3><Mic size={14} />{words('음성', 'Voice')}</h3>
+      <p>{words('입력창의 마이크 버튼으로 마스터와 말로 대화합니다 (OpenAI GPT-Live, 분당 약 $0.05). 한국어 음성 품질은 직접 확인해 주세요.', 'Talk to the master with the microphone button by the message box (OpenAI GPT-Live, about $0.05 a minute).')}</p>
+      <p>{voiceUsage(overview.voice, words)}</p>
+      <label className="master-field">{words('목소리', 'Voice')}
+        <select value={(settings.voice ?? DEFAULT_MASTER_VOICE).voice} disabled={busy} onChange={event => void voice({ voice: event.target.value })}>{MASTER_VOICES.map(name => <option key={name} value={name}>{name}</option>)}</select>
+      </label>
+      <label className="master-field">{words('말이 없으면 끄기 (초, 0 = 끄지 않음)', 'End after silence (seconds, 0 = never)')}
+        <input type="number" min={0} max={600} value={(settings.voice ?? DEFAULT_MASTER_VOICE).silenceSeconds} disabled={busy} onChange={event => void voice({ silenceSeconds: number(event.target.value, 600) })} />
+      </label>
+      <label className="master-toggle"><input type="checkbox" checked={(settings.voice ?? DEFAULT_MASTER_VOICE).autoWake} disabled={busy} onChange={event => void voice({ autoWake: event.target.checked })} />{words('말이 없어 꺼진 뒤 전할 소식이 오면 다시 켜서 말하기 (마스터 창이 열려 있을 때만)', 'After a quiet end, turn back on to tell news (only while the master panel is open)')}</label>
+      <label className="master-field">{words('하루 음성 한도 (분, 0 = 없음)', 'Daily voice limit (minutes, 0 = none)')}
+        <input type="number" min={0} max={1440} value={(settings.voice ?? DEFAULT_MASTER_VOICE).dailyMinutes} disabled={busy} onChange={event => void voice({ dailyMinutes: number(event.target.value, 1440) })} />
+      </label>
     </section>
     <section>
       <h3>{words('제한 (선택)', 'Limits (optional)')}</h3>

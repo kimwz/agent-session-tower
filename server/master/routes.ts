@@ -49,6 +49,17 @@ export function masterRoutes(client: MasterClient) {
       return true;
     }
     if (req.method === 'POST' && path === '/api/master/settings') { await call('settings', { body: await readJson(req, 16 * 1024) }); return true; }
+    // A voice call: the page makes it with its own connection, the host follows it with the owner's key.
+    const voice = /^\/api\/master\/voice\/(start|ready|stop|activity|notice)$/.exec(path);
+    if (req.method === 'POST' && voice) {
+      const body = await readJson(req, voice[1] === 'start' ? 160 * 1024 : 4 * 1024);
+      if (voice[1] === 'start') await call('voiceStart', { attemptId: body.attemptId, sdp: body.sdp, tabId: body.tabId, wake: body.wake, local: identity.local });
+      else if (voice[1] === 'ready') await call('voiceReady', { attemptId: body.attemptId });
+      else if (voice[1] === 'stop') await call('voiceStop', { attemptId: body.attemptId, reason: body.reason });
+      else if (voice[1] === 'activity') await call('voiceActivity', { attemptId: body.attemptId, speaking: body.speaking, playing: body.playing, sinceSpeechMs: body.sinceSpeechMs, sincePlaybackMs: body.sincePlaybackMs });
+      else await call('voiceNotice', { noticeId: body.noticeId, result: body.result });
+      return true;
+    }
     json(res, 404, { error: '찾을 수 없습니다.' });
     return true;
   };

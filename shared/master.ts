@@ -27,6 +27,20 @@ export interface MasterGuards {
 }
 export const DEFAULT_MASTER_GUARDS: MasterGuards = { hideSecrets: true, localOnlyPages: true, eventTurnsReadOnly: false, readOnlyNodes: [], maxIrreversiblePerTurn: 0 };
 
+/** GPT-Live's built-in voices; the first is its default. */
+export const MASTER_VOICES = ['marin', 'cedar', 'alloy', 'ash', 'ballad', 'beacon', 'bossa', 'cinder', 'coral', 'delta', 'echo', 'gleam', 'meridian', 'quartz', 'ripple', 'sage', 'shimmer', 'stone', 'tempo', 'verse', 'vesper', 'willow'] as const;
+/** Talking to the master: its voice, when it hangs up on silence, how much a day, and whether news wakes it. */
+export interface MasterVoiceSettings {
+  voice: string;
+  /** Seconds without anyone speaking before the call ends; 0 keeps it open. */
+  silenceSeconds: number;
+  /** Minutes of voice a day; 0 means no limit. */
+  dailyMinutes: number;
+  /** After a call ended on silence, news the master should tell starts it again while the master panel is open. */
+  autoWake: boolean;
+}
+export const DEFAULT_MASTER_VOICE: MasterVoiceSettings = { voice: 'marin', silenceSeconds: 15, dailyMinutes: 0, autoWake: true };
+
 export interface MasterSettings {
   enabled: boolean;
   model: string;
@@ -34,8 +48,9 @@ export interface MasterSettings {
   /** Let the master open what it found in the tab the owner is talking from. */
   showResults: boolean;
   guards: MasterGuards;
+  voice: MasterVoiceSettings;
 }
-export const DEFAULT_MASTER_SETTINGS: MasterSettings = { enabled: true, model: 'gpt-6-luna', effort: 'low', showResults: true, guards: DEFAULT_MASTER_GUARDS };
+export const DEFAULT_MASTER_SETTINGS: MasterSettings = { enabled: true, model: 'gpt-6-luna', effort: 'low', showResults: true, guards: DEFAULT_MASTER_GUARDS, voice: DEFAULT_MASTER_VOICE };
 
 export type MasterState = 'idle' | 'thinking' | 'unconfigured' | 'disabled';
 
@@ -49,18 +64,51 @@ export interface MasterOverview {
   activeTasks: number;
   lastOrder: number;
   error?: string;
+  voice?: MasterVoiceStatus;
+}
+
+export type MasterVoicePhase = 'reserved' | 'creating' | 'attached' | 'ready' | 'closing' | 'closed' | 'unconfirmed';
+/**
+ * The voice call as pages see it. Pages recognise their own call and tab by hashing their ids; nothing a page sent is
+ * shown back as it came.
+ */
+export interface MasterVoiceStatus {
+  /** The current or last call. */
+  attempt?: string;
+  tab?: string;
+  phase?: MasterVoicePhase;
+  /** Why it ended or is ending: owner, silence, failed, taken-over, connection, daily-limit, expired, … */
+  reason?: string;
+  /** Voice used today on this computer: seconds and dollars (GPT-Live only). */
+  today: { seconds: number; dollars: number };
+  limitMinutes: number;
+  /** News waiting to be told, and how much of it may still wake a call. */
+  pending: number;
+  wakeable: number;
+}
+/** How news the master should tell by voice is getting there. */
+export interface MasterSpeak {
+  state: 'pending' | 'sent' | 'delivered' | 'undelivered';
+  tries: number;
+  /** Already used to wake a call. */
+  woke?: boolean;
+  /** The call and requests it answers, when it answers a voice request. */
+  attempt?: string;
+  delegationIds?: string[];
 }
 
 export type MasterCallState = 'sending' | 'succeeded' | 'failed' | 'uncertain' | 'not-admitted';
 export type MasterTaskState = 'running' | 'completed' | 'error' | 'cancelled' | 'unknown';
 
 export type MasterEntryData =
-  | { kind: 'owner'; text: string; clientId?: string }
-  | { kind: 'master'; text: string; turnId: string; final: boolean }
+  | { kind: 'owner'; text: string; clientId?: string; voice?: true }
+  | { kind: 'master'; text: string; turnId: string; final: boolean; speak?: MasterSpeak }
+  /** What the master said aloud in a voice call. */
+  | { kind: 'voice'; text: string }
   | { kind: 'action'; turnId: string; method: string; path: string; node?: string; state: MasterCallState; summary?: string; write: boolean }
   | { kind: 'task'; sessionId?: string; runId?: string; jobId?: string; node?: string; title: string; state: MasterTaskState; answer?: string }
-  | { kind: 'event'; text: string }
-  | { kind: 'error'; text: string }
+  | { kind: 'event'; text: string; speak?: MasterSpeak }
+  | { kind: 'error'; text: string; speak?: MasterSpeak }
   | { kind: 'card'; card: MasterCard };
 
 export interface MasterEntry {
@@ -109,13 +157,16 @@ export type MasterDirectiveResult = 'done' | 'unavailable' | 'failed';
 export type MasterCard =
   | { type: 'open'; label: string; command: MasterScreenCommand }
   | { type: 'push'; state: 'waiting' | 'subscribed' | 'failed'; note?: string }
-  | { type: 'secret'; purpose: string; state: 'waiting' | 'provided' | 'dismissed' };
+  | { type: 'secret'; purpose: string; state: 'waiting' | 'provided' | 'dismissed'; voice?: { attempt: string; key: string } };
 
 export type MasterStreamEvent =
   | { type: 'entry'; seq: number; entry: MasterEntry }
   | { type: 'draft'; seq: number; draft: MasterDraft | null }
   | { type: 'overview'; seq: number; overview: MasterOverview }
-  | { type: 'directive'; seq: number; directive: MasterDirective };
+  | { type: 'directive'; seq: number; directive: MasterDirective }
+  | { type: 'voice'; seq: number; voice: MasterVoiceStatus }
+  /** A sentence the call's page says itself before an irreversible change goes out. */
+  | { type: 'notice'; seq: number; notice: { id: string; attempt: string; text: string } };
 
 /** Where the owner is looking when they send a message, so "this session" means something. */
 export interface MasterViewContext { tabId?: string; sessionId?: string; node?: string; cwd?: string }

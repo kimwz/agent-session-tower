@@ -13,6 +13,7 @@ import { MasterRoom } from './room.js';
 import { MasterService } from './service.js';
 import { MasterSettingsStore } from './settings.js';
 import { TowerClient, type WebCredentials } from './tower-client.js';
+import { MasterVoice, type VoiceTiming } from './voice.js';
 
 export const MASTER_PROTOCOL = 1;
 const MAX_REQUEST = 256 * 1024;
@@ -27,6 +28,8 @@ export interface MasterHostOptions {
   idleMs?: number;
   taskPollMs?: number;
   onClosed?: () => void;
+  /** Tests talk to fake GPT-Live servers, faster. */
+  voice?: { apiBase?: string; socketBase?: string; fetcher?: typeof fetch; timing?: Partial<VoiceTiming> };
 }
 
 const failure = (message: string, statusCode: number) => Object.assign(new Error(message), { statusCode });
@@ -48,6 +51,7 @@ export async function startMasterHost(options: MasterHostOptions) {
   const live = new LiveState((path, signal) => tower.stream(path, signal));
   const readDb = lookupsSupported() ? new ReadDatabase() : undefined;
   let service: MasterService | undefined;
+  let voice: MasterVoice | undefined;
   let lastRequest = Date.now();
   let pending = 0;
   let closing = false;
@@ -59,10 +63,12 @@ export async function startMasterHost(options: MasterHostOptions) {
       tower.setCredentials({ port: web.port!, token: web.token, callerSecret: web.callerSecret });
     }
   };
+  const busy = () => service!.busy() || Boolean(voice?.busy());
   const dispatch = async (method: string, args: Record<string, unknown>) => {
     const master = service!;
+    const speech = voice!;
     switch (method) {
-      case 'ping': return { busy: master.busy(), streams: streams.size };
+      case 'ping': return { busy: busy(), streams: streams.size };
       case 'hello': return true;
       case 'overview': return master.overview();
       case 'checkpoint': {
@@ -88,9 +94,18 @@ export async function startMasterHost(options: MasterHostOptions) {
         if (typeof args.id !== 'string' || !args.body || typeof args.body !== 'object') throw failure('카드 응답이 올바르지 않습니다.', 400);
         return master.card(args.id, args.body as Record<string, unknown>, args.local === true);
       }
-      case 'settings': return master.updateSettings(args.body && typeof args.body === 'object' ? args.body as Record<string, unknown> : {});
+      case 'settings': {
+        const overview = await master.updateSettings(args.body && typeof args.body === 'object' ? args.body as Record<string, unknown> : {});
+        speech.broadcast();
+        return overview;
+      }
+      case 'voiceStart': return speech.voiceStart({ attemptId: args.attemptId, sdp: args.sdp, tabId: args.tabId, wake: args.wake, local: args.local === true });
+      case 'voiceReady': return speech.voiceReady({ attemptId: args.attemptId });
+      case 'voiceStop': return speech.voiceStop({ attemptId: args.attemptId, reason: args.reason });
+      case 'voiceActivity': return speech.voiceActivity({ attemptId: args.attemptId, speaking: args.speaking, playing: args.playing, sinceSpeechMs: args.sinceSpeechMs, sincePlaybackMs: args.sincePlaybackMs });
+      case 'voiceNotice': return speech.voiceNotice({ noticeId: args.noticeId, result: args.result });
       case 'shutdown': {
-        if (master.busy()) return false;
+        if (busy()) return false;
         setImmediate(() => { void close(true); });
         return true;
       }
@@ -118,7 +133,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       if (input.protocol !== MASTER_PROTOCOL || typeof input.method !== 'string') throw failure('Incompatible master request.', 409);
       credentials(input.web);
       // A web's heartbeat or version check is not use: an idle master may still exit while pages are open.
-      if (input.method !== 'hello' && input.method !== 'ping') lastRequest = Date.now();
+      if (input.method !== 'hello' && input.method !== 'ping' && input.method !== 'voiceActivity') lastRequest = Date.now();
       reply.result = await dispatch(input.method, input.args && typeof input.args === 'object' ? input.args : {}) ?? null;
     } catch (error) {
       const value = error as { message?: string; statusCode?: number };
@@ -155,7 +170,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     await unlink(paths.token).catch(() => {});
     live.close();
     readDb?.close();
-    try { await service?.close(); } finally {
+    try { await voice?.close(); await service?.close(); } finally {
       await release();
       if (idle) options.onClosed?.();
     }
@@ -166,6 +181,10 @@ export async function startMasterHost(options: MasterHostOptions) {
     await room.start();
     await journal.start();
     service = new MasterService({ settings, room, journal, tower, live, readDb, model: options.model ?? openAiResponses(() => settings.key()), ...(options.taskPollMs ? { taskPollMs: options.taskPollMs } : {}) });
+    voice = new MasterVoice({ dataDir: paths.data, settings, room, hooks: service.voiceHooks(), ...options.voice });
+    service.setVoice(voice);
+    // The voice's records first: what the master answers from the start knows whether to be spoken.
+    await voice.start();
     await service.start();
     await unlink(paths.socket).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
     await unlink(paths.token).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
@@ -174,7 +193,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     // The credential appears last: a web that can read it can already talk to this host.
     await writeFile(paths.token, token, { flag: 'wx', mode: 0o600 });
     idleTimer = setInterval(() => {
-      if (closing || pending || streams.size || service!.busy() || Date.now() - lastRequest < (options.idleMs ?? IDLE_MS)) return;
+      if (closing || pending || streams.size || busy() || Date.now() - lastRequest < (options.idleMs ?? IDLE_MS)) return;
       void close(true).catch(error => { console.error(`Master host idle cleanup failed: ${(error as NodeJS.ErrnoException)?.code ?? 'error'}`); });
     }, 1000);
     idleTimer.unref();

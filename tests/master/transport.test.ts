@@ -235,3 +235,28 @@ test('a page\'s answers to screen commands and cards reach the host, a card with
   assert.equal((await post('/api/master/cards/not-an-id', { value: 'x' })).status, 404);
   assert.deepEqual(calls, [['ack', { id, result: 'done', note: 'ok' }], ['card', { id, body: { value: 'x' }, local: false }]]);
 });
+
+test('a page\'s voice call goes to the host through the master routes, its start with whether the page is on this computer', async t => {
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  const client = { call: async (method: string, args: Record<string, unknown>) => { calls.push([method, args]); return method === 'voiceStart' ? { sdp: 'v=0 answer', attempt: 'a' } : true; } } as unknown as MasterClient;
+  const handle = masterRoutes(client);
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url!, 'http://tower.invalid');
+    if (!await handle(req, res, url.pathname, url, { local: false })) res.writeHead(404).end();
+  });
+  t.after(() => stop(server));
+  const port = await listen(server);
+  const post = (path: string, body: unknown) => fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const attemptId = '0190f1c2-3d4e-7f00-8a00-000000000002';
+  const start = await post('/api/master/voice/start', { attemptId, sdp: `v=0 ${'x'.repeat(90_000)}`, tabId: 'tab', wake: true, local: true });
+  assert.deepEqual(await start.json(), { sdp: 'v=0 answer', attempt: 'a' });
+  await post('/api/master/voice/ready', { attemptId });
+  await post('/api/master/voice/activity', { attemptId, speaking: true, playing: false, sinceSpeechMs: 0, extra: 'ignored' });
+  await post('/api/master/voice/notice', { noticeId: 'n', result: 'played' });
+  await post('/api/master/voice/stop', { attemptId, reason: 'silence' });
+  assert.equal((await post('/api/master/voice/other', {})).status, 404);
+  assert.deepEqual(calls.map(([method]) => method), ['voiceStart', 'voiceReady', 'voiceActivity', 'voiceNotice', 'voiceStop']);
+  assert.equal(calls[0][1].local, false, 'the server says where the page is, not the page');
+  assert.equal(calls[0][1].wake, true);
+  assert.deepEqual(calls[2][1], { attemptId, speaking: true, playing: false, sinceSpeechMs: 0, sincePlaybackMs: undefined });
+});

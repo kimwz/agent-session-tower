@@ -89,3 +89,26 @@
 .master-card.secret input { flex:1 1 100%; min-width:0; }
 .master-card.subscribed > svg, .master-card.done > svg { color:var(--teal); }
 .master-card small[role="alert"] { flex-basis:100%; color:var(--danger); }
+
+/* Voice: the call's bar above the message box, and what was said aloud in the conversation. */
+.master-fab.voice { border-color:var(--teal); box-shadow:0 0 0 3px rgba(136,213,196,.25); }
+.master-mic { height:38px; width:38px; border-radius:9px; border:1px solid var(--line); background:var(--surface-raised); color:var(--text); display:inline-flex; align-items:center; justify-content:center; cursor:pointer; }
+.master-mic:hover:not(:disabled) { color:var(--bright); border-color:#5278a9; }
+.master-mic:disabled { opacity:.45; cursor:default; }
+.master-voice { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:8px 12px; border-top:1px solid var(--line); font-size:12.5px; color:var(--text); }
+.master-voice-label { flex:1 1 140px; min-width:0; }
+.master-voice small { color:var(--muted); font-size:11px; }
+.master-voice-dot { width:9px; height:9px; border-radius:50%; background:var(--teal); flex:none; }
+.master-voice.speaking .master-voice-dot { animation:master-pulse 0.9s ease-in-out infinite; }
+.master-voice.playing .master-voice-dot { background:var(--blue); animation:master-pulse 1.4s ease-in-out infinite; }
+@keyframes master-pulse { 50% { transform:scale(1.5); opacity:.6; } }
+.master-voice-end, .master-voice-restart { display:inline-flex; align-items:center; gap:5px; height:28px; padding:0 10px; border-radius:7px; font-size:12px; cursor:pointer; }
+.master-voice-end { border:1px solid #7a3c3c; background:#4a2222; color:#ffecec; }
+.master-voice-restart { border:1px solid #5278a9; background:#254c7a; color:#edf5ff; }
+.master-voice-end:disabled, .master-voice-restart:disabled { opacity:.5; cursor:default; }
+.master-voice.ended { color:var(--muted); }
+.master-message.voice { display:flex; gap:6px; align-items:baseline; white-space:pre-wrap; }
+.master-message.voice > svg { flex:none; color:var(--muted); }
+.master-message.master.voice { color:var(--text); }
+.master-unspoken { display:inline-flex; align-items:center; gap:4px; margin-left:6px; color:var(--subtle); font-size:11px; }
+.master-message.master .master-unspoken { display:flex; margin:4px 0 0; }

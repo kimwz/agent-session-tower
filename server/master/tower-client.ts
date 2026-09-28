@@ -35,21 +35,30 @@ class NotSent extends Error {}
 export class TowerClient {
   private credentials?: WebCredentials;
   private waiters: Array<() => void> = [];
+  private changedAt = 0;
 
   constructor(private readonly waitForWebMs = WAIT_FOR_WEB_MS) {}
 
   setCredentials(credentials: WebCredentials): void {
-    this.credentials = credentials;
+    const known = this.credentials;
+    // The same web saying hello again changes nothing.
+    if (!known || known.port !== credentials.port || known.token !== credentials.token || known.callerSecret !== credentials.callerSecret) {
+      this.credentials = credentials;
+      this.changedAt = Date.now();
+    }
     for (const wake of this.waiters.splice(0)) wake();
   }
   hasCredentials(): boolean { return Boolean(this.credentials); }
+  /** When a web (a new one, or the same one again after it was lost) last handed over its credentials. */
+  connectedSince(): number { return this.changedAt; }
 
   /**
    * Reads are repeated after a web restart; changes are sent at most once unless the web proves it never ran them.
    * `signal` cancels the whole call (reads). `beforeSend` stops a change only while it has not gone out: waiting for a
    * web, or before sending again what the server did not admit; a change already on its way is never cut off.
+   * `gate` is asked right before each send, with the web it would go to known; false keeps the change unsent.
    */
-  async call(method: 'GET' | 'POST', path: string, body?: unknown, options: { write: boolean; headers?: Record<string, string>; signal?: AbortSignal; beforeSend?: AbortSignal } = { write: method === 'POST' }): Promise<TowerResponse> {
+  async call(method: 'GET' | 'POST', path: string, body?: unknown, options: { write: boolean; headers?: Record<string, string>; signal?: AbortSignal; beforeSend?: AbortSignal; gate?: () => Promise<boolean> } = { write: method === 'POST' }): Promise<TowerResponse> {
     const deadline = Date.now() + this.waitForWebMs;
     const waiting = options.signal ?? options.beforeSend;
     const stopped = () => !options.signal?.aborted && Boolean(options.beforeSend?.aborted);
@@ -66,6 +75,12 @@ export class TowerClient {
         throw error;
       }
       if (stopped()) return unsent('중지되어 보내지 않았습니다.');
+      if (options.gate) {
+        if (!await options.gate()) return unsent('보내기 전 확인을 통과하지 못해 보내지 않았습니다.');
+        if (stopped()) return unsent('중지되어 보내지 않았습니다.');
+        // The web changed while the gate looked: look again with the new one.
+        if (this.credentials !== credentials) continue;
+      }
       try {
         const response = await this.send(credentials, method, path, body, options.headers, options.signal);
         // A stale page token means this web never looked at the request: send it to the web that replaced it, whose

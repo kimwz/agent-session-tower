@@ -1,10 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { Bot, LoaderCircle } from 'lucide-react';
-import type { MasterDirective, MasterScreenCommand } from '../../../shared/master';
+import { Bot, LoaderCircle, Mic } from 'lucide-react';
+import { DEFAULT_MASTER_VOICE, type MasterDirective, type MasterScreenCommand } from '../../../shared/master';
 import { post } from './api';
 import { followRoom, type RoomState } from './room-stream';
 import { runScreenCommand, type MasterControls } from './screen';
 import { useWords } from './strings';
+import { VoiceCall, type CallView } from './voice-client';
+import { digest, shouldWake } from './voice-sound';
+import type { VoiceControls } from './VoiceBar';
 import './master.css';
 
 const MasterPanel = lazy(() => import('./MasterPanel').then(module => ({ default: module.MasterPanel })));
@@ -43,6 +46,15 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   tokenRef.current = token;
   /** Commands already done here, until they expire, so one sent again after a reconnect is not done twice. */
   const done = useRef(new Map<string, number>());
+  // The voice call lives here, not in the panel: closing the panel does not end it.
+  const call = useRef<VoiceCall | null>(null);
+  const [callView, setCallView] = useState<CallView | null>(null);
+  const [voiceEnd, setVoiceEnd] = useState<{ reason: string; error?: string } | null>(null);
+  const [tabHash, setTabHash] = useState<string>();
+  const [visible, setVisible] = useState(() => document.visibilityState === 'visible');
+  /** A call news tried to start here failed: no more of that until the owner starts one. */
+  const wakeFailed = useRef(false);
+  const silence = useRef(DEFAULT_MASTER_VOICE.silenceSeconds);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,11 +71,53 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
         try { answer = runScreenCommand(directive, controlsRef.current); }
         catch (error) { answer = { result: 'failed' as const, note: error instanceof Error ? error.message : String(error) }; }
         void post(`/api/master/directives/${directive.id}`, tokenRef.current, answer).catch(() => {});
+      }, {
+        status: voice => call.current?.lease(voice),
+        notice: notice => call.current?.say(notice),
+        connected: up => call.current?.stream(up),
       });
     }).catch(() => { if (!cancelled) retry = setTimeout(() => probe(Math.min(wait * 2, 30_000)), wait); });
     probe(2000);
-    return () => { cancelled = true; if (retry) clearTimeout(retry); follow.current?.stop(); };
+    return () => { cancelled = true; if (retry) clearTimeout(retry); follow.current?.stop(); void call.current?.stop('owner'); };
   }, []);
+
+  const voiceSupported = typeof window !== 'undefined' && window.isSecureContext && Boolean(navigator.mediaDevices?.getUserMedia) && typeof RTCPeerConnection !== 'undefined';
+  useEffect(() => { if (voiceSupported) void digest(tab.current).then(setTabHash).catch(() => {}); }, [voiceSupported]);
+  useEffect(() => {
+    const onVisibility = () => setVisible(document.visibilityState === 'visible');
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+  const startVoice = useCallback((wake: boolean) => {
+    if (call.current) return;
+    if (!wake) wakeFailed.current = false;
+    const current: VoiceCall = new VoiceCall({
+      token: () => tokenRef.current, tabId: tab.current, wake, silenceSeconds: () => silence.current,
+      onView: view => { if (call.current === current) setCallView(view); },
+      onEnded: (reason, error) => {
+        if (call.current !== current) return;
+        call.current = null;
+        setCallView(null);
+        setVoiceEnd({ reason, ...(error ? { error } : {}) });
+        if (wake && reason === 'failed') wakeFailed.current = true;
+      },
+    });
+    call.current = current;
+    setVoiceEnd(null);
+    setCallView({ phase: 'starting', speaking: false, playing: false });
+    void current.start().catch(() => { /* Shown by onEnded. */ });
+  }, []);
+
+  const voiceSettings = room.overview?.settings.voice ?? DEFAULT_MASTER_VOICE;
+  silence.current = voiceSettings.silenceSeconds;
+  // News the master has to tell wakes a call that ended on silence here, while the panel is open and in view.
+  useEffect(() => {
+    if (shouldWake({ status: room.voice, tabHash, panelOpen: open, autoWake: voiceSettings.autoWake, visible, busy: Boolean(call.current), failed: wakeFailed.current })) startVoice(true);
+  }, [room.voice, tabHash, open, voiceSettings.autoWake, visible, startVoice]);
+  const voice: VoiceControls = {
+    supported: voiceSupported, view: callView, end: voiceEnd, ...(room.voice ? { status: room.voice } : {}),
+    start: () => startVoice(false), stop: () => { void call.current?.stop('owner'); }, dismiss: () => setVoiceEnd(null),
+  };
 
   const lastOrder = room.entries.at(-1)?.order ?? -1;
   const unread = open ? 0 : room.entries.filter(entry => entry.order > seen && (entry.data.kind === 'master' || entry.data.kind === 'error' || (entry.data.kind === 'task' && entry.data.state !== 'running'))).length;
@@ -93,14 +147,14 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   const thinking = overview?.state === 'thinking' || Boolean(room.draft);
   const attention = overview && (overview.state === 'unconfigured');
   return <>
-    <button ref={button} className={`master-fab ${thinking ? 'thinking' : ''} ${attention ? 'attention' : ''} ${open ? 'open' : ''}`} style={fabStyle(position)} onClick={() => setOpen(value => !value)}
+    <button ref={button} className={`master-fab ${thinking ? 'thinking' : ''} ${attention ? 'attention' : ''} ${open ? 'open' : ''} ${callView ? 'voice' : ''}`} style={fabStyle(position)} onClick={() => setOpen(value => !value)}
       aria-label={words('마스터 에이전트', 'Master agent')} title={`${words('마스터 에이전트', 'Master agent')} (Shift+M)`} aria-expanded={open} aria-keyshortcuts="Shift+M">
-      {thinking ? <LoaderCircle size={22} className="spin" /> : <Bot size={22} />}
+      {callView ? <Mic size={22} /> : thinking ? <LoaderCircle size={22} className="spin" /> : <Bot size={22} />}
       {unread > 0 && <span className="master-fab-badge">{unread > 9 ? '9+' : unread}</span>}
       {!unread && (overview?.activeTasks ?? 0) > 0 && <span className="master-fab-tasks">{overview!.activeTasks}</span>}
     </button>
     {open && <Suspense fallback={<div className="master-panel"><LoaderCircle className="spin" size={18} /></div>}>
-      <MasterPanel token={token} room={room} tabId={tab.current} sessionId={sessionId} top={position.panelTop} onClose={close} onEarlier={() => follow.current?.earlier() ?? Promise.resolve()} onOpenSession={id => controlsRef.current.selectSession(id)}
+      <MasterPanel token={token} room={room} tabId={tab.current} sessionId={sessionId} voice={voice} top={position.panelTop} onClose={close} onEarlier={() => follow.current?.earlier() ?? Promise.resolve()} onOpenSession={id => controlsRef.current.selectSession(id)}
         onCommand={(command: MasterScreenCommand) => runScreenCommand(command, controlsRef.current)} />
     </Suspense>}
   </>;
