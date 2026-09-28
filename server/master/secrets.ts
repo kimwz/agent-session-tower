@@ -125,7 +125,7 @@ export class SecretVault {
 
   /** `redact` over any JSON value, names of fields included. */
   redactInResponse(value: unknown): unknown {
-    const walk = (item: unknown): unknown => typeof item === 'string' ? this.redact(item) : Array.isArray(item) ? item.map(walk)
+    const walk = (item: unknown): unknown => typeof item === 'string' ? this.redact(item) : typeof item === 'number' ? this.redactNumber(item) : Array.isArray(item) ? item.map(walk)
       : item && typeof item === 'object' ? Object.fromEntries(Object.entries(item).map(([key, child]) => [this.redact(key), walk(child)])) : item;
     return walk(value);
   }
@@ -135,6 +135,7 @@ export class SecretVault {
     const fields = SECRET_FIELDS.find(item => item.path.test(localRoute(path)))?.fields ?? [];
     const walk = (item: unknown): unknown => {
       if (typeof item === 'string') return this.hide(item);
+      if (typeof item === 'number') return this.redactNumber(item);
       if (Array.isArray(item)) return item.map(walk);
       if (item && typeof item === 'object') {
         return Object.fromEntries(Object.entries(item).map(([key, child]) => [this.hide(key), fields.includes(key) && typeof child === 'string' ? `{{secret:${this.keep(child, 'answer')}}}` : walk(child)]));
@@ -169,6 +170,16 @@ export class SecretVault {
     };
     return walk(value, []);
   }
+
+  /** A number that spells a value hidden everywhere (a numeric card value) becomes its reference. */
+  private redactNumber(item: number): number | string {
+    const text = String(item);
+    const hidden = this.redact(text);
+    return hidden === text ? item : hidden;
+  }
+
+  /** Whether text holds, as it is, a value hidden everywhere. */
+  holds(text: string): boolean { return this.redact(text) !== text; }
 
   /** A reference for a value the owner typed into a secret card, whatever its format; none past `MAX_CARDS`. */
   reference(value: string): string {

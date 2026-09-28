@@ -835,6 +835,40 @@ test('the answer as it is written never shows a card value, not even the start o
   assert.doesNotMatch(JSON.stringify(answer.data), /card-password/);
 });
 
+test('a card value the model writes out itself goes nowhere: not into requests, the screen, cards, notes or numbers it reads', async t => {
+  const value = '12345678';
+  const long = 'L'.repeat(4096);
+  const { service, room, tower, said } = await master(t, seen => seen.method === 'GET' ? { body: { payload: { selected: 12345678 } } } : { body: {} }, [
+    [call('request_secret', { purpose: 'pin' }), call('request_secret', { purpose: 'long' })],
+    [say('카드를 드렸습니다.')],
+    [say('첫째 받았습니다.')],
+    [say('둘째 받았습니다.')],
+    [call('tower_api', { method: 'POST', path: '/api/sessions', body: { provider: 'claude', cwd: '/w', prompt: `type ${value}` } }),
+      call('tower_api', { method: 'GET', path: '/api/triggers/t/events/e' }),
+      call('ui', { action: 'openPanel', panel: 'newSession', cwd: '/w', prompt: `type ${value}` })],
+    request => {
+      const [post, read, ui] = toolOutputs(request);
+      assert.match(String(post.error), /그대로 들어 있습니다/);
+      assert.doesNotMatch(JSON.stringify(read), /12345678/);
+      assert.doesNotMatch(JSON.stringify(ui), /LLLLLLLL/);
+      return [say('끝.')];
+    },
+  ]);
+  const seen = screen(room, () => ({ result: 'done', note: long }), () => service);
+  await service.send({ clientMessageId: 'message-0214', text: '핀이랑 긴 값 받아줘', local: true });
+  await said(/카드를 드렸습니다/);
+  const [pin, longCard] = room.recent(20).filter(entry => entry.data.kind === 'card');
+  await service.card(pin.id, { value }, true);
+  await said(/첫째 받았습니다/);
+  await service.card(longCard.id, { value: long }, true);
+  await said(/둘째 받았습니다/);
+  await service.send({ clientMessageId: 'message-0215', text: '진행해', local: true, viewContext: { tabId: 'tab-q' } });
+  await said(/끝/);
+  assert.equal(tower.seen.filter(entry => entry.method === 'POST').length, 0, 'nothing was sent with the value in it');
+  assert.equal(seen.length, 1);
+  assert.doesNotMatch(JSON.stringify(seen[0]), /12345678/);
+});
+
 test('a notifications card records how it went on the device that pressed it', async t => {
   const { service, room, said } = await master(t, () => ({ body: {} }), [
     [call('browser_action', { kind: 'push-subscribe' })],

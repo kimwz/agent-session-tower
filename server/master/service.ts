@@ -360,6 +360,9 @@ export class MasterService {
     const refusal = refusalFor(guards, turn.scope, target, affected);
     if (refusal) return { error: refusal };
     const given = target.method === 'POST' ? (args.body && typeof args.body === 'object' ? args.body as Record<string, unknown> : {}) : undefined;
+    // A value from a secret card goes out only through its reference, in the request's secret field; written out as
+    // it is (in a path, a title or a prompt), it would be kept and shown openly.
+    if (this.vault.holds(target.path) || this.vault.holds(JSON.stringify(given ?? null))) return { error: '요청에 비밀 카드로 받은 값이 그대로 들어 있습니다. 값 대신 참조를 이 요청의 비밀 칸에 넣으세요.' };
     let body: unknown = given;
     // References come only from values the owner gave (pasted, or typed into a secret card), whatever the settings,
     // and go back only into the request's secret fields.
@@ -490,6 +493,8 @@ export class MasterService {
   private async ui(args: Record<string, unknown>, turn: Turn): Promise<unknown> {
     let command: MasterScreenCommand;
     try { command = screenCommand(args); } catch (error) { return { error: (error as Error).message }; }
+    // What goes to the page (a prefilled request, a search) and into a card is hidden like everything shown.
+    command = hideStrings(command, text => this.hideText(text));
     if (!this.options.settings.current().showResults && (command.kind === 'openSession' || command.kind === 'openPanel')) {
       this.options.room.add({ kind: 'card', card: { type: 'open', label: truncate(this.hideText(openLabel(command)), 120), command } });
       return { result: 'card', note: 'Opening things on the screen is off in the settings; the owner got a button to open it.' };
@@ -517,7 +522,7 @@ export class MasterService {
   ack(id: string, result: MasterDirectiveResult, note?: string): boolean {
     const waiting = this.acks.get(id);
     // Hidden, then shortened, where the command waits.
-    waiting?.({ result, ...(note ? { note: note.slice(0, 4000) } : {}) });
+    waiting?.({ result, ...(note ? { note } : {}) });
     return Boolean(waiting);
   }
 
@@ -851,4 +856,11 @@ function plainTerminal(output: string): string {
     .replace(/\x1b[@-Z\\-_]/g, '')
     .replace(/\r+\n/g, '\n').replace(/\r/g, '\n')
     .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+}
+
+/** Every string in a plain value passed through `hide`. */
+function hideStrings<T>(value: T, hide: (text: string) => string): T {
+  const walk = (item: unknown): unknown => typeof item === 'string' ? hide(item) : Array.isArray(item) ? item.map(walk)
+    : item && typeof item === 'object' ? Object.fromEntries(Object.entries(item).map(([key, child]) => [key, walk(child)])) : item;
+  return walk(value) as T;
 }
