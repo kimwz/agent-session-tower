@@ -32,6 +32,7 @@ async function harness(t: test.TestContext, options: { bound?: boolean; createSt
     run.status = status; run.finishedAt = tick(); kept.updatedAt = tick();
   };
   let messageStatus = 202;
+  let pageSize = 200;
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
@@ -47,7 +48,7 @@ async function harness(t: test.TestContext, options: { bound?: boolean; createSt
     }
     const message = /^\/api\/sessions\/([^/]+)\/messages$/.exec(url.pathname);
     if (req.method === 'POST' && message) {
-      if (messageStatus !== 202) { res.writeHead(messageStatus, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'busy' })); return; }
+      if (messageStatus !== 202) { res.writeHead(messageStatus, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: 'busy', ...(messageStatus === 503 ? { disposition: 'not-admitted' } : {}) })); return; }
       const run: Run = { id: `r${runs.length + 1}`, sessionId: decodeURIComponent(message[1]), prompt: String(body.prompt), status: 'running', createdAt: tick(), output: '' };
       runs.push(run);
       res.writeHead(202, { 'Content-Type': 'application/json' }).end(JSON.stringify({ run }));
@@ -57,7 +58,10 @@ async function harness(t: test.TestContext, options: { bound?: boolean; createSt
     if (req.method === 'GET' && detail) {
       const id = decodeURIComponent(detail[1]);
       const kept = history(id);
-      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ session: { id, updatedAt: kept.updatedAt }, messages: kept.messages, hasMore: false }));
+      const before = url.searchParams.get('before');
+      const end = before === null ? kept.messages.length : Number(before);
+      const start = Math.max(0, end - pageSize);
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ session: { id, updatedAt: kept.updatedAt }, messages: kept.messages.slice(start, end), hasMore: start > 0, ...(start > 0 ? { nextBefore: start } : {}) }));
       return;
     }
     res.writeHead(404, { 'Content-Type': 'application/json' }).end('{}');
@@ -82,7 +86,7 @@ async function harness(t: test.TestContext, options: { bound?: boolean; createSt
   const session = await open();
   // Reports Tower took: each became a turn of the master session.
   const reports = () => runs.filter(run => run.sessionId === MASTER && run.prompt.startsWith('[Tower report]')).map(run => ({ body: { prompt: run.prompt } }));
-  return { dir, session, settings, runs, jobs, posted, finish, reports, open, tick, setMessageStatus: (status: number) => { messageStatus = status; } };
+  return { dir, session, settings, runs, jobs, posted, finish, reports, open, tick, history, setMessageStatus: (status: number) => { messageStatus = status; }, setPageSize: (size: number) => { pageSize = size; } };
 }
 
 test('the first message starts the master session in its own folder, with its guide; a second start needs "replace"', async t => {
@@ -209,4 +213,57 @@ test('a report Tower keeps refusing is tried less and less often, then shown as 
   assert.equal(h.session.activeTasks(), 0);
   const tries = h.posted.filter(item => String(item.body.prompt).startsWith('[Tower report]')).length;
   assert.equal(tries, 8, 'given up after eight refusals');
+});
+
+test('a report Tower could not take just then (a web or worker changing over) waits without counting a try', async t => {
+  const h = await harness(t, { bound: true });
+  await h.session.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: 'held' }, { session: { id: 'claude:held' }, run: { id: 'h1' } });
+  const run: Run = { id: 'h1', sessionId: 'claude:held', prompt: 'held', status: 'running', createdAt: h.tick(), output: '' };
+  h.runs.push(run);
+  h.finish(run, 'Done.');
+  h.setMessageStatus(503);
+  for (let round = 0; round < 20; round++) { await h.session.follow(); await new Promise(resolve => setTimeout(resolve, 5)); }
+  assert.equal(h.session.failedReports(), 0);
+  assert.equal(h.session.activeTasks(), 1);
+  h.setMessageStatus(202);
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await h.session.follow();
+  assert.equal(h.reports().length, 1);
+});
+
+test('a spoken request whose sending is in doubt is not sent again by its key; a refused one can be said again', async t => {
+  const h = await harness(t, { bound: true });
+  h.setMessageStatus(500);
+  await assert.rejects(h.session.spoken({ text: '배포해 줘', voiceSession: 'v', key: 'k1' }));
+  await h.session.spoken({ text: '배포해 줘', voiceSession: 'v', key: 'k1' });
+  assert.equal(h.posted.filter(item => String(item.body.prompt).includes('배포해 줘')).length, 1, 'not sent twice');
+  h.setMessageStatus(400);
+  await assert.rejects(h.session.spoken({ text: '다른 요청', voiceSession: 'v', key: 'k2' }));
+  h.setMessageStatus(202);
+  await h.session.spoken({ text: '다른 요청', voiceSession: 'v', key: 'k2' });
+  assert.equal(h.runs.filter(run => run.prompt === '[voice] 다른 요청').length, 1);
+});
+
+test('a report in doubt is looked for back through the history to when it was sent, pages included', async t => {
+  const h = await harness(t, { bound: true });
+  await h.session.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: 'paged' }, { session: { id: 'claude:paged' }, run: { id: 'p1' } });
+  const run: Run = { id: 'p1', sessionId: 'claude:paged', prompt: 'paged', status: 'running', createdAt: h.tick(), output: '' };
+  h.runs.push(run);
+  h.finish(run, 'Done.');
+  const saved = join(h.dir, 'follow.json');
+  const file = JSON.parse(await readFile(saved, 'utf8')) as { followed: Array<Record<string, unknown>> };
+  const sentAt = Date.now() - 5 * 60_000;
+  Object.assign(file.followed[0], { state: 'completed', report: 'uncertain', reportId: 'cccc3333', reportAt: new Date(sentAt).toISOString() });
+  // It arrived (its run is gone from the list), and many messages came after it.
+  const kept = h.history(MASTER);
+  kept.messages.push({ id: randomUUID(), role: 'user', text: '[Tower report] Work you handed out ended (report cccc3333):\n- "paged" — completed', timestamp: new Date(sentAt + 1000).toISOString() });
+  for (let index = 0; index < 30; index++) kept.messages.push({ id: randomUUID(), role: index % 2 ? 'assistant' : 'user', text: `later ${index}`, timestamp: new Date(sentAt + 2000 + index * 1000).toISOString() });
+  h.setPageSize(10);
+  await h.session.close();
+  const { writePrivateJson } = await import('../../server/stores/private-json.js');
+  await writePrivateJson(saved, JSON.stringify(file));
+  const again = await h.open();
+  await again.follow();
+  assert.equal(h.reports().length, 0, 'found on an older page, so not sent again');
+  assert.equal(again.activeTasks(), 0);
 });

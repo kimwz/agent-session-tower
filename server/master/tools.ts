@@ -7,6 +7,8 @@ import { READ_SCHEMA, tablesFrom, type ReadDatabase, type Table } from './read-d
 import type { TowerClient, TowerResponse } from './tower-client.js';
 
 const MAX_TOOL_OUTPUT = 12_000;
+/** A tool call ends by then, before its caller (the relay and the CLI, five minutes) gives up on it. */
+const TOOL_MS = 4 * 60_000;
 const REMOTE_WRITES_PER_MINUTE = 30;
 /** How long a screen command waits for the page to say it was done. */
 const ACK_MS = 5_000;
@@ -63,6 +65,7 @@ export interface MasterToolsOptions {
   /** The work the master handed out, for tower_query. */
   delegated(): Table;
   ackMs?: number;
+  toolMs?: number;
 }
 
 /**
@@ -78,9 +81,10 @@ export class MasterTools {
 
   async call(name: string, args: Record<string, unknown>): Promise<unknown> {
     if (!this.options.tower.hasCredentials()) return { error: 'Tower 웹에 아직 연결되지 않았습니다. 잠시 뒤 다시 하세요.' };
-    if (name === 'tower_api') return this.towerApi(args);
+    const signal = AbortSignal.timeout(this.options.toolMs ?? TOOL_MS);
+    if (name === 'tower_api') return this.towerApi(args, signal);
     if (name === 'tower_query') return this.towerQuery(args);
-    if (name === 'session_read') return this.sessionRead(args);
+    if (name === 'session_read') return this.sessionRead(args, signal);
     if (name === 'ui') return this.ui(args);
     if (name === 'terminal_read') return this.terminalRead(args);
     return { error: `알 수 없는 도구: ${name}` };
@@ -96,17 +100,21 @@ export class MasterTools {
     return Boolean(waiting);
   }
 
-  private async towerApi(args: Record<string, unknown>): Promise<unknown> {
+  private async towerApi(args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
     let target: ApiTarget;
     try { target = apiTarget(String(args.method), String(args.path), typeof args.node === 'string' && args.node ? args.node : undefined); }
     catch (error) { return { error: (error as Error).message }; }
     const body = target.method === 'POST' ? (args.body && typeof args.body === 'object' && !Array.isArray(args.body) ? { ...args.body as Record<string, unknown> } : {}) : undefined;
-    if (!target.write) return answer(await this.options.tower.call(target.method, target.path, body, { write: false }));
-    if (target.node) await this.paceRemote(target.node);
+    if (!target.write) return answer(await this.options.tower.call(target.method, target.path, body, { write: false, signal })
+      .catch((error: unknown): TowerResponse => ({ status: 0, body: { error: error instanceof Error ? error.message : String(error) }, state: 'failed' })));
+    if (target.node) await this.paceRemote(target.node, signal);
+    // Out of time before anything went out: nothing was sent.
+    if (signal.aborted) return { error: '시간이 오래 걸려 보내지 않았습니다. 다시 시도하세요.' };
     // A joined computer runs a new request at most once by its ID; an Auto Prompt needs its own.
     const headers: Record<string, string> = target.node ? { 'X-Tower-Request-Id': uuidv7() } : {};
     if (target.local === '/api/auto-prompts' && body && !body.requestId) body.requestId = randomUUID();
-    const response = await this.options.tower.call('POST', target.path, body, { write: true, headers })
+    // Past the deadline a change still waiting for the web does not go; one on its way is not cut off.
+    const response = await this.options.tower.call('POST', target.path, body, { write: true, headers, beforeSend: signal })
       .catch((error: unknown): TowerResponse => ({ status: 0, body: { error: error instanceof Error ? error.message : String(error) }, state: 'uncertain' }));
     if (response.state === 'succeeded') await this.options.started(target, body, response.body).catch(() => {});
     const result = answer(response);
@@ -117,10 +125,14 @@ export class MasterTools {
    * A joined computer counts changes per controlling computer, shared with the owner's pages there; the master keeps
    * to half of that budget so the pages always have room.
    */
-  private async paceRemote(node: string): Promise<void> {
+  private async paceRemote(node: string, signal: AbortSignal): Promise<void> {
     const window = 60_000;
     const recent = (this.remoteWrites.get(node) ?? []).filter(at => Date.now() - at < window);
-    if (recent.length >= REMOTE_WRITES_PER_MINUTE) await new Promise(resolve => setTimeout(resolve, window - (Date.now() - recent[0]) + 10));
+    if (recent.length >= REMOTE_WRITES_PER_MINUTE) await new Promise<void>(resolve => {
+      const timer = setTimeout(resolve, window - (Date.now() - recent[0]) + 10);
+      signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+    if (signal.aborted) return;
     this.remoteWrites.set(node, [...recent.filter(at => Date.now() - at < window), Date.now()]);
   }
 
@@ -138,14 +150,15 @@ export class MasterTools {
     } catch (error) { return { error: (error as Error).message }; }
   }
 
-  private async sessionRead(args: Record<string, unknown>): Promise<unknown> {
+  private async sessionRead(args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
     const id = typeof args.sessionId === 'string' ? args.sessionId : '';
     if (!id) return { error: 'sessionId가 필요합니다.' };
     const limit = typeof args.limit === 'number' ? Math.min(Math.max(Math.floor(args.limit), 1), 60) : 20;
     let target: ApiTarget;
     try { target = apiTarget('GET', `/api/sessions/${encodeURIComponent(id)}?limit=${limit}`, typeof args.node === 'string' && args.node ? args.node : undefined); }
     catch (error) { return { error: (error as Error).message }; }
-    const response = await this.options.tower.call('GET', target.path, undefined, { write: false });
+    const response = await this.options.tower.call('GET', target.path, undefined, { write: false, signal })
+      .catch((error: unknown): TowerResponse => ({ status: 0, body: { error: error instanceof Error ? error.message : String(error) }, state: 'failed' }));
     if (response.state !== 'succeeded') return answer(response);
     const detail = response.body as SessionDetail;
     return answer({ ...response, body: {

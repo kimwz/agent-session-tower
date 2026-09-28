@@ -713,6 +713,19 @@ test('an outdated worker is never given the master, which it would run on whatev
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
 });
 
+test('while an outdated worker has a master session, it is not asked to route work by itself, since it would not keep it out of the master', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-master-route-'));
+  const stateDir = join(directory, 'state');
+  const master: Session = { id: 'claude:master', nativeId: 'm', provider: 'claude', title: '마스터', cwd: join(stateDir, 'master-session'), project: 'master-session', status: 'idle', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
+  const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [master], nativeIds: {}, settled: [], autoPrompts: [] });
+  const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
+  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  await client.start();
+  await assert.rejects(client.submitAutoPrompt({ provider: 'claude', prompt: 'somewhere', requestId: '12345678-1234-4234-8234-123456789ac0' }), { statusCode: 503, disposition: 'not-admitted' });
+  await assert.rejects(client.enqueue('claude:master', 'hello'), { statusCode: 503, disposition: 'not-admitted' });
+  assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
+});
+
 test('the current worker says it keeps the master to a subscription sign-in', async t => {
   const f = await fixture(); t.after(f.cleanup);
   const client = await f.connect();

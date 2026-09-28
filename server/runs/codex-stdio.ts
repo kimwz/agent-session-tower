@@ -8,7 +8,7 @@ import { requestedEffort, requestedModel } from '../providers/models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
 import { APP_NAME, APP_TITLE, APP_VERSION } from '../../shared/app-identity.js';
 import type { SessionMcpServers } from './session-mcp.js';
-import { checkCodexAccount, checkCodexConfig, CODEX_SUBSCRIPTION_CONFIG } from './subscription.js';
+import { checkCodexAccount, checkCodexProvider, CODEX_SUBSCRIPTION_CONFIG } from './subscription.js';
 
 // v2 wire shapes verified with Codex CLI 0.153.4 app-server generate-ts --experimental.
 type RequestId = string | number;
@@ -184,8 +184,6 @@ class StdioRun implements CodexStdioRun {
     if (this.options.subscriptionOnly) {
       checkCodexAccount(await this.request('account/read', { refreshToken: false }));
       if (this.result) return;
-      checkCodexConfig(await this.request('config/read', {}));
-      if (this.result) return;
     }
     const open = (approvalsReviewer?: CodexApprovalsReviewer) => this.request(this.options.threadId ? 'thread/resume' : 'thread/start', {
       ...(this.options.mcpServers ? { config: { mcp_servers: this.options.mcpServers } } : {}),
@@ -203,6 +201,8 @@ class StdioRun implements CodexStdioRun {
       resumed = await open();
     }
     if (this.result) return;
+    // The thread says which provider it runs on, profiles applied; the master's goes nowhere but OpenAI's own.
+    if (this.options.subscriptionOnly) checkCodexProvider(resumed?.modelProvider);
     // For unattended work, auto approval review is an execution requirement, not a preference. Older
     // providers that ignore it must not receive the task under another mode.
     if (this.options.approvalsReviewer === 'auto_review' && resumed?.approvalsReviewer !== 'auto_review') {

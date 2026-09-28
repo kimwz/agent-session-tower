@@ -83,4 +83,11 @@ test('the master\'s folder is recognised through a linked state directory too', 
   assert.equal(subscriptionOnly(join(base, 'linked'), join(real, 'master-session')), true);
   assert.equal(subscriptionOnly(real, join(base, 'linked', 'master-session')), true);
   assert.equal(subscriptionOnly(join(base, 'linked'), join(real, 'elsewhere')), false);
+  // The master's folder itself a link to somewhere else: the session's folder is recorded where it leads.
+  const away = join(base, 'away');
+  await mkdir(away);
+  await mkdir(join(base, 'state2'));
+  await symlink(away, join(base, 'state2', 'master-session'));
+  assert.equal(subscriptionOnly(join(base, 'state2'), away), true);
+  assert.equal(subscriptionOnly(join(base, 'state2'), join(base, 'state2', 'master-session')), true);
 });

@@ -627,3 +627,21 @@ test('two spoken requests steered into one turn get its one answer, read aloud o
   assert.equal(answers.length, 1, 'one answer, and no "could not answer" for the other');
   assert.equal(h.says().filter(item => item.kind === 'answer').length, 1);
 });
+
+test('a spoken request steered into a report\'s turn is answered aloud even when reports are not read', async t => {
+  const h = await harness(t, { settings: { voice: { readReports: false } }, steps: [undefined, undefined] });
+  const session = on(h);
+  autoPlay(h, session);
+  await h.queueEvent('W ended');
+  const report = await until(() => h.runs.find(run => run.prompt.startsWith('[Tower report]')));
+  await request(h, session, '그거 어떻게 됐어?');
+  const spoken = h.runs.find(run => run.prompt === '[voice] 그거 어떻게 됐어?')!;
+  spoken.steering = { targetRunId: report.id, state: 'delivered', requestedAt: h.tick(), deliveredAt: h.tick() };
+  const kept = h.history(MASTER);
+  kept.messages.push({ id: randomUUID(), role: 'user', text: report.prompt, timestamp: h.tick() }, { id: randomUUID(), role: 'user', text: spoken.prompt, timestamp: h.tick() },
+    { id: randomUUID(), role: 'assistant', text: 'W가 끝났습니다.', timestamp: h.tick() });
+  for (const run of [report, spoken]) { run.status = 'completed'; run.finishedAt = h.tick(); }
+  kept.updatedAt = h.tick();
+  await masterEntry(h, /W가 끝났습니다/);
+  assert.equal(h.says().filter(item => item.kind === 'answer').length >= 1, true);
+});

@@ -227,6 +227,8 @@ export class DurableRunManager extends EventEmitter {
     }
     this.requireSubscription(input.cwd);
     if (input.targetSessionId) this.requireSubscription(this.getSession(input.targetSessionId)?.cwd);
+    // An older worker routes by itself and does not know to keep other work out of the master's conversation.
+    else if (!input.cwd) for (const session of this.snapshot?.sessions ?? []) this.requireSubscription(session.cwd);
     const admitted = { ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) };
     return this.call('submitAutoPrompt', [input, ...(Object.keys(admitted).length ? [admitted] : [])]) as Promise<AutoPromptJob>;
   }

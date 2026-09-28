@@ -50,6 +50,8 @@ export interface Followed {
   report?: 'pending' | 'sending' | 'sent' | 'uncertain' | 'failed';
   /** How often Tower refused the report; it waits longer each time and gives up (shown as failed) in the end. */
   reportTries?: number;
+  /** Tower could not take it just then (a web or worker changing over): it waits a little, without counting a try. */
+  reportHeld?: true;
   /** The message the report went in, named in its text, and when it was sent. */
   reportId?: string;
   reportAt?: string;
@@ -187,13 +189,24 @@ export class MasterSession {
 
   private async sendSpoken(binding: MasterBinding, input: { text: string; voiceSession: string; key: string }): Promise<void> {
     const prompt = `${VOICE_MARK} ${input.text}`;
-    this.options.room.add({ kind: 'owner', text: input.text, voice: true });
-    const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true });
-    const run = (response.body as { run?: Run } | undefined)?.run;
-    if (response.state !== 'succeeded' || !run?.id) throw Object.assign(new Error((response.body as { error?: string } | undefined)?.error ?? '마스터 세션에 보내지 못했습니다.'), { statusCode: response.status || 503 });
-    this.remember(run.id);
-    this.add({ id: randomUUID(), kind: 'spoken', title: truncate(input.text, 80), sessionId: binding.sessionId, runId: run.id, prompt, createdAt: new Date().toISOString(), state: 'running', voice: input.voiceSession, key: input.key });
+    // On disk before it goes: sent again with the same key, or after a restart, it is not sent twice.
+    const item: Followed = { id: randomUUID(), kind: 'spoken', title: truncate(input.text, 80), sessionId: binding.sessionId, prompt, createdAt: new Date().toISOString(), state: 'running', voice: input.voiceSession, key: input.key };
+    this.add(item);
     await this.save();
+    this.options.room.add({ kind: 'owner', text: input.text, voice: true });
+    const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true })
+      .catch(() => ({ state: 'uncertain' as const, status: 0, body: undefined }));
+    const run = (response.body as { run?: Run } | undefined)?.run;
+    if (response.state === 'succeeded' && run?.id) {
+      item.runId = run.id;
+      this.remember(run.id);
+      await this.save();
+      return;
+    }
+    // Refused, it can be said again; whether an uncertain one arrived is not known, so it is not sent again by its key.
+    if (response.state !== 'uncertain') { this.file.followed = this.file.followed.filter(entry => entry !== item); await this.save(); }
+    else { item.state = 'unknown'; await this.save(); }
+    throw Object.assign(new Error((response.body as { error?: string } | undefined)?.error ?? '마스터 세션에 보내지 못했습니다.'), { statusCode: response.status || 503 });
   }
 
   /** Work a tower_api call started (a new session, a message, an Auto Prompt), followed so its end is reported. */
@@ -309,13 +322,15 @@ export class MasterSession {
     // A turn several messages were steered into is answered, and read aloud, once.
     const turn = item.turn ?? item.runId;
     if (turn && this.file.followed.some(other => other !== item && other.spoke && (other.turn ?? other.runId) === turn)) return;
-    item.spoke = true;
     const report = item.kind === 'report';
     const state = voice.speaks(report);
     if (!state) return;
     const speak = { state, ...(item.voice && !report ? { session: item.voice } : {}) };
-    if (ended === 'completed' && item.answer) this.options.room.add(report ? { kind: 'event', text: item.answer, speak } : { kind: 'master', text: item.answer, turnId: item.id, final: true, speak });
-    else this.options.room.add({ kind: 'error', text: ended === 'cancelled' ? '요청이 멈췄습니다.' : '요청에 답하지 못했습니다. 마스터 창에서 확인해 주세요.', speak });
+    if (ended === 'completed' && item.answer) {
+      // Only an answer read aloud stands for its turn; a failure does not keep the turn's answer from being read.
+      item.spoke = true;
+      this.options.room.add(report ? { kind: 'event', text: item.answer, speak } : { kind: 'master', text: item.answer, turnId: item.id, final: true, speak });
+    } else this.options.room.add({ kind: 'error', text: ended === 'cancelled' ? '요청이 멈췄습니다.' : '요청에 답하지 못했습니다. 마스터 창에서 확인해 주세요.', speak });
     voice.deliver();
   }
 
@@ -324,7 +339,9 @@ export class MasterSession {
    * sending was cut off can be found again. Nothing is sent twice.
    */
   private async sendReports(binding: MasterBinding): Promise<boolean> {
-    const due = (item: Followed) => !item.reportTries || Date.now() - Date.parse(item.reportAt ?? item.createdAt) >= (this.options.reportRetryMs ?? REPORT_RETRY_MS) * 2 ** (item.reportTries - 1);
+    const retry = this.options.reportRetryMs ?? REPORT_RETRY_MS;
+    const since = (item: Followed) => Date.now() - Date.parse(item.reportAt ?? item.createdAt);
+    const due = (item: Followed) => item.reportHeld ? since(item) >= retry : !item.reportTries || since(item) >= retry * 2 ** (item.reportTries - 1);
     const waiting = this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'pending' && due(item));
     if (!waiting.length) return false;
     const line = (item: Followed) => `- "${item.title}" — ${item.state}${item.sessionId ? ` (session ${item.sessionId}${item.node ? ` on node ${item.node}` : ''})` : ''}`
@@ -347,6 +364,8 @@ export class MasterSession {
       const run = (response.body as { run?: Run } | undefined)?.run;
       for (const item of batch) {
         item.report = response.state === 'succeeded' ? 'sent' : response.state === 'uncertain' ? 'uncertain' : 'pending';
+        if (response.state === 'not-admitted') { item.reportHeld = true; continue; }
+        delete item.reportHeld;
         if (item.report !== 'pending') continue;
         item.reportTries = (item.reportTries ?? 0) + 1;
         if (item.reportTries >= REPORT_TRIES) item.report = 'failed';
@@ -374,21 +393,36 @@ export class MasterSession {
     const doubtful = this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'uncertain' && item.reportId);
     if (!doubtful.length) return false;
     let changed = false;
-    let history: SessionDetail | undefined;
+    const earliest = Math.min(...doubtful.map(item => Date.parse(item.reportAt ?? item.createdAt)));
+    let history: ChatMessage[] | undefined | null = null;
     for (const reportId of new Set(doubtful.map(item => item.reportId!))) {
       const items = doubtful.filter(item => item.reportId === reportId);
       const named = (text: string) => text.startsWith(REPORT_MARK) && text.includes(`(report ${reportId})`);
       const run = (snapshot.runs ?? []).find(entry => entry.sessionId === binding.sessionId && named(entry.prompt));
-      if (!run) {
-        history ??= await this.options.tower.call('GET', `/api/sessions/${encodeURIComponent(binding.sessionId)}?limit=200`, undefined, { write: false })
-          .then(response => response.state === 'succeeded' ? response.body as SessionDetail : undefined).catch(() => undefined);
-        if (!history) continue;
-      }
-      const seen = run || history!.messages?.some(message => message.role === 'user' && named(normalize(message.text)));
-      if (seen) { for (const item of items) item.report = 'sent'; if (run) this.reported(run, binding, run.prompt); changed = true; }
+      if (run) { for (const item of items) item.report = 'sent'; this.reported(run, binding, run.prompt); changed = true; continue; }
+      // Read back to before it was sent; history that could not be read that far proves nothing.
+      if (history === null) history = await this.historySince(binding.sessionId, earliest - 60_000);
+      if (!history) continue;
+      if (history.some(message => message.role === 'user' && named(normalize(message.text)))) { for (const item of items) item.report = 'sent'; changed = true; }
       else if (Date.now() - Date.parse(items[0].reportAt ?? items[0].createdAt) > RECONCILE_MS) { for (const item of items) item.report = 'pending'; changed = true; }
     }
     return changed;
+  }
+
+  /** A session's messages back to `since`, or nothing when they could not all be read. */
+  private async historySince(sessionId: string, since: number): Promise<ChatMessage[] | undefined> {
+    const path = `/api/sessions/${encodeURIComponent(sessionId)}?limit=200`;
+    const messages: ChatMessage[] = [];
+    let before: number | undefined;
+    for (let page = 0; page < 10; page++) {
+      const response = await this.options.tower.call('GET', before === undefined ? path : `${path}&before=${before}`, undefined, { write: false }).catch(() => undefined);
+      if (response?.state !== 'succeeded') return undefined;
+      const detail = response.body as SessionDetail;
+      messages.push(...(detail.messages ?? []));
+      if (!detail.hasMore || detail.nextBefore === undefined || (detail.messages ?? []).some(message => Date.parse(message.timestamp) < since)) return messages;
+      before = detail.nextBefore;
+    }
+    return undefined;
   }
 
   /**
@@ -430,8 +464,15 @@ export class MasterSession {
       if (candidates.length > 1) return undefined;
       const request = candidates[0] ?? -1;
       if (request >= 0) {
-        // Messages steered into the same turn are part of this request, not the next one.
-        const next = messages.findIndex((message, index) => index > request && message.role === 'user' && !together.some(other => sameRequest(message.text, other)));
+        // Messages steered into the same turn are part of this request, not the next one: each of them once.
+        const steered = [...together];
+        const next = messages.findIndex((message, index) => {
+          if (index <= request || message.role !== 'user') return false;
+          const one = steered.findIndex(other => sameRequest(message.text, other));
+          if (one < 0) return true;
+          steered.splice(one, 1);
+          return false;
+        });
         const answer = messages.slice(request + 1, next < 0 ? messages.length : next).reverse().find(message => message.role === 'assistant' && message.text.trim());
         if (answer) return { text: answer.text, followedBy: next >= 0 };
       }
@@ -450,7 +491,7 @@ export class MasterSession {
 
   /** Keeps what is still followed or not yet reported, and the most recent of the rest. */
   private trim(): void {
-    const open = (item: Followed) => item.state === 'running' || item.report === 'pending' || item.report === 'sending';
+    const open = (item: Followed) => item.state === 'running' || item.report === 'pending' || item.report === 'sending' || item.report === 'uncertain';
     const done = this.file.followed.filter(item => !open(item));
     if (done.length <= FOLLOWED) return;
     const drop = new Set(done.slice(0, done.length - FOLLOWED).map(item => item.id));

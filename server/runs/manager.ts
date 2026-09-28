@@ -21,7 +21,7 @@ import { findExecutable, providerDirectories, PROVIDERS } from '../providers/dis
 import { towerInstructionsBlock } from '../sessions/parser.js';
 import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
-import { checkClaudeSubscription, subscriptionOnly, withoutKeys } from './subscription.js';
+import { checkClaudeSubscription, MASTER_TOOL_TIMEOUT_SECONDS, subscriptionOnly, withoutKeys } from './subscription.js';
 import { awaitToolServers, NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { automatedOrigin, ownerOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
 import { WakeupTracker, type Wakeup } from './wakeup.js';
@@ -853,7 +853,9 @@ export class RunManager extends EventEmitter {
       this.reservedSessions.delete(session.id);
       return;
     }
-    const mcpServers = tools.servers;
+    // The master's own tools may take longer than Codex's default minute (see MASTER_TOOL_TIMEOUT_SECONDS).
+    const mcpServers = master && tools.servers?.tower_master
+      ? { ...tools.servers, tower_master: { ...tools.servers.tower_master, tool_timeout_sec: MASTER_TOOL_TIMEOUT_SECONDS } as typeof tools.servers.tower_master } : tools.servers;
     if (tools.towerTools) run.towerTools = tools.towerTools;
     // The owner's own turns hand approvals to Codex's automatic reviewer, in new and resumed threads alike; if Codex
     // does not confirm it, the turn still runs and approvals wait in Tower. Other work keeps the reviewer its setting
@@ -965,6 +967,7 @@ export class RunManager extends EventEmitter {
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_SESSION_ID;
     if (master) {
+      env.MCP_TOOL_TIMEOUT = String(MASTER_TOOL_TIMEOUT_SECONDS * 1000);
       // Asked the way the turn will start: same program, folder and environment.
       await (this.options.checkClaudeSubscription ?? checkClaudeSubscription)(executable, session.cwd, env);
       await this.prepareLaunch(run);

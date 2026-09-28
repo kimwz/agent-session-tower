@@ -65,11 +65,10 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const request = JSON.parse(line);
   if (request.method === 'initialize') { reply(request, {}); return; }
   if (request.method === 'initialized') return;
-  if (request.method === 'config/read') { reply(request, { config: { model_provider: process.env.FIXTURE_PROVIDER || null }, origins: {}, layers: null }); return; }
   if (request.method === 'account/read') { reply(request, { account: process.env.FIXTURE_ACCOUNT === 'apiKey' ? { type: 'apiKey' } : { type: 'chatgpt', email: null, planType: 'pro' }, requiresOpenaiAuth: true }); return; }
   if (request.method === 'thread/start' || request.method === 'thread/resume') {
     if (mode === 'writer-conflict') { send({ id: request.id, error: { code: -32000, message: 'thread-store conflict: already has an active writer' } }); return; }
-    reply(request, { thread: { id: mode === 'mismatch' ? '${OTHER}' : threadId, status: { type: mode === 'active' ? 'active' : 'idle' } }, approvalPolicy: 'on-request', approvalsReviewer: mode === 'reviewer-missing' ? undefined : mode === 'reviewer-mismatch' ? 'user' : request.params.approvalsReviewer || 'user', sandbox: { type: 'readOnly', networkAccess: false } }); return;
+    reply(request, { thread: { id: mode === 'mismatch' ? '${OTHER}' : threadId, status: { type: mode === 'active' ? 'active' : 'idle' } }, modelProvider: process.env.FIXTURE_PROVIDER || 'openai', approvalPolicy: 'on-request', approvalsReviewer: mode === 'reviewer-missing' ? undefined : mode === 'reviewer-mismatch' ? 'user' : request.params.approvalsReviewer || 'user', sandbox: { type: 'readOnly', networkAccess: false } }); return;
   }
   if (request.method === 'turn/start') {
     if (mode === 'lost-start') { process.exit(3); return; }
@@ -408,8 +407,8 @@ test('the master\'s Codex accepts only a ChatGPT sign-in, checked before its thr
   const elsewhere = await fixture(t, 'complete', { subscriptionOnly: true, env: { ...process.env, FIXTURE_MODE: 'complete', FIXTURE_PROVIDER: 'custom-gateway' } });
   await elsewhere.run.start().catch(() => {});
   await until(() => elsewhere.finished.length === 1);
-  assert.match(String(elsewhere.finished[0].error), /OpenAI의 기본 서비스로만/, 'a profile that switches the provider is refused too');
-  assert.equal(elsewhere.sent.some(frame => frame.method === 'thread/resume'), false);
+  assert.match(String(elsewhere.finished[0].error), /OpenAI의 기본 서비스로만/, 'a thread Codex opened on another provider (a profile, project settings) is refused');
+  assert.equal(elsewhere.sent.some(frame => frame.method === 'turn/start'), false, 'nothing is sent to it');
 
   const ordinary = await fixture(t, 'complete');
   await ordinary.run.start();

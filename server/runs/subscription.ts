@@ -16,6 +16,11 @@ const KEYED_ENVIRONMENT = [
 
 /** Codex settings for a turn of the master: a ChatGPT sign-in only, and OpenAI's own service. */
 export const CODEX_SUBSCRIPTION_CONFIG = ['-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"'];
+/**
+ * How long the master's own tools may take: a call waits for a web that is restarting and paces calls to joined
+ * computers, and a tool cut off by the CLI while the host still works would be sent again by the master.
+ */
+export const MASTER_TOOL_TIMEOUT_SECONDS = 300;
 
 /** A path as the file system names it, links followed; for a path that does not exist (yet), its nearest existing parent's. */
 function canonical(path: string): string {
@@ -31,7 +36,17 @@ function canonical(path: string): string {
  * compared with links followed, so a state directory reached through a link (as /var is on macOS) still matches.
  */
 export function subscriptionOnly(stateDir: string, cwd: string): boolean {
-  return canonical(cwd) === join(canonical(stateDir), MASTER_FOLDER);
+  if (resolve(cwd) === join(resolve(stateDir), MASTER_FOLDER)) return true;
+  return canonical(cwd) === masterFolder(stateDir);
+}
+/** The master's folder with links followed (itself included), kept a little so busy callers do not ask the disk each time. */
+const folders = new Map<string, { path: string; at: number }>();
+function masterFolder(stateDir: string): string {
+  const known = folders.get(stateDir);
+  if (known && Date.now() - known.at < 10_000) return known.path;
+  const path = canonical(join(stateDir, MASTER_FOLDER));
+  folders.set(stateDir, { path, at: Date.now() });
+  return path;
 }
 
 /** Takes out what would let a CLI use an API key or another provider. */
@@ -58,10 +73,9 @@ export async function checkClaudeSubscription(executable: string, cwd: string, e
   throw new SubscriptionError('마스터는 Claude 구독 로그인(claude.ai)으로만 대화합니다. 이 컴퓨터의 Claude Code가 API 키나 다른 방식으로 로그인되어 있어 보내지 않았습니다. `claude auth login`으로 구독 계정에 로그인해 주세요.');
 }
 
-/** Codex's effective settings: OpenAI's own service, whatever profile is active. */
-export function checkCodexConfig(result: unknown): void {
-  const provider = (result as { config?: { model_provider?: unknown } } | undefined)?.config?.model_provider;
-  if (provider === undefined || provider === null || provider === 'openai') return;
+/** The provider Codex opened the master's thread with, as it says (profiles and project settings applied): only OpenAI's own. */
+export function checkCodexProvider(provider: unknown): void {
+  if (provider === 'openai') return;
   throw new SubscriptionError('마스터는 OpenAI의 기본 서비스로만 대화합니다. Codex 설정이 다른 제공자를 쓰고 있어 보내지 않았습니다.');
 }
 
