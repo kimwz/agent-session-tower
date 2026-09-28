@@ -9,32 +9,32 @@ import { startMasterHost } from '../../server/master/host.js';
 import { MasterClient } from '../../server/master/client.js';
 import { masterPaths } from '../../server/master/paths.js';
 import { writePrivateJson } from '../../server/stores/private-json.js';
-import type { ModelCall } from '../../server/master/model-openai.js';
 import type { MasterCheckpoint, MasterOverview } from '../../shared/master.js';
 import { until } from '../helpers/until.js';
 
-test('the master runs in its own host: the web relays its conversation live and lets go of it without stopping it', async t => {
+test('the master host keeps its folder private, relays its live stream through the web, and lets go of it without stopping', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-host-'));
   const cleanup: Array<() => unknown> = [];
   // In order: pages and clients let go, the host flushes and stops, then its folder goes.
   t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
-  const model: ModelCall = async () => ({ output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: '네, 지금은 조용합니다.' }] }], text: '네, 지금은 조용합니다.' });
-  const host = await startMasterHost({ stateDir, model, idleMs: 60_000 });
+  const host = await startMasterHost({ stateDir, idleMs: 60_000 });
   cleanup.push(() => host.close());
   const paths = await masterPaths(stateDir);
   assert.equal((await stat(paths.token)).mode & 0o777, 0o600);
   assert.equal((await stat(paths.data)).mode & 0o777, 0o700);
+  // The master's own folder holds its guide for both tools.
+  const guide = await readFile(join(stateDir, 'master-session', 'CLAUDE.md'), 'utf8');
+  assert.equal(await readFile(join(stateDir, 'master-session', 'AGENTS.md'), 'utf8'), guide);
+  assert.match(guide, /tower_api/);
+  assert.match(guide, /\[Tower report\]/);
   const client = new MasterClient({ stateDir, credentials: () => ({ port: 1, token: 'a'.repeat(64), callerSecret: 'b'.repeat(64) }) });
   cleanup.push(() => client.dispose());
 
   const before = await client.call('overview') as MasterOverview;
-  assert.equal(before.state, 'unconfigured');
-  assert.equal(before.settings.guards.maxIrreversiblePerTurn, 0, 'no limits unless the owner sets them');
-  const after = await client.call('settings', { body: { apiKey: 'sk-test-0123456789abcdef' } }) as MasterOverview;
-  assert.equal(after.configured, true);
-  assert.equal(after.keyHint, '…cdef');
-  assert.doesNotMatch(JSON.stringify(after), /0123456789ab/);
-  assert.equal(((await stat(join(paths.data, 'openai-key.json'))).mode & 0o777), 0o600);
+  assert.equal(before.session, undefined, 'no master session until the owner starts one');
+  assert.equal(before.activeTasks, 0);
+  assert.deepEqual(Object.keys(before.settings).sort(), ['voice']);
+  await assert.rejects(client.call('settings', { body: { apiKey: 'sk-test-0123456789abcdef' } }), { statusCode: 400 }, 'the master takes no model key');
 
   // A page's live stream goes through the web to the host.
   const checkpoint = await client.call('checkpoint') as MasterCheckpoint;
@@ -45,24 +45,15 @@ test('the master runs in its own host: the web relays its conversation live and 
   const reader = stream.body!.getReader();
   let text = '';
   const reading = (async () => { for (;;) { const { value, done } = await reader.read(); if (done) return; text += new TextDecoder().decode(value); } })();
-  await client.call('send', { clientMessageId: 'message-0001', text: '지금 뭐 돌아가?', local: true });
-  await until(() => text.includes('조용합니다'));
-  assert.match(text, /"kind":"owner"/);
+  await client.call('settings', { body: { voice: { endSilenceMs: 1400 } } });
+  await until(() => text.includes('"endSilenceMs":1400'));
   await reader.cancel(); await reading.catch(() => {});
 
-  // Letting go (a web shutting down) leaves the host and its conversation in place.
+  // Letting go (a web shutting down) leaves the host in place; idle, it steps aside when asked.
   client.dispose();
   const again = new MasterClient({ stateDir, credentials: () => undefined });
   cleanup.push(() => again.dispose());
-  const resumed = await again.call('checkpoint') as MasterCheckpoint;
-  assert.equal(resumed.epoch, checkpoint.epoch);
-  assert.ok(resumed.entries.some(entry => entry.data.kind === 'master'));
-  // Idle (its answer saved), it steps aside when asked; then nothing answers and no version is in use.
-  for (let tries = 0; (await again.call('overview') as MasterOverview).state === 'thinking'; tries++) {
-    assert.ok(tries < 250, 'the turn did not end');
-    await new Promise(resolve => setTimeout(resolve, 20));
-  }
-  assert.equal(await again.hostVersion() !== null, true);
+  assert.equal((await again.call('checkpoint') as MasterCheckpoint).epoch, checkpoint.epoch);
   assert.equal(await again.call('shutdown'), true);
   const deadline = Date.now() + 5000;
   while (await again.hostVersion().catch(() => 'error') !== null) {
@@ -71,47 +62,69 @@ test('the master runs in its own host: the web relays its conversation live and 
   }
 });
 
-test('delegated work still running keeps an idle host alive, yet a newer build may take it over', async t => {
-  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-host-tasks-'));
+test('settings of the master that talked through a model API are dropped, its key files deleted, and its conversation left as it was', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-migrate-'));
+  const cleanup: Array<() => unknown> = [];
+  t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
+  const paths = await masterPaths(stateDir);
+  await mkdir(join(paths.data, 'room'), { recursive: true, mode: 0o700 });
+  await writePrivateJson(join(paths.data, 'settings.json'), JSON.stringify({ enabled: true, model: 'gpt-6-sol', effort: 'medium', showResults: true, guards: { hideSecrets: true }, voice: { endSilenceMs: 1300, voice: 'old' } }));
+  await writePrivateJson(join(paths.data, 'openai-key.json'), JSON.stringify({ apiKey: 'sk-old-0123456789abcdef' }));
+  await writePrivateJson(join(paths.data, 'anthropic-key.json'), JSON.stringify({ apiKey: 'sk-ant-0123456789abcdef' }));
+  await writePrivateJson(join(paths.data, 'elevenlabs-key.json'), JSON.stringify({ apiKey: 'el-0123456789abcdef' }));
+  const archived = JSON.stringify({ version: 1, entries: [{ id: 'e1', order: 0, at: '2026-09-27T00:00:00.000Z', revision: 1, data: { kind: 'owner', text: 'old' } }] });
+  await writeFile(join(paths.data, 'room', '000000.json'), archived, { mode: 0o600 });
+  const host = await startMasterHost({ stateDir, idleMs: 60_000 });
+  cleanup.push(() => host.close());
+  const client = new MasterClient({ stateDir, credentials: () => undefined });
+  cleanup.push(() => client.dispose());
+  const overview = await client.call('overview') as MasterOverview;
+  assert.equal(overview.settings.voice.endSilenceMs, 1300, 'voice settings are kept');
+  assert.equal(overview.voiceConfigured, true, 'the ElevenLabs key is kept');
+  assert.deepEqual(JSON.parse(await readFile(join(paths.data, 'settings.json'), 'utf8')), { voice: overview.settings.voice });
+  assert.equal(existsSync(join(paths.data, 'openai-key.json')), false);
+  assert.equal(existsSync(join(paths.data, 'anthropic-key.json')), false);
+  assert.equal(await readFile(join(paths.data, 'room', '000000.json'), 'utf8'), archived, 'the old conversation stays as it was');
+});
+
+test('a master session keeps the host alive past its idle time, yet another build may take it over', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-host-bound-'));
   const cleanup: Array<() => unknown> = [];
   t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
   const paths = await masterPaths(stateDir);
   await mkdir(paths.data, { recursive: true, mode: 0o700 });
-  await writePrivateJson(join(paths.data, 'tasks.json'), JSON.stringify({ items: [{ id: 'task-1', entryId: 'entry-1', sessionId: 'claude:elsewhere', title: 'Work in another session', state: 'running', createdAt: new Date().toISOString() }] }));
-  const host = await startMasterHost({ stateDir, model: async () => ({ output: [], text: '' }), idleMs: 50 });
+  await writePrivateJson(join(paths.data, 'settings.json'), JSON.stringify({ session: { sessionId: 'claude:master', provider: 'claude', startedAt: new Date().toISOString() } }));
+  const host = await startMasterHost({ stateDir, idleMs: 50 });
   cleanup.push(() => host.close());
   const client = new MasterClient({ stateDir, credentials: () => undefined });
   cleanup.push(() => client.dispose());
-  assert.equal((await client.call('overview') as MasterOverview).activeTasks, 1);
-  // Past its idle time it stays, to watch the work and report its end.
+  assert.equal((await client.call('overview') as MasterOverview).session?.id, 'claude:master');
+  // Past its idle time it stays, to report the work the master handed out.
   await new Promise(resolve => setTimeout(resolve, 1500));
   assert.notEqual(await client.hostVersion(), null);
-  // The work lives in its session and in the records, so the host steps aside for another build all the same.
+  // What it follows is on disk, so it steps aside for another build all the same.
   assert.equal(await client.call('shutdown'), true);
   const deadline = Date.now() + 5000;
   while (await client.hostVersion().catch(() => 'error') !== null) {
     assert.ok(Date.now() < deadline, 'the host did not step aside');
     await new Promise(resolve => setTimeout(resolve, 20));
   }
-  const saved = JSON.parse(await readFile(join(paths.data, 'tasks.json'), 'utf8')) as { items: Array<{ state: string }> };
-  assert.equal(saved.items[0]?.state, 'running', 'the next host takes the work up from the records');
 });
 
 test('the host answers a page\'s voice requests, refusing what is not its call, and shows voice use in its overview', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-host-voice-'));
   const cleanup: Array<() => unknown> = [];
   t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
-  const host = await startMasterHost({ stateDir, model: async () => ({ output: [], text: '' }), idleMs: 60_000 });
+  const host = await startMasterHost({ stateDir, idleMs: 60_000 });
   cleanup.push(() => host.close());
   const client = new MasterClient({ stateDir, credentials: () => undefined });
   cleanup.push(() => client.dispose());
-  await client.call('settings', { body: { apiKey: 'sk-test-0123456789abcdef' } });
   const overview = await client.call('overview') as MasterOverview;
   assert.deepEqual(overview.voice?.today, { sttSeconds: 0, ttsChars: 0, dollars: 0 });
   assert.deepEqual(overview.settings.voice, { voiceId: 'cgSgspJ2msm6clMCkdW9', model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0 });
   assert.equal(overview.voiceConfigured, false);
   const session = '0190f1c2-3d4e-7f00-8a00-000000000003';
-  await assert.rejects(client.call('voiceOn', { tabId: session }), { statusCode: 409 }, 'no ElevenLabs key yet');
+  await assert.rejects(client.call('voiceOn', { tabId: session }), { statusCode: 409 }, 'no master session yet');
   assert.equal(await client.call('voiceOff', { session }), false);
   assert.equal(await client.call('voicePresence', { session, listening: true, panelOpen: true }), false);
   assert.equal(await client.call('voiceActivity', { session, speaking: true }), false);
@@ -125,9 +138,10 @@ test('the host answers a page\'s voice requests, refusing what is not its call, 
   assert.doesNotMatch(JSON.stringify(saved), /0123456789ab/);
 });
 
-test('the master stays removable: only three existing files reach into it', async () => {
+test('the master stays removable: only these existing files reach into it', async () => {
   const root = join(import.meta.dirname, '..', '..');
-  const allowed = new Set(['server/index.ts', 'client/src/app/App.tsx']);
+  // The worker knows the master's folder, to give its turns their tools and keep them to a subscription sign-in.
+  const allowed = new Set(['server/index.ts', 'client/src/app/App.tsx', 'server/api/run-tools.ts', 'server/runs/subscription.ts']);
   const offenders: string[] = [];
   const walk = async (directory: string): Promise<void> => {
     for (const entry of await readdir(directory, { withFileTypes: true })) {
@@ -157,7 +171,7 @@ test('the master stays removable: only three existing files reach into it', asyn
   assert.doesNotMatch(await readFile(join(root, 'server/http/server.ts'), 'utf8'), /from '\.\.\/master\//);
 });
 
-test('a web that starts while delegated work or a message still waits starts the master host itself, without waiting for a page', async t => {
+test('a web that starts while a master session exists starts the master host itself, without waiting for a page', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-resume-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   const paths = await masterPaths(stateDir);
@@ -171,9 +185,9 @@ test('a web that starts while delegated work or a message still waits starts the
   const quiet = start();
   await new Promise(resolve => setTimeout(resolve, 400));
   quiet.dispose();
-  assert.equal(existsSync(marker), false, 'nothing waits, so no host is started');
+  assert.equal(existsSync(marker), false, 'no master session, so no host is started');
 
-  await writePrivateJson(join(paths.data, 'tasks.json'), JSON.stringify({ items: [{ id: 'task-1', state: 'running' }] }));
+  await writePrivateJson(join(paths.data, 'settings.json'), JSON.stringify({ session: { sessionId: 'claude:master', provider: 'claude', startedAt: new Date().toISOString() } }));
   const web = start();
   t.after(() => web.dispose());
   await until(() => existsSync(marker));

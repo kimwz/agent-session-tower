@@ -65,6 +65,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const request = JSON.parse(line);
   if (request.method === 'initialize') { reply(request, {}); return; }
   if (request.method === 'initialized') return;
+  if (request.method === 'account/read') { reply(request, { account: process.env.FIXTURE_ACCOUNT === 'apiKey' ? { type: 'apiKey' } : { type: 'chatgpt', email: null, planType: 'pro' }, requiresOpenaiAuth: true }); return; }
   if (request.method === 'thread/start' || request.method === 'thread/resume') {
     if (mode === 'writer-conflict') { send({ id: request.id, error: { code: -32000, message: 'thread-store conflict: already has an active writer' } }); return; }
     reply(request, { thread: { id: mode === 'mismatch' ? '${OTHER}' : threadId, status: { type: mode === 'active' ? 'active' : 'idle' } }, approvalPolicy: 'on-request', approvalsReviewer: mode === 'reviewer-missing' ? undefined : mode === 'reviewer-mismatch' ? 'user' : request.params.approvalsReviewer || 'user', sandbox: { type: 'readOnly', networkAccess: false } }); return;
@@ -385,3 +386,27 @@ for (const mode of ['steer-ok', 'steer-rejected', 'steer-mismatch', 'steer-lost'
     assert.equal(f.sent.filter(frame => frame.method === 'turn/steer').length, 1);
   });
 }
+
+test('the master\'s Codex accepts only a ChatGPT sign-in, checked before its thread opens', async t => {
+  const signedIn = await fixture(t, 'complete', { subscriptionOnly: true });
+  await signedIn.run.start();
+  await until(() => signedIn.finished.length === 1);
+  assert.equal(signedIn.finished[0].status, 'completed');
+  assert.deepEqual(signedIn.launches[0].args, ['app-server', '--stdio', '-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"']);
+  const methods = signedIn.sent.map(frame => frame.method);
+  assert.ok(methods.indexOf('account/read') >= 0 && methods.indexOf('account/read') < methods.indexOf('thread/resume'), 'the sign-in is read first');
+  assert.deepEqual(signedIn.sent.find(frame => frame.method === 'account/read')?.params, { refreshToken: false });
+
+  const keyed = await fixture(t, 'complete', { subscriptionOnly: true, env: { ...process.env, FIXTURE_MODE: 'complete', FIXTURE_ACCOUNT: 'apiKey' } });
+  await keyed.run.start().catch(() => {});
+  await until(() => keyed.finished.length === 1);
+  assert.equal(keyed.finished[0].status, 'error');
+  assert.match(String(keyed.finished[0].error), /ChatGPT 구독 로그인으로만/);
+  assert.equal(keyed.sent.some(frame => frame.method === 'thread/resume' || frame.method === 'turn/start'), false, 'nothing is sent to a keyed Codex');
+
+  const ordinary = await fixture(t, 'complete');
+  await ordinary.run.start();
+  await until(() => ordinary.finished.length === 1);
+  assert.deepEqual(ordinary.launches[0].args, ['app-server', '--stdio'], 'other sessions keep their own configuration');
+  assert.equal(ordinary.sent.some(frame => frame.method === 'account/read'), false);
+});

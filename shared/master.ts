@@ -1,37 +1,14 @@
 /**
- * The master agent: one conversation in which the owner asks Tower to do anything its pages can do.
- * Everything about it lives in `server/master`, `client/src/master` and this file, so it can be removed as a unit.
+ * The master agent: a Claude or Codex session Tower keeps in its own folder, with Tower's tools and a guide there, in
+ * which the owner asks Tower to do anything its pages can do. Tower adds only what a session cannot do alone: its
+ * tools, reports of the work it hands out, the owner's screen and voice. Everything about it lives in `server/master`,
+ * `client/src/master` and this file, so it can be removed as a unit.
  */
 
-import type { Attachment, SessionStatus } from './types.js';
+import type { Provider, SessionStatus } from './types.js';
 
-export const MASTER_OPENAI_MODELS = ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'] as const;
-/** Claude models, asked through the Anthropic API with the owner's Anthropic key. */
-export const MASTER_CLAUDE_MODELS = ['claude-opus-5', 'claude-opus-5-5'] as const;
-export const MASTER_MODELS = [...MASTER_OPENAI_MODELS, ...MASTER_CLAUDE_MODELS] as const;
-export type MasterProvider = 'openai' | 'anthropic';
-/** Which API a model name is asked through; any `claude-` model goes to Anthropic, everything else to OpenAI. */
-export const masterProvider = (model: string): MasterProvider => model.startsWith('claude-') ? 'anthropic' : 'openai';
-export const MASTER_EFFORTS = ['none', 'low', 'medium', 'high'] as const;
-export type MasterEffort = typeof MASTER_EFFORTS[number];
-
-/**
- * Optional limits. By default the master does everything the owner asks; the two protections that stay on keep
- * key values out of the model's context and keep this computer's local-only pages local.
- */
-export interface MasterGuards {
-  /** Keys and tokens the owner pastes, or a page returns, reach the model only as references. */
-  hideSecrets: boolean;
-  /** Account management and Tower updates only for requests typed on this computer itself, as on Tower's own pages. */
-  localOnlyPages: boolean;
-  /** Turns started by finished work (not by the owner) may only read and report. */
-  eventTurnsReadOnly: boolean;
-  /** Joined computers the master may only read from. */
-  readOnlyNodes: string[];
-  /** Irreversible calls one turn may make; 0 means no limit. */
-  maxIrreversiblePerTurn: number;
-}
-export const DEFAULT_MASTER_GUARDS: MasterGuards = { hideSecrets: true, localOnlyPages: true, eventTurnsReadOnly: false, readOnlyNodes: [], maxIrreversiblePerTurn: 0 };
+/** The master's folder under Tower's state directory: the session runs there, with its guide files. */
+export const MASTER_FOLDER = 'master-session';
 
 /** ElevenLabs voices the master reads aloud with; the first is the default (fast, natural Korean). */
 export const MASTER_TTS_MODELS = ['eleven_v3_conversational', 'eleven_v3', 'eleven_flash_v2_5'] as const;
@@ -53,36 +30,26 @@ export interface MasterVoiceSettings {
 }
 export const DEFAULT_MASTER_VOICE: MasterVoiceSettings = { voiceId: DEFAULT_MASTER_VOICE_ID, model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0 };
 
+/** The session the master talks through, and the ones it replaced (kept as ordinary sessions). */
+export interface MasterBinding { sessionId: string; provider: Provider; startedAt: string }
 export interface MasterSettings {
-  enabled: boolean;
-  model: string;
-  effort: MasterEffort;
-  /** Let the master open what it found in the tab the owner is talking from. */
-  showResults: boolean;
-  guards: MasterGuards;
   voice: MasterVoiceSettings;
+  /** The master session; none until the owner starts one. */
+  session?: MasterBinding;
 }
-export const DEFAULT_MASTER_SETTINGS: MasterSettings = { enabled: true, model: 'gpt-6-luna', effort: 'low', showResults: true, guards: DEFAULT_MASTER_GUARDS, voice: DEFAULT_MASTER_VOICE };
-
-export type MasterState = 'idle' | 'thinking' | 'unconfigured' | 'disabled';
+export const DEFAULT_MASTER_SETTINGS: MasterSettings = { voice: DEFAULT_MASTER_VOICE };
 
 export interface MasterOverview {
   available: true;
   version: string;
   settings: MasterSettings;
-  /** The key for the model in the settings is saved, so the master can answer. */
-  configured: boolean;
-  /** An OpenAI key is saved (its last four characters). */
-  keyHint?: string;
-  /** An Anthropic key is saved (its last four characters), for Claude models. */
-  anthropicKeyHint?: string;
+  /** The master session: its state, as the session list shows it. */
+  session?: { id: string; provider: Provider; status?: SessionStatus; title?: string };
   /** An ElevenLabs key is saved, so voice can be turned on. */
   voiceConfigured: boolean;
   voiceKeyHint?: string;
-  state: MasterState;
+  /** Work the master handed out that has not been reported yet. */
   activeTasks: number;
-  lastOrder: number;
-  error?: string;
   voice?: MasterVoiceStatus;
 }
 
@@ -124,33 +91,26 @@ export interface MasterSay {
 export type MasterCallState = 'sending' | 'succeeded' | 'failed' | 'uncertain' | 'not-admitted';
 export type MasterTaskState = 'running' | 'completed' | 'error' | 'cancelled' | 'unknown';
 
+/**
+ * The voice's record of what it hears and reads aloud. The conversation itself is the master session's; this keeps only
+ * spoken requests, and the answers and reports to read aloud with how their reading went.
+ */
 export type MasterEntryData =
-  /**
-   * `attachments`: files sent with the message, shown from `/api/master/attachments/<id>`. `model`/`effort`: chosen for
-   * this message instead of the settings'. `outcome`: the request was not answered (it can be sent again), and
-   * `retried` once it was.
-   */
-  | { kind: 'owner'; text: string; clientId?: string; voice?: true; attachments?: Attachment[]; model?: string; effort?: MasterEffort; outcome?: 'failed' | 'cancelled'; retried?: true }
+  | { kind: 'owner'; text: string; voice?: true }
   | { kind: 'master'; text: string; turnId: string; final: boolean; speak?: MasterSpeak }
-  /** What the master said aloud in a GPT-Live call (1.52–1.55), kept in conversations since. */
-  | { kind: 'voice'; text: string }
-  | { kind: 'action'; turnId: string; method: string; path: string; node?: string; state: MasterCallState; summary?: string; write: boolean }
-  | { kind: 'task'; sessionId?: string; runId?: string; jobId?: string; node?: string; title: string; state: MasterTaskState; answer?: string }
   | { kind: 'event'; text: string; speak?: MasterSpeak }
-  | { kind: 'error'; text: string; speak?: MasterSpeak }
-  | { kind: 'card'; card: MasterCard };
+  | { kind: 'error'; text: string; speak?: MasterSpeak };
 
 export interface MasterEntry {
   id: string;
-  /** Creation order; pages and the display follow it. */
   order: number;
   at: string;
   revision: number;
   data: MasterEntryData;
 }
 
-/** What the page shows from the start: the recent conversation and where its live stream continues. */
-export interface MasterCheckpoint { epoch: string; seq: number; entries: MasterEntry[]; hasMore: boolean; draft?: MasterDraft; overview: MasterOverview }
+/** Where a page's live stream of the master starts. */
+export interface MasterCheckpoint { epoch: string; seq: number; overview: MasterOverview }
 export interface MasterDraft { turnId: string; text: string }
 /** Panels the master may open on the owner's screen, each the page's own. */
 export const MASTER_PANELS = ['sessions', 'help', 'newSession', 'autoPrompt', 'triggers', 'remote', 'decisions', 'notifications', 'account'] as const;
@@ -179,15 +139,6 @@ export type MasterScreenCommand =
 /** A screen command for one tab, which says back whether it could do it. */
 export type MasterDirective = MasterScreenCommand & { id: string; tabId?: string; expiresAt: number };
 export type MasterDirectiveResult = 'done' | 'unavailable' | 'failed';
-/**
- * Cards in the conversation for what only the owner's own browser can do: open a result when showing results is
- * off, turn on notifications on a device, or enter a secret the model must never read.
- */
-export type MasterCard =
-  | { type: 'open'; label: string; command: MasterScreenCommand }
-  | { type: 'push'; state: 'waiting' | 'subscribed' | 'failed'; note?: string }
-  | { type: 'secret'; purpose: string; state: 'waiting' | 'provided' | 'dismissed'; voice?: { key: string; session?: string; attempt?: string } };
-
 export type MasterStreamEvent =
   | { type: 'entry'; seq: number; entry: MasterEntry }
   | { type: 'draft'; seq: number; draft: MasterDraft | null }

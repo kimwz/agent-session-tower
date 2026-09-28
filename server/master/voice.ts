@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import type { MasterEntry, MasterEntryData, MasterSay, MasterSpeak, MasterStreamEvent, MasterViewContext, MasterVoiceStatus } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { ElevenLabs, VoiceInfo } from './elevenlabs.js';
-import type { VoiceOrigin } from './journal.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
 import { isNoise, speakable, VOICE_ACKS, VOICE_NUDGE, VOICE_WORKING, voiced, voicedParts } from './voice-text.js';
@@ -38,14 +37,17 @@ const STALE_MS = 60 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface VoiceTiming {
-  firstChunkMs: number; synthMs: number; playMs: number; noticeMs: number; resyncMs: number; waitMs: number; presenceMs: number; tickMs: number;
+  firstChunkMs: number; synthMs: number; playMs: number; resyncMs: number; waitMs: number; presenceMs: number; tickMs: number;
 }
-const TIMING: VoiceTiming = { firstChunkMs: 10_000, synthMs: 30_000, playMs: 60_000, noticeMs: 20_000, resyncMs: 15_000, waitMs: 30_000, presenceMs: 15_000, tickMs: 5_000 };
+const TIMING: VoiceTiming = { firstChunkMs: 10_000, synthMs: 30_000, playMs: 60_000, resyncMs: 15_000, waitMs: 30_000, presenceMs: 15_000, tickMs: 5_000 };
 
 /** What the voice needs from the master: its hiding, its inbox, and when a new web arrived. */
+/** Where a spoken request came from: its key, and the digest of the voice session it was said in. */
+export interface VoiceOrigin { key: string; session?: string }
+
 export interface VoiceHooks {
   hide(text: string): string;
-  send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean; voice: VoiceOrigin; spoken: true }): Promise<MasterEntry>;
+  send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean; voice: VoiceOrigin; spoken: true }): Promise<unknown>;
   connectedSince(): number;
 }
 
@@ -78,7 +80,6 @@ interface Session {
   panelOpen: boolean;
   seenAt: number;
   activity?: { receivedAt: number; lastSpeechAt: number };
-  gates: Set<{ since: number; controller: AbortController }>;
 }
 
 /** Audio being made (or made) for the page, kept a short while. */
@@ -202,7 +203,7 @@ export class MasterVoice {
     this.ready();
     this.endSession(this.session);
     const id = randomUUID();
-    this.session = { id, digest: hash(id), tabId: input.tabId, local: input.local, listening: true, panelOpen: true, seenAt: Date.now(), gates: new Set() };
+    this.session = { id, digest: hash(id), tabId: input.tabId, local: input.local, listening: true, panelOpen: true, seenAt: Date.now() };
     this.broadcast();
     this.deliver();
     return { session: id };
@@ -236,7 +237,6 @@ export class MasterVoice {
     const ago = typeof input.sinceSpeechMs === 'number' && Number.isFinite(input.sinceSpeechMs) && input.sinceSpeechMs >= 0 ? now - Math.min(input.sinceSpeechMs, 86_400_000) : 0;
     session.activity = { receivedAt: now, lastSpeechAt: speaking ? now : ago };
     session.seenAt = now;
-    for (const gate of session.gates) if (session.activity.lastSpeechAt >= gate.since) gate.controller.abort(new Error('소유자가 말했습니다.'));
     return true;
   }
 
@@ -405,48 +405,6 @@ export class MasterVoice {
       if (signal?.aborted || this.session !== session) { finish('stopped'); return; }
       this.options.room.broadcast({ type: 'say', seq: 0, say: { id, session: session.digest, kind: what.kind, text: what.text, audio: `/api/master/voice/audio/${what.audio}`, expiresAt: Date.now() + 60_000 } });
     });
-  }
-
-  /**
-   * Before an irreversible change of a spoken request: the sentence is read aloud on the page where voice is
-   * listening. The change may go only if the whole sentence was made and played, nobody objected in the moment
-   * after, and the page's next word (after it played) says the owner did not speak since it began.
-   */
-  async announce(text: string, signal: AbortSignal): Promise<{ ok: true; signal: AbortSignal; check: () => Promise<boolean>; done: () => void } | { ok: false; reason: string }> {
-    const session = this.session;
-    if (!session || !session.listening || !this.alive(session)) return { ok: false, reason: '음성을 듣는 중이 아니라 먼저 알릴 수 없어 되돌릴 수 없는 작업을 보내지 않았습니다.' };
-    const since = Date.now();
-    const gate = { since, controller: new AbortController() };
-    session.gates.add(gate);
-    const done = () => { session.gates.delete(gate); };
-    const hidden = this.options.hooks.hide(text).slice(0, 200);
-    const result = await this.onLine(async () => {
-      if (this.session !== session || signal.aborted) return 'stopped';
-      const model = this.options.settings.current().voice.model;
-      const sent = voiced(hidden, model, 'notice');
-      if (this.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) return 'failed';
-      const live = this.synthesize(sent);
-      if (!await this.firstChunk(live)) return 'failed';
-      const heard = await this.play(session, { kind: 'notice', text: hidden, audio: live.id }, this.timing.noticeMs, AbortSignal.any([signal, gate.controller.signal]));
-      // Played only counts for the whole sentence: one cut off by a failed synthesis is not a notice.
-      if (heard === 'played') await this.finished(live);
-      return heard === 'played' && live.done && !live.failed ? 'played' : heard === 'played' ? 'failed' : heard;
-    });
-    const playedAt = Date.now();
-    if (result !== 'played' || gate.controller.signal.aborted || this.session !== session) {
-      done();
-      const reason = result === 'interrupted' || (result === 'played' && gate.controller.signal.aborted && this.session === session) ? '안내 뒤 소유자가 말하거나 취소해서 보내지 않았습니다. 무엇을 원하는지 다시 들어 주세요.'
-        : result === 'stopped' || this.session !== session ? '중지되어 보내지 않았습니다.' : '안내를 들려 드리지 못해 보내지 않았습니다.';
-      return { ok: false, reason };
-    }
-    const check = async () => {
-      // Only the page's word from after the notice played counts: an older one may have missed the owner speaking.
-      const deadline = Date.now() + this.timing.resyncMs;
-      const heard = () => (session.activity?.receivedAt ?? 0) > Math.max(this.options.hooks.connectedSince(), playedAt);
-      while (this.session === session && !heard() && !gate.controller.signal.aborted && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
-      return this.session === session && session.listening && heard() && !gate.controller.signal.aborted && (session.activity?.lastSpeechAt ?? 0) < since;
-    };
-    return { ok: true, signal: gate.controller.signal, check, done };
   }
 
   /** What is read of an entry: hidden whole, then all of it as it is heard (without markdown), and hidden again. */
@@ -759,7 +717,7 @@ export class MasterVoice {
 
   private ready(): void {
     const settings = this.options.settings.current();
-    if (!settings.enabled || !this.options.settings.keyFor(settings.model)) throw fail('마스터가 꺼져 있거나 설정한 모델의 API 키가 없습니다.', 409);
+    if (!settings.session) throw fail('마스터 세션이 아직 없습니다. 먼저 글로 한 번 말을 걸어 주세요.', 409);
     if (!this.options.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 409);
   }
 
@@ -773,7 +731,6 @@ export class MasterVoice {
   private endSession(session: Session | undefined): void {
     if (!session || this.session !== session) return;
     this.session = undefined;
-    for (const gate of session.gates) gate.controller.abort(new Error('음성이 꺼졌습니다.'));
     for (const done of [...this.results.values()]) done('stopped');
   }
 

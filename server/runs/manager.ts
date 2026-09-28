@@ -21,6 +21,7 @@ import { findExecutable, providerDirectories, PROVIDERS } from '../providers/dis
 import { towerInstructionsBlock } from '../sessions/parser.js';
 import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
+import { checkClaudeSubscription, subscriptionOnly, withoutKeys } from './subscription.js';
 import { awaitToolServers, NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { automatedOrigin, ownerOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
 import { WakeupTracker, type Wakeup } from './wakeup.js';
@@ -39,6 +40,8 @@ interface RunnerOptions {
   getSession: (id: string) => Session | undefined;
   refreshSessions: () => Promise<void>;
   stateDir?: string;
+  /** How the master's Claude sign-in is checked before its turn (tests replace it). */
+  checkClaudeSubscription?: typeof checkClaudeSubscription;
   env?: NodeJS.ProcessEnv;
   spawnProcess?: SpawnProcess;
   findExecutable?: (provider: Provider) => Promise<string | undefined>;
@@ -727,7 +730,8 @@ export class RunManager extends EventEmitter {
           }
           this.reservedSessions.add(session.id);
           try {
-            if (!creating && session.provider === 'codex' && await this.launchBridge(run, session)) continue;
+            // The master talks through Tower's own Codex, never a desktop app with its own sign-in.
+            if (!creating && session.provider === 'codex' && !this.masterSession(session) && await this.launchBridge(run, session)) continue;
             if (!creating && session.provider === 'codex' && this.getSession(session.id)?.activeProcess) {
               this.reservedSessions.delete(session.id);
               const reason = this.waitReason(session);
@@ -820,6 +824,9 @@ export class RunManager extends EventEmitter {
     return true;
   }
 
+  /** The master's session talks only through a subscription sign-in (see subscription.ts). */
+  private masterSession(session: Session): boolean { return subscriptionOnly(this.options.stateDir ?? defaultStateDir(), session.cwd); }
+
   private async launchCodex(run: Run, session: Session, creating: boolean): Promise<void> {
     const executable = await this.executable('codex');
     if (!executable) throw new Error('Codex CLI is no longer available in PATH.');
@@ -832,7 +839,8 @@ export class RunManager extends EventEmitter {
     }
     if (!creating) this.validateSession(latest);
     else if (!latest) throw new RunError('Session no longer exists.', 404);
-    const env = { ...process.env, ...this.options.env };
+    const master = this.masterSession(session);
+    const env = master ? withoutKeys({ ...process.env, ...this.options.env }) : { ...process.env, ...this.options.env };
     env.PATH = providerDirectories(env).join(delimiter);
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_SESSION_ID;
@@ -854,7 +862,7 @@ export class RunManager extends EventEmitter {
     const approvalsReviewer = mcpServers?.tower_slack || owner ? 'auto_review' as const : creating ? run.codexApprovalsReviewer : undefined;
     const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
       executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
-      mcpServers,
+      mcpServers, ...(master ? { subscriptionOnly: true } : {}),
       ...(!creating ? { threadId: session.nativeId } : {}),
       ...(approvalsReviewer ? { approvalsReviewer } : {}),
       ...(owner && !mcpServers?.tower_slack ? { approvalsReviewerPreferred: true } : {}),
@@ -950,11 +958,18 @@ export class RunManager extends EventEmitter {
     }
     if (!creating) this.validateSession(latest);
     else if (!latest) throw new RunError('Session no longer exists.', 404);
-    const env = { ...process.env, ...this.options.env };
+    const master = this.masterSession(session);
+    const env = master ? withoutKeys({ ...process.env, ...this.options.env }) : { ...process.env, ...this.options.env };
     env.PATH = providerDirectories(env).join(delimiter);
     // The web server may itself have been started from inside Claude Code.
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_SESSION_ID;
+    if (master) {
+      // Asked the way the turn will start: same program, folder and environment.
+      await (this.options.checkClaudeSubscription ?? checkClaudeSubscription)(executable, session.cwd, env);
+      await this.prepareLaunch(run);
+      if (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session)) { this.reservedSessions.delete(session.id); return; }
+    }
     const privateConfig = mcpServers && Object.values(mcpServers).some(server => server.env) ? await privateMcpConfig(mcpServers) : undefined;
     // Writing the file yielded; nothing may have stopped the run in the meantime.
     if (privateConfig) await this.prepareLaunch(run);

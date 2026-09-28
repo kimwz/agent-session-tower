@@ -8,11 +8,10 @@
 .master-fab.open { background:#254c7a; border-color:#729cd0; }
 .master-fab.thinking { border-color:var(--teal); }
 .master-fab.attention { border-color:var(--amber); }
-.master-fab-badge, .master-fab-tasks {
+.master-fab-tasks {
   position:absolute; top:-3px; right:-3px; min-width:19px; height:19px; padding:0 5px; border-radius:10px;
   font-size:11px; font-weight:700; line-height:19px; text-align:center;
 }
-.master-fab-badge { background:var(--danger); color:#1b0b0b; }
 .master-fab-tasks { background:var(--teal); color:#0b1c18; }
 
 .master-panel {
@@ -24,44 +23,8 @@
 .master-state { flex:1; font-size:11px; color:var(--muted); }
 .master-state.thinking { color:var(--teal); }
 .master-state.unconfigured { color:var(--amber); }
-.master-timeline { flex:1; min-height:0; overflow-y:auto; overflow-anchor:none; padding:12px; }
-.master-timeline-body { min-height:100%; display:flex; flex-direction:column; gap:10px; }
-.master-empty { margin:auto; max-width:300px; text-align:center; color:var(--muted); font-size:13px; line-height:1.5; }
-.master-empty svg { opacity:.6; }
-.master-earlier { align-self:center; border:1px solid var(--line); background:transparent; color:var(--muted); border-radius:14px; padding:4px 12px; font-size:12px; cursor:pointer; }
-.master-message { max-width:92%; font-size:13.5px; line-height:1.55; overflow-wrap:anywhere; }
-.master-message.owner { align-self:flex-end; background:#1f3453; color:var(--bright); padding:8px 11px; border-radius:12px 12px 3px 12px; white-space:pre-wrap; }
-.master-message.master { align-self:flex-start; }
-.master-message.master .markdown > :first-child { margin-top:0; }
-.master-message.master .markdown > :last-child { margin-bottom:0; }
-.master-cursor { display:inline-block; width:7px; height:14px; margin-left:2px; background:var(--teal); animation:master-blink 1s steps(2) infinite; vertical-align:text-bottom; }
-@keyframes master-blink { 50% { opacity:0; } }
-.master-thinking { display:flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; }
-.master-actions { align-self:flex-start; font-size:12px; color:var(--muted); }
-.master-actions > button { display:flex; align-items:center; gap:5px; background:none; border:none; color:inherit; cursor:pointer; padding:2px 0; font-size:12px; }
-.master-actions.problem > button { color:var(--amber); }
-.master-actions ul { margin:4px 0 0 18px; padding:0; list-style:none; display:grid; gap:4px; }
-.master-actions li { display:grid; gap:1px; }
-.master-actions li code { font-size:11.5px; color:var(--text); word-break:break-all; }
-.master-actions li.failed span, .master-actions li.uncertain span { color:var(--amber); }
-.master-task { align-self:stretch; border:1px solid var(--line); border-radius:9px; padding:8px 10px; background:var(--surface-raised); font-size:12.5px; }
-.master-task-head { display:flex; align-items:center; gap:6px; color:var(--bright); }
-.master-task-head b { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.master-task.completed .master-task-head svg { color:var(--teal); }
-.master-task.error .master-task-head svg, .master-task.unknown .master-task-head svg { color:var(--amber); }
-.master-task-meta { display:flex; align-items:center; gap:10px; margin-top:4px; color:var(--muted); font-size:11.5px; }
-.master-task-meta button { display:inline-flex; align-items:center; gap:4px; background:none; border:none; color:var(--blue); cursor:pointer; padding:0; font-size:11.5px; }
-.master-task p { margin:6px 0 0; color:var(--text); white-space:pre-wrap; max-height:120px; overflow:hidden; }
-.spin-slow { animation:orbit 2.4s linear infinite; }
-.master-event { align-self:center; font-size:11.5px; color:var(--subtle); text-align:center; display:flex; gap:5px; align-items:center; }
-.master-event.error, .master-error { color:var(--danger); }
+.master-error { color:var(--danger); }
 .master-error { display:flex; gap:6px; align-items:flex-start; padding:6px 12px; font-size:12px; }
-.master-composer { display:flex; gap:8px; align-items:flex-end; padding:10px 12px calc(10px + env(safe-area-inset-bottom)); border-top:1px solid var(--line); }
-.master-composer textarea { flex:1; resize:none; max-height:160px; min-height:40px; border:1px solid var(--line); border-radius:9px; background:var(--bg); color:var(--bright); padding:9px 10px; font:inherit; font-size:13.5px; }
-.master-send, .master-stop { height:38px; border-radius:9px; border:1px solid #5278a9; background:#254c7a; color:#edf5ff; display:inline-flex; align-items:center; justify-content:center; gap:5px; cursor:pointer; }
-.master-send { width:38px; }
-.master-send:disabled { opacity:.45; cursor:default; }
-.master-stop { padding:0 10px; border-color:#7a5b3c; background:#4a3522; font-size:12px; }
 .master-settings { flex:1; overflow-y:auto; padding:12px 14px 20px; display:grid; gap:16px; align-content:start; font-size:13px; }
 .master-settings section { display:grid; gap:8px; }
 .master-settings h3 { margin:0; display:flex; gap:6px; align-items:center; font-size:13px; color:var(--bright); }
@@ -75,23 +38,13 @@
 .master-toggle input { margin-top:2px; }
 .master-field { display:grid; gap:4px; color:var(--muted); font-size:12px; }
 .master-field select, .master-field input { border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--bright); padding:7px 8px; }
-.master-nodes { border:1px solid var(--line); border-radius:8px; padding:8px 10px; display:grid; gap:6px; }
-.master-nodes legend { color:var(--muted); font-size:12px; padding:0 4px; }
-.master-settings-done { justify-self:start; }
 
 @media (max-width:680px) {
   .master-panel { top:auto; left:0; right:0; bottom:0; width:100vw; height:min(88dvh, 100dvh - 40px); border-right:none; border-top:1px solid var(--line); border-radius:14px 14px 0 0; box-shadow:0 -8px 24px rgba(0,0,0,.4); }
 }
 
-/* Cards: what only the owner's own browser can do. */
-.master-card { align-self:stretch; display:flex; flex-wrap:wrap; align-items:center; gap:8px; border:1px solid var(--line); border-radius:9px; padding:8px 10px; background:var(--surface-raised); font-size:12.5px; color:var(--text); }
-.master-card > svg { color:var(--amber); }
-.master-card > span { flex:1 1 160px; min-width:0; }
-.master-card.secret input { flex:1 1 100%; min-width:0; }
-.master-card.subscribed > svg, .master-card.done > svg { color:var(--teal); }
-.master-card small[role="alert"] { flex-basis:100%; color:var(--danger); }
 
-/* Voice: the call's bar above the message box, and what was said aloud in the conversation. */
+/* Voice. */
 .master-fab.voice { border-color:var(--teal); box-shadow:0 0 0 3px rgba(136,213,196,.25); }
 .master-mic { height:38px; width:38px; border-radius:9px; border:1px solid var(--line); background:var(--surface-raised); color:var(--text); display:inline-flex; align-items:center; justify-content:center; cursor:pointer; }
 .master-mic:hover:not(:disabled) { color:var(--bright); border-color:#5278a9; }
@@ -109,11 +62,6 @@
 .master-voice-end:disabled, .master-voice-restart:disabled { opacity:.5; cursor:default; }
 .master-voice.ended { color:var(--muted); }
 .master-voice.idle { padding:4px 12px; }
-.master-message.voice { display:flex; gap:6px; align-items:baseline; white-space:pre-wrap; }
-.master-message.voice > svg { flex:none; color:var(--muted); }
-.master-message.master.voice { color:var(--text); }
-.master-unspoken { display:inline-flex; align-items:center; gap:4px; margin-left:6px; color:var(--subtle); font-size:11px; }
-.master-message.master .master-unspoken { display:flex; margin:4px 0 0; }
 .master-voice-actions { display:flex; gap:6px; flex-wrap:wrap; margin-left:auto; }
 .master-voice-actions .secondary-button { height:28px; display:inline-flex; align-items:center; gap:5px; font-size:12px; }
 .master-voice-error { flex-basis:100%; color:var(--danger); }
@@ -126,3 +74,9 @@
 .master-voice-now > .master-voice-label { flex:1; min-width:0; max-height:calc(1.45em * 3); overflow-y:auto; overflow-wrap:anywhere; line-height:1.45; display:flex; flex-direction:column-reverse; }
 .master-voice-controls { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; min-width:0; }
 .master-voice-usage { flex:1 1 150px; min-width:0; overflow-wrap:anywhere; }
+
+/* While the master's conversation is open: voice and settings beside the button. */
+.master-bar { position:fixed; z-index:39; display:flex; align-items:flex-end; gap:8px; max-width:min(460px, calc(100vw - 90px)); }
+.master-bar .master-voice { border:1px solid var(--line); border-radius:10px; background:var(--surface); box-shadow:0 6px 18px rgba(0,0,0,.35); min-width:0; flex:1; }
+.master-bar-buttons { display:flex; gap:6px; }
+.master-bar .master-mic { box-shadow:0 4px 12px rgba(0,0,0,.35); }

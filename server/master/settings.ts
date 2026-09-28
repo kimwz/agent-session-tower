@@ -1,31 +1,14 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DEFAULT_MASTER_SETTINGS, DEFAULT_MASTER_VOICE, MASTER_EFFORTS, masterProvider, MASTER_TTS_MODELS, type MasterEffort, type MasterGuards, type MasterSettings, type MasterTtsModel, type MasterVoiceSettings } from '../../shared/master.js';
+import { DEFAULT_MASTER_SETTINGS, DEFAULT_MASTER_VOICE, MASTER_TTS_MODELS, type MasterBinding, type MasterSettings, type MasterTtsModel, type MasterVoiceSettings } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 const invalid = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
 const validKey = (value: unknown): value is string => typeof value === 'string' && value.length >= 8 && value.length <= 512 && !/[\s\x00-\x1f\x7f]/.test(value);
-const NODE_ID = /^[a-f0-9]{32}$/;
-
-function readGuards(value: unknown, fallback: MasterGuards): MasterGuards {
-  if (value === undefined) return fallback;
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid('마스터 안전 설정이 올바르지 않습니다.');
-  const input = value as Record<string, unknown>;
-  const next = { ...fallback };
-  for (const [key, item] of Object.entries(input)) {
-    if (key === 'hideSecrets' || key === 'localOnlyPages' || key === 'eventTurnsReadOnly') {
-      if (typeof item !== 'boolean') throw invalid('마스터 안전 설정이 올바르지 않습니다.');
-      next[key] = item;
-    } else if (key === 'readOnlyNodes') {
-      if (!Array.isArray(item) || item.length > 64 || item.some(node => typeof node !== 'string' || !NODE_ID.test(node))) throw invalid('읽기 전용 컴퓨터 목록이 올바르지 않습니다.');
-      next.readOnlyNodes = [...new Set(item as string[])];
-    } else if (key === 'maxIrreversiblePerTurn') {
-      if (typeof item !== 'number' || !Number.isInteger(item) || item < 0 || item > 1000) throw invalid('한 번에 할 수 있는 작업 수가 올바르지 않습니다.');
-      next.maxIrreversiblePerTurn = item;
-    } else throw invalid('마스터 안전 설정이 올바르지 않습니다.');
-  }
-  return next;
-}
+/** Settings of the master that answered through a model API (1.44–1.64): read and dropped. */
+const LEGACY_KEYS = new Set(['enabled', 'model', 'effort', 'showResults', 'guards']);
+/** Keys that master used for its conversation. The master never talks through an API key, so they are removed. */
+const LEGACY_KEY_FILES = ['openai-key.json', 'anthropic-key.json'];
 
 /** Voice settings kept before voice moved to ElevenLabs (GPT-Live, 1.52–1.55); read and dropped. */
 const LEGACY_VOICE_KEYS = new Set(['voice', 'silenceSeconds', 'dailyMinutes', 'autoWake']);
@@ -60,48 +43,36 @@ function readVoice(value: unknown, fallback: MasterVoiceSettings, saved: boolean
   return next;
 }
 
-/** Parses a settings change against the current settings; unknown fields are refused. */
+/** Parses a settings change against the current settings; unknown fields are refused (saved legacy ones are dropped). */
 export function mergeSettings(current: MasterSettings, value: unknown, saved = false): MasterSettings {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw invalid('마스터 설정이 올바르지 않습니다.');
-  const input = value as Record<string, unknown>;
-  const next: MasterSettings = { ...current, guards: { ...current.guards }, voice: { ...(current.voice ?? DEFAULT_MASTER_VOICE) } };
-  for (const [key, item] of Object.entries(input)) {
-    if (key === 'enabled' || key === 'showResults') {
-      if (typeof item !== 'boolean') throw invalid('마스터 설정이 올바르지 않습니다.');
-      next[key] = item;
-    } else if (key === 'model') {
-      if (typeof item !== 'string' || !/^[a-zA-Z0-9._:-]{1,80}$/.test(item)) throw invalid('모델 이름이 올바르지 않습니다.');
-      next.model = item;
-    } else if (key === 'effort') {
-      if (!(MASTER_EFFORTS as readonly unknown[]).includes(item)) throw invalid('추론 수준이 올바르지 않습니다.');
-      next.effort = item as MasterEffort;
-    } else if (key === 'guards') next.guards = readGuards(item, next.guards);
-    else if (key === 'voice') next.voice = readVoice(item, next.voice, saved);
+  const next: MasterSettings = { ...current, voice: { ...(current.voice ?? DEFAULT_MASTER_VOICE) } };
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'voice') next.voice = readVoice(item, next.voice, saved);
+    else if (key === 'session' && saved) { const binding = readBinding(item); if (binding) next.session = binding; }
+    else if (saved && LEGACY_KEYS.has(key)) continue;
     else throw invalid('마스터 설정이 올바르지 않습니다.');
   }
   return next;
 }
 
-/**
- * The owner's master settings, OpenAI key, Anthropic key and ElevenLabs key, each in its own owner-only file. Keys
- * are never returned; only their last four characters are shown.
- */
+function readBinding(value: unknown): MasterBinding | undefined {
+  const input = value as Partial<MasterBinding> | undefined;
+  if (!input || typeof input.sessionId !== 'string' || input.sessionId.length > 200 || (input.provider !== 'claude' && input.provider !== 'codex') || typeof input.startedAt !== 'string') return undefined;
+  return { sessionId: input.sessionId, provider: input.provider, startedAt: input.startedAt };
+}
+
+/** The master's settings and its ElevenLabs key, each in an owner-only file. The key is never returned, only its end. */
 export class MasterSettingsStore {
   private settings: MasterSettings = structuredClone(DEFAULT_MASTER_SETTINGS);
-  private apiKey?: string;
   private voiceApiKey?: string;
-  private anthropicApiKey?: string;
   private changes: Promise<unknown> = Promise.resolve();
   private readonly settingsPath: string;
-  private readonly keyPath: string;
   private readonly voiceKeyPath: string;
-  private readonly anthropicKeyPath: string;
 
   constructor(private readonly directory: string) {
     this.settingsPath = join(directory, 'settings.json');
-    this.keyPath = join(directory, 'openai-key.json');
     this.voiceKeyPath = join(directory, 'elevenlabs-key.json');
-    this.anthropicKeyPath = join(directory, 'anthropic-key.json');
   }
 
   async start(): Promise<void> {
@@ -109,50 +80,46 @@ export class MasterSettingsStore {
     const saved = await readPrivateJson(this.settingsPath).catch(() => undefined);
     try { if (saved) this.settings = mergeSettings(DEFAULT_MASTER_SETTINGS, saved, true); }
     catch { this.settings = structuredClone(DEFAULT_MASTER_SETTINGS); }
-    const key = await readPrivateJson(this.keyPath).catch(() => undefined) as { apiKey?: unknown } | undefined;
-    if (validKey(key?.apiKey)) this.apiKey = key.apiKey;
     const voiceKey = await readPrivateJson(this.voiceKeyPath).catch(() => undefined) as { apiKey?: unknown } | undefined;
     if (validKey(voiceKey?.apiKey)) this.voiceApiKey = voiceKey.apiKey;
-    const anthropicKey = await readPrivateJson(this.anthropicKeyPath).catch(() => undefined) as { apiKey?: unknown } | undefined;
-    if (validKey(anthropicKey?.apiKey)) this.anthropicApiKey = anthropicKey.apiKey;
+    for (const name of LEGACY_KEY_FILES) await unlink(join(this.directory, name)).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
+    // Written back without the dropped fields, so they are gone from disk too.
+    if (saved) await this.save(this.settings);
   }
 
   current(): MasterSettings { return structuredClone(this.settings); }
-  key(): string | undefined { return this.apiKey; }
-  keyHint(): string | undefined { return this.apiKey ? `…${this.apiKey.slice(-4)}` : undefined; }
   voiceKey(): string | undefined { return this.voiceApiKey; }
   voiceKeyHint(): string | undefined { return this.voiceApiKey ? `…${this.voiceApiKey.slice(-4)}` : undefined; }
-  anthropicKey(): string | undefined { return this.anthropicApiKey; }
-  anthropicKeyHint(): string | undefined { return this.anthropicApiKey ? `…${this.anthropicApiKey.slice(-4)}` : undefined; }
-  /** The key a model's requests are sent with: Anthropic's for Claude models, OpenAI's for the rest. */
-  keyFor(model: string): string | undefined { return masterProvider(model) === 'anthropic' ? this.anthropicApiKey : this.apiKey; }
 
-  /** `apiKey`/`anthropicKey`/`voiceKey: null` removes that key; any other field goes through `mergeSettings`. */
+  /** `voiceKey: null` removes the key; any other field goes through `mergeSettings`. */
   update(body: Record<string, unknown>): Promise<MasterSettings> {
-    const next = this.changes.then(async () => {
-      const { apiKey, anthropicKey, voiceKey, ...rest } = body;
-      if (apiKey !== undefined && apiKey !== null && !validKey(apiKey)) throw invalid('OpenAI API 키 형식이 올바르지 않습니다.');
-      if (anthropicKey !== undefined && anthropicKey !== null && !validKey(anthropicKey)) throw invalid('Anthropic API 키 형식이 올바르지 않습니다.');
+    return this.change(async () => {
+      const { voiceKey, ...rest } = body;
       if (voiceKey !== undefined && voiceKey !== null && !validKey(voiceKey)) throw invalid('ElevenLabs API 키 형식이 올바르지 않습니다.');
       const settings = Object.keys(rest).length ? mergeSettings(this.settings, rest) : this.settings;
-      if (apiKey !== undefined) {
-        await writePrivateJson(this.keyPath, JSON.stringify(apiKey === null ? {} : { apiKey }));
-        this.apiKey = apiKey === null ? undefined : apiKey as string;
-      }
-      if (anthropicKey !== undefined) {
-        await writePrivateJson(this.anthropicKeyPath, JSON.stringify(anthropicKey === null ? {} : { apiKey: anthropicKey }));
-        this.anthropicApiKey = anthropicKey === null ? undefined : anthropicKey as string;
-      }
       if (voiceKey !== undefined) {
         await writePrivateJson(this.voiceKeyPath, JSON.stringify(voiceKey === null ? {} : { apiKey: voiceKey }));
         this.voiceApiKey = voiceKey === null ? undefined : voiceKey as string;
       }
-      if (settings !== this.settings) {
-        await writePrivateJson(this.settingsPath, JSON.stringify(settings));
-        this.settings = settings;
-      }
-      return this.current();
+      if (settings !== this.settings) await this.save(settings);
     });
+  }
+
+  /** Binds the master to a session (or unbinds it), on disk before anything else relies on it. */
+  bind(binding: MasterBinding | undefined): Promise<MasterSettings> {
+    return this.change(async () => {
+      const { session: _previous, ...rest } = this.settings;
+      await this.save(binding ? { ...rest, session: binding } : rest);
+    });
+  }
+
+  private async save(settings: MasterSettings): Promise<void> {
+    await writePrivateJson(this.settingsPath, JSON.stringify(settings));
+    this.settings = settings;
+  }
+
+  private change(work: () => Promise<void>): Promise<MasterSettings> {
+    const next = this.changes.then(async () => { await work(); return this.current(); });
     this.changes = next.catch(() => {});
     return next;
   }

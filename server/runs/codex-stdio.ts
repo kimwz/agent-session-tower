@@ -8,6 +8,7 @@ import { requestedEffort, requestedModel } from '../providers/models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
 import { APP_NAME, APP_TITLE, APP_VERSION } from '../../shared/app-identity.js';
 import type { SessionMcpServers } from './session-mcp.js';
+import { checkCodexAccount, CODEX_SUBSCRIPTION_CONFIG } from './subscription.js';
 
 // v2 wire shapes verified with Codex CLI 0.153.4 app-server generate-ts --experimental.
 type RequestId = string | number;
@@ -31,6 +32,8 @@ export interface CodexStdioOptions {
    * output says so and the turn goes ahead with the thread's own reviewer.
    */
   approvalsReviewerPreferred?: boolean;
+  /** The master: Codex accepts only a ChatGPT sign-in and OpenAI's own service, checked before anything is sent. */
+  subscriptionOnly?: boolean;
   prompt: string;
   imagePaths?: readonly string[];
   spawnProcess?: SpawnProcess;
@@ -149,7 +152,7 @@ class StdioRun implements CodexStdioRun {
 
   private async submit(): Promise<void> {
     // Omitting permission and model overrides preserves user/project configuration.
-    this.child = (this.options.spawnProcess ?? spawn)(this.options.executable, ['app-server', '--stdio'], {
+    this.child = (this.options.spawnProcess ?? spawn)(this.options.executable, ['app-server', '--stdio', ...(this.options.subscriptionOnly ? CODEX_SUBSCRIPTION_CONFIG : [])], {
       cwd: this.options.cwd, env: this.options.env, detached: true, stdio: 'pipe', shell: false,
     });
     const child = this.child;
@@ -178,6 +181,10 @@ class StdioRun implements CodexStdioRun {
     await this.request('initialize', { clientInfo: { name: APP_NAME, title: APP_TITLE, version: APP_VERSION }, capabilities: { experimentalApi: true, requestAttestation: false } });
     if (this.result) return;
     this.write({ method: 'initialized' });
+    if (this.options.subscriptionOnly) {
+      checkCodexAccount(await this.request('account/read', { refreshToken: false }));
+      if (this.result) return;
+    }
     const open = (approvalsReviewer?: CodexApprovalsReviewer) => this.request(this.options.threadId ? 'thread/resume' : 'thread/start', {
       ...(this.options.mcpServers ? { config: { mcp_servers: this.options.mcpServers } } : {}),
       ...(this.options.threadId ? { threadId: this.options.threadId, excludeTurns: true }

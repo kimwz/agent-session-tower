@@ -1,8 +1,10 @@
 import { isSea } from 'node:sea';
+import { join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MASTER_FOLDER } from '../../shared/master.js';
 import type { Run, Session } from '../../shared/types.js';
 import type { RunManager } from '../runs/manager.js';
-import { NO_RUN_TOOLS, type RunTools, type SessionMcpServer } from '../runs/session-mcp.js';
+import { NO_RUN_TOOLS, type RunTools, type SessionMcpServer, type SessionMcpServers } from '../runs/session-mcp.js';
 import type { SlackService } from '../slack/service.js';
 import type { GitHubCoordinator } from '../triggers/github-coordinator.js';
 import type { CapabilityRegistry } from './mcp.js';
@@ -12,6 +14,11 @@ import { SESSION_TOOLS_SERVER, sessionToolServer } from './session-tools.js';
 export function thisBuild(): { command: string; args: string[] } {
   const entry = fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? '../index.ts' : '../index.js', import.meta.url));
   return { command: process.execPath, args: isSea() ? [] : [...process.execArgv.filter(arg => !/^--inspect(?:-brk|-port|-publish-uid)?(?:=|$)/.test(arg)), entry] };
+}
+/** The master session's page tools; they reach the master host, which only the owner's own processes can. */
+function masterToolServer(stateDir: string): SessionMcpServer {
+  const build = thisBuild();
+  return { command: build.command, args: [...build.args, '--master-mcp', stateDir] };
 }
 function toolServer(stateDir: string, mode: '--tower-mcp' | '--slack-mcp', extra: string[], capability: string): SessionMcpServer {
   const build = thisBuild();
@@ -23,10 +30,12 @@ function toolServer(stateDir: string, mode: '--tower-mcp' | '--slack-mcp', extra
  * from Tower, here or from a controlling computer, gets Tower's tools, unless its conversation holds outside content
  * or its origin cannot be proven; a controlling computer's turn then sees only what that computer may see.
  * Trigger, Slack and agent-started turns never get Tower's tools. Every turn started here also gets the read-only session
- * lookups, which Claude Code and Codex elsewhere on this computer get from their user configuration.
+ * lookups, which Claude Code and Codex elsewhere on this computer get from their user configuration. The owner's turns in
+ * the master's folder also get the master's page tools.
  */
 export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry }) {
   const lookups = { [SESSION_TOOLS_SERVER]: sessionToolServer(options.stateDir, thisBuild()) };
+  const masterFolder = join(resolvePath(options.stateDir), MASTER_FOLDER);
   return (run: Run, session: Session): RunTools => {
     const tools = resolve(run, session);
     // Given here too, so they work even where the user configuration does not name them.
@@ -49,6 +58,9 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
     if (provenance?.untrustedInput) return { required: false, towerTools: 'external-input' };
     if (provenance && provenance.kind !== 'owner') return { required: false, towerTools: 'not-owner-session' };
     // Bound to this run: a later turn, even in the same conversation, gets its own credential.
-    return { servers: { tower: toolServer(options.stateDir, '--tower-mcp', [], options.capabilities.issue({ kind: 'owner-run', runId: run.id, sessionId: session.id })) }, required: false, towerTools: 'attached' };
+    const tower = toolServer(options.stateDir, '--tower-mcp', [], options.capabilities.issue({ kind: 'owner-run', runId: run.id, sessionId: session.id }));
+    const servers: SessionMcpServers = { tower };
+    if (!origin.controllerId && resolvePath(session.cwd) === masterFolder) servers.tower_master = masterToolServer(options.stateDir);
+    return { servers, required: false, towerTools: 'attached' };
   }
 }

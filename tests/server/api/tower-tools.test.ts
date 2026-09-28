@@ -231,3 +231,18 @@ test('the session tool server answers through the worker with the key kept in th
   assert.equal(replies[1].result.isError, true, 'nothing but the session tools');
   assert.equal(await sessionToolsKey(f.stateDir), await sessionToolsKey(f.stateDir), 'the key is kept');
 });
+
+test('the owner\'s turns in the master\'s folder also get the master\'s page tools; nothing else does', async t => {
+  const f = await fixture(t);
+  const resolver = runToolResolver({ stateDir: f.stateDir, capabilities: f.capabilities, runs: { sessionOrigin: () => undefined } });
+  const turn = (id: string, origin: Run['origin']): Run => ({ id: randomUUID(), sessionId: id, prompt: '', status: 'queued', createdAt: '', output: '', origin });
+  const master = { ...session('claude:master'), cwd: join(f.stateDir, 'master-session') };
+  const tools = resolver(turn(master.id, { kind: 'owner' }), master);
+  assert.deepEqual(Object.keys(tools.servers ?? {}).sort(), ['tower', 'tower_master', 'tower_sessions']);
+  assert.deepEqual(tools.servers!.tower_master.args.slice(-2), ['--master-mcp', f.stateDir]);
+  assert.equal(tools.servers!.tower_master.env, undefined, 'it reaches the master host through the owner-only socket');
+  assert.equal(tools.required, false);
+  assert.equal(resolver(turn(master.id, { kind: 'owner', controllerId: 'c'.repeat(32) }), master).servers?.tower_master, undefined, 'not from a controlling computer');
+  assert.equal(resolver(turn(master.id, { kind: 'agent' }), master).servers?.tower_master, undefined);
+  assert.equal(resolver(turn('codex:native', { kind: 'owner' }), session('codex:native')).servers?.tower_master, undefined);
+});

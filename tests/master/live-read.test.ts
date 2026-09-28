@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import { createServer, type ServerResponse } from 'node:http';
 import { LiveState } from '../../server/master/live-state.js';
 import { lookupsSupported, ReadDatabase, tablesFrom } from '../../server/master/read-db.js';
-import { statusDigest } from '../../server/master/digest.js';
 import { TowerClient } from '../../server/master/tower-client.js';
 import { diffSnapshots, indexSnapshot } from '../../shared/snapshot-patch.js';
 import type { Session, Snapshot } from '../../shared/types.js';
@@ -91,21 +90,6 @@ test('a query is cut at 500 rows, and one that runs too long is stopped without 
   assert.equal((await db.query('SELECT count(*) AS n FROM sessions', 'many', many)).rows[0].n, 600, 'a fresh thread rebuilds and answers');
 });
 
-test('the status digest names what is working, waiting and just finished, with its time', () => {
-  const now = Date.parse('2026-09-27T12:00:00Z');
-  const local = snapshot([session('a', 'working', { lastRequestAt: '2026-09-27T11:50:00Z' }), session('b', 'idle', { outcome: 'needsOwner' }), session('c', 'idle', { isSubagent: true, status: 'working' })],
-    { runs: [{ id: 'r', sessionId: 'b', prompt: 'p', status: 'completed', createdAt: '2026-09-27T11:40:00Z', finishedAt: '2026-09-27T11:55:00Z', output: '' }], nodes: [{ id: NODE, name: 'Server', status: 'connected', features: [], streaming: true }] });
-  const digest = statusDigest(local, new Map([[NODE, snapshot([session('n', 'working')])]]), now);
-  assert.match(digest, /2026-09-27T12:00:00/);
-  assert.match(digest, /Working now \(2\)/);
-  assert.match(digest, /title a — project-a \[a\], for 10 min/);
-  assert.match(digest, /@Server/);
-  assert.match(digest, /Waiting for the owner or stopped \(1\)/);
-  assert.match(digest, /completed 5 min ago/);
-  assert.doesNotMatch(digest, /title c/, 'subagents are left out');
-  assert.match(statusDigest(undefined, new Map()), /not available/);
-});
-
 test('a first look waits a moment for joined computers, and says which ones have not arrived', async t => {
   const events = await eventServer(t);
   const live = new LiveState((path, signal) => events.client.stream(path, signal));
@@ -122,7 +106,6 @@ test('a first look waits a moment for joined computers, and says which ones have
   assert.ok(live.node(NODE), 'the computer that answered is included');
   assert.deepEqual(live.missing(), [other]);
   assert.ok(Date.now() - started < 2500);
-  assert.match(statusDigest(live.snapshot(), live.nodeSnapshots(), Date.now(), live.missing()), /No current data yet from: Laptop/);
 });
 
 test('every text in the lookup database is hidden before it is stored, names and paths included, and sizes count bytes', { skip: noLookups }, async t => {
@@ -137,16 +120,6 @@ test('every text in the lookup database is hidden before it is stored, names and
   const result = await db.query('SELECT last_message FROM sessions', 'korean', korean);
   assert.equal(result.truncated, true, 'about 870 bytes a row: fewer than 400 rows fit in 256 KB');
   assert.ok(Buffer.byteLength(JSON.stringify(result.rows)) <= 256 * 1024 + 1000);
-});
-
-test('the digest counts conversations that finished on their own, once each', () => {
-  const now = Date.parse('2026-09-27T12:00:00Z');
-  const local = snapshot([session('typed', 'idle', { lastCompletedAt: '2026-09-27T11:59:00Z' }), session('ran', 'idle', { lastCompletedAt: '2026-09-27T11:58:00Z' })],
-    { runs: [{ id: 'r', sessionId: 'ran', prompt: 'p', status: 'completed', createdAt: '2026-09-27T11:50:00Z', finishedAt: '2026-09-27T11:58:00Z', output: '' }] });
-  const digest = statusDigest(local, new Map(), now);
-  assert.match(digest, /Finished in the last 30 min \(2\)/);
-  assert.match(digest, /completed 1 min ago — title typed/);
-  assert.equal(digest.match(/title ran/g)?.length, 1);
 });
 
 test('a lookup process whose host was killed exits by itself', { skip: noLookups }, async () => {
@@ -188,7 +161,7 @@ test('a lookup process stuck in a runaway query when its host is killed is ended
   await until(() => !alive(), 8000);
 });
 
-test('a key at the edge of a shortened text is hidden whole first, in the lookup database and in the digest', { skip: noLookups }, async t => {
+test('a key at the edge of a shortened text is hidden whole first in the lookup database', { skip: noLookups }, async t => {
   const db = new ReadDatabase();
   t.after(() => db.close());
   const key = 'AKIAABCDEFGHIJKLMNOP';
@@ -198,28 +171,4 @@ test('a key at the edge of a shortened text is hidden whole first, in the lookup
   const local = snapshot([session('a', 'working', { customTitle: `${'y'.repeat(70)} ${key}` }), session('b', 'idle', { customTitle: title })]);
   const rows = await db.query(`SELECT title FROM sessions`, 'edge', () => tablesFrom(local, new Map(), hide));
   assert.doesNotMatch(JSON.stringify(rows), /AKIAABCDEF/);
-  assert.doesNotMatch(statusDigest(local, new Map(), Date.now(), [], hide), /AKIAABCDEF/);
-});
-
-test('the warning about computers without data survives any cut of a long digest', () => {
-  const long = (index: number) => session(`s${index}`, 'working', { customTitle: 'T'.repeat(80), project: 'P'.repeat(80) });
-  // Many joined computers with long names make the one line that has no count limit.
-  const computers = Array.from({ length: 60 }, (_, index) => ({ id: index.toString(16).padStart(32, '0'), name: `computer-${index}-${'N'.repeat(70)}`, status: 'connected' as const, features: [], streaming: true }));
-  const local = snapshot(Array.from({ length: 20 }, (_, index) => long(index)), { nodes: computers });
-  const digest = statusDigest(local, new Map(), Date.now(), [computers[59].id]);
-  assert.ok(digest.length <= 4200);
-  assert.match(digest, /No current data yet from: computer-59-/);
-  assert.match(digest, /cut; look up the rest/);
-});
-
-test('names of joined computers are hidden whole before the digest is cut', () => {
-  const key = 'AKIAABCDEFGHIJKLMNOP';
-  const hide = (text: string) => text.replace(/\bAKIA[0-9A-Z]{16}\b/g, '{{secret}}');
-  const computers = Array.from({ length: 50 }, (_, index) => ({ id: index.toString(16).padStart(32, '0'), name: `computer-${index} ${key}`, status: 'connected' as const, features: [], streaming: true }));
-  const local = snapshot([session('a', 'working')], { nodes: computers });
-  for (const width of [0, 7, 13]) {
-    const padded = { ...local, nodes: computers.map(node => ({ ...node, name: `${'w'.repeat(width)}${node.name}` })) };
-    const digest = statusDigest(padded, new Map([[computers[0].id, snapshot([session('n', 'working')])]]), Date.now(), [computers[1].id], hide);
-    assert.doesNotMatch(digest, /AKIAABCD/, `width ${width}`);
-  }
 });

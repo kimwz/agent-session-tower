@@ -7,8 +7,6 @@ import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { readPrivateJson } from '../stores/private-json.js';
-import type { AttachmentStore } from '../stores/attachments.js';
-import { masterAttachments } from './attachments.js';
 import { MASTER_PROTOCOL, type MasterHostReply } from './host.js';
 import { masterPaths, type MasterPaths } from './paths.js';
 import type { WebCredentials } from './tower-client.js';
@@ -22,6 +20,8 @@ export interface MasterClientOptions {
   credentials: () => WebCredentials | undefined;
   hostEntry?: string;
   startupTimeoutMs?: number;
+  /** Only talk to a running host, never start or replace one (the master session's tool server, of the worker's build). */
+  attachOnly?: boolean;
 }
 
 /**
@@ -34,19 +34,13 @@ export class MasterClient {
   private readonly streams = new Set<ClientRequest>();
   private heartbeat?: ReturnType<typeof setInterval>;
   private closed = false;
-  private pictures?: Promise<AttachmentStore>;
 
   constructor(private readonly options: MasterClientOptions) {}
 
-  /** Where pictures sent to the master are kept; the host reads the same folder. */
-  attachments(): Promise<AttachmentStore> {
-    return this.pictures ??= this.hostPaths().then(paths => masterAttachments(paths.data)).catch(error => { this.pictures = undefined; throw error; });
-  }
-
   /**
-   * Keeps a running host told who this web is, so work it continues after a web restart can reach Tower. When no host
-   * runs but work was left waiting (the host or the computer stopped), it starts one, so the work goes on and its
-   * report comes without waiting for someone to open a page.
+   * Keeps a running host told who this web is, so what it follows after a web restart can reach Tower. When no host runs
+   * but a master session exists (the host or the computer stopped), it starts one, so work the master handed out is
+   * still reported without waiting for someone to open a page.
    */
   start(): void {
     const tell = () => { void this.exchange('hello').catch(() => {}); };
@@ -58,18 +52,15 @@ export class MasterClient {
     this.heartbeat.unref();
   }
 
-  /** Whether the master's records hold a message not yet answered or delegated work not yet reported. */
+  /** Whether a master session exists, so the host should run to follow it. */
   private async pendingWork(): Promise<boolean> {
     const { data } = await this.hostPaths();
-    const waiting = async (name: string, states: string[]) => {
-      const saved = await readPrivateJson(join(data, name)).catch(() => undefined) as { items?: Array<{ state?: unknown }> } | undefined;
-      return Array.isArray(saved?.items) && saved.items.some(item => typeof item?.state === 'string' && states.includes(item.state));
-    };
-    return await waiting('inbox.json', ['queued', 'processing']) || await waiting('tasks.json', ['running']);
+    const saved = await readPrivateJson(join(data, 'settings.json')).catch(() => undefined) as { session?: { sessionId?: unknown } } | undefined;
+    return typeof saved?.session?.sessionId === 'string';
   }
 
   async call(method: string, args: Record<string, unknown> = {}): Promise<unknown> {
-    await this.ensureHost();
+    if (!this.options.attachOnly) await this.ensureHost();
     return (await this.exchange(method, args)).result;
   }
 
@@ -143,7 +134,7 @@ export class MasterClient {
     this.streams.clear();
   }
 
-  /** Starts the host if none runs; replaces one of another version unless it is mid-turn (delegated work carries over). */
+  /** Starts the host if none runs; replaces one of another version unless it is sending a report or answering a tool. */
   private ensureHost(): Promise<void> {
     return this.starting ??= this.startHost().finally(() => { this.starting = undefined; });
   }

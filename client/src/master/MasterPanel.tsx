@@ -1,314 +1,79 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
-import { AlertTriangle, ArrowUp, Bell, Bot, Check, ChevronDown, ChevronRight, CircleDashed, ExternalLink, KeyRound, LoaderCircle, Mic, Pencil, RotateCcw, Settings, Square, Volume2, VolumeX, X } from 'lucide-react';
-import type { MasterCard, MasterEntry, MasterOverview, MasterScreenCommand, MasterSpeak } from '../../../shared/master';
-import type { NotificationOverview } from '../../../shared/notifications';
-import { api } from '../common/lib';
-import { enablePush, pushSupport } from '../notifications/push';
-import { Markdown } from '../chat/Markdown';
-import { scopedId, splitScopedId } from '../remote/scope';
-import type { RoomState } from './room-stream';
+import { useState } from 'react';
+import { Bot, LoaderCircle, Settings, X } from 'lucide-react';
+import type { MasterBinding, MasterOverview } from '../../../shared/master';
+import type { Provider } from '../../../shared/types';
+import { post } from './api';
 import { MasterSettingsView } from './MasterSettings';
 import { useWords } from './strings';
-import { post } from './api';
 import { VoiceBar, type VoiceControls } from './VoiceBar';
-import { BottomFollower } from './follow-bottom';
-import { FileButton, FileDrafts, keptDraftFile, SentFiles, useMasterFiles } from './MasterAttachments';
-import { MessageChoices, useFold } from './MasterChoices';
-import { updateDraft, useMasterDraft } from './master-draft';
 
-
-interface Props {
-  token: string;
-  room: RoomState;
-  tabId: string;
-  sessionId: string | null;
-  voice: VoiceControls;
-  /** Where the page header ends, so the panel sits right under it. */
-  top?: number;
-  onClose(): void;
-  onEarlier(): Promise<void>;
-  onOpenSession(id: string): void;
-  /** Does what an "open" card offers, with the page's own controls. */
-  onCommand(command: MasterScreenCommand): void;
-}
-
-/** The master's one conversation: what the owner asked, what the master did and said, and the work it handed out. */
-/** The last message whose sending was not confirmed (it may or may not have arrived), for as long as this tab lives. */
-let unconfirmed: { id: string; key: string } | undefined;
-
-export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose, onEarlier, onOpenSession, onCommand }: Props) {
+/**
+ * The master's own panel: starting its session, and its settings. The conversation itself is the master session,
+ * shown like any session.
+ */
+export function MasterPanel({ token, overview, voice, top, onClose, onStarted }: {
+  token: string; overview: MasterOverview | undefined; voice: VoiceControls; top?: number; onClose(): void; onStarted(sessionId: string): void;
+}) {
   const words = useWords();
-  const draft = useMasterDraft();
-  const text = draft.text;
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState('');
   const [settings, setSettings] = useState(false);
-  const scroller = useRef<HTMLDivElement | null>(null);
-  const follower = useRef(new BottomFollower()).current;
-  const input = useRef<HTMLTextAreaElement>(null);
-  const overview = room.overview;
-  const thinking = overview?.state === 'thinking';
-  const off = overview?.settings.enabled === false;
-  const files = useMasterFiles(setError, !off && !sending);
-
-  useEffect(() => { if (!settings) input.current?.focus(); }, [settings]);
-  // The timeline opens on the latest and stays there while it grows, unless the owner scrolled up to read.
-  const first = room.entries[0]?.id;
-  useLayoutEffect(() => { if (scroller.current) follower.entriesChanged(scroller.current, first); }, [follower, first, room.entries, room.draft?.text, thinking]);
-  const timeline = useCallback((element: HTMLDivElement | null) => {
-    scroller.current = element;
-    if (!element) return;
-    follower.reset();
-    follower.resized(element);
-    // Text, cards and the panel itself keep settling after the first paint; follow them while at the latest.
-    if (typeof ResizeObserver === 'undefined') return;
-    const sizes = new ResizeObserver(() => follower.resized(element));
-    sizes.observe(element);
-    if (element.firstElementChild) sizes.observe(element.firstElementChild);
-    return () => sizes.disconnect();
-  }, [follower]);
-  const earlier = () => { if (scroller.current) follower.keepPlace(scroller.current, first); void onEarlier(); };
-  // Escape inside the panel closes the panel only (not the conversation behind it), and never while composing text.
-  const panel = useRef<HTMLElement>(null);
-  useEffect(() => {
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
-      if (!(event.target instanceof Node) || !panel.current?.contains(event.target)) return;
-      event.preventDefault();
-      onClose();
-    };
-    window.addEventListener('keydown', onKey, true);
-    return () => window.removeEventListener('keydown', onKey, true);
-  }, [onClose]);
-
-  const send = async () => {
-    const value = text.trim();
-    if ((!value && !files.files.length) || sending) return;
-    setSending(true); setError('');
-    const { node, id } = sessionId ? splitScopedId(sessionId) : { node: undefined, id: undefined };
-    const { model, effort } = draft;
-    // Sent again after its answer was lost, the same message keeps its id, so the master takes it once.
-    const key = JSON.stringify([value, files.files.map(item => item.key), model, effort]);
-    const messageId = unconfirmed?.key === key ? unconfirmed.id : crypto.randomUUID();
-    unconfirmed = { id: messageId, key };
-    try {
-      const prepared = await files.prepare();
-      await post('/api/master/messages', token, { clientMessageId: messageId, text: value, ...prepared, ...(model ? { model } : {}), ...(effort ? { effort } : {}), viewContext: { tabId, ...(id ? { sessionId: id } : {}), ...(node ? { node } : {}) } });
-      // Only this message's own id is let go: another may have been sent from a panel opened meanwhile.
-      if (unconfirmed?.id === messageId) unconfirmed = undefined;
-      // The text and files go; a chosen model or reasoning stays for the next message.
-      updateDraft({ text: '', files: [] });
-      follower.follow(scroller.current ?? undefined);
-    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
-    finally { setSending(false); }
-  };
-  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); void send(); }
-  };
-  const stop = () => { void post('/api/master/stop', token, {}).catch(reason => setError(reason instanceof Error ? reason.message : String(reason))); };
-
-  const configured = overview?.configured;
-  // With a key for some model the conversation stays open; a message may choose a model whose key is saved.
-  const usable = Boolean(overview && (configured || overview.keyHint || overview.anthropicKeyHint));
-  const disabled = off;
-  const writing = !(settings || (overview && !usable));
-  // "Edit" on a request that was not answered puts it back in the message box, files and choices included.
-  const edit = (data: Extract<MasterEntry['data'], { kind: 'owner' }>) => {
-    updateDraft({ text: data.text, files: (data.attachments ?? []).map(keptDraftFile), model: data.model, effort: data.effort });
-    input.current?.focus();
-  };
-  return <aside ref={panel} className={`master-panel ${files.dragging ? 'master-dragging' : ''}`} {...(writing ? files.drop : {})} role="dialog" aria-label={words('마스터 에이전트', 'Master agent')} style={top !== undefined ? { '--master-top': `${top}px` } as React.CSSProperties : undefined}>
+  const [replacing, setReplacing] = useState(false);
+  const starting = !overview?.session || replacing;
+  return <aside className="master-panel" role="dialog" aria-label={words('마스터 에이전트', 'Master agent')} style={top !== undefined ? { '--master-top': `${top}px` } as React.CSSProperties : undefined}>
     <header className="master-header">
       <Bot size={17} />
       <h2>{words('마스터', 'Master')}</h2>
-      <span className={`master-state ${overview?.state ?? ''}`}>{stateLabel(overview, words)}</span>
-      <button className={`icon-button ${settings ? 'active' : ''}`} onClick={() => setSettings(value => !value)} aria-label={words('마스터 설정', 'Master settings')} title={words('마스터 설정', 'Master settings')}><Settings size={16} /></button>
+      <span className="master-state">{overview?.session ? `${overview.session.provider === 'claude' ? 'Claude' : 'Codex'}${overview.session.status ? ` · ${overview.session.status}` : ''}` : words('세션 없음', 'No session')}</span>
+      {overview?.session && <button className={`icon-button ${settings ? 'active' : ''}`} onClick={() => setSettings(value => !value)} aria-label={words('마스터 설정', 'Master settings')} title={words('마스터 설정', 'Master settings')}><Settings size={16} /></button>}
       <button className="icon-button" onClick={onClose} aria-label={words('닫기', 'Close')} title={words('닫기', 'Close')}><X size={16} /></button>
     </header>
-    {settings || (overview && !usable) ? <MasterSettingsView token={token} overview={overview} onDone={() => setSettings(false)} /> : <>
-      <div className="master-timeline" ref={timeline} onScroll={event => follower.scrolled(event.currentTarget)}><div className="master-timeline-body">
-        {room.hasMore && <button className="master-earlier" onClick={earlier}>{words('이전 대화 보기', 'Show earlier')}</button>}
-        {!room.entries.length && !room.draft && <div className="master-empty"><Bot size={26} /><p>{words('Tower에서 하던 일을 말로 시켜 보세요. 예: "지금 작업 중인 세션 알려줘", "monitor에 세션 열어서 로그인 버그 고쳐줘".', 'Ask Tower in plain words. For example: "What is working right now?", "Open a session in monitor and fix the login bug."')}</p></div>}
-        <Timeline entries={room.entries} token={token} tabId={tabId} onOpenSession={onOpenSession} onCommand={onCommand} onEdit={edit} />
-        {room.draft?.text && <div className="master-message master"><Markdown>{room.draft.text}</Markdown><span className="master-cursor" /></div>}
-        {thinking && !room.draft?.text && <div className="master-thinking"><LoaderCircle size={14} className="spin" />{words('생각하는 중', 'Thinking')}</div>}
-      </div></div>
-      {(error || room.error) && <div className="master-error" role="alert"><AlertTriangle size={13} />{error || room.error}</div>}
-      <VoiceBar voice={voice} />
-      <FileDrafts files={files} disabled={sending} />
-      <MessageChoices settings={overview?.settings} disabled={disabled || sending} />
-      <div className="master-composer">
-        <textarea ref={input} value={text} rows={2} maxLength={32_000} disabled={disabled} placeholder={disabled ? words('마스터가 꺼져 있습니다', 'The master is turned off') : words('마스터에게 시킬 일', 'What should Tower do?')} onChange={event => updateDraft({ text: event.target.value })} onKeyDown={onKeyDown} onPaste={files.onPaste} aria-label={words('마스터에게 보낼 메시지', 'Message to the master')} />
-        <FileButton files={files} disabled={disabled || sending} />
-        {!voice.view && <button className="master-mic" onClick={voice.start} disabled={Boolean(voice.unavailable) || disabled || !configured}
-          title={voice.unavailable ?? words('말로 시키기 (ElevenLabs 받아쓰기·읽어 주기)', 'Talk to the master (ElevenLabs speech to text and reading aloud)')}
-          aria-label={words('음성 대화 시작', 'Start voice')}><Mic size={16} /></button>}
-        {thinking ? <button className="master-stop" onClick={stop} title={words('생각 멈추기 (보낸 작업은 계속됩니다)', 'Stop thinking (work already sent continues)')}><Square size={14} />{words('생각 멈춤', 'Stop')}</button>
-          : <button className="master-send" onClick={() => void send()} disabled={(!text.trim() && !files.files.length) || sending || disabled} aria-label={words('보내기', 'Send')}>{sending ? <LoaderCircle size={15} className="spin" /> : <ArrowUp size={16} />}</button>}
-      </div>
-    </>}
+    {starting && !settings
+      ? <MasterStart token={token} replace={replacing} current={overview?.session?.provider} onCancel={replacing ? () => setReplacing(false) : undefined} onStarted={binding => { setReplacing(false); onStarted(binding.sessionId); }} />
+      : <MasterSettingsView token={token} overview={overview} onNewSession={() => { setSettings(false); setReplacing(true); }} />}
+    <VoiceBar voice={voice} />
   </aside>;
 }
 
-function stateLabel(overview: MasterOverview | undefined, words: (ko: string, en: string) => string): string {
-  if (!overview) return words('연결 중', 'Connecting');
-  if (overview.state === 'disabled') return words('꺼짐', 'Off');
-  if (overview.state === 'unconfigured') return words('키 필요', 'Key needed');
-  if (overview.state === 'thinking') return words('생각 중', 'Thinking');
-  return overview.activeTasks ? words(`맡긴 일 ${overview.activeTasks}개 진행 중`, `${overview.activeTasks} delegated running`) : words('대기', 'Ready');
-}
-
-/** Consecutive calls of one turn fold into one line; everything else is shown as it came. */
-interface EntryProps { token: string; tabId: string; onOpenSession(id: string): void; onCommand(command: MasterScreenCommand): void; onEdit(data: Extract<MasterEntry['data'], { kind: 'owner' }>): void }
-
-function Timeline({ entries, ...props }: { entries: MasterEntry[] } & EntryProps) {
-  const groups: Array<MasterEntry | MasterEntry[]> = [];
-  for (const entry of entries) {
-    const last = groups.at(-1);
-    if (entry.data.kind === 'action' && Array.isArray(last) && last[0].data.kind === 'action' && last[0].data.turnId === entry.data.turnId) last.push(entry);
-    else groups.push(entry.data.kind === 'action' ? [entry] : entry);
-  }
-  return <>{groups.map(group => Array.isArray(group) ? <Actions key={group[0].id} entries={group} /> : <Entry key={group.id} entry={group} {...props} />)}</>;
-}
-
-function Actions({ entries }: { entries: MasterEntry[] }) {
+/** The master's first message, which starts its session with the chosen tool. */
+function MasterStart({ token, replace, current, onCancel, onStarted }: { token: string; replace: boolean; current?: Provider; onCancel?: () => void; onStarted(binding: MasterBinding): void }) {
   const words = useWords();
-  const [open, setOpen] = useState(false);
-  const writes = entries.filter(entry => entry.data.kind === 'action' && entry.data.write);
-  const pending = entries.some(entry => entry.data.kind === 'action' && entry.data.state === 'sending');
-  const problems = entries.filter(entry => entry.data.kind === 'action' && (entry.data.state === 'failed' || entry.data.state === 'uncertain'));
-  return <div className={`master-actions ${problems.length ? 'problem' : ''}`}>
-    <button onClick={() => setOpen(value => !value)} aria-expanded={open}>
-      {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
-      {pending ? <LoaderCircle size={12} className="spin" /> : problems.length ? <AlertTriangle size={12} /> : <Check size={12} />}
-      <span>{writes.length ? words(`작업 ${writes.length}개 실행`, `${writes.length} change${writes.length > 1 ? 's' : ''}`) : words(`조회 ${entries.length}개`, `${entries.length} lookup${entries.length > 1 ? 's' : ''}`)}{problems.length ? words(` · 확인 필요 ${problems.length}`, ` · ${problems.length} need a look`) : ''}</span>
-    </button>
-    {open && <ul>{entries.map(entry => entry.data.kind === 'action' && <li key={entry.id} className={entry.data.state}>
-      <code>{entry.data.method} {entry.data.path}</code>
-      <span>{actionLabel(entry.data.state, words)}{entry.data.summary ? ` · ${entry.data.summary}` : ''}</span>
-    </li>)}</ul>}
-  </div>;
-}
-
-function actionLabel(state: string, words: (ko: string, en: string) => string): string {
-  return state === 'sending' ? words('보내는 중', 'Sending') : state === 'succeeded' ? words('완료', 'Done') : state === 'failed' ? words('거절됨', 'Refused')
-    : state === 'uncertain' ? words('결과 불명', 'Outcome unknown') : words('처리 안 됨', 'Not run');
-}
-
-function Entry({ entry, token, tabId, onOpenSession, onCommand, onEdit }: { entry: MasterEntry } & EntryProps) {
-  const words = useWords();
-  const data = entry.data;
-  if (data.kind === 'owner') return <OwnerMessage id={entry.id} data={data} token={token} tabId={tabId} onEdit={onEdit} />;
-  if (data.kind === 'voice') return <div className="master-message master voice"><Volume2 size={11} aria-label={words('음성', 'Spoken')} />{showSecrets(data.text)}</div>;
-  if (data.kind === 'master') return <MasterMessage text={showSecrets(data.text)} speak={data.speak} />;
-  if (data.kind === 'event') return <div className="master-event">{data.text}<Spoken speak={data.speak} /></div>;
-  if (data.kind === 'error') return <div className="master-event error"><AlertTriangle size={12} />{data.text}<Spoken speak={data.speak} /></div>;
-  if (data.kind === 'task') {
-    const session = data.sessionId ? scopedId(data.node, data.sessionId) : undefined;
-    return <div className={`master-task ${data.state}`}>
-      <div className="master-task-head">{data.state === 'running' ? <CircleDashed size={13} className="spin-slow" /> : data.state === 'completed' ? <Check size={13} /> : <AlertTriangle size={13} />}<b>{data.title}</b></div>
-      <div className="master-task-meta">{taskLabel(data.state, words)}{session && <button onClick={() => onOpenSession(session)}><ExternalLink size={12} />{words('세션 열기', 'Open session')}</button>}</div>
-      {data.answer && <p>{data.answer}</p>}
-    </div>;
-  }
-  if (data.kind === 'card') return <Card id={entry.id} card={data.card} token={token} tabId={tabId} onCommand={onCommand} />;
-  return null;
-}
-
-/** The owner's request: its files, the model chosen for it, and, if it was not answered, a way to send it again. */
-function OwnerMessage({ id, data, token, tabId, onEdit }: { id: string; data: Extract<MasterEntry['data'], { kind: 'owner' }>; token: string; tabId: string; onEdit: EntryProps['onEdit'] }) {
-  const words = useWords();
-  const fold = useFold(showSecrets(data.text));
+  const [provider, setProvider] = useState<Provider>(current ?? 'claude');
+  const [model, setModel] = useState('');
+  const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const retry = async () => {
+  const start = async () => {
+    if (!text.trim() || busy) return;
     setBusy(true); setError('');
-    try { await post(`/api/master/retry/${id}`, token, { viewContext: { tabId } }); }
-    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    try {
+      const answer = await post<{ binding: MasterBinding }>('/api/master/start', token, { provider, text: text.trim(), ...(model.trim() ? { model: model.trim() } : {}), ...(replace ? { replace: true } : {}) });
+      onStarted(answer.binding);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setBusy(false); }
   };
-  const chosen = [data.model, data.effort && words(`추론 ${data.effort}`, `reasoning ${data.effort}`)].filter(Boolean).join(' · ');
-  return <div className="master-owner">
-    <div className={`master-message owner ${data.voice ? 'voice' : ''}`}>
-      {data.voice && <Mic size={11} aria-label={words('말함', 'Said')} />}{fold.shown}
-      {fold.toggle && <button className="master-fold" onClick={fold.toggle.flip}>{fold.toggle.open ? words('접기', 'Show less') : words('더 보기', 'Show more')}</button>}
-      {data.attachments?.length ? <SentFiles attachments={data.attachments} /> : null}
-    </div>
-    {chosen && <small className="master-chosen">{chosen}</small>}
-    {data.outcome && <div className="master-outcome" role={data.retried ? undefined : 'status'}>
-      <AlertTriangle size={11} />{data.outcome === 'cancelled' ? words('멈춘 요청', 'Stopped') : words('답을 받지 못한 요청', 'Not answered')}
-      {data.retried ? <span>· {words('다시 보냄', 'Sent again')}</span> : <>
-        <button disabled={busy} onClick={() => void retry()}>{busy ? <LoaderCircle size={11} className="spin" /> : <RotateCcw size={11} />}{words('다시 보내기', 'Send again')}</button>
-        <button disabled={busy} onClick={() => onEdit(data)}><Pencil size={11} />{words('고쳐 쓰기', 'Edit')}</button>
-      </>}
-      {error && <small role="alert">{error}</small>}
-    </div>}
+  return <div className="master-settings">
+    <section>
+      <h3>{replace ? words('새 마스터 세션', 'New master session') : words('마스터 시작', 'Start the master')}</h3>
+      <p>{words('마스터는 Tower가 전용 폴더에 두는 Claude 또는 Codex 세션입니다. 구독 로그인으로만 대화하고 API 키는 쓰지 않습니다. 모든 도구를 쓸 수 있고, 프로젝트 작업은 다른 세션에 맡긴 뒤 끝나면 결과를 알려 줍니다.',
+        'The master is a Claude or Codex session Tower keeps in its own folder. It talks only through your subscription sign-in, never an API key. It has every tool, hands project work to other sessions and reports when it ends.')}</p>
+      {replace && <p>{words('지금 마스터 세션은 일반 세션으로 남고, 이제부터 새 세션이 마스터가 됩니다.', 'The current master session stays as an ordinary session; the new one becomes the master.')}</p>}
+      <label className="master-field">{words('도구', 'Tool')}
+        <select value={provider} disabled={busy} onChange={event => setProvider(event.target.value as Provider)}>
+          <option value="claude">Claude Code</option>
+          <option value="codex">Codex</option>
+        </select>
+      </label>
+      <label className="master-field">{words('모델 (비우면 기본)', 'Model (empty for the default)')}
+        <input value={model} disabled={busy} onChange={event => setModel(event.target.value)} placeholder={provider === 'claude' ? 'opus' : 'gpt-5.6-sol'} maxLength={80} />
+      </label>
+      <label className="master-field">{words('첫 메시지', 'First message')}
+        <textarea rows={3} value={text} disabled={busy} maxLength={32_000} onChange={event => setText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void start(); } }}
+          placeholder={words('예: 지금 작업 중인 세션 알려줘', 'For example: what is working right now?')} />
+      </label>
+      <div className="master-key-row">
+        <button className="master-primary" disabled={busy || !text.trim()} onClick={() => void start()}>{busy ? <LoaderCircle size={13} className="spin" /> : words('시작', 'Start')}</button>
+        {onCancel && <button className="secondary-button" disabled={busy} onClick={onCancel}>{words('취소', 'Cancel')}</button>}
+      </div>
+      {error && <div className="master-error" role="alert">{error}</div>}
+    </section>
   </div>;
 }
-
-function MasterMessage({ text, speak }: { text: string; speak?: MasterSpeak }) {
-  const words = useWords();
-  const fold = useFold(text, 4000);
-  return <div className="master-message master"><Markdown>{fold.shown}</Markdown>
-    {fold.toggle && <button className="master-fold" onClick={fold.toggle.flip}>{fold.toggle.open ? words('접기', 'Show less') : words('더 보기', 'Show more')}</button>}
-    <Spoken speak={speak} /></div>;
-}
-
-/** News the master could not tell by voice says so; it is all on the screen. */
-function Spoken({ speak }: { speak?: MasterSpeak }) {
-  const words = useWords();
-  if (speak?.state !== 'unspoken' && speak?.state !== 'undelivered') return null;
-  return <small className="master-unspoken"><VolumeX size={11} />{words('음성으로 전하지 못함', 'Not said aloud')}</small>;
-}
-
-/** What only the owner's own browser can do, pressed on the device that should do it. */
-function Card({ id, card, token, tabId, onCommand }: { id: string; card: MasterCard; token: string; tabId: string; onCommand(command: MasterScreenCommand): void }) {
-  const words = useWords();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [value, setValue] = useState('');
-  const answer = async (body: Record<string, unknown>) => { await post(`/api/master/cards/${id}`, token, body); };
-  const run = async (work: () => Promise<void>) => {
-    setBusy(true); setError('');
-    try { await work(); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } finally { setBusy(false); }
-  };
-  if (card.type === 'open') return <div className="master-card"><ExternalLink size={13} /><span>{card.label}</span><button className="secondary-button" onClick={() => onCommand(card.command)}>{words('열기', 'Open')}</button></div>;
-  if (card.type === 'push') {
-    const subscribe = () => run(async () => {
-      const support = pushSupport();
-      try {
-        if (support !== 'supported') throw new Error(support === 'insecure' ? words('알림은 https 주소나 이 컴퓨터(localhost)에서만 켤 수 있습니다.', 'Notifications need an https address or this computer (localhost).')
-          : support === 'install' ? words('이 기기에서는 홈 화면에 Tower를 추가한 뒤 켤 수 있습니다.', 'On this device, add Tower to the home screen first.') : words('이 브라우저는 알림을 지원하지 않습니다.', 'This browser does not support notifications.'));
-        const overview = await api<NotificationOverview>('/api/notifications');
-        await enablePush(token, overview.publicKey);
-        await answer({ result: 'subscribed' });
-      } catch (reason) {
-        const note = reason instanceof Error ? reason.message : String(reason);
-        await answer({ result: 'failed', note }).catch(() => {});
-        throw reason;
-      }
-    });
-    return <div className={`master-card ${card.state}`}><Bell size={13} />
-      <span>{card.state === 'subscribed' ? words('알림을 켰습니다.', 'Notifications are on.') : words('알림을 받을 기기에서 누르세요.', 'Press this on the device that should get notifications.')}{card.state === 'failed' && card.note ? ` (${card.note})` : ''}</span>
-      {card.state !== 'subscribed' && <button className="secondary-button" disabled={busy} onClick={() => void subscribe()}>{busy ? <LoaderCircle size={13} className="spin" /> : words('이 기기에서 알림 받기', 'Get notifications here')}</button>}
-      {error && <small role="alert">{error}</small>}
-    </div>;
-  }
-  if (card.state !== 'waiting') return <div className="master-card done"><KeyRound size={13} /><span>{card.purpose}: {card.state === 'provided' ? words('입력했습니다. 값은 마스터에게 보이지 않습니다.', 'Entered. The master never sees the value.') : words('취소했습니다.', 'Cancelled.')}</span></div>;
-  return <form className="master-card secret" onSubmit={event => { event.preventDefault(); if (value) void run(async () => { await answer({ value, tabId }); setValue(''); }); }}>
-    <KeyRound size={13} /><span>{card.purpose}</span>
-    <input type="password" autoComplete="off" value={value} onChange={event => setValue(event.target.value)} aria-label={card.purpose} placeholder={words('값 입력 (8자 이상, 마스터에게 보이지 않음)', 'Value (8+ characters; the master never sees it)')} />
-    <button className="master-primary" disabled={busy || !value}>{busy ? <LoaderCircle size={13} className="spin" /> : words('보내기', 'Send')}</button>
-    <button type="button" className="secondary-button" disabled={busy} onClick={() => void run(() => answer({ dismiss: true }))}>{words('취소', 'Cancel')}</button>
-    {error && <small role="alert">{error}</small>}
-  </form>;
-}
-
-function taskLabel(state: string, words: (ko: string, en: string) => string): string {
-  return state === 'running' ? words('맡긴 일 진행 중', 'Delegated · running') : state === 'completed' ? words('끝남', 'Finished') : state === 'cancelled' ? words('멈춤', 'Stopped')
-    : state === 'error' ? words('오류', 'Error') : words('상태 모름', 'Unknown');
-}
-
-/** Secret references read as a lock, never as the value. */
-function showSecrets(text: string): string { return text.replace(/\{\{secret:[a-f0-9]{16}\}\}/g, '🔒'); }
-

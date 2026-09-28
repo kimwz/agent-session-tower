@@ -1,19 +1,18 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, unlink, writeFile } from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
+import { join } from 'node:path';
 import { APP_VERSION } from '../../shared/app-identity.js';
-import { MASTER_EFFORTS, type MasterEffort, type MasterStreamEvent } from '../../shared/master.js';
+import type { MasterOverview, MasterStreamEvent } from '../../shared/master.js';
+import type { Provider } from '../../shared/types.js';
 import { acquireStateLock, MonitorAlreadyRunning } from '../instance/state-lock.js';
-import { fileList, masterAttachments } from './attachments.js';
-import { MasterJournal } from './journal.js';
 import { LiveState } from './live-state.js';
 import { lookupsSupported, ReadDatabase } from './read-db.js';
-import { openAiResponses, type ModelCall } from './model-openai.js';
-import { anthropicMessages, routedModel } from './model-anthropic.js';
 import { masterPaths } from './paths.js';
 import { MasterRoom } from './room.js';
-import { MasterService } from './service.js';
+import { MasterSession } from './session.js';
 import { MasterSettingsStore } from './settings.js';
+import { MASTER_TOOLS, MasterTools } from './tools.js';
 import { TowerClient, type WebCredentials } from './tower-client.js';
 import { ElevenLabs, type ElevenLabsOptions } from './elevenlabs.js';
 import { MasterVoice, type VoiceTiming } from './voice.js';
@@ -27,20 +26,20 @@ export interface MasterHostReply { protocol: number; stateDir: string; version: 
 export interface MasterHostOptions {
   stateDir: string;
   releaseStateLock?: () => Promise<void>;
-  model?: ModelCall;
   idleMs?: number;
-  taskPollMs?: number;
+  followMs?: number;
   onClosed?: () => void;
-  /** Tests talk to fake GPT-Live servers, faster. */
+  /** Tests talk to fake ElevenLabs servers, faster. */
   voice?: { elevenLabs?: Omit<ElevenLabsOptions, 'key'>; timing?: Partial<VoiceTiming> };
 }
 
 const failure = (message: string, statusCode: number) => Object.assign(new Error(message), { statusCode });
 
 /**
- * The master agent's own process. The web starts it on first use and talks to it over an owner-only socket; it keeps
- * running when the web restarts, so a turn in progress is never cut off by a deployment. It exits once nothing waits,
- * runs or listens for a while.
+ * The master's own process: it keeps the master session's guide, gives the session Tower's page tools, follows the
+ * work the master hands out and reports when it ends, and runs the voice. The web starts it and talks to it over an
+ * owner-only socket; the session's tool server reaches it the same way. It keeps running when the web restarts, and
+ * while a master session exists, so no report is missed.
  */
 export async function startMasterHost(options: MasterHostOptions) {
   const paths = await masterPaths(options.stateDir);
@@ -48,12 +47,13 @@ export async function startMasterHost(options: MasterHostOptions) {
   const release = options.releaseStateLock ?? await acquireStateLock(paths.runtime, 0);
   const token = randomBytes(32).toString('hex');
   const settings = new MasterSettingsStore(paths.data);
-  const room = new MasterRoom(paths.data);
-  const journal = new MasterJournal(paths.data);
+  // The voice's ledger lives beside the conversation the master kept before it became a session, which stays as it was.
+  const room = new MasterRoom(join(paths.data, 'voice'));
   const tower = new TowerClient();
   const live = new LiveState((path, signal) => tower.stream(path, signal));
   const readDb = lookupsSupported() ? new ReadDatabase() : undefined;
-  let service: MasterService | undefined;
+  let session: MasterSession | undefined;
+  let tools: MasterTools | undefined;
   let voice: MasterVoice | undefined;
   let lastRequest = Date.now();
   let pending = 0;
@@ -66,59 +66,66 @@ export async function startMasterHost(options: MasterHostOptions) {
       tower.setCredentials({ port: web.port!, token: web.token, callerSecret: web.callerSecret });
     }
   };
-  const busy = () => service!.busy();
-  // A host of another build steps aside unless it is in the middle of something only it holds.
-  const working = () => service!.working();
+  const overview = (): MasterOverview => {
+    const current = settings.current();
+    const binding = current.session;
+    const shown = binding ? live.snapshot()?.sessions.find(item => item.id === binding.sessionId) : undefined;
+    const voiceConfigured = Boolean(settings.voiceKey());
+    return {
+      available: true, version: APP_VERSION, settings: current,
+      ...(binding ? { session: { id: binding.sessionId, provider: binding.provider, ...(shown ? { status: shown.status, title: shown.customTitle || shown.title } : {}) } } : {}),
+      voiceConfigured, ...(voiceConfigured ? { voiceKeyHint: settings.voiceKeyHint() } : {}),
+      activeTasks: session?.activeTasks() ?? 0,
+      ...(voice ? { voice: voice.status() } : {}),
+    };
+  };
+  const broadcastOverview = () => room.broadcast({ type: 'overview', seq: 0, overview: overview() });
+  // A host of another build steps aside unless a report is on its way or a tool is being answered.
+  const working = () => pending > 1 || Boolean(session?.busy());
   const dispatch = async (method: string, args: Record<string, unknown>) => {
-    const master = service!;
+    const master = session!;
     const speech = voice!;
     switch (method) {
       case 'ping': return { busy: working(), streams: streams.size };
       case 'hello': return true;
-      case 'overview': return master.overview();
-      case 'checkpoint': {
-        // The position is taken first: whatever happens while the page is read is replayed after it, never skipped.
-        const position = room.position();
-        const draft = room.currentDraft();
-        const overview = master.overview();
-        const page = await room.page(undefined, typeof args.limit === 'number' ? args.limit : 80);
-        return { ...position, ...page, ...(draft ? { draft } : {}), overview };
+      case 'overview': return overview();
+      case 'checkpoint': return { ...room.position(), overview: overview() };
+      case 'start': {
+        if (args.provider !== 'claude' && args.provider !== 'codex') throw failure('Claude 또는 Codex를 선택하세요.', 400);
+        if (typeof args.text !== 'string' || !args.text.trim() || args.text.length > 32_000) throw failure('첫 메시지를 적어 주세요.', 400);
+        const text = (value: unknown, pattern: RegExp) => typeof value === 'string' && pattern.test(value) ? value : undefined;
+        const binding = await master.begin({ provider: args.provider as Provider, text: args.text.trim(), replace: args.replace === true,
+          ...(text(args.model, /^[a-zA-Z0-9._:\[\]-]{1,80}$/) ? { model: args.model as string } : {}), ...(text(args.effort, /^[a-z]{1,20}$/) ? { effort: args.effort as string } : {}) });
+        broadcastOverview();
+        return { binding, overview: overview() };
       }
-      case 'page': return room.page(typeof args.before === 'number' ? args.before : undefined, typeof args.limit === 'number' ? args.limit : 80);
-      case 'send': {
-        if (typeof args.clientMessageId !== 'string' || !/^[a-zA-Z0-9-]{8,64}$/.test(args.clientMessageId)) throw failure('메시지 ID가 올바르지 않습니다.', 400);
-        const attachments = fileList(args.attachments);
-        if (typeof args.text !== 'string' || (!args.text.trim() && !attachments.length) || args.text.length > 32_000) throw failure('메시지가 비었거나 너무 깁니다.', 400);
-        if (args.model !== undefined && (typeof args.model !== 'string' || !/^[a-zA-Z0-9._:-]{1,80}$/.test(args.model))) throw failure('모델 이름이 올바르지 않습니다.', 400);
-        if (args.effort !== undefined && !(MASTER_EFFORTS as readonly unknown[]).includes(args.effort)) throw failure('추론 수준이 올바르지 않습니다.', 400);
-        return master.send({ clientMessageId: args.clientMessageId, text: args.text, local: args.local === true, ...(attachments.length ? { attachments } : {}),
-          ...(args.model !== undefined ? { model: args.model as string } : {}), ...(args.effort !== undefined ? { effort: args.effort as MasterEffort } : {}),
-          ...(args.viewContext && typeof args.viewContext === 'object' ? { viewContext: viewContext(args.viewContext) } : {}) });
+      case 'release': { await master.release(); broadcastOverview(); return overview(); }
+      case 'presence': {
+        if (typeof args.tabId !== 'string' || !/^[a-zA-Z0-9-]{8,80}$/.test(args.tabId)) throw failure('탭 ID가 올바르지 않습니다.', 400);
+        tools!.present(args.tabId);
+        return true;
       }
-      case 'retry': {
-        if (typeof args.id !== 'string') throw failure('다시 보낼 요청이 올바르지 않습니다.', 400);
-        return master.retry(args.id, { local: args.local === true, ...(args.viewContext && typeof args.viewContext === 'object' ? { viewContext: viewContext(args.viewContext) } : {}) });
-      }
-      case 'stop': return master.stop();
       case 'ack': {
         if (typeof args.id !== 'string' || !['done', 'unavailable', 'failed'].includes(String(args.result))) throw failure('화면 응답이 올바르지 않습니다.', 400);
-        return master.ack(args.id, args.result as 'done' | 'unavailable' | 'failed', typeof args.note === 'string' ? args.note : undefined);
-      }
-      case 'card': {
-        if (typeof args.id !== 'string' || !args.body || typeof args.body !== 'object') throw failure('카드 응답이 올바르지 않습니다.', 400);
-        return master.card(args.id, args.body as Record<string, unknown>, args.local === true);
+        return tools!.ack(args.id, args.result as 'done' | 'unavailable' | 'failed', typeof args.note === 'string' ? args.note : undefined);
       }
       case 'settings': {
-        const overview = await master.updateSettings(args.body && typeof args.body === 'object' ? args.body as Record<string, unknown> : {});
+        await settings.update(args.body && typeof args.body === 'object' ? args.body as Record<string, unknown> : {});
         speech.broadcast();
-        return overview;
+        broadcastOverview();
+        return overview();
+      }
+      case 'tools': return MASTER_TOOLS;
+      case 'tool': {
+        if (typeof args.name !== 'string' || !args.arguments || typeof args.arguments !== 'object' || Array.isArray(args.arguments)) throw failure('도구 호출이 올바르지 않습니다.', 400);
+        return tools!.call(args.name, args.arguments as Record<string, unknown>);
       }
       case 'voiceOn': return speech.voiceOn({ tabId: args.tabId, local: args.local === true });
       case 'voiceOff': return speech.voiceOff({ session: args.session });
       case 'voicePresence': return speech.voicePresence({ session: args.session, listening: args.listening, panelOpen: args.panelOpen });
       case 'voiceToken': return speech.voiceToken({ session: args.session });
       case 'voiceUsage': return speech.voiceUsage({ tokenId: args.tokenId, seconds: args.seconds });
-      case 'voiceRequest': return speech.voiceRequest({ session: args.session, clientMessageId: args.clientMessageId, text: args.text, local: args.local === true, ...(args.viewContext && typeof args.viewContext === 'object' ? { viewContext: viewContext(args.viewContext) } : {}) });
+      case 'voiceRequest': return speech.voiceRequest({ session: args.session, clientMessageId: args.clientMessageId, text: args.text, local: args.local === true });
       case 'voiceActivity': return speech.voiceActivity({ session: args.session, speaking: args.speaking, sinceSpeechMs: args.sinceSpeechMs });
       case 'voiceKnown': return speech.voiceKnown({ session: args.session });
       case 'voiceNudge': return speech.voiceNudge({ session: args.session });
@@ -136,7 +143,7 @@ export async function startMasterHost(options: MasterHostOptions) {
   const server = createServer(async (req, res) => {
     const supplied = Buffer.from(req.headers.authorization ?? '');
     const expected = Buffer.from(`Bearer ${token}`);
-    if (closing || !service || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) { res.writeHead(403); res.end(); return; }
+    if (closing || !session || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) { res.writeHead(403); res.end(); return; }
     const url = new URL(req.url ?? '/', 'http://master.invalid');
     if (req.method === 'GET' && url.pathname === '/events') { lastRequest = Date.now(); events(res, url.searchParams.get('epoch') ?? '', Number(url.searchParams.get('after') ?? '-1')); return; }
     // Audio read aloud, streamed to the page through the web as it is made.
@@ -155,8 +162,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { protocol?: number; method?: string; args?: Record<string, unknown>; web?: unknown };
       if (input.protocol !== MASTER_PROTOCOL || typeof input.method !== 'string') throw failure('Incompatible master request.', 409);
       credentials(input.web);
-      // A web's heartbeat or version check is not use: an idle master may still exit while pages are open.
-      if (!['hello', 'ping', 'voiceActivity', 'voicePresence'].includes(input.method)) lastRequest = Date.now();
+      if (!['hello', 'ping', 'voiceActivity', 'voicePresence', 'presence'].includes(input.method)) lastRequest = Date.now();
       reply.result = await dispatch(input.method, input.args && typeof input.args === 'object' ? input.args : {}) ?? null;
     } catch (error) {
       const value = error as { message?: string; statusCode?: number };
@@ -169,7 +175,6 @@ export async function startMasterHost(options: MasterHostOptions) {
   /** Live changes for one page: what it missed since `(epoch, after)`, then everything new. */
   function events(res: ServerResponse, epoch: string, after: number) {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    // Opens the page's stream at once, before anything has happened.
     res.write(': connected\n\n');
     const missed = Number.isInteger(after) ? room.since(epoch, after) : undefined;
     if (!missed) { res.end(`event: resync\ndata: {}\n\n`); return; }
@@ -191,9 +196,9 @@ export async function startMasterHost(options: MasterHostOptions) {
     await new Promise<void>(resolve => server.close(() => resolve()));
     await unlink(paths.socket).catch(() => {});
     await unlink(paths.token).catch(() => {});
-    live.close();
-    readDb?.close();
-    try { await voice?.close(); await service?.close(); } finally {
+    try { await voice?.close(); await session?.close(); await room.flush(); } finally {
+      live.close();
+      readDb?.close();
       await release();
       if (idle) options.onClosed?.();
     }
@@ -202,14 +207,14 @@ export async function startMasterHost(options: MasterHostOptions) {
   try {
     await settings.start();
     await room.start();
-    await journal.start();
-    service = new MasterService({ settings, room, journal, tower, live, readDb, attachments: await masterAttachments(paths.data), model: options.model ?? routedModel(openAiResponses(() => settings.key()), anthropicMessages(() => settings.anthropicKey())), ...(options.taskPollMs ? { taskPollMs: options.taskPollMs } : {}) });
+    session = new MasterSession({ stateDir: paths.stateDir, dataDir: paths.data, settings, tower, live, room, onChange: broadcastOverview, ...(options.followMs ? { followMs: options.followMs } : {}) });
+    tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), broadcast: event => room.broadcast(event), started: (target, body, answer) => session!.started(target, body, answer), delegated: () => session!.delegatedTable() });
     const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), ...options.voice?.elevenLabs });
-    voice = new MasterVoice({ dataDir: paths.data, settings, room, hooks: service.voiceHooks(), elevenLabs, ...(options.voice?.timing ? { timing: options.voice.timing } : {}) });
-    service.setVoice(voice);
-    // The voice's records first: what the master answers from the start knows whether to be spoken.
+    voice = new MasterVoice({ dataDir: paths.data, settings, room, elevenLabs, ...(options.voice?.timing ? { timing: options.voice.timing } : {}),
+      hooks: { hide: text => text, connectedSince: () => tower.connectedSince(), send: input => session!.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }) } });
+    session.setVoice(voice);
     await voice.start();
-    await service.start();
+    await session.start();
     await unlink(paths.socket).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
     await unlink(paths.token).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(paths.socket, () => { server.off('error', reject); resolve(); }); });
@@ -217,19 +222,13 @@ export async function startMasterHost(options: MasterHostOptions) {
     // The credential appears last: a web that can read it can already talk to this host.
     await writeFile(paths.token, token, { flag: 'wx', mode: 0o600 });
     idleTimer = setInterval(() => {
-      if (closing || pending || streams.size || busy() || Date.now() - lastRequest < (options.idleMs ?? IDLE_MS)) return;
+      // With a master session it stays, to report the work handed out whenever it ends.
+      if (closing || pending || streams.size || settings.current().session || Date.now() - lastRequest < (options.idleMs ?? IDLE_MS)) return;
       void close(true).catch(error => { console.error(`Master host idle cleanup failed: ${(error as NodeJS.ErrnoException)?.code ?? 'error'}`); });
     }, 1000);
     idleTimer.unref();
-    return { socketPath: paths.socket, close, service };
+    return { socketPath: paths.socket, close, session, tools };
   } catch (error) { await close(); throw error; }
-}
-
-function viewContext(value: object) {
-  const input = value as Record<string, unknown>;
-  const text = (item: unknown, max: number) => typeof item === 'string' && item.length <= max ? item : undefined;
-  const tabId = text(input.tabId, 80), sessionId = text(input.sessionId, 400), node = text(input.node, 32), cwd = text(input.cwd, 4096);
-  return { ...(tabId ? { tabId } : {}), ...(sessionId ? { sessionId } : {}), ...(node && /^[a-f0-9]{32}$/.test(node) ? { node } : {}), ...(cwd ? { cwd } : {}) };
 }
 
 export async function runMasterHost(stateDir: string): Promise<void> {

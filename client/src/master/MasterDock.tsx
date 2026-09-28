@@ -1,22 +1,23 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { Bot, LoaderCircle, Mic } from 'lucide-react';
+import { Bot, LoaderCircle, Mic, Settings } from 'lucide-react';
 import { APP_VERSION } from '../../../shared/app-identity';
-import { DEFAULT_MASTER_VOICE, type MasterDirective, type MasterScreenCommand, type MasterViewContext } from '../../../shared/master';
+import { DEFAULT_MASTER_VOICE, type MasterDirective } from '../../../shared/master';
 import { splitScopedId } from '../remote/scope';
 import { post } from './api';
 import { followRoom, type RoomState } from './room-stream';
 import { runScreenCommand, type MasterControls } from './screen';
 import { useWords } from './strings';
 import { VoiceSession, type VoiceView } from './voice-client';
-import type { VoiceControls } from './VoiceBar';
+import { VoiceBar, type VoiceControls } from './VoiceBar';
 import './master.css';
 
 const MasterPanel = lazy(() => import('./MasterPanel').then(module => ({ default: module.MasterPanel })));
 
 export type { MasterControls } from './screen';
 
-const SEEN_KEY = 'tower.master.seen-order';
 const TAB_KEY = 'tower.master.tab';
+/** How often a tab showing the master says so, so the master's screen commands go there. */
+const PRESENCE_MS = 30_000;
 /** One id per browser tab, so the master opens results only where the owner is talking. */
 function tabId(): string {
   try {
@@ -29,15 +30,15 @@ function tabId(): string {
 }
 
 /**
- * The master agent's floating button (bottom left) and its panel. Hidden when this Tower has no master.
- * `sessionId` is the conversation the owner has open, so "this session" means something.
+ * The master agent's floating button (bottom left). The master is a session: the button opens its conversation like
+ * any other, or, before it has one, a panel to start it. While its conversation is open, a small bar beside the button
+ * holds voice and the master's settings. Hidden when this Tower has no master. `sessionId` is the open conversation.
  */
 export function MasterDock({ token, controls, sessionId }: { token: string; controls: MasterControls; sessionId: string | null }) {
   const words = useWords();
   const [open, setOpen] = useState(false);
-  const [room, setRoom] = useState<RoomState>({ entries: [], hasMore: false });
+  const [room, setRoom] = useState<RoomState>({});
   const [absent, setAbsent] = useState(false);
-  const [seen, setSeen] = useState(() => Number(window.localStorage.getItem(SEEN_KEY) ?? '-1'));
   const follow = useRef<ReturnType<typeof followRoom> | undefined>(undefined);
   const tab = useRef(tabId());
   const controlsRef = useRef(controls);
@@ -47,16 +48,18 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   tokenRef.current = token;
   /** Commands already done here, until they expire, so one sent again after a reconnect is not done twice. */
   const done = useRef(new Map<string, number>());
-  // Voice lives here, not in the panel: closing the panel does not turn it off (news is then not read aloud).
+  // Voice lives here: closing the conversation does not turn it off (news is then not read aloud).
   const voiceRef = useRef<VoiceSession | null>(null);
   const [voiceView, setVoiceView] = useState<VoiceView | null>(null);
   const [voiceEnded, setVoiceEnded] = useState<{ reason: string; error?: string } | null>(null);
-  const openRef = useRef(open);
-  openRef.current = open;
   const voiceSettings = useRef(DEFAULT_MASTER_VOICE);
-  const viewContext = useRef<MasterViewContext | undefined>(undefined);
+
+  const overview = room.overview;
+  const masterId = overview?.session?.id;
   const { node: viewNode, id: viewSession } = sessionId ? splitScopedId(sessionId) : { node: undefined, id: undefined };
-  viewContext.current = { tabId: tab.current, ...(viewSession ? { sessionId: viewSession } : {}), ...(viewNode ? { node: viewNode } : {}) };
+  const masterOpen = Boolean(masterId && !viewNode && viewSession === masterId);
+  const masterOpenRef = useRef(masterOpen);
+  masterOpenRef.current = masterOpen;
 
   useEffect(() => {
     let cancelled = false;
@@ -83,13 +86,21 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
     return () => { cancelled = true; if (retry) clearTimeout(retry); follow.current?.stop(); voiceRef.current?.stop(); };
   }, []);
 
-  const overview = room.overview;
+  // A tab showing the master's conversation is where its screen commands go.
+  useEffect(() => {
+    if (!masterOpen) return;
+    const tell = () => { void post('/api/master/presence', tokenRef.current, { tabId: tab.current }).catch(() => {}); };
+    tell();
+    const timer = setInterval(tell, PRESENCE_MS);
+    return () => clearInterval(timer);
+  }, [masterOpen]);
+
   voiceSettings.current = overview?.settings.voice ?? DEFAULT_MASTER_VOICE;
   // Called straight from the owner's click, so the browser lets what is read aloud play later.
   const startVoice = useCallback(() => {
     if (voiceRef.current) return;
     const current: VoiceSession = new VoiceSession({
-      token: () => tokenRef.current, tabId: tab.current, settings: () => voiceSettings.current, panelOpen: () => openRef.current, viewContext: () => viewContext.current,
+      token: () => tokenRef.current, tabId: tab.current, settings: () => voiceSettings.current, panelOpen: () => masterOpenRef.current, viewContext: () => undefined,
       onView: view => { if (voiceRef.current === current) setVoiceView(view); },
       onEnded: (reason, error) => {
         if (voiceRef.current !== current) return;
@@ -104,9 +115,9 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
     void current.start().catch(() => { /* Shown through onEnded. */ });
   }, []);
   // Whether the master is open here matters for reading news aloud: told at once.
-  useEffect(() => { voiceRef.current?.touch(); }, [open]);
+  useEffect(() => { voiceRef.current?.touch(); }, [masterOpen]);
   const unavailable = !VoiceSession.supported() ? words('음성은 https 주소나 이 컴퓨터(localhost)에서 마이크를 쓸 수 있을 때만 됩니다.', 'Voice needs an https address or this computer (localhost), and a microphone.')
-    : overview && overview.version !== APP_VERSION ? words('마스터가 업데이트를 기다리는 중입니다. 진행 중인 일이 끝나면 음성을 쓸 수 있습니다.', 'The master is waiting to update; voice is available once its current work ends.')
+    : overview && overview.version !== APP_VERSION ? words('마스터가 업데이트를 기다리는 중입니다. 잠시 뒤 음성을 쓸 수 있습니다.', 'The master is waiting to update; voice is available shortly.')
     : overview && !overview.voiceConfigured ? words('마스터 설정에 ElevenLabs API 키를 넣으면 음성을 쓸 수 있습니다.', 'Add an ElevenLabs API key in the master settings to use voice.')
     : undefined;
   const voice: VoiceControls = {
@@ -116,22 +127,22 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
     finish: () => voiceRef.current?.finish(), discard: () => voiceRef.current?.discard(),
   };
 
-  const lastOrder = room.entries.at(-1)?.order ?? -1;
-  const unread = open ? 0 : room.entries.filter(entry => entry.order > seen && (entry.data.kind === 'master' || entry.data.kind === 'error' || (entry.data.kind === 'task' && entry.data.state !== 'running'))).length;
-  useEffect(() => {
-    if (!open || lastOrder <= seen) return;
-    setSeen(lastOrder);
-    try { window.localStorage.setItem(SEEN_KEY, String(lastOrder)); } catch { /* ignore */ }
-  }, [open, lastOrder, seen]);
-
-  // Shift+M opens and closes the panel, except while typing or in a terminal.
+  // The button opens (or closes) the master's conversation; before the master has a session, its start panel.
+  const press = useCallback(() => {
+    if (!masterId) { setOpen(value => !value); return; }
+    setOpen(false);
+    controlsRef.current.selectSession(masterOpenRef.current ? null : masterId);
+  }, [masterId]);
+  const pressRef = useRef(press);
+  pressRef.current = press;
+  // Shift+M does the same, except while typing or in a terminal.
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key !== 'M' || !event.shiftKey || event.metaKey || event.ctrlKey || event.altKey || event.isComposing || event.keyCode === 229) return;
       const target = event.target as HTMLElement | null;
       if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], .xterm, .workspace-overlay')) return;
       event.preventDefault();
-      setOpen(value => !value);
+      pressRef.current();
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
@@ -140,23 +151,32 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   const position = useDockPosition();
   const close = useCallback(() => { setOpen(false); requestAnimationFrame(() => button.current?.focus()); }, []);
   if (absent) return null;
-  const thinking = overview?.state === 'thinking' || Boolean(room.draft);
-  const attention = overview && (overview.state === 'unconfigured');
+  const thinking = overview?.session?.status === 'working';
+  const tasks = overview?.activeTasks ?? 0;
   return <>
-    <button ref={button} className={`master-fab ${thinking ? 'thinking' : ''} ${attention ? 'attention' : ''} ${open ? 'open' : ''} ${voiceView ? 'voice' : ''}`} style={fabStyle(position)} onClick={() => setOpen(value => !value)}
-      aria-label={words('마스터 에이전트', 'Master agent')} title={`${words('마스터 에이전트', 'Master agent')} (Shift+M)`} aria-expanded={open} aria-keyshortcuts="Shift+M">
+    <button ref={button} className={`master-fab ${thinking ? 'thinking' : ''} ${masterOpen || open ? 'open' : ''} ${voiceView ? 'voice' : ''}`} style={fabStyle(position)} onClick={press}
+      aria-label={words('마스터 에이전트', 'Master agent')} title={`${words('마스터 에이전트', 'Master agent')} (Shift+M)`} aria-pressed={masterOpen || open} aria-keyshortcuts="Shift+M">
       {voiceView ? <Mic size={22} /> : thinking ? <LoaderCircle size={22} className="spin" /> : <Bot size={22} />}
-      {unread > 0 && <span className="master-fab-badge">{unread > 9 ? '9+' : unread}</span>}
-      {!unread && (overview?.activeTasks ?? 0) > 0 && <span className="master-fab-tasks">{overview!.activeTasks}</span>}
+      {tasks > 0 && <span className="master-fab-tasks" title={words('맡긴 일 중 아직 보고되지 않은 것', 'Handed-out work not reported yet')}>{tasks}</span>}
     </button>
+    {(masterOpen || voiceView || voiceEnded) && !open && <div className="master-bar" style={barStyle(position)}>
+      <VoiceBar voice={voice} />
+      <div className="master-bar-buttons">
+        {!voiceView && <button className="master-mic" onClick={voice.start} disabled={Boolean(voice.unavailable)} title={voice.unavailable ?? words('말로 시키기 (ElevenLabs 받아쓰기·읽어 주기)', 'Talk to the master (ElevenLabs speech to text and reading aloud)')} aria-label={words('음성 대화 시작', 'Start voice')}><Mic size={16} /></button>}
+        <button className="master-mic" onClick={() => setOpen(true)} title={words('마스터 설정', 'Master settings')} aria-label={words('마스터 설정', 'Master settings')}><Settings size={16} /></button>
+      </div>
+    </div>}
     {open && <Suspense fallback={<div className="master-panel"><LoaderCircle className="spin" size={18} /></div>}>
-      <MasterPanel token={token} room={room} tabId={tab.current} sessionId={sessionId} voice={voice} top={position.panelTop} onClose={close} onEarlier={() => follow.current?.earlier() ?? Promise.resolve()} onOpenSession={id => controlsRef.current.selectSession(id)}
-        onCommand={(command: MasterScreenCommand) => runScreenCommand(command, controlsRef.current)} />
+      <MasterPanel token={token} overview={overview} voice={voice} top={position.panelTop} onClose={close} onStarted={id => { setOpen(false); controlsRef.current.selectSession(id); }} />
     </Suspense>}
   </>;
 }
 
 function fabStyle({ panelTop: _, ...style }: React.CSSProperties & { panelTop?: number }): React.CSSProperties { return style; }
+/** The bar sits right of the button, on the same line. */
+function barStyle({ panelTop: _, left, ...style }: React.CSSProperties & { panelTop?: number }): React.CSSProperties {
+  return { ...style, ...(left !== undefined ? { left: `calc(${String(left).replace(/^calc/, '')} + 62px)` } : {}) };
+}
 
 /**
  * Keeps the button clear of what already sits at the bottom left: the expanded sidebar on wide screens and a
