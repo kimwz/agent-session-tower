@@ -284,8 +284,8 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Which reading of a file a state is: a file rewritten or replaced gets a new state, and so a new number. Numbers from
-   * before this process started never match, so a search resumed after a restart reads the conversation again.
+   * Which reading of a file a state is: a file rewritten or replaced gets a new state, and so a new number. Numbers start
+   * from a random base in each process, so a search resumed after a restart almost surely reads the conversation again.
    */
   private generation(state: RecordState): number {
     let number = this.generations.get(state);
