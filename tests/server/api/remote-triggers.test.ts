@@ -52,7 +52,8 @@ async function fixture(t: TestContext) {
   const submitted: Array<{ origin?: RunOrigin }> = [];
   // Runs during a look (after `skip` others), after what it judges was read: like a change made here at that moment.
   const looking: { during?: () => Promise<unknown>; skip?: number } = {};
-  const api = new TowerApi({ stateDir: root, triggers, runs: { list: () => runs }, sessions: { list: () => sessions, read: async () => [] },
+  const api = new TowerApi({ stateDir: root, triggers, runs: { list: () => runs }, sessions: { list: () => sessions, read: async () => ({ messages: [], hasMore: false }),
+      search: async () => ({ count: 1, matches: [{ message: { id: 'm', role: 'user', text: 'release notes', timestamp: new Date().toISOString() }, cursor: 10 }], bytes: 10 }) },
     projects: () => [{ cwd: open, title: 'open', sessions: 1, pinned: false }, { cwd: secret, title: 'secret', sessions: 1, pinned: false }],
     autoPrompts: { submit: async (request, internal) => { submitted.push(internal); return { ...job(request.requestId), ...(internal.origin ? { origin: internal.origin } : {}) }; }, get: () => undefined },
     remote: async () => {
@@ -268,7 +269,7 @@ test('where a folder really is, and the sharing list, are looked at again for ev
     create: async () => { throw new Error('unused'); }, enqueue: async () => { throw new Error('unused'); }, runs: () => [], session: () => undefined } });
   await triggers.start();
   t.after(() => triggers.close());
-  const api = new TowerApi({ stateDir: root, triggers, sessions: { list: () => [], read: async () => [] },
+  const api = new TowerApi({ stateDir: root, triggers, sessions: { list: () => [], read: async () => ({ messages: [], hasMore: false }) },
     remote: async paths => { await store.reload(); await store.prepare(paths, { fresh: true }); return { matcher: store.matcher(), coordinators: new Set() }; } });
   await api.call('triggers.create', { trigger: trigger({ mode: 'folder', cwd: link }, 'Through a link') }, owner);
   const names = async () => ((await api.call('triggers.list', {}, remote)) as { triggers: Array<{ name: string }> }).triggers.map(item => item.name);
@@ -308,6 +309,7 @@ test('an agent in a turn started from a controlling computer sees and starts onl
   assert.deepEqual((await tool<{ sessions: Array<{ id: string }> }>('sessions_list', {})).sessions.map(item => item.id), ['codex:shared']);
   assert.deepEqual((await tool<{ projects: Array<{ cwd: string }> }>('projects_list', {})).projects.map(item => item.cwd), [f.open]);
   await assert.rejects(tool('sessions_read', { id: 'codex:private' }), { statusCode: 404 });
+  assert.deepEqual((await tool<{ sessions: Array<{ id: string }> }>('sessions_search', { query: 'release' })).sessions.map(item => item.id), ['codex:shared']);
   await tool('autoPrompt_submit', { requestId: randomUUID(), provider: 'codex', prompt: 'Look into it' });
   assert.deepEqual(f.submitted.at(-1)!.origin, { kind: 'agent', runId: run.id, controllerId: CONTROLLER });
   const created = await tool<{ trigger: { remoteEdited?: unknown; createdBy: TriggerActor } }>('triggers_create', { requestKey: 'k1', trigger: trigger({ mode: 'auto' }) });

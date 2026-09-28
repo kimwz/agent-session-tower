@@ -4,6 +4,9 @@ import { GitHubAuthSchema, HttpConditionSchema, HttpRequestSchema, ScheduleSchem
 const id = z.string().min(1).max(200);
 const uuid = z.string().regex(/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i, 'A UUID is required.');
 const revision = z.number().int().min(1);
+/** An ISO 8601 date or date and time. */
+const time = z.string().max(40).refine(value => /^\d{4}-\d{2}-\d{2}/.test(value) && Number.isFinite(Date.parse(value)), 'An ISO 8601 date or time is required.');
+const cursor = z.string().min(1).max(500);
 const page = { before: z.string().max(40).optional(), limit: z.number().int().min(1).max(200).optional() };
 
 /**
@@ -14,10 +17,14 @@ const page = { before: z.string().max(40).optional(), limit: z.number().int().mi
  * call returns the first result instead of acting twice.
  */
 export const OPERATIONS = {
-  'sessions.list': { input: z.object({ provider: z.enum(['claude', 'codex']).optional(), cwd: z.string().max(4096).optional(), limit: z.number().int().min(1).max(200).optional() }).strict(), write: false, agent: true,
-    summary: 'List Tower sessions (most recent first) with their folder, status and whether a trigger created them.' },
-  'sessions.read': { input: z.object({ id, limit: z.number().int().min(1).max(100).optional() }).strict(), write: false, agent: true,
-    summary: 'Read the most recent messages of a Tower session.' },
+  'sessions.list': { input: z.object({ provider: z.enum(['claude', 'codex']).optional(), cwd: z.string().max(4096).optional(), query: z.string().max(200).optional(),
+    since: time.optional(), until: time.optional(), cursor: cursor.optional(), limit: z.number().int().min(1).max(200).optional() }).strict(), write: false, agent: true,
+    summary: 'List Tower sessions, most recently active first (20 by default), with their folder, status and whether a trigger created them. query matches the title or folder; since/until bound the last activity. Pass nextCursor as cursor for the next page.' },
+  'sessions.read': { input: z.object({ id, cursor: cursor.optional(), limit: z.number().int().min(1).max(100).optional(), tools: z.boolean().optional() }).strict(), write: false, agent: true,
+    summary: 'Read a Tower session’s messages, oldest to newest, ending with the latest (20 by default). Pass nextCursor as cursor for the page before, or a search match’s cursor to read up to that match. Tool calls are left out unless tools is true.' },
+  'sessions.search': { input: z.object({ query: z.string().trim().min(1).max(200), since: time.optional(), until: time.optional(), provider: z.enum(['claude', 'codex']).optional(),
+    cwd: z.string().max(4096).optional(), sessionId: id.optional(), tools: z.boolean().optional(), cursor: cursor.optional(), limit: z.number().int().min(1).max(50).optional() }).strict(), write: false, agent: true,
+    summary: 'Find earlier Tower sessions whose messages contain every word of query (case-insensitive), most recently active first (10 by default), with matching excerpts. since/until bound the message time (ISO date or time). Use it to look for related past work before starting a task. A search that stops early returns nextCursor to continue.' },
   'projects.list': { input: z.object({}).strict(), write: false, agent: true, summary: 'List the project folders Tower knows, with their names and how many sessions each has.' },
   'runs.list': { input: z.object({ sessionId: id.optional(), limit: z.number().int().min(1).max(100).optional() }).strict(), write: false, agent: true,
     summary: 'List recent Tower runs with their status, origin and the end of their output.' },

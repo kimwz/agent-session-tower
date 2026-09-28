@@ -8,6 +8,17 @@ import { sortSessions } from '../../shared/session-activity.js';
 import { inspectProcesses, type ProcessSnapshot } from './processes.js';
 import { appendFile, applyStatus, initial, ownHistory, parseMessages, walk, CHUNK, MAX_LINE, type RecordState } from './parser.js';
 
+/** Every term is lowercase; times are milliseconds, `until` excluded. Tool calls and results are searched only with `tools`. */
+export interface SessionSearch { terms: string[]; since?: number; until?: number; tools?: boolean; keep: number }
+export interface SessionSearchResult { count: number; matches: Array<{ message: ChatMessage; cursor: number }>; bytes: number }
+
+/** A term as the JSONL writers store it inside a string: JSON-escaped, ASCII letters lowercased like the line it is looked for in. */
+function rawNeedle(term: string): Buffer {
+  const needle = Buffer.from(JSON.stringify(term).slice(1, -1));
+  for (let index = 0; index < needle.length; index++) { const byte = needle[index]!; if (byte >= 65 && byte <= 90) needle[index] = byte + 32; }
+  return needle;
+}
+
 interface SessionOptions { codexHome?: string; claudeHome?: string; pollIntervalMs?: number; inspectProcesses?: () => Promise<ProcessSnapshot> }
 
 export class SessionService extends EventEmitter {
@@ -184,6 +195,70 @@ export class SessionService extends EventEmitter {
       const previousUser = hasMore ? await this.previousUser(file, state, nextBefore, historyStart) : undefined;
       return { session: { ...state.session }, messages: collected.reverse().flat(), hasMore, nextBefore: hasMore ? nextBefore : undefined, ...(previousUser ? { previousUser } : {}) };
     } finally { await file.close(); }
+  }
+
+  /**
+   * The messages of one conversation that contain every term (lowercase), read from its start. Only lines whose raw bytes
+   * could hold the first term are parsed, so a search costs little more than reading the file. Keeps the last `keep`
+   * matches, each with the cursor that pages `detail` back from just after it.
+   */
+  async search(id: string, query: SessionSearch): Promise<SessionSearchResult | undefined> {
+    const state = this.index.get(id);
+    if (!state) return undefined;
+    const result: SessionSearchResult = { count: 0, matches: [], bytes: 0 };
+    if (state.historyStartOrdinal !== undefined && state.historyStartOffset === undefined) return result;
+    const needle = rawNeedle(query.terms[0]!);
+    const escapes = /[^\x00-\x7f]/.test(query.terms[0]!) ? Buffer.from('\\u') : undefined;
+    const file = await open(state.session.filePath!, 'r');
+    let lowered = Buffer.alloc(0);
+    const test = (line: Buffer, start: number): void => {
+      if (line.length < needle.length) return;
+      if (lowered.length < line.length) lowered = Buffer.allocUnsafe(Math.max(line.length, lowered.length * 2));
+      for (let index = 0; index < line.length; index++) { const byte = line[index]!; lowered[index] = byte >= 65 && byte <= 90 ? byte + 32 : byte; }
+      const view = lowered.subarray(0, line.length);
+      if (view.indexOf(needle) === -1 && !(escapes && view.indexOf(escapes) !== -1)) return;
+      let row: Record<string, any>;
+      try { row = JSON.parse(line.toString('utf8')); } catch { return; }
+      if (!ownHistory(state, row, start)) return;
+      for (const message of parseMessages(state.session.provider, row, start, state.session.createdAt)) {
+        if (message.role === 'tool' && !query.tools) continue;
+        const at = Date.parse(message.timestamp);
+        if ((query.since !== undefined && !(at >= query.since)) || (query.until !== undefined && !(at < query.until))) continue;
+        const text = message.text.toLowerCase();
+        if (!query.terms.every(term => text.includes(term))) continue;
+        result.count++;
+        result.matches.push({ message, cursor: start + line.length + 1 });
+        if (result.matches.length > query.keep) result.matches.shift();
+      }
+    };
+    try {
+      let position = state.historyStartOffset ?? 0;
+      let fragments: Buffer[] = [];
+      let pending = 0;
+      let lineStart = position;
+      let oversized = false;
+      while (position < state.offset) {
+        const buffer = Buffer.allocUnsafe(Math.min(CHUNK, state.offset - position));
+        const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
+        if (!bytesRead) break;
+        const data = buffer.subarray(0, bytesRead);
+        let from = 0;
+        for (let newline = data.indexOf(10); newline !== -1; newline = data.indexOf(10, from)) {
+          if (!oversized && pending + newline - from <= MAX_LINE) test(pending ? Buffer.concat([...fragments, data.subarray(from, newline)]) : data.subarray(from, newline), lineStart);
+          fragments = []; pending = 0; oversized = false;
+          from = newline + 1;
+          lineStart = position + from;
+        }
+        const rest = data.subarray(from);
+        if (!oversized && rest.length) {
+          pending += rest.length;
+          if (pending > MAX_LINE) { fragments = []; oversized = true; } else fragments.push(rest);
+        }
+        position += bytesRead;
+        result.bytes += bytesRead;
+      }
+    } finally { await file.close(); }
+    return result;
   }
 
   /**

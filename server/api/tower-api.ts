@@ -2,9 +2,10 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { OPERATIONS, REMOTE_PAGE_OPERATIONS, isOperationName, type OperationName } from '../../shared/api/operations.js';
 import type { TriggerActor, TriggerEvent, TriggerInput } from '../../shared/triggers.js';
-import type { AutoPromptJob, AutoPromptRequest, ChatMessage, Run, RunOrigin, Session } from '../../shared/types.js';
+import type { AutoPromptJob, AutoPromptRequest, ChatMessage, Run, RunOrigin, Session, SessionDetail } from '../../shared/types.js';
 import type { SlackWorkflow } from '../../shared/slack.js';
 import type { RunAdmission } from '../runs/manager.js';
+import type { SessionSearch, SessionSearchResult } from '../sessions/service.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { TriggerScope, TriggerService } from '../triggers/service.js';
 import { remoteRequestTime } from '../remote/request-ledger.js';
@@ -20,7 +21,12 @@ const SUCCEEDED = { done: true, note: 'This request succeeded. Read the current 
 export interface TowerServices {
   stateDir: string;
   triggers: TriggerService;
-  sessions?: { list(): Session[]; read(id: string, limit: number): Promise<ChatMessage[] | undefined> };
+  sessions?: {
+    list(): Session[];
+    /** A page of a conversation ending before the `before` byte cursor, or at its end. */
+    read(id: string, limit: number, before?: number): Promise<Pick<SessionDetail, 'messages' | 'hasMore' | 'nextBefore'> | undefined>;
+    search?(id: string, query: SessionSearch): Promise<SessionSearchResult | undefined>;
+  };
   runs?: { list(): Run[] };
   projects?: () => Array<{ cwd: string; title: string; sessions: number; pinned: boolean }>;
   autoPrompts?: { submit(request: AutoPromptRequest, internal: Pick<RunAdmission, 'origin'>): Promise<AutoPromptJob>; get(id: string): AutoPromptJob | undefined };
@@ -35,7 +41,7 @@ interface Held { kept: KeptTriggers; sessions: Session[] }
  * Operations a controlling computer may use, for the owner there or an agent in a turn started there. Secrets,
  * trigger limits, HTTP tests and GitHub replies stay with this computer's own Tower.
  */
-const REMOTE_OPERATIONS: ReadonlySet<string> = new Set([...REMOTE_PAGE_OPERATIONS, 'sessions.list', 'sessions.read', 'projects.list', 'runs.list', 'autoPrompt.submit', 'autoPrompt.get']);
+const REMOTE_OPERATIONS: ReadonlySet<string> = new Set([...REMOTE_PAGE_OPERATIONS, 'sessions.list', 'sessions.read', 'sessions.search', 'projects.list', 'runs.list', 'autoPrompt.submit', 'autoPrompt.get']);
 interface RequestRecord { at: number; fingerprint: string; status: 'pending' | 'done'; result?: unknown }
 
 /**
@@ -158,7 +164,14 @@ export class TowerApi {
     switch (name) {
       case 'sessions.list': {
         const view = await this.view(held);
-        return { sessions: sessionList(held.sessions.filter(session => view.sessions.has(session.id)), value) };
+        return sessionList(held.sessions.filter(session => view.sessions.has(session.id)), value);
+      }
+      case 'sessions.search': {
+        // Only conversations it can see are searched, and only those it can still see after are shown.
+        const view = await this.view(held);
+        const found = await this.search(held.sessions.filter(session => view.sessions.has(session.id)), value);
+        const after = await this.view(this.held());
+        return { ...found, sessions: found.sessions.filter(session => after.sessions.has(session.id)) };
       }
       case 'projects.list': {
         const projects = this.services.projects?.() ?? [];
@@ -253,13 +266,20 @@ export class TowerApi {
     switch (name) {
       case 'sessions.list': {
         if (!sessions) throw failure('Sessions are unavailable.', 503);
-        return { sessions: sessionList(sessions.list(), value) };
+        return sessionList(sessions.list(), value);
       }
       case 'sessions.read': {
         if (!sessions) throw failure('Sessions are unavailable.', 503);
-        const messages = await sessions.read(value.id, value.limit ?? 20);
-        if (!messages) throw failure('Session not found.', 404);
-        return { messages: messages.map(message => ({ role: message.role, text: message.text.slice(0, 4000), timestamp: message.timestamp, ...(message.toolName ? { toolName: message.toolName } : {}) })) };
+        const before = value.cursor === undefined ? undefined : Number(value.cursor);
+        if (before !== undefined && !(Number.isSafeInteger(before) && before >= 0)) throw failure('Invalid request: cursor: Pass a nextCursor or a search match’s cursor unchanged.', 400);
+        const page = await sessions.read(value.id, value.limit ?? 20, before);
+        if (!page) throw failure('Session not found.', 404);
+        return { messages: page.messages.filter(message => value.tools || message.role !== 'tool').map(message => shownMessage(message, 4000)),
+          hasMore: page.hasMore, ...(page.hasMore && page.nextBefore !== undefined ? { nextCursor: String(page.nextBefore) } : {}) };
+      }
+      case 'sessions.search': {
+        if (!sessions) throw failure('Sessions are unavailable.', 503);
+        return this.search(sessions.list(), value);
       }
       case 'projects.list': {
         if (!this.services.projects) throw failure('Projects are unavailable.', 503);
@@ -317,6 +337,42 @@ export class TowerApi {
     }
   }
 
+  /**
+   * Searches conversations newest first until `limit` of them match or the read budget is spent; the cursor then
+   * continues after the last conversation read. Conversations whose activity lies wholly outside the period are skipped
+   * without being read.
+   */
+  private async search(list: Session[], value: Record<string, any>) {
+    const search = this.services.sessions?.search;
+    if (!search) throw failure('Session search is unavailable.', 503);
+    const terms = [...new Set(String(value.query).toLowerCase().split(/\s+/).filter(Boolean))].sort((a, b) => b.length - a.length).slice(0, 8);
+    const since = value.since ? boundary(value.since, false) : undefined;
+    const until = value.until ? boundary(value.until, true) : undefined;
+    if (since !== undefined && until !== undefined && since >= until) throw failure('Invalid request: since must be before until.', 400);
+    const after = value.cursor === undefined ? undefined : decodeCursor(value.cursor);
+    const limit = value.limit ?? 10;
+    const candidates = ordered(list.filter(session => !session.isSubagent && !session.launchedByAgent && (!value.sessionId || session.id === value.sessionId)
+      && (!value.provider || session.provider === value.provider) && (!value.cwd || session.cwd === value.cwd)
+      && (since === undefined || !(Date.parse(session.updatedAt) < since)) && (until === undefined || !(Date.parse(session.createdAt) >= until))), after);
+    const found: Array<ReturnType<typeof sessionSummary> & { matchCount: number; matches: unknown[] }> = [];
+    const started = Date.now();
+    let bytes = 0;
+    let read = 0;
+    for (const session of candidates) {
+      if (found.length >= limit || (read && (bytes >= SEARCH_BYTES || Date.now() - started >= SEARCH_MS))) {
+        const last = candidates[read - 1]!;
+        return { sessions: found, searched: read, nextCursor: encodeCursor(last) };
+      }
+      read++;
+      const result = await search(session.id, { terms, since, until, tools: value.tools === true, keep: 3 }).catch(() => undefined);
+      if (!result) continue;
+      bytes += result.bytes;
+      if (result.count) found.push({ ...sessionSummary(session), matchCount: result.count,
+        matches: result.matches.reverse().map(({ message, cursor }) => ({ ...shownMessage(message, 0), text: excerpt(message.text, terms), cursor: String(cursor) })) });
+    }
+    return { sessions: found, searched: read };
+  }
+
   private get path() { return join(this.services.stateDir, 'tower-api-requests.json'); }
   private async ledger(): Promise<Map<string, RequestRecord>> {
     if (this.requests) return this.requests;
@@ -348,12 +404,57 @@ function reference(result: unknown) {
     ...(typeof job?.id === 'string' ? { job: { id: job.id } } : {}) };
 }
 
-/** Conversations as Tower's tools list them, newest first. */
+const SEARCH_BYTES = 1024 * 1024 * 1024;
+const SEARCH_MS = 10_000;
+
+/** Most recently active first; ties in a stable order, so a cursor names one place in the list. */
+function ordered(sessions: Session[], after?: { updatedAt: string; id: string }) {
+  const sorted = [...sessions].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id));
+  return after ? sorted.filter(session => session.updatedAt < after.updatedAt || (session.updatedAt === after.updatedAt && session.id < after.id)) : sorted;
+}
+const encodeCursor = (session: Session) => Buffer.from(JSON.stringify([session.updatedAt, session.id])).toString('base64url');
+function decodeCursor(cursor: string): { updatedAt: string; id: string } {
+  try {
+    const [updatedAt, id] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown[];
+    if (typeof updatedAt === 'string' && typeof id === 'string') return { updatedAt, id };
+  } catch { /* Reported below. */ }
+  throw failure('Invalid request: cursor: Pass nextCursor unchanged.', 400);
+}
+/** A date alone is that whole day on this computer: `since` its start, `until` the start of the next day. */
+function boundary(value: string, end: boolean): number {
+  const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  return day ? new Date(Number(day[1]), Number(day[2]) - 1, Number(day[3]) + (end ? 1 : 0)).getTime() : Date.parse(value);
+}
+
+function sessionSummary(session: Session) {
+  return { id: session.id, title: session.customTitle || session.title, provider: session.provider, cwd: session.cwd, status: session.status,
+    createdAt: session.createdAt, updatedAt: session.updatedAt, ...(session.launchedBy ? { launchedBy: session.launchedBy } : {}), ...(session.closed ? { closed: true } : {}) };
+}
+function shownMessage(message: ChatMessage, max: number) {
+  return { role: message.role, text: message.text.length > max ? `${message.text.slice(0, max)}…` : message.text, timestamp: message.timestamp, ...(message.toolName ? { toolName: message.toolName } : {}) };
+}
+/** Around the first place a term appears, on one line. */
+function excerpt(text: string, terms: string[]): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  const lower = flat.toLowerCase();
+  const at = Math.max(0, Math.min(...terms.map(term => lower.indexOf(term)).filter(index => index !== -1)));
+  const start = Math.max(0, at - 120);
+  const end = Math.min(flat.length, at + 280);
+  return `${start ? '…' : ''}${flat.slice(start, end)}${end < flat.length ? '…' : ''}`;
+}
+
+/** Conversations as Tower's tools list them, most recently active first, a page at a time. */
 function sessionList(sessions: Session[], value: Record<string, any>) {
-  return sessions.filter(session => !session.isSubagent && (!value.provider || session.provider === value.provider) && (!value.cwd || session.cwd === value.cwd))
-    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, value.limit ?? 50)
-    .map(session => ({ id: session.id, title: session.customTitle || session.title, provider: session.provider, cwd: session.cwd, status: session.status,
-      updatedAt: session.updatedAt, lastMessage: session.lastMessage.slice(0, 300), ...(session.launchedBy ? { launchedBy: session.launchedBy } : {}) }));
+  const query = typeof value.query === 'string' ? value.query.trim().toLowerCase() : '';
+  const since = value.since ? boundary(value.since, false) : undefined;
+  const until = value.until ? boundary(value.until, true) : undefined;
+  const limit = value.limit ?? 20;
+  const matching = ordered(sessions.filter(session => !session.isSubagent && !session.launchedByAgent && (!value.provider || session.provider === value.provider) && (!value.cwd || session.cwd === value.cwd)
+    && (!query || `${session.customTitle ?? ''}\n${session.title}\n${session.cwd}`.toLowerCase().includes(query))
+    && (since === undefined || !(Date.parse(session.updatedAt) < since)) && (until === undefined || Date.parse(session.updatedAt) < until)), value.cursor === undefined ? undefined : decodeCursor(value.cursor));
+  const page = matching.slice(0, limit);
+  return { sessions: page.map(session => ({ ...sessionSummary(session), lastMessage: session.lastMessage.slice(0, 300) })),
+    ...(matching.length > limit ? { nextCursor: encodeCursor(page.at(-1)!) } : {}) };
 }
 /** Runs as Tower's tools list them, newest first. */
 function runList(runs: Run[], value: Record<string, any>) {
