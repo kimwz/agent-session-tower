@@ -1,6 +1,6 @@
 import { translate as t, useI18n } from '../i18n/i18n';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from 'react';
-import { applyNodeChanges, Background, BackgroundVariant, ReactFlow, ReactFlowProvider, useReactFlow, type Edge, type FitViewOptions, type Node, type NodeChange } from '@xyflow/react';
+import { applyNodeChanges, Background, BackgroundVariant, ReactFlow, ReactFlowProvider, useReactFlow, useStore, type Edge, type FitViewOptions, type Node, type NodeChange, type ReactFlowState } from '@xyflow/react';
 import { Maximize, Minus, Plus, Scan } from 'lucide-react';
 import type { ProjectGroup, ProjectGroupPatch, ProviderHealth, Session } from '../../../shared/types';
 import type { RepositoryAction, RepositoryStatus } from '../../../shared/repositories';
@@ -20,6 +20,7 @@ import { graphProjectId, graphProjectKey, graphSessionGroups, clearHostPosition,
 import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, projectColumns, projectGrid, PROJECT_GAP, reconcileManualGraph, setGraphLayoutMode, setProjectColumns, type GraphLayoutMode, type GraphPreferences, type ProjectFrame } from './graph-layout-preferences';
 import { includePinnedProjectGroups, projectGroupLabel } from '../project-groups/project-groups';
 import { CanvasSettings } from './CanvasSettings';
+import { GRAPH_FIT, graphFitSignature } from './graph-fit';
 import { projectGroupMinimumWidth, projectGroupTitleMeasurer } from '../project-groups/project-group-title';
 
 type GraphProps = { slackUnreadIds?: ReadonlySet<string>; slack?: SlackPublicStatus | null; selectedSlackId?: string | null; onSelectSlack?: (id: string | null) => void;
@@ -39,6 +40,8 @@ function readPreferences(): GraphPreferences {
   catch { return defaultGraphPreferences(); }
 }
 
+const fitSignatureOf = (state: ReactFlowState) => graphFitSignature(state.nodeLookup.values(), state.width, state.height);
+
 function viewportTransitionDuration() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 280;
 }
@@ -48,12 +51,29 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
   const { fitView, zoomIn, zoomOut, getViewport, setViewport } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
   const doubleClickZoomed = useRef(false);
+  // Until someone moves the view, it keeps showing the whole graph as it loads, is measured and resizes.
+  const followingFit = useRef(true);
+  const [settled, setSettled] = useState(false);
   const fitVisibleGraph = useCallback((options: FitViewOptions) => {
     const bounds = canvas.current?.getBoundingClientRect();
     if (!bounds?.width || !bounds.height) return;
+    followingFit.current = !options.nodes;
     if (!options.nodes) doubleClickZoomed.current = false;
     void fitView({ ...options, duration: options.duration ?? 0 });
   }, [fitView]);
+  const fitSignature = useStore(fitSignatureOf);
+  useEffect(() => {
+    if (!fitSignature || !followingFit.current) return;
+    void fitView({ ...GRAPH_FIT, duration: 0 });
+    // The queued fit applies with the next node update, before this frame is drawn.
+    const frame = window.requestAnimationFrame(() => setSettled(true));
+    return () => window.cancelAnimationFrame(frame);
+  }, [fitSignature, fitView]);
+  // A graph that never finishes measuring is still shown.
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setSettled(true), 1500);
+    return () => window.clearTimeout(timeout);
+  }, []);
   useEffect(() => {
     const element = canvas.current;
     if (!element) return;
@@ -69,7 +89,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     if (!(event.target instanceof Element) || !event.target.matches('.react-flow__pane')) return;
     event.preventDefault();
     if (doubleClickZoomed.current) {
-      fitVisibleGraph({ padding: 0.13, maxZoom: 0.95, duration: viewportTransitionDuration() });
+      fitVisibleGraph({ ...GRAPH_FIT, duration: viewportTransitionDuration() });
       return;
     }
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -80,6 +100,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     const x = event.clientX - bounds.left;
     const y = event.clientY - bounds.top;
     doubleClickZoomed.current = true;
+    followingFit.current = false;
     void setViewport({ x: x - (x - viewport.x) * ratio, y: y - (y - viewport.y) * ratio, zoom: nextZoom }, { duration: viewportTransitionDuration() });
   }, [fitVisibleGraph, getViewport, setViewport]);
   const [motion, setMotion] = useState(() => !window.matchMedia('(prefers-reduced-motion: reduce)').matches);
@@ -234,24 +255,24 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
 
   useEffect(() => {
     if (manual) return;
-    const timeout = window.setTimeout(() => fitVisibleGraph({ padding: 0.1, minZoom: 0.15, maxZoom: 0.95 }), 100);
+    const timeout = window.setTimeout(() => fitVisibleGraph(GRAPH_FIT), 100);
     return () => window.clearTimeout(timeout);
   }, [filterKey, fitVisibleGraph, graphLimit, manual, visibleProjectKey, slackLimit]);
 
   useEffect(() => {
     if (!manual || !manualFitRequest) return;
-    const timeout = window.setTimeout(() => fitVisibleGraph({ padding: 0.1, minZoom: 0.15, maxZoom: 0.95 }), 100);
+    const timeout = window.setTimeout(() => fitVisibleGraph(GRAPH_FIT), 100);
     return () => window.clearTimeout(timeout);
   }, [manualFitRequest, manual, fitVisibleGraph]);
 
   const working = sessions.filter(session => session.status === 'working').length;
-  return <div ref={canvas} className={`graph-canvas ${manual ? 'manual-layout' : 'auto-layout'} ${motion ? '' : 'motion-off'}`}>
-    <ReactFlow onPaneClick={onCanvasClick} onDoubleClick={onCanvasDoubleClick} zoomOnDoubleClick={false} nodes={nodes} edges={edges} onNodesChange={onNodesChange} nodeTypes={canvasNodeTypes} fitView fitViewOptions={{ padding: 0.1, minZoom: 0.15, maxZoom: 0.95, duration: 0 }} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(_, viewport) => setZoom(Math.round(viewport.zoom * 100))} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
+  return <div ref={canvas} className={`graph-canvas ${manual ? 'manual-layout' : 'auto-layout'} ${motion ? '' : 'motion-off'} ${settled ? '' : 'settling'}`}>
+    <ReactFlow onPaneClick={onCanvasClick} onDoubleClick={onCanvasDoubleClick} zoomOnDoubleClick={false} nodes={nodes} edges={edges} onNodesChange={onNodesChange} onNodeDragStart={() => { followingFit.current = false; }} nodeTypes={canvasNodeTypes} fitView fitViewOptions={GRAPH_FIT} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(event, viewport) => { if (event) followingFit.current = false; setZoom(Math.round(viewport.zoom * 100)); }} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
       <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#283343" />
     </ReactFlow>
     {!showMonitor && emptyState}
     <div className="canvas-quick-controls" aria-label={t("캔버스 보기 도구")}>
-      <div className="canvas-zoom-controls" role="group" aria-label={t("그래프 보기 조절")}><button onClick={() => { void zoomOut({ duration: 0 }); }} aria-label={t("그래프 축소")} title={t("축소")}><Minus size={15} /></button><span>{zoom}%</span><button onClick={() => { void zoomIn({ duration: 0 }); }} aria-label={t("그래프 확대")} title={t("확대")}><Plus size={15} /></button><i /><button onClick={() => fitVisibleGraph({ padding: 0.13, maxZoom: 0.95 })} aria-label={t("전체 그래프 맞춤")} title={t("전체 맞춤")}><Maximize size={15} /></button>{selectedId && nodes.some(n => n.id === selectedId) && <button className="canvas-find-session" onClick={() => fitVisibleGraph({ nodes: [{ id: selectedId }], maxZoom: 1.1, padding: 0.7 })} aria-label={t("선택한 세션 위치로 이동")} title={t("선택한 세션 찾기")}><Scan size={15} /></button>}</div>
+      <div className="canvas-zoom-controls" role="group" aria-label={t("그래프 보기 조절")}><button onClick={() => { followingFit.current = false; void zoomOut({ duration: 0 }); }} aria-label={t("그래프 축소")} title={t("축소")}><Minus size={15} /></button><span>{zoom}%</span><button onClick={() => { followingFit.current = false; void zoomIn({ duration: 0 }); }} aria-label={t("그래프 확대")} title={t("확대")}><Plus size={15} /></button><i /><button onClick={() => fitVisibleGraph(GRAPH_FIT)} aria-label={t("전체 그래프 맞춤")} title={t("전체 맞춤")}><Maximize size={15} /></button>{selectedId && nodes.some(n => n.id === selectedId) && <button className="canvas-find-session" onClick={() => fitVisibleGraph({ nodes: [{ id: selectedId }], maxZoom: 1.1, padding: 0.7 })} aria-label={t("선택한 세션 위치로 이동")} title={t("선택한 세션 찾기")}><Scan size={15} /></button>}</div>
       <CanvasSettings manual={manual} onLayoutChange={changeMode} motion={motion} onMotionChange={setMotion} showHidden={showHidden} onShowHiddenChange={onShowHiddenChange} suspended={settingsSuspended} />
     </div>
     <div className="canvas-session-summary"><span>{t("{0} / {1}개 세션 표시 · {2}개 작업 중", { 0: shown.toLocaleString(), 1: sessions.length.toLocaleString(), 2: working.toLocaleString() })}</span>{!manual && shown < sessions.length && graphLimit < 72 && <button onClick={() => setGraphLimit(value => Math.min(72, value + 8))}>{t("더 표시")}</button>}{!manual && graphLimit > 8 && <button onClick={() => setGraphLimit(8)}>{t("접기")}</button>}</div>

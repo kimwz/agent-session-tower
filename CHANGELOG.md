@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.59.1] - 2026-09-28
+
+### Fixed
+- **The canvas opens already fitted.** After opening or reloading Tower, the canvas used to show the graph off-center until you pressed **전체 맞춤**: the first fit ran before every card was drawn and used a different margin, and a manually arranged canvas never refit once the sessions arrived. The canvas now appears only once it shows the whole graph, with the same view as **전체 맞춤**. Until you pan, zoom or drag something, it keeps fitting as sessions load and as the window or side panels change size. Once you move the view yourself, it stays where you put it.
+
 ## [1.59.0] - 2026-09-28
 
 ### Added

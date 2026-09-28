@@ -54,3 +54,7 @@
   stroke-dasharray:3 10;
   animation-duration:2s
 }
+/* A freshly opened canvas appears once it shows the whole graph. */
+.graph-canvas.settling .react-flow__viewport {
+  visibility:hidden
+}
