@@ -41,8 +41,8 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   const button = useRef<HTMLButtonElement>(null);
   const tokenRef = useRef(token);
   tokenRef.current = token;
-  /** Commands already done here, so one sent again after a reconnect is not done twice. */
-  const done = useRef(new Set<string>());
+  /** Commands already done here, until they expire, so one sent again after a reconnect is not done twice. */
+  const done = useRef(new Map<string, number>());
 
   useEffect(() => {
     let cancelled = false;
@@ -52,8 +52,9 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
       if (cancelled) return;
       if (response.status === 404) { setAbsent(true); return; }
       follow.current = followRoom(setRoom, (directive: MasterDirective) => {
+        for (const [id, expiresAt] of done.current) if (expiresAt < Date.now()) done.current.delete(id);
         if (directive.tabId !== tab.current || directive.expiresAt < Date.now() || done.current.has(directive.id)) return;
-        done.current.add(directive.id);
+        done.current.set(directive.id, directive.expiresAt);
         let answer;
         try { answer = runScreenCommand(directive, controlsRef.current); }
         catch (error) { answer = { result: 'failed' as const, note: error instanceof Error ? error.message : String(error) }; }

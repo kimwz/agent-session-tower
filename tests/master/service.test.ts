@@ -690,6 +690,8 @@ test('a secret typed into a card reaches Tower but never the model, the conversa
   await service.send({ clientMessageId: 'message-0204', text: 'Slack 연결해줘', local: true });
   await said(/카드에 입력/);
   const card = room.recent(20).find(entry => entry.data.kind === 'card')!;
+  // A value too short to be found and hidden reliably is refused; the card still waits.
+  await assert.rejects(service.card(card.id, { value: '731' }, true), /8자 이상/);
   const answered = await service.card(card.id, { value }, true);
   assert.equal(answered.data.kind === 'card' && answered.data.card.type === 'secret' && answered.data.card.state, 'provided');
   await said(/연결했습니다/);

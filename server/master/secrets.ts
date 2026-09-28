@@ -19,12 +19,15 @@ const PATTERNS: RegExp[] = [
 const REFERENCE = /\{\{secret:([a-f0-9]{16})\}\}/g;
 /** How long a reference may be used in a request. The value itself stays hidden for as long as the host runs. */
 const LIFETIME_MS = 30 * 60_000;
-/** Values found by their format that are kept to put back; past this the least recently seen go, oldest first. */
+/**
+ * Values found by their format in answers and files that are kept to put back. None is dropped before its
+ * reference expires; past this, a further one is still hidden but gets a reference that cannot be put back.
+ */
 const MAX_FOUND = 20_000;
 /** Secret-by-nature values from answers (join codes) hidden everywhere; the oldest go first past this. */
 const MAX_ANSWERED = 200;
-/** Values shorter than this are not searched for in text: they would match ordinary words. */
-const SHORTEST_KNOWN = 4;
+/** Values shorter than this are not searched for in text: they would match ordinary words. A card takes no shorter value. */
+export const SHORTEST_SECRET = 8;
 
 /**
  * Where each request takes a secret: the only fields a reference is put back into, as `a.b` key paths. Anywhere
@@ -60,9 +63,9 @@ interface Kept { value: string; at: number; source: 'owner' | 'answer' | 'format
  *
  * Values the owner gave on purpose (a secret card) are hidden wherever they show up, for as long as the host runs,
  * and are never dropped; so are values secret by nature in an answer (a join code), the latest `MAX_ANSWERED`.
- * Values found by their format (a pasted key, a key in an answer) are hidden by that format wherever it shows; they
- * are kept so their reference can be put back, the latest `MAX_FOUND`. Hiding is best effort: a secret in an
- * unknown format that the owner did not give through a card is not recognised.
+ * Keys the owner pastes into a message count as given by the owner too. Keys found by their format in answers and
+ * files are hidden by that format wherever it shows, and kept so their reference can be put back until it expires.
+ * Hiding is best effort: a secret in an unknown format that the owner did not give through a card is not recognised.
  */
 export class SecretVault {
   private readonly given = new Map<string, Kept>();
@@ -71,9 +74,12 @@ export class SecretVault {
   private readonly refs = new Map<string, string>();
   private givenPattern?: RegExp;
 
-  /** Hides the owner's given values first (whole, so no format inside one splits it), then recognised formats. */
-  hide(text: string): string {
-    return outsideReferences(this.redact(text), part => PATTERNS.reduce((result, pattern) => result.replace(pattern, match => `{{secret:${this.keep(match, 'format')}}}`), part));
+  /**
+   * Hides the owner's given values first (whole, so no format inside one splits it), then recognised formats. In the
+   * owner's own message (`source` 'owner') a recognised key counts as given by the owner.
+   */
+  hide(text: string, source: 'owner' | 'format' = 'format'): string {
+    return outsideReferences(this.redact(text), part => PATTERNS.reduce((result, pattern) => result.replace(pattern, match => `{{secret:${this.keep(match, source)}}}`), part));
   }
 
   /** Hides only the values the owner gave, whatever the settings: they are never shown back. */
@@ -146,6 +152,11 @@ export class SecretVault {
       this.trim();
       return known;
     }
+    if (!given) {
+      this.expireFound();
+      // Full of references still in use: the value is hidden all the same, under a reference that cannot be put back.
+      if (this.found.size >= MAX_FOUND) return randomBytes(8).toString('hex');
+    }
     const ref = randomBytes(8).toString('hex');
     (given ? this.given : this.found).set(ref, { value, at: Date.now(), source });
     this.refs.set(value, ref);
@@ -154,13 +165,18 @@ export class SecretVault {
     return ref;
   }
 
-  /** Drops the oldest found values and the oldest answered ones past their limits; the owner's own values stay. */
-  private trim(): void {
-    while (this.found.size > MAX_FOUND) {
-      const [oldest, kept] = this.found.entries().next().value!;
-      this.found.delete(oldest);
+  /** Drops found values whose reference has expired, least recently seen first. */
+  private expireFound(): void {
+    const now = Date.now();
+    for (const [ref, kept] of this.found) {
+      if (now - kept.at <= LIFETIME_MS) break;
+      this.found.delete(ref);
       this.refs.delete(kept.value);
     }
+  }
+
+  /** Drops the oldest values from answers past their limit; the owner's own values stay. */
+  private trim(): void {
     const answered = [...this.given].filter(([, kept]) => kept.source === 'answer');
     for (const [ref, kept] of answered.slice(0, Math.max(0, answered.length - MAX_ANSWERED))) {
       this.given.delete(ref);
@@ -172,7 +188,7 @@ export class SecretVault {
   /** One pattern for every given value, longest first, so a value inside a longer one never leaves a remainder. */
   private pattern(): RegExp | undefined {
     if (this.givenPattern) return this.givenPattern;
-    const values = [...this.given.values()].map(kept => kept.value).filter(value => value.length >= SHORTEST_KNOWN);
+    const values = [...this.given.values()].map(kept => kept.value).filter(value => value.length >= SHORTEST_SECRET);
     if (!values.length) return undefined;
     return this.givenPattern = new RegExp(values.sort((a, b) => b.length - a.length).map(escape).join('|'), 'g');
   }

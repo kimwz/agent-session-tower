@@ -10,7 +10,7 @@ import type { ModelCall, ModelItem, ModelTool } from './model-openai.js';
 import type { LiveState } from './live-state.js';
 import { tablesFrom, type ReadDatabase, type Table } from './read-db.js';
 import type { MasterRoom } from './room.js';
-import { SecretVault } from './secrets.js';
+import { SecretVault, SHORTEST_SECRET } from './secrets.js';
 import type { MasterSettingsStore } from './settings.js';
 import type { TowerClient, TowerResponse } from './tower-client.js';
 
@@ -165,8 +165,8 @@ export class MasterService {
     const known = journal.inbox.find(item => item.clientMessageId === input.clientMessageId);
     const existing = known && room.get(known.id);
     if (existing) return existing;
-    // Values typed into a secret card are hidden here too, whatever the setting.
-    const text = this.hideText(input.text);
+    // Keys the owner pastes are theirs; values typed into a secret card are hidden here too, whatever the setting.
+    const text = settings.current().guards.hideSecrets ? this.vault.hide(input.text, 'owner') : this.vault.redact(input.text);
     const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: input.clientMessageId, text, local: input.local, ...(input.viewContext ? { viewContext: input.viewContext } : {}), at: new Date().toISOString(), state: 'queued', retries: 0 };
     if (input.viewContext?.tabId) this.lastTab = input.viewContext.tabId;
     const entry = room.add({ kind: 'owner', text, ...(input.viewContext?.tabId ? { clientId: input.viewContext.tabId } : {}) }, item.id);
@@ -544,7 +544,9 @@ export class MasterService {
       if (card.state !== 'waiting') return entry;
       if (body.dismiss === true) return room.update(id, { kind: 'card', card: { ...card, state: 'dismissed' } }) ?? entry;
       const value = body.value;
-      if (typeof value !== 'string' || !value || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value)) throw Object.assign(new Error('값이 비었거나 올바르지 않습니다.'), { statusCode: 400 });
+      if (typeof value !== 'string' || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value)) throw Object.assign(new Error('값이 올바르지 않습니다.'), { statusCode: 400 });
+      // A shorter value could not be found and hidden reliably wherever it shows up.
+      if (value.length < SHORTEST_SECRET) throw Object.assign(new Error(`비밀 값은 ${SHORTEST_SECRET}자 이상이어야 합니다.`), { statusCode: 400 });
       const updated = room.update(id, { kind: 'card', card: { ...card, state: 'provided' } }) ?? entry;
       // The tab that answered is where the owner is now: what follows is shown there.
       const tabId = typeof body.tabId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(body.tabId) ? body.tabId : undefined;

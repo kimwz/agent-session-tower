@@ -126,3 +126,18 @@ test('keys are found after "_" or "=" too, a pasted key\'s reference outlives ma
   assert.ok(Date.now() - started < 2000, `600 invites took ${Date.now() - started} ms`);
   assert.doesNotMatch(vault.hide(`the code is ${last}`), /JOIN-0599/);
 });
+
+test('no reference is dropped before it expires, however many keys an answer holds; past the limit keys are still hidden', () => {
+  const vault = new SecretVault();
+  const pasted = 'sk-proj-pastedpastedpastedpasted0001';
+  const read = 'sk-proj-readfromafilereadfromafile0002';
+  const mine = /\{\{secret:[a-f0-9]{16}\}\}/.exec(vault.hide(`my key ${pasted}`, 'owner'))![0];
+  const theirs = /\{\{secret:[a-f0-9]{16}\}\}/.exec(vault.hide(`.env: ${read}`))![0];
+  const started = Date.now();
+  for (let index = 0; index < 25_000; index++) assert.doesNotMatch(vault.hide(`sk-proj-${String(index).padStart(8, '0')}${'k'.repeat(24)}`), /sk-proj-/);
+  assert.ok(Date.now() - started < 5000, `25000 keys took ${Date.now() - started} ms`);
+  assert.deepEqual(vault.reveal({ apiKey: mine }, '/api/decisions/settings'), { apiKey: pasted });
+  assert.deepEqual(vault.reveal({ apiKey: theirs }, '/api/decisions/settings'), { apiKey: read });
+  // The owner's pasted key is hidden wherever it shows up, even out of its format's reach.
+  assert.doesNotMatch(vault.hide(`x${pasted}`), /pastedpasted/);
+});

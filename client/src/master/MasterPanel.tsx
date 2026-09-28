@@ -208,7 +208,7 @@ function Card({ id, card, token, tabId, onCommand }: { id: string; card: MasterC
   if (card.state !== 'waiting') return <div className="master-card done"><KeyRound size={13} /><span>{card.purpose}: {card.state === 'provided' ? words('입력했습니다. 값은 마스터에게 보이지 않습니다.', 'Entered. The master never sees the value.') : words('취소했습니다.', 'Cancelled.')}</span></div>;
   return <form className="master-card secret" onSubmit={event => { event.preventDefault(); if (value) void run(async () => { await answer({ value, tabId }); setValue(''); }); }}>
     <KeyRound size={13} /><span>{card.purpose}</span>
-    <input type="password" autoComplete="off" value={value} onChange={event => setValue(event.target.value)} aria-label={card.purpose} placeholder={words('값 입력 (마스터에게 보이지 않음)', 'Value (the master never sees it)')} />
+    <input type="password" autoComplete="off" value={value} onChange={event => setValue(event.target.value)} aria-label={card.purpose} placeholder={words('값 입력 (8자 이상, 마스터에게 보이지 않음)', 'Value (8+ characters; the master never sees it)')} />
     <button className="master-primary" disabled={busy || !value}>{busy ? <LoaderCircle size={13} className="spin" /> : words('보내기', 'Send')}</button>
     <button type="button" className="secondary-button" disabled={busy} onClick={() => void run(() => answer({ dismiss: true }))}>{words('취소', 'Cancel')}</button>
     {error && <small role="alert">{error}</small>}
