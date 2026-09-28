@@ -4,6 +4,20 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.52.0] - 2026-09-28
+
+### Added
+- **Talk to the master.** The microphone button by the master's message box starts a voice call (OpenAI GPT-Live, about $0.05 a minute, on the master's OpenAI key). Say what you want: the master does it as if you had typed it, and tells you how it went. Long answers stay on the screen and the voice gives the gist. What you and the master say appears in the conversation as it is spoken.
+  - The call ends after 15 seconds in which nobody speaks and nothing plays, and **다시 시작** starts it again at once. The seconds are a setting; 0 keeps the call open.
+  - If the call ended that way and news for you arrives, such as delegated work finishing, the voice turns itself back on and tells you. This happens only while the master panel is open and in view, and once for each piece of news. News that could not be told within an hour is marked on the screen instead.
+  - Before something that cannot be undone (closing a session, cancelling work, deleting, sending out), your browser says in one sentence what is about to happen. The change goes only if the sentence played to the end and you said nothing until it was sent. If you speak, it is not sent, and what you said becomes your next request.
+  - Today's voice time and cost always show under the conversation and in the settings. A daily limit is optional.
+  - The OpenAI key stays on this computer: the master makes and follows the call, and your browser only carries the sound. Secrets are never taken by voice; the master offers a card instead. A card's value is hidden in the transcript too, even when it is said across a pause.
+  - Voice needs a microphone and an https address or this computer (localhost). Ending a call never stops work the master started.
+
+### Changed
+- **The master reads the conversation in its own roles.** Your messages are yours, its answers are its own, and everything else (calls, finished work, cards, what you are looking at, Tower's status) is marked as data. Only Tower's own words are instructions.
+
 ## [1.51.1] - 2026-09-28
 
 ### Changed
