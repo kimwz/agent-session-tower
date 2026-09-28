@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.53.0] - 2026-09-28
+
+### Added
+- **Mark a conversation as looked at.** The chat header now shows how the conversation's last turn ended, next to its status. When it shows **확인 필요** or **작업 끊김**, click it (**확인했음**) after you have read the conversation and found nothing left to do. It then shows **작업 완료**, on the canvas card too, and drops out of the master's list of what needs you. A new turn in the conversation is judged again as usual. This works for conversations on joined computers too, once they run this version.
+
 ## [1.52.1] - 2026-09-28
 
 ### Fixed
