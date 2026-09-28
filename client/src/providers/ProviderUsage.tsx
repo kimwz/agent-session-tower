@@ -54,7 +54,7 @@ function UsageWindowDetail({ window, now }: { window: UsageWindow; now: number }
   return <div className={usageAheadOfTime(window, elapsed) ? 'ahead' : undefined}>
     <dt>{usageWindowLabel(window)}<span>{reset ? t('초기화: {0}', { 0: reset }) : t('초기화 시간 정보 없음')}</span></dt>
     <dd title={elapsed === undefined ? undefined : t('기간 {0} 경과', { 0: usagePercent(elapsed) })}>
-      <i className="usage-bar"><b style={{ width: `${Math.min(100, window.usedPercent)}%` }} />{elapsed !== undefined && <u style={{ width: `${elapsed}%` }} />}</i>
+      <span className="usage-bar"><i><b style={{ width: `${Math.min(100, window.usedPercent)}%` }} /></i>{elapsed !== undefined && <u style={{ left: `${elapsed}%` }} />}</span>
       <em>{usagePercent(window.usedPercent)}</em>
     </dd>
   </div>;

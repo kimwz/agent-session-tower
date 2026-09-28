@@ -31,10 +31,11 @@
 .usage-tooltip dt span { color: #90a8c3; font-size: 10px; }
 .usage-tooltip dd { margin: 6px 0 0; display: grid; grid-template-columns: 1fr 32px; align-items: center; gap: 8px; }
 .usage-tooltip dd em { font-style: normal; text-align: right; font-variant-numeric: tabular-nums; }
-.usage-bar { position: relative; height: 8px; border-radius: 3px; background: #2a3b50; overflow: hidden; }
-.usage-bar b, .usage-bar u { position: absolute; left: 0; display: block; }
-.usage-bar b { top: 0; height: 6px; background: #d8a379; }
-.usage-bar u { bottom: 0; height: 2px; background: #9fb0c4; }
+.usage-bar { position: relative; padding-top: 6px; }
+.usage-bar i { display: block; height: 6px; border-radius: 3px; background: #2a3b50; overflow: hidden; }
+.usage-bar b { display: block; height: 100%; background: #d8a379; }
+.usage-bar u { position: absolute; top: 0; bottom: -2px; width: 1px; margin-left: -.5px; background: #c9d8ea; }
+.usage-bar u::before { content: ''; position: absolute; top: 0; left: 50%; transform: translateX(-50%); border: 3.5px solid transparent; border-top: 4px solid #c9d8ea; border-bottom: 0; }
 .codex .usage-bar b { background: #76c5b5; }
 .usage-tooltip dl > .ahead .usage-bar b { background: #ec8a7d; }
 .usage-tooltip > small { color: #8ba0bb; }

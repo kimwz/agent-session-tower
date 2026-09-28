@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.58.4] - 2026-09-28
+
+### Changed
+- **Elapsed time in the usage details is a marker.** The thin grey line along the bottom of each usage bar is gone. A small triangle above the bar now points at how much of the period has passed, with a single line through the bar at that point.
+
 ## [1.58.3] - 2026-09-28
 
 ### Added
