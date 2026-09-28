@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.51.1] - 2026-09-28
+
+### Changed
+- **Related sessions are judged by what you asked in them.** Each earlier session is now described by its title and its latest requests from you, newest first. There are up to eight, 300 characters each, and as many are sent as fit its share. The agent's last answer is no longer sent. Requests say what a session is about, even when its work moved on from the first one.
+
 ## [1.51.0] - 2026-09-28
 
 ### Added
