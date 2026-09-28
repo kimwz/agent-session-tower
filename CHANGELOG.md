@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.55.4] - 2026-09-28
+
+### Fixed
+- **Slack conversations read messages posted by integrations.** Apps such as GitHub post their whole message as an attachment and leave the message text empty. Tower read only the text, so a mention under a GitHub "Pull request opened" message saw an empty first message and had to search for the pull request on its own. The thread a conversation reads now includes each message's attachments: the pretext, title with its link, text, fields and footer.
+
 ## [1.55.3] - 2026-09-28
 
 ### Fixed

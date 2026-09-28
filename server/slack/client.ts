@@ -13,6 +13,29 @@ export class SlackApiError extends Error {
   }
 }
 
+/** Integrations such as GitHub post their content only in legacy attachments, so a thread reader must include them. */
+function attachmentText(attachments: unknown): string {
+  if (!Array.isArray(attachments)) return '';
+  const field = (value: unknown) => typeof value === 'string' ? value.trim() : '';
+  return attachments.slice(0, 20).map(attachment => {
+    if (!attachment || typeof attachment !== 'object') return '';
+    const item = attachment as Record<string, unknown>;
+    const title = field(item.title);
+    const link = field(item.title_link);
+    const fields = Array.isArray(item.fields) ? item.fields.map(value => value && typeof value === 'object'
+      ? [field((value as Record<string, unknown>).title), field((value as Record<string, unknown>).value)].filter(Boolean).join(': ') : '') : [];
+    return [field(item.pretext), field(item.author_name), title && link && !title.includes(link) ? `<${link}|${title}>` : title,
+      field(item.text), ...fields, field(item.footer)].filter(Boolean).join('\n') || field(item.fallback);
+  }).filter(Boolean).join('\n\n');
+}
+
+function messageText(message: Record<string, any>): string {
+  const text = typeof message.text === 'string' ? message.text : '';
+  const attached = attachmentText(message.attachments);
+  if (!attached) return text;
+  return text.trim() ? `${text}\n\n${attached}` : attached;
+}
+
 const safeErrors = new Set(['invalid_auth', 'not_authed', 'token_revoked', 'account_inactive', 'missing_scope', 'not_in_channel', 'channel_not_found', 'thread_not_found', 'ratelimited', 'is_archived', 'restricted_action', 'invalid_name', 'too_many_reactions', 'message_not_found', 'already_reacted', 'no_reaction']);
 
 export class SlackClient {
@@ -80,9 +103,10 @@ export class SlackClient {
       const data = await this.call('conversations.replies', { channel, ts, limit: '100', ...(cursor ? { cursor } : {}) }, true);
       if (!Array.isArray(data.messages)) throw new SlackApiError('invalid_response');
       for (const message of data.messages) {
-        if (typeof message.ts !== 'string' || typeof message.text !== 'string') throw new SlackApiError('invalid_response');
-        totalCharacters += message.text.length;
-        messages.push({ ts: message.ts, text: message.text, user: typeof message.user === 'string' ? message.user : typeof message.bot_id === 'string' ? message.bot_id : 'unknown' });
+        if (typeof message?.ts !== 'string') throw new SlackApiError('invalid_response');
+        const text = messageText(message);
+        totalCharacters += text.length;
+        messages.push({ ts: message.ts, text, user: typeof message.user === 'string' ? message.user : typeof message.bot_id === 'string' ? message.bot_id : 'unknown' });
       }
       if (messages.length > 1000 || totalCharacters > 200_000) throw new SlackApiError('thread_too_large');
       cursor = typeof data.response_metadata?.next_cursor === 'string' ? data.response_metadata.next_cursor.trim() : '';

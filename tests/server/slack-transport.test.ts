@@ -17,6 +17,20 @@ test('Slack thread exhausts pages and rejects incomplete context', async () => {
   const incomplete = new SlackClient('secret', {fetch:(async () => ok({messages:[],has_more:true})) as typeof fetch});
   await assert.rejects(incomplete.thread('C','1'), /incomplete_thread/);
 });
+test('Slack thread includes attachment content posted by integrations', async () => {
+  const client = new SlackClient('secret', { fetch: (async () => ok({ messages: [
+    { ts: '1', text: '', bot_id: 'B', attachments: [{ pretext: 'Pull request opened by <https://github.com/d|d>', title: '#627 chore: upgrade', title_link: 'https://github.com/o/r/pull/627', text: 'body', fields: [{ title: 'Reviewers', value: 'karl' }] }] },
+    { ts: '2', bot_id: 'B', attachments: [{ fallback: 'only fallback' }] },
+    { ts: '3', text: 'see this', user: 'U', attachments: [{ title: 'Link', text: 'unfurl' }] },
+    { ts: '4', user: 'U', files: [{}] },
+  ] })) as typeof fetch });
+  assert.deepEqual(await client.thread('C', '1'), [
+    { ts: '1', user: 'B', text: 'Pull request opened by <https://github.com/d|d>\n<https://github.com/o/r/pull/627|#627 chore: upgrade>\nbody\nReviewers: karl' },
+    { ts: '2', user: 'B', text: 'only fallback' },
+    { ts: '3', user: 'U', text: 'see this\n\nLink\nunfurl' },
+    { ts: '4', user: 'U', text: '' },
+  ]);
+});
 test('Slack reads retry rate limits; replies never retry and escape mentions', async () => {
   let calls = 0;
   const delays: number[] = [];
