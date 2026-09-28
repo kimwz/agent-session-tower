@@ -139,7 +139,6 @@ test('requests go to the API their model belongs to', async () => {
 
 test('the Anthropic key is kept in its own file, never shown, and a Claude model needs it while GPT keeps its own key', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-master-claude-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
   const settings = new MasterSettingsStore(dir);
   await settings.start();
   await settings.update({ apiKey: 'sk-openai-0123456789' });
@@ -154,7 +153,8 @@ test('the Anthropic key is kept in its own file, never shown, and a Claude model
   const openai: ModelCall = async () => { await gate; return { output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'GPT 답' }] }], text: 'GPT 답' }; };
   const service = new MasterService({ settings, room, journal, tower: new TowerClient(), readDb: { query: async () => ({ rows: [{ one: 1 }] }) } as never, model: routedModel(openai, anthropicMessages(() => settings.anthropicKey(), { fetch: fetcher })), taskPollMs: 1000 });
   await service.start();
-  t.after(() => service.close());
+  // One cleanup, in order: the service finishes its writes before its folder goes.
+  t.after(async () => { await service.close(); await rm(dir, { recursive: true, force: true }); });
 
   let overview = await service.updateSettings({ model: 'claude-opus-5' });
   assert.equal(overview.configured, false, 'a Claude model with only an OpenAI key cannot answer');
