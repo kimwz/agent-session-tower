@@ -215,6 +215,8 @@ export class SessionService extends EventEmitter {
     const plain = query.terms.find(term => ![...term].some(letter => letter > '\x7f' && letter.toUpperCase() !== letter));
     const needle = plain === undefined ? undefined : rawNeedle(plain);
     const escapes = plain !== undefined && /[^\x00-\x7f]/.test(plain) ? Buffer.from('\\u') : undefined;
+    // The only letters outside ASCII whose lowercase holds ASCII letters: İ (i̇) and the Kelvin sign (k).
+    const folding = plain !== undefined && /[ik]/.test(plain) ? [Buffer.from('\u0130'), Buffer.from('\u212a')] : [];
     const file = await open(state.session.filePath!, 'r');
     let lowered = Buffer.alloc(0);
     const test = (line: Buffer, start: number): void => {
@@ -223,7 +225,7 @@ export class SessionService extends EventEmitter {
         if (lowered.length < line.length) lowered = Buffer.allocUnsafe(Math.max(line.length, lowered.length * 2));
         for (let index = 0; index < line.length; index++) { const byte = line[index]!; lowered[index] = byte >= 65 && byte <= 90 ? byte + 32 : byte; }
         const view = lowered.subarray(0, line.length);
-        if (view.indexOf(needle) === -1 && !(escapes && view.indexOf(escapes) !== -1)) return;
+        if (view.indexOf(needle) === -1 && !(escapes && view.indexOf(escapes) !== -1) && !folding.some(letter => view.indexOf(letter) !== -1)) return;
       }
       let row: Record<string, any>;
       try { row = JSON.parse(line.toString('utf8')); } catch { return; }
@@ -240,7 +242,8 @@ export class SessionService extends EventEmitter {
       }
     };
     try {
-      const first = Math.max(state.historyStartOffset ?? 0, query.from ?? 0);
+      // A place past the end means the file was replaced since: it is read again from its start.
+      const first = Math.max(state.historyStartOffset ?? 0, query.from !== undefined && query.from <= state.offset ? query.from : 0);
       let position = first;
       let fragments: Buffer[] = [];
       let pending = 0;
@@ -265,9 +268,10 @@ export class SessionService extends EventEmitter {
         }
         position += bytesRead;
         result.bytes += bytesRead;
-        // Past the first line, so going on from here always moves forward.
-        if (position < state.offset && lineStart > first && ((query.maxBytes !== undefined && result.bytes >= query.maxBytes) || (query.deadline !== undefined && Date.now() >= query.deadline))) {
-          result.next = lineStart;
+        // Going on moves forward: from the line being read, or from inside a line too long to hold chat, which is never parsed
+        // (its rest reads as a malformed line).
+        if (position < state.offset && (lineStart > first || oversized) && ((query.maxBytes !== undefined && result.bytes >= query.maxBytes) || (query.deadline !== undefined && Date.now() >= query.deadline))) {
+          result.next = oversized ? position : lineStart;
           break;
         }
       }

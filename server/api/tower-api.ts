@@ -358,15 +358,17 @@ export class TowerApi {
       && (!value.provider || session.provider === value.provider) && (!value.cwd || session.cwd === value.cwd)
       && (since === undefined || !(Date.parse(session.updatedAt) < since)) && (until === undefined || !(Date.parse(session.createdAt) >= until)));
     // A conversation the last page stopped inside is finished first, from where it stopped.
+    // It keeps the place the cursor gave it, whatever its activity since, so nothing is read twice or passed over.
     const resumed = after?.offset !== undefined ? eligible.find(session => session.id === after.id) : undefined;
-    const candidates = [...(resumed ? [resumed] : []), ...ordered(eligible, after)];
+    const candidates = [...(resumed ? [resumed] : []), ...ordered(eligible.filter(session => session !== resumed), after)];
+    const place = (session: Session) => session === resumed ? { updatedAt: after!.updatedAt, id: after!.id } : session;
     const found: Array<ReturnType<typeof sessionSummary> & { matchCount: number; matches: unknown[] }> = [];
     const deadline = Date.now() + SEARCH_MS;
     let bytes = 0;
     let read = 0;
     for (const session of candidates) {
       if (found.length >= limit || (read && (bytes >= SEARCH_BYTES || Date.now() >= deadline))) {
-        return { sessions: found, searched: read, nextCursor: encodeCursor(candidates[read - 1]!) };
+        return { sessions: found, searched: read, nextCursor: encodeCursor(place(candidates[read - 1]!)) };
       }
       read++;
       const result = await search(session.id, { terms, since, until, tools: value.tools === true, keep: 3, maxBytes: Math.max(1, SEARCH_BYTES - bytes), deadline,
@@ -375,7 +377,7 @@ export class TowerApi {
       bytes += result.bytes;
       if (result.count) found.push({ ...sessionSummary(session), matchCount: result.count,
         matches: result.matches.reverse().map(({ message, cursor }) => ({ ...shownMessage(message, 0), text: excerpt(message.text, terms), cursor: String(cursor) })) });
-      if (result.next !== undefined) return { sessions: found, searched: read, nextCursor: encodeCursor(session, result.next) };
+      if (result.next !== undefined) return { sessions: found, searched: read, nextCursor: encodeCursor(place(session), result.next) };
     }
     return { sessions: found, searched: read };
   }
@@ -420,7 +422,7 @@ function ordered(sessions: Session[], after?: { updatedAt: string; id: string })
   return after ? sorted.filter(session => session.updatedAt < after.updatedAt || (session.updatedAt === after.updatedAt && session.id < after.id)) : sorted;
 }
 /** Where a page ended: after a conversation, or at `offset` inside one a search had not finished. */
-const encodeCursor = (session: Session, offset?: number) => Buffer.from(JSON.stringify([session.updatedAt, session.id, ...(offset === undefined ? [] : [offset])])).toString('base64url');
+const encodeCursor = (session: { updatedAt: string; id: string }, offset?: number) => Buffer.from(JSON.stringify([session.updatedAt, session.id, ...(offset === undefined ? [] : [offset])])).toString('base64url');
 function decodeCursor(cursor: string): { updatedAt: string; id: string; offset?: number } {
   try {
     const [updatedAt, id, offset] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown[];

@@ -7,6 +7,7 @@ import { TowerApi } from '../../../server/api/tower-api.js';
 import { SessionService } from '../../../server/sessions/service.js';
 import { TriggerService } from '../../../server/triggers/service.js';
 import type { TriggerActor } from '../../../shared/triggers.js';
+import type { Session } from '../../../shared/types.js';
 
 const agent: TriggerActor = { kind: 'agent', via: 'mcp', sessionId: 'claude:caller', runId: 'run' };
 const id = (n: number) => `${String(n).repeat(8)}-${String(n).repeat(4)}-4${String(n).repeat(3)}-8${String(n).repeat(3)}-${String(n).repeat(12)}`;
@@ -144,10 +145,51 @@ test('a long conversation is searched in parts, going on where the last part sto
 test('every search word counts, and letters outside ASCII match in either case', async t => {
   const f = await fixture(t);
   await f.write(1, [claudeRow(id(1), 'user', 'ÉCHEC du déploiement', '2026-09-01T10:00:00.000Z', 'a')]);
+  await f.write(3, [claudeRow(id(3), 'user', 'Set the \u212aELVIN scale', '2026-09-03T10:00:00.000Z', 'c')]);
   await f.write(2, [claudeRow(id(2), 'user', 'alpha bravo charlie delta echo foxtrot golf hotel', '2026-09-02T10:00:00.000Z', 'b')]);
   await f.sessions.refresh();
   type Found = { sessions: Array<{ id: string }> };
   assert.deepEqual((await f.call<Found>('sessions.search', { query: 'échec' })).sessions.map(item => item.id), [`claude:${id(1)}`]);
+  assert.deepEqual((await f.call<Found>('sessions.search', { query: 'kelvin' })).sessions.map(item => item.id), [`claude:${id(3)}`], 'the Kelvin sign lowercases to k');
   assert.deepEqual((await f.call<Found>('sessions.search', { query: 'alpha bravo charlie delta echo foxtrot golf hotel' })).sessions.map(item => item.id), [`claude:${id(2)}`]);
-  assert.deepEqual((await f.call<Found>('sessions.search', { query: 'alpha bravo charlie delta echo foxtrot golf hotel india' })).sessions, []);
+  assert.deepEqual((await f.call<Found>('sessions.search', { query: 'alpha bravo charlie delta echo foxtrot golf hotel zz' })).sessions, [], 'the shortest word counts too');
+});
+
+test('a conversation a search stopped inside keeps its place, however its activity changed since', async () => {
+  const visits: Array<[string, number | undefined]> = [];
+  const at = (day: string) => `2026-09-${day}T00:00:00.000Z`;
+  let list: Session[] = [];
+  const api = new TowerApi({ stateDir: tmpdir(), triggers: {} as TriggerService, sessions: { list: () => list, read: async () => undefined,
+    search: async (session, query) => { visits.push([session, query.from]); return { count: 1, matches: [], bytes: 1 }; } } });
+  const session = (id: string, day: string) => ({ id, updatedAt: at(day), createdAt: at('01'), title: id, cwd: '/w', provider: 'claude', status: 'completed', isSubagent: false }) as Session;
+  const cursor = Buffer.from(JSON.stringify([at('10'), 'A', 100])).toString('base64url');
+  type Found = { sessions: Array<{ id: string }>; nextCursor?: string };
+  // Active again since: finished first, then the search goes on below where it was, not above B.
+  list = [session('A', '20'), session('B', '15'), session('C', '05')];
+  const first = await api.call('sessions.search', { query: 'x', cursor, limit: 1 }, agent) as Found;
+  await api.call('sessions.search', { query: 'x', cursor: first.nextCursor, limit: 1 }, agent);
+  assert.deepEqual(visits, [['A', 100], ['C', undefined]]);
+  // A cursor naming a later time than the conversation has now still reads it once.
+  visits.length = 0;
+  list = [session('A', '09'), session('C', '05')];
+  const all = await api.call('sessions.search', { query: 'x', cursor }, agent) as Found;
+  assert.deepEqual(all.sessions.map(item => item.id), ['A', 'C']);
+  assert.deepEqual(visits, [['A', 100], ['C', undefined]]);
+});
+
+test('a search stops inside a line too long to hold chat once its budget is spent', async t => {
+  const f = await fixture(t);
+  await f.write(1, [claudeRow(id(1), 'user', 'needle before', '2026-09-01T10:00:00.000Z', 'a'), { type: 'blob', data: 'x'.repeat(40 * 1024 * 1024) },
+    claudeRow(id(1), 'user', 'needle after', '2026-09-01T10:02:00.000Z', 'b')]);
+  await f.sessions.refresh();
+  const session = `claude:${id(1)}`;
+  let count = 0;
+  let parts = 0;
+  for (let from: number | undefined = 0; from !== undefined; parts++) {
+    const part = await f.sessions.search(session, { terms: ['needle'], keep: 5, maxBytes: 1, deadline: 0, from });
+    assert.ok(part!.bytes <= 17 * 1024 * 1024, 'never reads much past the longest line kept');
+    count += part!.count; from = part!.next;
+  }
+  assert.equal(count, 2);
+  assert.ok(parts > 2, 'the long line was read in parts');
 });
