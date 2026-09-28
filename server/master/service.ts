@@ -124,6 +124,9 @@ export class MasterService {
   private readonly vault = new SecretVault();
   private taskTimer?: ReturnType<typeof setInterval>;
   private polling = false;
+  /** The turn and the look at delegated work under way, which closing waits for so nothing is written after it. */
+  private turnRun?: Promise<void>;
+  private pollRun?: Promise<void>;
   private closed = false;
   /** Wakes the inbox when a failed turn's second try is due. */
   private wake?: ReturnType<typeof setTimeout>;
@@ -163,7 +166,7 @@ export class MasterService {
       }
     }
     await journal.save('inbox', 'calls');
-    this.taskTimer = setInterval(() => { void this.pollTasks(); }, this.options.taskPollMs ?? TASK_POLL_MS);
+    this.taskTimer = setInterval(() => { if (!this.polling) this.pollRun = this.pollTasks(); }, this.options.taskPollMs ?? TASK_POLL_MS);
     this.taskTimer.unref();
     this.pump();
   }
@@ -265,6 +268,9 @@ export class MasterService {
     this.closed = true;
     if (this.taskTimer) clearInterval(this.taskTimer);
     if (this.wake) clearTimeout(this.wake);
+    // Work already under way finishes and is written first; no new turn or look starts once closed.
+    await this.turnRun?.catch(() => {});
+    await this.pollRun?.catch(() => {});
     await this.options.journal.flush();
     await this.options.room.flush();
   }
@@ -291,7 +297,7 @@ export class MasterService {
     // Only inputs from the same kind of place share a turn, so what a turn may do follows every request in it. A
     // spoken request (or what follows from one) has a turn of its own: its changes are announced, its answer spoken.
     const batch = first.voice ? [first] : (owners.length ? owners.filter(item => item.local === first.local) : queued).filter(item => !item.voice).slice(0, 10);
-    void this.run(batch);
+    this.turnRun = this.run(batch);
   }
 
   private async run(inputs: InboxItem[]): Promise<void> {
