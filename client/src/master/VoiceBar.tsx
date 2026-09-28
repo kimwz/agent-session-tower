@@ -39,7 +39,7 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
       <button className="master-voice-end" onClick={voice.stop} disabled={view.phase === 'ending'} title={words('음성 끊기 (맡긴 일은 계속됩니다)', 'End voice (work already sent continues)')}><PhoneOff size={13} />{words('끊기', 'End')}</button>
     </div>;
   }
-  if (!voice.end) return null;
+  if (!voice.end) return usage && voice.status?.today.seconds ? <div className="master-voice idle"><small>{words('음성', 'Voice')} · {usage}</small></div> : null;
   const pending = voice.status?.pending ?? 0;
   return <div className="master-voice ended" role="status">
     <span className="master-voice-label">{voice.end.error ?? endReason(voice.end.reason, words)}{pending ? words(` 전할 소식 ${pending}개가 기다립니다.`, ` ${pending} update${pending > 1 ? 's' : ''} waiting.`) : ''}</span>

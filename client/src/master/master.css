@@ -107,6 +107,7 @@
 .master-voice-restart { border:1px solid #5278a9; background:#254c7a; color:#edf5ff; }
 .master-voice-end:disabled, .master-voice-restart:disabled { opacity:.5; cursor:default; }
 .master-voice.ended { color:var(--muted); }
+.master-voice.idle { padding:4px 12px; }
 .master-message.voice { display:flex; gap:6px; align-items:baseline; white-space:pre-wrap; }
 .master-message.voice > svg { flex:none; color:var(--muted); }
 .master-message.master.voice { color:var(--text); }

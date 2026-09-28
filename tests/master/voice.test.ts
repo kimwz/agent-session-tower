@@ -12,7 +12,7 @@ import { MasterRoom } from '../../server/master/room.js';
 import { MasterService } from '../../server/master/service.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/master/tower-client.js';
-import { MasterVoice, type VoiceTiming } from '../../server/master/voice.js';
+import { MasterVoice, spread, type VoiceTiming } from '../../server/master/voice.js';
 import { VOICE_INSTRUCTIONS, VOICE_PHRASES } from '../../server/master/voice-text.js';
 import type { MasterEntry, MasterSpeak, MasterStreamEvent } from '../../shared/master.js';
 import { until } from '../helpers/until.js';
@@ -35,7 +35,7 @@ interface LiveSession { id: string; sockets: WebSocket[]; received: Json[]; head
 async function fakeLive() {
   const state = {
     creates: [] as Array<{ body: Json; auth?: string }>, sessions: new Map<string, LiveSession>(), order: [] as string[], log: [] as string[],
-    ack: 'ok' as 'ok' | 'error' | 'none', closeUsage: 20 as number | undefined, closeAnswer: true, createStatus: 201, attachStatus: 0, events: 0,
+    ack: 'ok' as 'ok' | 'error' | 'none', closeUsage: 20 as number | undefined, closeAnswer: true, closeDelayMs: 0, createStatus: 201, attachStatus: 0, events: 0,
   };
   const send = (socket: WebSocket, event: Json) => socket.send(JSON.stringify({ event_id: `evt_${++state.events}`, ...event }));
   const server = createServer(async (req: IncomingMessage, res) => {
@@ -67,7 +67,8 @@ async function fakeLive() {
           else if (state.ack === 'error') send(ws, { type: 'error', error: { type: 'invalid_request_error', code: 'refused', message: 'no', client_event_id: command.event_id } });
         } else if (command.type === 'session.close') {
           state.log.push(`close ${session.id}`);
-          if (state.closeAnswer) send(ws, { type: 'session.closed', client_event_id: command.event_id, reason: 'close_requested', session: { id: session.id }, ...(state.closeUsage !== undefined ? { usage: { seconds: state.closeUsage } } : {}) });
+          const answer = () => send(ws, { type: 'session.closed', client_event_id: command.event_id, reason: 'close_requested', session: { id: session.id }, ...(state.closeUsage !== undefined ? { usage: { seconds: state.closeUsage } } : {}) });
+          if (state.closeAnswer) { if (state.closeDelayMs) setTimeout(answer, state.closeDelayMs); else answer(); }
         }
       });
     });
@@ -471,7 +472,7 @@ test('voice time counts what GPT-Live reports, at least fifteen seconds a call, 
   assert.ok(h.voice.status().today.seconds > before, 'a call not known to be over keeps counting');
   // Checked later: GPT-Live no longer knows it, so it ended; its time stops there.
   h.live.attachStatus = 404;
-  await (h.voice as unknown as { probe(): Promise<void> }).probe();
+  await h.voice.probe();
   assert.equal(h.voice.status().phase, 'closed');
   const fixed = h.voice.status().today.seconds;
   await sleep(1_100);
@@ -480,7 +481,7 @@ test('voice time counts what GPT-Live reports, at least fifteen seconds a call, 
   const days: Record<string, number> = {};
   const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
   const yesterday = new Date(midnight.getTime() - 1);
-  (h.voice as unknown as { spread(days: Record<string, number>, seconds: number, from: number, to: number): void }).spread(days, 100, midnight.getTime() - 25_000, midnight.getTime() + 75_000);
+  spread(days, 100, midnight.getTime() - 25_000, midnight.getTime() + 75_000);
   const day = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
   assert.deepEqual(days, { [day(yesterday)]: 25, [day(midnight)]: 75 });
 });
@@ -506,4 +507,91 @@ test('the text master keeps roles apart: only Tower speaks as developer, the con
     ['user', `[data] The owner is looking at: ${JSON.stringify({ tabId: TAB, sessionId: 's1' })}`],
     ['user', '지금 요청'],
   ]);
+});
+
+test('ending a call stops a change waiting on it at once, even while the host is still closing it; news taken in as it ends is told again', async t => {
+  const h = await harness(t, { timing: { closeWaitMs: 1_500, deliveredMs: 150 }, steps: [[call('tower_api', { method: 'POST', path: '/api/sessions/s7/close' })], [say('다음 답')]] });
+  const closes = () => h.seen.filter(seen => seen.path.endsWith('/close'));
+  const live = await startCall(h);
+  h.voice.voiceActivity({ attemptId: live.attemptId, speaking: false, playing: false });
+  said(h, live.session, 's7 닫아', 100);
+  delegated(h, live.session, 'del_1', 1_000);
+  const notice = await until(() => h.events.flatMap(event => event.type === 'notice' ? [event.notice] : [])[0]);
+  // A new web: the change waits for the page's next word, and the owner ends the call meanwhile.
+  h.tower.setCredentials({ port: h.towerPort, token: 'e'.repeat(64), callerSecret: SECRET });
+  h.voice.voiceNotice({ noticeId: notice.id, result: 'played' });
+  h.live.closeAnswer = false;
+  const stopping = h.voice.voiceStop({ attemptId: live.attemptId, reason: 'owner' });
+  await masterEntry(h, /보내지 않았습니다/);
+  assert.equal(closes().length, 0);
+  await stopping;
+
+  // News taken in just before the call began to end, whose end GPT-Live confirms late, is not counted as told.
+  h.live.closeAnswer = true;
+  h.live.closeDelayMs = 600;
+  const second = await startCall(h);
+  await h.queueEvent('D ended');
+  const news = await masterEntry(h, /다음 답/);
+  await until(() => h.speakOf(news.id)?.state === 'sent');
+  const ending = h.voice.voiceStop({ attemptId: second.attemptId, reason: 'owner' });
+  await sleep(300);
+  assert.deepEqual(h.speakOf(news.id), { state: 'pending', tries: 1 });
+  await ending;
+  assert.deepEqual(h.speakOf(news.id), { state: 'pending', tries: 1 });
+});
+
+test('the day\'s voice time survives many calls, counts the fifteen seconds once, and a call that cannot be checked keeps counting until it could no longer run', async t => {
+  const h = await harness(t, { timing: { callMaxMs: 3_000 } });
+  for (let index = 0; index < 101; index++) {
+    const live = await startCall(h);
+    await h.voice.voiceStop({ attemptId: live.attemptId, reason: 'owner' });
+  }
+  assert.equal(h.voice.status().today.seconds, 101 * 20, 'more calls than are kept one by one still count');
+  const kept = JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8')) as { attempts: unknown[] };
+  assert.ok(kept.attempts.length <= 100);
+
+  const base = h.voice.status().today.seconds;
+  const short = await startCall(h);
+  h.live.emit(short.session, { type: 'session.usage.updated', usage: { seconds: 5 } });
+  await sleep(1_050);
+  assert.equal(h.voice.status().today.seconds - base, 15, 'five seconds used and one more since: still the fifteen billed');
+  h.live.closeUsage = 5;
+  await h.voice.voiceStop({ attemptId: short.attemptId, reason: 'owner' });
+  assert.equal(h.voice.status().today.seconds - base, 15);
+
+  // The answer to making a call was lost: nothing to check it by, so it is counted until it could no longer run.
+  h.live.createStatus = 500;
+  await assert.rejects(startCall(h), { statusCode: 502 });
+  const lost = base + 15;
+  assert.equal(h.voice.status().phase, 'unconfirmed');
+  await h.voice.probe();
+  assert.equal(h.voice.status().phase, 'unconfirmed', 'not being able to check is not an end');
+  await sleep(1_200);
+  await h.voice.probe();
+  assert.equal(h.voice.status().phase, 'unconfirmed');
+  await sleep(2_000);
+  await h.voice.probe();
+  assert.equal(h.voice.status().phase, 'closed', 'past the longest a call can run');
+  const counted = h.voice.status().today.seconds - lost;
+  assert.ok(counted >= 15 && counted <= 16, `billed for as long as it could have run (${counted} s)`);
+});
+
+test('news waiting to be told is found however much the conversation grew, and after the host restarts', async t => {
+  const h = await harness(t, { steps: [[say('E 끝.')]] });
+  const first = await startCall(h);
+  await h.voice.voiceStop({ attemptId: first.attemptId, reason: 'silence' });
+  await h.queueEvent('E ended');
+  const news = await masterEntry(h, /E 끝/);
+  for (let index = 0; index < 600; index++) h.room.add({ kind: 'event', text: `기록 ${index}` });
+  assert.equal(h.voice.status().wakeable, 1);
+  // A host that stopped while it was being told tells it again.
+  h.live.ack = 'none';
+  const woken = await startCall(h, { wake: true });
+  await until(() => woken.received().some(command => command.type === 'session.commentary.append'));
+  h.room.update(news.id, { ...(h.room.get(news.id)!.data as Extract<MasterEntry['data'], { kind: 'master' }>), speak: { state: 'sent', tries: 0, woke: true } });
+  await h.voice.close();
+  const again = new MasterVoice({ dataDir: h.dir, settings: h.settings, room: h.room, hooks: h.service.voiceHooks(), apiBase: h.live.base, socketBase: h.live.base.replace('http', 'ws'), timing: FAST });
+  await again.start();
+  assert.deepEqual(h.speakOf(news.id), { state: 'pending', tries: 1, woke: true });
+  await again.close();
 });

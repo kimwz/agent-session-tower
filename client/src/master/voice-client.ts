@@ -65,12 +65,15 @@ export class VoiceCall {
   async start(): Promise<void> {
     try {
       if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia || typeof RTCPeerConnection === 'undefined') throw new Error('음성은 https 주소나 이 컴퓨터(localhost)에서 마이크를 쓸 수 있을 때만 됩니다.');
+      // Made while the owner's press still counts, so the browser lets the call be heard.
+      const context = this.context = new AudioContext();
+      const resumed = context.resume().catch(() => {});
+      const audio = this.audio = new Audio();
+      audio.autoplay = true;
       this.attemptHash = await digest(this.attemptId);
       this.mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
       this.throwIfOver();
       const pc = this.pc = new RTCPeerConnection();
-      const audio = this.audio = new Audio();
-      audio.autoplay = true;
       const remote = new Promise<MediaStream>(resolve => { pc.ontrack = event => resolve(event.streams[0] ?? new MediaStream([event.track])); });
       for (const track of this.mic.getAudioTracks()) pc.addTrack(track, this.mic);
       const channel = pc.createDataChannel('oai-events');
@@ -94,8 +97,8 @@ export class VoiceCall {
       const stream = await timeout(remote, STARTED_MS, '음성이 연결되지 않았습니다.');
       audio.srcObject = stream;
       await audio.play();
-      const context = this.context = new AudioContext();
-      await context.resume();
+      await resumed;
+      if (context.state !== 'running') await context.resume();
       this.micAnalyser = analyser(context, this.mic, 1024);
       this.remoteAnalyser = analyser(context, stream, 256);
       await timeout(started, STARTED_MS, '음성 세션이 시작되지 않았습니다.');
@@ -112,6 +115,8 @@ export class VoiceCall {
         void post('/api/master/voice/stop', this.options.token(), { attemptId: this.attemptId, reason: 'failed' }).catch(() => {});
         this.end('failed', message);
       }
+      // What arrived after the call was already ended here (a microphone allowed late) is let go too.
+      this.release();
       throw error;
     }
   }
@@ -167,11 +172,16 @@ export class VoiceCall {
     if (this.loop) clearInterval(this.loop);
     if (this.notice) { window.speechSynthesis?.cancel(); void post('/api/master/voice/notice', this.options.token(), { noticeId: this.notice.id, result: 'failed' }).catch(() => {}); }
     this.notice = undefined;
-    for (const track of this.mic?.getTracks() ?? []) track.stop();
-    this.pc?.close();
-    if (this.audio) { this.audio.pause(); this.audio.srcObject = null; }
-    void this.context?.close().catch(() => {});
+    this.release();
     this.options.onEnded(reason, error);
+  }
+
+  /** Lets go of the microphone, the connection and the sound; safe to do again for what arrived late. */
+  private release(): void {
+    for (const track of this.mic?.getTracks() ?? []) track.stop();
+    if (this.pc && this.pc.signalingState !== 'closed') this.pc.close();
+    if (this.audio) { this.audio.pause(); this.audio.srcObject = null; }
+    if (this.context && this.context.state !== 'closed') void this.context.close().catch(() => {});
   }
 
   private throwIfOver(): void { if (this.over) throw new Error('음성을 멈췄습니다.'); }

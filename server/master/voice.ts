@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import WebSocket from 'ws';
-import type { MasterEntry, MasterEntryData, MasterSpeak, MasterVoicePhase, MasterVoiceStatus } from '../../shared/master.js';
+import type { MasterEntry, MasterEntryData, MasterSpeak, MasterStreamEvent, MasterVoicePhase, MasterVoiceStatus } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { VoiceOrigin } from './journal.js';
 import type { MasterRoom } from './room.js';
@@ -27,17 +27,21 @@ const STALE_MS = 60 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ACTIVE: ReadonlySet<MasterVoicePhase> = new Set(['reserved', 'creating', 'attached', 'ready', 'closing']);
 const KEEP_ATTEMPTS = 100;
+const KEEP_DAYS = 40;
+const KEEP_SPEAKING = 500;
 const KEEP_SEEN = 5_000;
 
 export interface VoiceTiming {
   createMs: number; attachMs: number; readyMs: number; closeWaitMs: number; ackMs: number; deliveredMs: number;
-  backstopMs: number; leaseMs: number; probeMs: number; probeForMs: number; quietMs: number; quietMaxMs: number;
+  backstopMs: number; leaseMs: number; probeMs: number; quietMs: number; quietMaxMs: number;
   noticeMs: number; resyncMs: number; limitNoticeMs: number;
+  /** The longest a call can run (GPT-Live ends a connected call after two hours) when it has not said when it expires. */
+  callMaxMs: number;
 }
 const TIMING: VoiceTiming = {
   createMs: 20_000, attachMs: 10_000, readyMs: 30_000, closeWaitMs: 12_000, ackMs: 10_000, deliveredMs: 5_000,
-  backstopMs: 60_000, leaseMs: 5_000, probeMs: 5 * 60_000, probeForMs: 2 * 60 * 60_000, quietMs: 600, quietMaxMs: 2_000,
-  noticeMs: 15_000, resyncMs: 15_000, limitNoticeMs: 6_000,
+  backstopMs: 60_000, leaseMs: 5_000, probeMs: 5 * 60_000, quietMs: 600, quietMaxMs: 2_000,
+  noticeMs: 15_000, resyncMs: 15_000, limitNoticeMs: 6_000, callMaxMs: 2 * 60 * 60_000,
 };
 
 /** What the voice needs from the master: its hiding, its inbox and its conversation. */
@@ -78,6 +82,8 @@ interface Attempt {
   closedConfirmed?: boolean;
   /** GPT-Live refused to make it: nothing was billed. */
   unbilled?: boolean;
+  /** Its time is in the daily totals, so it may be forgotten. */
+  folded?: boolean;
   sessionId?: string;
   createdAt: number;
   readyAt?: number;
@@ -91,6 +97,10 @@ interface VoiceFile {
   attempts: Attempt[];
   /** The last call ended on silence, in this tab, and nobody ended or started one by hand since: news may wake it. */
   silence: { tab: string; at: number } | null;
+  /** Seconds of voice per local day of the calls that are over. */
+  days: Record<string, number>;
+  /** Conversation entries with news not yet told or given up on, wherever they are in the conversation. */
+  speaking: Array<{ id: string; order: number }>;
 }
 
 /** One side of the call's transcript: everything said, and the lines on screen not yet final. */
@@ -107,6 +117,7 @@ interface Live {
   /** The page's own tab id, in memory only, so screen commands of its requests go there. */
   tabId: string;
   socket?: WebSocket;
+  /** The call is ending: nothing more is sent on it, and no change waiting on it goes. */
   closing?: boolean;
   seen: Set<string>;
   input: Side;
@@ -135,8 +146,8 @@ const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const fail = (message: string, statusCode: number) => Object.assign(new Error(message), { statusCode });
 const localDay = (time: number) => { const date = new Date(time); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; };
 const nextMidnight = (time: number) => { const date = new Date(time); date.setHours(24, 0, 0, 0); return date.getTime(); };
-const midnight = (time: number) => { const date = new Date(time); date.setHours(0, 0, 0, 0); return date.getTime(); };
 const emptySide = (): Side => ({ raw: '', lines: [], lastAt: 0 });
+const speakOf = (data: MasterEntryData | undefined): MasterSpeak | undefined => data && (data.kind === 'master' || data.kind === 'error' || data.kind === 'event') ? data.speak : undefined;
 /** At most `bytes` of UTF-8, cut on a character boundary. */
 export function cutBytes(text: string, bytes: number): string {
   if (Buffer.byteLength(text) <= bytes) return text;
@@ -162,12 +173,24 @@ function boundary(raw: string, from: number, at: number, whole: string, hide: (t
   const before = hide(raw.slice(from, at));
   let common = 0;
   while (common < before.length && common < whole.length && before.charCodeAt(common) === whole.charCodeAt(common)) common++;
-  const open = whole.lastIndexOf('{{secret:', common - 1);
-  if (open >= 0 && open < common) {
-    const close = whole.indexOf('}}', open);
-    if (close < 0 || close + 2 > common) return open;
+  return outsideReference(whole, common);
+}
+/** `at`, or the start of a reference it would cut. */
+function outsideReference(text: string, at: number): number {
+  const open = text.lastIndexOf('{{secret:', at - 1);
+  if (open < 0 || open >= at) return at;
+  const close = text.indexOf('}}', open);
+  return close < 0 || close + 2 > at ? open : at;
+}
+/** Adds `seconds` used from `from` to `to` to the days they fell on. */
+export function spread(days: Record<string, number>, seconds: number, from: number, to: number): void {
+  if (seconds <= 0) return;
+  if (to <= from) { days[localDay(to)] = (days[localDay(to)] ?? 0) + seconds; return; }
+  for (let at = from; at < to;) {
+    const end = Math.min(to, nextMidnight(at));
+    days[localDay(at)] = (days[localDay(at)] ?? 0) + seconds * (end - at) / (to - from);
+    at = end;
   }
-  return common;
 }
 
 /**
@@ -176,12 +199,15 @@ function boundary(raw: string, from: number, at: number, whole: string, hide: (t
  * life. Ending a call never stops the master's work or anything it started.
  */
 export class MasterVoice {
-  private file: VoiceFile = { attempts: [], silence: null };
+  private file: VoiceFile = { attempts: [], silence: null, days: {}, speaking: [] };
   private live?: Live;
   private serial: Promise<unknown> = Promise.resolve();
   private writes: Promise<void> = Promise.resolve();
   private leaseTimer?: ReturnType<typeof setInterval>;
   private probeTimer?: ReturnType<typeof setInterval>;
+  private probing?: Promise<void>;
+  private unsubscribe?: () => void;
+  private shownDay = localDay(Date.now());
   private closedHost = false;
   private readonly timing: VoiceTiming;
   private readonly path: string;
@@ -193,24 +219,37 @@ export class MasterVoice {
 
   async start(): Promise<void> {
     const saved = await readPrivateJson(this.path).catch(() => undefined) as Partial<VoiceFile> | undefined;
-    if (saved && Array.isArray(saved.attempts)) this.file = { attempts: saved.attempts.filter(item => item && typeof item === 'object' && item.usage), silence: saved.silence ?? null };
+    if (saved && Array.isArray(saved.attempts)) {
+      this.file = {
+        attempts: saved.attempts.filter(item => item && typeof item === 'object' && item.usage),
+        silence: saved.silence ?? null,
+        days: saved.days && typeof saved.days === 'object' ? saved.days : {},
+        speaking: Array.isArray(saved.speaking) ? saved.speaking.filter(item => typeof item?.id === 'string' && Number.isInteger(item.order)) : [],
+      };
+    }
     // A call this host was following when it stopped cannot be followed again: it is closed if it still runs.
     for (const attempt of this.file.attempts) if (ACTIVE.has(attempt.phase)) { attempt.phase = 'unconfirmed'; attempt.appReason ??= 'host'; attempt.closedAt ??= Date.now(); }
+    // News waiting to be told may sit in an older part of the conversation.
+    for (const item of this.file.speaking) await this.options.room.load(item.order).catch(() => {});
+    this.file.speaking = this.file.speaking.filter(item => speakOf(this.options.room.get(item.id)?.data));
+    this.unsubscribe = this.options.room.subscribe(event => this.follow(event));
     // News sent just before the stop may not have been heard.
     for (const { entry, speak } of this.speakEntries()) if (speak.state === 'sent') this.retry(entry, speak);
     await this.save();
-    this.leaseTimer = setInterval(() => { if (this.live) { this.broadcast(); this.checkLimit(this.live); } }, this.timing.leaseMs);
+    this.leaseTimer = setInterval(() => this.tick(), this.timing.leaseMs);
     this.leaseTimer.unref();
-    this.probeTimer = setInterval(() => { void this.inTurn(() => this.probe()); }, this.timing.probeMs);
+    this.probeTimer = setInterval(() => { void this.probe(); }, this.timing.probeMs);
     this.probeTimer.unref();
-    void this.inTurn(() => this.probe());
+    void this.probe();
   }
 
   async close(): Promise<void> {
     this.closedHost = true;
+    this.unsubscribe?.();
     if (this.leaseTimer) clearInterval(this.leaseTimer);
     if (this.probeTimer) clearInterval(this.probeTimer);
     if (this.live) this.release(this.live);
+    await this.probing;
     await this.writes;
   }
 
@@ -259,10 +298,11 @@ export class MasterVoice {
       }
       // Starting by hand while a call runs takes it over: the old one ends first, so two are never paid for at once.
       if (this.live) await this.finish(this.live, 'taken-over');
+      // A wake that fails does not wake again: the silence it followed is spent.
       this.file.silence = null;
       const record: Attempt = { attempt, tab, local: input.local, ...(wake ? { wake } : {}), phase: 'reserved', createdAt: Date.now(), usage: { seconds: 0, byDay: {} } };
       this.file.attempts.push(record);
-      while (this.file.attempts.length > KEEP_ATTEMPTS && this.file.attempts[0].phase !== 'unconfirmed') this.file.attempts.shift();
+      this.prune();
       await this.save();
       const live: Live = { attempt: record, key, tabId, seen: new Set(), input: emptySide(), output: emptySide(), words: [], cursor: 0, lastWordAt: 0, delegations: [], working: false, handled: new Set(), acks: new Map(), notices: new Map(), gates: new Set() };
       this.live = live;
@@ -272,10 +312,10 @@ export class MasterVoice {
       catch (error) {
         // Refused outright, nothing was made; any other failure may have made a call this host cannot find.
         const refused = (error as { refused?: boolean }).refused === true;
-        record.phase = refused ? 'closed' : 'unconfirmed';
         record.appReason = 'failed';
-        if (refused) { record.closedConfirmed = true; record.unbilled = true; record.usage.final = true; }
         record.closedAt = Date.now();
+        if (refused) { record.closedConfirmed = true; record.unbilled = true; record.usage.final = true; this.closeAttempt(record); }
+        else record.phase = 'unconfirmed';
         this.live = undefined;
         await this.save();
         this.broadcast();
@@ -307,14 +347,14 @@ export class MasterVoice {
   /** The page heard the call start and plays it. */
   async voiceReady(input: { attemptId: unknown }): Promise<boolean> {
     const live = this.mine(input.attemptId);
-    if (!live || live.attempt.phase !== 'attached') return false;
+    if (!live || live.closing || live.attempt.phase !== 'attached') return false;
     live.attempt.phase = 'ready';
     live.attempt.readyAt = Date.now();
     if (live.readyTimer) clearTimeout(live.readyTimer);
     // The page reports every two seconds while the call is on; a page silent this long is gone.
     live.backstop = setInterval(() => {
       const last = live.activity?.receivedAt ?? live.attempt.readyAt ?? Date.now();
-      if (Date.now() - last > this.timing.backstopMs) void this.inTurn(() => this.live === live ? this.finish(live, 'connection') : Promise.resolve());
+      if (Date.now() - last > this.timing.backstopMs) this.end(live, 'connection');
     }, 1_000);
     live.backstop.unref();
     await this.save();
@@ -323,21 +363,22 @@ export class MasterVoice {
     return true;
   }
 
-  /** The page ends its call: by hand, on silence, or because it could not start it. Another call's stop is ignored. */
+  /**
+   * The page ends its call: by hand, on silence, or because it could not start it. From the moment it asks, nothing
+   * more goes out on the call's behalf, even while the host is still busy closing another. Another call's stop is ignored.
+   */
   async voiceStop(input: { attemptId: unknown; reason: unknown }): Promise<boolean> {
     const reason = input.reason === 'silence' || input.reason === 'failed' ? input.reason : 'owner';
-    return this.inTurn(async () => {
-      const live = this.mine(input.attemptId);
-      if (!live) return false;
-      await this.finish(live, reason);
-      return true;
-    });
+    const live = this.mine(input.attemptId);
+    if (!live) return false;
+    await this.end(live, reason);
+    return true;
   }
 
   /** What the page hears: whether the owner speaks and the call plays, and how long ago each last happened. */
   voiceActivity(input: { attemptId: unknown; speaking: unknown; playing: unknown; sinceSpeechMs?: unknown; sincePlaybackMs?: unknown }): boolean {
     const live = this.mine(input.attemptId);
-    if (!live) return false;
+    if (!live || live.closing) return false;
     const now = Date.now();
     // Durations, not the page's clock: its clock may differ from this computer's.
     const ago = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? now - Math.min(value, 86_400_000) : 0;
@@ -380,7 +421,7 @@ export class MasterVoice {
    */
   async announce(text: string, signal: AbortSignal): Promise<{ ok: true; signal: AbortSignal; check: () => Promise<boolean>; done: () => void } | { ok: false; reason: string }> {
     const live = this.live;
-    if (!live || live.attempt.phase !== 'ready') return { ok: false, reason: '음성으로 먼저 알릴 수 없어 되돌릴 수 없는 작업을 보내지 않았습니다.' };
+    if (!live || live.closing || live.attempt.phase !== 'ready') return { ok: false, reason: '음성으로 먼저 알릴 수 없어 되돌릴 수 없는 작업을 보내지 않았습니다.' };
     const id = randomUUID();
     const since = Date.now();
     const gate = { since, controller: new AbortController() };
@@ -395,18 +436,18 @@ export class MasterVoice {
       if (signal.aborted) { finish('stopped'); return; }
       this.options.room.broadcast({ type: 'notice', seq: 0, notice: { id, attempt: live.attempt.attempt, text: cutBytes(this.options.hooks.hide(text), 600) } });
     });
-    if (result !== 'played' || gate.controller.signal.aborted || this.live !== live) {
+    if (result !== 'played' || gate.controller.signal.aborted || live.closing) {
       done();
-      const reason = result === 'interrupted' || (result === 'played' && gate.controller.signal.aborted) ? '안내하는 동안 소유자가 말해서 보내지 않았습니다. 무엇을 원하는지 다시 들어 주세요.'
-        : result === 'stopped' ? '중지되어 보내지 않았습니다.' : '안내를 들려 드리지 못해 보내지 않았습니다.';
+      const reason = result === 'interrupted' || (result === 'played' && gate.controller.signal.aborted && !live.closing) ? '안내하는 동안 소유자가 말해서 보내지 않았습니다. 무엇을 원하는지 다시 들어 주세요.'
+        : result === 'stopped' || live.closing ? '중지되어 보내지 않았습니다.' : '안내를 들려 드리지 못해 보내지 않았습니다.';
       return { ok: false, reason };
     }
     const check = async () => {
       // A web restart may have kept the page's word from arriving: only a report made after it counts.
       const deadline = Date.now() + this.timing.resyncMs;
       const heard = () => (live.activity?.receivedAt ?? 0) > this.options.hooks.connectedSince();
-      while (this.live === live && !heard() && !gate.controller.signal.aborted && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
-      return this.live === live && live.attempt.phase === 'ready' && heard() && !gate.controller.signal.aborted && (live.activity?.lastSpeechAt ?? 0) < since;
+      while (!live.closing && !heard() && !gate.controller.signal.aborted && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
+      return this.live === live && !live.closing && live.attempt.phase === 'ready' && heard() && !gate.controller.signal.aborted && (live.activity?.lastSpeechAt ?? 0) < since;
     };
     return { ok: true, signal: gate.controller.signal, check, done };
   }
@@ -414,27 +455,29 @@ export class MasterVoice {
   /** Tells what is waiting to be told, in order, while a call is ready. */
   async deliver(): Promise<void> {
     const live = this.live;
-    if (!live || live.attempt.phase !== 'ready') return;
+    if (!live || live.closing || live.attempt.phase !== 'ready') return;
     if (live.delivering) { live.deliverAgain = true; return; }
     live.delivering = true;
     try {
       do {
         live.deliverAgain = false;
+        this.sweep();
         for (const { entry, speak } of this.speakEntries()) {
           if (speak.state !== 'pending') continue;
-          if (this.live !== live || live.attempt.phase !== 'ready') return;
-          if (Date.now() - Date.parse(entry.at) > STALE_MS) { this.setSpeak(entry, { ...speak, state: 'undelivered' }); continue; }
-          const content = this.content(entry.data);
-          // A request of this call is answered under its own delegation; other news is told without one.
-          const delegationId = speak.attempt === live.attempt.attempt ? speak.delegationIds?.at(-1) ?? null : null;
-          const ok = await this.append(live, 'session.commentary.append', delegationId, content);
-          const current = this.currentSpeak(entry) ?? speak;
-          if (!ok) { this.retry(entry, current); continue; }
+          if (this.live !== live || live.closing) return;
+          // A request of this call is answered under its latest delegation, the earlier ones it joined quietly;
+          // other news is told without a delegation.
+          const own = speak.attempt === live.attempt.attempt ? speak.delegationIds ?? [] : [];
+          const ok = await this.append(live, 'session.commentary.append', own.at(-1) ?? null, this.content(entry.data));
+          const current = speakOf(this.options.room.get(entry.id)?.data) ?? speak;
+          // Taken in just as the call began to end: perhaps never heard.
+          if (!ok || live.closing) { this.retry(entry, current); if (live.closing) return; continue; }
           this.setSpeak(entry, { ...current, state: 'sent' });
-          // Taken in and not cut off right after: counted as told.
+          for (const earlier of own.slice(0, -1)) void this.append(live, 'session.thinking.append', earlier, VOICE_PHRASES.answeredTogether);
           const timer = setTimeout(() => {
-            const later = this.currentSpeak(entry);
-            if (this.live === live && later?.state === 'sent') this.setSpeak(entry, { ...later, state: 'delivered' });
+            const later = speakOf(this.options.room.get(entry.id)?.data);
+            // Told, unless the call has ended or begun to end since.
+            if (this.live === live && !live.closing && later?.state === 'sent') this.setSpeak(entry, { ...later, state: 'delivered' });
           }, this.timing.deliveredMs);
           timer.unref();
           if (live.attempt.wake && !live.toldFirst) {
@@ -442,7 +485,7 @@ export class MasterVoice {
             void this.append(live, 'session.instructions.append', null, VOICE_PHRASES.tellFirst);
           }
         }
-      } while (live.deliverAgain && this.live === live);
+      } while (live.deliverAgain && this.live === live && !live.closing);
     } finally { live.delivering = false; this.broadcast(); }
   }
 
@@ -520,8 +563,9 @@ export class MasterVoice {
   /** The follow-up connection went away: what it missed does not come back, so the call is closed rather than trusted. */
   private lost(live: Live): void {
     if (live.closing || this.live !== live || this.closedHost) return;
+    this.halt(live);
     void this.inTurn(async () => {
-      if (this.live !== live || live.closing) return;
+      if (this.live !== live) return;
       if (!live.attempt.closedConfirmed) await this.attach(live).catch(() => undefined);
       await this.finish(live, 'connection');
     });
@@ -584,7 +628,7 @@ export class MasterVoice {
         live.attempt.apiReason = typeof event.reason === 'string' ? event.reason.slice(0, 40) : 'closed';
         live.attempt.closedConfirmed = true;
         if (live.closed) live.closed();
-        else void this.inTurn(() => this.live === live ? this.finish(live, live.attempt.apiReason === 'expired' ? 'expired' : 'closed') : Promise.resolve());
+        else if (this.live === live) void this.end(live, live.attempt.apiReason === 'expired' ? 'expired' : 'closed');
         return;
       }
     }
@@ -602,7 +646,8 @@ export class MasterVoice {
 
   /**
    * Draws a side's open lines from the hidden text of all of it, so a value said across a pause is still found whole.
-   * The end, where a card's value may not be whole yet, waits for more (or for the call to end).
+   * The end, where a card's value may not be whole yet, waits for more (or for the call to end), and a reference is
+   * never shown in part.
    */
   private render(side: Side, kind: 'input' | 'output', final: boolean): void {
     if (side.timer) { clearTimeout(side.timer); side.timer = undefined; }
@@ -610,10 +655,7 @@ export class MasterVoice {
     const hide = this.options.hooks.hide;
     const from = Math.max(0, side.lines[0].start - CONTEXT_CHARS);
     const whole = hide(side.raw.slice(from));
-    let limit = final ? whole.length : Math.max(0, whole.length - this.options.hooks.holdBack());
-    // Never part of a reference: it waits whole.
-    const open = whole.lastIndexOf('{{secret:', limit - 1);
-    if (open >= 0 && open < limit && (whole.indexOf('}}', open) < 0 || whole.indexOf('}}', open) + 2 > limit)) limit = open;
+    const limit = outsideReference(whole, final ? whole.length : Math.max(0, whole.length - this.options.hooks.holdBack()));
     const starts = side.lines.map(line => boundary(side.raw, from, line.start, whole, hide));
     side.lines.forEach((line, index) => {
       const start = starts[index];
@@ -691,24 +733,42 @@ export class MasterVoice {
   /** The daily limit, when set, is reached during a call: the model says so, and the call ends. */
   private checkLimit(live: Live): void {
     const limit = this.options.settings.current().voice.dailyMinutes;
-    if (live.limitReached || limit <= 0 || live.attempt.phase !== 'ready' || this.todaySeconds(Date.now()) < limit * 60) return;
+    if (live.limitReached || live.closing || limit <= 0 || live.attempt.phase !== 'ready' || this.todaySeconds(Date.now()) < limit * 60) return;
     live.limitReached = true;
     void this.append(live, 'session.instructions.append', null, VOICE_PHRASES.dailyLimit);
-    const timer = setTimeout(() => { void this.inTurn(() => this.live === live ? this.finish(live, 'daily-limit') : Promise.resolve()); }, this.timing.limitNoticeMs);
+    const timer = setTimeout(() => { if (this.live === live) void this.end(live, 'daily-limit'); }, this.timing.limitNoticeMs);
     timer.unref();
+  }
+
+  /** Stops a call at once for everything waiting on it, then closes it in turn with the other calls' work. */
+  private end(live: Live, reason: string): Promise<void> {
+    live.attempt.appReason ??= reason;
+    this.halt(live);
+    return this.inTurn(() => this.live === live ? this.finish(live, reason) : Promise.resolve());
+  }
+
+  /**
+   * From here on the call does nothing more: no change waiting on it goes, no news is sent, and news sent just now
+   * is told again next time (it may not have been heard).
+   */
+  private halt(live: Live): void {
+    if (live.closing) return;
+    live.closing = true;
+    for (const gate of live.gates) gate.controller.abort(new Error('음성이 끝났습니다.'));
+    for (const done of [...live.notices.values()]) done('stopped');
+    for (const { entry, speak } of this.speakEntries()) if (speak.state === 'sent') this.retry(entry, speak);
+    if (live.attempt.phase !== 'closed' && live.attempt.phase !== 'unconfirmed') live.attempt.phase = 'closing';
+    this.broadcast();
   }
 
   /**
    * Ends a call: asks GPT-Live to close it and waits a while for its word and final use; without it the end stays
-   * unconfirmed and is checked later. News sent just before the end is told again next time.
+   * unconfirmed and is checked later.
    */
   private async finish(live: Live, reason: string): Promise<void> {
-    if (live.closing) return;
-    live.closing = true;
     const attempt = live.attempt;
     attempt.appReason ??= reason;
-    attempt.phase = 'closing';
-    this.broadcast();
+    this.halt(live);
     const socket = live.socket;
     if (socket && socket.readyState === WebSocket.OPEN && !attempt.closedConfirmed) {
       await new Promise<void>(resolve => {
@@ -717,12 +777,11 @@ export class MasterVoice {
         socket.send(JSON.stringify({ type: 'session.close', event_id: `tower_${randomUUID()}` }), error => { if (error) { clearTimeout(timer); resolve(); } });
       });
     }
-    attempt.phase = attempt.closedConfirmed ? 'closed' : 'unconfirmed';
     attempt.closedAt = Date.now();
+    if (attempt.closedConfirmed) this.closeAttempt(attempt);
+    else attempt.phase = 'unconfirmed';
     if (reason === 'silence') this.file.silence = { tab: attempt.tab, at: attempt.closedAt };
-    // A call woken by news that could not start stops waking: the owner restarts it by hand.
-    else if (reason === 'owner' || (reason === 'failed' && attempt.wake)) this.file.silence = null;
-    for (const { entry, speak } of this.speakEntries()) if (speak.state === 'sent') this.retry(entry, speak);
+    else if (reason === 'owner') this.file.silence = null;
     this.release(live);
     await this.save();
     this.broadcast();
@@ -730,12 +789,12 @@ export class MasterVoice {
 
   /** Lets go of a call's connection and timers, showing what it said to the end; its work and records stay. */
   private release(live: Live): void {
+    live.closing = true;
     if (live.readyTimer) clearTimeout(live.readyTimer);
     if (live.backstop) clearInterval(live.backstop);
     for (const done of [...live.acks.values()]) done(false);
     for (const done of [...live.notices.values()]) done('stopped');
     for (const gate of live.gates) gate.controller.abort(new Error('음성이 끝났습니다.'));
-    live.closing = true;
     this.render(live.input, 'input', true);
     this.render(live.output, 'output', true);
     const socket = live.socket;
@@ -744,18 +803,23 @@ export class MasterVoice {
     if (this.live === live) this.live = undefined;
   }
 
-  /** Calls whose end was never confirmed: attach and close them, until GPT-Live says they are gone or two hours pass. */
-  private async probe(): Promise<void> {
+  /**
+   * Calls whose end was never confirmed: attach and close them every few minutes. One GPT-Live no longer knows has
+   * ended; one that could not be checked (no id, no key) stays counted until it could no longer be running.
+   */
+  probe(): Promise<void> {
+    if (!this.probing && !this.closedHost) this.probing = this.probeAll().finally(() => { this.probing = undefined; });
+    return this.probing ?? Promise.resolve();
+  }
+
+  private async probeAll(): Promise<void> {
     const key = this.options.settings.key();
-    const now = Date.now();
-    for (const attempt of this.file.attempts) {
-      if (attempt.phase !== 'unconfirmed' || this.closedHost) continue;
-      if (!attempt.sessionId || !key || now - attempt.createdAt > this.timing.probeForMs) {
-        // Given up on: its use is estimated up to now.
-        attempt.phase = 'closed';
-        attempt.closedAt = now;
-        continue;
-      }
+    for (const attempt of this.file.attempts.filter(item => item.phase === 'unconfirmed')) {
+      if (this.closedHost) return;
+      const now = Date.now();
+      const limit = this.limitOf(attempt);
+      if (now >= limit) { attempt.closedAt = limit; this.closeAttempt(attempt); continue; }
+      if (!attempt.sessionId || !key) continue;
       attempt.lastProbeAt = now;
       const live: Live = { attempt, key, tabId: '', seen: new Set(), input: emptySide(), output: emptySide(), words: [], cursor: 0, lastWordAt: 0, delegations: [], working: false, handled: new Set(), acks: new Map(), notices: new Map(), gates: new Set(), closing: true };
       try {
@@ -765,15 +829,20 @@ export class MasterVoice {
           live.closed = () => { clearTimeout(timer); resolve(); };
           live.socket?.send(JSON.stringify({ type: 'session.close', event_id: `tower_${randomUUID()}` }));
         });
-        if (attempt.closedConfirmed) { attempt.phase = 'closed'; attempt.closedAt = Date.now(); }
+        if (attempt.closedConfirmed) { attempt.closedAt = Date.now(); this.closeAttempt(attempt); }
       } catch (error) {
         // GPT-Live no longer knows the call: it ended. Its use stays as estimated until now.
         const status = (error as { status?: number }).status;
-        if (status === 404 || status === 410) { attempt.phase = 'closed'; attempt.closedConfirmed = true; attempt.closedAt = now; }
+        if (status === 404 || status === 410) { attempt.closedConfirmed = true; attempt.closedAt = now; this.closeAttempt(attempt); }
       } finally { const socket = live.socket; live.socket = undefined; socket?.close(); }
     }
+    if (this.closedHost) return;
     await this.save();
+    this.broadcast();
   }
+
+  /** When a call can be running no longer: when GPT-Live said it expires, or the longest a call can last. */
+  private limitOf(attempt: Attempt): number { return attempt.expiresAt ?? attempt.createdAt + this.timing.callMaxMs; }
 
   // ─── cost ────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -782,7 +851,7 @@ export class MasterVoice {
     const from = attempt.usage.observedAt ?? attempt.readyAt ?? attempt.createdAt;
     const added = total - attempt.usage.seconds;
     if (added > 0) {
-      this.spread(attempt.usage.byDay, added, Math.min(from, now), now);
+      spread(attempt.usage.byDay, added, Math.min(from, now), now);
       attempt.usage.seconds = total;
     }
     attempt.usage.observedAt = now;
@@ -790,42 +859,85 @@ export class MasterVoice {
     void this.save();
   }
 
-  private spread(days: Record<string, number>, seconds: number, from: number, to: number): void {
-    if (to <= from) { days[localDay(to)] = (days[localDay(to)] ?? 0) + seconds; return; }
-    for (let at = from; at < to;) {
-      const end = Math.min(to, nextMidnight(at));
-      days[localDay(at)] = (days[localDay(at)] ?? 0) + seconds * (end - at) / (to - from);
-      at = end;
+  /**
+   * A call's seconds per day: what GPT-Live reported, plus, until it reports a final total, all the time since its
+   * last report (up to when the call ends or could no longer run); at least the 15 seconds every call is billed.
+   */
+  private attemptDays(attempt: Attempt, now: number): Record<string, number> {
+    if (attempt.unbilled) return {};
+    const days = { ...attempt.usage.byDay };
+    let total = attempt.usage.seconds;
+    if (!attempt.usage.final) {
+      const from = attempt.usage.observedAt ?? attempt.readyAt ?? attempt.createdAt;
+      const open = ACTIVE.has(attempt.phase) || attempt.phase === 'unconfirmed';
+      const to = Math.min(open ? now : attempt.closedAt ?? now, this.limitOf(attempt));
+      if (to > from) { spread(days, (to - from) / 1000, from, to); total += (to - from) / 1000; }
     }
+    if (total < RESERVED_SECONDS) spread(days, RESERVED_SECONDS - total, attempt.createdAt, attempt.createdAt);
+    return days;
   }
 
-  /**
-   * Seconds of voice today: what GPT-Live reported, at least the 15 seconds each call is billed, and for calls not
-   * known to be over, all the time since their last report (up to when they expire).
-   */
+  /** A call that is over: its time goes into the daily totals for good, so the call itself may be forgotten. */
+  private closeAttempt(attempt: Attempt): void {
+    attempt.phase = 'closed';
+    attempt.closedAt ??= Date.now();
+    if (attempt.folded) return;
+    for (const [day, seconds] of Object.entries(this.attemptDays(attempt, attempt.closedAt))) this.file.days[day] = (this.file.days[day] ?? 0) + seconds;
+    attempt.folded = true;
+  }
+
+  /** Old calls go once they are counted; old days go after a while. */
+  private prune(): void {
+    while (this.file.attempts.length > KEEP_ATTEMPTS) {
+      const index = this.file.attempts.findIndex(item => item.folded);
+      if (index < 0) break;
+      this.file.attempts.splice(index, 1);
+    }
+    const oldest = localDay(Date.now() - KEEP_DAYS * 86_400_000);
+    for (const day of Object.keys(this.file.days)) if (day < oldest) delete this.file.days[day];
+  }
+
   private todaySeconds(now: number): number {
     const today = localDay(now);
-    const dayStart = midnight(now);
-    let total = 0;
-    for (const attempt of this.file.attempts) {
-      total += attempt.usage.byDay[today] ?? 0;
-      if (attempt.unbilled) continue;
-      if (localDay(attempt.createdAt) === today) total += Math.max(0, RESERVED_SECONDS - attempt.usage.seconds);
-      if (attempt.usage.final) continue;
-      const open = ACTIVE.has(attempt.phase) || attempt.phase === 'unconfirmed';
-      const from = Math.max(attempt.usage.observedAt ?? attempt.readyAt ?? attempt.createdAt, dayStart);
-      const to = Math.min(open ? now : attempt.closedAt ?? now, attempt.expiresAt ?? Number.MAX_SAFE_INTEGER);
-      // Past the reserved seconds only: those are counted above.
-      const counted = attempt.usage.observedAt ? 0 : RESERVED_SECONDS * 1000;
-      if (to - from > counted) total += (to - from - counted) / 1000;
-    }
+    let total = this.file.days[today] ?? 0;
+    for (const attempt of this.file.attempts) if (!attempt.folded) total += this.attemptDays(attempt, now)[today] ?? 0;
     return total;
   }
 
   // ─── news to tell ────────────────────────────────────────────────────────────────────────────────────────────
 
+  /** Keeps the list of news not yet told as the conversation changes, whatever else is added meanwhile. */
+  private follow(event: MasterStreamEvent): void {
+    if (event.type !== 'entry') return;
+    const speak = speakOf(event.entry.data);
+    const known = this.file.speaking.findIndex(item => item.id === event.entry.id);
+    const open = speak?.state === 'pending' || speak?.state === 'sent';
+    if (open && known < 0) {
+      this.file.speaking.push({ id: event.entry.id, order: event.entry.order });
+      // Bounded: the oldest beyond the limit is given up on (and says so on screen).
+      while (this.file.speaking.length > KEEP_SPEAKING) {
+        const oldest = this.file.speaking.shift()!;
+        const entry = this.options.room.get(oldest.id);
+        const stale = speakOf(entry?.data);
+        if (entry && stale) this.setSpeak(entry, { ...stale, state: 'undelivered' });
+      }
+    } else if (!open && known >= 0) this.file.speaking.splice(known, 1);
+    else return;
+    void this.save();
+  }
+
   private speakEntries(): Array<{ entry: MasterEntry; speak: MasterSpeak }> {
-    return this.options.room.recent(500).flatMap(entry => (entry.data.kind === 'master' || entry.data.kind === 'error' || entry.data.kind === 'event') && entry.data.speak ? [{ entry, speak: entry.data.speak }] : []);
+    return this.file.speaking.flatMap(item => {
+      const entry = this.options.room.get(item.id);
+      const speak = speakOf(entry?.data);
+      return entry && speak ? [{ entry, speak }] : [];
+    }).sort((a, b) => a.entry.order - b.entry.order);
+  }
+
+  /** News older than an hour is not told any more; it says so on screen. */
+  private sweep(): void {
+    const now = Date.now();
+    for (const { entry, speak } of this.speakEntries()) if (speak.state === 'pending' && now - Date.parse(entry.at) > STALE_MS) this.setSpeak(entry, { ...speak, state: 'undelivered' });
   }
 
   private speakCounts(): { pending: number; wakeable: number } {
@@ -837,11 +949,6 @@ export class MasterVoice {
       if (!speak.woke) wakeable++;
     }
     return { pending, wakeable };
-  }
-
-  private currentSpeak(entry: MasterEntry): MasterSpeak | undefined {
-    const data = this.options.room.get(entry.id)?.data;
-    return data && (data.kind === 'master' || data.kind === 'error' || data.kind === 'event') ? data.speak : undefined;
   }
 
   /** Not taken in, or perhaps not heard: waits for the next try, up to three. */
@@ -857,6 +964,15 @@ export class MasterVoice {
 
   // ─── plumbing ────────────────────────────────────────────────────────────────────────────────────────────────
 
+  /** Every few seconds: the host's word to the page on its call, the daily limit, old news, and a new day's totals. */
+  private tick(): void {
+    this.sweep();
+    const day = localDay(Date.now());
+    if (this.live) { this.checkLimit(this.live); this.broadcast(); }
+    else if (day !== this.shownDay) this.broadcast();
+    this.shownDay = day;
+  }
+
   private mine(attemptId: unknown): Live | undefined {
     if (typeof attemptId !== 'string' || !UUID.test(attemptId)) return undefined;
     const live = this.live;
@@ -866,7 +982,7 @@ export class MasterVoice {
   /** The ready call a request came from, if it is still on. */
   private ready(origin: VoiceOrigin): Live | undefined {
     const live = this.live;
-    return live && live.attempt.phase === 'ready' && live.attempt.attempt === origin.attempt ? live : undefined;
+    return live && !live.closing && live.attempt.phase === 'ready' && live.attempt.attempt === origin.attempt ? live : undefined;
   }
 
   private inTurn<T>(work: () => Promise<T>): Promise<T> {

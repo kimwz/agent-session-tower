@@ -21,6 +21,7 @@ export const VOICE_PHRASES = {
   tellFirst: '방금 전한 소식을 소유자에게 먼저 짧게 말하고, 그다음 듣는다.',
   dailyLimit: '오늘 쓸 수 있는 음성 시간이 다 되어 곧 음성을 끝낸다고 짧게 말하라.',
   failed: '요청을 처리하지 못했다. 이유를 짧게 말하고, 자세한 내용은 화면에 있다고 말하라.',
+  answeredTogether: '이 요청은 뒤이은 요청과 함께 한 번에 답했다. 따로 답하지 않는다.',
 } as const;
 
 /** Every text above, for the check that keeps card values out of what the model is always given. */

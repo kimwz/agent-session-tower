@@ -50,6 +50,8 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   const call = useRef<VoiceCall | null>(null);
   const [callView, setCallView] = useState<CallView | null>(null);
   const [voiceEnd, setVoiceEnd] = useState<{ reason: string; error?: string } | null>(null);
+  /** The host's last call in this tab, dismissed from view. */
+  const [dismissed, setDismissed] = useState<string>();
   const [tabHash, setTabHash] = useState<string>();
   const [visible, setVisible] = useState(() => document.visibilityState === 'visible');
   /** A call news tried to start here failed: no more of that until the owner starts one. */
@@ -114,9 +116,13 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   useEffect(() => {
     if (shouldWake({ status: room.voice, tabHash, panelOpen: open, autoWake: voiceSettings.autoWake, visible, busy: Boolean(call.current), failed: wakeFailed.current })) startVoice(true);
   }, [room.voice, tabHash, open, voiceSettings.autoWake, visible, startVoice]);
+  // After a reload, how this tab's last call ended comes from the host.
+  const hostEnd = room.voice && room.voice.tab === tabHash && room.voice.attempt !== dismissed && (room.voice.phase === 'closed' || room.voice.phase === 'unconfirmed') && room.voice.reason
+    ? { reason: room.voice.reason } : null;
   const voice: VoiceControls = {
-    supported: voiceSupported, view: callView, end: voiceEnd, ...(room.voice ? { status: room.voice } : {}),
-    start: () => startVoice(false), stop: () => { void call.current?.stop('owner'); }, dismiss: () => setVoiceEnd(null),
+    supported: voiceSupported, view: callView, end: voiceEnd ?? hostEnd, ...(room.voice ? { status: room.voice } : {}),
+    start: () => startVoice(false), stop: () => { void call.current?.stop('owner'); },
+    dismiss: () => { setVoiceEnd(null); setDismissed(room.voice?.attempt); },
   };
 
   const lastOrder = room.entries.at(-1)?.order ?? -1;
