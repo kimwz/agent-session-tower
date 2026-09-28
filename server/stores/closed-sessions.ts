@@ -27,6 +27,8 @@ export class ClosedSessionStore {
     } finally { await file.close(); }
   }
 
+  closedIds(): ReadonlySet<string> { return new Set(this.ids); }
+
   apply(session: Session): Session {
     const { closed: _, ...native } = session;
     return this.ids.has(session.id) ? { ...native, closed: true } : native;

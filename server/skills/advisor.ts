@@ -17,6 +17,8 @@ export interface SkillAdvisorDependencies {
   /** Work that automation, not the owner, asked for (trigger, Slack, another agent). */
   automated: (session: Session) => boolean;
   history: (session: Session, limit: number) => Promise<ChatMessage[] | undefined>;
+  /** Sessions the owner closed, read fresh: the page closes them in another process. */
+  closed?: () => Promise<ReadonlySet<string>>;
   model: (request: AutoPromptModelRequest, options?: { timeoutMs?: number }) => Promise<unknown>;
   onChange: () => void;
   now?: () => number;
@@ -127,6 +129,18 @@ export class SkillAdvisor {
     return !this.deps.automated(session);
   }
 
+  /**
+   * Whether a session may still be read, judged on its latest state right now: the owner may have closed it, or someone
+   * else may have joined it, while the advisor was busy with another.
+   */
+  private async readable(session: Session): Promise<boolean> {
+    const latest = this.deps.sessions().find(item => item.id === session.id) ?? session;
+    const closed = await this.deps.closed?.().catch(() => undefined);
+    // A closed list that cannot be read counts as closed: nothing is read on a guess.
+    if (this.deps.closed && !closed) return false;
+    return !closed?.has(latest.id) && this.eligible(latest);
+  }
+
   /** Finished sessions with owner requests the advisor has not read yet, oldest first. */
   due(): Session[] {
     const { reflected, startedAt } = this.deps.state.get();
@@ -162,7 +176,7 @@ export class SkillAdvisor {
     const state = this.deps.state.get();
     const marker = state.reflected[session.id] ?? state.startedAt;
     // Checked again right before reading and right before sending: someone else may have joined it meanwhile.
-    if (!this.eligible(session)) return;
+    if (!await this.readable(session)) return;
     const messages = await this.deps.history(session, 200).catch(() => undefined);
     const requests = ownerRequests(messages ?? [], marker);
     const upTo = requests.at(-1)?.timestamp ?? session.lastRequestAt ?? new Date(this.now()).toISOString();
@@ -170,7 +184,7 @@ export class SkillAdvisor {
     if (text.length < 30) { await this.deps.state.update(next => { next.reflected[session.id] = upTo; }); return; }
     try {
       const prompt = await this.reflectPrompt(session, requests, messages ?? []);
-      if (!this.eligible(session)) return;
+      if (!await this.readable(session)) return;
       const result = await this.deps.model({ ...this.request(), prompt, schema: REFLECT_SCHEMA as unknown as Record<string, unknown> }, { timeoutMs: REFLECT_TIMEOUT_MS });
       await this.apply(session, result, upTo);
       this.failures.delete(session.id);
@@ -254,7 +268,7 @@ export class SkillAdvisor {
       let budget = BACKFILL_CHARS;
       for (const session of sessions) {
         if (budget < 2_000) break;
-        if (!this.eligible(session)) continue;
+        if (!await this.readable(session)) continue;
         const requests = ownerRequests(await this.deps.history(session, 200).catch(() => undefined) ?? [], since).slice(-BACKFILL_REQUESTS_PER_SESSION);
         if (!requests.length) continue;
         const label = `S${labels.size + 1}`;
@@ -267,7 +281,7 @@ export class SkillAdvisor {
       }
       const context = await this.context();
       // Sessions someone else joined while the requests were being read are left out of what is sent.
-      for (const [label, session] of [...labels]) if (!this.eligible(session)) { labels.delete(label); blocks.splice(blocks.findIndex(block => block.startsWith(`${label} · `)), 1); }
+      for (const [label, session] of [...labels]) if (!await this.readable(session)) { labels.delete(label); blocks.splice(blocks.findIndex(block => block.startsWith(`${label} · `)), 1); }
       if (!blocks.length) { this.backfillStatus = { at: new Date(this.now()).toISOString(), proposals: 0 }; return 0; }
       const result = await this.deps.model({ ...this.request(), schema: BACKFILL_SCHEMA as unknown as Record<string, unknown>, prompt: [
         context,

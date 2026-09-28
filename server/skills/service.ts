@@ -7,6 +7,7 @@ import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
 import { SkillAdvisor } from './advisor.js';
 import { SkillError, SkillFiles, type SkillHomes } from './files.js';
 import { SkillStateStore } from './state.js';
+import { ClosedSessionStore } from '../stores/closed-sessions.js';
 
 export interface SkillServiceOptions {
   stateDir: string;
@@ -44,7 +45,8 @@ export class SkillService {
     this.state = new SkillStateStore(options.stateDir);
     this.advisor = new SkillAdvisor({
       stateDir: options.stateDir, state: this.state, skills: cwd => this.files.list(cwd), sessions: options.sessions,
-      automated: session => this.automated(session), history: options.history, model: options.model, onChange: () => options.onChange?.(),
+      automated: session => this.automated(session), history: options.history,
+      closed: async () => { const store = new ClosedSessionStore(options.stateDir); await store.start(); return store.closedIds(); }, model: options.model, onChange: () => options.onChange?.(),
     });
   }
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ChatMessage, Run, Session } from '../../../shared/types.js';
@@ -221,4 +221,33 @@ test('a session someone else joins while the advisor is busy is not read or sent
   const sent = f.calls.at(-1)!.prompt;
   assert.doesNotMatch(sent, /Session first/);
   assert.match(sent, /Session third/);
+});
+
+test('a session the owner closes while the advisor is busy is not read or sent afterwards', async t => {
+  let closing: (() => Promise<void>) | undefined;
+  const f = await fixture(t, async () => { await closing?.(); return reflection({ action: 'none' }); });
+  f.sessions.push(session('first', f.project, { updatedAt: minutes(31) }), session('second', f.project));
+  for (const item of f.sessions) f.histories.set(item.id, [message('user', 'A request long enough to be worth reading.', 40)]);
+  // The page closes it in another process: the worker's session objects do not change, only the saved list does.
+  closing = async () => { closing = undefined; await writeFile(join(f.stateDir, 'closed-sessions.json'), JSON.stringify(['claude:second']), { mode: 0o600 }); };
+  await f.tick();
+  assert.equal(f.calls.length, 1);
+  assert.doesNotMatch(f.calls[0].prompt, /Session second/);
+  await f.tick();
+  assert.equal(f.calls.length, 1, 'still closed on the next round');
+
+  // The 7-day analysis drops a session closed while it was reading the others.
+  await writeFile(join(f.stateDir, 'closed-sessions.json'), '[]', { mode: 0o600 });
+  f.sessions.push(session('third', f.other, { updatedAt: minutes(29) }));
+  f.histories.set('claude:third', [message('user', 'Another request long enough to be worth reading.', 40)]);
+  const deps = (f.service as unknown as { advisor: { deps: { history: (session: Session, limit: number) => Promise<ChatMessage[] | undefined> } } }).advisor.deps;
+  const original = deps.history;
+  deps.history = async (item, limit) => {
+    if (item.id === 'claude:first') await writeFile(join(f.stateDir, 'closed-sessions.json'), JSON.stringify(['claude:third']), { mode: 0o600 });
+    return original(item, limit);
+  };
+  await (f.service as unknown as { advisor: { backfill(days: number): Promise<number> } }).advisor.backfill(7).catch(() => 0);
+  const sent = f.calls.at(-1)!.prompt;
+  assert.match(sent, /Session first/);
+  assert.doesNotMatch(sent, /Session third/);
 });
