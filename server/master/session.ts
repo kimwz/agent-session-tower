@@ -25,6 +25,7 @@ const REPORT_RETRY_MS = 15_000;
 const REPORT_TRIES = 8;
 /** A report whose sending was cut off is looked for this long in the master's runs and history before it goes again. */
 const RECONCILE_MS = 2 * 60_000;
+const RECONCILES = 60;
 /** How Tower adds attached files to a request in a session's history (`attachmentPrompt`), once spaces are folded. */
 const ATTACHED = ' 첨부 파일 (사용자가 이번 메시지에 첨부한 로컬 파일):';
 
@@ -52,6 +53,8 @@ export interface Followed {
   reportTries?: number;
   /** Tower could not take it just then (a web or worker changing over): it waits a little, without counting a try. */
   reportHeld?: true;
+  /** Looks for a report in doubt that could not settle it (its history too long to read back); given up on in the end. */
+  reconciles?: number;
   /** The message the report went in, named in its text, and when it was sent. */
   reportId?: string;
   reportAt?: string;
@@ -116,8 +119,12 @@ export class MasterSession {
     if (saved?.version === 1 && Array.isArray(saved.followed) && Array.isArray(saved.masterRuns) && typeof saved.baselineAt === 'string') {
       this.file = { version: 1, baselineAt: saved.baselineAt, masterRuns: saved.masterRuns.filter(id => typeof id === 'string'), followed: saved.followed.filter(item => item && typeof item.id === 'string') };
     }
-    // A report that was being sent when the host stopped may have arrived: it is not sent again.
-    for (const item of this.file.followed) if (item.report === 'sending') item.report = 'uncertain';
+    // A report that was being sent when the host stopped may have arrived: it is looked for before it goes again. A
+    // spoken request cut off the same way is not followed (nor sent again), so no late "could not answer" is read aloud.
+    for (const item of this.file.followed) {
+      if (item.report === 'sending') item.report = 'uncertain';
+      if (item.kind === 'spoken' && !item.runId && item.state === 'running') item.state = 'unknown';
+    }
     await this.save();
     await writeMasterGuide(this.folder);
     this.timer = setInterval(() => { void this.follow(); }, this.options.followMs ?? FOLLOW_MS);
@@ -303,7 +310,9 @@ export class MasterSession {
     }
     // Messages steered into one turn share its answer, given after the last of them.
     const target = run ? run.steering?.targetRunId ?? run.id : undefined;
-    const together = run ? (snapshot.runs ?? []).filter(entry => entry.id !== run.id && (entry.id === target || entry.steering?.targetRunId === target)).map(entry => normalize(entry.prompt)) : [];
+    // Only messages steered in after this one come after it in the history, before the turn's answer.
+    const together = run ? (snapshot.runs ?? []).filter(entry => entry.id !== run.id && (entry.id === target || entry.steering?.targetRunId === target)
+      && Date.parse(entry.createdAt) > Date.parse(run.createdAt)).map(entry => normalize(entry.prompt)) : [];
     if (target) item.turn = target;
     const found = item.sessionId && ended !== 'unknown' ? await this.finalAnswer(item, run, together).catch(() => undefined) : undefined;
     item.state = ended;
@@ -400,9 +409,14 @@ export class MasterSession {
       const named = (text: string) => text.startsWith(REPORT_MARK) && text.includes(`(report ${reportId})`);
       const run = (snapshot.runs ?? []).find(entry => entry.sessionId === binding.sessionId && named(entry.prompt));
       if (run) { for (const item of items) item.report = 'sent'; this.reported(run, binding, run.prompt); changed = true; continue; }
-      // Read back to before it was sent; history that could not be read that far proves nothing.
+      // Read back to before it was sent; history that could not be read that far proves nothing, and after many such
+      // looks the report is shown as failed rather than kept in doubt for ever.
       if (history === null) history = await this.historySince(binding.sessionId, earliest - 60_000);
-      if (!history) continue;
+      if (!history) {
+        for (const item of items) { item.reconciles = (item.reconciles ?? 0) + 1; if (item.reconciles >= RECONCILES) item.report = 'failed'; }
+        changed = true;
+        continue;
+      }
       if (history.some(message => message.role === 'user' && named(normalize(message.text)))) { for (const item of items) item.report = 'sent'; changed = true; }
       else if (Date.now() - Date.parse(items[0].reportAt ?? items[0].createdAt) > RECONCILE_MS) { for (const item of items) item.report = 'pending'; changed = true; }
     }
@@ -491,7 +505,9 @@ export class MasterSession {
 
   /** Keeps what is still followed or not yet reported, and the most recent of the rest. */
   private trim(): void {
-    const open = (item: Followed) => item.state === 'running' || item.report === 'pending' || item.report === 'sending' || item.report === 'uncertain';
+    // A spoken request whose sending is in doubt keeps its key, so it is never sent again.
+    const open = (item: Followed) => item.state === 'running' || item.report === 'pending' || item.report === 'sending' || item.report === 'uncertain'
+      || (item.kind === 'spoken' && !item.runId && item.state === 'unknown');
     const done = this.file.followed.filter(item => !open(item));
     if (done.length <= FOLLOWED) return;
     const drop = new Set(done.slice(0, done.length - FOLLOWED).map(item => item.id));

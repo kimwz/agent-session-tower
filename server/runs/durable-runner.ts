@@ -169,7 +169,7 @@ export class DurableRunManager extends EventEmitter {
   }
   /** An older worker would run the master on whatever sign-in its CLI has, an API key included, so it is never given the master. */
   private requireSubscription(cwd: string | undefined): void {
-    if (cwd && subscriptionOnly(this.paths?.stateDir ?? this.options.stateDir, cwd) && !this.supports('subscriptionOnly')) {
+    if (cwd && !this.supports('subscriptionOnly') && subscriptionOnly(this.paths?.stateDir ?? this.options.stateDir, cwd)) {
       throw Object.assign(new Error('실행 워커가 아직 새 버전으로 바뀌지 않아 마스터에게 보내지 않았습니다. 진행 중인 작업이 끝나면 바뀝니다.'), { statusCode: 503, disposition: 'not-admitted' });
     }
   }

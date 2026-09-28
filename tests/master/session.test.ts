@@ -267,3 +267,43 @@ test('a report in doubt is looked for back through the history to when it was se
   assert.equal(h.reports().length, 0, 'found on an older page, so not sent again');
   assert.equal(again.activeTasks(), 0);
 });
+
+test('a request steered into a turn takes that turn\'s answer, even when a later turn repeats an earlier request', async t => {
+  const h = await harness(t, { bound: true });
+  await h.session.spoken({ text: 'A', voiceSession: 'v', key: 'ka' });
+  await h.session.spoken({ text: 'B', voiceSession: 'v', key: 'kb' });
+  await h.session.spoken({ text: 'A', voiceSession: 'v', key: 'ka2' });
+  const [first, second, third] = h.runs;
+  // Minutes apart, as they would be: the first turn answers A and B, a later turn answers A again.
+  const at = (minutes: number) => new Date(Date.now() - (30 - minutes) * 60_000).toISOString();
+  Object.assign(first, { createdAt: at(0), startedAt: at(0) });
+  Object.assign(second, { createdAt: at(1), steering: { targetRunId: first.id, state: 'delivered', requestedAt: at(1), deliveredAt: at(1) } });
+  Object.assign(third, { createdAt: at(10), startedAt: at(10) });
+  const kept = h.history(MASTER);
+  kept.messages.push({ id: randomUUID(), role: 'user', text: first.prompt, timestamp: at(0) }, { id: randomUUID(), role: 'user', text: second.prompt, timestamp: at(1) },
+    { id: randomUUID(), role: 'assistant', text: 'A와 B를 했습니다.', timestamp: at(2) },
+    { id: randomUUID(), role: 'user', text: third.prompt, timestamp: at(10) }, { id: randomUUID(), role: 'assistant', text: 'A를 다시 했습니다.', timestamp: at(11) });
+  for (const [run, done] of [[first, 2], [second, 2], [third, 11]] as const) { run.status = 'completed'; run.finishedAt = at(done); }
+  kept.updatedAt = at(12);
+  await h.session.follow();
+  const saved = JSON.parse(await readFile(join(h.dir, 'follow.json'), 'utf8')) as { followed: Array<{ runId?: string; answer?: string }> };
+  const answer = (run: Run) => saved.followed.find(item => item.runId === run.id)?.answer;
+  assert.equal(answer(second), 'A와 B를 했습니다.');
+  assert.equal(answer(third), 'A를 다시 했습니다.');
+});
+
+test('a spoken request in doubt keeps its key however much else is followed since', async t => {
+  const h = await harness(t, { bound: true });
+  h.setMessageStatus(500);
+  await assert.rejects(h.session.spoken({ text: '한 번만', voiceSession: 'v', key: 'once' }));
+  h.setMessageStatus(202);
+  for (let index = 0; index < 320; index++) {
+    const id = `many${index}`;
+    await h.session.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: id }, { session: { id: `claude:${id}` }, run: { id } });
+    const run: Run = { id, sessionId: `claude:${id}`, prompt: id, status: 'completed', createdAt: h.tick(), finishedAt: h.tick(), output: '' };
+    h.runs.push(run);
+  }
+  await h.session.follow();
+  await h.session.spoken({ text: '한 번만', voiceSession: 'v', key: 'once' });
+  assert.equal(h.posted.filter(item => String(item.body.prompt).includes('한 번만')).length, 1);
+});
