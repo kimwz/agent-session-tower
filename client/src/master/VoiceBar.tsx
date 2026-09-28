@@ -50,11 +50,12 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
     const playing = view.playing;
     const label = playing ? (playing.kind === 'notice' ? `${words('되돌릴 수 없는 작업', 'Irreversible change')}: ${playing.text}` : playing.text)
       : view.capturing ? `${view.waiting ? words('듣고 있어요 · 이어서 말씀하세요', 'Listening · go on') : words('듣고 있어요', 'Listening')}: ${view.heard || '…'}`
+      : view.hearing ? `${words('듣고 있어요', 'Listening')}: ${view.draft ? `${view.draft} …` : '…'}`
       : view.draft ? `${words('아직 보내지 않은 말', 'Not sent yet')}: ${view.draft}`
       : view.listening ? (view.heard ? `${words('들은 말', 'Heard')}: ${view.heard}` : words('듣는 중 — 말씀하세요', 'Listening — go ahead'))
       : words('음성 켜짐 · 맡긴 일 소식은 읽어 드려요', 'Voice on · news of finished work is read aloud');
     // What is heard or read aloud has a line of its own; today's use sits beside the buttons below it, so neither covers the other.
-    return <div className={`master-voice live ${view.capturing ? 'speaking' : playing ? 'playing' : ''}`}>
+    return <div className={`master-voice live ${view.capturing || view.hearing ? 'speaking' : playing ? 'playing' : ''}`}>
       <div className="master-voice-now" role="status">
         <span className="master-voice-dot" aria-hidden />
         {playing ? <Volume2 size={13} /> : view.listening ? <Mic size={13} /> : <MicOff size={13} />}

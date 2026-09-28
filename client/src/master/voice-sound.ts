@@ -3,7 +3,9 @@
  * listening has gone on long enough, and how a notice went. The speech gate is SORI's, which works in real rooms.
  */
 
-const SPEECH_ONSET_MS = 280;
+const SPEECH_ONSET_MS = 240;
+/** Quiet this short between syllables does not start the onset over: speech is not one unbroken sound. */
+const ONSET_GAP_MS = 100;
 const ABS_START_MIN = 0.005;
 const ABS_END_MIN = 0.003;
 const START_RATIO = 2.5;
@@ -23,6 +25,7 @@ export class SpeechGate {
   private baseline = ABS_START_MIN;
   private preSpeechBaseline = ABS_START_MIN;
   private voicedSince = 0;
+  private lastAbove = 0;
   private lastLoud = 0;
   private speaking = false;
   private initialized = false;
@@ -52,6 +55,7 @@ export class SpeechGate {
     if (!this.speaking) {
       if (rms > Math.max(ABS_START_MIN, this.baseline * START_RATIO)) {
         if (!this.voicedSince) this.voicedSince = now;
+        this.lastAbove = now;
         if (now - this.voicedSince >= SPEECH_ONSET_MS) {
           this.speaking = true;
           this.preSpeechBaseline = this.baseline;
@@ -59,7 +63,7 @@ export class SpeechGate {
           this.voicedSince = 0;
           return 'speech-start';
         }
-      } else this.voicedSince = 0;
+      } else if (now - this.lastAbove > ONSET_GAP_MS) this.voicedSince = 0;
       return null;
     }
     if (rms > Math.max(ABS_END_MIN, this.preSpeechBaseline * END_RATIO)) this.lastLoud = now;

@@ -81,6 +81,8 @@ class FakeContext {
 const posts: Array<{ path: string; body: Record<string, unknown> }> = [];
 let requestAnswer: unknown = {};
 let tokens = 0;
+/** How many token requests fail next (the web restarting, say). */
+let tokenFailures = 0;
 /** How the web judges a pause (Jev in real life): by default, finished. */
 let turnEnd: (body: { text: string; pauseMs: number }) => unknown = () => ({ finished: 0.9 });
 let nudgeAnswer: unknown = {};
@@ -94,6 +96,7 @@ Object.assign(globalThis, {
   fetch: async (path: string, init: { body: string }) => {
     const body = JSON.parse(init.body) as Record<string, unknown>;
     posts.push({ path, body });
+    if (path.endsWith('/token') && tokenFailures > 0) { tokenFailures--; return { ok: false, status: 503, json: async () => ({ error: 'restarting' }) }; }
     const reply = path.endsWith('/on') ? { session: 'session-1' }
       : path.endsWith('/token') ? { tokenId: `token-${++tokens}`, url: 'wss://stt.test', expiresAt: Date.now() + 900_000 }
       : path.endsWith('/request') ? requestAnswer
@@ -111,7 +114,7 @@ type View = import('../../client/src/master/voice-client.js').VoiceView;
 const flush = async () => { for (let round = 0; round < 5; round++) await new Promise(resolve => setImmediate(resolve)); };
 
 /** A fake page; `frame` samples at `rate` a microphone frame (a real worklet: 128 at 44.1 or 48 kHz). */
-async function harness({ rate = 16_000, frame = 160 } = {}) {
+async function harness({ rate = 16_000, frame = 160, failTokens = 0 } = {}) {
   FakeSocket.all = [];
   FakeAudio.all = [];
   FakeAudio.refuse = false;
@@ -121,6 +124,7 @@ async function harness({ rate = 16_000, frame = 160 } = {}) {
   requestAnswer = {};
   turnEnd = () => ({ finished: 0.9 });
   nudgeAnswer = {};
+  tokenFailures = failTokens;
   mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 1_000_000 });
   let view: View | undefined;
   const voice = new VoiceSession({
@@ -536,5 +540,86 @@ test('once the reply starts, talking over it is never written down; afterwards i
     await flush();
     assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/ack-2');
     assert.deepEqual(requests(), ['첫 요청', '두 번째 요청', '아 그리고 테스트도 돌려 줘']);
+  } finally { page.end(); }
+});
+
+test('a finished request after many pauses still goes: once judgments run out, the pause and how it ends decide, a judgment made or not', async () => {
+  const page = await harness();
+  try {
+    // 2026-09-28: the last judgment one utterance may have landed on the finished request, just under the bar (0.48),
+    // and with none left to ask at the longer pause, it waited twenty seconds and was kept unsent.
+    turnEnd = () => ({ finished: 0.48 });
+    const socket = await startSpeaking(page, '그,');
+    let said = '그,';
+    for (let pause = 0; pause < 19; pause++) {
+      await page.hearSlowly(0.002, 1_200);
+      said += ` 말 ${pause}`;
+      await page.hearSlowly(0.1, 400);
+      socket.message({ message_type: 'partial_transcript', text: said });
+    }
+    said += ' 신난 목소리로 대화할 수 있도록.';
+    socket.message({ message_type: 'partial_transcript', text: said });
+    assert.equal(commits(socket), 0);
+    await page.hearSlowly(0.002, 1_200);
+    assert.equal(judged().length, 20, 'the finished request had the last judgment');
+    await page.hearSlowly(0.002, 2_300);
+    assert.equal(commits(socket), 1, 'sent within seconds, not kept unsent after twenty');
+    socket.message({ message_type: 'committed_transcript', text: said });
+    await flush();
+    assert.deepEqual(requests(), [said]);
+    assert.ok(judged().length <= 20);
+  } finally { page.end(); }
+});
+
+test('words still being written down in what seemed a pause are speech too quiet to hear: the pause starts over, unjudged as long and without the sign', async () => {
+  const page = await harness();
+  try {
+    turnEnd = ({ text }) => ({ finished: text.endsWith('줄래?') ? 0.9 : 0.05 });
+    nudgeAnswer = { say: { ...page.say('nudge', 'ack'), text: '계속 말씀하세요, 듣고 있어요.' } };
+    const socket = await startSpeaking(page, '그, 마스터 채팅 음성으로 할 때,');
+    // The owner goes on softly: the microphone stays below speech, but ElevenLabs keeps writing.
+    let said = '그, 마스터 채팅 음성으로 할 때,';
+    for (const more of [' 어, 그,', ' 음성에 태그를', ' 줄 수가 있거든?', ' 그, 음성 태그 줄 때', ' 신남, 약간 들뜸']) {
+      await page.hearSlowly(0.002, 1_000);
+      said += more;
+      socket.message({ message_type: 'partial_transcript', text: said });
+    }
+    await page.hearSlowly(0.002, 1_000);
+    assert.equal(nudges(), 0, 'not told to go on while speaking');
+    assert.ok(judged().every(body => body.pauseMs < 3_000), `judged as short pauses: ${judged().map(body => body.pauseMs).join(', ')}`);
+    assert.equal(commits(socket), 0);
+    said += ' 이런 태그를 줄래?';
+    socket.message({ message_type: 'partial_transcript', text: said });
+    await page.hearSlowly(0.002, 2_500);
+    assert.equal(commits(socket), 1);
+  } finally { page.end(); }
+});
+
+test('speaking starts shows at once, and what is written down begins with the first syllable, the onset before it included', async () => {
+  const page = await harness();
+  try {
+    await page.hear(0.002, 500);
+    await page.hear(0.1, 30);
+    assert.deepEqual([page.view().hearing, page.view().capturing], [true, false], 'a voice is shown before it counts as speech');
+    await page.hear(0.002, 300);
+    assert.equal(page.view().hearing, false, 'a blip is let go');
+    // Syllables with short gaps: the first one is sent, not cut off.
+    for (let syllable = 0; syllable < 4; syllable++) { await page.hear(0.1, 150); await page.hear(0.002, 60); }
+    assert.equal(page.view().capturing, true);
+    const socket = FakeSocket.all.at(-1)!;
+    socket.open();
+    const loud = socket.sent.reduce((sum, message) => { const pcm = new Int16Array(new Uint8Array(Buffer.from(JSON.parse(message).audio_base_64, 'base64')).buffer); return sum + pcm.filter(sample => sample > 1_000).length; }, 0);
+    assert.ok(loud >= 4 * 150 * 16, `all four syllables sent (${loud / 16} ms loud)`);
+  } finally { page.end(); }
+});
+
+test('with no token ready when speaking starts, one is fetched then and nothing said is lost', async () => {
+  const page = await harness({ failTokens: 1 });
+  try {
+    assert.equal(tokenFailures, 0, 'the token ready for speaking failed');
+    const socket = await page.speak('세션 목록 보여 줘');
+    assert.equal(FakeSocket.all.length, 1);
+    assert.equal(commits(socket), 1);
+    assert.deepEqual(requests(), ['세션 목록 보여 줘']);
   } finally { page.end(); }
 });

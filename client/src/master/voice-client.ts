@@ -5,7 +5,8 @@ import { base64, digest, endHoldMs, fitUtterance, listenExpired, noticeOutcome, 
 
 const PRESENCE_MS = 5_000;
 const REPORT_MS = 2_000;
-const PREROLL_SECONDS = 0.6;
+/** Kept from before speech is recognised as speech (its onset, and the syllable that started it), so no first word is lost. */
+const PREROLL_SECONDS = 1;
 const TAIL_BYTES = 640;
 const COMMIT_MS = 4_000;
 const COOLDOWN_MS = 400;
@@ -15,7 +16,12 @@ const REASK_MS = 3_000;
 /** A judgment not back by then is not waited for: the page's own rule decides the rest of the utterance. */
 const JUDGE_WAIT_MS = 3_000;
 /** At most this many judgments for one utterance; past them the page's own rule decides. */
-const JUDGMENTS = 12;
+const JUDGMENTS = 20;
+/**
+ * Writing that changes this far into a pause is new speech too quiet for the gate, not late writing of what came
+ * before: the pause starts over, so it is neither judged as a long one nor answered with the sign mid-sentence.
+ */
+const WRITING_LAG_MS = 2_000;
 /** A pause this long in the middle of what is said gets a short sign that the owner is still heard, once. */
 const NUDGE_MS = 5_000;
 /** How long the sign may play before it is given up on. */
@@ -33,6 +39,8 @@ export interface VoiceView {
   listening: boolean;
   /** The owner is speaking, and it is being written down. */
   capturing: boolean;
+  /** A voice is heard, not yet long enough to be taken as speech: shown at once, before writing down begins. */
+  hearing?: boolean;
   /** What was just heard, or is being heard. */
   heard?: string;
   /** The owner paused, but does not seem finished: listening goes on. */
@@ -349,6 +357,7 @@ export class VoiceSession {
       else if (this.gate.isSpeaking && at - this.gate.lastVoiceAt >= this.gate.silenceMs / 2) this.prejudge(utterance);
     } else if (event === 'speech-start') this.begin();
     else {
+      if (this.gate.isVoicing !== Boolean(this.view.hearing)) this.show({});
       this.preroll.push(data);
       this.prerollLength += data.length;
       while (this.prerollLength > this.context.sampleRate * PREROLL_SECONDS && this.preroll.length > 1) this.prerollLength -= this.preroll.shift()!.length;
@@ -376,9 +385,11 @@ export class VoiceSession {
 
   /** The owner started speaking: a connection with the token ready, the last moment before included. */
   private begin(): void {
+    // No token ready (the last one failed): one is asked for now and the utterance waits for it, so nothing said is lost.
+    if (!this.spare) this.prefetch();
     const spare = this.spare;
     this.spare = undefined;
-    if (!spare) { this.prefetch(); return; }
+    if (!spare) return;
     const preroll = this.preroll;
     this.preroll = [];
     this.prerollLength = 0;
@@ -407,7 +418,7 @@ export class VoiceSession {
       socket.onmessage = event => {
         let message: { message_type?: string; text?: string; error?: string };
         try { message = JSON.parse(String(event.data)); } catch { return; }
-        if (message.message_type === 'partial_transcript' && this.utterance === utterance) { utterance.heard = String(message.text ?? ''); this.show({ heard: this.said(utterance.heard) }); }
+        if (message.message_type === 'partial_transcript' && this.utterance === utterance) this.written(utterance, String(message.text ?? ''));
         else if (message.message_type === 'committed_transcript' || message.message_type === 'committed_transcript_with_timestamps') utterance.settle(String(message.text ?? ''));
         else if (message.message_type && STT_ERRORS.has(message.message_type)) utterance.settle(new Error(message.error ?? message.message_type));
       };
@@ -415,6 +426,15 @@ export class VoiceSession {
       socket.onclose = () => utterance.settle(new Error('받아쓰기 연결이 끊겼습니다.'));
     });
     this.prefetch();
+  }
+
+  /** ElevenLabs wrote down more of the utterance. */
+  private written(utterance: Utterance, text: string): void {
+    const changed = text.trim() !== utterance.heard.trim();
+    utterance.heard = text;
+    const at = (this.context?.currentTime ?? 0) * 1000;
+    if (changed && utterance.quietSince !== undefined && at - utterance.quietSince >= WRITING_LAG_MS) utterance.quietSince = at;
+    this.show({ heard: this.said(text) });
   }
 
   /** Audio for the utterance, never past its 60 seconds (the silent tail that commits it included). */
@@ -491,7 +511,8 @@ export class VoiceSession {
    */
   private paused(utterance: Utterance, silent: number): void {
     // Loud again, perhaps speaking again: nothing is decided until it is clear.
-    if (this.gate.isVoicing) return;
+    // New words mid-pause started it over: it is a pause again once it is as long as one.
+    if (this.gate.isVoicing || silent < this.gate.silenceMs) return;
     const text = this.said(utterance.heard);
     if (utterance.asking && Date.now() - utterance.asking.at >= JUDGE_WAIT_MS) { utterance.asking = undefined; utterance.ownRule = true; }
     if (utterance.ownRule || !text) {
@@ -501,8 +522,10 @@ export class VoiceSession {
     const verdict = utterance.verdict?.text === text ? utterance.verdict : undefined;
     if (verdict && verdict.finished >= VOICE_TURN_FINISHED) { void this.commit(); return; }
     if (!utterance.asking && (!verdict || (verdict.pauseMs < REASK_MS && silent >= REASK_MS))) {
+      // Out of judgments, the page's own rule decides the rest, a judgment already made or not: waiting on an
+      // answer that will not be asked again would keep a finished request until the long pause keeps it unsent.
       if (utterance.judgments < JUDGMENTS) this.judge(utterance, text, silent);
-      else if (!verdict) { utterance.ownRule = true; return; }
+      else { utterance.ownRule = true; return; }
     }
     if (!verdict) return;
     if (silent >= PARK_MS) { void this.commit(true); return; }
@@ -734,7 +757,8 @@ export class VoiceSession {
   private show(change: Partial<VoiceView>): void {
     const utterance = this.utterance;
     const waiting = Boolean(utterance && utterance.quietSince !== undefined && !utterance.ownRule && utterance.verdict && utterance.verdict.finished < VOICE_TURN_FINISHED);
-    this.view = { ...this.view, ...change, listening: this.listening, capturing: Boolean(utterance), waiting, draft: this.draft || undefined, playing: this.current ? { kind: this.current.say.kind, text: this.current.say.text } : undefined, blocked: this.blocked ? { text: this.blocked.text } : undefined };
+    const hearing = !utterance && !this.current && this.armed && this.gate.isVoicing;
+    this.view = { ...this.view, ...change, listening: this.listening, capturing: Boolean(utterance), hearing, waiting, draft: this.draft || undefined, playing: this.current ? { kind: this.current.say.kind, text: this.current.say.text } : undefined, blocked: this.blocked ? { text: this.blocked.text } : undefined };
     this.options.onView(this.view);
   }
 }

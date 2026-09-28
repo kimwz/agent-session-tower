@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { base64, endHoldMs, END_HOLD_MS, fitUtterance, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from '../../client/src/master/voice-sound.js';
 
-/** Feeds the gate a loudness for a while, 10 ms a frame (about what an audio worklet gives), and returns its events. */
-function feed(gate: SpeechGate, rms: number, ms: number, from: number): { events: Array<{ at: number; event: string }>; end: number } {
+/** Feeds the gate a loudness for a while, 10 ms a frame (or `step`: a worklet's 128 samples at 48 kHz are 2.67 ms), and returns its events. */
+function feed(gate: SpeechGate, rms: number, ms: number, from: number, step = 10): { events: Array<{ at: number; event: string }>; end: number } {
   const events: Array<{ at: number; event: string }> = [];
-  for (let at = from; at < from + ms; at += 10) { const event = gate.update(rms, at); if (event) events.push({ at, event }); }
+  for (let at = from; at < from + ms; at += step) { const event = gate.update(rms, at); if (event) events.push({ at, event }); }
   return { events, end: from + ms };
 }
 
@@ -15,7 +15,7 @@ test('speech starts after it holds above the room for a moment and ends after th
   assert.deepEqual(quiet.events, []);
   const talk = feed(gate, 0.05, 1_000, quiet.end);
   assert.equal(talk.events[0]?.event, 'speech-start');
-  assert.ok(talk.events[0].at - quiet.end >= 280 && talk.events[0].at - quiet.end <= 400, 'a short sound is not speech');
+  assert.ok(talk.events[0].at - quiet.end >= 240 && talk.events[0].at - quiet.end <= 360, 'a short sound is not speech');
   assert.ok(gate.isSpeaking);
   const pause = feed(gate, 0.002, 1_500, talk.end);
   assert.equal(pause.events[0]?.event, 'silence-commit');
@@ -76,4 +76,27 @@ test('the gate tells when the voice was last heard, and a loud moment too short 
   assert.ok(gate.isVoicing, 'loud, not yet speech');
   feed(gate, 0.002, 400, blip.end);
   assert.equal(gate.isVoicing, false);
+});
+
+test('speech made of syllables with short gaps between them starts at its first syllable; clicks a while apart never do', () => {
+  const gate = new SpeechGate(1_000);
+  let at = feed(gate, 0.002, 1_000, 0).end;
+  const events: Array<{ at: number; event: string }> = [];
+  // "그, 마스터…": 150 ms syllables, 60 ms between them, never 280 ms unbroken.
+  const start = at;
+  for (let syllable = 0; syllable < 6; syllable++) {
+    const loud = feed(gate, 0.05, 150, at, 128 / 48);
+    const gap = feed(gate, 0.002, 60, loud.end, 128 / 48);
+    events.push(...loud.events, ...gap.events);
+    at = gap.end;
+  }
+  assert.equal(events[0]?.event, 'speech-start');
+  assert.ok(events[0].at - start <= 400, `speech starts within the second syllable, not ${events[0].at - start} ms in`);
+
+  const clicks = new SpeechGate(1_000);
+  let time = feed(clicks, 0.002, 1_000, 0).end;
+  for (let click = 0; click < 20; click++) {
+    assert.deepEqual(feed(clicks, 0.05, 30, time, 128 / 48).events, [], 'a key typed now and then is not speech');
+    time = feed(clicks, 0.002, 250, time + 30, 128 / 48).end;
+  }
 });
