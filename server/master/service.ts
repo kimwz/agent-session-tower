@@ -165,7 +165,8 @@ export class MasterService {
     const known = journal.inbox.find(item => item.clientMessageId === input.clientMessageId);
     const existing = known && room.get(known.id);
     if (existing) return existing;
-    const text = settings.current().guards.hideSecrets ? this.vault.hide(input.text) : input.text;
+    // Values typed into a secret card are hidden here too, whatever the setting.
+    const text = this.hideText(input.text);
     const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: input.clientMessageId, text, local: input.local, ...(input.viewContext ? { viewContext: input.viewContext } : {}), at: new Date().toISOString(), state: 'queued', retries: 0 };
     if (input.viewContext?.tabId) this.lastTab = input.viewContext.tabId;
     const entry = room.add({ kind: 'owner', text, ...(input.viewContext?.tabId ? { clientId: input.viewContext.tabId } : {}) }, item.id);

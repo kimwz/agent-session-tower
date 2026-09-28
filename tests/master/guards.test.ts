@@ -109,3 +109,20 @@ test('a value the owner gave stays hidden however many keys pass by, is hidden w
   assert.equal(vault.hide('login with card-password-never-public'), `login with ${password}`);
   assert.equal(vault.hide(`x prefix-sk-${'a'.repeat(24)}-password!tail y`), `x ${tricky} y`);
 });
+
+test('keys are found after "_" or "=" too, a pasted key\'s reference outlives many other keys, and join codes from answers stay bounded', () => {
+  const vault = new SecretVault();
+  const key = 'sk-proj-abcdefghijklmnopqrstuvwxyz0123456789';
+  assert.doesNotMatch(vault.hide(`OPENAI_KEY_${key} and AWS=AKIAABCDEFGHIJKLMNOP`), /abcdefghij|AKIAABCD/);
+  const ref = /\{\{secret:[a-f0-9]{16}\}\}/.exec(vault.hide(`use ${key}`))![0];
+  for (let index = 0; index < 3000; index++) vault.hide(`sk-proj-${String(index).padStart(6, '0')}${'k'.repeat(40)}`);
+  assert.deepEqual(vault.reveal({ apiKey: ref }, '/api/decisions/settings'), { apiKey: key }, 'still usable within its time');
+  const started = Date.now();
+  let last = '';
+  for (let index = 0; index < 600; index++) {
+    last = `JOIN-${String(index).padStart(4, '0')}-CODE`;
+    vault.hideInResponse('/api/link/invite', { code: last, command: `tower join ${last}` });
+  }
+  assert.ok(Date.now() - started < 2000, `600 invites took ${Date.now() - started} ms`);
+  assert.doesNotMatch(vault.hide(`the code is ${last}`), /JOIN-0599/);
+});

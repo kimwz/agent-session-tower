@@ -736,6 +736,24 @@ test('a secret from a card goes only into secret fields, is hidden when Tower ec
   assert.deepEqual(seen.map(directive => directive.tabId), ['tab-answered']);
 });
 
+test('with key hiding off, a value typed into a secret card is still hidden when the owner pastes it into the chat', async t => {
+  const { service, room, said, script } = await master(t, () => ({ body: {} }), [
+    [call('request_secret', { purpose: 'password' })],
+    [say('카드를 드렸습니다.')],
+    [say('받았습니다.')],
+    request => { assert.doesNotMatch(JSON.stringify(request.input), /card-password-never-public/); assert.match(JSON.stringify(request.input), /login failed for \{\{secret:/); return [say('로그를 봤습니다.')]; },
+  ], undefined, { guards: { hideSecrets: false } });
+  await service.send({ clientMessageId: 'message-0208', text: '비밀번호 받아줘', local: true });
+  await said(/카드를 드렸습니다/);
+  const card = room.recent(20).find(entry => entry.data.kind === 'card')!;
+  await service.card(card.id, { value: 'card-password-never-public' }, true);
+  await said(/받았습니다/);
+  await service.send({ clientMessageId: 'message-0209', text: 'error: login failed for card-password-never-public', local: true });
+  await said(/로그를 봤습니다/);
+  assert.equal(script.requests.length, 4);
+  assert.ok(room.recent(30).every(entry => !JSON.stringify(entry.data).includes('card-password-never-public')));
+});
+
 test('a notifications card records how it went on the device that pressed it', async t => {
   const { service, room, said } = await master(t, () => ({ body: {} }), [
     [call('browser_action', { kind: 'push-subscribe' })],

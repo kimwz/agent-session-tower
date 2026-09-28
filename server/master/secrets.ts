@@ -4,22 +4,25 @@ import { randomBytes } from 'node:crypto';
  * Key and token formats kept out of the model's context: OpenAI, Anthropic, Slack, GitHub, AWS, Google and
  * Jev-style bearer keys. Matching is best effort; a secret in an unknown format is not recognised.
  */
+// A key starts after anything but a letter or digit (`_`, `=`, a quote), so `TOKEN_sk-…` or `KEY=AKIA…` is found too.
 const PATTERNS: RegExp[] = [
-  /\bsk-(?:proj-|ant-|svcacct-)?[A-Za-z0-9_-]{20,}/g,
-  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
-  /\bxapp-[A-Za-z0-9-]{10,}/g,
-  /\bgh[pousr]_[A-Za-z0-9]{30,}/g,
-  /\bgithub_pat_[A-Za-z0-9_]{40,}/g,
-  /\bglpat-[A-Za-z0-9_-]{20,}/g,
-  /\bAKIA[0-9A-Z]{16}\b/g,
-  /\bAIza[0-9A-Za-z_-]{35}\b/g,
-  /\bjev_[A-Za-z0-9_-]{16,}/g,
+  /(?<![A-Za-z0-9])sk-(?:proj-|ant-|svcacct-)?[A-Za-z0-9_-]{20,}/g,
+  /(?<![A-Za-z0-9])xox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /(?<![A-Za-z0-9])xapp-[A-Za-z0-9-]{10,}/g,
+  /(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{30,}/g,
+  /(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{40,}/g,
+  /(?<![A-Za-z0-9])glpat-[A-Za-z0-9_-]{20,}/g,
+  /(?<![A-Za-z0-9])AKIA[0-9A-Z]{16}(?![A-Za-z0-9])/g,
+  /(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}(?![A-Za-z0-9_-])/g,
+  /(?<![A-Za-z0-9])jev_[A-Za-z0-9_-]{16,}/g,
 ];
 const REFERENCE = /\{\{secret:([a-f0-9]{16})\}\}/g;
 /** How long a reference may be used in a request. The value itself stays hidden for as long as the host runs. */
 const LIFETIME_MS = 30 * 60_000;
-/** Values found by their format that are kept to put back; the least recently seen go first past this. */
-const MAX_FOUND = 1000;
+/** Values found by their format that are kept to put back; past this the least recently seen go, oldest first. */
+const MAX_FOUND = 20_000;
+/** Secret-by-nature values from answers (join codes) hidden everywhere; the oldest go first past this. */
+const MAX_ANSWERED = 200;
 /** Values shorter than this are not searched for in text: they would match ordinary words. */
 const SHORTEST_KNOWN = 4;
 
@@ -49,16 +52,17 @@ const SECRET_FIELDS: Array<{ path: RegExp; fields: string[] }> = [
 const localRoute = (route: string) => route.replace(/^\/api\/nodes\/[a-f0-9]{32}\//, '/api/');
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-interface Kept { value: string; at: number }
+interface Kept { value: string; at: number; source: 'owner' | 'answer' | 'format' }
 
 /**
  * Keeps secret values out of what the model reads and writes. Each value becomes `{{secret:<ref>}}`; the reference
  * is swapped back only into a request's secret field, just before it is sent. Values live in memory only.
  *
- * Two kinds are kept. Values the owner gave on purpose (a secret card) or that are secret by nature (a join code)
- * are hidden wherever they show up, for as long as the host runs, and are never dropped. Values found by their
- * format (a pasted key, a key in an answer) are hidden by that format anyway; they are kept only so their reference
- * can be put back, and the least recently seen go first past `MAX_FOUND`.
+ * Values the owner gave on purpose (a secret card) are hidden wherever they show up, for as long as the host runs,
+ * and are never dropped; so are values secret by nature in an answer (a join code), the latest `MAX_ANSWERED`.
+ * Values found by their format (a pasted key, a key in an answer) are hidden by that format wherever it shows; they
+ * are kept so their reference can be put back, the latest `MAX_FOUND`. Hiding is best effort: a secret in an
+ * unknown format that the owner did not give through a card is not recognised.
  */
 export class SecretVault {
   private readonly given = new Map<string, Kept>();
@@ -69,7 +73,7 @@ export class SecretVault {
 
   /** Hides the owner's given values first (whole, so no format inside one splits it), then recognised formats. */
   hide(text: string): string {
-    return outsideReferences(this.redact(text), part => PATTERNS.reduce((result, pattern) => result.replace(pattern, match => `{{secret:${this.keep(match, false)}}}`), part));
+    return outsideReferences(this.redact(text), part => PATTERNS.reduce((result, pattern) => result.replace(pattern, match => `{{secret:${this.keep(match, 'format')}}}`), part));
   }
 
   /** Hides only the values the owner gave, whatever the settings: they are never shown back. */
@@ -92,7 +96,7 @@ export class SecretVault {
       if (typeof item === 'string') return this.hide(item);
       if (Array.isArray(item)) return item.map(walk);
       if (item && typeof item === 'object') {
-        return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, fields.includes(key) && typeof child === 'string' ? `{{secret:${this.keep(child, true)}}}` : walk(child)]));
+        return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, fields.includes(key) && typeof child === 'string' ? `{{secret:${this.keep(child, 'answer')}}}` : walk(child)]));
       }
       return item;
     };
@@ -125,30 +129,44 @@ export class SecretVault {
   }
 
   /** A reference for a value the owner gave on purpose (a secret card), whatever its format. */
-  reference(value: string): string { return `{{secret:${this.keep(value, true)}}}`; }
+  reference(value: string): string { return `{{secret:${this.keep(value, 'owner')}}}`; }
 
-  private keep(value: string, given: boolean): string {
+  private keep(value: string, source: Kept['source']): string {
+    const given = source !== 'format';
     const known = this.refs.get(value);
     if (known) {
       const kept = this.given.get(known) ?? this.found.get(known)!;
       kept.at = Date.now();
-      if (this.found.has(known)) {
-        // Seen again: it becomes the most recent found value, or a given one when the owner gave it.
-        this.found.delete(known);
-        if (given) { this.given.set(known, kept); this.givenPattern = undefined; } else this.found.set(known, kept);
-      }
+      // Seen again, it becomes the most recent of its kind; a value the owner gives is theirs from now on.
+      const was = this.given.has(known) ? this.given : this.found;
+      was.delete(known);
+      if (given && (kept.source === 'format' || source === 'owner')) kept.source = source;
+      (kept.source === 'format' ? this.found : this.given).set(known, kept);
+      if (was !== this.found || kept.source !== 'format') this.givenPattern = undefined;
+      this.trim();
       return known;
     }
     const ref = randomBytes(8).toString('hex');
-    (given ? this.given : this.found).set(ref, { value, at: Date.now() });
+    (given ? this.given : this.found).set(ref, { value, at: Date.now(), source });
     this.refs.set(value, ref);
     if (given) this.givenPattern = undefined;
+    this.trim();
+    return ref;
+  }
+
+  /** Drops the oldest found values and the oldest answered ones past their limits; the owner's own values stay. */
+  private trim(): void {
     while (this.found.size > MAX_FOUND) {
       const [oldest, kept] = this.found.entries().next().value!;
       this.found.delete(oldest);
       this.refs.delete(kept.value);
     }
-    return ref;
+    const answered = [...this.given].filter(([, kept]) => kept.source === 'answer');
+    for (const [ref, kept] of answered.slice(0, Math.max(0, answered.length - MAX_ANSWERED))) {
+      this.given.delete(ref);
+      this.refs.delete(kept.value);
+      this.givenPattern = undefined;
+    }
   }
 
   /** One pattern for every given value, longest first, so a value inside a longer one never leaves a remainder. */
