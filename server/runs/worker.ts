@@ -28,6 +28,7 @@ import { GitHubCoordinator } from '../triggers/github-coordinator.js';
 import { PUBLIC_TRIGGER_PREFIX, PublicAgentService } from '../public-agents/service.js';
 import { TowerApi } from '../api/tower-api.js';
 import { CapabilityRegistry, handleMcpRequest } from '../api/mcp.js';
+import { sessionToolsKey } from '../api/session-tools.js';
 import { runToolResolver } from '../api/run-tools.js';
 import { RemoteExclusionStore } from '../remote/exclusions.js';
 import { remoteTriggerLaunch } from '../remote/visibility.js';
@@ -431,8 +432,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const github = new GitHubCoordinator({ stateDir, runs, autoPrompts, refresh: context.refresh, language: () => slack.language(),
       github: (triggerId, fresh) => { if (!triggerEngine) throw new Error('Triggers are still starting.'); return triggerEngine.githubClient(triggerId, fresh); } });
     coordinators = () => new Set([...slack.coordinatorSessionIds(), ...github.coordinatorSessionIds()]);
-    const capabilities = new CapabilityRegistry(capability => capability.kind === 'slack-workflow' || capability.kind === 'github-workflow'
+    const capabilities = new CapabilityRegistry(capability => capability.kind !== 'owner-run'
       || runs.list().some(run => run.id === capability.runId && (run.status === 'running' || run.status === 'queued')));
+    capabilities.grant(await sessionToolsKey(stateDir), { kind: 'session-reader' });
     runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, github, capabilities }));
     const visible = await runnerContext({ stateDir, runs, sessions, slack, exclusions });
     autoPrompts.updateContext(visible);

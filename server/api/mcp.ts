@@ -4,10 +4,13 @@ import { OPERATIONS, type OperationName } from '../../shared/api/operations.js';
 import type { Run } from '../../shared/types.js';
 import { GITHUB_SESSION_TOOLS } from '../triggers/github-coordinator.js';
 import { SLACK_SESSION_TOOLS } from '../slack/mcp-bridge.js';
+import { SESSION_TOOL_OPERATIONS } from './session-tools.js';
 import type { TowerApi } from './tower-api.js';
 
 /** What a capability lets its holder do. The holder never chooses; the worker decides when it issues one. */
-export type Capability = { kind: 'owner-run'; runId: string; sessionId: string } | { kind: 'slack-workflow'; workflowId: string } | { kind: 'github-workflow'; workflowId: string };
+export type Capability = { kind: 'owner-run'; runId: string; sessionId: string } | { kind: 'slack-workflow'; workflowId: string } | { kind: 'github-workflow'; workflowId: string }
+  /** The standing key of the session lookup tools every agent here gets (see session-tools.ts). */
+  | { kind: 'session-reader' };
 const MAX_CAPABILITIES = 2000;
 
 /**
@@ -17,6 +20,7 @@ const MAX_CAPABILITIES = 2000;
 export class CapabilityRegistry {
   private readonly tokens = new Map<string, Capability>();
   private readonly issued = new Map<string, string>();
+  private readonly standing = new Map<string, Capability>();
   /** `live` says whether a credential may still be used; only credentials that cannot are forgotten first. */
   constructor(private readonly live: (capability: Capability) => boolean = () => true) {}
   issue(capability: Capability): string {
@@ -35,12 +39,14 @@ export class CapabilityRegistry {
     }
     return token;
   }
-  resolve(token: string): Capability | undefined { return /^[a-f\d]{64}$/.test(token) ? this.tokens.get(token) : undefined; }
+  /** A credential that is never forgotten, for tools that outlive any one run. */
+  grant(token: string, capability: Capability): void { this.standing.set(token, capability); }
+  resolve(token: string): Capability | undefined { return /^[a-f\d]{64}$/.test(token) ? this.standing.get(token) ?? this.tokens.get(token) : undefined; }
 }
 
 /** Tool names agents see (`mcp__tower__triggers_create`), with a requestKey on operations that create something. */
-export function towerTools() {
-  return (Object.entries(OPERATIONS) as [OperationName, (typeof OPERATIONS)[OperationName]][]).filter(([, operation]) => 'agent' in operation && operation.agent).map(([name, operation]) => {
+export function towerTools(only?: ReadonlySet<string>) {
+  return (Object.entries(OPERATIONS) as [OperationName, (typeof OPERATIONS)[OperationName]][]).filter(([name, operation]) => 'agent' in operation && operation.agent && (!only || only.has(name))).map(([name, operation]) => {
     const { $schema: _schema, ...schema } = z.toJSONSchema(operation.input, { io: 'input' }) as Record<string, any>;
     if (operation.write && !('keyField' in operation)) {
       schema.properties = { ...schema.properties, requestKey: { type: 'string', minLength: 1, maxLength: 100, description: 'A stable key for this request. Reuse the same key to retry the same request; a new request needs a new key.' } };
@@ -64,6 +70,13 @@ export interface McpContext {
 export async function handleMcpRequest(context: McpContext, token: string, body: { method?: unknown; name?: unknown; arguments?: unknown }): Promise<unknown> {
   const capability = context.capabilities.resolve(token);
   if (!capability) throw Object.assign(new Error('This tool credential is not valid.'), { statusCode: 403 });
+  if (capability.kind === 'session-reader') {
+    if (body.method === 'tools/list') return { tools: towerTools(SESSION_TOOL_OPERATIONS) };
+    const operation = typeof body.name === 'string' ? operationOf(body.name) : undefined;
+    if (body.method !== 'tools/call' || !operation || !SESSION_TOOL_OPERATIONS.has(operation)) throw Object.assign(new Error('Unknown session tool.'), { statusCode: 404 });
+    if (!context.api) throw Object.assign(new Error('Tower operations are unavailable.'), { statusCode: 503 });
+    return context.api.call(operation, body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments) ? body.arguments : {}, { kind: 'agent', via: 'mcp' });
+  }
   if (capability.kind === 'slack-workflow') {
     if (body.method === 'tools/list') return { tools: SLACK_SESSION_TOOLS };
     if (body.method !== 'tools/call' || typeof body.name !== 'string' || !SLACK_SESSION_TOOLS.some(tool => tool.name === body.name)) throw Object.assign(new Error('Unknown Slack session tool.'), { statusCode: 404 });

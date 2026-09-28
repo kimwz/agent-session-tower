@@ -31,6 +31,7 @@ import { projectSessionStates } from './sessions/snapshot.js';
 import { ProviderCapabilities } from './providers/capabilities.js';
 import { RepositoryMonitor, watchedRepositoryPaths } from './repositories/monitor.js';
 import { installAgentGuidance } from './agent-guidance/install.js';
+import { startSessionsMcp } from './api/session-tools.js';
 import { overlapsRepository } from '../shared/repositories.js';
 import { RemoteExclusionStore } from './remote/exclusions.js';
 import { createRemoteRouter } from './remote/router.js';
@@ -93,6 +94,11 @@ async function main() {
   if (args[0] === '--slack-mcp') {
     if (args.length !== 3) throw new Error('Slack MCP requires a state directory and workflow ID.');
     await startSlackMcp(resolve(args[1]), args[2]);
+    return;
+  }
+  if (args[0] === '--sessions-mcp') {
+    if (args.length !== 2) throw new Error('The session tools require a state directory.');
+    await startSessionsMcp(resolve(args[1]));
     return;
   }
   if (args[0] === '--tower-mcp') {

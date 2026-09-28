@@ -147,6 +147,7 @@ export class TowerApi {
   private async shown(name: OperationName, value: Record<string, any>, answer: unknown, actor: TriggerActor): Promise<unknown> {
     const { triggers, runs, autoPrompts } = this.services;
     if (name === 'sessions.read') {
+      value = { ...value, id: fullId(this.held().sessions, value.id) };
       // Judged before anything is read from it, and again after.
       if (!(await this.view(this.held())).sessions.has(value.id)) throw failure('Session not found.', 404);
       const read = await this.performLocal(name, value, actor).catch(() => { throw failure('Session not found.', 404); });
@@ -275,7 +276,7 @@ export class TowerApi {
         if (!sessions) throw failure('Sessions are unavailable.', 503);
         const before = value.cursor === undefined ? undefined : Number(value.cursor);
         if (before !== undefined && !(Number.isSafeInteger(before) && before >= 0)) throw failure('Invalid request: cursor: Pass a nextCursor or a search match’s cursor unchanged.', 400);
-        const page = await sessions.read(value.id, value.limit ?? 20, before);
+        const page = await sessions.read(fullId(sessions.list(), value.id), value.limit ?? 20, before);
         if (!page) throw failure('Session not found.', 404);
         return { messages: page.messages.filter(message => value.tools || message.role !== 'tool').map(message => shownMessage(message, 4000)),
           hasMore: page.hasMore, ...(page.hasMore && page.nextBefore !== undefined ? { nextCursor: String(page.nextBefore) } : {}) };
@@ -354,7 +355,8 @@ export class TowerApi {
     if (since !== undefined && until !== undefined && since >= until) throw failure('Invalid request: since must be before until.', 400);
     const after = value.cursor === undefined ? undefined : decodeCursor(value.cursor);
     const limit = value.limit ?? 10;
-    const eligible = list.filter(session => !session.isSubagent && !session.launchedByAgent && (!value.sessionId || session.id === value.sessionId)
+    const only = value.sessionId ? fullId(list, value.sessionId) : undefined;
+    const eligible = list.filter(session => !session.isSubagent && !session.launchedByAgent && (!only || session.id === only)
       && (!value.provider || session.provider === value.provider) && (!value.cwd || session.cwd === value.cwd)
       && (since === undefined || !(Date.parse(session.updatedAt) < since)) && (until === undefined || !(Date.parse(session.createdAt) >= until)));
     // A conversation the last page stopped inside is finished first, from where it stopped.
@@ -415,6 +417,13 @@ function reference(result: unknown) {
 
 const SEARCH_BYTES = 1024 * 1024 * 1024;
 const SEARCH_MS = 10_000;
+
+/** A session named by its native id alone (as Claude Code and Codex show it), when exactly one has it. */
+function fullId(sessions: Session[], id: string): string {
+  if (sessions.some(session => session.id === id)) return id;
+  const named = sessions.filter(session => session.nativeId === id);
+  return named.length === 1 ? named[0]!.id : id;
+}
 
 /** Most recently active first; ties in a stable order, so a cursor names one place in the list. */
 function ordered(sessions: Session[], after?: { updatedAt: string; id: string }) {

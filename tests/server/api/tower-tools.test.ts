@@ -116,7 +116,7 @@ test('a Slack conversation credential opens only that conversation’s Slack too
   assert.deepEqual(calls, [['workflow-1', 'slack_thread', {}]]);
 });
 
-test('only owner turns in the owner’s own conversations receive Tower tools', async t => {
+test('only owner turns in the owner’s own conversations receive Tower tools; every turn here can look up sessions', async t => {
   const f = await fixture(t);
   const origins = new Map<string, SessionOrigin | undefined>([
     ['codex:native', undefined], ['codex:created', { kind: 'owner', untrustedInput: false }], ['codex:issue', { kind: 'trigger', triggerId: 'gh', untrustedInput: true }],
@@ -133,13 +133,20 @@ test('only owner turns in the owner’s own conversations receive Tower tools', 
   assert.deepEqual(native.servers!.tower.args.slice(-2), ['--tower-mcp', f.stateDir]);
   assert.match(native.servers!.tower.env!.TOWER_MCP_CAPABILITY, /^[a-f\d]{64}$/);
   assert.equal(resolve(owner, session('codex:created')).towerTools, 'attached');
-  assert.deepEqual(resolve(owner, session('codex:issue')), { required: false, towerTools: 'external-input' });
-  assert.deepEqual(resolve(owner, session('codex:scheduled')), { required: false, towerTools: 'not-owner-session' });
-  assert.equal(resolve({ kind: 'trigger', triggerId: 'daily' }, session('codex:native')).servers, undefined);
-  assert.equal(resolve({ kind: 'agent' }, session('codex:native')).servers, undefined);
+  const lookups = (tools: ReturnType<typeof resolve>) => Object.keys(tools.servers ?? {}).sort();
+  assert.deepEqual(lookups(native), ['tower', 'tower_sessions']);
+  assert.deepEqual(native.servers!.tower_sessions.args.slice(-2), ['--sessions-mcp', f.stateDir]);
+  assert.equal(native.servers!.tower_sessions.env, undefined, 'its key stays in the state directory');
+  const issue = resolve(owner, session('codex:issue'));
+  assert.deepEqual([issue.towerTools, lookups(issue)], ['external-input', ['tower_sessions']]);
+  const scheduled = resolve(owner, session('codex:scheduled'));
+  assert.deepEqual([scheduled.towerTools, lookups(scheduled)], ['not-owner-session', ['tower_sessions']]);
+  assert.deepEqual(lookups(resolve({ kind: 'trigger', triggerId: 'daily' }, session('codex:native'))), ['tower_sessions']);
+  assert.deepEqual(lookups(resolve({ kind: 'agent' }, session('codex:native'))), ['tower_sessions']);
+  assert.deepEqual(lookups(resolve({ kind: 'owner', controllerId: 'c'.repeat(32) }, session('codex:native'))), ['tower'], 'a controlling computer keeps to what it may see');
   const coordinator = resolve(owner, session('codex:coordinator'));
   assert.equal(coordinator.required, true);
-  assert.deepEqual(Object.keys(coordinator.servers!), ['tower_slack']);
+  assert.deepEqual(lookups(coordinator), ['tower_sessions', 'tower_slack']);
   assert.equal(f.capabilities.resolve(coordinator.servers!.tower_slack.env!.TOWER_MCP_CAPABILITY)?.kind, 'slack-workflow');
   assert.equal(towerTools().some(tool => tool.name === 'triggers_updateSettings'), false);
 });
@@ -183,4 +190,44 @@ test('a full retry ledger refuses new agent changes but still answers retries of
   await assert.rejects(call({ requestKey: 'new', trigger: { ...schedule(f.project), name: 'One too many' } }), { statusCode: 429 });
   assert.deepEqual(await call({ requestKey: 'first', trigger: schedule(f.project) }), first);
   assert.equal(f.triggers.list().length, 1);
+});
+
+test('the standing session key opens only the read-only session tools, for any caller', async t => {
+  const f = await fixture(t);
+  const key = 'b'.repeat(64);
+  f.capabilities.grant(key, { kind: 'session-reader' });
+  const { tools } = await handleMcpRequest(f.context, key, { method: 'tools/list' }) as { tools: Array<{ name: string }> };
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ['sessions_list', 'sessions_read', 'sessions_search']);
+  await assert.rejects(handleMcpRequest(f.context, key, { method: 'tools/call', name: 'triggers_create', arguments: { requestKey: 'k', trigger: schedule(f.project) } }), { statusCode: 404 });
+  await assert.rejects(handleMcpRequest(f.context, key, { method: 'tools/call', name: 'autoPrompt_submit', arguments: {} }), { statusCode: 404 });
+  // No sessions service in this fixture: the call reaches the operation and reports that.
+  await assert.rejects(handleMcpRequest(f.context, key, { method: 'tools/call', name: 'sessions_list', arguments: {} }), { statusCode: 503 });
+});
+
+test('the session tool server answers through the worker with the key kept in the state directory', async t => {
+  const { startSessionsMcp, sessionToolsKey } = await import('../../../server/api/session-tools.js');
+  const { startRunnerHost } = await import('../../../server/runs/worker.js');
+  const { RunManager } = await import('../../../server/runs/manager.js');
+  const { EventEmitter } = await import('node:events');
+  const { runnerPaths } = await import('../../../server/runs/runner-protocol.js');
+  const f = await fixture(t);
+  const out = async (frames: unknown[]) => {
+    let text = '';
+    await startSessionsMcp(f.stateDir, Readable.from(frames.map(frame => JSON.stringify(frame) + '\n')), new Writable({ write(chunk, _encoding, done) { text += chunk; done(); } }));
+    return text.trim().split('\n').map(line => JSON.parse(line));
+  };
+  const list = { jsonrpc: '2.0', id: 1, method: 'tools/list' };
+  // Before Tower has made its key, the tool says so instead of failing obscurely.
+  assert.match((await out([list]))[0].error.message, /has not started/);
+  const runs = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, findExecutable: async () => undefined });
+  await runs.start();
+  const sessions = Object.assign(new EventEmitter(), { list: () => [] }) as unknown as import('../../../server/sessions/service.js').SessionService;
+  f.capabilities.grant(await sessionToolsKey(f.stateDir), { kind: 'session-reader' });
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions, runs, api: f.api, capabilities: f.capabilities });
+  let replies;
+  try { replies = await out([list, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'triggers_list', arguments: {} } }]); }
+  finally { await host.close(); await runs.close(); await rm((await runnerPaths(f.stateDir)).directory, { recursive: true, force: true }); }
+  assert.deepEqual(replies[0].result.tools.map((tool: { name: string }) => tool.name).sort(), ['sessions_list', 'sessions_read', 'sessions_search']);
+  assert.equal(replies[1].result.isError, true, 'nothing but the session tools');
+  assert.equal(await sessionToolsKey(f.stateDir), await sessionToolsKey(f.stateDir), 'the key is kept');
 });

@@ -93,6 +93,8 @@ test('agents find earlier sessions by keywords within a period, and read up to a
   assert.deepEqual(words.sessions[0].matches.map(match => match.role), ['assistant', 'user'], 'newest match first');
   assert.match(words.sessions[0].matches[1].text, /PAYMENT webhook/);
 
+  assert.equal((await f.call<{ messages: unknown[] }>('sessions.read', { id: id(1) })).messages.length, 3, 'a bare session UUID names it');
+  assert.deepEqual((await f.call<Found>('sessions.search', { query: 'webhook', sessionId: id(1) })).sessions.map(item => item.id), [`claude:${id(1)}`]);
   const korean = await f.call<Found>('sessions.search', { query: '웹훅 재시도' });
   assert.deepEqual(korean.sessions.map(item => item.id), [`claude:${id(2)}`]);
 
