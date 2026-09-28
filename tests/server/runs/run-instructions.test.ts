@@ -102,6 +102,9 @@ test('the conversation leaves out exactly Tower’s own instruction blocks', () 
   assert.equal(claude!.text, 'Look at the request');
   const [codex] = parseMessages('codex', { type: 'response_item', timestamp: now, payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Look at the request' }, { type: 'input_text', text: block }] } });
   assert.equal(codex!.text, 'Look at the request');
+  // A message Claude took while it worked is recorded as a queued command; its instruction block is left out there too.
+  const [queued] = parseMessages('claude', { type: 'attachment', uuid: 'c', timestamp: now, attachment: { type: 'queued_command', prompt: [{ type: 'text', text: 'Also check the logs' }, { type: 'text', text: block }] } });
+  assert.equal(queued!.text, 'Also check the logs');
   // What someone wrote stays whole, even when it quotes such a block.
   const quoted = `Please check this:\n\n${block}\nand fix it`;
   assert.equal(parseMessages('claude', { type: 'user', uuid: 'q', timestamp: now, message: { role: 'user', content: quoted } })[0]!.text, quoted);
