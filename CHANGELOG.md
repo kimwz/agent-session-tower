@@ -4,6 +4,38 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.65.0] - 2026-09-28
+
+### Changed
+- **The master is a Claude Code or Codex session.** The master no longer talks through a model API with a key. It is an ordinary session that Tower keeps in its own folder, `<state>/master-session`, and it runs on your Claude or ChatGPT subscription sign-in like every other Tower session.
+  - The button at the bottom left opens its conversation in the usual chat panel. The first time, a small panel asks which tool to use and takes the first message.
+  - Models and reasoning are chosen in the chat, as in any session. **새 마스터 세션** in its settings starts a new one, for example with the other tool. The old one stays as an ordinary session.
+  - The master has every tool its CLI has. Tower also gives it the master's own tools:
+    - `tower_api`: everything Tower's pages can do;
+    - `tower_query`: fast read-only lookups;
+    - `session_read`;
+    - `ui`: the screen of the tab showing the master;
+    - `terminal_read`;
+    - Tower's own tools, such as Auto Prompt.
+  - A guide in its folder (`CLAUDE.md`, `AGENTS.md`) asks it to hand project work to other sessions.
+- **Handed-out work is reported to the master.**
+  - Tower follows the work the master hands out, whether through Auto Prompt or by starting a session or sending a message. When it ends, Tower sends the master a `[Tower report]` message with the result, and the master tells you.
+  - Reports go in messages of bounded size, each named by an ID. A report whose sending was cut off is looked for in the master's conversation and sent again only when it is surely missing.
+- **Voice works with the session.** What you say goes to the master session, and its answer is read aloud as before. Messages that land in the same turn are answered once. Jev still judges when you have finished speaking.
+- **Never an API key for the conversation.**
+  - Master turns run without API-key environment variables.
+  - Claude Code must report a claude.ai sign-in with Anthropic's own service.
+  - Codex runs with ChatGPT sign-in only, and its thread must be on OpenAI's own service. The Codex desktop app's own sign-in is not used.
+  - Otherwise nothing is sent, and the turn says why.
+  - An execution worker from before this release does not take the master; the master waits until the worker has changed over.
+
+### Removed
+- The master's model API connection: OpenAI Responses, and the Claude models over an Anthropic API key added in 1.63.0.
+  - The OpenAI and Anthropic key settings go too, and the saved key files are deleted.
+  - The `@anthropic-ai/sdk` dependency is removed.
+  - The master's own conversation list, message box, per-message model row, secret and push cards, and optional limits are gone.
+  - The conversation kept before this release stays on disk, unchanged.
+
 ## [1.64.0] - 2026-09-28
 
 ### Changed
