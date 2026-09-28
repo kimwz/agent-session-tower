@@ -29,6 +29,9 @@ export async function relatedSessionNotes(engine: DecisionEngine | undefined, ru
   const earlierSessions = Object.fromEntries(candidates.map((item, index) => [`s${index}`, { title: clip(item.customTitle || item.title, 300),
     folder: clip(item.cwd, 300), lastActive: item.updatedAt.slice(0, 16), latestUserRequests: [] as string[] }]));
   const state = { newRequest: { folder: clip(session.cwd, 300), text: clip(run.prompt, REQUEST_CHARS) }, earlierSessions };
+  // Sessions last in line are left out while even that is too much (titles or folders JSON writes many times longer).
+  while (candidates.length > 1 && JSON.stringify(state).length > STATE_CHARS) delete earlierSessions[`s${candidates.length - 1}`], candidates.pop();
+  if (JSON.stringify(state).length > STATE_CHARS) return undefined;
   const share = Math.floor((STATE_CHARS - JSON.stringify(state).length) / candidates.length);
   candidates.forEach((item, index) => {
     let used = 0;

@@ -82,3 +82,13 @@ test('what is sent stays within the judgment’s limit even when every request i
   assert.ok(state.length + longestQuestion <= 110_000, `${state.length + longestQuestion} characters`);
   assert.deepEqual((Object.values(seen[0]!.state.earlierSessions)[0] as { latestUserRequests: string[] }).latestUserRequests, ['plain request'], 'what fits is still sent');
 });
+
+test('when titles and folders alone are too much, the sessions last in line are left out', async () => {
+  const seen: Array<{ state: any; questions: Record<string, any> }> = [];
+  const control = '\u001b'.repeat(300);
+  const all = [fresh, ...Array.from({ length: 40 }, (_, i) => session(`codex:c${i}`, control, `/${control}`, 0.01 * (i + 1)))];
+  await relatedSessionNotes(engine('nothing', seen), { ...run, prompt: control.repeat(14) }, fresh, all, () => [], now);
+  const state = JSON.stringify(seen[0]!.state);
+  const questions = Object.keys(seen[0]!.questions).length;
+  assert.ok(state.length <= 100_000 && questions < 40 && questions === Object.keys(seen[0]!.state.earlierSessions).length);
+});
