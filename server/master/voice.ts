@@ -284,10 +284,16 @@ export class MasterVoice {
 
   // ─── reading aloud ───────────────────────────────────────────────────────────────────────────────────────────
 
-  /** Whether an answer (or, `report`, news of finished work) should be read aloud: voice is on with the master open. */
-  speaks(report: boolean): boolean {
+  /**
+   * How an answer (or, `report`, news of finished work) is told: read aloud where voice is on with the master open,
+   * or marked as not said aloud when there is no such page (a report only while voice is on somewhere). Nothing when
+   * reports are not read, or for a report with voice off.
+   */
+  speaks(report: boolean): 'pending' | 'unspoken' | undefined {
     const session = this.session;
-    return Boolean(session && this.alive(session) && (!report || this.options.settings.current().voice.readReports));
+    if (report && !this.options.settings.current().voice.readReports) return undefined;
+    if (session && this.alive(session)) return 'pending';
+    return session || !report ? 'unspoken' : undefined;
   }
 
   /** The page's word on something it was given to play (a notice included). */

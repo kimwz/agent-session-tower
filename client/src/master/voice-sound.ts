@@ -90,13 +90,15 @@ export function listenExpired(lastActivityAt: number, minutes: number, now: numb
 
 /**
  * How a notice went: cancelled or talked over (during it, or in the moment after) is interrupted; played through with
- * the moment after passed is played; not yet decided otherwise.
+ * the moment after passed is played; not yet decided otherwise. The moment after starts at `armedAt` (when it really
+ * began) and, when the microphone is heard (`heardMs`), lasts until that much of it was heard as well.
  */
-export function noticeOutcome(input: { endedAt?: number; failed?: boolean; cancelled?: boolean; spokeAt?: number; startedAt: number; now: number; windowMs: number }): 'played' | 'interrupted' | 'failed' | undefined {
+export function noticeOutcome(input: { armedAt?: number; heardMs?: number; failed?: boolean; cancelled?: boolean; spokeAt?: number; startedAt: number; now: number; windowMs: number }): 'played' | 'interrupted' | 'failed' | undefined {
   if (input.failed) return 'failed';
   if (input.cancelled || (input.spokeAt !== undefined && input.spokeAt >= input.startedAt)) return 'interrupted';
-  if (input.endedAt !== undefined && input.now - input.endedAt >= input.windowMs) return 'played';
-  return undefined;
+  if (input.armedAt === undefined || input.now - input.armedAt < input.windowMs) return undefined;
+  if (input.heardMs !== undefined && input.heardMs < input.windowMs) return undefined;
+  return 'played';
 }
 
 /** The same digest the host keeps of a voice session, so the page knows its own. */

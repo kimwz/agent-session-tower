@@ -9,6 +9,8 @@ const TAIL_BYTES = 640;
 const COMMIT_MS = 4_000;
 const COOLDOWN_MS = 400;
 const OBJECTION_MS = 2_000;
+/** How long a closed utterance's connection may take to finish sending before playing goes on anyway. */
+const CLOSE_MS = 10_000;
 /** A spare token older than this is traded for a fresh one (they last 15 minutes). */
 const SPARE_MS = 10 * 60_000;
 const QUEUE = 20;
@@ -21,6 +23,8 @@ export interface VoiceView {
   /** What was just heard, or is being heard. */
   heard?: string;
   playing?: { kind: MasterSay['kind']; text: string };
+  /** What the browser would not play by itself, to be played with a click. */
+  blocked?: { text: string };
   error?: string;
 }
 
@@ -37,8 +41,13 @@ export interface VoiceSessionOptions {
 
 interface Token { tokenId: string; url: string; expiresAt: number }
 interface Spare { token: Promise<Token | undefined>; at: number }
-interface Utterance { token?: Token; socket?: WebSocket; bytes: number; queue: string[]; open: boolean; closed: boolean; done: Promise<string>; settle(text: string | Error): void }
-interface Playing { say: MasterSay; startedAt: number; endedAt?: number; failed?: boolean; cancelled?: boolean; spokeAt?: number; timers: Array<ReturnType<typeof setTimeout>> }
+/** `bytes` is the audio taken for the utterance (it may not pass 60 seconds); `sent` what actually went out. */
+interface Utterance { token?: Token; socket?: WebSocket; bytes: number; sent: number; queue: Array<{ message: string; bytes: number }>; open: boolean; closed: boolean; done: Promise<string>; settle(text: string | Error): void }
+/**
+ * A say being played. A notice's moment to object starts at `armedAt`, when it really began (however late its timer
+ * ran); with listening on, `heard` counts the microphone samples the speech gate has looked at since.
+ */
+interface Playing { say: MasterSay; startedAt: number; replay?: boolean; failed?: boolean; cancelled?: boolean; spokeAt?: number; armedAt?: number; heard?: number; timers: Array<ReturnType<typeof setTimeout>> }
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -71,9 +80,10 @@ export class VoiceSession {
   private lastPresenceAt = 0;
   private speechToTell = false;
   private reporting = false;
-  private readonly queue: MasterSay[] = [];
+  private readonly queue: Array<{ say: MasterSay; replay?: boolean }> = [];
   private readonly seen = new Set<string>();
   private current?: Playing;
+  private blocked?: MasterSay;
   private view: VoiceView = { listening: false, capturing: false };
   private timer?: ReturnType<typeof setInterval>;
   private over = false;
@@ -135,6 +145,8 @@ export class VoiceSession {
   mute(): void {
     if (!this.listening) return;
     this.listening = false;
+    // A notice can no longer be objected to by voice: its change is not sent.
+    if (this.current?.say.kind === 'notice') { this.current.cancelled = true; this.decideNotice(this.current); }
     this.disarm();
     this.abandon('muted');
     this.releaseSpare();
@@ -152,6 +164,16 @@ export class VoiceSession {
     this.finishPlay(current, 'stopped');
   }
 
+  /** Plays, from the owner's click, what the browser would not play by itself (not a notice: its moment is gone). */
+  replay(): void {
+    const say = this.blocked;
+    if (!say || this.over) return;
+    this.blocked = undefined;
+    this.queue.unshift({ say, replay: true });
+    this.show({ error: undefined });
+    this.next();
+  }
+
   /** Tells the master at once where this page stands (the master panel opened or closed). */
   touch(): void { void this.presence(); }
 
@@ -167,8 +189,8 @@ export class VoiceSession {
     if (this.over || say.session !== this.sessionDigest || this.seen.has(say.id) || say.expiresAt < Date.now()) return;
     this.seen.add(say.id);
     if (this.seen.size > 500) this.seen.delete(this.seen.values().next().value!);
-    this.queue.push(say);
-    while (this.queue.length > QUEUE) { const dropped = this.queue.shift()!; this.report(dropped, 'failed'); }
+    this.queue.push({ say });
+    while (this.queue.length > QUEUE) { const dropped = this.queue.shift()!; if (!dropped.replay) this.report(dropped.say, 'failed'); }
     this.next();
   }
 
@@ -242,8 +264,13 @@ export class VoiceSession {
     if (this.gate.isSpeaking || event === 'speech-start') this.lastSpeechAt = now;
     if (event === 'speech-start') this.speechToTell = true;
     // In a notice's moment after, speech only objects: nothing is written down.
-    if (this.current) {
-      if (this.current.say.kind === 'notice' && (this.gate.isSpeaking || event === 'speech-start')) { this.current.spokeAt ??= now; this.decideNotice(this.current); }
+    const current = this.current;
+    if (current) {
+      if (current.say.kind === 'notice' && current.heard !== undefined) {
+        current.heard += data.length;
+        if (this.gate.isSpeaking || event === 'speech-start') current.spokeAt ??= now;
+        this.decideNotice(current);
+      }
       return;
     }
     if (this.utterance) {
@@ -287,7 +314,7 @@ export class VoiceSession {
     let settle!: (text: string | Error) => void;
     const done = new Promise<string>((resolve, reject) => { settle = value => value instanceof Error ? reject(value) : resolve(value); });
     done.catch(() => {});
-    const utterance: Utterance = { bytes: 0, queue: [], open: false, closed: false, done, settle };
+    const utterance: Utterance = { bytes: 0, sent: 0, queue: [], open: false, closed: false, done, settle };
     this.utterance = utterance;
     this.open.add(utterance);
     this.lastActivityAt = Date.now();
@@ -302,7 +329,10 @@ export class VoiceSession {
       }
       utterance.token = token;
       const socket = utterance.socket = new WebSocket(token.url);
-      socket.onopen = () => { utterance.open = true; for (const message of utterance.queue.splice(0)) socket.send(message); };
+      socket.onopen = () => {
+        utterance.open = true;
+        for (const chunk of utterance.queue.splice(0)) { socket.send(chunk.message); utterance.sent += chunk.bytes; }
+      };
       socket.onmessage = event => {
         let message: { message_type?: string; text?: string; error?: string };
         try { message = JSON.parse(String(event.data)); } catch { return; }
@@ -324,13 +354,14 @@ export class VoiceSession {
     const allowed = fitUtterance(utterance.bytes, pcm.byteLength, TAIL_BYTES);
     if (!allowed) return;
     utterance.bytes += allowed;
-    this.transmit(utterance, JSON.stringify({ message_type: 'input_audio_chunk', audio_base_64: base64(new Uint8Array(pcm.buffer, 0, allowed)), sample_rate: 16_000, commit: false }));
+    this.transmit(utterance, JSON.stringify({ message_type: 'input_audio_chunk', audio_base_64: base64(new Uint8Array(pcm.buffer, 0, allowed)), sample_rate: 16_000, commit: false }), allowed);
   }
 
-  private transmit(utterance: Utterance, message: string): void {
+  /** Sends audio on the utterance's connection, or keeps it until the connection opens; only what goes out is paid. */
+  private transmit(utterance: Utterance, message: string, bytes: number): void {
     if (utterance.closed) return;
-    if (utterance.open && utterance.socket) utterance.socket.send(message);
-    else utterance.queue.push(message);
+    if (utterance.open && utterance.socket) { utterance.socket.send(message); utterance.sent += bytes; }
+    else utterance.queue.push({ message, bytes });
   }
 
   /** The owner stopped (or ran out of time): what was said is committed, written down and sent as a request. */
@@ -340,7 +371,7 @@ export class VoiceSession {
     this.utterance = undefined;
     // The commit rides on a short silent tail; an empty chunk is refused.
     utterance.bytes += TAIL_BYTES;
-    this.transmit(utterance, JSON.stringify({ message_type: 'input_audio_chunk', audio_base_64: base64(new Uint8Array(TAIL_BYTES)), sample_rate: 16_000, commit: true }));
+    this.transmit(utterance, JSON.stringify({ message_type: 'input_audio_chunk', audio_base_64: base64(new Uint8Array(TAIL_BYTES)), sample_rate: 16_000, commit: true }), TAIL_BYTES);
     let text = '';
     try {
       text = (await Promise.race([utterance.done, new Promise<string>((_, reject) => setTimeout(() => reject(new Error('받아쓰기가 늦어 버렸습니다.')), COMMIT_MS))])).trim();
@@ -360,18 +391,29 @@ export class VoiceSession {
     } catch (error) { this.show({ error: errorText(error) }); }
   }
 
-  /** Closes an utterance's connection, settles its cost, and lets what waits to play go on. */
+  /**
+   * Closes an utterance: nothing more is sent on it, what went out is settled, and once its connection has really
+   * closed (what it still had to send gone), what waits to play goes on. A connection that does not close within
+   * ten seconds is let be: it gets nothing new, so nothing played afterwards can reach it.
+   */
   private close(utterance: Utterance, error?: Error): void {
     if (utterance.closed) return;
     utterance.closed = true;
     if (this.utterance === utterance) this.utterance = undefined;
     utterance.settle(error ?? new Error('closed'));
     utterance.queue.length = 0;
-    try { utterance.socket?.close(); } catch { /* Closed already. */ }
-    if (utterance.token) this.settleUsage(utterance.token.tokenId, utterance.bytes / 32_000);
+    if (utterance.token) this.settleUsage(utterance.token.tokenId, utterance.sent / 32_000);
     if (error) this.show({ error: error.message });
-    this.open.delete(utterance);
-    this.next();
+    const socket = utterance.socket;
+    if (!socket || socket.readyState === WebSocket.CLOSED) { this.release(utterance); return; }
+    const timer = setTimeout(() => this.release(utterance), CLOSE_MS);
+    socket.addEventListener('close', () => { clearTimeout(timer); this.release(utterance); });
+    try { socket.close(); } catch { clearTimeout(timer); this.release(utterance); }
+  }
+
+  /** An utterance's connection is closed: playing (or listening) may go on. */
+  private release(utterance: Utterance): void {
+    if (this.open.delete(utterance)) this.next();
   }
 
   /** Every utterance not yet sent is called off (voice ended, listening muted): nothing more goes out. */
@@ -392,11 +434,12 @@ export class VoiceSession {
   /** Plays the next thing when nothing plays and no utterance is still being written down. */
   private next(): void {
     if (this.over || this.current || this.utterance || this.open.size) return;
-    const say = this.queue.shift();
-    if (!say) { this.arm(); return; }
-    if (say.expiresAt < Date.now()) { this.report(say, 'failed'); this.next(); return; }
+    const item = this.queue.shift();
+    if (!item) { this.arm(); return; }
+    const say = item.say;
+    if (!item.replay && say.expiresAt < Date.now()) { this.report(say, 'failed'); this.next(); return; }
     this.disarm();
-    const current: Playing = { say, startedAt: Date.now(), timers: [] };
+    const current: Playing = { say, startedAt: Date.now(), ...(item.replay ? { replay: true } : {}), timers: [] };
     this.current = current;
     this.show({});
     // A player that never ends or fails is given up on after a while, so the queue goes on.
@@ -404,10 +447,12 @@ export class VoiceSession {
     this.audio.onended = () => { if (this.current === current) say.kind === 'notice' ? this.noticeEnded(current) : this.finishPlay(current, 'played'); };
     this.audio.onerror = () => { if (this.current === current) say.kind === 'notice' ? (current.failed = true, this.decideNotice(current)) : this.finishPlay(current, 'failed'); };
     this.audio.src = say.audio;
-    this.audio.play().catch(() => {
+    this.audio.play().catch((error: unknown) => {
       if (this.current !== current) return;
-      if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); }
-      else { this.finishPlay(current, 'failed'); this.show({ error: '브라우저가 소리 재생을 막았습니다. 화면을 한 번 누른 뒤 다시 켜 주세요.' }); }
+      if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); return; }
+      this.finishPlay(current, 'failed');
+      // Autoplay refused: the owner can play it with a click (a click lets it play).
+      if (error instanceof DOMException && error.name === 'NotAllowedError') { this.blocked = say; this.show({ error: '브라우저가 소리 재생을 막았습니다.' }); }
     });
   }
 
@@ -416,29 +461,38 @@ export class VoiceSession {
     for (const timer of current.timers) clearTimeout(timer);
     this.current = undefined;
     this.audio.pause();
-    this.report(current.say, result);
+    if (!current.replay) this.report(current.say, result);
+    else if (result === 'failed') this.show({ error: '다시 들을 수 없습니다. 답은 화면에 있습니다.' });
     // A report read aloud turns listening back on, so the owner can answer it.
     if (current.say.kind === 'report' && result === 'played') { this.lastActivityAt = Date.now(); void this.listen(); }
     this.show({});
     setTimeout(() => this.next(), COOLDOWN_MS);
   }
 
-  /** A notice played through: a moment to object follows (speaking or cancelling), with the microphone heard again. */
+  /**
+   * A notice played through: a moment to object follows (speaking or cancelling). It starts when the microphone is
+   * heard again, not when it was meant to, and with listening on it lasts until two seconds of the microphone were
+   * actually looked at: a page that stalls does not skip it.
+   */
   private noticeEnded(current: Playing): void {
-    current.endedAt = Date.now();
     current.timers.push(setTimeout(() => {
-      if (this.current !== current || !this.listening) return;
-      this.gate.reset();
-      this.ensureNode();
-      this.armed = true;
+      if (this.current !== current) return;
+      current.armedAt = Date.now();
+      if (this.listening && this.stream) {
+        this.gate.reset();
+        this.ensureNode();
+        current.heard = 0;
+        this.armed = true;
+      }
+      current.timers.push(setTimeout(() => this.decideNotice(current), OBJECTION_MS));
     }, COOLDOWN_MS));
-    current.timers.push(setTimeout(() => this.decideNotice(current), COOLDOWN_MS + OBJECTION_MS));
   }
 
   /** Settles this notice (and only this one) once its outcome is known; until then it keeps waiting. */
   private decideNotice(current: Playing): void {
     if (this.current !== current) return;
-    const outcome = noticeOutcome({ ...current, now: Date.now(), windowMs: COOLDOWN_MS + OBJECTION_MS });
+    const heardMs = current.heard !== undefined && this.context ? current.heard / this.context.sampleRate * 1000 : undefined;
+    const outcome = noticeOutcome({ ...current, heardMs, now: Date.now(), windowMs: OBJECTION_MS });
     if (!outcome) return;
     for (const timer of current.timers) clearTimeout(timer);
     this.current = undefined;
@@ -489,7 +543,7 @@ export class VoiceSession {
   }
 
   private show(change: Partial<VoiceView>): void {
-    this.view = { ...this.view, ...change, listening: this.listening, capturing: Boolean(this.utterance), playing: this.current ? { kind: this.current.say.kind, text: this.current.say.text } : undefined };
+    this.view = { ...this.view, ...change, listening: this.listening, capturing: Boolean(this.utterance), playing: this.current ? { kind: this.current.say.kind, text: this.current.say.text } : undefined, blocked: this.blocked ? { text: this.blocked.text } : undefined };
     this.options.onView(this.view);
   }
 }

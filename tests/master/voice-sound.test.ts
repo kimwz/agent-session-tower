@@ -35,9 +35,12 @@ test('listening ends after its minutes, a notice is judged with its moment to ob
   assert.equal(listenExpired(0, 5, 299_999), false);
   assert.equal(listenExpired(0, 5, 300_000), true);
   const notice = { startedAt: 1_000, now: 5_000, windowMs: 2_000 };
-  assert.equal(noticeOutcome({ ...notice, endedAt: 2_500 }), 'played');
-  assert.equal(noticeOutcome({ ...notice, endedAt: 4_000 }), undefined, 'still inside the moment to object');
-  assert.equal(noticeOutcome({ ...notice, endedAt: 2_500, spokeAt: 3_000 }), 'interrupted');
+  assert.equal(noticeOutcome({ ...notice, armedAt: 2_500 }), 'played', 'listening off: the moment after is time alone');
+  assert.equal(noticeOutcome({ ...notice, armedAt: 2_500, heardMs: 2_000 }), 'played');
+  assert.equal(noticeOutcome(notice), undefined, 'the moment after has not begun');
+  assert.equal(noticeOutcome({ ...notice, armedAt: 4_000, heardMs: 2_000 }), undefined, 'still inside the moment to object');
+  assert.equal(noticeOutcome({ ...notice, armedAt: 2_500, heardMs: 1_990 }), undefined, 'a stalled page has not heard the moment yet');
+  assert.equal(noticeOutcome({ ...notice, armedAt: 2_500, heardMs: 2_000, spokeAt: 3_000 }), 'interrupted');
   assert.equal(noticeOutcome({ ...notice, cancelled: true }), 'interrupted');
   assert.equal(noticeOutcome({ ...notice, failed: true }), 'failed');
   const pcm = toPcm16(new Float32Array([0, 0.5, -0.5, 1, -1, 2]), 16_000);

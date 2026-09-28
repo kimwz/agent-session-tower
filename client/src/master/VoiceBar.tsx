@@ -1,4 +1,4 @@
-import { Mic, MicOff, Square, Volume2, VolumeX, X } from 'lucide-react';
+import { Mic, MicOff, Play, Square, Volume2, VolumeX, X } from 'lucide-react';
 import type { MasterVoiceStatus } from '../../../shared/master';
 import type { VoiceView } from './voice-client';
 import { useWords } from './strings';
@@ -16,6 +16,8 @@ export interface VoiceControls {
   listen(): void;
   mute(): void;
   skip(): void;
+  /** Plays what the browser would not play by itself. */
+  replay(): void;
   dismiss(): void;
 }
 
@@ -53,6 +55,7 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
       {view.error && <small className="master-voice-error">{view.error}</small>}
       {usage && <small>{usage}</small>}
       <div className="master-voice-actions">
+        {!playing && view.blocked && <button className="master-voice-restart" onClick={voice.replay} title={view.blocked.text}><Play size={12} />{words('듣기', 'Play')}</button>}
         {playing && <button className="master-voice-restart" onClick={voice.skip}><Square size={12} />{playing.kind === 'notice' ? words('취소', 'Cancel') : words('멈춤', 'Stop')}</button>}
         {!playing && (view.listening
           ? <button className="secondary-button" onClick={voice.mute}><MicOff size={12} />{words('듣기 끄기', 'Stop listening')}</button>

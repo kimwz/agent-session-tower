@@ -434,13 +434,17 @@ export class MasterService {
 
   /**
    * Whether an answer, a stop or a failure is to be told by voice: a spoken request's (its answer under its own
-   * delegation), and a report of finished work; only while a call is on or the last one ended on silence.
+   * delegation), and a report of finished work. Read aloud where voice is on with the master open; otherwise marked
+   * as not said aloud (a report only when voice is on somewhere).
    */
   private speakFor(turn: Turn, answer: boolean): MasterSpeak | undefined {
     if (!this.voice) return undefined;
     // A spoken request's answer, stop or failure is read where voice is on; so is a report, when reports are read.
-    if (turn.voice && turn.scope.cause === 'owner') return this.voice.speaks(false) ? { state: 'pending', ...(turn.voice.session ? { session: turn.voice.session } : {}) } : undefined;
-    if ((turn.voice || answer) && turn.scope.cause === 'event') return this.voice.speaks(true) ? { state: 'pending' } : undefined;
+    if (turn.voice && turn.scope.cause === 'owner') {
+      const state = this.voice.speaks(false);
+      return state && { state, ...(turn.voice.session ? { session: turn.voice.session } : {}) };
+    }
+    if ((turn.voice || answer) && turn.scope.cause === 'event') { const state = this.voice.speaks(true); return state && { state }; }
     return undefined;
   }
 

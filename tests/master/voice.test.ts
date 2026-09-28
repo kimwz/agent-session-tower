@@ -250,7 +250,9 @@ test('what the owner said is a request like a typed one, answered first with a r
 });
 
 test('an answer to a spoken request is read aloud where voice is on and marked played; with nobody to hear it, it is marked so', async t => {
-  const h = await harness(t, { steps: [[say('작업 두 개입니다.\n\n자세한 목록은 화면에.')], [say('보고 A 끝.')], [say('보고 B 끝.')]] });
+  let later = '';
+  const h: Harness = await harness(t, { steps: [[say('작업 두 개입니다.\n\n자세한 목록은 화면에.')], [say('보고 A 끝.')], [say('보고 C 끝.')], [say('보고 B 끝.')],
+    () => { h.voice.voiceOff({ session: later }); return [say('답 D.')]; }] });
   const session = on(h);
   await request(h, session, '최근 작업 알려줘');
   const answer = await masterEntry(h, /두 개입니다/);
@@ -265,11 +267,21 @@ test('an answer to a spoken request is read aloud where voice is on and marked p
   const reportSay = await until(() => h.says().find(item => item.kind === 'report'));
   h.voice.voicePlayed({ session, id: reportSay.id, result: 'played' });
   await until(() => h.speakOf(report.id)?.state === 'played');
+  // Voice on, but the master closed: the report is marked as not said aloud.
+  h.voice.voicePresence({ session, listening: true, panelOpen: false });
+  await h.queueEvent('C ended');
+  const unheard = await masterEntry(h, /보고 C/);
+  assert.equal(h.speakOf(unheard.id)?.state, 'unspoken');
   // Voice turned off: news is shown only.
   h.voice.voiceOff({ session });
   await h.queueEvent('B ended');
   const quiet = await masterEntry(h, /보고 B/);
   assert.equal(h.speakOf(quiet.id), undefined);
+  // A spoken request answered after voice went off is marked as not said aloud.
+  later = on(h, randomUUID());
+  await request(h, later, '마지막 질문');
+  const late = await masterEntry(h, /답 D/);
+  assert.equal(h.speakOf(late.id)?.state, 'unspoken');
   await until(() => h.labs.deletes.length >= 2);
   assert.ok(h.labs.deletes.every(id => /^h\d+$/.test(id)), 'what ElevenLabs kept of a reading is removed');
 });
