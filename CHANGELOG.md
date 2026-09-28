@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.50.0] - 2026-09-28
+
+### Added
+- **The master works your screen.** Ask it to open or close a conversation, open a panel (the session list, help, the new-session dialog with the folder and request filled in, the Auto Prompt dialog on a folder or computer, triggers, joined computers, quick judgments, notifications, account), set the sidebar's search and filters, or change the language or chat text size. The tab you wrote from does it with the page's own controls and tells the master whether it could; account management opens only on a page of this computer itself. With **찾은 세션을 내 화면에 열기** off, the master offers a button in the conversation instead.
+- **Cards for what only your browser can do.** The master can show a card that turns on notifications on the device where you press it, and a card for typing a password, token or key. A value typed into a card stays in memory only: the master sees a reference and can put the value only into that request's secret field (a Slack token, a fast-judgment key, a password, a saved header's value, a join code). From then on, wherever the value appears whole, it is hidden in everything the master reads, keeps or shows, whatever the key-hiding setting. A card takes values of 8 characters or more that are not words of the master's own instructions.
+- **The master reads terminals**: it can look at a terminal's recent output, with keys hidden.
+
+### Changed
+- Keys are recognised after `_` or `=` too (as in `OPENAI_KEY_sk-…`), in answers' field names as well as values, and before anything is shortened. A reference to a key now goes back only into the exact field of the request that takes that secret; a reference anywhere else, such as a title or a prompt, is refused.
+
 ## [1.49.0] - 2026-09-28
 
 ### Added
