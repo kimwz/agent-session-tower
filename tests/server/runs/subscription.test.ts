@@ -32,7 +32,6 @@ test('only a claude.ai sign-in with Anthropic\'s own service passes; anything el
 /** A Claude session in `folder`, run by a manager whose sign-in check and processes are fakes. */
 async function fixture(t: TestContext, folder: (stateDir: string) => string, signedIn: boolean) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-subscription-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
   const cwd = folder(stateDir);
   await mkdir(cwd, { recursive: true });
   const session: Session = { id: `claude:${nativeId}`, nativeId, provider: 'claude', title: 'Fixture', cwd, project: 'fixture', status: 'completed', statusReason: 'Done',
@@ -51,7 +50,8 @@ async function fixture(t: TestContext, folder: (stateDir: string) => string, sig
       return child;
     } });
   await manager.start();
-  t.after(() => manager.close());
+  // One cleanup, in order: the manager saves before its folder goes.
+  t.after(async () => { await manager.close(); await rm(stateDir, { recursive: true, force: true }); });
   const run = await manager.enqueue(session.id, 'hello', {}, { origin: { kind: 'owner' } });
   await until(() => ['completed', 'error'].includes(manager.list().find(item => item.id === run.id)?.status ?? '') || undefined);
   return { run: manager.list().find(item => item.id === run.id)!, checked, spawned };
