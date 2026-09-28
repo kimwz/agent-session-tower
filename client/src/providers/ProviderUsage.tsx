@@ -32,7 +32,7 @@ export function ProviderUsageMeter({ provider, health }: { provider: Provider; h
   return <div ref={container} className={`provider-usage-meter ${provider} ${stale ? 'stale' : ''} ${ahead ? 'ahead' : ''} nodrag nopan nowheel`} onMouseEnter={() => setOpen(true)} onMouseLeave={() => { if (!container.current?.contains(document.activeElement)) setOpen(false); }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}>
     <button type="button" className="usage-trigger" aria-label={t('{0} 계정 사용량: {1}{2}', { 0: providerLabels[provider], 1: primary ? `${percent} ${label}${elapsed === undefined ? '' : t(' · 기간 {0} 경과', { 0: usagePercent(elapsed) })}` : label, 2: stale ? t(' · 이전 정보') : '' })} aria-describedby={open ? id : undefined} aria-expanded={open} onFocus={() => setOpen(true)} onClick={() => setOpen(true)} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); setOpen(false); } }}>
       <span className="usage-donut" aria-hidden="true">
-        <svg viewBox="0 0 36 36"><circle className="usage-track" cx="18" cy="18" r="15" />{primary && <circle className="usage-fill" cx="18" cy="18" r="15" pathLength="100" strokeDasharray={`${Math.min(100, primary.usedPercent)} 100`} />}{elapsed !== undefined && <circle className="usage-time" cx="18" cy="18" r="11.5" pathLength="100" strokeDasharray={`${elapsed} 100`} />}</svg>
+        <svg viewBox="0 0 36 36"><circle className="usage-track" cx="18" cy="18" r="15" />{primary && <circle className="usage-fill" cx="18" cy="18" r="15" pathLength="100" strokeDasharray={`${Math.min(100, primary.usedPercent)} 100`} />}{elapsed !== undefined && <circle className="usage-time" cx="18" cy="18" r="12.375" pathLength="100" strokeDasharray={`${elapsed} 100`} />}</svg>
         <ProviderIcon provider={provider} size={14} />
       </span>
       <span className="usage-summary"><strong>{percent}{stale && <i aria-hidden="true">*</i>}</strong><small>{provider === 'claude' ? 'Claude' : 'Codex'} · {primary ? usageWindowLabel(primary) : label}</small></span>
@@ -53,15 +53,11 @@ function UsageWindowDetail({ window, now }: { window: UsageWindow; now: number }
   const reset = window.resetsAt && absoluteTime(window.resetsAt);
   return <div className={usageAheadOfTime(window, elapsed) ? 'ahead' : undefined}>
     <dt>{usageWindowLabel(window)}<span>{reset ? t('초기화: {0}', { 0: reset }) : t('초기화 시간 정보 없음')}</span></dt>
-    <dd>
-      <UsageBar kind="used" label={t('사용')} percent={window.usedPercent} />
-      {elapsed !== undefined && <UsageBar kind="time" label={t('경과')} percent={elapsed} />}
+    <dd title={elapsed === undefined ? undefined : t('기간 {0} 경과', { 0: usagePercent(elapsed) })}>
+      <i className="usage-bar"><b style={{ width: `${Math.min(100, window.usedPercent)}%` }} />{elapsed !== undefined && <u style={{ width: `${elapsed}%` }} />}</i>
+      <em>{usagePercent(window.usedPercent)}</em>
     </dd>
   </div>;
-}
-
-function UsageBar({ kind, label, percent }: { kind: 'used' | 'time'; label: string; percent: number }) {
-  return <div className={`usage-bar ${kind}`}><span>{label}</span><i><b style={{ width: `${Math.min(100, percent)}%` }} /></i><em>{usagePercent(percent)}</em></div>;
 }
 
 export function ProviderUsage({ providers }: { providers: ProviderHealth[] }) {

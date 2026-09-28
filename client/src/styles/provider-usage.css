@@ -13,7 +13,7 @@
 .usage-track { stroke: #344356; }
 .usage-fill { stroke: #d8a379; stroke-linecap: round; }
 .codex .usage-fill { stroke: #76c5b5; }
-.usage-time { stroke: #c9d8ea; stroke-width: 1; opacity: .75; }
+.usage-time { stroke: #9fb0c4; stroke-width: 2.25; }
 .provider-usage-meter.ahead .usage-fill { stroke: #ec8a7d; }
 .usage-summary { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .usage-summary strong { font-size: 13px; font-variant-numeric: tabular-nums; font-weight: 600; }
@@ -29,14 +29,13 @@
 .usage-tooltip dl > div { border-top: 1px solid #30465f; padding: 8px 0; }
 .usage-tooltip dt { display: flex; justify-content: space-between; gap: 12px; color: #b7cbe5; }
 .usage-tooltip dt span { color: #90a8c3; font-size: 10px; }
-.usage-tooltip dd { margin: 6px 0 0; display: grid; gap: 4px; }
-.usage-bar { display: grid; grid-template-columns: 28px 1fr 32px; align-items: center; gap: 6px; font-size: 10px; color: #90a8c3; }
-.usage-bar i { height: 6px; border-radius: 3px; background: #2a3b50; overflow: hidden; }
-.usage-bar b { display: block; height: 100%; border-radius: 3px; }
-.usage-bar em { font-style: normal; text-align: right; font-variant-numeric: tabular-nums; color: #d8e5f5; }
-.usage-bar.used b { background: #d8a379; }
-.codex .usage-bar.used b { background: #76c5b5; }
-.usage-tooltip dl > .ahead .usage-bar.used b { background: #ec8a7d; }
-.usage-bar.time b { background: #c9d8ea; opacity: .6; }
+.usage-tooltip dd { margin: 6px 0 0; display: grid; grid-template-columns: 1fr 32px; align-items: center; gap: 8px; }
+.usage-tooltip dd em { font-style: normal; text-align: right; font-variant-numeric: tabular-nums; }
+.usage-bar { position: relative; height: 8px; border-radius: 3px; background: #2a3b50; overflow: hidden; }
+.usage-bar b, .usage-bar u { position: absolute; left: 0; display: block; }
+.usage-bar b { top: 0; height: 6px; background: #d8a379; }
+.usage-bar u { bottom: 0; height: 2px; background: #9fb0c4; }
+.codex .usage-bar b { background: #76c5b5; }
+.usage-tooltip dl > .ahead .usage-bar b { background: #ec8a7d; }
 .usage-tooltip > small { color: #8ba0bb; }
 .usage-tooltip .usage-stale { color: #e1b776; }

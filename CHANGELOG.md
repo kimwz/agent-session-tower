@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.58.2] - 2026-09-28
+
+### Changed
+- **Elapsed time on usage meters is quieter.** On the donut, the elapsed-time ring now sits directly against the inside of the usage ring, 2px thick and a softer grey. In the details shown on hover, each limit is one bar again: usage is the bar, and elapsed time is a thin grey line along its bottom edge, with the exact share shown when you point at it.
+
 ## [1.58.1] - 2026-09-28
 
 ### Changed
