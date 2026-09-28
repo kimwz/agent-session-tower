@@ -35,12 +35,16 @@ export interface RecordState {
   ordinal: number;
   historyStartOrdinal?: number;
   historyStartOffset?: number;
+  /** The latest user requests, newest first and shortened; they say what a session is working on. */
+  recentRequests?: string[];
 }
 
 export const CHUNK = 128 * 1024;
 export const MAX_LINE = 16 * 1024 * 1024;
 const MAX_TEXT = 100_000;
 const FRESH_MS = 120_000;
+const RECENT_REQUESTS = 8;
+const RECENT_REQUEST_CHARS = 300;
 
 function text(value: unknown, maximum = MAX_TEXT): string {
   if (typeof value === 'string') return value.length > maximum ? `${value.slice(0, maximum)}\n… [truncated]` : value;
@@ -326,6 +330,7 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
       s.title = compact(message.text, 100); state.titleSet = true;
     }
     if (['user', 'assistant'].includes(message.role)) s.lastMessage = compact(message.text);
+    if (message.role === 'user') state.recentRequests = [compact(message.text, RECENT_REQUEST_CHARS), ...(state.recentRequests ?? [])].slice(0, RECENT_REQUESTS);
   }
   if (row.timestamp && at > Date.parse(s.updatedAt)) s.updatedAt = timestamp;
 

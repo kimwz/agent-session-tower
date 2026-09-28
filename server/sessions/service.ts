@@ -64,6 +64,8 @@ export class SessionService extends EventEmitter {
   stop(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
   list(): Session[] { return [...this.index.values()].map((record) => ({ ...record.session })).sort(sortSessions); }
   get(id: string): Session | undefined { const state = this.index.get(id); return state ? { ...state.session } : undefined; }
+  /** A conversation's latest user requests, newest first, each shortened to 300 characters. */
+  recentRequests(id: string): string[] { return [...(this.index.get(id)?.recentRequests ?? [])]; }
 
   refresh(forceProcesses = false): Promise<void> {
     if (this.pendingRefresh) return forceProcesses ? this.pendingRefresh.then(() => this.refresh(true)) : this.pendingRefresh;

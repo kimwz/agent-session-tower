@@ -449,7 +449,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const decisions = new DecisionService(stateDir);
     runs.setFirstTurnNotes(async (run, session) => {
       await decisions.start();
-      return relatedSessionNotes(decisions.engine('relatedSessions'), run, session, visible.allSessions());
+      return relatedSessionNotes(decisions.engine('relatedSessions'), run, session, visible.allSessions(), id => sessions.recentRequests(runs.nativeSessionId(id)));
     });
     await slack.start();
     // Sessions created before provenance existed are classified once from surviving ledger links.

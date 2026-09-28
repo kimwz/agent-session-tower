@@ -65,7 +65,7 @@ export function DecisionPanel({ token, onClose }: { token: string; onClose: () =
           <label><input type="checkbox" checked={overview.features.attentionNotifications} onChange={event => setFeature('attentionNotifications', event.target.checked)} />{t('알림 선별')}<small>{t('끝난 턴의 요청과 마지막 답변을 보내, 중간 단계로 판단된 턴은 푸시하지 않습니다.')}</small></label>
           <label><input type="checkbox" checked={overview.features.steerTiming} onChange={event => setFeature('steerTiming', event.target.checked)} />{t('작업 중 보낸 메시지 끼워넣기')}<small>{t('작업 중인 대화에 보낸 메시지가 지금 작업에 속하면 바로 끼워 넣고, 별개의 요청이면 끝난 뒤 보냅니다. 판단할 때 지금 요청, 진행 상황 끝부분, 새 메시지를 보냅니다.')}</small></label>
           <label><input type="checkbox" checked={overview.features.sessionOutcomes ?? true} onChange={event => setFeature('sessionOutcomes', event.target.checked)} />{t('캔버스에 세션 상태 표시')}<small>{t('끝난 세션의 마지막 요청과 답변을 보내, 작업 완료·확인 필요·작업 끊김을 카드 오른쪽 위에 색으로 표시합니다.')}</small></label>
-          <label><input type="checkbox" checked={overview.features.relatedSessions ?? true} onChange={event => setFeature('relatedSessions', event.target.checked)} />{t('새 세션에 관련 세션 알려주기')}<small>{t('새 세션의 첫 요청과 최근 세션 40개의 제목과 마지막 메시지를 보내, 같은 작업으로 보이는 세션을 에이전트에게만 보이는 안내로 알려줍니다. 대화에는 표시되지 않습니다.')}</small></label>
+          <label><input type="checkbox" checked={overview.features.relatedSessions ?? true} onChange={event => setFeature('relatedSessions', event.target.checked)} />{t('새 세션에 관련 세션 알려주기')}<small>{t('새 세션의 첫 요청과 최근 세션 40개의 제목과 최근 사용자 요청들을 보내, 같은 작업으로 보이는 세션을 에이전트에게만 보이는 안내로 알려줍니다. 대화에는 표시되지 않습니다.')}</small></label>
         </fieldset>
         <p className="auth-hint">{t('켜진 기능은 위 내용을 {0}로 보냅니다. API 키는 이 컴퓨터의 상태 폴더에만 저장되고 화면에 다시 표시되지 않습니다.', { 0: label })}</p>
       </section>

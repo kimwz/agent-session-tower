@@ -551,3 +551,20 @@ test('a verified Claude process can remain idle despite an old transcript, while
   assert.equal(service.get(`claude:${childId}`)?.status, 'error');
   assert.equal(service.get(`claude:${childId}`)?.activeProcess, false);
 });
+
+test('a conversation keeps its latest user requests, newest first and shortened, without injected context', async (t) => {
+  const { service, codex } = await fixture(t);
+  await writeFile(codex, lines([
+    row('session_meta', { id: rootId, cwd: '/work/project', timestamp: now() }),
+    codexMessage('user', '<environment_context>\n<cwd>/work</cwd>\n</environment_context>'),
+    ...Array.from({ length: 10 }, (_, i) => [codexMessage('user', `request ${i} ${i === 9 ? 'y'.repeat(400) : ''}`), codexMessage('assistant', `answer ${i}`)]).flat(),
+  ]));
+  await service.refresh();
+  const requests = service.recentRequests(`codex:${rootId}`);
+  assert.equal(requests.length, 8);
+  assert.match(requests[0]!, /^request 9 y+$/);
+  assert.equal(requests[0]!.length, 300);
+  assert.deepEqual(requests.slice(1, 3), ['request 8', 'request 7']);
+  assert.ok(!requests.some(text => /answer|environment_context/.test(text)));
+  assert.deepEqual(service.recentRequests('codex:missing'), []);
+});

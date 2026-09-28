@@ -10,6 +10,7 @@ const session = (id: string, title: string, cwd: string, daysAgo: number, extra:
   isSubagent: false, resumable: true, ...extra });
 const run: Run = { id: 'r', sessionId: 'claude:new', prompt: '용사단 키우기 결제 아이템이 서버를 거치지 않고 지급됩니다', status: 'queued', createdAt: '', output: '' };
 const fresh = session('claude:new', 'new', '/slack', 0);
+const noRequests = () => [];
 
 /** A judgment that says yes to the sessions whose titles mention a word, and records what it was shown. */
 function engine(word: string, seen: Array<{ state: any; questions: Record<string, any> }>): DecisionEngine {
@@ -29,7 +30,7 @@ test('a new conversation hears of at most three earlier sessions a judgment find
     session('codex:sub', '용사단 subagent', '/work/verse8', 0.01, { isSubagent: true }),
     session('codex:exec', '용사단 exec', '/work/verse8', 0.01, { launchedByAgent: true }),
     ...Array.from({ length: 5 }, (_, i) => session(`codex:many${i}`, `용사단 follow-up ${i}`, '/work/verse8', 1 + i))];
-  const notes = await relatedSessionNotes(engine('용사단', seen), run, fresh, all, now);
+  const notes = await relatedSessionNotes(engine('용사단', seen), run, fresh, all, noRequests, now);
   const ids = [...notes!.matchAll(/^- (\S+)/gm)].map(match => match[1]);
   assert.equal(ids.length, 3, 'at most three');
   assert.ok(ids.includes('codex:heroes'));
@@ -42,17 +43,31 @@ test('a new conversation hears of at most three earlier sessions a judgment find
 
 test('no judgment, no likely match or no request means no notes', async () => {
   const all = [fresh, session('codex:other', 'Unrelated refactor', '/work', 0.1)];
-  assert.equal(await relatedSessionNotes(undefined, run, fresh, all, now), undefined);
-  assert.equal(await relatedSessionNotes(engine('용사단', []), run, fresh, all, now), undefined);
-  assert.equal(await relatedSessionNotes(engine('Unrelated', []), { ...run, prompt: ' ' }, fresh, all, now), undefined);
+  assert.equal(await relatedSessionNotes(undefined, run, fresh, all, noRequests, now), undefined);
+  assert.equal(await relatedSessionNotes(engine('용사단', []), run, fresh, all, noRequests, now), undefined);
+  assert.equal(await relatedSessionNotes(engine('Unrelated', []), { ...run, prompt: ' ' }, fresh, all, noRequests, now), undefined);
 });
 
 test('sessions in the same folder are offered first when there are more than can be asked about', async () => {
   const seen: Array<{ state: any; questions: Record<string, any> }> = [];
   const all = [fresh, ...Array.from({ length: 45 }, (_, i) => session(`codex:elsewhere${i}`, `elsewhere ${i}`, '/other', 0.001 * (i + 1))),
     session('codex:here', 'same folder', '/slack', 10)];
-  await relatedSessionNotes(engine('nothing', seen), run, fresh, all, now);
+  await relatedSessionNotes(engine('nothing', seen), run, fresh, all, noRequests, now);
   const shown = Object.values(seen[0]!.state.earlierSessions).map((item: any) => item.title);
   assert.equal(shown.length, 40);
   assert.equal(shown[0], 'same folder');
+});
+
+test('each earlier session is described by its latest user requests, newest first, as many as fit its share', async () => {
+  const seen: Array<{ state: any; questions: Record<string, any> }> = [];
+  const requests = new Map([['codex:long', Array.from({ length: 8 }, (_, i) => `${String(8 - i)} ${'x'.repeat(290)}`)], ['codex:short', ['결제 아이템 서버 지급 확인', '용사단 키우기 결제 조사']]]);
+  const all = [fresh, session('codex:short', 'Payments', '/work', 0.1), ...Array.from({ length: 38 }, (_, i) => session(`codex:long${i}`, `busy ${i}`, '/work', 0.2 + i / 100)), session('codex:long', 'Long', '/work', 0.05)];
+  await relatedSessionNotes(engine('nothing', seen), run, fresh, all, id => requests.get(id) ?? [], now);
+  const earlier = Object.values(seen[0]!.state.earlierSessions) as Array<{ title: string; latestUserRequests: string[]; lastMessage?: string }>;
+  assert.deepEqual(earlier.find(item => item.title === 'Payments')!.latestUserRequests, ['결제 아이템 서버 지급 확인', '용사단 키우기 결제 조사'], 'newest first, as kept');
+  const long = earlier.find(item => item.title === 'Long')!.latestUserRequests;
+  assert.ok(long.length >= 1 && long.length < 8, 'only as many as fit');
+  assert.match(long[0]!, /^8 /, 'the newest first');
+  assert.ok(earlier.every(item => item.lastMessage === undefined), 'the agent’s answers are not sent');
+  assert.ok(JSON.stringify(seen[0]!.state).length < 105_000, 'within what the judgment takes');
 });
