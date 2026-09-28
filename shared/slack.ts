@@ -43,8 +43,6 @@ export interface SlackWorkflow {
   rule?: SlackRule;
   thread?: SlackMessage[];
   prompt?: string;
-  /** Tower's policy and the owner's rules for the first turn, given to the agent apart from `prompt`. */
-  instructions?: string;
   autoPromptId?: string;
   runId?: string;
   sessionId?: string;

@@ -324,9 +324,10 @@ export class SlackAutomationManager extends EventEmitter {
     const prompt = requestText(this.channel.label, item.mention, thread);
     if (instructions.length > 40_000) throw new Error('Slack 처리 지침이 너무 깁니다.');
     if (prompt.length > 32_000) throw new Error('Slack 쓰레드가 너무 깁니다.');
-    await this.save(item, { thread, prompt, instructions, conversationClaimed: true, status: 'dispatching' });
+    // Only the request is kept with the workflow, which pages read; the instructions go straight to the turn.
+    await this.save(item, { thread, prompt, conversationClaimed: true, status: 'dispatching' });
     let created: { sessionId: string; runId: string };
-    try { created = await this.options.startConversation!(structuredClone(item), item.prompt!, item.instructions); }
+    try { created = await this.options.startConversation!(structuredClone(item), item.prompt!, instructions); }
     catch (error) { const recovered = this.options.findConversation?.(item.id); if (!recovered) throw error; created = recovered; }
     await this.save(item, { ...created, status: 'running' });
   }
@@ -701,7 +702,7 @@ export class SlackAutomationManager extends EventEmitter {
       // Historical transcripts can be dropped after a workflow has settled.
       for (const item of this.items) {
         if (!terminal.has(item.status)) continue;
-        item.rules = []; delete item.thread; delete item.prompt; delete item.instructions; delete item.rule;
+        item.rules = []; delete item.thread; delete item.prompt; delete item.rule;
         item.mention.text = item.mention.text.trim().slice(0, 500);
       }
       data = JSON.stringify({ rules: this.configured, workflows: this.items });

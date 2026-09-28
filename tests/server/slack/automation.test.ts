@@ -236,7 +236,8 @@ test('settled conversational ticks do not emit changes or rewrite history while 
   const path = join(f.directory, 'slack-automation.json'); const before = await readFile(path, 'utf8');
   await f.manager.tick(); await f.manager.tick();
   assert.equal(changes, 0); assert.equal(await readFile(path, 'utf8'), before);
-  assert.match(f.manager.list()[0].instructions!, /first whose condition clearly matches/);
+  assert.match(f.manager.list()[0].prompt!, /^Slack request from <@U2> in C1:\n<@U1> review this Verse8 PR/);
+  assert.doesNotMatch(JSON.stringify(f.manager.list()), /first whose condition clearly matches/, 'pages read the workflow; the policy is not in it');
 });
 
 test('rejected delegation becomes a durable visible error and the same key can retry successfully', async t => {

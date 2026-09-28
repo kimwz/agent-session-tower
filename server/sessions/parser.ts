@@ -67,6 +67,13 @@ function validTime(value: unknown): string | undefined {
 function latestTime(previous: string | undefined, candidate: string | undefined): string | undefined {
   return candidate && (!previous || candidate > previous) ? candidate : previous;
 }
+export const TOWER_INSTRUCTIONS_OPEN = '<tower-instructions>';
+export const TOWER_INSTRUCTIONS_CLOSE = '</tower-instructions>';
+/** A user message without the instructions Tower added to a Codex turn; the agent saw them, the conversation does not. */
+function withoutTowerInstructions(value: string): string {
+  const start = value.lastIndexOf(`\n\n${TOWER_INSTRUCTIONS_OPEN}\n`);
+  return start === -1 ? value : value.slice(0, start);
+}
 function isInjectedUser(value: string): boolean {
   return /^(?:# AGENTS\.md instructions|<environment_context>|<recommended_plugins>|<INSTRUCTIONS>|<system-reminder>|\[Request interrupted by user)/.test(value.trim());
 }
@@ -97,7 +104,7 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
       const kinds: string[] = value.internal_chat_message_metadata_passthrough?.content_item_kinds ?? [];
       const parts = Array.isArray(value.content) ? value.content.filter((_: unknown, index: number) =>
         value.role !== 'user' || !kinds[index] || /^(user\.|unknown)/.test(kinds[index]!)) : value.content;
-      const content = text(parts);
+      const content = value.role === 'user' ? withoutTowerInstructions(text(parts)) : text(parts);
       if (!content || (value.role === 'user' && isInjectedUser(content))) return [];
       return [{ id, role: value.role, text: content, timestamp }];
     }

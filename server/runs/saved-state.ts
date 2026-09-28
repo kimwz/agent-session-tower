@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path';
-import type { Run, Session } from '../../shared/types.js';
+import type { Run, RunInstructions, Session } from '../../shared/types.js';
 import { attachmentMetadata } from '../stores/attachments.js';
 import { validEffort, validModelId } from '../providers/models.js';
 import { PROVIDERS } from '../providers/discovery.js';
@@ -18,6 +18,12 @@ export interface CreatedSession {
   origin?: SessionOrigin;
 }
 
+export function isSavedInstructions(value: unknown): value is RunInstructions {
+  const instructions = value as Partial<RunInstructions> | null;
+  return !!instructions && typeof instructions === 'object' && typeof instructions.text === 'string' && instructions.text.length <= 48_000
+    && (instructions.required === undefined || typeof instructions.required === 'boolean');
+}
+
 export function isSavedRun(value: unknown): value is Run {
   if (!value || typeof value !== 'object') return false;
   const run = value as Partial<Run>;
@@ -29,8 +35,6 @@ export function isSavedRun(value: unknown): value is Run {
     && (run.autoPromptId === undefined || UUID.test(run.autoPromptId))
     && (run.steering === undefined || isSavedSteering(run.steering, run))
     && (run.scheduled === undefined || isSavedSchedule(run.scheduled, run))
-    && (run.instructions === undefined || (typeof run.instructions === 'object' && typeof run.instructions.text === 'string' && run.instructions.text.length <= 48_000
-      && (run.instructions.required === undefined || typeof run.instructions.required === 'boolean')))
     && (run.attachments === undefined || (Array.isArray(run.attachments) && run.attachments.length <= 10 && run.attachments.every(item => attachmentMetadata(item))))
     && ['queued', 'running', 'completed', 'error', 'cancelled'].includes(run.status ?? '');
 }
