@@ -4,6 +4,7 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
 import { ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus, parseAutoPrompt, parseAutoPromptSuggestion, parseCreateSession, parseMessage, readJson, UUID } from './requests.js';
+import type { SkillDetail, SkillOverview, SkillSummary } from '../../shared/skills.js';
 import type { RequestContext } from './request-context.js';
 import type { RemoteExclusionStore } from '../remote/exclusions.js';
 import { handleLinkRoute, type LinkRoutes } from '../link/routes.js';
@@ -39,6 +40,13 @@ export interface Backend {
     overview(): Promise<PublicAgentOverview>;
     conversation(agentId: string, conversationId: string): Promise<PublicConversationView>;
     mutate(action: string, body: Record<string, unknown>): Promise<PublicAgentOverview>;
+  };
+  /** The owner's skills on this computer; managed only from this Tower's own pages. */
+  skills?: {
+    overview(input: Record<string, unknown>): Promise<SkillOverview>;
+    detail(input: Record<string, unknown>): Promise<SkillDetail>;
+    summary(): Promise<SkillSummary>;
+    mutate(action: string, body: Record<string, unknown>): Promise<SkillOverview>;
   };
   snapshot(): Snapshot;
   detail(id: string, before?: number, limit?: number): Promise<SessionDetail | undefined>;
@@ -317,6 +325,17 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (notificationAction && req.method === 'POST') {
         if (!notifications) return json(res, 503, { error: '알림을 사용할 수 없습니다.' });
         return json(res, 200, await notifications[notificationAction[1] as 'subscribe'](await readJson(req, 16 * 1024)));
+      }
+      if ((path === '/api/skills' || path === '/api/skills/detail' || path === '/api/skills/summary') && req.method === 'GET') {
+        if (!backend.skills) return json(res, 503, { error: '스킬을 사용할 수 없습니다.' });
+        const input = { cwd: url.searchParams.get('cwd') ?? undefined, dir: url.searchParams.get('dir') ?? undefined };
+        if (path === '/api/skills/summary') return json(res, 200, await backend.skills.summary());
+        return json(res, 200, path === '/api/skills' ? await backend.skills.overview(input) : await backend.skills.detail(input));
+      }
+      const skillAction = path.match(/^\/api\/skills\/(save|pin|link|delete|dismiss|settings|backfill)$/);
+      if (skillAction && req.method === 'POST') {
+        if (!backend.skills) return json(res, 503, { error: '스킬을 사용할 수 없습니다.' });
+        return json(res, 200, await backend.skills.mutate(skillAction[1], await readJson(req, 200_000)));
       }
       if (path === '/api/decisions' && req.method === 'GET') {
         if (!decisions) return json(res, 503, { error: '빠른 판단을 사용할 수 없습니다.' });

@@ -115,7 +115,7 @@ export interface MasterEntry {
 export interface MasterCheckpoint { epoch: string; seq: number; overview: MasterOverview }
 export interface MasterDraft { turnId: string; text: string }
 /** Panels the master may open on the owner's screen, each the page's own. */
-export const MASTER_PANELS = ['sessions', 'help', 'newSession', 'autoPrompt', 'triggers', 'remote', 'decisions', 'notifications', 'account'] as const;
+export const MASTER_PANELS = ['sessions', 'help', 'newSession', 'autoPrompt', 'triggers', 'remote', 'decisions', 'notifications', 'account', 'skills'] as const;
 export type MasterPanel = typeof MASTER_PANELS[number];
 /** The sidebar's filters and the canvas's "show hidden", as the owner sets them by hand. */
 export interface MasterFilter {

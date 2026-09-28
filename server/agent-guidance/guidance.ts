@@ -15,6 +15,14 @@ Tower's session tools (\`sessions_search\`, \`sessions_read\`, \`sessions_list\`
 - Then build on what it found: check that it still holds, and say which session it came from. Do not repeat an investigation that is already done.
 - Skip the lookup for self-contained tasks whose context is all in the request or the repository.
 
+## Follow the owner's skills
+
+The owner keeps their recurring ways of working as skills (\`SKILL.md\` folders in \`~/.agents/skills\`, \`~/.claude/skills\` and a project's \`.agents/skills\` or \`.claude/skills\`).
+
+- Before you start a task, check whether one of your available skills fits it, and follow it even when the request does not name it. Tower names the skills the owner pinned at the start of its turns.
+- Explicit instructions in the request and the project's own instructions come first.
+- When the owner asks to keep a way of working as a skill, write \`~/.agents/skills/<name>/SKILL.md\` (or \`<project>/.agents/skills/<name>/SKILL.md\` for one project) with \`name\` and \`description\` frontmatter, and link \`~/.claude/skills/<name>\` (or \`<project>/.claude/skills/<name>\`) to that folder so both Claude Code and Codex find it.
+
 ## Keep git branches in sync
 
 Several agents can work in the same repository folder at once, and branches are often merged on the remote. Local branches then fall behind, or keep commits nobody pushed.

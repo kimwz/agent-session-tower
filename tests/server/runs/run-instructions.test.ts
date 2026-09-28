@@ -12,7 +12,7 @@ const NATIVE = '40000000-0000-4000-8000-000000000001';
 const now = '2026-09-28T00:00:00.000Z';
 
 /** A manager whose providers never start: each launch is recorded, then refused. */
-async function fixture(t: TestContext, notes?: (run: Run, session: Session) => Promise<string | undefined>, saved?: { runs: unknown[] }) {
+async function fixture(t: TestContext, notes?: (run: Run, session: Session) => Promise<string | undefined>, saved?: { runs: unknown[] }, turnNotes?: (run: Run, session: Session) => Promise<string | undefined>) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-run-instructions-'));
   const stateDir = join(directory, 'state');
   await mkdir(stateDir, { recursive: true });
@@ -25,7 +25,7 @@ async function fixture(t: TestContext, notes?: (run: Run, session: Session) => P
     findExecutable: async provider => `/fixture/${provider}`,
     spawnProcess: ((_command: string, args: string[]) => { claude.push(args); throw new Error('Fixtures never start providers.'); }) as never,
     openCodexStdio: async options => { codex.push(options); throw new Error('Fixtures never start providers.'); },
-    ...(notes ? { firstTurnNotes: notes } : {}) });
+    ...(notes ? { firstTurnNotes: notes } : {}), ...(turnNotes ? { turnNotes } : {}) });
   await manager.start();
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
   const settled = async (id: string) => { for (let i = 0; i < 200 && manager.list().find(run => run.id === id)?.status === 'queued'; i++) await new Promise(resolve => setTimeout(resolve, 10)); };
@@ -63,6 +63,19 @@ test('a new conversation’s first turn gets its notes; a later turn does not', 
   const remote = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Remote task' }, { origin: { kind: 'owner', controllerId: 'c'.repeat(32) } });
   await f.settled(remote.run.id);
   assert.deepEqual(asked, ['Fix the payment webhook']);
+});
+
+test('every turn gets the owner’s pinned skills after the first turn’s notes, but not work from a controlling computer', async t => {
+  const f = await fixture(t, async () => 'Related: claude:earlier', undefined, async (_run, session) => `Check skills in ${session.provider}`);
+  const created = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'New feature' }, { origin: { kind: 'owner' }, instructions: { text: 'Policy', required: true } });
+  await f.settled(created.run.id);
+  assert.equal(f.codex[0].instructions, 'Policy\n\nRelated: claude:earlier\n\nCheck skills in codex');
+  const next = await f.manager.enqueue(f.native.id, 'Another task', {}, { origin: { kind: 'trigger', triggerId: 't' } });
+  await f.settled(next.id);
+  assert.equal(f.codex[1].instructions, 'Check skills in codex', 'later turns and automation get them too');
+  const remote = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Remote task' }, { origin: { kind: 'owner', controllerId: 'c'.repeat(32) } });
+  await f.settled(remote.run.id);
+  assert.equal(f.codex[2].instructions, undefined);
 });
 
 test('notes that fail or take too long never hold up or break the turn', async t => {

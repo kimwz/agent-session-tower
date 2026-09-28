@@ -28,6 +28,8 @@ export interface AutoPromptNativeDependencies {
   killGraceMs?: number;
 }
 
+/** Routing and judgments use the strong models; the skill advisor's summaries use the light ones. */
+const MODELS: Record<Provider, readonly string[]> = { claude: ['opus', 'sonnet'], codex: ['gpt-5.6-sol', 'gpt-5.6-terra'] };
 const MAX_OUTPUT = 1_000_000;
 const MAX_ERROR_OUTPUT = 64_000;
 const MAX_PROMPT = 512_000;
@@ -133,7 +135,7 @@ async function imagesForRequest(paths: readonly string[], directory: string): Pr
 /** Reasoning only. The caller validates the returned decision before dispatch. */
 export async function runAutoPromptModel(options: AutoPromptModelRequest, dependencies: AutoPromptNativeDependencies = {}): Promise<unknown> {
   if (options.signal.aborted) throw cancelled();
-  if (!['claude', 'codex'].includes(options.provider) || options.model !== (options.provider === 'claude' ? 'opus' : 'gpt-5.6-sol')) throw failure('routing model is unsupported.');
+  if (!['claude', 'codex'].includes(options.provider) || !MODELS[options.provider].includes(options.model)) throw failure('routing model is unsupported.');
   const schema = JSON.stringify(options.schema);
   if (!record(options.schema) || typeof options.prompt !== 'string' || typeof options.systemPrompt !== 'string'
     || Buffer.byteLength(options.prompt) > MAX_PROMPT || Buffer.byteLength(options.systemPrompt) > 64_000 || Buffer.byteLength(schema) > 64_000) throw failure('routing input is invalid or too large.');

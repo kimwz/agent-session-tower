@@ -54,6 +54,8 @@ interface RunnerOptions {
    * the provider starts; whatever it cannot answer quickly is left out.
    */
   firstTurnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
+  /** Notes for every turn, such as the owner's pinned skills; asked and limited like `firstTurnNotes`. */
+  turnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
   /** Pre-accepts the native folder trust prompt for a newly created session. */
   trustWorkspace?: (provider: Provider, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
   /** Streamed output alone is saved at most this often; state changes are saved at once. */
@@ -133,6 +135,8 @@ export class RunManager extends EventEmitter {
   private readonly runs = new Map<string, Run>();
   private readonly owned = new Map<string, OwnedProcess>();
   private readonly bridged = new Map<string, CodexBridgeRun>();
+  /** Turns that already received their notes. */
+  private readonly noted = new Set<string>();
   private readonly stdio = new Map<string, CodexStdioRun>();
   private readonly reservedSessions = new Set<string>();
   /** CLIs being updated: none of their runs start until the update is done. */
@@ -186,6 +190,7 @@ export class RunManager extends EventEmitter {
   }
 
   setFirstTurnNotes(notes: NonNullable<RunnerOptions['firstTurnNotes']>): void { this.options.firstTurnNotes = notes; }
+  setTurnNotes(notes: NonNullable<RunnerOptions['turnNotes']>): void { this.options.turnNotes = notes; }
   setRunToolResolver(resolver: NonNullable<RunnerOptions['resolveRunTools']>): void {
     this.options.resolveRunTools = resolver;
   }
@@ -500,14 +505,21 @@ export class RunManager extends EventEmitter {
     return shown(run);
   }
 
-  /** Adds `firstTurnNotes` to a new conversation's first turn. Never delays it by more than a few seconds, never fails it. */
-  private async addFirstTurnNotes(run: Run, session: Session): Promise<void> {
-    if (!this.options.firstTurnNotes || run.origin?.controllerId) return;
+  /**
+   * Adds `firstTurnNotes` to a new conversation's first turn and `turnNotes` to every turn. Never delays a turn by more
+   * than a few seconds, never fails it, and a turn gets them once however often it is launched.
+   */
+  private async addTurnNotes(run: Run, session: Session, creating: boolean): Promise<void> {
+    if (run.origin?.controllerId || this.noted.has(run.id)) return;
+    if (this.noted.size >= 10_000) this.noted.clear();
+    this.noted.add(run.id);
+    const ask = (notes: ((run: Run, session: Session) => Promise<string | undefined>) | undefined) => notes ? notes(run, session).catch(() => undefined) : Promise.resolve(undefined);
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const notes = await Promise.race([this.options.firstTurnNotes(run, session).catch(() => undefined), new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), FIRST_TURN_NOTES_MS); })]);
+    const all = Promise.all([creating ? ask(this.options.firstTurnNotes) : undefined, ask(this.options.turnNotes)]);
+    const notes = await Promise.race([all, new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), FIRST_TURN_NOTES_MS); })]);
     clearTimeout(timer);
-    if (!notes?.trim() || run.status !== 'queued') return;
-    const text = run.instructions ? `${run.instructions.text}\n\n${notes}` : notes;
+    const text = [run.instructions?.text, ...(notes ?? [])].filter(item => item?.trim()).join('\n\n');
+    if (run.status !== 'queued' || !text || text === run.instructions?.text) return;
     if (text.length <= MAX_INSTRUCTIONS) run.instructions = { text, ...(run.instructions?.required ? { required: true } : {}) };
   }
 
@@ -846,7 +858,7 @@ export class RunManager extends EventEmitter {
     delete env.CLAUDE_CODE_SESSION_ID;
     let started = false;
     let registered = false;
-    if (creating) await this.addFirstTurnNotes(run, session);
+    await this.addTurnNotes(run, session, creating);
     const tools = this.runTools(run, session);
     await awaitToolServers(tools);
     if (run.status !== 'queued' || this.stopping) {
@@ -931,7 +943,7 @@ export class RunManager extends EventEmitter {
     if (!(await stat(session.cwd)).isDirectory()) throw new Error('The session working directory no longer exists.');
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     const images = attachments.filter(item => isImageAttachment(item.metadata.mimeType));
-    if (creating) await this.addFirstTurnNotes(run, session);
+    await this.addTurnNotes(run, session, creating);
     const args = creating ? buildCreateArgs(session, run.model, run.effort) : buildResumeArgs(session, run.model, run.effort);
     const tools = this.runTools(run, session);
     await awaitToolServers(tools);

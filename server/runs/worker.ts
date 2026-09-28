@@ -36,9 +36,12 @@ import { runToolResolver } from '../api/run-tools.js';
 import { RemoteExclusionStore } from '../remote/exclusions.js';
 import { remoteTriggerLaunch } from '../remote/visibility.js';
 import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
+import { SkillService } from '../skills/service.js';
+import { skillHomes } from '../skills/files.js';
+import { runAutoPromptModel } from '../auto-prompt/native.js';
 import { MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
-const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation']);
+const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary']);
 
 export interface RunnerHostOptions {
   stateDir: string;
@@ -51,6 +54,8 @@ export interface RunnerHostOptions {
   triggers?: TriggerService;
   /** Pages the owner published for outside visitors. */
   publicAgents?: PublicAgentService;
+  /** The owner's skills and the advisor that proposes new ones. */
+  skills?: SkillService;
   api?: TowerApi;
   terminals?: WorkspaceTerminals;
   idleMs?: number;
@@ -77,8 +82,10 @@ export interface RunnerHostOptions {
   exclusions?: RemoteExclusionStore;
 }
 
+const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+
 /** Only these read state; every other request is refused while the worker hands off, never half-accepted. */
-const READS_DURING_HANDOFF = new Set(['snapshot', 'sessionHistory', 'attachment', 'slackOverview']);
+const READS_DURING_HANDOFF = new Set(['snapshot', 'sessionHistory', 'attachment', 'slackOverview', 'skillsOverview', 'skillsDetail', 'skillsSummary']);
 
 /** Hosts an already-started engine, including one adopted during an in-place upgrade. */
 export async function startRunnerHost(options: RunnerHostOptions) {
@@ -196,6 +203,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         return options.api.call(args[0], args[1], controllerId ? { kind: 'owner', via: 'remote', controllerId } : { kind: 'owner', via: 'ui' }, admitted?.requestId);
       } break;
       case 'slackTool': if (options.slack) return options.slack.tool(args[0] as string, args[1] as string, args[2] as Record<string, unknown>); break;
+      case 'skillsOverview': if (options.skills) return options.skills.overview(record(args[0])); break;
+      case 'skillsDetail': if (options.skills) return options.skills.detail(record(args[0])); break;
+      case 'skillsSummary': if (options.skills) return options.skills.summary(); break;
+      case 'skillsMutate': if (options.skills) return options.skills.mutate(String(args[0]), record(args[1])); break;
       case 'publicAgentsOverview': if (options.publicAgents) return options.publicAgents.overview(); break;
       case 'publicAgentsConversation': if (options.publicAgents) return options.publicAgents.conversation(args[0] as string, args[1] as string); break;
       case 'publicAgentsMutate': if (options.publicAgents) return options.publicAgents.mutate(args[0] as string, args[1] as Record<string, unknown>); break;
@@ -465,6 +476,14 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const ownPorts = async () => { for (const port of await lockedPorts(stateDir)) towerPorts.add(port); return [...towerPorts]; };
     const publicAgents = new PublicAgentService({ stateDir, runs });
     await publicAgents.start();
+    // Skill files live in the account's home; only the Tower on its own state folder proposes new ones.
+    const skills = new SkillService({ stateDir, homes: skillHomes(stateDir), sessions: () => visible.allSessions(), runs: () => runs.list(),
+      projects: () => (visible.snapshot().groups ?? []).map(group => group.cwd),
+      history: async (session, limit) => (await sessions.detail(runs.nativeSessionId(session.id), undefined, limit))?.messages,
+      model: (request, options) => runAutoPromptModel(request, { stateDir, ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) }),
+      advise: resolve(stateDir) === resolve(defaultStateDir()) });
+    await skills.start();
+    runs.setTurnNotes((_run, session) => skills.turnNotes(session));
     const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), publicAgents: () => publicAgents.projection(), ownPorts,
       // A trigger set up from a controlling computer checks the sharing list as it is when it runs.
       sharing: { check: async path => { await exclusions.reload(); return exclusions.excludesNow(path); }, now: path => exclusions.matcher().excludes(path) }, executor: {
@@ -510,13 +529,13 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         read: async (id, limit, before) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), before, limit)) ?? { messages: [], hasMore: false } : undefined,
         search: async (id, query) => runs.getSession(id) ? (await sessions.search(runs.nativeSessionId(id), query)) ?? { count: 0, matches: [], bytes: 0 } : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
-    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
-      onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || Boolean(tools?.busy()), holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); },
-      quiesce: async () => { tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); await Promise.all([slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush()]); },
-      resume: () => { tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); },
+    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
+      onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || Boolean(tools?.busy()), holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); },
+      quiesce: async () => { tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); await Promise.all([slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush()]); },
+      resume: () => { tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});

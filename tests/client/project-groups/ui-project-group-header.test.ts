@@ -54,7 +54,7 @@ test('the settings menu offers one to four sessions per row and marks the folder
 test('a group that is not a real folder cannot be renamed, pinned, hidden or worked in, but its row width still changes', () => {
   const unknown = { path: '알 수 없음', name: '알 수 없음' };
   assert.equal(disabledCount(header(unknown)), 1);
-  assert.equal(disabledCount(menu(unknown)), 5);
+  assert.equal(disabledCount(menu(unknown)), 6);
   assert.doesNotMatch(menu(unknown), /disabled=""[^>]*aria-label="한 줄에/);
 });
 

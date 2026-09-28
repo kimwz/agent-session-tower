@@ -34,6 +34,7 @@ import { projectSessionStates } from './sessions/snapshot.js';
 import { ProviderCapabilities } from './providers/capabilities.js';
 import { RepositoryMonitor, watchedRepositoryPaths } from './repositories/monitor.js';
 import { installAgentGuidance } from './agent-guidance/install.js';
+import type { SkillDetail, SkillOverview, SkillSummary } from '../shared/skills.js';
 import { startSessionsMcp } from './api/session-tools.js';
 import { overlapsRepository } from '../shared/repositories.js';
 import { RemoteExclusionStore } from './remote/exclusions.js';
@@ -382,6 +383,12 @@ async function main() {
         if (action === 'listener') { await publicListener.configure(body); return { ...await runs.publicAgentsOverview().catch(() => ({ agents: [] })), listener: publicListener.status() }; }
         return { ...await runs.publicAgentsMutate(action, body), listener: publicListener.status() };
       },
+    },
+    skills: {
+      overview: input => runs.skills('skillsOverview', [input]) as Promise<SkillOverview>,
+      detail: input => runs.skills('skillsDetail', [input]) as Promise<SkillDetail>,
+      summary: () => runs.skills('skillsSummary', []) as Promise<SkillSummary>,
+      mutate: (action, body) => runs.skills('skillsMutate', [action, body]) as Promise<SkillOverview>,
     },
     setGroup: async patch => { const group = await groups.set(patch); changed(); return group; },
     enqueue: async (id, prompt, attachments, context) => {

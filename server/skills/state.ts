@@ -1,0 +1,102 @@
+import { mkdir } from 'node:fs/promises';
+import { join } from 'node:path';
+import type { SkillAdvisorSettings, SkillNote, SkillProposal } from '../../shared/skills.js';
+import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+
+/** What Tower keeps about skills beside the skill folders themselves, in `<state>/skills.json`. */
+export interface SkillState {
+  version: 1;
+  /** Skills named in the guidance; a project skill with the project it belongs to. */
+  pinned: { dir: string; cwd?: string }[];
+  settings: SkillAdvisorSettings;
+  proposals: SkillProposal[];
+  notes: SkillNote[];
+  /** Per session, the time of the last owner request the advisor has read. */
+  reflected: Record<string, string>;
+  /** Requests before this were never read one by one; the 7-day analysis covers them. */
+  startedAt: string;
+  calls: { day: string; count: number };
+}
+
+export const MAX_PROPOSALS = 60;
+export const MAX_NOTES = 200;
+const MAX_REFLECTED = 2_000;
+
+export function emptySkillState(now = new Date()): SkillState {
+  return { version: 1, pinned: [], settings: { enabled: true, provider: 'claude' }, proposals: [], notes: [], reflected: {}, startedAt: now.toISOString(), calls: { day: '', count: 0 } };
+}
+
+export class SkillStateStore {
+  private readonly path: string;
+  private state: SkillState = emptySkillState();
+  private writes: Promise<void> = Promise.resolve();
+
+  constructor(private readonly stateDir: string) { this.path = join(stateDir, 'skills.json'); }
+
+  async start(): Promise<void> {
+    await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
+    let saved: unknown;
+    try { saved = await readPrivateJson(this.path, 4_000_000); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') { await this.save(); return; }
+      throw error;
+    }
+    this.state = normalize(saved);
+  }
+
+  get(): SkillState { return this.state; }
+
+  /** Changes the state and writes it; writes are kept in order. */
+  update(change: (state: SkillState) => void): Promise<void> {
+    change(this.state);
+    trim(this.state);
+    return this.save();
+  }
+
+  private save(): Promise<void> {
+    const data = JSON.stringify(this.state, null, 2);
+    this.writes = this.writes.catch(() => {}).then(() => writePrivateJson(this.path, data));
+    return this.writes;
+  }
+}
+
+function trim(state: SkillState): void {
+  state.notes = state.notes.slice(-MAX_NOTES);
+  // Accepted and dismissed proposals go first; they only keep the advisor from proposing them again.
+  while (state.proposals.length > MAX_PROPOSALS) {
+    const index = state.proposals.findIndex(item => item.status !== 'open');
+    state.proposals.splice(index >= 0 ? index : 0, 1);
+  }
+  const reflected = Object.entries(state.reflected);
+  if (reflected.length > MAX_REFLECTED) state.reflected = Object.fromEntries(reflected.sort((a, b) => a[1].localeCompare(b[1])).slice(-MAX_REFLECTED));
+}
+
+const text = (value: unknown, max: number): string => typeof value === 'string' ? value.slice(0, max) : '';
+
+function normalize(value: unknown): SkillState {
+  const input = value && typeof value === 'object' ? value as Partial<SkillState> : {};
+  const state = emptySkillState();
+  if (typeof input.startedAt === 'string') state.startedAt = input.startedAt;
+  if (Array.isArray(input.pinned)) state.pinned = input.pinned.filter(item => item && typeof item.dir === 'string')
+    .map(item => ({ dir: item.dir, ...(typeof item.cwd === 'string' ? { cwd: item.cwd } : {}) }));
+  const settings = input.settings;
+  if (settings && typeof settings === 'object') state.settings = { enabled: settings.enabled !== false, provider: settings.provider === 'codex' ? 'codex' : 'claude' };
+  if (Array.isArray(input.proposals)) state.proposals = input.proposals.filter(item => item && typeof item.id === 'string' && typeof item.name === 'string')
+    .map(item => ({
+      id: item.id, name: text(item.name, 64), description: text(item.description, 1024), body: text(item.body, 64 * 1024),
+      scope: item.scope === 'project' && typeof item.cwd === 'string' ? 'project' as const : 'global' as const,
+      ...(item.scope === 'project' && typeof item.cwd === 'string' ? { cwd: item.cwd } : {}),
+      reason: text(item.reason, 2000), explicit: item.explicit === true,
+      evidence: Array.isArray(item.evidence) ? item.evidence.filter(entry => entry && typeof entry.sessionId === 'string')
+        .map(entry => ({ sessionId: entry.sessionId, title: text(entry.title, 200), at: text(entry.at, 40) })) : [],
+      status: item.status === 'accepted' || item.status === 'dismissed' ? item.status : 'open' as const,
+      createdAt: text(item.createdAt, 40), updatedAt: text(item.updatedAt, 40),
+      ...(typeof item.skillDir === 'string' ? { skillDir: item.skillDir } : {}),
+    }));
+  if (Array.isArray(input.notes)) state.notes = input.notes.filter(item => item && typeof item.note === 'string')
+    .map(item => ({ at: text(item.at, 40), sessionId: text(item.sessionId, 200), title: text(item.title, 200), cwd: text(item.cwd, 4096), note: text(item.note, 600) }));
+  if (input.reflected && typeof input.reflected === 'object') state.reflected = Object.fromEntries(Object.entries(input.reflected).filter(([, at]) => typeof at === 'string'));
+  if (input.calls && typeof input.calls.day === 'string' && Number.isSafeInteger(input.calls.count)) state.calls = { day: input.calls.day, count: input.calls.count };
+  trim(state);
+  return state;
+}

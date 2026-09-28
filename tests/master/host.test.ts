@@ -166,7 +166,7 @@ test('the master stays removable: only these existing files reach into it', asyn
     }
   };
   await mark(join(root, 'client/src'));
-  assert.deepEqual(marked.sort(), ['client/src/auth/AccountPanel.tsx', 'client/src/decisions/DecisionPanel.tsx', 'client/src/notifications/NotificationPanel.tsx', 'client/src/remote/RemotePanel.tsx', 'client/src/triggers/TriggerPanel.tsx']);
+  assert.deepEqual(marked.sort(), ['client/src/auth/AccountPanel.tsx', 'client/src/decisions/DecisionPanel.tsx', 'client/src/notifications/NotificationPanel.tsx', 'client/src/remote/RemotePanel.tsx', 'client/src/skills/SkillsPanel.tsx', 'client/src/triggers/TriggerPanel.tsx']);
   // server/http/server.ts takes the master only as an option and never imports it.
   assert.doesNotMatch(await readFile(join(root, 'server/http/server.ts'), 'utf8'), /from '\.\.\/master\//);
 });
