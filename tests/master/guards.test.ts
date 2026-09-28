@@ -97,3 +97,15 @@ test('kept values stay hidden for as long as the host runs, without ever changin
   assert.equal(vault.hide('printed hunter2-correct-horse again'), `printed ${long} again`);
   assert.throws(() => vault.reveal({ password: long }, '/api/public-agents/password'), /만료/);
 });
+
+test('a value the owner gave stays hidden however many keys pass by, is hidden whole before formats are looked for, and hiding stays fast', () => {
+  const vault = new SecretVault();
+  const password = vault.reference('card-password-never-public');
+  const tricky = vault.reference(`prefix-sk-${'a'.repeat(24)}-password!tail`);
+  const started = Date.now();
+  // Many different keys in a large answer (a lookup table, say): each is hidden, none pushes the owner's values out.
+  for (let index = 0; index < 3000; index++) assert.doesNotMatch(vault.hide(`row ${index}: sk-proj-${String(index).padStart(6, '0')}${'k'.repeat(480)}`), /sk-proj-/);
+  assert.ok(Date.now() - started < 3000, `hiding 3000 rows took ${Date.now() - started} ms`);
+  assert.equal(vault.hide('login with card-password-never-public'), `login with ${password}`);
+  assert.equal(vault.hide(`x prefix-sk-${'a'.repeat(24)}-password!tail y`), `x ${tricky} y`);
+});
