@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { AlertTriangle, ArrowUp, Bell, Bot, Check, ChevronDown, ChevronRight, CircleDashed, ExternalLink, KeyRound, LoaderCircle, Mic, Settings, Square, Volume2, VolumeX, X } from 'lucide-react';
 import type { MasterCard, MasterEntry, MasterOverview, MasterScreenCommand, MasterSpeak } from '../../../shared/master';
 import type { NotificationOverview } from '../../../shared/notifications';
@@ -11,6 +11,7 @@ import { MasterSettingsView } from './MasterSettings';
 import { useWords } from './strings';
 import { post } from './api';
 import { VoiceBar, type VoiceControls } from './VoiceBar';
+import { BottomFollower } from './follow-bottom';
 
 
 interface Props {
@@ -38,16 +39,29 @@ export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose
   const [sending, setSending] = useState(false);
   const [error, setError] = useState('');
   const [settings, setSettings] = useState(false);
-  const scroller = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLDivElement | null>(null);
+  const follower = useRef(new BottomFollower()).current;
   const input = useRef<HTMLTextAreaElement>(null);
   const overview = room.overview;
   const thinking = overview?.state === 'thinking';
 
   useEffect(() => { if (!settings) input.current?.focus(); }, [settings]);
-  useEffect(() => {
-    const element = scroller.current;
-    if (element && element.scrollHeight - element.scrollTop - element.clientHeight < 160) element.scrollTop = element.scrollHeight;
-  }, [room.entries.length, room.draft?.text]);
+  // The timeline opens on the latest and stays there while it grows, unless the owner scrolled up to read.
+  const first = room.entries[0]?.id;
+  useLayoutEffect(() => { if (scroller.current) follower.entriesChanged(scroller.current, first); }, [follower, first, room.entries, room.draft?.text, thinking]);
+  const timeline = useCallback((element: HTMLDivElement | null) => {
+    scroller.current = element;
+    if (!element) return;
+    follower.reset();
+    follower.resized(element);
+    // Text, cards and the panel itself keep settling after the first paint; follow them while at the latest.
+    if (typeof ResizeObserver === 'undefined') return;
+    const sizes = new ResizeObserver(() => follower.resized(element));
+    sizes.observe(element);
+    if (element.firstElementChild) sizes.observe(element.firstElementChild);
+    return () => sizes.disconnect();
+  }, [follower]);
+  const earlier = () => { if (scroller.current) follower.keepPlace(scroller.current, first); void onEarlier(); };
   // Escape inside the panel closes the panel only (not the conversation behind it), and never while composing text.
   const panel = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -74,6 +88,7 @@ export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose
       // Only this message's own id is let go: another may have been sent from a panel opened meanwhile.
       if (unconfirmed?.id === messageId) unconfirmed = undefined;
       setText('');
+      follower.follow(scroller.current ?? undefined);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setSending(false); }
   };
@@ -93,13 +108,13 @@ export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose
       <button className="icon-button" onClick={onClose} aria-label={words('닫기', 'Close')} title={words('닫기', 'Close')}><X size={16} /></button>
     </header>
     {settings || (overview && !configured) ? <MasterSettingsView token={token} overview={overview} onDone={() => setSettings(false)} /> : <>
-      <div className="master-timeline" ref={scroller}>
-        {room.hasMore && <button className="master-earlier" onClick={() => void onEarlier()}>{words('이전 대화 보기', 'Show earlier')}</button>}
+      <div className="master-timeline" ref={timeline} onScroll={event => follower.scrolled(event.currentTarget)}><div className="master-timeline-body">
+        {room.hasMore && <button className="master-earlier" onClick={earlier}>{words('이전 대화 보기', 'Show earlier')}</button>}
         {!room.entries.length && !room.draft && <div className="master-empty"><Bot size={26} /><p>{words('Tower에서 하던 일을 말로 시켜 보세요. 예: "지금 작업 중인 세션 알려줘", "monitor에 세션 열어서 로그인 버그 고쳐줘".', 'Ask Tower in plain words. For example: "What is working right now?", "Open a session in monitor and fix the login bug."')}</p></div>}
         <Timeline entries={room.entries} token={token} tabId={tabId} onOpenSession={onOpenSession} onCommand={onCommand} />
         {room.draft?.text && <div className="master-message master"><Markdown>{room.draft.text}</Markdown><span className="master-cursor" /></div>}
         {thinking && !room.draft?.text && <div className="master-thinking"><LoaderCircle size={14} className="spin" />{words('생각하는 중', 'Thinking')}</div>}
-      </div>
+      </div></div>
       {(error || room.error) && <div className="master-error" role="alert"><AlertTriangle size={13} />{error || room.error}</div>}
       <VoiceBar voice={voice} />
       <div className="master-composer">

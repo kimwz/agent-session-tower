@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.58.6] - 2026-09-28
+
+### Fixed
+- **The master conversation opens on its latest message.** Opening the master panel often left the conversation at the top or partway up, because it only followed new messages when it already happened to be near the end, and the panel starts at the top. It now opens at the latest message and stays there while messages arrive, replies stream in, and text and cards finish laying out. Once you scroll up to read, new messages no longer pull you down; scrolling back to the end, or sending a message, follows the latest again. **Show earlier** keeps the message you were looking at in place instead of jumping to the oldest one.
+
 ## [1.58.5] - 2026-09-28
 
 ### Changed

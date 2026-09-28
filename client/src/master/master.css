@@ -24,7 +24,8 @@
 .master-state { flex:1; font-size:11px; color:var(--muted); }
 .master-state.thinking { color:var(--teal); }
 .master-state.unconfigured { color:var(--amber); }
-.master-timeline { flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:10px; }
+.master-timeline { flex:1; min-height:0; overflow-y:auto; overflow-anchor:none; padding:12px; }
+.master-timeline-body { min-height:100%; display:flex; flex-direction:column; gap:10px; }
 .master-empty { margin:auto; max-width:300px; text-align:center; color:var(--muted); font-size:13px; line-height:1.5; }
 .master-empty svg { opacity:.6; }
 .master-earlier { align-self:center; border:1px solid var(--line); background:transparent; color:var(--muted); border-radius:14px; padding:4px 12px; font-size:12px; cursor:pointer; }
