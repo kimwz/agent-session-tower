@@ -384,7 +384,7 @@ export class MasterVoice {
     // Judged and recorded together: nothing else can start making audio in between.
     if (!parts.length || this.session !== session || !this.alive(session) || this.limited(Date.now(), chars * ttsDollarsPerChar(model))) { this.setSpeak(entry, { ...speak, state: 'unspoken' }); return; }
     const live = this.synthesize(parts);
-    if (!await this.firstChunk(live) || this.session !== session) { this.setSpeak(entry, { ...speak, state: 'unspoken' }); return; }
+    if (!await this.firstChunk(live) || this.session !== session) { this.abandon(live); this.setSpeak(entry, { ...speak, state: 'unspoken' }); return; }
     this.setSpeak(entry, { ...speak, state: 'playing' });
     const result = await this.play(session, { kind: speak.session ? 'answer' : 'report', text, audio: live.id }, this.timing.playMs + chars * MS_PER_CHAR);
     // Not heard to the end (skipped, voice ended, or given up on): the parts not made yet are not asked for.
@@ -596,9 +596,11 @@ export class MasterVoice {
    */
   private cutOff(res: ServerResponse): void {
     const socket = res.socket;
-    if (!socket || socket.destroyed || (!socket.writableLength && !res.writableLength)) { res.destroy(); return; }
+    if (!socket || socket.destroyed) { res.destroy(); return; }
+    // Ending the connection (not the response) sends what is queued first; the page sees a response cut short.
     const timer = setTimeout(() => res.destroy(), this.timing.waitMs);
-    socket.once('drain', () => { clearTimeout(timer); res.destroy(); });
+    socket.once('close', () => clearTimeout(timer));
+    socket.end();
   }
 
   /**
@@ -681,6 +683,9 @@ export class MasterVoice {
     const reserved = this.file.tokens.length * UTTERANCE_SECONDS * STT_DOLLARS_PER_SECOND;
     return (this.file.days[localDay(now)]?.dollars ?? 0) + reserved;
   }
+
+  /** Whether today's limit is already reached, so nothing more would be read aloud. */
+  spentOut(): boolean { return this.limited(Date.now(), 0); }
 
   /** Whether spending `more` now would pass the daily limit (when there is one). */
   private limited(now: number, more: number): boolean {

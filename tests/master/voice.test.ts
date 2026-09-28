@@ -36,7 +36,7 @@ const stop = (server: Server) => new Promise<void>(resolve => { server.closeAllC
 async function fakeElevenLabs() {
   const state = {
     tokens: 0, speeches: [] as Array<{ voice: string; body: Record<string, unknown>; key?: string }>, deletes: [] as string[], keys: [] as string[],
-    mode: 'ok' as 'ok' | 'cut' | 'error', fail: (_text: string) => false, silent: (_text: string) => false, chunks: [Buffer.from('ID3-first-'), Buffer.from('second-part')], gapMs: 20,
+    mode: 'ok' as 'ok' | 'cut' | 'error', fail: (_text: string) => false, silent: (_text: string) => false, lagMs: 0, chunks: [Buffer.from('ID3-first-'), Buffer.from('second-part')], gapMs: 20,
   };
   const server = createServer(async (req: IncomingMessage, res) => {
     const chunks: Buffer[] = [];
@@ -52,6 +52,7 @@ async function fakeElevenLabs() {
       if (state.mode === 'error' || state.fail(String(state.speeches.at(-1)!.body.text))) { res.writeHead(500).end('no'); return; }
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `h${state.speeches.length}` });
       if (state.silent(String(state.speeches.at(-1)!.body.text))) { res.end(); return; }
+      if (state.lagMs) await sleep(state.lagMs);
       res.write(state.chunks[0]);
       await sleep(state.gapMs);
       if (state.mode === 'cut') { res.destroy(); return; }
@@ -315,7 +316,7 @@ test('an answer to a spoken request is read aloud where voice is on and marked p
 });
 
 test('audio streams to the page as it is made; cut-off audio cuts the page off, and a page gone leaves nothing waiting', async t => {
-  const h = await harness(t, { steps: [[say('답 하나.')], [say('답 둘.')], [say('답 셋.')]] });
+  const h = await harness(t, { steps: [[say('답 하나.')], [say('답 둘.')], [say('답 셋.')]], timing: { waitMs: 10_000 } });
   const { fetchAudio, port: audioPort } = await audioServer(t, h.voice);
   const session = on(h);
   h.labs.gapMs = 200;
@@ -336,7 +337,9 @@ test('audio streams to the page as it is made; cut-off audio cuts the page off, 
   assert.equal(cut.body.toString(), 'ID3-first-');
   assert.equal(h.voice.listeners(second.audio.split('/').at(-1)!), 0);
   // A page that comes only after the audio failed still gets what was made before its connection is cut.
+  const lateAt = Date.now();
   const late = await fetchAudio(second.audio.split('/').at(-1)!);
+  assert.ok(Date.now() - lateAt < 3_000, 'cut off once sent, not after a wait');
   assert.equal(late.complete, false);
   assert.equal(late.body.toString(), 'ID3-first-');
   // A slow page that stops reading and then goes away leaves nothing waiting.
@@ -445,6 +448,21 @@ test('a long answer skipped partway stops being made: the parts not yet asked fo
   const paid = h.voice.status().today.ttsChars;
   assert.ok(paid >= asked && paid <= asked + 520, `${paid} for ${asked} asked`);
   assert.ok(paid < all.reduce((sum, part) => sum + part.length, 0) / 2);
+});
+
+test('an answer whose sound does not start in time is not made further', async t => {
+  const answer = Array.from({ length: 30 }, (_, index) => `${index + 1}번째 문장은 조금 길게 이어지는 설명입니다.`).join(' ');
+  const h = await harness(t, { steps: [[say(answer)]], timing: { firstChunkMs: 100 } });
+  const session = on(h);
+  h.labs.chunks = [mp3('a'), Buffer.from('b')];
+  h.labs.gapMs = 5;
+  h.labs.lagMs = 300;
+  await request(h, session, '길게 알려줘');
+  const entry = await masterEntry(h, /30번째/);
+  await until(() => h.speakOf(entry.id)?.state === 'unspoken');
+  await sleep(800);
+  assert.equal(readings(h).length, 1, 'only the first part was asked for');
+  assert.equal(h.says().filter(item => item.kind === 'answer').length, 0);
 });
 
 test('a later part that comes back without sound is asked for again, never skipped', async t => {
@@ -590,6 +608,10 @@ test('an answer is heard whole: every paragraph, list item and table cell, witho
   assert.equal(speakable('앞\n~~~\nx\n~~~\n뒤'), '앞. 코드는 화면에 있어요. 뒤.');
   // Arithmetic keeps its sign, markup tags are not read, and a bar in a sentence is not a table.
   assert.equal(speakable('*참고*: 2*3=6'), '참고: 2*3=6.');
+  assert.equal(speakable('2 * 3 = 6'), '2 * 3 = 6.');
+  // A fence is a line of its own mark; a longer fence holds shorter ones, and backticks on a line are text.
+  assert.equal(speakable('```foo``` is the value. And more.'), 'foo is the value. And more.');
+  assert.equal(speakable('````\n```js\nx\n```\n````\n뒤'), '코드는 화면에 있어요. 뒤.');
   assert.equal(speakable('<details><summary>로그</summary>내용</details>'), '로그 내용.');
   assert.equal(speakable('A | B 중 하나예요.'), 'A | B 중 하나예요.');
 });

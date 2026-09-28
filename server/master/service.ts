@@ -378,7 +378,7 @@ export class MasterService {
       };
 
       // Only what Tower itself says is the developer's; the conversation keeps its roles, and everything else read is data.
-      const spoken = turn.scope.cause === 'owner' ? voice && VOICE_TURN : this.voice?.speaks(true) === 'pending' && VOICE_NEWS;
+      const spoken = turn.scope.cause === 'owner' ? voice && VOICE_TURN : this.voice?.speaks(true) === 'pending' && !this.voice.spentOut() && VOICE_NEWS;
       const developer = [`Now: ${new Date().toISOString()}`, spoken || ''].filter(Boolean).join('\n');
       const data = [digest ? `[data] ${digest}` : '', this.context(inputs)].filter(Boolean).join('\n\n');
       const attached = await this.files(inputs);

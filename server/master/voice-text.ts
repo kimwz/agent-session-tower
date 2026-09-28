@@ -76,17 +76,19 @@ export function speakable(text: string): string {
     .replace(/\p{Extended_Pictographic}\uFE0F?/gu, '')
     .split('\n');
   const said: string[] = [];
-  let code = false;
+  // A code block is pointed to once. It opens with a line of three or more backticks or tildes (backticks not
+  // repeated after them), and closes only with a line of the same mark, at least as long, and nothing else.
+  let fence = '';
   for (const raw of lines) {
-    // A code block, fenced on lines of its own, is pointed to once; backticks within a line are not a fence.
-    if (/^\s*(```|~~~)/.test(raw)) { if (!code) said.push('코드는 화면에 있어요.'); code = !code; continue; }
-    if (code) continue;
+    if (fence) { if (new RegExp(`^ {0,3}${fence[0] === '`' ? '`' : '~'}{${fence.length},}\\s*$`).test(raw)) fence = ''; continue; }
+    const open = /^ {0,3}(`{3,}(?=[^`]*$)|~{3,})/.exec(raw);
+    if (open) { fence = open[1]; said.push('코드는 화면에 있어요.'); continue; }
     // A table's divider row says nothing.
     if (/^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(raw)) continue;
     let line = raw.trim().replace(/^#{1,6}\s+/, '').replace(/^(>\s*)+/, '').replace(/^[-*+•]\s+/, '').replace(/^(\[[ xX]\])\s+/, '');
     // A table row starts with a bar or has several; a bar in a sentence is read as it is.
     if (line.startsWith('|') || (line.match(/\|/g)?.length ?? 0) >= 2) line = line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim()).filter(Boolean).join(', ');
-    line = line.replace(/\*\*|__|~~|`/g, '').replace(/\*(?!\d)|(?<!\d)\*/g, '').replace(/(\w)_(?=\w)/g, '$1 ').replace(/_/g, '').replace(/\s+/g, ' ').trim();
+    line = line.replace(/\*\*|__|~~|`/g, '').replace(/\*(?!\s?\d)|(?<!\d\s?)\*/g, '').replace(/(\w)_(?=\w)/g, '$1 ').replace(/_/g, '').replace(/\s+/g, ' ').trim();
     if (!line) continue;
     said.push(/[.!?…。:;]["'”’)]*$/.test(line) ? line : `${line}.`);
   }
