@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.53.1] - 2026-09-28
+
+### Fixed
+- **The master finishes what it is writing before it closes.** When its process stepped aside, a turn or a check of finished work could still be saving the conversation. Closing now waits for both, and neither starts again once it has begun.
+
 ## [1.53.0] - 2026-09-28
 
 ### Added
