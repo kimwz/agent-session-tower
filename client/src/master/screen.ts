@@ -44,6 +44,7 @@ export function runScreenCommand(command: MasterScreenCommand, controls: MasterC
       }
       break;
     }
+    default: return { result: 'failed', note: 'This page does not know that command.' };
   }
   return { result: 'done' };
 }

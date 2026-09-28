@@ -501,8 +501,9 @@ export class MasterService {
   private async ui(args: Record<string, unknown>, turn: Turn): Promise<unknown> {
     let command: MasterScreenCommand;
     try { command = screenCommand(args); } catch (error) { return { error: (error as Error).message }; }
-    // What goes to the page (a prefilled request, a search) and into a card is hidden like everything shown.
-    command = hideStrings(command, text => this.hideText(text));
+    // What goes to the page as text (a prefilled request, a search) and into a card is hidden like everything shown;
+    // what says which command it is stays as it is.
+    command = hideContent(command, text => this.hideText(text));
     if (!this.options.settings.current().showResults && (command.kind === 'openSession' || command.kind === 'openPanel')) {
       this.options.room.add({ kind: 'card', card: { type: 'open', label: truncate(this.hideText(openLabel(command)), 120), command } });
       return { result: 'card', note: 'Opening things on the screen is off in the settings; the owner got a button to open it.' };
@@ -868,9 +869,10 @@ function plainTerminal(output: string): string {
     .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
 }
 
-/** Every string in a plain value passed through `hide`. */
-function hideStrings<T>(value: T, hide: (text: string) => string): T {
-  const walk = (item: unknown): unknown => typeof item === 'string' ? hide(item) : Array.isArray(item) ? item.map(walk)
-    : item && typeof item === 'object' ? Object.fromEntries(Object.entries(item).map(([key, child]) => [key, walk(child)])) : item;
-  return walk(value) as T;
+/** A screen command with its free text (folder, title, request, search) passed through `hide`, its controls kept. */
+function hideContent(command: MasterScreenCommand, hide: (text: string) => string): MasterScreenCommand {
+  const text = (value: string | undefined) => value === undefined ? undefined : hide(value);
+  if (command.kind === 'openPanel') return { ...command, ...(command.cwd !== undefined ? { cwd: text(command.cwd) } : {}), ...(command.title !== undefined ? { title: text(command.title) } : {}), ...(command.prompt !== undefined ? { prompt: text(command.prompt) } : {}) };
+  if (command.kind === 'filter') return { ...command, filter: { ...command.filter, ...(command.filter.query !== undefined ? { query: text(command.filter.query) } : {}), ...(command.filter.project !== undefined ? { project: text(command.filter.project) } : {}) } };
+  return command;
 }

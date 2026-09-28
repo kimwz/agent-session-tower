@@ -905,6 +905,26 @@ test('Tower never hands the model a card value: not in results, errors, earlier 
   assert.equal(tower.seen.length, 0, 'nothing went out with a card value in it');
 });
 
+test('a card value that happens to be a command\'s name leaves the command working; only its text is hidden', async t => {
+  const { service, room, said } = await master(t, () => ({ body: {} }), [
+    [call('request_secret', { purpose: 'word' })],
+    [say('카드를 드렸습니다.')],
+    [say('받았습니다.')],
+    [call('ui', { action: 'openPanel', panel: 'newSession', cwd: '/w', prompt: 'openPanel please' })],
+    [say('열었습니다.')],
+  ]);
+  const seen = screen(room, () => ({ result: 'done' }), () => service);
+  await service.send({ clientMessageId: 'message-0220', text: '단어 받아줘', local: true });
+  await said(/카드를 드렸습니다/);
+  await service.card(room.recent(20).find(entry => entry.data.kind === 'card')!.id, { value: 'openPanel' }, true);
+  await said(/받았습니다/);
+  await service.send({ clientMessageId: 'message-0221', text: '새 세션 창 열어줘', local: true, viewContext: { tabId: 'tab-o' } });
+  await said(/열었습니다/);
+  assert.equal(seen[0].kind, 'openPanel');
+  assert.equal(seen[0].kind === 'openPanel' && seen[0].panel, 'newSession');
+  assert.match(seen[0].kind === 'openPanel' ? String(seen[0].prompt) : '', /^\{\{secret:[a-f0-9]{16}\}\} please$/);
+});
+
 test('a notifications card records how it went on the device that pressed it', async t => {
   const { service, room, said } = await master(t, () => ({ body: {} }), [
     [call('browser_action', { kind: 'push-subscribe' })],
