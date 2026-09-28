@@ -131,13 +131,29 @@ test('no reference is dropped before it expires, however many keys an answer hol
   const vault = new SecretVault();
   const pasted = 'sk-proj-pastedpastedpastedpasted0001';
   const read = 'sk-proj-readfromafilereadfromafile0002';
-  const mine = /\{\{secret:[a-f0-9]{16}\}\}/.exec(vault.hide(`my key ${pasted}`, 'owner'))![0];
+  const mine = /\{\{secret:[a-f0-9]{16}\}\}/.exec(vault.hide(`my key ${pasted}`, 'pasted'))![0];
   const theirs = /\{\{secret:[a-f0-9]{16}\}\}/.exec(vault.hide(`.env: ${read}`))![0];
   const started = Date.now();
   for (let index = 0; index < 25_000; index++) assert.doesNotMatch(vault.hide(`sk-proj-${String(index).padStart(8, '0')}${'k'.repeat(24)}`), /sk-proj-/);
   assert.ok(Date.now() - started < 5000, `25000 keys took ${Date.now() - started} ms`);
   assert.deepEqual(vault.reveal({ apiKey: mine }, '/api/decisions/settings'), { apiKey: pasted });
   assert.deepEqual(vault.reveal({ apiKey: theirs }, '/api/decisions/settings'), { apiKey: read });
-  // The owner's pasted key is hidden wherever it shows up, even out of its format's reach.
-  assert.doesNotMatch(vault.hide(`x${pasted}`), /pastedpasted/);
+});
+
+test('a card value is hidden in the names of an answer\'s fields too, and a reference goes back only at the exact secret field', () => {
+  const vault = new SecretVault();
+  const ref = vault.reference('card-password-never-public');
+  assert.deepEqual(vault.redactInResponse({ 'card-password-never-public': 'denied' }), { [ref]: 'denied' });
+  assert.deepEqual(vault.hideInResponse('/api/runs/r', { input: { 'card-password-never-public': 1 } }), { input: { [ref]: 1 } });
+  assert.throws(() => vault.reveal({ 'secret.value': ref }, '/api/v1/secrets.create'), /secret\.value/);
+  assert.throws(() => vault.reveal({ secret: [{ value: ref }] }, '/api/v1/secrets.create'), /secret\.value/);
+  assert.deepEqual(vault.reveal({ secret: { name: 'n', origin: 'https://a.example', value: ref } }, '/api/v1/secrets.create'), { secret: { name: 'n', origin: 'https://a.example', value: 'card-password-never-public' } });
+});
+
+test('pasted keys stay bounded: many in the owner\'s messages neither grow the vault without end nor slow hiding down', () => {
+  const vault = new SecretVault();
+  for (let message = 0; message < 10; message++) vault.hide(Array.from({ length: 750 }, (_, index) => `sk-proj-${String(message * 1000 + index).padStart(8, '0')}${'p'.repeat(24)}`).join(' '), 'pasted');
+  const started = Date.now();
+  for (let index = 0; index < 20_000; index++) vault.hide(`sk-proj-read${String(index).padStart(8, '0')}${'r'.repeat(24)}`);
+  assert.ok(Date.now() - started < 3000, `20000 keys took ${Date.now() - started} ms`);
 });

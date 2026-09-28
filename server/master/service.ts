@@ -166,7 +166,7 @@ export class MasterService {
     const existing = known && room.get(known.id);
     if (existing) return existing;
     // Keys the owner pastes are theirs; values typed into a secret card are hidden here too, whatever the setting.
-    const text = settings.current().guards.hideSecrets ? this.vault.hide(input.text, 'owner') : this.vault.redact(input.text);
+    const text = settings.current().guards.hideSecrets ? this.vault.hide(input.text, 'pasted') : this.vault.redact(input.text);
     const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: input.clientMessageId, text, local: input.local, ...(input.viewContext ? { viewContext: input.viewContext } : {}), at: new Date().toISOString(), state: 'queued', retries: 0 };
     if (input.viewContext?.tabId) this.lastTab = input.viewContext.tabId;
     const entry = room.add({ kind: 'owner', text, ...(input.viewContext?.tabId ? { clientId: input.viewContext.tabId } : {}) }, item.id);
@@ -545,8 +545,9 @@ export class MasterService {
       if (body.dismiss === true) return room.update(id, { kind: 'card', card: { ...card, state: 'dismissed' } }) ?? entry;
       const value = body.value;
       if (typeof value !== 'string' || value.length > 4096 || /[\x00-\x1f\x7f]/.test(value)) throw Object.assign(new Error('값이 올바르지 않습니다.'), { statusCode: 400 });
-      // A shorter value could not be found and hidden reliably wherever it shows up.
+      // A shorter value could not be found and hidden reliably wherever it shows up, nor one that reads like a reference.
       if (value.length < SHORTEST_SECRET) throw Object.assign(new Error(`비밀 값은 ${SHORTEST_SECRET}자 이상이어야 합니다.`), { statusCode: 400 });
+      if (value.includes('{{secret:')) throw Object.assign(new Error('비밀 값에 {{secret:를 넣을 수 없습니다.'), { statusCode: 400 });
       const updated = room.update(id, { kind: 'card', card: { ...card, state: 'provided' } }) ?? entry;
       // The tab that answered is where the owner is now: what follows is shown there.
       const tabId = typeof body.tabId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(body.tabId) ? body.tabId : undefined;

@@ -17,30 +17,32 @@ const PATTERNS: RegExp[] = [
   /(?<![A-Za-z0-9])jev_[A-Za-z0-9_-]{16,}/g,
 ];
 const REFERENCE = /\{\{secret:([a-f0-9]{16})\}\}/g;
-/** How long a reference may be used in a request. The value itself stays hidden for as long as the host runs. */
+/** How long a reference may be used in a request. A value the owner gave stays hidden for as long as the host runs. */
 const LIFETIME_MS = 30 * 60_000;
 /**
- * Values found by their format in answers and files that are kept to put back. None is dropped before its
- * reference expires; past this, a further one is still hidden but gets a reference that cannot be put back.
+ * How many keys found by their format are kept to put back: those the owner pasted, and those read in answers and
+ * files. None is dropped before its reference expires; past the limit a further key is still hidden, under a
+ * reference that cannot be put back.
  */
-const MAX_FOUND = 20_000;
+const MAX_PASTED = 1_000;
+const MAX_READ = 20_000;
 /** Secret-by-nature values from answers (join codes) hidden everywhere; the oldest go first past this. */
 const MAX_ANSWERED = 200;
 /** Values shorter than this are not searched for in text: they would match ordinary words. A card takes no shorter value. */
 export const SHORTEST_SECRET = 8;
 
 /**
- * Where each request takes a secret: the only fields a reference is put back into, as `a.b` key paths. Anywhere
- * else (a title, a prompt, a secret's name or address) Tower would keep or show it openly, so it is refused. Routes
- * are matched after `/api/nodes/<id>` is removed.
+ * Where each request takes a secret: the only fields a reference is put back into, as exact key paths (array items
+ * are not fields). Anywhere else (a title, a prompt, a secret's name or address) Tower would keep or show it openly,
+ * so it is refused. Routes are matched after `/api/nodes/<id>` is removed.
  */
-const SECRET_REQUEST_FIELDS: Array<{ route: RegExp; fields: string[] }> = [
-  { route: /^\/api\/slack\/connect$/, fields: ['appToken', 'userToken'] },
-  { route: /^\/api\/decisions\/settings$/, fields: ['apiKey'] },
-  { route: /^\/api\/public-agents\/(create|password)$/, fields: ['password'] },
-  { route: /^\/api\/auth\/credentials$/, fields: ['password'] },
-  { route: /^\/api\/v1\/secrets\.create$/, fields: ['secret.value'] },
-  { route: /^\/api\/link\/join$/, fields: ['code'] },
+const SECRET_REQUEST_FIELDS: Array<{ route: RegExp; fields: string[][] }> = [
+  { route: /^\/api\/slack\/connect$/, fields: [['appToken'], ['userToken']] },
+  { route: /^\/api\/decisions\/settings$/, fields: [['apiKey']] },
+  { route: /^\/api\/public-agents\/(create|password)$/, fields: [['password']] },
+  { route: /^\/api\/auth\/credentials$/, fields: [['password']] },
+  { route: /^\/api\/v1\/secrets\.create$/, fields: [['secret', 'value']] },
+  { route: /^\/api\/link\/join$/, fields: [['code']] },
 ];
 
 /**
@@ -55,54 +57,58 @@ const SECRET_FIELDS: Array<{ path: RegExp; fields: string[] }> = [
 const localRoute = (route: string) => route.replace(/^\/api\/nodes\/[a-f0-9]{32}\//, '/api/');
 const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-interface Kept { value: string; at: number; source: 'owner' | 'answer' | 'format' }
+/** Where a value came from: a secret card, a secret-by-nature answer field, a key the owner pasted, or one read. */
+type Source = 'card' | 'answer' | 'pasted' | 'read';
+interface Kept { value: string; at: number; source: Source }
+const HIDDEN_EVERYWHERE: ReadonlySet<Source> = new Set(['card', 'answer']);
 
 /**
  * Keeps secret values out of what the model reads and writes. Each value becomes `{{secret:<ref>}}`; the reference
- * is swapped back only into a request's secret field, just before it is sent. Values live in memory only.
+ * is swapped back only into a request's exact secret field, just before it is sent. Values live in memory only.
  *
- * Values the owner gave on purpose (a secret card) are hidden wherever they show up, for as long as the host runs,
- * and are never dropped; so are values secret by nature in an answer (a join code), the latest `MAX_ANSWERED`.
- * Keys the owner pastes into a message count as given by the owner too. Keys found by their format in answers and
- * files are hidden by that format wherever it shows, and kept so their reference can be put back until it expires.
- * Hiding is best effort: a secret in an unknown format that the owner did not give through a card is not recognised.
+ * A value the owner typed into a secret card is hidden wherever it shows up, in text and in the names and values of
+ * answers, for as long as the host runs, and is never dropped; so are secret-by-nature values in answers (join
+ * codes), the latest `MAX_ANSWERED`. Keys found by their format, pasted by the owner or read, are hidden by that
+ * format wherever it shows, and kept so their reference can be put back until it expires. Hiding is best effort: a
+ * secret in an unknown format that did not come through a card is not recognised.
  */
 export class SecretVault {
-  private readonly given = new Map<string, Kept>();
-  private readonly found = new Map<string, Kept>();
-  /** Each kept value's reference, of either kind. */
+  /** Every kept value by reference; a Map keeps the order values were last seen. */
+  private readonly kept = new Map<string, Kept>();
+  /** Each kept value's reference. */
   private readonly refs = new Map<string, string>();
-  private givenPattern?: RegExp;
+  private readonly counts: Record<Source, number> = { card: 0, answer: 0, pasted: 0, read: 0 };
+  private everywhere?: RegExp | null;
 
   /**
-   * Hides the owner's given values first (whole, so no format inside one splits it), then recognised formats. In the
-   * owner's own message (`source` 'owner') a recognised key counts as given by the owner.
+   * Hides the values the owner gave first (whole, so no format inside one splits it), then recognised formats. In the
+   * owner's own message (`source` 'pasted') a recognised key is kept as theirs.
    */
-  hide(text: string, source: 'owner' | 'format' = 'format'): string {
+  hide(text: string, source: 'pasted' | 'read' = 'read'): string {
     return outsideReferences(this.redact(text), part => PATTERNS.reduce((result, pattern) => result.replace(pattern, match => `{{secret:${this.keep(match, source)}}}`), part));
   }
 
-  /** Hides only the values the owner gave, whatever the settings: they are never shown back. */
+  /** Hides only the values hidden everywhere (cards, secret answer fields), whatever the settings. */
   redact(text: string): string {
     const pattern = this.pattern();
     return pattern ? outsideReferences(text, part => part.replace(pattern, match => `{{secret:${this.refs.get(match)}}}`)) : text;
   }
 
-  /** `redact` over any JSON value. */
+  /** `redact` over any JSON value, names of fields included. */
   redactInResponse(value: unknown): unknown {
     const walk = (item: unknown): unknown => typeof item === 'string' ? this.redact(item) : Array.isArray(item) ? item.map(walk)
-      : item && typeof item === 'object' ? Object.fromEntries(Object.entries(item).map(([key, child]) => [key, walk(child)])) : item;
+      : item && typeof item === 'object' ? Object.fromEntries(Object.entries(item).map(([key, child]) => [this.redact(key), walk(child)])) : item;
     return walk(value);
   }
 
-  /** Hides secrets in any JSON value, including the fields of `path`'s answer that are secret by nature. */
+  /** Hides secrets in any JSON value, names of fields included, and the fields of `path`'s answer secret by nature. */
   hideInResponse(path: string, value: unknown): unknown {
     const fields = SECRET_FIELDS.find(item => item.path.test(localRoute(path)))?.fields ?? [];
     const walk = (item: unknown): unknown => {
       if (typeof item === 'string') return this.hide(item);
       if (Array.isArray(item)) return item.map(walk);
       if (item && typeof item === 'object') {
-        return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, fields.includes(key) && typeof child === 'string' ? `{{secret:${this.keep(child, 'answer')}}}` : walk(child)]));
+        return Object.fromEntries(Object.entries(item).map(([key, child]) => [this.hide(key), fields.includes(key) && typeof child === 'string' ? `{{secret:${this.keep(child, 'answer')}}}` : walk(child)]));
       }
       return item;
     };
@@ -110,89 +116,88 @@ export class SecretVault {
   }
 
   /**
-   * Puts the values back into the body of a request to `route`, only in that request's secret fields; an unknown
-   * or expired reference, or one anywhere else, is an error.
+   * Puts the values back into the body of a request to `route`, only in that request's exact secret fields; an
+   * unknown or expired reference, or one anywhere else, is an error.
    */
   reveal(value: unknown, route: string): unknown {
-    const allowed = SECRET_REQUEST_FIELDS.find(item => item.route.test(localRoute(route)))?.fields ?? [];
-    const walk = (item: unknown, path: string[]): unknown => {
+    const allowed = (SECRET_REQUEST_FIELDS.find(item => item.route.test(localRoute(route)))?.fields ?? []).map(path => JSON.stringify(path));
+    const walk = (item: unknown, path: Array<string | number>): unknown => {
       if (typeof item === 'string') {
         if (!item.match(REFERENCE)) return item;
-        if (!allowed.includes(path.join('.'))) {
-          throw Object.assign(new Error(allowed.length ? `비밀 값 참조는 이 요청의 비밀 칸(${allowed.join(', ')})에만 넣을 수 있습니다.` : '이 요청에는 비밀 값을 넣을 칸이 없습니다.'), { statusCode: 400 });
+        if (!allowed.includes(JSON.stringify(path))) {
+          const names = (SECRET_REQUEST_FIELDS.find(entry => entry.route.test(localRoute(route)))?.fields ?? []).map(field => field.join('.'));
+          throw Object.assign(new Error(names.length ? `비밀 값 참조는 이 요청의 비밀 칸(${names.join(', ')})에만 넣을 수 있습니다.` : '이 요청에는 비밀 값을 넣을 칸이 없습니다.'), { statusCode: 400 });
         }
         return item.replace(REFERENCE, (_match, ref: string) => {
-          const kept = this.given.get(ref) ?? this.found.get(ref);
+          const kept = this.kept.get(ref);
           if (!kept || Date.now() - kept.at > LIFETIME_MS) throw Object.assign(new Error('비밀 값 참조가 만료되었습니다. 값을 다시 입력해 달라고 요청하세요.'), { statusCode: 400 });
           return kept.value;
         });
       }
-      if (Array.isArray(item)) return item.map(child => walk(child, path));
+      if (Array.isArray(item)) return item.map((child, index) => walk(child, [...path, index]));
       if (item && typeof item === 'object') return Object.fromEntries(Object.entries(item).map(([key, child]) => [key, walk(child, [...path, key])]));
       return item;
     };
     return walk(value, []);
   }
 
-  /** A reference for a value the owner gave on purpose (a secret card), whatever its format. */
-  reference(value: string): string { return `{{secret:${this.keep(value, 'owner')}}}`; }
+  /** A reference for a value the owner typed into a secret card, whatever its format. */
+  reference(value: string): string { return `{{secret:${this.keep(value, 'card')}}}`; }
 
-  private keep(value: string, source: Kept['source']): string {
-    const given = source !== 'format';
+  private keep(value: string, source: Source): string {
+    const now = Date.now();
     const known = this.refs.get(value);
     if (known) {
-      const kept = this.given.get(known) ?? this.found.get(known)!;
-      kept.at = Date.now();
-      // Seen again, it becomes the most recent of its kind; a value the owner gives is theirs from now on.
-      const was = this.given.has(known) ? this.given : this.found;
-      was.delete(known);
-      if (given && (kept.source === 'format' || source === 'owner')) kept.source = source;
-      (kept.source === 'format' ? this.found : this.given).set(known, kept);
-      if (was !== this.found || kept.source !== 'format') this.givenPattern = undefined;
-      this.trim();
+      const kept = this.kept.get(known)!;
+      // A value seen again is the most recent; one the owner now gives on a card is theirs from then on.
+      this.kept.delete(known);
+      kept.at = now;
+      if (rank(source) > rank(kept.source)) {
+        this.counts[kept.source]--;
+        this.counts[source]++;
+        kept.source = source;
+        if (HIDDEN_EVERYWHERE.has(source)) this.everywhere = undefined;
+      }
+      this.kept.set(known, kept);
       return known;
     }
-    if (!given) {
-      this.expireFound();
-      // Full of references still in use: the value is hidden all the same, under a reference that cannot be put back.
-      if (this.found.size >= MAX_FOUND) return randomBytes(8).toString('hex');
-    }
+    const limit = source === 'pasted' ? MAX_PASTED : source === 'read' ? MAX_READ : source === 'answer' ? MAX_ANSWERED : Infinity;
+    if (this.counts[source] >= limit) this.drop(source, source === 'answer' ? Infinity : LIFETIME_MS);
     const ref = randomBytes(8).toString('hex');
-    (given ? this.given : this.found).set(ref, { value, at: Date.now(), source });
+    // Full of references still in use: the key is hidden all the same, under a reference that cannot be put back.
+    if (this.counts[source] >= limit) return ref;
+    this.kept.set(ref, { value, at: now, source });
     this.refs.set(value, ref);
-    if (given) this.givenPattern = undefined;
-    this.trim();
+    this.counts[source]++;
+    if (HIDDEN_EVERYWHERE.has(source)) this.everywhere = undefined;
     return ref;
   }
 
-  /** Drops found values whose reference has expired, least recently seen first. */
-  private expireFound(): void {
+  /** Drops values of `source` not seen for longer than `olderThan` (join codes: the oldest one), oldest first. */
+  private drop(source: Source, olderThan: number): void {
     const now = Date.now();
-    for (const [ref, kept] of this.found) {
-      if (now - kept.at <= LIFETIME_MS) break;
-      this.found.delete(ref);
+    for (const [ref, kept] of this.kept) {
+      if (kept.source !== source) continue;
+      if (olderThan !== Infinity && now - kept.at <= olderThan) break;
+      this.kept.delete(ref);
       this.refs.delete(kept.value);
+      this.counts[source]--;
+      if (HIDDEN_EVERYWHERE.has(source)) this.everywhere = undefined;
+      if (olderThan === Infinity) break;
     }
   }
 
-  /** Drops the oldest values from answers past their limit; the owner's own values stay. */
-  private trim(): void {
-    const answered = [...this.given].filter(([, kept]) => kept.source === 'answer');
-    for (const [ref, kept] of answered.slice(0, Math.max(0, answered.length - MAX_ANSWERED))) {
-      this.given.delete(ref);
-      this.refs.delete(kept.value);
-      this.givenPattern = undefined;
-    }
-  }
-
-  /** One pattern for every given value, longest first, so a value inside a longer one never leaves a remainder. */
+  /** One pattern for every value hidden everywhere, longest first, so a value inside a longer one leaves no remainder. */
   private pattern(): RegExp | undefined {
-    if (this.givenPattern) return this.givenPattern;
-    const values = [...this.given.values()].map(kept => kept.value).filter(value => value.length >= SHORTEST_SECRET);
-    if (!values.length) return undefined;
-    return this.givenPattern = new RegExp(values.sort((a, b) => b.length - a.length).map(escape).join('|'), 'g');
+    if (this.everywhere !== undefined) return this.everywhere ?? undefined;
+    const values = [...this.kept.values()].filter(kept => HIDDEN_EVERYWHERE.has(kept.source) && kept.value.length >= SHORTEST_SECRET).map(kept => kept.value);
+    this.everywhere = values.length ? new RegExp(values.sort((a, b) => b.length - a.length).map(escape).join('|'), 'g') : null;
+    return this.everywhere ?? undefined;
   }
 }
+
+/** Which source a value counts as when seen from several: a card is the strongest claim. */
+function rank(source: Source): number { return source === 'card' ? 3 : source === 'answer' ? 2 : source === 'pasted' ? 1 : 0; }
 
 /** Applies `change` to the text between references, so a reference is never altered by what replaces values. */
 function outsideReferences(text: string, change: (part: string) => string): string {
