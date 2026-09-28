@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.64.0] - 2026-09-28
+
+### Changed
+- **The master reads its whole answer aloud.** An answer to a spoken request used to be cut to its first paragraph (at most 300 characters), so a second paragraph, a list, or the joke itself after "좋아요, 하나 해볼게요!" was shown but not said. Now the whole answer is read, in order. Headings, list items and table rows are read as sentences, a link by its words, and markdown marks are left out. A code block is pointed to ("코드는 화면에 있어요"), and a web address is read as "링크". Reports of finished work that are read aloud are read whole too. The master is told its whole answer will be heard, so it writes short spoken sentences with the point first. The tone tag still sets only how it sounds: it goes to speech, never on screen, and is given to each part.
+- **Long answers are made in parts that play as one.** The answer is split between whole sentences: a short first part so the sound starts soon, then parts of up to 500 characters, each made after the one before and played as a single recording, with nothing repeated or skipped between them. A part that fails before any sound comes, or comes back silent, is asked for once more. An answer skipped, cut off by voice ending, or not started in time stops being made: parts not yet asked for are not asked for or paid for. Reading ends at a sentence after about 5,000 characters (some ten minutes), followed by "나머지는 화면에 있어요."
+
+### Fixed
+- **A page that asked for audio after it failed got none of it.** The connection was cut before what was already made had been sent. It now receives that part before the connection is cut. This was also why the "audio streams to the page" test failed now and then.
+
 ## [1.63.0] - 2026-09-28
 
 ### Added
