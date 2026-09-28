@@ -1,4 +1,4 @@
-import { Mic, MicOff, Play, Square, Volume2, VolumeX, X } from 'lucide-react';
+import { Mic, MicOff, Play, Send, Square, Volume2, VolumeX, X } from 'lucide-react';
 import type { MasterVoiceStatus } from '../../../shared/master';
 import type { VoiceView } from './voice-client';
 import { useWords } from './strings';
@@ -18,6 +18,10 @@ export interface VoiceControls {
   skip(): void;
   /** Plays what the browser would not play by itself. */
   replay(): void;
+  /** Sends what is being said, or what waits unsent, now. */
+  finish(): void;
+  /** Drops what waits unsent. */
+  discard(): void;
   dismiss(): void;
 }
 
@@ -45,7 +49,8 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
   if (view) {
     const playing = view.playing;
     const label = playing ? (playing.kind === 'notice' ? `${words('되돌릴 수 없는 작업', 'Irreversible change')}: ${playing.text}` : playing.text)
-      : view.capturing ? `${words('듣고 있어요', 'Listening')}: ${view.heard || '…'}`
+      : view.capturing ? `${view.waiting ? words('듣고 있어요 · 이어서 말씀하세요', 'Listening · go on') : words('듣고 있어요', 'Listening')}: ${view.heard || '…'}`
+      : view.draft ? `${words('아직 보내지 않은 말', 'Not sent yet')}: ${view.draft}`
       : view.listening ? (view.heard ? `${words('들은 말', 'Heard')}: ${view.heard}` : words('듣는 중 — 말씀하세요', 'Listening — go ahead'))
       : words('음성 켜짐 · 맡긴 일 소식은 읽어 드려요', 'Voice on · news of finished work is read aloud');
     // What is heard or read aloud has a line of its own; today's use sits beside the buttons below it, so neither covers the other.
@@ -60,6 +65,8 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
       {usage && <small className="master-voice-usage">{usage}</small>}
       <div className="master-voice-actions">
         {!playing && view.blocked && <button className="master-voice-restart" onClick={voice.replay} title={view.blocked.text}><Play size={12} />{words('듣기', 'Play')}</button>}
+        {!playing && (view.capturing || view.draft) && <button className="master-voice-restart" onClick={voice.finish} title={words('말이 끝났다고 보고 지금 보내기', 'Done speaking: send it now')}><Send size={12} />{words('보내기', 'Send')}</button>}
+        {!playing && !view.capturing && view.draft && <button className="secondary-button" onClick={voice.discard}><X size={12} />{words('지우기', 'Discard')}</button>}
         {playing && <button className="master-voice-restart" onClick={voice.skip}><Square size={12} />{playing.kind === 'notice' ? words('취소', 'Cancel') : words('멈춤', 'Stop')}</button>}
         {!playing && (view.listening
           ? <button className="secondary-button" onClick={voice.mute}><MicOff size={12} />{words('듣기 끄기', 'Stop listening')}</button>

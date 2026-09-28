@@ -16,8 +16,10 @@ export interface DecisionFeatures {
   relatedSessions: boolean;
   /** A later message in a Slack thread Tower already handled continues that conversation when it asks something of the owner. */
   slackFollowUps: boolean;
+  /** While the owner speaks to the master, each pause is judged: the request is sent only once they seem finished. */
+  voiceTurnEnd: boolean;
 }
-export const DEFAULT_DECISION_FEATURES: DecisionFeatures = { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true, sessionOutcomes: true, relatedSessions: true, slackFollowUps: true };
+export const DEFAULT_DECISION_FEATURES: DecisionFeatures = { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true, sessionOutcomes: true, relatedSessions: true, slackFollowUps: true, voiceTurnEnd: true };
 
 /** One judgment a feature made, kept in memory so the owner can see what the service answered and what Tower did. */
 export interface DecisionRecord {
@@ -37,7 +39,7 @@ export interface DecisionRecord {
  * For notifications, the judgment itself: `notify` is a turn judged worth a push, which the owner's next message or
  * the device settings can still stop; `quiet` is a turn judged an intermediate step, which is not pushed.
  */
-export type DecisionResult = 'notify' | 'quiet' | 'suggested' | 'noSuggestion' | 'inserted' | 'waiting' | 'labeled' | 'failed';
+export type DecisionResult = 'notify' | 'quiet' | 'suggested' | 'noSuggestion' | 'inserted' | 'waiting' | 'labeled' | 'finished' | 'listening' | 'failed';
 /** How many recent judgments the settings page can show. */
 export const DECISION_RECORDS_KEPT = 40;
 
@@ -52,6 +54,9 @@ export interface DecisionOverview {
   /** Newest first. Absent from servers that predate it. */
   recent?: DecisionRecord[];
 }
+
+/** A spoken request is sent once the owner is judged finished with at least this probability. */
+export const VOICE_TURN_FINISHED = 0.6;
 
 /** An Auto Prompt draft gets suggestions once it is this long. */
 export const AUTO_PROMPT_SUGGESTION_MIN_CHARS = 30;

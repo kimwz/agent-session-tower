@@ -32,6 +32,12 @@ export class SpeechGate {
 
   get isSpeaking(): boolean { return this.speaking; }
 
+  /** When (on the clock given to `update`) the voice was last heard, while speaking. */
+  get lastVoiceAt(): number { return this.lastLoud; }
+
+  /** Loud, but not for long enough yet to count as speech: the owner may be starting to speak again. */
+  get isVoicing(): boolean { return !this.speaking && this.voicedSince > 0; }
+
   update(rawRms: number, now = Date.now()): GateEvent {
     this.smooth = this.smooth ? this.smooth + (rawRms - this.smooth) * 0.1 : rawRms;
     const rms = this.smooth;
@@ -72,6 +78,34 @@ export class SpeechGate {
     this.initialized = false;
     this.smooth = 0;
   }
+}
+
+/** Words said while thinking, or that lead into more: after one of these the owner is not done. */
+const LEAD_WORDS = new Set(['음', '으음', '음음', '어', '어어', '아', '저', '저기', '그', '뭐', '뭐지', '뭐더라', '그러니까', '그니까', '그리고', '그래서', '그런데', '근데', '그럼', '그러면', '아니면', '또', '및', '혹은', '이제', '좀', '막', '약간', '일단', '우선', '그거', '그게', '이거', '이게', '거기', 'um', 'umm', 'uh', 'uhm', 'er', 'erm', 'and', 'so', 'but', 'or', 'like', 'the', 'a', 'an', 'to', 'of', 'with', 'because']);
+/** Korean endings that join a clause to the next one, and particles after which the sentence has not ended. */
+const LEAD_ENDING = /(?:고|서|는데|은데|인데|한데|던데|면|면서|니까|지만|거나|든지|도록|려고|랑|과|를|을|은|는|에|에서|에게|한테|로|의|도|만|까지|부터|보다|처럼)$/;
+/** How a finished Korean sentence (or any sentence with its full stop) ends. */
+const FINAL_ENDING = /(?:[.?!。？！]|요|다|까|죠|지|네|니다|세요|줘|봐|래|야|자|해|어|아)$/;
+
+/** How long past the gate's own pause the owner is given before what they said is taken as finished. */
+export const END_HOLD_MS = { finished: 200, unclear: 900, unfinished: 1_600 } as const;
+
+/**
+ * How much longer to wait, after a pause long enough to end speech, before taking what was said so far (`heard`, the
+ * latest partial writing) as finished: little after a finished sentence, more when it is unclear, and most when it
+ * trails off with a filler, a joining ending or a particle. Nothing written down yet is unclear: likely a noise, or
+ * writing that lags behind.
+ */
+export function endHoldMs(heard: string): number {
+  const text = heard.trim().toLowerCase();
+  if (!text) return END_HOLD_MS.unclear;
+  if (/(?:,|，|、|\.\.\.|…|-)$/.test(text)) return END_HOLD_MS.unfinished;
+  const bare = text.replace(/[\s.?!。？！]+$/, '');
+  const last = bare.split(/\s+/).at(-1) ?? '';
+  if (!last || LEAD_WORDS.has(last)) return END_HOLD_MS.unfinished;
+  if (LEAD_ENDING.test(last)) return END_HOLD_MS.unfinished;
+  if (/[.?!。？！]$/.test(text) || FINAL_ENDING.test(last)) return END_HOLD_MS.finished;
+  return END_HOLD_MS.unclear;
 }
 
 /** One utterance is at most 60 seconds of 16 kHz 16-bit audio: what each token reserves. */

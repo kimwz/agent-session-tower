@@ -18,6 +18,7 @@ import { runMasterHost } from './master/host.js';
 import { runMasterQuery } from './master/query-process.js';
 import { MasterClient } from './master/client.js';
 import { masterRoutes } from './master/routes.js';
+import { VoiceTurnEnd } from './master/voice-turn-end.js';
 import type { WebCredentials } from './master/tower-client.js';
 import { startSlackMcp, startTowerMcp } from './slack/mcp-bridge.js';
 import { getProviderHealth } from './providers/discovery.js';
@@ -470,7 +471,8 @@ async function main() {
       },
       record: entry => decisions.record(entry), claim: runId => judgedMessages.claim(`${nodeId}:${runId}`), sentBy: identity.id }, run).catch(() => {});
   };
-  const { server, dispose, token: pageToken } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes, onNodeMessage: insertRemote, master: { callerSecret: masterCallerSecret, handle: masterRoutes(master) },
+  const { server, dispose, token: pageToken } = createMonitorServer({ port, clientDir, backend, nodes: remoteNodes, onNodeMessage: insertRemote, master: { callerSecret: masterCallerSecret, handle: masterRoutes(master, { turnEnd: new VoiceTurnEnd({ engine: () => decisions.engine('voiceTurnEnd'),
+      known: async session => await master.call('voiceKnown', { session }) === true, record: entry => decisions.record(entry) }) }) },
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })) } : { error: linkError },
     workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications,

@@ -1,6 +1,7 @@
+import { VOICE_TURN_FINISHED } from '../../../shared/decisions';
 import type { MasterSay, MasterViewContext, MasterVoiceSettings, MasterVoiceStatus } from '../../../shared/master';
 import { post } from './api';
-import { base64, digest, fitUtterance, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from './voice-sound';
+import { base64, digest, endHoldMs, fitUtterance, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from './voice-sound';
 
 const PRESENCE_MS = 5_000;
 const REPORT_MS = 2_000;
@@ -9,6 +10,18 @@ const TAIL_BYTES = 640;
 const COMMIT_MS = 4_000;
 const COOLDOWN_MS = 400;
 const OBJECTION_MS = 2_000;
+/** The same words are judged again once the pause has grown this long: a longer pause says more. */
+const REASK_MS = 3_000;
+/** A judgment not back by then is not waited for: the page's own rule decides the rest of the utterance. */
+const JUDGE_WAIT_MS = 3_000;
+/** At most this many judgments for one utterance; past them the page's own rule decides. */
+const JUDGMENTS = 12;
+/** A pause this long in the middle of what is said gets a short sign that the owner is still heard, once. */
+const NUDGE_MS = 5_000;
+/** How long the sign may play before it is given up on. */
+const NUDGE_PLAY_MS = 8_000;
+/** A pause this long ends the utterance without sending it: what was said waits, to go on with or send by click. */
+const PARK_MS = 20_000;
 /** How long a closed utterance's connection may take to finish sending before playing goes on anyway. */
 const CLOSE_MS = 10_000;
 /** A spare token older than this is traded for a fresh one (they last 15 minutes). */
@@ -22,6 +35,10 @@ export interface VoiceView {
   capturing: boolean;
   /** What was just heard, or is being heard. */
   heard?: string;
+  /** The owner paused, but does not seem finished: listening goes on. */
+  waiting?: boolean;
+  /** What was said but not sent (a long pause before it seemed finished): speaking goes on with it, or a click sends it. */
+  draft?: string;
   playing?: { kind: MasterSay['kind']; text: string };
   /** What the browser would not play by itself, to be played with a click. */
   blocked?: { text: string };
@@ -41,8 +58,17 @@ export interface VoiceSessionOptions {
 
 interface Token { tokenId: string; url: string; expiresAt: number }
 interface Spare { token: Promise<Token | undefined>; at: number }
-/** `bytes` is the audio taken for the utterance (it may not pass 60 seconds); `sent` what actually went out. */
-interface Utterance { token?: Token; socket?: WebSocket; bytes: number; sent: number; queue: Array<{ message: string; bytes: number }>; open: boolean; closed: boolean; done: Promise<string>; settle(text: string | Error): void }
+/**
+ * `bytes` is the audio taken for the utterance (it may not pass 60 seconds); `sent` what actually went out. `heard` is
+ * the latest partial writing. `quietSince` (audio clock, ms) is set while the owner pauses; each pause is judged
+ * (`asking`, then `verdict`) until they seem finished, and `ownRule` means judgments failed and the page decides.
+ */
+interface Utterance {
+  token?: Token; socket?: WebSocket; bytes: number; sent: number; queue: Array<{ message: string; bytes: number }>; open: boolean; closed: boolean; done: Promise<string>; settle(text: string | Error): void;
+  heard: string; quietSince?: number; judgments: number; asking?: { text: string; at: number }; verdict?: { text: string; finished: number; pauseMs: number }; ownRule?: boolean; nudged?: boolean;
+}
+/** The sign that the owner is still heard, playing: the microphone is kept, not sent, unless they speak over it. */
+interface Nudge { frames: Float32Array[]; length: number; timer?: ReturnType<typeof setTimeout> }
 /**
  * A say being played. A notice's moment to object starts at `armedAt`; with listening on, `heard` counts the
  * microphone samples heard since it began (on the audio's clock), which it must reach as well.
@@ -72,6 +98,9 @@ export class VoiceSession {
   private utterance?: Utterance;
   private readonly open = new Set<Utterance>();
   private spare?: Spare;
+  /** What was said before a long pause and not sent yet; what is said next goes on from it. */
+  private draft = '';
+  private nudging?: Nudge;
   private listening = false;
   private armed = false;
   /** The audio time (seconds) from which the microphone is heard: frames captured before it are not. */
@@ -148,6 +177,7 @@ export class VoiceSession {
     // A notice can no longer be objected to by voice: its change is not sent.
     if (this.current?.say.kind === 'notice') { this.current.cancelled = true; this.decideNotice(this.current); }
     this.disarm();
+    this.stopNudge();
     this.abandon('muted');
     this.releaseSpare();
     this.closeMic();
@@ -162,6 +192,24 @@ export class VoiceSession {
     if (current.say.kind === 'notice') { current.cancelled = true; this.decideNotice(current); return; }
     this.audio.pause();
     this.finishPlay(current, 'stopped');
+  }
+
+  /** The owner says they are done (a click): what is being said, or what waits unsent, is sent now. */
+  finish(): void {
+    if (this.over) return;
+    if (this.utterance) { void this.commit(); return; }
+    const draft = this.draft;
+    if (!draft) return;
+    this.draft = '';
+    this.show({});
+    void this.request(draft);
+  }
+
+  /** What waits unsent is dropped. */
+  discard(): void {
+    if (!this.draft) return;
+    this.draft = '';
+    this.show({ heard: undefined });
   }
 
   /** Plays, from the owner's click, what the browser would not play by itself (not a notice: its moment is gone). */
@@ -209,6 +257,7 @@ export class VoiceSession {
     if (this.timer) clearInterval(this.timer);
     if (this.current) for (const timer of this.current.timers) clearTimeout(timer);
     this.current = undefined;
+    this.stopNudge();
     this.abandon('ended');
     this.releaseSpare();
     this.closeMic();
@@ -288,9 +337,16 @@ export class VoiceSession {
       }
       return;
     }
-    if (this.utterance) {
+    const utterance = this.utterance;
+    if (utterance) {
+      if (this.nudging) { this.duringNudge(this.nudging, data, event); return; }
       this.send(data);
-      if (event === 'silence-commit' || this.utterance.bytes >= UTTERANCE_BYTES - TAIL_BYTES) void this.commit();
+      if (utterance.bytes >= UTTERANCE_BYTES - TAIL_BYTES) { void this.commit(); return; }
+      const at = time * 1000;
+      if (event === 'silence-commit') { utterance.quietSince = at - this.gate.silenceMs; this.show({}); }
+      else if (event === 'speech-start' && utterance.quietSince !== undefined) { utterance.quietSince = undefined; this.show({}); }
+      if (utterance.quietSince !== undefined) this.paused(utterance, at - utterance.quietSince);
+      else if (this.gate.isSpeaking && at - this.gate.lastVoiceAt >= this.gate.silenceMs / 2) this.prejudge(utterance);
     } else if (event === 'speech-start') this.begin();
     else {
       this.preroll.push(data);
@@ -329,11 +385,11 @@ export class VoiceSession {
     let settle!: (text: string | Error) => void;
     const done = new Promise<string>((resolve, reject) => { settle = value => value instanceof Error ? reject(value) : resolve(value); });
     done.catch(() => {});
-    const utterance: Utterance = { bytes: 0, sent: 0, queue: [], open: false, closed: false, done, settle };
+    const utterance: Utterance = { bytes: 0, sent: 0, queue: [], open: false, closed: false, done, settle, heard: '', judgments: 0 };
     this.utterance = utterance;
     this.open.add(utterance);
     this.lastActivityAt = Date.now();
-    this.show({ heard: '' });
+    this.show({ heard: this.draft });
     for (const data of preroll) this.send(data);
     void spare.token.then(token => {
       if (utterance.closed) { if (token) this.settleUsage(token.tokenId, 0); return; }
@@ -351,7 +407,7 @@ export class VoiceSession {
       socket.onmessage = event => {
         let message: { message_type?: string; text?: string; error?: string };
         try { message = JSON.parse(String(event.data)); } catch { return; }
-        if (message.message_type === 'partial_transcript' && this.utterance === utterance) this.show({ heard: String(message.text ?? '') });
+        if (message.message_type === 'partial_transcript' && this.utterance === utterance) { utterance.heard = String(message.text ?? ''); this.show({ heard: this.said(utterance.heard) }); }
         else if (message.message_type === 'committed_transcript' || message.message_type === 'committed_transcript_with_timestamps') utterance.settle(String(message.text ?? ''));
         else if (message.message_type && STT_ERRORS.has(message.message_type)) utterance.settle(new Error(message.error ?? message.message_type));
       };
@@ -380,11 +436,15 @@ export class VoiceSession {
     else if (utterance.socket?.readyState === WebSocket.OPEN) { utterance.socket.send(message); utterance.sent += bytes; }
   }
 
-  /** The owner stopped (or ran out of time): what was said is committed, written down and sent as a request. */
-  private async commit(): Promise<void> {
+  /**
+   * The owner finished (or ran out of time): what was said is committed, written down and sent as a request, together
+   * with what waited unsent. `park` (a long pause before they seemed finished) writes it down but keeps it unsent.
+   */
+  private async commit(park = false): Promise<void> {
     const utterance = this.utterance;
     if (!utterance) return;
     this.utterance = undefined;
+    this.stopNudge();
     // The commit rides on a short silent tail; an empty chunk is refused.
     utterance.bytes += TAIL_BYTES;
     this.transmit(utterance, JSON.stringify({ message_type: 'input_audio_chunk', audio_base_64: base64(new Uint8Array(TAIL_BYTES)), sample_rate: 16_000, commit: true }), TAIL_BYTES);
@@ -395,7 +455,16 @@ export class VoiceSession {
       this.show({ error: `받아쓰지 못했습니다: ${errorText(error)}` });
     }
     this.close(utterance);
-    if (!text || this.over) return;
+    if (this.over) return;
+    const said = this.said(text);
+    if (park) { this.draft = said; this.show({ heard: said }); return; }
+    this.draft = '';
+    if (!said) { this.show({}); return; }
+    await this.request(said);
+  }
+
+  /** What the owner said, sent as a request; the short reply it gets is played. */
+  private async request(text: string): Promise<void> {
     this.show({ heard: text });
     this.lastActivityAt = Date.now();
     try {
@@ -405,6 +474,112 @@ export class VoiceSession {
       if (answer.ignored) { this.show({ heard: `(무시함) ${text}` }); return; }
       if (answer.ack) this.say(answer.ack);
     } catch (error) { this.show({ error: errorText(error) }); }
+  }
+
+  /** What was said: what waited unsent, and then `text`. */
+  private said(text: string): string {
+    return [this.draft, text.trim()].filter(Boolean).join(' ');
+  }
+
+  // ─── when the owner is done ──────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * The owner has paused for `silent` ms (the audio's clock) in the middle of an utterance. What they said so far is
+   * judged, and judged again when it changes or the pause grows; it is sent only once they seem finished. A long
+   * pause before that gets a short sign that they are still heard, and a very long one keeps it unsent. Without a
+   * judgment (none set up, failed or late) the page decides from the pause and how the sentence ends.
+   */
+  private paused(utterance: Utterance, silent: number): void {
+    // Loud again, perhaps speaking again: nothing is decided until it is clear.
+    if (this.gate.isVoicing) return;
+    const text = this.said(utterance.heard);
+    if (utterance.asking && Date.now() - utterance.asking.at >= JUDGE_WAIT_MS) { utterance.asking = undefined; utterance.ownRule = true; }
+    if (utterance.ownRule || !text) {
+      if (silent >= this.gate.silenceMs + endHoldMs(text)) void this.commit();
+      return;
+    }
+    const verdict = utterance.verdict?.text === text ? utterance.verdict : undefined;
+    if (verdict && verdict.finished >= VOICE_TURN_FINISHED) { void this.commit(); return; }
+    if (!utterance.asking && (!verdict || (verdict.pauseMs < REASK_MS && silent >= REASK_MS))) {
+      if (utterance.judgments < JUDGMENTS) this.judge(utterance, text, silent);
+      else if (!verdict) { utterance.ownRule = true; return; }
+    }
+    if (!verdict) return;
+    if (silent >= PARK_MS) { void this.commit(true); return; }
+    if (silent >= NUDGE_MS && !utterance.nudged) this.nudge(utterance);
+  }
+
+  /**
+   * Halfway to a pause, what was said is judged already (as at the pause), so a finished request goes out as soon as
+   * the pause is reached rather than a judgment later.
+   */
+  private prejudge(utterance: Utterance): void {
+    const text = this.said(utterance.heard);
+    if (!text || utterance.ownRule || utterance.asking || utterance.verdict?.text === text || utterance.judgments >= JUDGMENTS) return;
+    this.judge(utterance, text, this.gate.silenceMs);
+  }
+
+  /** Asks whether the owner is finished with `text` after a pause of `pauseMs`; one question at a time. */
+  private judge(utterance: Utterance, text: string, pauseMs: number): void {
+    const asking = { text, at: Date.now() };
+    utterance.asking = asking;
+    utterance.judgments++;
+    void post<{ finished?: number; unavailable?: true }>('/api/master/voice/finished', this.options.token(), { session: this.session, text, pauseMs: Math.round(pauseMs) })
+      .then(answer => {
+        if (utterance.asking !== asking) return;
+        if (typeof answer?.finished === 'number' && Number.isFinite(answer.finished)) utterance.verdict = { text, finished: answer.finished, pauseMs };
+        else utterance.ownRule = true;
+      }, () => { if (utterance.asking === asking) utterance.ownRule = true; })
+      .finally(() => { if (utterance.asking === asking) utterance.asking = undefined; this.show({}); });
+  }
+
+  /**
+   * "Go on, I am listening", said once in a long pause of an utterance. It ends nothing and sends nothing: what the
+   * microphone hears meanwhile is kept, not sent (it would carry the sign itself), and speaking over it stops it and
+   * sends the moment before, so the owner is never talked over.
+   */
+  private nudge(utterance: Utterance): void {
+    utterance.nudged = true;
+    void post<{ stale?: true; say?: MasterSay }>('/api/master/voice/nudge', this.options.token(), { session: this.session })
+      .then(answer => {
+        if (answer?.stale) { this.end('replaced'); return; }
+        const say = answer?.say;
+        if (!say || this.over || this.utterance !== utterance || utterance.quietSince === undefined || this.current || this.nudging) return;
+        const nudge: Nudge = { frames: [], length: 0 };
+        this.nudging = nudge;
+        const done = () => { if (this.nudging !== nudge) return; this.stopNudge(); this.gate.reset(); };
+        nudge.timer = setTimeout(done, NUDGE_PLAY_MS);
+        this.audio.onended = done;
+        this.audio.onerror = done;
+        this.audio.src = say.audio;
+        this.audio.play().catch(done);
+        this.show({});
+      })
+      .catch(() => {});
+  }
+
+  /** A frame while the sign plays: kept for a moment, and sent with what follows only if the owner speaks. */
+  private duringNudge(nudge: Nudge, data: Float32Array, event: ReturnType<SpeechGate['update']>): void {
+    nudge.frames.push(data);
+    nudge.length += data.length;
+    while (this.context && nudge.length > this.context.sampleRate * PREROLL_SECONDS && nudge.frames.length > 1) nudge.length -= nudge.frames.shift()!.length;
+    if (event !== 'speech-start') return;
+    const utterance = this.utterance!;
+    this.stopNudge();
+    utterance.quietSince = undefined;
+    for (const frame of nudge.frames) this.send(frame);
+    this.show({});
+  }
+
+  private stopNudge(): void {
+    const nudge = this.nudging;
+    if (!nudge) return;
+    this.nudging = undefined;
+    if (nudge.timer) clearTimeout(nudge.timer);
+    this.audio.onended = null;
+    this.audio.onerror = null;
+    this.audio.pause();
+    this.show({});
   }
 
   /**
@@ -557,7 +732,9 @@ export class VoiceSession {
   }
 
   private show(change: Partial<VoiceView>): void {
-    this.view = { ...this.view, ...change, listening: this.listening, capturing: Boolean(this.utterance), playing: this.current ? { kind: this.current.say.kind, text: this.current.say.text } : undefined, blocked: this.blocked ? { text: this.blocked.text } : undefined };
+    const utterance = this.utterance;
+    const waiting = Boolean(utterance && utterance.quietSince !== undefined && !utterance.ownRule && utterance.verdict && utterance.verdict.finished < VOICE_TURN_FINISHED);
+    this.view = { ...this.view, ...change, listening: this.listening, capturing: Boolean(utterance), waiting, draft: this.draft || undefined, playing: this.current ? { kind: this.current.say.kind, text: this.current.say.text } : undefined, blocked: this.blocked ? { text: this.blocked.text } : undefined };
     this.options.onView(this.view);
   }
 }

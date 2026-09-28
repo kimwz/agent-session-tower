@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { ATTACHMENT_BODY_BYTES, readJson } from '../http/requests.js';
 import { MASTER_CONVERSATION, onlyImages, sendPicture } from './attachments.js';
 import type { MasterClient } from './client.js';
+import type { VoiceTurnEnd } from './voice-turn-end.js';
 
 const json = (res: ServerResponse, status: number, body: unknown) => {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -12,7 +13,7 @@ const json = (res: ServerResponse, status: number, body: unknown) => {
  * `/api/master/*` on the owner's pages. Tower's server has already checked who is asking (and the page token for
  * changes) before this runs; `local` says whether the request came from this computer itself.
  */
-export function masterRoutes(client: MasterClient) {
+export function masterRoutes(client: MasterClient, options: { turnEnd?: VoiceTurnEnd } = {}) {
   return async function handle(req: IncomingMessage, res: ServerResponse, path: string, url: URL, identity: { local: boolean }): Promise<boolean> {
     if (!path.startsWith('/api/master')) return false;
     const call = async (method: string, args: Record<string, unknown> = {}) => {
@@ -75,7 +76,7 @@ export function masterRoutes(client: MasterClient) {
     }
     if (req.method === 'POST' && path === '/api/master/settings') { await call('settings', { body: await readJson(req, 16 * 1024) }); return true; }
     // Voice: the page turns it on, writes down what is said with a token from here, and plays what is read aloud.
-    const voice = /^\/api\/master\/voice\/(on|off|presence|token|usage|request|activity|played)$/.exec(path);
+    const voice = /^\/api\/master\/voice\/(on|off|presence|token|usage|request|activity|finished|nudge|played)$/.exec(path);
     if (req.method === 'POST' && voice) {
       const body = await readJson(req, voice[1] === 'request' ? 16 * 1024 : 4 * 1024);
       switch (voice[1]) {
@@ -86,6 +87,9 @@ export function masterRoutes(client: MasterClient) {
         case 'usage': await call('voiceUsage', { tokenId: body.tokenId, seconds: body.seconds }); break;
         case 'request': await call('voiceRequest', { session: body.session, clientMessageId: body.clientMessageId, text: body.text, viewContext: body.viewContext, local: identity.local }); break;
         case 'activity': await call('voiceActivity', { session: body.session, speaking: body.speaking, sinceSpeechMs: body.sinceSpeechMs }); break;
+        // Judged here in the web, where fast judgments live; the host only confirms the session.
+        case 'finished': json(res, 200, options.turnEnd ? await options.turnEnd.judge({ session: body.session, text: body.text, pauseMs: body.pauseMs }) : { unavailable: true }); break;
+        case 'nudge': await call('voiceNudge', { session: body.session }); break;
         default: await call('voicePlayed', { session: body.session, id: body.id, result: body.result });
       }
       return true;

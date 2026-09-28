@@ -1,5 +1,7 @@
 /** Short things the master says at once, recorded the first time they are needed and played from then on. */
 export const VOICE_ACKS = ['네, 확인해 볼게요.', '네, 알아볼게요.', '잠시만요, 볼게요.'] as const;
+/** Said, without ending what is being said, when the owner pauses long in the middle of it. */
+export const VOICE_NUDGE = '계속 말씀하세요, 듣고 있어요.';
 /** Said once when a spoken request takes a while. */
 export const VOICE_WORKING = '아직 하고 있어요. 끝나면 말씀드릴게요.';
 

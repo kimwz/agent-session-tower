@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { base64, fitUtterance, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from '../../client/src/master/voice-sound.js';
+import { base64, endHoldMs, END_HOLD_MS, fitUtterance, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from '../../client/src/master/voice-sound.js';
 
 /** Feeds the gate a loudness for a while, 10 ms a frame (about what an audio worklet gives), and returns its events. */
 function feed(gate: SpeechGate, rms: number, ms: number, from: number): { events: Array<{ at: number; event: string }>; end: number } {
@@ -55,4 +55,25 @@ test('listening ends after its minutes, a notice is judged with its moment to ob
   let sent = 0;
   for (let chunk = 0; chunk < 700; chunk++) sent += fitUtterance(sent, 3_200, 640);
   assert.equal(sent + 640, UTTERANCE_BYTES);
+});
+
+test('without a judgment, the wait after a pause follows how the sentence ends: short when finished, longest when it trails off', () => {
+  for (const text of ['세션 목록 보여 줘', '지금 몇 시예요?', '배포해 주세요.', '그거 해', '네', 'Deploy it.', '확인했습니다']) assert.equal(endHoldMs(text), END_HOLD_MS.finished, text);
+  for (const text of ['이거 확인하고', '로그를 보니까', '테스트는 통과했는데', '음', '그리고', '그래서 음', 'check the logs and', 'um', '첫째,', '이건…', '캔버스에서']) assert.equal(endHoldMs(text), END_HOLD_MS.unfinished, text);
+  for (const text of ['', '세션 목록', 'the build']) assert.equal(endHoldMs(text), END_HOLD_MS.unclear, text);
+  assert.equal(endHoldMs('그리고.'), END_HOLD_MS.unfinished, 'a full stop after a joining word is the writing\'s, not the owner\'s');
+});
+
+test('the gate tells when the voice was last heard, and a loud moment too short to be speech yet', () => {
+  const gate = new SpeechGate(1_000);
+  const quiet = feed(gate, 0.002, 1_000, 0);
+  const talk = feed(gate, 0.05, 600, quiet.end);
+  assert.ok(gate.isSpeaking && talk.end - gate.lastVoiceAt <= 10);
+  const pause = feed(gate, 0.002, 1_500, talk.end);
+  assert.equal(pause.events.at(-1)?.event, 'silence-commit');
+  const blip = feed(gate, 0.05, 150, pause.end);
+  assert.deepEqual(blip.events, []);
+  assert.ok(gate.isVoicing, 'loud, not yet speech');
+  feed(gate, 0.002, 400, blip.end);
+  assert.equal(gate.isVoicing, false);
 });

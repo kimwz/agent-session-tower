@@ -13,7 +13,7 @@ import { MasterService } from '../../server/master/service.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/master/tower-client.js';
 import { MasterVoice, migrate, type VoiceTiming } from '../../server/master/voice.js';
-import { isNoise, VOICE_ACKS } from '../../server/master/voice-text.js';
+import { isNoise, VOICE_ACKS, VOICE_NUDGE } from '../../server/master/voice-text.js';
 import type { MasterEntry, MasterSpeak, MasterStreamEvent } from '../../shared/master.js';
 import { until } from '../helpers/until.js';
 
@@ -247,6 +247,23 @@ test('what the owner said is a request like a typed one, answered first with a r
   assert.equal(h.labs.speeches[0].body.model_id, 'eleven_v3_conversational');
   assert.equal(h.labs.speeches[0].body.language_code, 'ko');
   assert.equal(isNoise('네 알겠어요'), false);
+});
+
+test('a long pause gets a recorded sign that the owner is still heard: made once, never a request, and only for the voice session now', async t => {
+  const h = await harness(t, { steps: [] });
+  const session = on(h);
+  assert.equal(h.voice.voiceKnown({ session }), true);
+  assert.equal(h.voice.voiceKnown({ session: 'not-this-one' }), false);
+  const first = await h.voice.voiceNudge({ session });
+  assert.equal(first.say?.text, VOICE_NUDGE);
+  assert.equal(first.say?.kind, 'ack', 'reported to nobody, as a short reply');
+  assert.match(first.say!.audio, /^\/api\/master\/voice\/audio\/clip-[a-f0-9]{64}$/);
+  const made = h.labs.speeches.length;
+  const again = await h.voice.voiceNudge({ session });
+  assert.equal(again.say?.audio, first.say?.audio);
+  assert.equal(h.labs.speeches.length, made, 'played from its recording');
+  assert.equal(h.journal.inbox.length, 0, 'nothing is asked of the master');
+  assert.deepEqual(await h.voice.voiceNudge({ session: 'not-this-one' }), { stale: true });
 });
 
 test('an answer to a spoken request is read aloud where voice is on and marked played; with nobody to hear it, it is marked so', async t => {

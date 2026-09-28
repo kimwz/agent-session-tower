@@ -109,6 +109,8 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'voiceUsage': return speech.voiceUsage({ tokenId: args.tokenId, seconds: args.seconds });
       case 'voiceRequest': return speech.voiceRequest({ session: args.session, clientMessageId: args.clientMessageId, text: args.text, local: args.local === true, ...(args.viewContext && typeof args.viewContext === 'object' ? { viewContext: viewContext(args.viewContext) } : {}) });
       case 'voiceActivity': return speech.voiceActivity({ session: args.session, speaking: args.speaking, sinceSpeechMs: args.sinceSpeechMs });
+      case 'voiceKnown': return speech.voiceKnown({ session: args.session });
+      case 'voiceNudge': return speech.voiceNudge({ session: args.session });
       case 'voicePlayed': return speech.voicePlayed({ session: args.session, id: args.id, result: args.result });
       case 'voiceVoices': return speech.voiceVoices();
       case 'shutdown': {

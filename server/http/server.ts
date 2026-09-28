@@ -111,7 +111,7 @@ export interface HttpOptions {
   };
 }
 /** What the page where voice is on sends while it listens and plays (turning voice on counts as an ordinary change). */
-const VOICE_REPORT = /^\/api\/master\/voice\/(presence|token|usage|request|activity|played|off)$/;
+const VOICE_REPORT = /^\/api\/master\/voice\/(presence|token|usage|request|activity|finished|nudge|played|off)$/;
 /** Suggestions follow the owner's typing; they change nothing, so they have their own budget apart from changes. */
 const SUGGESTION_PATH = '/api/auto-prompt-suggestions';
 const SUGGESTIONS_PER_MINUTE = 60;

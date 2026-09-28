@@ -113,6 +113,7 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
     ...(unavailable ? { unavailable } : {}), view: voiceView, ended: voiceEnded, ...(room.voice ? { status: room.voice } : {}),
     start: startVoice, stop: () => voiceRef.current?.stop(), listen: () => { void voiceRef.current?.listen(); }, mute: () => voiceRef.current?.mute(),
     skip: () => voiceRef.current?.skip(), replay: () => voiceRef.current?.replay(), dismiss: () => setVoiceEnded(null),
+    finish: () => voiceRef.current?.finish(), discard: () => voiceRef.current?.discard(),
   };
 
   const lastOrder = room.entries.at(-1)?.order ?? -1;
