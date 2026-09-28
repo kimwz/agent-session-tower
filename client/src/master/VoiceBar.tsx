@@ -48,12 +48,16 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
       : view.capturing ? `${words('듣고 있어요', 'Listening')}: ${view.heard || '…'}`
       : view.listening ? (view.heard ? `${words('들은 말', 'Heard')}: ${view.heard}` : words('듣는 중 — 말씀하세요', 'Listening — go ahead'))
       : words('음성 켜짐 · 맡긴 일 소식은 읽어 드려요', 'Voice on · news of finished work is read aloud');
-    return <div className={`master-voice live ${view.capturing ? 'speaking' : playing ? 'playing' : ''}`} role="status">
-      <span className="master-voice-dot" aria-hidden />
-      {playing ? <Volume2 size={13} /> : view.listening ? <Mic size={13} /> : <MicOff size={13} />}
-      <span className="master-voice-label">{label}</span>
+    // What is heard or read aloud has a line of its own; today's use sits beside the buttons below it, so neither covers the other.
+    return <div className={`master-voice live ${view.capturing ? 'speaking' : playing ? 'playing' : ''}`}>
+      <div className="master-voice-now" role="status">
+        <span className="master-voice-dot" aria-hidden />
+        {playing ? <Volume2 size={13} /> : view.listening ? <Mic size={13} /> : <MicOff size={13} />}
+        <span className="master-voice-label"><span>{label}</span></span>
+      </div>
       {view.error && <small className="master-voice-error">{view.error}</small>}
-      {usage && <small>{usage}</small>}
+      <div className="master-voice-controls">
+      {usage && <small className="master-voice-usage">{usage}</small>}
       <div className="master-voice-actions">
         {!playing && view.blocked && <button className="master-voice-restart" onClick={voice.replay} title={view.blocked.text}><Play size={12} />{words('듣기', 'Play')}</button>}
         {playing && <button className="master-voice-restart" onClick={voice.skip}><Square size={12} />{playing.kind === 'notice' ? words('취소', 'Cancel') : words('멈춤', 'Stop')}</button>}
@@ -61,6 +65,7 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
           ? <button className="secondary-button" onClick={voice.mute}><MicOff size={12} />{words('듣기 끄기', 'Stop listening')}</button>
           : <button className="master-voice-restart" onClick={voice.listen}><Mic size={12} />{words('다시 듣기', 'Listen')}</button>)}
         <button className="master-voice-end" onClick={voice.stop} title={words('음성 끄기 (맡긴 일은 계속됩니다)', 'Voice off (work already sent continues)')}><VolumeX size={12} />{words('음성 끄기', 'Voice off')}</button>
+      </div>
       </div>
     </div>;
   }

@@ -117,3 +117,12 @@
 .master-voice-actions { display:flex; gap:6px; flex-wrap:wrap; margin-left:auto; }
 .master-voice-actions .secondary-button { height:28px; display:inline-flex; align-items:center; gap:5px; font-size:12px; }
 .master-voice-error { flex-basis:100%; color:var(--danger); }
+/* Live voice: what is heard on its own line (long speech scrolls within it), then today's use left of the buttons. */
+.master-voice.live { flex-direction:column; flex-wrap:nowrap; align-items:stretch; gap:6px; }
+.master-voice-now { display:flex; align-items:flex-start; gap:8px; min-width:0; }
+.master-voice-now > .master-voice-dot { margin-top:4px; }
+.master-voice-now > svg { flex:none; margin-top:2px; }
+/* At most three lines; longer speech keeps its latest words in view (the column is anchored at its end). */
+.master-voice-now > .master-voice-label { flex:1; min-width:0; max-height:calc(1.45em * 3); overflow-y:auto; overflow-wrap:anywhere; line-height:1.45; display:flex; flex-direction:column-reverse; }
+.master-voice-controls { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; min-width:0; }
+.master-voice-usage { flex:1 1 150px; min-width:0; overflow-wrap:anywhere; }

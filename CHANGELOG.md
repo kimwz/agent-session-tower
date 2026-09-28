@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.59.0] - 2026-09-28
+
+### Added
+- **Send pictures to the master.** The master panel now takes pictures (PNG, JPEG, GIF, WebP) like a session's chat does: choose them with the picture button, paste them into the message box, or drop them on the panel. They show as thumbnails before sending and can be removed; a message can be pictures alone. The master sees the pictures together with your message, and they stay in the conversation as thumbnails you can open. Later messages mention earlier pictures by name without sending them again, and the master can hand a picture to a session on this computer by its saved path. Other kinds of files are refused, and while an older master is still finishing work after an update, pictures wait until the new one takes over rather than being dropped.
+
+### Fixed
+- **Voice no longer crowds what it heard.** While voice is on, what the master heard or is reading aloud has a line of its own, up to three lines with the latest words in view. Today's use sits on the line below, left of the buttons, so the two never overlap on a narrow screen or with long speech.
+
 ## [1.58.6] - 2026-09-28
 
 ### Fixed
