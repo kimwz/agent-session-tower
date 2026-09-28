@@ -57,7 +57,7 @@
 /* Joined computers on the canvas */
 .host-with-usage.is-remote .host-node { border-color: #4a5f7e; }
 .host-node .host-link i { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--muted); }
-.host-node .host-link.connected.live i { background: var(--teal); }
+.host-node .host-link.connected.live i, .host-node .host-link.local i { background: var(--teal); }
 .host-node .host-link.update-required i, .host-node .host-link.removed-by-node i { background: var(--amber); }
 .host-node .host-link.updating i { background: var(--amber); animation: blink 1.4s infinite; }
 .host-with-usage.is-stale { opacity: .75; }

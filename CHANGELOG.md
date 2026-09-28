@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.55.1] - 2026-09-28
+
+### Changed
+- **This computer shows its Tower version too.** On the canvas, this computer's card now reads **이 컴퓨터 · v1.55.1**, the way a joined computer's card shows its version beside **연결됨**.
+
 ## [1.55.0] - 2026-09-28
 
 ### Added

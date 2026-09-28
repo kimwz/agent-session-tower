@@ -101,7 +101,14 @@ test('a joined computer’s host node says whether it is connected, out of date 
   assert.match(away, /<i><\/i>오프라인<\/span>/, 'the version is left out while it is away');
   assert.match(away, /마지막으로 본 상태입니다/);
   assert.match(host({ link: { status: 'update-required', live: false } }), /업데이트 필요/);
-  assert.doesNotMatch(host(), /host-link/, 'this computer’s own host node is unchanged');
+  assert.doesNotMatch(host(), /host-link/, 'without a version this computer’s host node shows no line for it');
+});
+
+test('this computer’s host node shows its own Tower version', () => {
+  const local = host({ version: '1.55.1' });
+  assert.match(local, /class="host-link local"><i><\/i>이 컴퓨터 · v1\.55\.1<\/span>/);
+  assert.doesNotMatch(local, /is-remote/);
+  assert.doesNotMatch(host({ version: '1.55.1', link: { status: 'connected', live: true, version: '1.23.0' } }), /이 컴퓨터/, 'a joined computer shows its own version only');
 });
 
 test('cards of an unreachable computer are marked as its last known state', () => {
