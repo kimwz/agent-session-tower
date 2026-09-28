@@ -25,6 +25,25 @@ export interface SlackMention {
   /** GitHub: a pull request that asked for a review; replies are posted as reviews, with the verdicts allowed then. */
   review?: { verdicts: 'comment' | 'any' };
 }
+/**
+ * A later message in the thread of a conversation that already began. A message that mentions the owner is followed
+ * as it is; any other is followed when a fast judgment finds it asks something of the owner.
+ */
+export interface SlackFollowUp {
+  ts: string;
+  user: string;
+  text: string;
+  mentioned?: boolean;
+  /** received: waiting for a judgment; pending: waiting to reach the conversation; delivering: claimed before handing it over. */
+  status: 'received' | 'pending' | 'delivering' | 'delivered' | 'skipped' | 'error';
+  receivedAt: string;
+  /** How likely the judgment found it is for the owner, 0–1. */
+  addressed?: number;
+  /** Why it was skipped or failed. */
+  reason?: string;
+  runId?: string;
+  deliveredAt?: string;
+}
 export type SlackWorkflowState = 'received' | 'matching' | 'ignored' | 'dispatching' | 'running' | 'composing' | 'sending' | 'completed' | 'error' | 'reply-uncertain';
 export interface SlackWorkflow {
   id: string;
@@ -37,6 +56,8 @@ export interface SlackWorkflow {
   ownerConditionalReply?: { mode?: 'composed'; ruleId?: string; requestIds?: string[]; instruction?: string; requestId: string; requestKey: string; text: string; status: 'pending' | 'sent' | 'blocked' | 'cancelled' | 'uncertain'; authorizedAt: string; evidence?: string };
   ownerReplySelection?: { requestKey: string; text: string };
   reactions?: Array<{ name: string; action: 'add' | 'remove'; at: string }>;
+  /** Later thread messages, oldest first (Slack conversations only). */
+  followUps?: SlackFollowUp[];
   mention: SlackMention;
   status: SlackWorkflowState;
   createdAt: string;

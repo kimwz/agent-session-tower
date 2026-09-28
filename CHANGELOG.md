@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.55.0] - 2026-09-28
+
+### Added
+- **Later messages in a Slack thread continue its conversation.** After a mention started a Slack conversation, a new message in the same thread no longer needs to mention you. A fast judgment reads the first request, the latest thread messages and the new one. When the message asks you something, asks for follow-up work, or needs you to step in, it goes to the conversation that handled the thread, as a new turn once that conversation is idle. The conversation then decides what to do. It can delegate the follow-up under the same rule and build on what it already found. Thanks, acknowledgements and messages for other people stay out. A new mention in the same thread also continues that conversation instead of starting another one. This covers threads active in the last 14 days, and your own messages are never followed.
+- **Rules with automatic replies report on follow-up work too.** When the first result was already sent, work delegated for a follow-up gets its own result reply under **승인 없이 결과 자동 답변**, as a new mention would.
+- **See what happened to each later message.** The mention details in the trigger monitor list them under **스레드 후속 메시지**, with the judged chance each was for you and whether it reached the conversation. Turn the feature off under 빠른 판단 with **Slack 스레드 후속 메시지 이어받기**. Without a fast-judgment key, only mentions are followed.
+
 ## [1.54.0] - 2026-09-28
 
 ### Added

@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SlackService } from '../../../server/slack/service.js';
 import type { SlackSocketOptions } from '../../../server/slack/socket.js';
+import type { DecisionEngine } from '../../../server/decisions/engine.js';
+import type { Run } from '../../../shared/types.js';
 
 test('Slack connection stays private, admits only personal mentions, and pauses without losing accepted work', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-service-'));
@@ -240,4 +242,51 @@ test('Slack conversations, their delegated work and result resumes all run as Sl
   const linked = service.linkedSessions();
   assert.ok(linked.sessionIds.has('chat') && linked.sessionIds.has('work'), 'both the coordinator and the delegated session hold Slack content');
   assert.ok(linked.requestIds.has(workflowId) && linked.requestIds.has(delegatedRequest));
+});
+
+test('a later message in a handled thread reaches its conversation when the judgment finds it is for the owner', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-follow-'));
+  let socket: SlackSocketOptions | undefined;
+  const runs: Run[] = [];
+  const turns: string[] = [];
+  const asked: unknown[] = [];
+  const engine: DecisionEngine = { provider: 'jev', label: 'Jev', decide: async request => {
+    asked.push(request.state);
+    const owner = /merge/.test(JSON.stringify((request.state as { new_message: string }).new_message)) ? 0.92 : 0.05;
+    return { audience: { choice: owner >= 0.5 ? 'owner' : 'others', probabilities: { owner, others: 1 - owner }, confidence: 0.9 } } as never;
+  } };
+  const service: SlackService = new SlackService({ stateDir, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not delegate'); } }, refresh: async () => {},
+    followUpEngine: async () => engine,
+    runs: { list: () => runs,
+      create: (async (request: { prompt: string }) => { const run = { id: 'coordinator-run', sessionId: 'coordinator', prompt: request.prompt, status: 'completed', createdAt: '', output: '' } as Run; runs.push(run); turns.push(request.prompt); return { session: { id: run.sessionId }, run }; }) as never,
+      enqueue: (async (sessionId: string, prompt: string, _options: unknown, internal: { autoPromptId: string }) => { const run = { id: `turn-${runs.length}`, sessionId, prompt, status: 'queued', createdAt: '', output: '', autoPromptId: internal.autoPromptId } as Run; runs.push(run); turns.push(prompt); return run; }) as never },
+  }, {
+    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [{ user: 'U2', ts: '100.001', text: '<@U1> review please' }], reply: async () => { throw new Error('Must not send'); } }),
+    socket: options => { socket = options; return { start() {}, stop() {} }; },
+    model: async () => { throw new Error('Must not start a provider'); },
+  });
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  await service.start();
+  await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  await service.mutate('rules', { rules: [{ id: 'review', name: 'Review', enabled: true, condition: 'review', instructions: 'Review it', replyInstructions: 'Say done', provider: 'claude' }] });
+  await service.mutate('settings', { enabled: true });
+  await socket!.onEvent({ team_id: 'T1', event_id: 'Ev1', event: { type: 'message', channel: 'C1', user: 'U2', ts: '100.001', text: '<@U1> review please' } });
+  await service.automation.tick();
+  assert.equal(turns.length, 1);
+  const reply = (ts: string, text: string, extra: Record<string, unknown> = {}) => socket!.onEvent({ team_id: 'T1', event_id: `Ev${ts}`, event: { type: 'message', channel: 'C1', user: 'U3', ts, thread_ts: '100.001', text, ...extra } });
+  await reply('100.002', 'thanks');
+  await reply('100.003', 'fixed the comments, can I merge?');
+  await reply('100.004', 'my own note', { user: 'U1' });
+  await socket!.onEvent({ team_id: 'T1', event_id: 'Ev-elsewhere', event: { type: 'message', channel: 'C1', user: 'U3', ts: '200.001', text: 'unrelated, can I merge?' } });
+  assert.deepEqual(service.overview().events[0].followUps?.map(item => item.ts), ['100.002', '100.003'], 'the owner\'s own messages and other threads are not followed');
+  assert.equal(service.overview().events.length, 1, 'a later message never starts another conversation');
+  await service.automation.tick();
+  assert.equal(turns.length, 2);
+  assert.match(turns[1], /can I merge\?/); assert.doesNotMatch(turns[1], /thanks/);
+  assert.equal((asked[0] as { owner: string }).owner, '<@U1>');
+  assert.match(JSON.stringify(asked[1]), /review please/, 'the judgment sees the first request');
+  // A mention in the same thread continues the same conversation too.
+  await reply('100.005', '<@U1> one more question');
+  assert.equal(service.overview().events.length, 1);
+  assert.equal(service.overview().events[0].followUps?.at(-1)?.mentioned, true);
 });

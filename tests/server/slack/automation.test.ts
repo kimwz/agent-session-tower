@@ -827,3 +827,102 @@ test('the same coordinator serves another channel under its own name, tools and 
   assert.deepEqual(again.list().map(item => item.mention.channel), ['octo/app']);
 });
 
+
+/** A coordinator conversation that already began, with every turn it runs and every later message it received. */
+async function followUpFixture(t: TestContext, judged: (text: string) => number | undefined = text => /merge/.test(text) ? 0.9 : 0.1) {
+  const f = await fixture(t);
+  const coordinator: Run = { id: 'coordinator-run', sessionId: 'coordinator', prompt: '', status: 'completed', createdAt: '', output: '' };
+  const runs: Run[] = [coordinator];
+  const resumed: Array<{ prompt: string; instructions?: string }> = [];
+  f.options.startConversation = async () => ({ sessionId: coordinator.sessionId, runId: coordinator.id });
+  f.options.getSessionRuns = () => runs;
+  f.options.findConversation = id => { const run = runs.find(run => run.autoPromptId === id); return run ? { sessionId: run.sessionId, runId: run.id } : undefined; };
+  f.options.resumeConversation = async (_workflow, prompt, correlationId, instructions) => {
+    resumed.push({ prompt, instructions });
+    const run: Run = { ...coordinator, id: `follow-up-${resumed.length}`, status: 'queued', autoPromptId: correlationId };
+    runs.push(run); return { runId: run.id };
+  };
+  f.options.judgeFollowUp = async ({ message }) => judged(message.text);
+  await f.manager.ingest(mention); await f.manager.tick();
+  const later = (ts: string, text: string, mentioned = false) => ({ channel: 'C1', threadTs: '1.0', user: 'U2', ts, text, mentioned });
+  return { ...f, coordinator, runs, resumed, later };
+}
+
+test('a later thread message for the owner continues the conversation once; others stay out of it', async t => {
+  const f = await followUpFixture(t);
+  assert.equal(await f.manager.followUp({ ...f.later('3.0', 'can I merge?'), threadTs: '9.0' }), false, 'another thread is not followed');
+  assert.equal(await f.manager.followUp(f.later('1.0', 'Review PR 5 for Verse8')), true);
+  assert.equal(await f.manager.followUp(f.later('2.0', 'thanks!')), true);
+  assert.equal(await f.manager.followUp(f.later('3.0', 'Comments addressed, can I merge?')), true);
+  assert.equal(await f.manager.followUp(f.later('3.0', 'Comments addressed, can I merge?')), true, 'a repeated event is taken once');
+  assert.equal(await f.manager.followUp(f.later('4.0', '<@U1> also check the admin PR', true)), true);
+  assert.equal(f.resumed.length, 0, 'taking a message only saves it');
+  await f.manager.tick();
+  assert.equal(f.resumed.length, 1, 'waiting messages reach the conversation in one turn');
+  assert.match(f.resumed[0].prompt, /can I merge\?/); assert.match(f.resumed[0].prompt, /also check the admin PR/); assert.doesNotMatch(f.resumed[0].prompt, /thanks!/);
+  assert.match(f.resumed[0].instructions!, /pass its ruleId when delegating/); assert.match(f.resumed[0].instructions!, /"id":"review"/);
+  assert.doesNotMatch(f.resumed[0].prompt, /pass its ruleId/, 'the conversation shows the messages; the policy goes to the agent');
+  const followUps = f.manager.list()[0].followUps!;
+  assert.deepEqual(followUps.map(item => [item.ts, item.status]), [['1.0', 'skipped'], ['2.0', 'skipped'], ['3.0', 'delivered'], ['4.0', 'delivered']]);
+  assert.equal(followUps[1].addressed, 0.1); assert.equal(followUps[2].addressed, 0.9); assert.equal(followUps[3].addressed, undefined, 'a mention is not judged');
+  assert.equal(followUps[2].runId, 'follow-up-1');
+  f.runs[1].status = 'completed';
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick(); await restarted.tick();
+  assert.equal(f.resumed.length, 1, 'nothing is handed over twice');
+});
+
+test('follow-ups wait for a running turn, and a delivery that cannot be confirmed is not repeated', async t => {
+  const f = await followUpFixture(t);
+  f.coordinator.status = 'running';
+  await f.manager.followUp(f.later('3.0', 'can I merge now?'));
+  await f.manager.tick();
+  assert.equal(f.resumed.length, 0); assert.equal(f.manager.list()[0].followUps![0].status, 'pending');
+  f.coordinator.status = 'completed';
+  const resume = f.options.resumeConversation!;
+  f.options.resumeConversation = async () => { throw new Error('worker connection lost'); };
+  await f.manager.tick();
+  assert.equal(f.manager.list()[0].followUps![0].status, 'error'); assert.match(f.manager.list()[0].followUps![0].reason!, /worker connection lost/);
+  f.options.resumeConversation = resume;
+  await f.manager.tick(); assert.equal(f.resumed.length, 0);
+});
+
+test('follow-ups are left alone without a judgment, and a claimed delivery is settled from the record after a restart', async t => {
+  const f = await followUpFixture(t, () => undefined);
+  await f.manager.followUp(f.later('3.0', 'can I merge?'));
+  await f.manager.tick();
+  assert.equal(f.manager.list()[0].followUps![0].status, 'skipped'); assert.match(f.manager.list()[0].followUps![0].reason!, /off/);
+  assert.equal(f.resumed.length, 0);
+  // A worker that stopped between claiming a delivery and recording it: the run it started is found, not started again.
+  const path = join(f.directory, 'slack-automation.json');
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  saved.workflows[0].followUps.push({ ts: '4.0', user: 'U2', text: '<@U1> merge?', mentioned: true, status: 'delivering', receivedAt: new Date().toISOString() });
+  await writeFile(path, JSON.stringify(saved));
+  const correlation = (await import('../../../server/slack/automation.js')).slackRequestId({ ...mention, id: JSON.stringify(['follow-up', saved.workflows[0].id, '4.0']) });
+  f.runs.push({ ...f.coordinator, id: 'delivered-before-restart', autoPromptId: correlation });
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick();
+  assert.equal(restarted.list()[0].followUps![1].status, 'delivered'); assert.equal(restarted.list()[0].followUps![1].runId, 'delivered-before-restart');
+  assert.equal(f.resumed.length, 0);
+});
+
+test('an autoReply rule gives work delegated for a follow-up its own result report once the first was sent', async t => {
+  const f = await followUpFixture(t);
+  await f.manager.setRules([{ ...rule, autoReply: true }]);
+  await f.manager.ingest({ ...mention, id: 'event-auto', threadTs: '5.0', ts: '5.1' }); await f.manager.tick();
+  const id = f.manager.list()[1].id;
+  const first = await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'review', prompt: 'Review PR', ruleId: 'review' }) as { requestId: string };
+  const run: Run = { id: 'run', sessionId: 'session', autoPromptId: first.requestId, status: 'completed', prompt: '', output: 'Review finished with no findings.', createdAt: '' };
+  f.options.getRun = () => run;
+  const sent = await f.manager.tool(id, 'tower_task_complete', { requestId: first.requestId, runId: 'run', outcome: 'succeeded', evidence: 'Review finished', text: '확인 했습니다.' }) as { status: string };
+  assert.equal(sent.status, 'sent');
+  const again = await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'again', prompt: 'Review again', ruleId: 'review' }) as { conditionalReply: { status: string } };
+  assert.equal(again.conditionalReply.status, 'sent', 'without a follow-up no new report is recorded');
+  await f.manager.followUp({ ...f.later('6.0', '<@U1> fixed, can I merge?', true), threadTs: '5.0' });
+  await f.manager.tick();
+  assert.deepEqual(f.resumed.map(turn => /delegated task finished/.test(turn.prompt)), [true], 'a delegated result reaches the conversation first');
+  for (let turn = 0; turn < 3; turn++) { for (const run of f.runs) run.status = 'completed'; await f.manager.tick(); }
+  assert.deepEqual(f.resumed.map(turn => /delegated task finished/.test(turn.prompt)), [true, true, false]);
+  assert.match(f.resumed[2].prompt, /fixed, can I merge\?/);
+  const follow = await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'follow-up', prompt: 'Check the fixes', ruleId: 'review' }) as { requestId: string; conditionalReply: { status: string; requestIds: string[] } };
+  assert.equal(follow.conditionalReply.status, 'pending');
+  assert.deepEqual(follow.conditionalReply.requestIds, [follow.requestId]);
+});

@@ -9,6 +9,8 @@ import { useI18n, translateMessage } from '../i18n/i18n';
 import { SlackReplyProposals } from './SlackReplyProposals';
 import { slackMentionTitle, slackWorkflowLabel, slackWorkflowWorking } from './slack-monitor';
 
+const FOLLOW_UP_LABELS: Record<NonNullable<SlackWorkflow['followUps']>[number]['status'], string> = { received: '판단 대기', pending: '대화에 전달 대기', delivering: '대화에 전달 중', delivered: '대화에 전달함', skipped: '전달하지 않음', error: '오류' };
+
 /** Slack's part of the trigger monitor: the connection, reply tone and received mentions. */
 export function SlackOverview({ slack, token, unreadIds, onSelectMention }: { slack: SlackPublicStatus | null; token: string; unreadIds?: ReadonlySet<string>; onSelectMention: (id: string) => void }) {
   const { t } = useI18n();
@@ -42,6 +44,7 @@ export function SlackWorkflowSummary({ workflow, job, token = '' }: { workflow: 
     <div className={`slack-monitor-state ${slackWorkflowWorking(workflow.status) ? 'working' : ''}`} role="status">{slackWorkflowLabel(workflow.status)}</div>
     <section><h3>{t('받은 멘션')}</h3><p className="slack-monitor-muted">{workflow.mention.user} · {workflow.mention.channel} · {new Date(workflow.createdAt).toLocaleString()}</p><p className="slack-monitor-text">{workflow.mention.text}</p>{workflow.thread && <details><summary>{t('원본 스레드')} ({workflow.thread.length})</summary>{workflow.thread.map(message => <div key={message.ts} className="slack-monitor-thread-message"><small>{message.user}</small><p className="slack-monitor-text">{message.text}</p></div>)}</details>}</section>
     <section><h3>{t('에이전트 판단')}</h3>{workflow.rule && <><strong>{workflow.rule.name}</strong><p className="slack-monitor-text">{workflow.rule.instructions}</p></> }<p className="slack-monitor-text">{workflow.reason || t('아직 판단 결과가 없습니다.')}</p>{workflow.prompt && <details><summary>{t('전달한 작업 지침')}</summary><p className="slack-monitor-text">{workflow.prompt}</p></details>}</section>
+    {!!workflow.followUps?.length && <section><h3>{t('스레드 후속 메시지')} ({workflow.followUps.length})</h3>{workflow.followUps.map(followUp => <div key={followUp.ts} className="slack-monitor-thread-message"><small>{followUp.user} · {t(FOLLOW_UP_LABELS[followUp.status])}{followUp.mentioned ? ` · ${t('멘션')}` : followUp.addressed !== undefined ? ` · ${t('나에게 묻는 메시지일 확률')} ${followUp.addressed.toFixed(2)}` : ''}</small><p className="slack-monitor-text">{followUp.text}</p>{followUp.reason && <small>{translateMessage(followUp.reason)}</small>}</div>)}</section>}
     {job && <section><h3>Auto Prompt</h3><p>{t('라우팅 상태')}: {routeLabels[job.status]}</p>{job.decision && <><p>{job.decision.action === 'resume' ? t('기존 세션 이어서 실행') : t('새 세션 생성')} · {job.decision.cwd}</p><p className="slack-monitor-text">{job.decision.reason}</p></>}{job.error && <p role="alert">{translateMessage(job.error)}</p>}</section>}
     {workflow.error && <p role="alert">{translateMessage(workflow.error)}</p>}
     <SlackReplyProposals token={token} key={workflow.id} workflow={workflow} />

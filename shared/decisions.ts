@@ -14,8 +14,10 @@ export interface DecisionFeatures {
   sessionOutcomes: boolean;
   /** A new conversation's first turn is told which earlier sessions may be about the same work. */
   relatedSessions: boolean;
+  /** A later message in a Slack thread Tower already handled continues that conversation when it asks something of the owner. */
+  slackFollowUps: boolean;
 }
-export const DEFAULT_DECISION_FEATURES: DecisionFeatures = { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true, sessionOutcomes: true, relatedSessions: true };
+export const DEFAULT_DECISION_FEATURES: DecisionFeatures = { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true, sessionOutcomes: true, relatedSessions: true, slackFollowUps: true };
 
 /** One judgment a feature made, kept in memory so the owner can see what the service answered and what Tower did. */
 export interface DecisionRecord {

@@ -16,6 +16,8 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { SlackAutomationManager, validateSlackRules } from './automation.js';
 import { SlackClient } from './client.js';
 import { SlackSocket, type SlackSocketOptions } from './socket.js';
+import { judgeSlackFollowUp } from './follow-up.js';
+import type { DecisionEngine } from '../decisions/engine.js';
 
 type Account = { teamId: string; userId: string; teamName?: string; userName?: string };
 type Settings = { enabled: boolean; allowSelfMentions?: boolean; language?: 'ko' | 'en'; appToken?: string; userToken?: string; account?: Account };
@@ -24,6 +26,7 @@ interface Dependencies {
   socket?: (options: SlackSocketOptions) => Pick<SlackSocket, 'start' | 'stop'>;
   model?: typeof runAutoPromptModel;
 }
+const FOLLOW_UP_JUDGMENT_MS = 10_000;
 const invalid = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
 const slackOrigin = (workflowId: string): RunOrigin => ({ kind: 'slack', workflowId });
 
@@ -38,7 +41,9 @@ export class SlackService extends EventEmitter {
   private changedAt = new Date().toISOString();
   readonly tone: SlackToneStore;
   readonly automation: SlackAutomationManager;
-  constructor(private readonly options: { stateDir: string; runs: Pick<RunManager, 'list'> & Partial<Pick<RunManager, 'create' | 'enqueue' | 'getSession' | 'sessionList'>>; autoPrompts: Pick<AutoPromptManager, 'get' | 'submit'>; refresh: () => Promise<void> }, private readonly dependencies: Dependencies = {}) {
+  constructor(private readonly options: { stateDir: string; runs: Pick<RunManager, 'list'> & Partial<Pick<RunManager, 'create' | 'enqueue' | 'getSession' | 'sessionList'>>; autoPrompts: Pick<AutoPromptManager, 'get' | 'submit'>; refresh: () => Promise<void>;
+    /** The fast-judgment engine for Slack follow-ups, read again each time; nothing when that feature is off. */
+    followUpEngine?: () => Promise<DecisionEngine | undefined> }, private readonly dependencies: Dependencies = {}) {
     super();
     this.tone = new SlackToneStore(options.stateDir, () => this.emit('change'));
     this.automation = new SlackAutomationManager({
@@ -85,6 +90,13 @@ export class SlackService extends EventEmitter {
           prompt: JSON.stringify(input), schema: { type: 'object', additionalProperties: false, properties: { text: { type: 'string' } }, required: ['text'] },
           signal: AbortSignal.timeout(180_000),
         }, { stateDir: options.stateDir });
+      },
+      judgeFollowUp: async ({ mention, thread, message }) => {
+        const engine = await options.followUpEngine?.();
+        const owner = this.settings.account?.userId;
+        if (!engine || !owner) return undefined;
+        const request = thread.find(item => item.ts === mention.ts) ?? { user: mention.user, text: mention.text, ts: mention.ts };
+        return (await judgeSlackFollowUp(engine, { owner, request, thread, message }, AbortSignal.timeout(FOLLOW_UP_JUDGMENT_MS))).addressed;
       },
       sendReply: (mention, text, mentionable) => this.client(mention.teamId).reply(mention.channel, mention.threadTs, text, mentionable),
       react: async (mention, name, action) => {
@@ -256,9 +268,14 @@ export class SlackService extends EventEmitter {
         const event = payload.event as Record<string, unknown>;
         if (payload.team_id !== account.teamId || event?.type !== 'message' || event.bot_id || event.hidden || (event.user === account.userId && !this.settings.allowSelfMentions)
           || (event.subtype && !['file_share', 'thread_broadcast'].includes(String(event.subtype)))
-          || typeof event.text !== 'string' || !event.text.includes(`<@${account.userId}>`)
+          || typeof event.text !== 'string'
           || typeof event.user !== 'string' || typeof event.channel !== 'string' || typeof event.ts !== 'string' || typeof payload.event_id !== 'string') return;
         if (event.user === account.userId && typeof event.thread_ts === 'string' && this.automation.isOwnReply(event.channel, event.thread_ts, event.ts)) return;
+        const mentioned = event.text.includes(`<@${account.userId}>`);
+        // A later message in a thread Tower already handled goes back to that conversation, mentioned or not.
+        if (typeof event.thread_ts === 'string' && event.thread_ts !== event.ts
+          && await this.automation.followUp({ channel: event.channel, threadTs: event.thread_ts, user: event.user, ts: event.ts, text: event.text, mentioned })) return;
+        if (!mentioned) return;
         await this.automation.ingest({ id: payload.event_id, teamId: account.teamId, channel: event.channel, user: event.user, ts: event.ts,
           threadTs: typeof event.thread_ts === 'string' ? event.thread_ts : event.ts, text: event.text });
       },

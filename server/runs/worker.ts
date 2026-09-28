@@ -433,7 +433,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     let coordinators = (): ReadonlySet<string> => new Set();
     const autoPrompts = new AutoPromptManager({ stateDir, runs, remote: { prepare: (paths, options) => exclusions.prepare(paths, options), matcher: () => exclusions.matcher(), coordinators: () => coordinators() }, ...context });
     await autoPrompts.start();
-    const slack = new SlackService({ stateDir, runs, autoPrompts, refresh: context.refresh });
+    // The owner's fast-judgment settings are read again each time, so a change on the settings page applies at once.
+    const decisions = new DecisionService(stateDir);
+    const slack = new SlackService({ stateDir, runs, autoPrompts, refresh: context.refresh,
+      followUpEngine: async () => { await decisions.start(); return decisions.engine('slackFollowUps'); } });
     // GitHub coordinators use a trigger's credentials; the trigger engine starts right after.
     let triggerEngine: TriggerService | undefined;
     const github = new GitHubCoordinator({ stateDir, runs, autoPrompts, refresh: context.refresh, language: () => slack.language(),
@@ -445,8 +448,6 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, github, capabilities }));
     const visible = await runnerContext({ stateDir, runs, sessions, slack, exclusions });
     autoPrompts.updateContext(visible);
-    // The owner's fast-judgment settings are read again each time, so a change on the settings page applies at once.
-    const decisions = new DecisionService(stateDir);
     runs.setFirstTurnNotes(async (run, session) => {
       await decisions.start();
       return relatedSessionNotes(decisions.engine('relatedSessions'), run, session, visible.allSessions(), id => sessions.recentRequests(runs.nativeSessionId(id)));

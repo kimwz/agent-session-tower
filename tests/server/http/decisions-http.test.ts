@@ -12,7 +12,7 @@ import type { Snapshot } from '../../../shared/types.js';
 const requestId = '95257141-1ee4-4438-8374-c5507b156cd7';
 const prompt = 'Add a dark mode toggle to the settings page';
 const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'here', version: 't', updatedAt: '' };
-const overview: DecisionOverview = { provider: 'jev', label: 'Jev', configured: true, keyHint: '…1234', features: { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true, sessionOutcomes: true, relatedSessions: true }, providers: [{ id: 'jev', label: 'Jev' }] };
+const overview: DecisionOverview = { provider: 'jev', label: 'Jev', configured: true, keyHint: '…1234', features: { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true, sessionOutcomes: true, relatedSessions: true, slackFollowUps: true }, providers: [{ id: 'jev', label: 'Jev' }] };
 
 test('an Auto Prompt may name a new conversation or one to continue, always with its folder', () => {
   assert.deepEqual(parseAutoPrompt({ requestId, provider: 'claude', prompt, cwd: '/work', sessionMode: 'new' }), { requestId, provider: 'claude', prompt, cwd: '/work', sessionMode: 'new' });
