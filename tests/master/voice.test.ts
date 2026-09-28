@@ -642,10 +642,27 @@ test('news waiting to be told is found however much the conversation grew, and a
   await writeFile(join(h.dir, 'voice.json'), JSON.stringify(saved));
   const older = new MasterRoom(h.dir);
   await older.start();
-  await older.load(news.order);
   const rebuilt = new MasterVoice({ dataDir: h.dir, settings: h.settings, room: older, hooks: h.service.voiceHooks(), apiBase: h.live.base, socketBase: h.live.base.replace('http', 'ws'), timing: FAST });
   await rebuilt.start();
   assert.equal(rebuilt.status().pending, 1);
   await rebuilt.close();
   await older.flush();
+});
+
+test('a call that reached the page and was never confirmed ended keeps counting without a known end, even with no key to check it', async t => {
+  const h = await harness(t);
+  const open = await startCall(h);
+  h.live.emit(open.session, { type: 'session.usage.updated', usage: { seconds: 20 } });
+  await until(() => h.voice.status().today.seconds === 20);
+  h.live.closeAnswer = false;
+  await h.voice.voiceStop({ attemptId: open.attemptId, reason: 'owner' });
+  assert.equal(h.voice.status().phase, 'unconfirmed');
+  await h.settings.update({ apiKey: null });
+  // Long past what any rule of thumb would allow: without GPT-Live's word it is not over.
+  (h.voice as unknown as { file: { attempts: Array<{ createdAt: number }> } }).file.attempts.at(-1)!.createdAt -= 3 * 3_600_000;
+  await h.voice.probe();
+  assert.equal(h.voice.status().phase, 'unconfirmed');
+  const before = h.voice.status().today.seconds;
+  await sleep(1_100);
+  assert.ok(h.voice.status().today.seconds > before);
 });

@@ -235,9 +235,15 @@ export class MasterVoice {
     // News waiting to be told may sit in an older part of the conversation.
     for (const item of this.file.speaking) await this.options.room.load(item.order).catch(() => {});
     this.file.speaking = this.file.speaking.filter(item => speakOf(this.options.room.get(item.id)?.data));
-    // Records kept without that list: it is rebuilt from what the conversation holds.
+    // Records kept without that list: it is rebuilt from the conversation, back as far as news is still told.
     if (saved && !Array.isArray(saved.speaking)) {
-      for (const entry of this.options.room.recent(Number.MAX_SAFE_INTEGER)) this.follow({ type: 'entry', seq: 0, entry });
+      for (let before = Number.MAX_SAFE_INTEGER; ;) {
+        const page = await this.options.room.page(before, 200).catch(() => undefined);
+        if (!page?.entries.length) break;
+        for (const entry of page.entries) this.follow({ type: 'entry', seq: 0, entry });
+        if (!page.hasMore || Date.now() - Date.parse(page.entries[0].at) > STALE_MS) break;
+        before = page.entries[0].order;
+      }
     }
     this.unsubscribe = this.options.room.subscribe(event => this.follow(event));
     // News sent just before the stop may not have been heard.
@@ -356,6 +362,10 @@ export class MasterVoice {
       record.phase = 'attached';
       record.answered = true;
       await this.save();
+      if (live.closing || pending.cancelled) {
+        await this.finish(live, 'owner');
+        throw fail('음성 시작을 취소했습니다.', 409);
+      }
       this.broadcast();
       // The page must say it is ready (started and playing) in time, or the call is ended.
       live.readyTimer = setTimeout(() => { void this.inTurn(() => this.live === live && record.phase === 'attached' ? this.finish(live, 'failed') : Promise.resolve()); }, this.timing.readyMs);
