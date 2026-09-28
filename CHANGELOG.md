@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.62.2] - 2026-09-28
+
+### Fixed
+- **Past its judgments, a spoken request neither waits forever nor goes mid-thought.** In 1.62.1 a request whose last judgment came at a pause of three seconds or more could still wait twenty seconds and be kept unsent, and one Jev had judged unfinished (…고쳐 주고 그리고) went at three seconds once the 20 judgments were used. Now, past them, a request goes at a pause of three seconds when its last judgment was near the bar (0.3 or more), and words said since then go at three seconds plus the wait for how they end. A request judged clearly unfinished, or trailing off since, waits for you as before: **계속 말씀하세요**, and after twenty seconds kept unsent.
+- **Jev no longer takes a bare 그리고 after a request as the end.** 1.62.1 told Jev that what follows a request finishes it; now only a reason or purpose does ("…해 줄래? 그래서 신나게 말할 수 있도록."), while a joining word left at the end ("…고쳐 줘. 그리고") or another task being added ("…고쳐 줘, 테스트도 넣고") is not finished. Measured against Jev on 27 sentences (11 finished requests, 16 unfinished): one wrong, a finished request at 0.59 that goes at the next judgment (0.62); 1.62.0's wording got four wrong, among them the request that was not sent.
+- **Speaking softly uses fewer judgments.** When the microphone misses quiet speech that is still being written down, its pauses are judged once they pass two seconds, not at each new word.
+- **"계속 말씀하세요" is not said over you.** When you went on speaking softly, the sign already asked for could play anyway, and one playing went on. Now one on its way is dropped, and one still playing when more of what you said is written down stops, with what the microphone heard while it played written down with the rest.
+- **Typing is not taken for speech, and a click does not flash 듣고 있어요.** Speech starts only when most of its first 0.24 seconds is sound, so keys typed quickly do not open a transcription, and the voice bar shows a voice once it has sounded for 0.12 seconds.
+
 ## [1.62.1] - 2026-09-28
 
 ### Fixed

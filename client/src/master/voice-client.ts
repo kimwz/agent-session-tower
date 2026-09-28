@@ -1,7 +1,7 @@
 import { VOICE_TURN_FINISHED } from '../../../shared/decisions';
 import type { MasterSay, MasterViewContext, MasterVoiceSettings, MasterVoiceStatus } from '../../../shared/master';
 import { post } from './api';
-import { base64, digest, endHoldMs, fitUtterance, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from './voice-sound';
+import { base64, digest, END_HOLD_MS, endHoldMs, fitUtterance, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from './voice-sound';
 
 const PRESENCE_MS = 5_000;
 const REPORT_MS = 2_000;
@@ -15,13 +15,22 @@ const OBJECTION_MS = 2_000;
 const REASK_MS = 3_000;
 /** A judgment not back by then is not waited for: the page's own rule decides the rest of the utterance. */
 const JUDGE_WAIT_MS = 3_000;
-/** At most this many judgments for one utterance; past them the page's own rule decides. */
+/**
+ * At most this many judgments for one utterance. Past them, what was said goes after a pause of `REASK_MS` when the
+ * last judgment was near the bar (or, not judged, it does not trail off); otherwise the sign and the long pause follow.
+ */
 const JUDGMENTS = 20;
 /**
  * Writing that changes this far into a pause is new speech too quiet for the gate, not late writing of what came
  * before: the pause starts over, so it is neither judged as a long one nor answered with the sign mid-sentence.
  */
 const WRITING_LAG_MS = 2_000;
+/** A loud moment shown as a voice being heard once it has been loud this long, so a click or a cough does not flash it. */
+const HEARING_MS = 120;
+/** What the microphone heard while the sign played, kept to send if the owner speaks over it (its echo is not wanted). */
+const NUDGE_KEEP_SECONDS = 0.6;
+/** Out of judgments, a last judgment at least this sure lets a request go at `REASK_MS`; a lower one waits for the owner. */
+const EXHAUSTED_FINISHED = 0.3;
 /** A pause this long in the middle of what is said gets a short sign that the owner is still heard, once. */
 const NUDGE_MS = 5_000;
 /** How long the sign may play before it is given up on. */
@@ -73,7 +82,7 @@ interface Spare { token: Promise<Token | undefined>; at: number }
  */
 interface Utterance {
   token?: Token; socket?: WebSocket; bytes: number; sent: number; queue: Array<{ message: string; bytes: number }>; open: boolean; closed: boolean; done: Promise<string>; settle(text: string | Error): void;
-  heard: string; quietSince?: number; judgments: number; asking?: { text: string; at: number }; verdict?: { text: string; finished: number; pauseMs: number }; ownRule?: boolean; nudged?: boolean;
+  heard: string; quietSince?: number; resumedQuietly?: boolean; judgments: number; asking?: { text: string; at: number }; verdict?: { text: string; finished: number; pauseMs: number }; ownRule?: boolean; nudged?: boolean;
 }
 /** The sign that the owner is still heard, playing: the microphone is kept, not sent, unless they speak over it. */
 interface Nudge { frames: Float32Array[]; length: number; timer?: ReturnType<typeof setTimeout> }
@@ -110,6 +119,8 @@ export class VoiceSession {
   private draft = '';
   private nudging?: Nudge;
   private listening = false;
+  /** A voice is heard, not speech yet (see `VoiceView.hearing`). */
+  private hearing = false;
   private armed = false;
   /** The audio time (seconds) from which the microphone is heard: frames captured before it are not. */
   private heardFrom = 0;
@@ -351,13 +362,14 @@ export class VoiceSession {
       this.send(data);
       if (utterance.bytes >= UTTERANCE_BYTES - TAIL_BYTES) { void this.commit(); return; }
       const at = time * 1000;
-      if (event === 'silence-commit') { utterance.quietSince = at - this.gate.silenceMs; this.show({}); }
-      else if (event === 'speech-start' && utterance.quietSince !== undefined) { utterance.quietSince = undefined; this.show({}); }
+      if (event === 'silence-commit') { utterance.quietSince = at - this.gate.silenceMs; utterance.resumedQuietly = false; this.show({}); }
+      else if (event === 'speech-start' && utterance.quietSince !== undefined) { utterance.quietSince = undefined; utterance.resumedQuietly = false; this.show({}); }
       if (utterance.quietSince !== undefined) this.paused(utterance, at - utterance.quietSince);
       else if (this.gate.isSpeaking && at - this.gate.lastVoiceAt >= this.gate.silenceMs / 2) this.prejudge(utterance);
     } else if (event === 'speech-start') this.begin();
     else {
-      if (this.gate.isVoicing !== Boolean(this.view.hearing)) this.show({});
+      const hearing = this.gate.voicedMs >= HEARING_MS;
+      if (hearing !== this.hearing) { this.hearing = hearing; this.show({}); }
       this.preroll.push(data);
       this.prerollLength += data.length;
       while (this.prerollLength > this.context.sampleRate * PREROLL_SECONDS && this.preroll.length > 1) this.prerollLength -= this.preroll.shift()!.length;
@@ -433,8 +445,19 @@ export class VoiceSession {
     const changed = text.trim() !== utterance.heard.trim();
     utterance.heard = text;
     const at = (this.context?.currentTime ?? 0) * 1000;
-    if (changed && utterance.quietSince !== undefined && at - utterance.quietSince >= WRITING_LAG_MS) utterance.quietSince = at;
+    if (changed && utterance.quietSince !== undefined && at - utterance.quietSince >= WRITING_LAG_MS) this.resumed(utterance, at);
     this.show({ heard: this.said(text) });
+  }
+
+  /** The owner is speaking again, too quietly for the gate: the pause starts over, and the sign is not played over them. */
+  private resumed(utterance: Utterance, at: number): void {
+    utterance.quietSince = at;
+    utterance.resumedQuietly = true;
+    const nudge = this.nudging;
+    if (!nudge) return;
+    // What the microphone heard while the sign played is theirs: it is sent, as when they speak over it out loud.
+    this.stopNudge();
+    for (const frame of nudge.frames) this.send(frame);
   }
 
   /** Audio for the utterance, never past its 60 seconds (the silent tail that commits it included). */
@@ -512,7 +535,8 @@ export class VoiceSession {
   private paused(utterance: Utterance, silent: number): void {
     // Loud again, perhaps speaking again: nothing is decided until it is clear.
     // New words mid-pause started it over: it is a pause again once it is as long as one.
-    if (this.gate.isVoicing || silent < this.gate.silenceMs) return;
+    // Quiet speech writes more every second or so: its pauses are judged once they are longer than that, not at each word.
+    if (this.gate.isVoicing || silent < (utterance.resumedQuietly ? WRITING_LAG_MS : this.gate.silenceMs)) return;
     const text = this.said(utterance.heard);
     if (utterance.asking && Date.now() - utterance.asking.at >= JUDGE_WAIT_MS) { utterance.asking = undefined; utterance.ownRule = true; }
     if (utterance.ownRule || !text) {
@@ -521,13 +545,15 @@ export class VoiceSession {
     }
     const verdict = utterance.verdict?.text === text ? utterance.verdict : undefined;
     if (verdict && verdict.finished >= VOICE_TURN_FINISHED) { void this.commit(); return; }
-    if (!utterance.asking && (!verdict || (verdict.pauseMs < REASK_MS && silent >= REASK_MS))) {
-      // Out of judgments, the page's own rule decides the rest, a judgment already made or not: waiting on an
-      // answer that will not be asked again would keep a finished request until the long pause keeps it unsent.
-      if (utterance.judgments < JUDGMENTS) this.judge(utterance, text, silent);
-      else { utterance.ownRule = true; return; }
-    }
-    if (!verdict) return;
+    const exhausted = !utterance.asking && utterance.judgments >= JUDGMENTS;
+    if (exhausted) {
+      // Out of judgments: waiting on an answer that will not be asked again would keep a finished request until the
+      // long pause keeps it unsent. A last judgment near the bar lets it go at the longer pause; one sure it is not
+      // finished, or words not judged that trail off, wait for the owner.
+      if (verdict ? verdict.finished >= EXHAUSTED_FINISHED && silent >= REASK_MS
+        : endHoldMs(text) !== END_HOLD_MS.unfinished && silent >= REASK_MS + endHoldMs(text)) { void this.commit(); return; }
+    } else if (!utterance.asking && (!verdict || (verdict.pauseMs < REASK_MS && silent >= REASK_MS))) this.judge(utterance, text, silent);
+    if (!verdict && !exhausted) return;
     if (silent >= PARK_MS) { void this.commit(true); return; }
     if (silent >= NUDGE_MS && !utterance.nudged) this.nudge(utterance);
   }
@@ -563,10 +589,13 @@ export class VoiceSession {
    */
   private nudge(utterance: Utterance): void {
     utterance.nudged = true;
+    const pause = utterance.quietSince;
     void post<{ stale?: true; say?: MasterSay }>('/api/master/voice/nudge', this.options.token(), { session: this.session })
       .then(answer => {
         if (answer?.stale) { this.end('replaced'); return; }
         const say = answer?.say;
+        // The owner went on meanwhile: this pause's sign is not played, and a later long pause may have it.
+        if (utterance.quietSince !== pause) { utterance.nudged = false; return; }
         if (!say || this.over || this.utterance !== utterance || utterance.quietSince === undefined || this.current || this.nudging) return;
         const nudge: Nudge = { frames: [], length: 0 };
         this.nudging = nudge;
@@ -585,7 +614,7 @@ export class VoiceSession {
   private duringNudge(nudge: Nudge, data: Float32Array, event: ReturnType<SpeechGate['update']>): void {
     nudge.frames.push(data);
     nudge.length += data.length;
-    while (this.context && nudge.length > this.context.sampleRate * PREROLL_SECONDS && nudge.frames.length > 1) nudge.length -= nudge.frames.shift()!.length;
+    while (this.context && nudge.length > this.context.sampleRate * NUDGE_KEEP_SECONDS && nudge.frames.length > 1) nudge.length -= nudge.frames.shift()!.length;
     if (event !== 'speech-start') return;
     const utterance = this.utterance!;
     this.stopNudge();
@@ -757,7 +786,8 @@ export class VoiceSession {
   private show(change: Partial<VoiceView>): void {
     const utterance = this.utterance;
     const waiting = Boolean(utterance && utterance.quietSince !== undefined && !utterance.ownRule && utterance.verdict && utterance.verdict.finished < VOICE_TURN_FINISHED);
-    const hearing = !utterance && !this.current && this.armed && this.gate.isVoicing;
+    if (utterance || this.current || !this.armed) this.hearing = false;
+    const hearing = this.hearing;
     this.view = { ...this.view, ...change, listening: this.listening, capturing: Boolean(utterance), hearing, waiting, draft: this.draft || undefined, playing: this.current ? { kind: this.current.say.kind, text: this.current.say.text } : undefined, blocked: this.blocked ? { text: this.blocked.text } : undefined };
     this.options.onView(this.view);
   }

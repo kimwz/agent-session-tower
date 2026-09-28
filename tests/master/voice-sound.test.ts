@@ -95,8 +95,15 @@ test('speech made of syllables with short gaps between them starts at its first 
 
   const clicks = new SpeechGate(1_000);
   let time = feed(clicks, 0.002, 1_000, 0).end;
-  for (let click = 0; click < 20; click++) {
-    assert.deepEqual(feed(clicks, 0.05, 30, time, 128 / 48).events, [], 'a key typed now and then is not speech');
-    time = feed(clicks, 0.002, 250, time + 30, 128 / 48).end;
+  for (const [loud, quiet] of [[30, 250], [30, 120], [20, 100]]) {
+    const heard: string[] = [];
+    for (let click = 0; click < 20; click++) {
+      const key = feed(clicks, 0.05, loud, time, 128 / 48);
+      const after = feed(clicks, 0.002, quiet, key.end, 128 / 48);
+      heard.push(...key.events.map(item => item.event), ...after.events.map(item => item.event));
+      time = after.end;
+    }
+    assert.deepEqual(heard, [], `keys typed ${loud + quiet} ms apart are not speech`);
+    time = feed(clicks, 0.002, 1_000, time, 128 / 48).end;
   }
 });

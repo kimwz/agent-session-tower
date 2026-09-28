@@ -568,6 +568,24 @@ test('a finished request after many pauses still goes: once judgments run out, t
     await flush();
     assert.deepEqual(requests(), [said]);
     assert.ok(judged().length <= 20);
+    socket.closed();
+    await flush();
+
+    // Its last judgment sure that it is not finished, it waits for the owner however many judgments were used.
+    turnEnd = ({ text }) => ({ finished: text.endsWith('그리고') ? 0.05 : 0.48 });
+    const next = await startSpeaking(page, '그,');
+    let more = '그,';
+    for (let pause = 0; pause < 19; pause++) {
+      await page.hearSlowly(0.002, 1_200);
+      more += ` 말 ${pause}`;
+      await page.hearSlowly(0.1, 400);
+      next.message({ message_type: 'partial_transcript', text: more });
+    }
+    more += ' 이것도 고쳐 주고 그리고';
+    next.message({ message_type: 'partial_transcript', text: more });
+    await page.hearSlowly(0.002, 4_500);
+    assert.equal(judged().length, 40);
+    assert.equal(commits(next), 0, 'not sent at the longer pause');
   } finally { page.end(); }
 });
 
@@ -586,6 +604,7 @@ test('words still being written down in what seemed a pause are speech too quiet
     }
     await page.hearSlowly(0.002, 1_000);
     assert.equal(nudges(), 0, 'not told to go on while speaking');
+    assert.ok(judged().length <= 3, `words a second apart are not each judged (${judged().length})`);
     assert.ok(judged().every(body => body.pauseMs < 3_000), `judged as short pauses: ${judged().map(body => body.pauseMs).join(', ')}`);
     assert.equal(commits(socket), 0);
     said += ' 이런 태그를 줄래?';
@@ -596,10 +615,15 @@ test('words still being written down in what seemed a pause are speech too quiet
 });
 
 test('speaking starts shows at once, and what is written down begins with the first syllable, the onset before it included', async () => {
-  const page = await harness();
+  // A real worklet's frames: the gate's smoothing and timing as in a browser.
+  const page = await harness({ rate: 48_000, frame: 128 });
   try {
     await page.hear(0.002, 500);
+    const shown: boolean[] = [];
     await page.hear(0.1, 30);
+    for (let step = 0; step < 30; step++) { await page.hear(0.002, 10); shown.push(Boolean(page.view().hearing)); }
+    assert.ok(!shown.includes(true), 'a click does not flash it, nor the quiet after it');
+    await page.hear(0.1, 150);
     assert.deepEqual([page.view().hearing, page.view().capturing], [true, false], 'a voice is shown before it counts as speech');
     await page.hear(0.002, 300);
     assert.equal(page.view().hearing, false, 'a blip is let go');
@@ -621,5 +645,91 @@ test('with no token ready when speaking starts, one is fetched then and nothing 
     assert.equal(FakeSocket.all.length, 1);
     assert.equal(commits(socket), 1);
     assert.deepEqual(requests(), ['세션 목록 보여 줘']);
+  } finally { page.end(); }
+});
+
+test('out of judgments, a finished request goes even after a long pause judged unfinished, while one that trails off still waits for the owner', async () => {
+  const page = await harness();
+  try {
+    turnEnd = () => ({ finished: 0.3 });
+    nudgeAnswer = { say: { ...page.say('nudge', 'ack'), text: '계속 말씀하세요, 듣고 있어요.' } };
+    // Each pause gets its first judgment and the one at three seconds: ten pauses use all twenty.
+    const socket = await startSpeaking(page, '그,');
+    let said = '그,';
+    for (let pause = 0; pause < 10; pause++) {
+      await page.hearSlowly(0.002, 3_300);
+      said += ` 말 ${pause}`;
+      await page.hearSlowly(0.1, 400);
+      socket.message({ message_type: 'partial_transcript', text: said });
+    }
+    assert.equal(judged().length, 20);
+    assert.ok(judged().at(-1)!.pauseMs >= 3_000, 'the last one was at the longer pause');
+    // It trails off: no more judgments, and it is not sent however long the owner thinks (the sign plays, then it waits unsent).
+    said += ' 그러니까 음';
+    socket.message({ message_type: 'partial_transcript', text: said });
+    await page.hearSlowly(0.002, 4_500);
+    assert.deepEqual([commits(socket), judged().length], [0, 20]);
+    await page.hearSlowly(0.002, 1_000);
+    assert.equal(nudges(), 1);
+    page.audio.onended!();
+    await page.hearSlowly(0.002, 15_000);
+    assert.equal(commits(socket), 1, 'kept unsent after twenty seconds');
+    socket.message({ message_type: 'committed_transcript', text: said });
+    await flush();
+    socket.closed();
+    await flush();
+    assert.deepEqual(requests(), []);
+
+    // The same, with a finished request: it goes at three seconds and the wait for its ending, not after twenty.
+    page.voice.discard();
+    const next = await startSpeaking(page, '그,');
+    let more = '그,';
+    for (let pause = 0; pause < 10; pause++) {
+      await page.hearSlowly(0.002, 3_300);
+      more += ` 말 ${pause}`;
+      await page.hearSlowly(0.1, 400);
+      next.message({ message_type: 'partial_transcript', text: more });
+    }
+    assert.equal(judged().length, 40);
+    more += ' 로그 보여 줘';
+    next.message({ message_type: 'partial_transcript', text: more });
+    await page.hearSlowly(0.002, 3_000);
+    assert.equal(commits(next), 0, 'not before three seconds');
+    await page.hearSlowly(0.002, 500);
+    assert.equal(commits(next), 1);
+    next.message({ message_type: 'committed_transcript', text: more });
+    await flush();
+    assert.deepEqual(requests(), [more]);
+  } finally { page.end(); }
+});
+
+test('the owner going on quietly calls off the sign: one on its way is not played, one playing stops and what was heard meanwhile is sent', async () => {
+  const page = await harness();
+  try {
+    turnEnd = () => ({ finished: 0.1 });
+    let answerSign!: (value: unknown) => void;
+    nudgeAnswer = new Promise(resolve => { answerSign = resolve; });
+    const socket = await startSpeaking(page, '내일 회의는');
+    await page.hearSlowly(0.002, 5_300);
+    assert.equal(nudges(), 1, 'asked for');
+    socket.message({ message_type: 'partial_transcript', text: '내일 회의는 오후' });
+    answerSign({ say: { ...page.say('late', 'ack'), text: '계속 말씀하세요, 듣고 있어요.' } });
+    await page.hearSlowly(0.002, 300);
+    assert.ok(!page.audio.played.includes('/api/master/voice/audio/late'), 'a sign that came back late is not played');
+
+    // A later long pause may have its sign; words written while it plays stop it, and nothing heard meanwhile is lost.
+    nudgeAnswer = { say: { ...page.say('second', 'ack'), text: '계속 말씀하세요, 듣고 있어요.' } };
+    await page.hearSlowly(0.002, 5_300);
+    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/second');
+    const sent = socket.sent.length;
+    const paused = page.audio.paused.length;
+    await page.hearSlowly(0.002, 200);
+    assert.equal(socket.sent.length, sent);
+    socket.message({ message_type: 'partial_transcript', text: '내일 회의는 오후 세 시로' });
+    await flush();
+    assert.ok(page.audio.paused.length > paused, 'the sign stops');
+    assert.ok(socket.sent.length > sent, 'what the microphone heard while it played is sent');
+    await page.hearSlowly(0.002, 200);
+    assert.deepEqual([commits(socket), requests().length], [0, 0]);
   } finally { page.end(); }
 });

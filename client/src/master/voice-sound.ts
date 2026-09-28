@@ -6,6 +6,8 @@
 const SPEECH_ONSET_MS = 240;
 /** Quiet this short between syllables does not start the onset over: speech is not one unbroken sound. */
 const ONSET_GAP_MS = 100;
+/** Of the onset, at least this share must be loud: syllables are, keys typed or tapped a moment apart are not. */
+const ONSET_LOUD_SHARE = 0.6;
 const ABS_START_MIN = 0.005;
 const ABS_END_MIN = 0.003;
 const START_RATIO = 2.5;
@@ -26,6 +28,8 @@ export class SpeechGate {
   private preSpeechBaseline = ABS_START_MIN;
   private voicedSince = 0;
   private lastAbove = 0;
+  private loudMs = 0;
+  private lastUpdate = 0;
   private lastLoud = 0;
   private speaking = false;
   private initialized = false;
@@ -41,8 +45,13 @@ export class SpeechGate {
   /** Loud, but not for long enough yet to count as speech: the owner may be starting to speak again. */
   get isVoicing(): boolean { return !this.speaking && this.voicedSince > 0; }
 
+  /** How long the moment has been loud (its short gaps left out), while `isVoicing`. */
+  get voicedMs(): number { return this.isVoicing ? this.loudMs : 0; }
+
   update(rawRms: number, now = Date.now()): GateEvent {
     this.smooth = this.smooth ? this.smooth + (rawRms - this.smooth) * 0.1 : rawRms;
+    const step = this.lastUpdate ? Math.max(0, now - this.lastUpdate) : 0;
+    this.lastUpdate = now;
     const rms = this.smooth;
     if (!this.initialized) {
       // Starts at the room's level, so a noisy room is not one long voice while the slow average catches up.
@@ -53,10 +62,12 @@ export class SpeechGate {
     if (rms < this.baseline) this.baseline += (rms - this.baseline) * FALL;
     else this.baseline += (rms - this.baseline) * (this.speaking ? RISE_SPEAKING : RISE_IDLE);
     if (!this.speaking) {
-      if (rms > Math.max(ABS_START_MIN, this.baseline * START_RATIO)) {
-        if (!this.voicedSince) this.voicedSince = now;
+      const start = Math.max(ABS_START_MIN, this.baseline * START_RATIO);
+      if (rms > start) {
+        // Loud time is the frames' own loudness, not the smoothed one, whose tail would make a click last long.
+        if (!this.voicedSince) { this.voicedSince = now; this.loudMs = 0; } else if (rawRms > start) this.loudMs += step;
         this.lastAbove = now;
-        if (now - this.voicedSince >= SPEECH_ONSET_MS) {
+        if (now - this.voicedSince >= SPEECH_ONSET_MS && this.loudMs >= (now - this.voicedSince) * ONSET_LOUD_SHARE) {
           this.speaking = true;
           this.preSpeechBaseline = this.baseline;
           this.lastLoud = now;
@@ -79,6 +90,7 @@ export class SpeechGate {
   reset(): void {
     this.speaking = false;
     this.voicedSince = 0;
+    this.lastUpdate = 0;
     this.initialized = false;
     this.smooth = 0;
   }
