@@ -71,3 +71,14 @@ test('each earlier session is described by its latest user requests, newest firs
   assert.ok(earlier.every(item => item.lastMessage === undefined), 'the agent’s answers are not sent');
   assert.ok(JSON.stringify(seen[0]!.state).length < 105_000, 'within what the judgment takes');
 });
+
+test('what is sent stays within the judgment’s limit even when every request is full of characters JSON escapes', async () => {
+  const seen: Array<{ state: any; questions: Record<string, any> }> = [];
+  const escaped = '\\"'.repeat(150);
+  const all = [fresh, ...Array.from({ length: 45 }, (_, i) => session(`codex:e${i}`, `${escaped} ${i}`.repeat(3), `/w/${escaped.repeat(20)}`, 0.01 * (i + 1)))];
+  await relatedSessionNotes(engine('nothing', seen), { ...run, prompt: escaped.repeat(20) }, fresh, all, () => Array.from({ length: 8 }, () => escaped), now);
+  const state = JSON.stringify(seen[0]!.state);
+  const longestQuestion = Math.max(...Object.values(seen[0]!.questions).map(question => JSON.stringify(question).length));
+  assert.ok(state.length + longestQuestion <= 110_000, `${state.length + longestQuestion} characters`);
+  assert.ok((Object.values(seen[0]!.state.earlierSessions)[0] as { latestUserRequests: string[] }).latestUserRequests.length > 0, 'still describes each session');
+});

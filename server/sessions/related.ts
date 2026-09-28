@@ -26,18 +26,20 @@ export async function relatedSessionNotes(engine: DecisionEngine | undefined, ru
     .slice(0, CANDIDATES);
   if (!candidates.length) return undefined;
   const newRequest = clip(run.prompt, REQUEST_CHARS);
-  // Each session's share of what may be sent, after its title and details.
-  const share = Math.floor((STATE_CHARS - newRequest.length) / candidates.length) - 500;
+  // Each session's share of what may be sent, after its title, folder and time (at most about 1,300 characters as JSON).
+  const share = Math.floor((STATE_CHARS - JSON.stringify(newRequest).length - JSON.stringify(clip(session.cwd, 300)).length) / candidates.length) - 1_500;
   const state = {
-    newRequest: { folder: session.cwd, text: newRequest },
+    newRequest: { folder: clip(session.cwd, 300), text: newRequest },
     earlierSessions: Object.fromEntries(candidates.map((item, index) => {
       const latest: string[] = [];
       let used = 0;
+      // Counted as sent: quotes and backslashes grow when the state is written as JSON.
       for (const request of requests(item.id)) {
-        if (used + request.length > share) break;
-        latest.push(request); used += request.length;
+        const size = JSON.stringify(request).length;
+        if (used + size > share) break;
+        latest.push(request); used += size;
       }
-      return [`s${index}`, { title: clip(item.customTitle || item.title, 300), folder: item.cwd, lastActive: item.updatedAt.slice(0, 16), latestUserRequests: latest }];
+      return [`s${index}`, { title: clip(item.customTitle || item.title, 300), folder: clip(item.cwd, 300), lastActive: item.updatedAt.slice(0, 16), latestUserRequests: latest }];
     })),
   };
   const questions: Record<string, DecisionQuestion> = Object.fromEntries(candidates.map((_, index) => [`s${index}`, { type: 'yesNo',

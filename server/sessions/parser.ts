@@ -330,7 +330,8 @@ function consume(state: RecordState, row: Json, offset: number, ordinal: number)
       s.title = compact(message.text, 100); state.titleSet = true;
     }
     if (['user', 'assistant'].includes(message.role)) s.lastMessage = compact(message.text);
-    if (message.role === 'user') state.recentRequests = [compact(message.text, RECENT_REQUEST_CHARS), ...(state.recentRequests ?? [])].slice(0, RECENT_REQUESTS);
+    // Copied out, so a kept request never holds the whole (possibly very long) message in memory.
+    if (message.role === 'user') state.recentRequests = [Buffer.from(compact(message.text, RECENT_REQUEST_CHARS)).toString(), ...(state.recentRequests ?? [])].slice(0, RECENT_REQUESTS);
   }
   if (row.timestamp && at > Date.parse(s.updatedAt)) s.updatedAt = timestamp;
 
