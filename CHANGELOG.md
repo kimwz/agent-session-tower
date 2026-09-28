@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.60.0] - 2026-09-28
+
+### Changed
+- **Voice waits until you have finished speaking.** A short pause used to end what you said: after one second of silence the request was sent and the master answered ("네, 확인해 볼게요"), even when you were only thinking of the next words. Now each pause is judged by the fast-judgment service (Jev), from what was written down so far and how long you paused, and the request goes only once you seem finished. It is asked halfway to the pause already, so a finished request still goes about as quickly as before, and it is asked again when you say more or the pause grows. While you pause mid-thought, the voice bar shows **듣고 있어요 · 이어서 말씀하세요**, and whatever you say next continues the same request.
+- **A long pause gets a short "go on".** After about five seconds of silence in the middle of a request, the master says once "계속 말씀하세요, 듣고 있어요." It sends nothing and ends nothing, and it stops at once if you start speaking over it. After twenty seconds what you said is written down but kept unsent: speaking again goes on from it, and **보내기** sends it or **지우기** drops it. **보내기** also sends what you are saying right away, without waiting for the pause.
+- **Without Jev, the sentence ending decides.** With no Jev key, the **음성으로 말할 때 말이 끝났는지 판단** feature turned off in fast judgments, or Jev failing or taking over three seconds, voice waits a little longer after sentences that trail off (a filler such as 음 or 그리고, a joining ending such as -고 or -는데, or a particle) than after finished ones. Each pause's judgment is listed under the fast-judgment panel's recent judgments. Judgments are limited to 12 per request and 40 a minute.
+
 ## [1.59.1] - 2026-09-28
 
 ### Fixed
