@@ -9,8 +9,9 @@
 .chat-header-actions { display: flex; align-items: center; flex-shrink: 0; gap: 2px; margin-left: auto; }
 .chat-panel .chat-header-actions .icon-button { width: 26px; height: 26px; margin: 0; }
 .chat-panel .chat-header-actions .close-chat { position: static; display: inline-flex; }
-.chat-panel .chat-context-row { position: relative; flex-wrap: wrap; min-width: 0; min-height: 25px; margin-top: 4px; gap: 8px; }
-.chat-context-row > .workspace-actions { position: static; }
+.chat-panel .chat-context-row { position: relative; justify-content: flex-start; flex-wrap: wrap; min-width: 0; min-height: 25px; margin-top: 4px; gap: 8px; }
+.chat-context-row > .workspace-actions { position: static; margin-left: auto; }
+.chat-context-row > .workspace-actions ~ .session-family-nav { margin-left: 0; }
 .chat-context-row > .status-badge { flex-shrink: 0; margin: 0; }
 .chat-context-row .chat-project { flex: 0 1 auto; min-width: 0; }
 .chat-context-row .session-family-nav { margin-left: auto; }
@@ -32,8 +33,9 @@
   .chat-panel .chat-header-actions .icon-button svg { width: 20px; height: 20px; }
 }
 /* The judged outcome in the header; one waiting on the owner is a button that marks it looked at. */
-.chat-context-row > .chat-outcome { flex-shrink: 0; font-size: 11px; }
+.chat-context-row > .chat-outcome { flex-shrink: 0; gap: 4px; padding: 3px 6px; border-radius: 4px; font-size: 10px; line-height: 1; }
+.chat-context-row > .chat-outcome > i { width: 5px; height: 5px; box-shadow: none; }
 .chat-outcome.acknowledge { cursor: pointer; font-family: inherit; }
 .chat-outcome.acknowledge:hover:not(:disabled) { background: color-mix(in srgb, var(--outcome) 22%, transparent); }
 .chat-outcome.acknowledge:disabled { cursor: default; opacity: .6; }
-.chat-outcome-action { display: inline-flex; align-items: center; gap: 3px; margin-left: 2px; padding-left: 6px; border-left: 1px solid color-mix(in srgb, var(--outcome) 38%, transparent); font-weight: 500; }
+.chat-outcome-action { display: inline-flex; align-items: center; gap: 3px; margin-left: 2px; padding-left: 5px; border-left: 1px solid color-mix(in srgb, var(--outcome) 38%, transparent); font-weight: 500; }

@@ -235,8 +235,9 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
         </div>
       </div>
       <div className="chat-context-row">
-        {current && <span className={`status-badge ${current.status}`} title={translateMessage(current.statusReason)}><i />{statusLabels[current.status]}</span>}
-        {current?.status !== 'working' && current?.outcome && <SessionOutcomeBadge outcome={current.outcome} disabled={!reachable || !token} onAcknowledge={onAcknowledgeOutcome} onError={setSendError} />}
+        {/* A judged outcome says more than the plain finished status, so it takes the status's place. */}
+        {current && (current.status !== 'working' && current.outcome ? <SessionOutcomeBadge outcome={current.outcome} disabled={!reachable || !token} onAcknowledge={onAcknowledgeOutcome} onError={setSendError} />
+          : <span className={`status-badge ${current.status}`} title={translateMessage(current.statusReason)}><i />{statusLabels[current.status]}</span>)}
         <button className="chat-project" onClick={() => setShowMetadata(!showMetadata)} aria-expanded={showMetadata}><Folder size={12} /><span className="folder-tail" title={(current?.cwd && localPart(current.cwd)) || current?.project || t("세션 정보")}><bdi dir="ltr">{current?.project || t("세션 정보")}</bdi></span><ChevronDown size={12} className={showMetadata ? 'rotate' : ''} /></button>
         {current?.cwd && <WorkspaceActions key={current.cwd} cwd={current.cwd} token={token} disabled={!connected || (host ? !host.workspace : false)} note={host?.workspaceNote} machine={host?.name} />}
         <SessionFamilyNav sessions={allSessions} selectedId={sessionId} onNavigate={onNavigate} />
