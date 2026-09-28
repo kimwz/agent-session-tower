@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
-import { join, resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { MASTER_FOLDER } from '../../shared/master.js';
 
 /**
@@ -16,9 +17,21 @@ const KEYED_ENVIRONMENT = [
 /** Codex settings for a turn of the master: a ChatGPT sign-in only, and OpenAI's own service. */
 export const CODEX_SUBSCRIPTION_CONFIG = ['-c', 'forced_login_method="chatgpt"', '-c', 'model_provider="openai"'];
 
-/** Whether a session is the master's: it runs in the master's folder under Tower's state directory. */
+/** A path as the file system names it, links followed; for a path that does not exist (yet), its nearest existing parent's. */
+function canonical(path: string): string {
+  const full = resolve(path);
+  try { return realpathSync(full); } catch {
+    const parent = dirname(full);
+    return parent === full ? full : join(canonical(parent), basename(full));
+  }
+}
+
+/**
+ * Whether a session is the master's: it runs in the master's folder under Tower's state directory. Both sides are
+ * compared with links followed, so a state directory reached through a link (as /var is on macOS) still matches.
+ */
 export function subscriptionOnly(stateDir: string, cwd: string): boolean {
-  return resolve(cwd) === join(resolve(stateDir), MASTER_FOLDER);
+  return canonical(cwd) === join(canonical(stateDir), MASTER_FOLDER);
 }
 
 /** Takes out what would let a CLI use an API key or another provider. */
@@ -41,7 +54,15 @@ export async function checkClaudeSubscription(executable: string, cwd: string, e
   let status: { loggedIn?: unknown; authMethod?: unknown; apiProvider?: unknown } | undefined;
   try { status = output ? JSON.parse(output) : undefined; } catch { status = undefined; }
   if (status?.loggedIn === true && status.authMethod === 'claude.ai' && status.apiProvider === 'firstParty') return;
+  if (!status) throw new SubscriptionError('Claude Code의 로그인 방식을 확인하지 못해 마스터에게 보내지 않았습니다. 잠시 뒤 다시 보내 주세요.');
   throw new SubscriptionError('마스터는 Claude 구독 로그인(claude.ai)으로만 대화합니다. 이 컴퓨터의 Claude Code가 API 키나 다른 방식으로 로그인되어 있어 보내지 않았습니다. `claude auth login`으로 구독 계정에 로그인해 주세요.');
+}
+
+/** Codex's effective settings: OpenAI's own service, whatever profile is active. */
+export function checkCodexConfig(result: unknown): void {
+  const provider = (result as { config?: { model_provider?: unknown } } | undefined)?.config?.model_provider;
+  if (provider === undefined || provider === null || provider === 'openai') return;
+  throw new SubscriptionError('마스터는 OpenAI의 기본 서비스로만 대화합니다. Codex 설정이 다른 제공자를 쓰고 있어 보내지 않았습니다.');
 }
 
 /** A Codex account read from its app-server: only a ChatGPT sign-in passes. */

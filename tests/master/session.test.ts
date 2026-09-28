@@ -74,7 +74,7 @@ async function harness(t: test.TestContext, options: { bound?: boolean; createSt
   const snapshot = (): Snapshot => ({ sessions: [], runs, autoPrompts: jobs, providers: [], scanning: false, hostname: 'here', version: 't', updatedAt: '' });
   const live = { fresh: async () => snapshot(), snapshot, node: () => undefined } as unknown as LiveState;
   const open = async () => {
-    const session = new MasterSession({ stateDir: dir, dataDir: dir, settings, tower, live, room, followMs: 60_000 });
+    const session = new MasterSession({ stateDir: dir, dataDir: dir, settings, tower, live, room, followMs: 60_000, reportRetryMs: 1 });
     await session.start();
     cleanup.push(async () => { await session.close(); await room.flush(); });
     return session;
@@ -126,7 +126,7 @@ test('work the master handed out through Tower\'s tools is followed and reported
   h.finish(work, 'Fixed the login bug.');
   await h.session.follow();
   const [report] = h.reports();
-  assert.match(String(report.body.prompt), /^\[Tower report\] Work you handed out ended:\n- "fix the login bug" — completed \(session codex:work\)\n  Its answer:\n    Fixed the login bug\./);
+  assert.match(String(report.body.prompt), /^\[Tower report\] Work you handed out ended \(report [0-9a-f]{8}\):\n- "fix the login bug" — completed \(session codex:work\)\n  Its answer:\n    Fixed the login bug\./);
   await h.session.follow();
   await h.session.follow();
   assert.equal(h.reports().length, 1, 'reported once');
@@ -149,26 +149,64 @@ test('an Auto Prompt that fails before any run is reported as such, and a report
   assert.match(String(h.reports()[0].body.prompt), /"deploy it" — error/);
 });
 
-test('work a tower_api call started is followed too, and a report whose sending was cut off by a restart is never sent again', async t => {
+test('work a tower_api call started is followed too; a report cut off by a restart is found in the master session, or sent again only when surely missing', async t => {
   const h = await harness(t, { bound: true });
   await h.session.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: 'write docs', title: 'Docs' }, { session: { id: 'claude:docs' }, run: { id: 'd1' } });
+  await h.session.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: 'write tests', title: 'Tests' }, { session: { id: 'claude:tests' }, run: { id: 'd2' } });
   // A message to the master session itself is its own conversation.
   await h.session.started({ method: 'POST', path: '/api/sessions/claude%3Amaster/messages', route: '', local: `/api/sessions/${encodeURIComponent(MASTER)}/messages`, write: true }, { prompt: 'x' }, { run: { id: 'm9', sessionId: MASTER } });
-  assert.equal(h.session.activeTasks(), 1);
-  const docs: Run = { id: 'd1', sessionId: 'claude:docs', prompt: 'write docs', status: 'running', createdAt: h.tick(), output: '' };
-  h.runs.push(docs);
-  h.finish(docs, 'Docs written.');
-  // The report is marked as being sent, then the host stops before it knows whether Tower took it.
+  assert.equal(h.session.activeTasks(), 2);
+  for (const [id, session, prompt] of [['d1', 'claude:docs', 'write docs'], ['d2', 'claude:tests', 'write tests']]) {
+    const run: Run = { id, sessionId: session, prompt, status: 'running', createdAt: h.tick(), output: '' };
+    h.runs.push(run);
+    h.finish(run, 'Done.');
+  }
+  // Both reports were being sent when the host stopped: one reached the master session, the other did not.
   const saved = join(h.dir, 'follow.json');
-  const file = JSON.parse(await readFile(saved, 'utf8')) as { followed: Array<{ state: string; report?: string }> };
-  file.followed[0].state = 'completed'; file.followed[0].report = 'sending';
+  const file = JSON.parse(await readFile(saved, 'utf8')) as { followed: Array<{ state: string; report?: string; reportId?: string; reportAt?: string }> };
+  const old = new Date(Date.now() - 5 * 60_000).toISOString();
+  Object.assign(file.followed[0], { state: 'completed', report: 'sending', reportId: 'aaaa1111', reportAt: old });
+  Object.assign(file.followed[1], { state: 'completed', report: 'sending', reportId: 'bbbb2222', reportAt: old });
+  h.runs.push({ id: 'arrived', sessionId: MASTER, prompt: '[Tower report] Work you handed out ended (report aaaa1111):\n- "Docs" — completed', status: 'queued', createdAt: h.tick(), output: '' });
   await h.session.close();
   const { writePrivateJson } = await import('../../server/stores/private-json.js');
   await writePrivateJson(saved, JSON.stringify(file));
   const again = await h.open();
+  assert.equal(again.activeTasks(), 2, 'a report in doubt still counts');
   await again.follow();
-  assert.equal(h.reports().length, 0, 'an uncertain report is not sent twice');
+  await again.follow();
+  const resent = h.reports().filter(report => report.body.prompt !== h.runs.find(run => run.id === 'arrived')!.prompt);
+  assert.equal(resent.length, 1, 'only the report that never arrived goes again');
+  assert.match(String(resent[0].body.prompt), /"Tests" — completed/);
   assert.equal(again.activeTasks(), 0);
-  const after = JSON.parse(await readFile(saved, 'utf8')) as { followed: Array<{ report?: string }> };
-  assert.equal(after.followed[0].report, 'uncertain');
+});
+
+test('many reports at once go in messages a session takes, never one too large', async t => {
+  const h = await harness(t, { bound: true });
+  for (let index = 0; index < 12; index++) {
+    const id = `big${index}`;
+    await h.session.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: `task ${index}` }, { session: { id: `claude:${id}` }, run: { id } });
+    const run: Run = { id, sessionId: `claude:${id}`, prompt: `task ${index}`, status: 'running', createdAt: h.tick(), output: '' };
+    h.runs.push(run);
+    h.finish(run, 'x'.repeat(2900));
+  }
+  await h.session.follow();
+  const reports = h.reports();
+  assert.ok(reports.length >= 2);
+  assert.ok(reports.every(report => String(report.body.prompt).length < 32_000));
+  assert.equal(reports.map(report => (String(report.body.prompt).match(/^- "/gm) ?? []).length).reduce((sum, count) => sum + count, 0), 12);
+});
+
+test('a report Tower keeps refusing is tried less and less often, then shown as failed instead of forever', async t => {
+  const h = await harness(t, { bound: true });
+  await h.session.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: 'lost' }, { session: { id: 'claude:lost' }, run: { id: 'l1' } });
+  const run: Run = { id: 'l1', sessionId: 'claude:lost', prompt: 'lost', status: 'running', createdAt: h.tick(), output: '' };
+  h.runs.push(run);
+  h.finish(run, 'Done.');
+  h.setMessageStatus(404);
+  for (let round = 0; round < 60 && h.session.failedReports() === 0; round++) { await h.session.follow(); await new Promise(resolve => setTimeout(resolve, 20)); }
+  assert.equal(h.session.failedReports(), 1);
+  assert.equal(h.session.activeTasks(), 0);
+  const tries = h.posted.filter(item => String(item.body.prompt).startsWith('[Tower report]')).length;
+  assert.equal(tries, 8, 'given up after eight refusals');
 });

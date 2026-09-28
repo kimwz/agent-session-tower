@@ -78,13 +78,14 @@ export class MasterSettingsStore {
   async start(): Promise<void> {
     await mkdir(this.directory, { recursive: true, mode: 0o700 });
     const saved = await readPrivateJson(this.settingsPath).catch(() => undefined);
-    try { if (saved) this.settings = mergeSettings(DEFAULT_MASTER_SETTINGS, saved, true); }
+    let parsed = false;
+    try { if (saved) { this.settings = mergeSettings(DEFAULT_MASTER_SETTINGS, saved, true); parsed = true; } }
     catch { this.settings = structuredClone(DEFAULT_MASTER_SETTINGS); }
     const voiceKey = await readPrivateJson(this.voiceKeyPath).catch(() => undefined) as { apiKey?: unknown } | undefined;
     if (validKey(voiceKey?.apiKey)) this.voiceApiKey = voiceKey.apiKey;
     for (const name of LEGACY_KEY_FILES) await unlink(join(this.directory, name)).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; });
-    // Written back without the dropped fields, so they are gone from disk too.
-    if (saved) await this.save(this.settings);
+    // Written back without the dropped fields, so they are gone from disk too; a file this build cannot read is left as it is.
+    if (parsed && JSON.stringify(saved) !== JSON.stringify(this.settings)) await this.save(this.settings);
   }
 
   current(): MasterSettings { return structuredClone(this.settings); }

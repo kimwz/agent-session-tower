@@ -1,3 +1,4 @@
+import { subscriptionOnly } from '../runs/subscription.js';
 import { requestedEffort, requestedModel, validEffort, validModelId } from '../providers/models.js';
 import { EventEmitter } from 'node:events';
 import { constants } from 'node:fs';
@@ -417,7 +418,9 @@ export class AutoPromptManager extends EventEmitter {
     return this.snapshotNow(origin);
   }
   private snapshotNow(origin: RunOrigin | undefined): Snapshot {
-    const snapshot = this.options.snapshot();
+    const everything = this.options.snapshot();
+    // The master's own conversation is never where other work goes.
+    const snapshot = { ...everything, sessions: everything.sessions.filter(session => !subscriptionOnly(this.options.stateDir, session.cwd)) };
     if (!origin?.controllerId) return snapshot;
     if (!this.options.remote) throw new RunError('원격 공유 제외 목록을 확인할 수 없어 실행하지 않았습니다.', 503);
     return remoteWorkingSnapshot(snapshot, { matcher: this.options.remote.matcher(), coordinators: this.options.remote.coordinators() });

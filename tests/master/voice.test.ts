@@ -152,7 +152,7 @@ async function harness(t: test.TestContext, options: Options = {}) {
     await session.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: title }, { session: { id: run.sessionId }, run: { id } });
     answer(run, `${title}: done`);
   };
-  return { dir, labs, room, session, voice, client, towerPort, seen, events, says, speakOf, queueEvent, settings, prompts, runs };
+  return { dir, labs, room, session, voice, client, towerPort, seen, events, says, speakOf, queueEvent, settings, prompts, runs, history, tick };
 }
 type Harness = Awaited<ReturnType<typeof harness>>;
 const masterEntry = (h: Harness, pattern: RegExp) => until(() => h.room.recent(200).find((entry): entry is MasterEntry => (entry.data.kind === 'master' || entry.data.kind === 'event') && pattern.test(entry.data.text)));
@@ -319,7 +319,7 @@ test('an answer to a spoken request is read aloud where voice is on and marked p
   await sleep(150);
   assert.equal(h.room.recent(200).some(entry => entry.data.kind === 'event' && /보고 B/.test(entry.data.text)), false);
   // Reports reach the master session as Tower's messages, with the work's own answer.
-  assert.match(h.prompts.find(prompt => prompt.includes('A ended'))!, /^\[Tower report\] Work you handed out ended:\n- "A ended" — completed \(session claude:work-d\d+\)\n  Its answer:\n    A ended: done/);
+  assert.match(h.prompts.find(prompt => prompt.includes('A ended'))!, /^\[Tower report\] Work you handed out ended \(report [0-9a-f]{8}\):\n- "A ended" — completed \(session claude:work-d\d+\)\n  Its answer:\n    A ended: done/);
   // A spoken request answered after voice went off is marked as not said aloud.
   later = on(h, randomUUID());
   await request(h, later, '마지막 질문');
@@ -605,4 +605,25 @@ test('the parts of an answer are whole sentences that join back into it; a numbe
   // Serious news keeps the plain voice in every part; a model without tags gets no tag.
   assert.ok(voicedParts(`${'설명입니다. '.repeat(80)}마지막에 오류가 있었어요.`, 'eleven_v3', 'answer').every(part => !part.startsWith('[')));
   assert.deepEqual(voicedParts('', 'eleven_v3', 'answer'), []);
+});
+
+test('two spoken requests steered into one turn get its one answer, read aloud once; the same request sent twice goes once', async t => {
+  const h = await harness(t, { steps: [undefined, undefined] });
+  const session = on(h);
+  autoPlay(h, session);
+  await Promise.all([request(h, session, '첫 번째 요청'), h.session.spoken({ text: '두 번 온 요청', voiceSession: digestOf(session), key: 'same-key' }), h.session.spoken({ text: '두 번 온 요청', voiceSession: digestOf(session), key: 'same-key' })]);
+  assert.equal(h.prompts.filter(prompt => prompt.includes('두 번 온 요청')).length, 1, 'the same request goes once');
+  // The second went into the first one's turn, which answers both after the second.
+  const [first, second] = h.runs;
+  second.steering = { targetRunId: first.id, state: 'delivered', requestedAt: h.tick(), deliveredAt: h.tick() };
+  const kept = h.history(MASTER);
+  kept.messages.push({ id: randomUUID(), role: 'user', text: first.prompt, timestamp: h.tick() }, { id: randomUUID(), role: 'user', text: second.prompt, timestamp: h.tick() },
+    { id: randomUUID(), role: 'assistant', text: '두 가지 다 했습니다.', timestamp: h.tick() });
+  for (const run of [first, second]) { run.status = 'completed'; run.finishedAt = h.tick(); }
+  kept.updatedAt = h.tick();
+  await masterEntry(h, /두 가지 다 했습니다/);
+  await sleep(300);
+  const answers = h.room.recent(50).filter(entry => entry.data.kind === 'master' || entry.data.kind === 'error');
+  assert.equal(answers.length, 1, 'one answer, and no "could not answer" for the other');
+  assert.equal(h.says().filter(item => item.kind === 'answer').length, 1);
 });

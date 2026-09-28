@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import type { ChildProcessWithoutNullStreams, execFile } from 'node:child_process';
 import { PassThrough, Writable } from 'node:stream';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -72,4 +72,15 @@ test('a turn of the master runs only after its Claude sign-in is confirmed, with
   const ordinary = await fixture(t, stateDir => join(stateDir, 'project'), false);
   assert.equal(ordinary.checked.length, 0, 'other sessions are not checked');
   assert.equal(ordinary.spawned[0]?.ANTHROPIC_API_KEY, 'sk-ant-should-not-reach', 'nor is their environment changed');
+});
+
+test('the master\'s folder is recognised through a linked state directory too', async t => {
+  const base = await mkdtemp(join(tmpdir(), 'tower-subscription-link-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const real = join(base, 'real');
+  await mkdir(join(real, 'master-session'), { recursive: true });
+  await symlink(real, join(base, 'linked'));
+  assert.equal(subscriptionOnly(join(base, 'linked'), join(real, 'master-session')), true);
+  assert.equal(subscriptionOnly(real, join(base, 'linked', 'master-session')), true);
+  assert.equal(subscriptionOnly(join(base, 'linked'), join(real, 'elsewhere')), false);
 });

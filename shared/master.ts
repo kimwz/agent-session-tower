@@ -50,6 +50,8 @@ export interface MasterOverview {
   voiceKeyHint?: string;
   /** Work the master handed out that has not been reported yet. */
   activeTasks: number;
+  /** Reports of finished work Tower could not give the master session, after trying for a while. */
+  failedReports?: number;
   voice?: MasterVoiceStatus;
 }
 

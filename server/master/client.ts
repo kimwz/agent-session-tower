@@ -199,7 +199,8 @@ export class MasterClient {
           try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')) as MasterHostReply); } catch { reject(new Error('Invalid master host response.')); }
         });
       });
-      req.setTimeout(60_000, () => req.destroy(new Error('Master host response timed out.')));
+      // A tool may wait for a web that is restarting and pace its calls to a joined computer; it is not cut off before that.
+      req.setTimeout(method === 'tool' ? 5 * 60_000 : 60_000, () => req.destroy(new Error('Master host response timed out.')));
       req.on('error', error => reject(Object.assign(error, { statusCode: 503, ...(['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '') ? { hostAbsent: true } : {}) })));
       req.end(body);
     });

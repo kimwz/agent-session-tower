@@ -18,6 +18,13 @@ const UNKNOWN_MS = 30 * 60_000;
 const STILL_WORKING_MS = 20_000;
 const MASTER_RUNS = 500;
 const FOLLOWED = 300;
+/** Longest report message: well under what a session takes (32,000 characters), so a report is never refused for size. */
+const REPORT_CHARS = 24_000;
+/** A report Tower refused goes again after this long, twice as long each time, and is given up on after so many tries. */
+const REPORT_RETRY_MS = 15_000;
+const REPORT_TRIES = 8;
+/** A report whose sending was cut off is looked for this long in the master's runs and history before it goes again. */
+const RECONCILE_MS = 2 * 60_000;
 /** How Tower adds attached files to a request in a session's history (`attachmentPrompt`), once spaces are folded. */
 const ATTACHED = ' 첨부 파일 (사용자가 이번 메시지에 첨부한 로컬 파일):';
 
@@ -36,8 +43,21 @@ export interface Followed {
   prompt?: string;
   createdAt: string;
   state: MasterTaskState;
-  /** Delegated work's report. Written before it is sent; "sending" after a restart becomes "uncertain" and is not sent again. */
-  report?: 'pending' | 'sending' | 'sent' | 'uncertain';
+  /**
+   * Delegated work's report. Written as "sending" before it goes; one whose outcome is unknown ("uncertain", also after
+   * a restart) is looked for in the master session by its report ID and sent again only when it is surely not there.
+   */
+  report?: 'pending' | 'sending' | 'sent' | 'uncertain' | 'failed';
+  /** How often Tower refused the report; it waits longer each time and gives up (shown as failed) in the end. */
+  reportTries?: number;
+  /** The message the report went in, named in its text, and when it was sent. */
+  reportId?: string;
+  reportAt?: string;
+  /** A spoken request's key (from its client message ID), so the same request is sent once. */
+  key?: string;
+  /** Spoken or report runs that share one turn (steered into it) are read aloud once, as that turn's answer. */
+  turn?: string;
+  spoke?: true;
   answer?: string;
   /** The voice session a spoken request (or a report while voice is on) belongs to. */
   voice?: string;
@@ -62,6 +82,8 @@ export interface MasterSessionOptions {
   /** The voice's ledger: spoken requests and what is read aloud. */
   room: MasterRoom;
   followMs?: number;
+  /** Tests shorten the wait before a refused report goes again. */
+  reportRetryMs?: number;
   onChange?(): void;
 }
 
@@ -79,6 +101,7 @@ export class MasterSession {
   private following?: Promise<void>;
   private starting?: Promise<MasterBinding>;
   private writes: Promise<unknown> = Promise.resolve();
+  private readonly sending = new Set<string>();
   private closed = false;
 
   constructor(private readonly options: MasterSessionOptions) {
@@ -104,15 +127,17 @@ export class MasterSession {
   binding(): MasterBinding | undefined { return this.options.settings.current().session; }
 
   /** Work handed out and not reported yet. */
-  activeTasks(): number { return this.file.followed.filter(item => item.kind === 'delegated' && (item.state === 'running' || item.report === 'pending' || item.report === 'sending')).length; }
+  activeTasks(): number { return this.file.followed.filter(item => item.kind === 'delegated' && (item.state === 'running' || (item.report !== undefined && item.report !== 'sent' && item.report !== 'failed'))).length; }
+  /** Reports Tower kept refusing, which the master never got. */
+  failedReports(): number { return this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'failed').length; }
 
   /** A report is on its way: a host of another build waits until it is sent. */
   busy(): boolean { return this.file.followed.some(item => item.report === 'sending'); }
 
   /** The work handed out, as tower_query shows it. */
   delegatedTable(): Table {
-    return { name: 'delegated', columns: ['id', 'title', 'state', 'session_id', 'node', 'created_at'],
-      rows: this.file.followed.filter(item => item.kind === 'delegated').map(item => [item.id, item.title, item.state, item.sessionId ?? null, item.node ?? null, item.createdAt]) };
+    return { name: 'delegated', columns: ['id', 'title', 'state', 'session_id', 'node', 'created_at', 'report'],
+      rows: this.file.followed.filter(item => item.kind === 'delegated').map(item => [item.id, item.title, item.state, item.sessionId ?? null, item.node ?? null, item.createdAt, item.report ?? null]) };
   }
 
   /**
@@ -154,13 +179,20 @@ export class MasterSession {
   async spoken(input: { text: string; voiceSession: string; key: string }): Promise<void> {
     const binding = this.binding();
     if (!binding) throw Object.assign(new Error('마스터 세션이 아직 없습니다. 먼저 글로 한 번 말을 걸어 주세요.'), { statusCode: 409 });
+    // The same request (its page sent it again) goes once.
+    if (this.sending.has(input.key) || this.file.followed.some(item => item.key === input.key)) return;
+    this.sending.add(input.key);
+    try { await this.sendSpoken(binding, input); } finally { this.sending.delete(input.key); }
+  }
+
+  private async sendSpoken(binding: MasterBinding, input: { text: string; voiceSession: string; key: string }): Promise<void> {
     const prompt = `${VOICE_MARK} ${input.text}`;
     this.options.room.add({ kind: 'owner', text: input.text, voice: true });
     const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true });
     const run = (response.body as { run?: Run } | undefined)?.run;
     if (response.state !== 'succeeded' || !run?.id) throw Object.assign(new Error((response.body as { error?: string } | undefined)?.error ?? '마스터 세션에 보내지 못했습니다.'), { statusCode: response.status || 503 });
     this.remember(run.id);
-    this.add({ id: randomUUID(), kind: 'spoken', title: truncate(input.text, 80), sessionId: binding.sessionId, runId: run.id, prompt, createdAt: new Date().toISOString(), state: 'running', voice: input.voiceSession });
+    this.add({ id: randomUUID(), kind: 'spoken', title: truncate(input.text, 80), sessionId: binding.sessionId, runId: run.id, prompt, createdAt: new Date().toISOString(), state: 'running', voice: input.voiceSession, key: input.key });
     await this.save();
   }
 
@@ -202,6 +234,7 @@ export class MasterSession {
       const where = item.node ? this.options.live.node(item.node) ?? await this.nodeSnapshot(item.node) : snapshot;
       if (where && await this.check(item, where)) changed = true;
     }
+    if (await this.reconcile(snapshot, binding)) changed = true;
     if (await this.sendReports(binding)) changed = true;
     if (changed) { this.trim(); await this.save(); this.options.onChange?.(); }
   }
@@ -255,7 +288,11 @@ export class MasterSession {
       }
       return false;
     }
-    const found = item.sessionId && ended !== 'unknown' ? await this.finalAnswer(item, run).catch(() => undefined) : undefined;
+    // Messages steered into one turn share its answer, given after the last of them.
+    const target = run ? run.steering?.targetRunId ?? run.id : undefined;
+    const together = run ? (snapshot.runs ?? []).filter(entry => entry.id !== run.id && (entry.id === target || entry.steering?.targetRunId === target)).map(entry => normalize(entry.prompt)) : [];
+    if (target) item.turn = target;
+    const found = item.sessionId && ended !== 'unknown' ? await this.finalAnswer(item, run, together).catch(() => undefined) : undefined;
     item.state = ended;
     if (found?.text) item.answer = truncate(found.text, 3000);
     if (item.kind === 'delegated') {
@@ -269,6 +306,10 @@ export class MasterSession {
   private speak(item: Followed, ended: MasterTaskState): void {
     const voice = this.voice;
     if (!voice) return;
+    // A turn several messages were steered into is answered, and read aloud, once.
+    const turn = item.turn ?? item.runId;
+    if (turn && this.file.followed.some(other => other !== item && other.spoke && (other.turn ?? other.runId) === turn)) return;
+    item.spoke = true;
     const report = item.kind === 'report';
     const state = voice.speaks(report);
     if (!state) return;
@@ -278,24 +319,76 @@ export class MasterSession {
     voice.deliver();
   }
 
-  /** Every report waiting goes to the master session in one message. Nothing is sent twice. */
+  /**
+   * Reports waiting go to the master session, as few messages as fit, each named by its report ID so that one whose
+   * sending was cut off can be found again. Nothing is sent twice.
+   */
   private async sendReports(binding: MasterBinding): Promise<boolean> {
-    const waiting = this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'pending');
+    const due = (item: Followed) => !item.reportTries || Date.now() - Date.parse(item.reportAt ?? item.createdAt) >= (this.options.reportRetryMs ?? REPORT_RETRY_MS) * 2 ** (item.reportTries - 1);
+    const waiting = this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'pending' && due(item));
     if (!waiting.length) return false;
-    const lines = waiting.map(item => `- "${item.title}" — ${item.state}${item.sessionId ? ` (session ${item.sessionId}${item.node ? ` on node ${item.node}` : ''})` : ''}`
-      + (item.answer ? `\n  Its answer:\n${indent(item.answer)}` : '\n  Its answer could not be read; the owner can open the session.'));
-    const prompt = `${REPORT_MARK} Work you handed out ended:\n${lines.join('\n')}`;
-    for (const item of waiting) item.report = 'sending';
-    await this.save();
-    const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true })
-      .catch(() => ({ state: 'uncertain' as const, status: 0, body: undefined }));
-    const run = (response.body as { run?: Run } | undefined)?.run;
-    for (const item of waiting) item.report = response.state === 'succeeded' ? 'sent' : response.state === 'uncertain' ? 'uncertain' : 'pending';
-    if (response.state === 'succeeded' && run?.id) {
-      this.remember(run.id);
-      this.add({ id: randomUUID(), kind: 'report', title: 'report', sessionId: binding.sessionId, runId: run.id, prompt, createdAt: new Date().toISOString(), state: 'running' });
+    const line = (item: Followed) => `- "${item.title}" — ${item.state}${item.sessionId ? ` (session ${item.sessionId}${item.node ? ` on node ${item.node}` : ''})` : ''}`
+      + (item.answer ? `\n  Its answer:\n${indent(item.answer)}` : '\n  Its answer could not be read; the owner can open the session.');
+    const batches: Followed[][] = [];
+    let size = 0;
+    for (const item of waiting) {
+      const length = line(item).length + 1;
+      if (!batches.length || size + length > REPORT_CHARS) { batches.push([]); size = 200; }
+      batches.at(-1)!.push(item);
+      size += length;
+    }
+    for (const batch of batches) {
+      const reportId = randomUUID().slice(0, 8);
+      const prompt = `${REPORT_MARK} Work you handed out ended (report ${reportId}):\n${batch.map(line).join('\n')}`;
+      for (const item of batch) { item.report = 'sending'; item.reportId = reportId; item.reportAt = new Date().toISOString(); }
+      await this.save();
+      const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true })
+        .catch(() => ({ state: 'uncertain' as const, status: 0, body: undefined }));
+      const run = (response.body as { run?: Run } | undefined)?.run;
+      for (const item of batch) {
+        item.report = response.state === 'succeeded' ? 'sent' : response.state === 'uncertain' ? 'uncertain' : 'pending';
+        if (item.report !== 'pending') continue;
+        item.reportTries = (item.reportTries ?? 0) + 1;
+        if (item.reportTries >= REPORT_TRIES) item.report = 'failed';
+      }
+      if (response.state === 'succeeded' && run?.id) this.reported(run, binding, prompt);
+      // Tower refused it (the master busy, or the web away): the rest waits for the next look.
+      if (response.state !== 'succeeded') break;
     }
     return true;
+  }
+
+  /** A report the master session took: its answer is read aloud when voice is on. */
+  private reported(run: Run, binding: MasterBinding, prompt: string): void {
+    this.remember(run.id);
+    if (!this.file.followed.some(item => item.kind === 'report' && item.runId === run.id)) {
+      this.add({ id: randomUUID(), kind: 'report', title: 'report', sessionId: binding.sessionId, runId: run.id, prompt: run.prompt ?? prompt, createdAt: run.createdAt ?? new Date().toISOString(), state: 'running' });
+    }
+  }
+
+  /**
+   * A report whose sending was cut off is looked for in the master session: among its runs (queued ones included) and
+   * in its history, by its report ID. Found, it counts as sent; surely missing after a while, it goes again.
+   */
+  private async reconcile(snapshot: Snapshot, binding: MasterBinding): Promise<boolean> {
+    const doubtful = this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'uncertain' && item.reportId);
+    if (!doubtful.length) return false;
+    let changed = false;
+    let history: SessionDetail | undefined;
+    for (const reportId of new Set(doubtful.map(item => item.reportId!))) {
+      const items = doubtful.filter(item => item.reportId === reportId);
+      const named = (text: string) => text.startsWith(REPORT_MARK) && text.includes(`(report ${reportId})`);
+      const run = (snapshot.runs ?? []).find(entry => entry.sessionId === binding.sessionId && named(entry.prompt));
+      if (!run) {
+        history ??= await this.options.tower.call('GET', `/api/sessions/${encodeURIComponent(binding.sessionId)}?limit=200`, undefined, { write: false })
+          .then(response => response.state === 'succeeded' ? response.body as SessionDetail : undefined).catch(() => undefined);
+        if (!history) continue;
+      }
+      const seen = run || history!.messages?.some(message => message.role === 'user' && named(normalize(message.text)));
+      if (seen) { for (const item of items) item.report = 'sent'; if (run) this.reported(run, binding, run.prompt); changed = true; }
+      else if (Date.now() - Date.parse(items[0].reportAt ?? items[0].createdAt) > RECONCILE_MS) { for (const item of items) item.report = 'pending'; changed = true; }
+    }
+    return changed;
   }
 
   /**
@@ -303,7 +396,7 @@ export class MasterSession {
    * before the next message the session received. It waits until the session's history has caught up with the run's
    * end. When the request cannot be found, there is no answer rather than a guess.
    */
-  private async finalAnswer(item: Followed, run: Run | undefined): Promise<{ text: string; followedBy: boolean } | undefined> {
+  private async finalAnswer(item: Followed, run: Run | undefined, together: string[] = []): Promise<{ text: string; followedBy: boolean } | undefined> {
     const prompt = normalize(run?.prompt ?? item.prompt ?? '');
     if (!prompt) return undefined;
     const path = `${item.node ? `/api/nodes/${item.node}` : '/api'}/sessions/${encodeURIComponent(item.sessionId!)}?limit=200`;
@@ -337,7 +430,8 @@ export class MasterSession {
       if (candidates.length > 1) return undefined;
       const request = candidates[0] ?? -1;
       if (request >= 0) {
-        const next = messages.findIndex((message, index) => index > request && message.role === 'user');
+        // Messages steered into the same turn are part of this request, not the next one.
+        const next = messages.findIndex((message, index) => index > request && message.role === 'user' && !together.some(other => sameRequest(message.text, other)));
         const answer = messages.slice(request + 1, next < 0 ? messages.length : next).reverse().find(message => message.role === 'assistant' && message.text.trim());
         if (answer) return { text: answer.text, followedBy: next >= 0 };
       }

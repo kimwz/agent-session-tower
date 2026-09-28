@@ -8,7 +8,7 @@ import { requestedEffort, requestedModel } from '../providers/models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
 import { APP_NAME, APP_TITLE, APP_VERSION } from '../../shared/app-identity.js';
 import type { SessionMcpServers } from './session-mcp.js';
-import { checkCodexAccount, CODEX_SUBSCRIPTION_CONFIG } from './subscription.js';
+import { checkCodexAccount, checkCodexConfig, CODEX_SUBSCRIPTION_CONFIG } from './subscription.js';
 
 // v2 wire shapes verified with Codex CLI 0.153.4 app-server generate-ts --experimental.
 type RequestId = string | number;
@@ -183,6 +183,8 @@ class StdioRun implements CodexStdioRun {
     this.write({ method: 'initialized' });
     if (this.options.subscriptionOnly) {
       checkCodexAccount(await this.request('account/read', { refreshToken: false }));
+      if (this.result) return;
+      checkCodexConfig(await this.request('config/read', {}));
       if (this.result) return;
     }
     const open = (approvalsReviewer?: CodexApprovalsReviewer) => this.request(this.options.threadId ? 'thread/resume' : 'thread/start', {

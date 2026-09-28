@@ -193,3 +193,16 @@ test('a web that starts while a master session exists starts the master host its
   await until(() => existsSync(marker));
   assert.match(await readFile(marker, 'utf8'), /--master-host/);
 });
+
+test('a settings file this build cannot read is left as it is, not replaced by defaults', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-unreadable-'));
+  const cleanup: Array<() => unknown> = [];
+  t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(stateDir, { recursive: true, force: true }); });
+  const paths = await masterPaths(stateDir);
+  await mkdir(paths.data, { recursive: true, mode: 0o700 });
+  const newer = JSON.stringify({ voice: { endSilenceMs: 1300 }, session: { sessionId: 'claude:master', provider: 'claude', startedAt: '2026-09-28T00:00:00.000Z' }, somethingNewer: true });
+  await writePrivateJson(join(paths.data, 'settings.json'), newer);
+  const host = await startMasterHost({ stateDir, idleMs: 60_000 });
+  cleanup.push(() => host.close());
+  assert.equal(await readFile(join(paths.data, 'settings.json'), 'utf8'), newer);
+});

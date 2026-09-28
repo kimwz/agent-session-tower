@@ -10,6 +10,7 @@ import type { PublicAgentOverview, PublicConversationView, PublicVisitorState } 
 import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunApprovalResponse, Session } from '../../shared/types.js';
 import type { RunAdmission } from './manager.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
+import { subscriptionOnly } from './subscription.js';
 import { MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerCapability, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 import { readHandoff } from './handoff.js';
 import type { TriggerOverview } from '../../shared/triggers.js';
@@ -166,14 +167,22 @@ export class DurableRunManager extends EventEmitter {
   coordinators(): ReadonlySet<string> | undefined {
     return this.supports('remoteOrigins') && this.snapshot?.coordinators ? new Set(this.snapshot.coordinators) : undefined;
   }
+  /** An older worker would run the master on whatever sign-in its CLI has, an API key included, so it is never given the master. */
+  private requireSubscription(cwd: string | undefined): void {
+    if (cwd && subscriptionOnly(this.paths?.stateDir ?? this.options.stateDir, cwd) && !this.supports('subscriptionOnly')) {
+      throw Object.assign(new Error('실행 워커가 아직 새 버전으로 바뀌지 않아 마스터에게 보내지 않았습니다. 진행 중인 작업이 끝나면 바뀝니다.'), { statusCode: 503, disposition: 'not-admitted' });
+    }
+  }
   async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
     internal.validate?.();
     this.requireOrigins(internal);
+    this.requireSubscription(input.cwd);
     return this.call('create', [input, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) }]) as Promise<{ session: Session; run: Run }>;
   }
   async enqueue(id: string, prompt: string, attachments: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
     internal.validate?.();
     this.requireOrigins(internal);
+    this.requireSubscription(this.getSession(id)?.cwd);
     return this.call('enqueue', [id, prompt, attachments, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) }]) as Promise<Run>;
   }
   /** An older worker would ignore `targetRunId` and insert into whatever turn runs, so it is never sent one. */
@@ -216,6 +225,8 @@ export class DurableRunManager extends EventEmitter {
     if ((input.targetSessionId !== undefined && !this.supports('autoPromptTargets')) || (input.sessionMode !== undefined && !this.supports('origins'))) {
       throw Object.assign(new Error('실행 워커가 아직 업데이트되지 않아 추천한 곳으로 바로 보낼 수 없습니다. 추천을 끄고 보내거나, 진행 중인 작업이 끝나 워커가 교체된 뒤 다시 보내세요.'), { statusCode: 503, disposition: 'not-admitted' });
     }
+    this.requireSubscription(input.cwd);
+    if (input.targetSessionId) this.requireSubscription(this.getSession(input.targetSessionId)?.cwd);
     const admitted = { ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) };
     return this.call('submitAutoPrompt', [input, ...(Object.keys(admitted).length ? [admitted] : [])]) as Promise<AutoPromptJob>;
   }

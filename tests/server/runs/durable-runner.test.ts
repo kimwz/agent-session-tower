@@ -698,3 +698,23 @@ test('an outdated worker is never asked to insert into a chosen turn, since it w
   await assert.rejects(client.steer('queued-run', { targetRunId: 'turn' }), { statusCode: 503, disposition: 'not-admitted' });
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
 });
+
+test('an outdated worker is never given the master, which it would run on whatever sign-in its CLI has', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-master-'));
+  const stateDir = join(directory, 'state');
+  const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
+  const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
+  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  await client.start();
+  assert.equal(client.supports('subscriptionOnly'), false);
+  const master = join(stateDir, 'master-session');
+  await assert.rejects(client.create({ provider: 'claude', prompt: 'hello', cwd: master }), { statusCode: 503, disposition: 'not-admitted' });
+  await assert.rejects(client.submitAutoPrompt({ provider: 'claude', prompt: 'hello', cwd: master, requestId: '12345678-1234-4234-8234-123456789abf' }), { statusCode: 503, disposition: 'not-admitted' });
+  assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
+});
+
+test('the current worker says it keeps the master to a subscription sign-in', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = await f.connect();
+  assert.equal(client.supports('subscriptionOnly'), true);
+});

@@ -1,7 +1,6 @@
 import { isSea } from 'node:sea';
-import { join, resolve as resolvePath } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MASTER_FOLDER } from '../../shared/master.js';
+import { subscriptionOnly } from '../runs/subscription.js';
 import type { Run, Session } from '../../shared/types.js';
 import type { RunManager } from '../runs/manager.js';
 import { NO_RUN_TOOLS, type RunTools, type SessionMcpServer, type SessionMcpServers } from '../runs/session-mcp.js';
@@ -35,7 +34,6 @@ function toolServer(stateDir: string, mode: '--tower-mcp' | '--slack-mcp', extra
  */
 export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry }) {
   const lookups = { [SESSION_TOOLS_SERVER]: sessionToolServer(options.stateDir, thisBuild()) };
-  const masterFolder = join(resolvePath(options.stateDir), MASTER_FOLDER);
   return (run: Run, session: Session): RunTools => {
     const tools = resolve(run, session);
     // Given here too, so they work even where the user configuration does not name them.
@@ -60,7 +58,7 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
     // Bound to this run: a later turn, even in the same conversation, gets its own credential.
     const tower = toolServer(options.stateDir, '--tower-mcp', [], options.capabilities.issue({ kind: 'owner-run', runId: run.id, sessionId: session.id }));
     const servers: SessionMcpServers = { tower };
-    if (!origin.controllerId && resolvePath(session.cwd) === masterFolder) servers.tower_master = masterToolServer(options.stateDir);
+    if (!origin.controllerId && subscriptionOnly(options.stateDir, session.cwd)) servers.tower_master = masterToolServer(options.stateDir);
     return { servers, required: false, towerTools: 'attached' };
   }
 }

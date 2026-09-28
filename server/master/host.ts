@@ -76,6 +76,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       ...(binding ? { session: { id: binding.sessionId, provider: binding.provider, ...(shown ? { status: shown.status, title: shown.customTitle || shown.title } : {}) } } : {}),
       voiceConfigured, ...(voiceConfigured ? { voiceKeyHint: settings.voiceKeyHint() } : {}),
       activeTasks: session?.activeTasks() ?? 0,
+      ...(session?.failedReports() ? { failedReports: session.failedReports() } : {}),
       ...(voice ? { voice: voice.status() } : {}),
     };
   };
