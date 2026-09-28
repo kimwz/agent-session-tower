@@ -9,6 +9,7 @@ import { MasterJournal } from './journal.js';
 import { LiveState } from './live-state.js';
 import { lookupsSupported, ReadDatabase } from './read-db.js';
 import { openAiResponses, type ModelCall } from './model-openai.js';
+import { anthropicMessages, routedModel } from './model-anthropic.js';
 import { masterPaths } from './paths.js';
 import { MasterRoom } from './room.js';
 import { MasterService } from './service.js';
@@ -202,7 +203,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     await settings.start();
     await room.start();
     await journal.start();
-    service = new MasterService({ settings, room, journal, tower, live, readDb, attachments: await masterAttachments(paths.data), model: options.model ?? openAiResponses(() => settings.key()), ...(options.taskPollMs ? { taskPollMs: options.taskPollMs } : {}) });
+    service = new MasterService({ settings, room, journal, tower, live, readDb, attachments: await masterAttachments(paths.data), model: options.model ?? routedModel(openAiResponses(() => settings.key()), anthropicMessages(() => settings.anthropicKey())), ...(options.taskPollMs ? { taskPollMs: options.taskPollMs } : {}) });
     const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), ...options.voice?.elevenLabs });
     voice = new MasterVoice({ dataDir: paths.data, settings, room, hooks: service.voiceHooks(), elevenLabs, ...(options.voice?.timing ? { timing: options.voice.timing } : {}) });
     service.setVoice(voice);

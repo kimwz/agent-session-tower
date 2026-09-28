@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { KeyRound, LoaderCircle, Mic, Trash2 } from 'lucide-react';
-import { DEFAULT_MASTER_VOICE, MASTER_EFFORTS, MASTER_MODELS, MASTER_TTS_MODELS, type MasterOverview, type MasterSettings, type MasterVoiceSettings } from '../../../shared/master';
+import { DEFAULT_MASTER_VOICE, MASTER_CLAUDE_MODELS, MASTER_EFFORTS, MASTER_MODELS, MASTER_OPENAI_MODELS, MASTER_TTS_MODELS, masterProvider, type MasterOverview, type MasterSettings, type MasterVoiceSettings } from '../../../shared/master';
 import type { LinkOverview } from '../../../shared/link';
 import { api } from '../common/lib';
 import { post } from './api';
@@ -8,12 +8,13 @@ import { useWords } from './strings';
 import { voiceUsage } from './VoiceBar';
 
 /**
- * The master's settings. The OpenAI key turns it on. Everything else has a default that lets the master do whatever
+ * The master's settings. The key for the chosen model (OpenAI for GPT, Anthropic for Claude) turns it on. Everything else has a default that lets the master do whatever
  * the owner asks; the limits here are optional.
  */
 export function MasterSettingsView({ token, overview, onDone }: { token: string; overview: MasterOverview | undefined; onDone(): void }) {
   const words = useWords();
   const [key, setKey] = useState('');
+  const [claudeKey, setClaudeKey] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [nodes, setNodes] = useState<Array<{ id: string; name: string }>>([]);
@@ -42,11 +43,20 @@ export function MasterSettingsView({ token, overview, onDone }: { token: string;
   return <div className="master-settings">
     <section>
       <h3><KeyRound size={14} />{words('OpenAI API 키', 'OpenAI API key')}</h3>
-      <p>{words('platform.openai.com에서 만든 API 키를 넣으면 마스터가 켜집니다. 키는 이 컴퓨터에만 저장되고 다시 보여 주지 않습니다.', 'Enter an API key from platform.openai.com to turn the master on. It is stored on this computer only and never shown again.')}</p>
-      {overview.configured ? <div className="master-key-row"><span>{words('등록됨', 'Saved')} {overview.keyHint}</span><button className="secondary-button" disabled={busy} onClick={() => void save({ apiKey: null })}><Trash2 size={13} />{words('삭제', 'Remove')}</button></div> : null}
+      <p>{words('GPT 모델에 씁니다. platform.openai.com에서 만든 API 키를 넣으세요. 키는 이 컴퓨터에만 저장되고 다시 보여 주지 않습니다.', 'Used for GPT models. Enter an API key from platform.openai.com. It is stored on this computer only and never shown again.')}</p>
+      {overview.keyHint ? <div className="master-key-row"><span>{words('등록됨', 'Saved')} {overview.keyHint}</span><button className="secondary-button" disabled={busy} onClick={() => void save({ apiKey: null })}><Trash2 size={13} />{words('삭제', 'Remove')}</button></div> : null}
       <form className="master-key-row" onSubmit={event => { event.preventDefault(); if (key.trim()) void save({ apiKey: key.trim() }).then(() => setKey('')); }}>
-        <input type="password" autoComplete="off" value={key} onChange={event => setKey(event.target.value)} placeholder={overview.configured ? words('새 키로 바꾸기', 'Replace with a new key') : 'sk-…'} aria-label={words('OpenAI API 키', 'OpenAI API key')} />
+        <input type="password" autoComplete="off" value={key} onChange={event => setKey(event.target.value)} placeholder={overview.keyHint ? words('새 키로 바꾸기', 'Replace with a new key') : 'sk-…'} aria-label={words('OpenAI API 키', 'OpenAI API key')} />
         <button className="master-primary" disabled={busy || !key.trim()}>{busy ? <LoaderCircle size={13} className="spin" /> : words('저장', 'Save')}</button>
+      </form>
+    </section>
+    <section>
+      <h3><KeyRound size={14} />{words('Anthropic API 키', 'Anthropic API key')}</h3>
+      <p>{words('Claude Opus 모델에 씁니다. platform.claude.com에서 만든 API 키를 넣으세요. Claude Code 로그인(구독)으로는 쓸 수 없습니다. 키는 이 컴퓨터에만 저장되고 다시 보여 주지 않습니다.', 'Used for Claude Opus models. Enter an API key from platform.claude.com; a Claude Code sign-in (subscription) does not work here. It is stored on this computer only and never shown again.')}</p>
+      {overview.anthropicKeyHint ? <div className="master-key-row"><span>{words('등록됨', 'Saved')} {overview.anthropicKeyHint}</span><button className="secondary-button" disabled={busy} onClick={() => void save({ anthropicKey: null })}><Trash2 size={13} />{words('삭제', 'Remove')}</button></div> : null}
+      <form className="master-key-row" onSubmit={event => { event.preventDefault(); if (claudeKey.trim()) void save({ anthropicKey: claudeKey.trim() }).then(() => setClaudeKey('')); }}>
+        <input type="password" autoComplete="off" value={claudeKey} onChange={event => setClaudeKey(event.target.value)} placeholder={overview.anthropicKeyHint ? words('새 키로 바꾸기', 'Replace with a new key') : 'sk-ant-…'} aria-label={words('Anthropic API 키', 'Anthropic API key')} />
+        <button className="master-primary" disabled={busy || !claudeKey.trim()}>{busy ? <LoaderCircle size={13} className="spin" /> : words('저장', 'Save')}</button>
       </form>
     </section>
     <section>
@@ -54,10 +64,12 @@ export function MasterSettingsView({ token, overview, onDone }: { token: string;
       <label className="master-toggle"><input type="checkbox" checked={settings.enabled} disabled={busy} onChange={event => void save({ enabled: event.target.checked })} />{words('마스터 켜기', 'Master on')}</label>
       <label className="master-field">{words('모델', 'Model')}
         <select value={MASTER_MODELS.includes(settings.model as typeof MASTER_MODELS[number]) ? settings.model : ''} disabled={busy} onChange={event => { if (event.target.value) void save({ model: event.target.value }); }}>
-          {MASTER_MODELS.map(model => <option key={model} value={model}>{model}</option>)}
+          <optgroup label={words('GPT (OpenAI 키)', 'GPT (OpenAI key)')}>{MASTER_OPENAI_MODELS.map(model => <option key={model} value={model}>{model}</option>)}</optgroup>
+          <optgroup label={words('Claude (Anthropic 키)', 'Claude (Anthropic key)')}>{MASTER_CLAUDE_MODELS.map(model => <option key={model} value={model}>{model === 'claude-opus-5-5' ? 'Claude Opus 5.5' : 'Claude Opus 5'}</option>)}</optgroup>
           {!MASTER_MODELS.includes(settings.model as typeof MASTER_MODELS[number]) && <option value="">{settings.model}</option>}
         </select>
       </label>
+      {!overview.configured && <p className="master-error">{masterProvider(settings.model) === 'anthropic' ? words('Claude 모델은 위에 Anthropic API 키를 넣어야 답합니다.', 'Claude models answer once an Anthropic API key is saved above.') : words('GPT 모델은 위에 OpenAI API 키를 넣어야 답합니다.', 'GPT models answer once an OpenAI API key is saved above.')}</p>}
       <label className="master-field">{words('추론 수준', 'Reasoning')}
         <select value={settings.effort} disabled={busy} onChange={event => void save({ effort: event.target.value })}>{MASTER_EFFORTS.map(effort => <option key={effort} value={effort}>{effort}</option>)}</select>
       </label>

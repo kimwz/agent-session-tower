@@ -177,10 +177,12 @@ export class MasterService {
 
   overview(): MasterOverview {
     const settings = this.options.settings.current();
-    const configured = Boolean(this.options.settings.key());
+    const configured = Boolean(this.options.settings.keyFor(settings.model));
+    const keyHint = this.options.settings.keyHint();
+    const anthropicKeyHint = this.options.settings.anthropicKeyHint();
     const voiceConfigured = Boolean(this.options.settings.voiceKey());
     return {
-      available: true, version: APP_VERSION, settings, configured, ...(configured ? { keyHint: this.options.settings.keyHint() } : {}),
+      available: true, version: APP_VERSION, settings, configured, ...(keyHint ? { keyHint } : {}), ...(anthropicKeyHint ? { anthropicKeyHint } : {}),
       voiceConfigured, ...(voiceConfigured ? { voiceKeyHint: this.options.settings.voiceKeyHint() } : {}),
       state: !settings.enabled ? 'disabled' : !configured ? 'unconfigured' : this.turn ? 'thinking' : 'idle',
       activeTasks: this.options.journal.tasks.filter(task => task.state === 'running').length,
@@ -270,7 +272,7 @@ export class MasterService {
 
   async updateSettings(body: Record<string, unknown>): Promise<MasterOverview> {
     // Settings are shown on pages and sent with every model request; a value typed into a secret card has no place there.
-    const { apiKey: _key, voiceKey: _voiceKey, ...shown } = body;
+    const { apiKey: _key, anthropicKey: _anthropicKey, voiceKey: _voiceKey, ...shown } = body;
     const text = JSON.stringify(shown);
     if (this.vault.redact(text) !== text) throw Object.assign(new Error('설정에 비밀 카드로 받은 값을 넣을 수 없습니다.'), { statusCode: 400 });
     await this.options.settings.update(body);
@@ -294,7 +296,8 @@ export class MasterService {
   private pump(): void {
     if (this.closed || this.turn) return;
     const settings = this.options.settings.current();
-    if (!settings.enabled || !this.options.settings.key()) return;
+    // A message may choose a model other than the settings'; one whose key is missing fails with that reason.
+    if (!settings.enabled || !this.options.settings.anyKey()) return;
     const now = Date.now();
     const waiting = this.options.journal.inbox.filter(item => item.state === 'queued');
     const queued = waiting.filter(item => !(item.notBefore && Date.parse(item.notBefore) > now));

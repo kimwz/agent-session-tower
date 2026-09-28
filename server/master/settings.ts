@@ -1,6 +1,6 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DEFAULT_MASTER_SETTINGS, DEFAULT_MASTER_VOICE, MASTER_EFFORTS, MASTER_TTS_MODELS, type MasterEffort, type MasterGuards, type MasterSettings, type MasterTtsModel, type MasterVoiceSettings } from '../../shared/master.js';
+import { DEFAULT_MASTER_SETTINGS, DEFAULT_MASTER_VOICE, MASTER_EFFORTS, masterProvider, MASTER_TTS_MODELS, type MasterEffort, type MasterGuards, type MasterSettings, type MasterTtsModel, type MasterVoiceSettings } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 const invalid = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
@@ -83,22 +83,25 @@ export function mergeSettings(current: MasterSettings, value: unknown, saved = f
 }
 
 /**
- * The owner's master settings, OpenAI key and ElevenLabs key, each in its own owner-only file. Keys are never
- * returned; only their last four characters are shown.
+ * The owner's master settings, OpenAI key, Anthropic key and ElevenLabs key, each in its own owner-only file. Keys
+ * are never returned; only their last four characters are shown.
  */
 export class MasterSettingsStore {
   private settings: MasterSettings = structuredClone(DEFAULT_MASTER_SETTINGS);
   private apiKey?: string;
   private voiceApiKey?: string;
+  private anthropicApiKey?: string;
   private changes: Promise<unknown> = Promise.resolve();
   private readonly settingsPath: string;
   private readonly keyPath: string;
   private readonly voiceKeyPath: string;
+  private readonly anthropicKeyPath: string;
 
   constructor(private readonly directory: string) {
     this.settingsPath = join(directory, 'settings.json');
     this.keyPath = join(directory, 'openai-key.json');
     this.voiceKeyPath = join(directory, 'elevenlabs-key.json');
+    this.anthropicKeyPath = join(directory, 'anthropic-key.json');
   }
 
   async start(): Promise<void> {
@@ -110,6 +113,8 @@ export class MasterSettingsStore {
     if (validKey(key?.apiKey)) this.apiKey = key.apiKey;
     const voiceKey = await readPrivateJson(this.voiceKeyPath).catch(() => undefined) as { apiKey?: unknown } | undefined;
     if (validKey(voiceKey?.apiKey)) this.voiceApiKey = voiceKey.apiKey;
+    const anthropicKey = await readPrivateJson(this.anthropicKeyPath).catch(() => undefined) as { apiKey?: unknown } | undefined;
+    if (validKey(anthropicKey?.apiKey)) this.anthropicApiKey = anthropicKey.apiKey;
   }
 
   current(): MasterSettings { return structuredClone(this.settings); }
@@ -117,17 +122,28 @@ export class MasterSettingsStore {
   keyHint(): string | undefined { return this.apiKey ? `…${this.apiKey.slice(-4)}` : undefined; }
   voiceKey(): string | undefined { return this.voiceApiKey; }
   voiceKeyHint(): string | undefined { return this.voiceApiKey ? `…${this.voiceApiKey.slice(-4)}` : undefined; }
+  anthropicKey(): string | undefined { return this.anthropicApiKey; }
+  anthropicKeyHint(): string | undefined { return this.anthropicApiKey ? `…${this.anthropicApiKey.slice(-4)}` : undefined; }
+  /** The key a model's requests are sent with: Anthropic's for Claude models, OpenAI's for the rest. */
+  keyFor(model: string): string | undefined { return masterProvider(model) === 'anthropic' ? this.anthropicApiKey : this.apiKey; }
+  /** Some model can be asked: the master has at least one model key. */
+  anyKey(): boolean { return Boolean(this.apiKey || this.anthropicApiKey); }
 
-  /** `apiKey`/`voiceKey: null` removes that key; any other field goes through `mergeSettings`. */
+  /** `apiKey`/`anthropicKey`/`voiceKey: null` removes that key; any other field goes through `mergeSettings`. */
   update(body: Record<string, unknown>): Promise<MasterSettings> {
     const next = this.changes.then(async () => {
-      const { apiKey, voiceKey, ...rest } = body;
+      const { apiKey, anthropicKey, voiceKey, ...rest } = body;
       if (apiKey !== undefined && apiKey !== null && !validKey(apiKey)) throw invalid('OpenAI API 키 형식이 올바르지 않습니다.');
+      if (anthropicKey !== undefined && anthropicKey !== null && !validKey(anthropicKey)) throw invalid('Anthropic API 키 형식이 올바르지 않습니다.');
       if (voiceKey !== undefined && voiceKey !== null && !validKey(voiceKey)) throw invalid('ElevenLabs API 키 형식이 올바르지 않습니다.');
       const settings = Object.keys(rest).length ? mergeSettings(this.settings, rest) : this.settings;
       if (apiKey !== undefined) {
         await writePrivateJson(this.keyPath, JSON.stringify(apiKey === null ? {} : { apiKey }));
         this.apiKey = apiKey === null ? undefined : apiKey as string;
+      }
+      if (anthropicKey !== undefined) {
+        await writePrivateJson(this.anthropicKeyPath, JSON.stringify(anthropicKey === null ? {} : { apiKey: anthropicKey }));
+        this.anthropicApiKey = anthropicKey === null ? undefined : anthropicKey as string;
       }
       if (voiceKey !== undefined) {
         await writePrivateJson(this.voiceKeyPath, JSON.stringify(voiceKey === null ? {} : { apiKey: voiceKey }));

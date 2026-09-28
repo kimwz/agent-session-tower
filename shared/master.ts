@@ -5,7 +5,13 @@
 
 import type { Attachment, SessionStatus } from './types.js';
 
-export const MASTER_MODELS = ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'] as const;
+export const MASTER_OPENAI_MODELS = ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'] as const;
+/** Claude models, asked through the Anthropic API with the owner's Anthropic key. */
+export const MASTER_CLAUDE_MODELS = ['claude-opus-5', 'claude-opus-5-5'] as const;
+export const MASTER_MODELS = [...MASTER_OPENAI_MODELS, ...MASTER_CLAUDE_MODELS] as const;
+export type MasterProvider = 'openai' | 'anthropic';
+/** Which API a model name is asked through; any `claude-` model goes to Anthropic, everything else to OpenAI. */
+export const masterProvider = (model: string): MasterProvider => model.startsWith('claude-') ? 'anthropic' : 'openai';
 export const MASTER_EFFORTS = ['none', 'low', 'medium', 'high'] as const;
 export type MasterEffort = typeof MASTER_EFFORTS[number];
 
@@ -64,8 +70,12 @@ export interface MasterOverview {
   available: true;
   version: string;
   settings: MasterSettings;
+  /** The key for the model in the settings is saved, so the master can answer. */
   configured: boolean;
+  /** An OpenAI key is saved (its last four characters). */
   keyHint?: string;
+  /** An Anthropic key is saved (its last four characters), for Claude models. */
+  anthropicKeyHint?: string;
   /** An ElevenLabs key is saved, so voice can be turned on. */
   voiceConfigured: boolean;
   voiceKeyHint?: string;

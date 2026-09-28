@@ -666,7 +666,7 @@ export class MasterVoice {
 
   private ready(): void {
     const settings = this.options.settings.current();
-    if (!settings.enabled || !this.options.settings.key()) throw fail('마스터가 꺼져 있거나 OpenAI 키가 없습니다.', 409);
+    if (!settings.enabled || !this.options.settings.keyFor(settings.model)) throw fail('마스터가 꺼져 있거나 설정한 모델의 API 키가 없습니다.', 409);
     if (!this.options.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 409);
   }
 
