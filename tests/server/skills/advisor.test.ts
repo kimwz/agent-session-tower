@@ -178,15 +178,18 @@ test('a project proposal is never reinforced from another project’s session', 
   assert.deepEqual(proposals.find(item => item.id !== shop.id)?.cwd, f.other, 'the blog gets its own proposal instead');
 });
 
-test('a session someone else worked in stays excluded after its runs are gone, and one Tower created for automation too', async t => {
+test('a session someone else worked in stays excluded after its runs are gone, even when that happened while the advisor was off', async t => {
   const f = await fixture(t, () => reflection({ action: 'none' }));
   f.sessions.push(session('remote', f.project), session('made', f.project));
   for (const item of f.sessions) f.histories.set(item.id, [message('user', 'A request long enough to be worth reading.', 40)]);
+  await f.service.mutate('settings', { enabled: false });
+  // A controller's turn in a session the owner started here; the worker reports every change of its runs.
   f.runs.push({ id: 'r', sessionId: 'claude:remote', origin: { kind: 'owner', controllerId: 'c'.repeat(32) }, prompt: '', status: 'completed', createdAt: minutes(50), output: '' });
-  (f.service as unknown as { options: { origin: (id: string) => unknown } }).options.origin = id => id === 'claude:made' ? { kind: 'trigger', untrustedInput: false } : undefined;
-  await f.tick();
+  f.service.recordRuns();
+  await f.service.flush();
   f.runs.length = 0;
-  f.sessions.forEach(item => { item.lastRequestAt = minutes(35); });
+  (f.service as unknown as { options: { origin: (id: string) => unknown } }).options.origin = id => id === 'claude:made' ? { kind: 'trigger', untrustedInput: false } : undefined;
+  await f.service.mutate('settings', { enabled: true });
   await f.tick();
   assert.equal(f.calls.length, 0);
 });

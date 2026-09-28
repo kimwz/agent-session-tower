@@ -70,7 +70,8 @@ export class SkillStateStore {
 
 function trim(state: SkillState): void {
   state.notes = state.notes.slice(-MAX_NOTES);
-  state.excluded = [...new Set(state.excluded)].slice(-5_000);
+  // Never cut by count: a session dropped from here could be read as the owner's own again.
+  state.excluded = [...new Set(state.excluded)];
   // Accepted and dismissed proposals go first; they only keep the advisor from proposing them again.
   while (state.proposals.length > MAX_PROPOSALS) {
     const index = state.proposals.findIndex(item => item.status !== 'open');

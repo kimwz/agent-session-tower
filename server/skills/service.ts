@@ -26,6 +26,8 @@ export interface SkillServiceOptions {
 }
 
 const MAX_TURN_NOTES = 6_000;
+/** Work a trigger, Slack or another agent started, or the owner at a controlling computer. */
+const foreign = (kind: string | undefined, controllerId: unknown) => kind !== undefined && kind !== 'owner' || Boolean(controllerId);
 const text = (value: unknown): string => typeof value === 'string' ? value : '';
 
 /**
@@ -46,7 +48,7 @@ export class SkillService {
     });
   }
 
-  async start(): Promise<void> { await this.state.start(); if (this.options.advise !== false) this.advisor.start(); }
+  async start(): Promise<void> { await this.state.start(); this.recordRuns(); if (this.options.advise !== false) this.advisor.start(); }
   close(): void { this.advisor.stop(); }
   inFlight(): boolean { return this.advisor.inFlight(); }
   pause(): void { this.advisor.pause(); }
@@ -59,15 +61,20 @@ export class SkillService {
    */
   private automated(session: Session): boolean {
     const ids = [session.id, `${session.provider}:${session.nativeId}`];
-    const state = this.state.get();
-    if (ids.some(id => state.excluded.includes(id))) return true;
+    if (ids.some(id => this.state.get().excluded.includes(id))) return true;
     const origin = this.options.origin?.(session.id);
-    const foreign = (kind: string | undefined, controllerId: unknown) => kind !== undefined && kind !== 'owner' || Boolean(controllerId);
-    const seen = origin && (foreign(origin.kind, origin.controllerId) || origin.untrustedInput)
+    return Boolean(origin && (foreign(origin.kind, origin.controllerId) || origin.untrustedInput))
       || this.options.runs().some(run => ids.includes(run.sessionId) && foreign(run.origin?.kind, run.origin?.controllerId));
-    // Runs are pruned after a while; the mark stays, so such a session is never read later as the owner's own.
-    if (seen) void this.state.update(next => { next.excluded.push(session.id); }).catch(() => {});
-    return Boolean(seen);
+  }
+
+  /**
+   * Marks, as they are accepted, the sessions someone other than the owner here works in: runs are pruned after a while,
+   * the mark is not, and it is kept whether or not the advisor is on. The worker calls this on every change of its runs.
+   */
+  recordRuns(): void {
+    const excluded = new Set(this.state.get().excluded);
+    const fresh = [...new Set(this.options.runs().filter(run => foreign(run.origin?.kind, run.origin?.controllerId) && !excluded.has(run.sessionId)).map(run => run.sessionId))];
+    if (fresh.length) void this.state.update(state => { state.excluded.push(...fresh); }).catch(() => {});
   }
 
   private async project(cwd: unknown): Promise<string | undefined> {
