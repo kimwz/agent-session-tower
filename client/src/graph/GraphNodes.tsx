@@ -2,10 +2,11 @@ import { translate as t, useI18n } from '../i18n/i18n';
 import { memo, useId } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import { ArrowUpRight, Check, Clock, GitBranch, Monitor, Radio, Sparkles } from 'lucide-react';
-import type { ProviderHealth, Session, SessionOutcome } from '../../../shared/types';
+import type { ProviderHealth, Session } from '../../../shared/types';
 import type { NodeStatus } from '../../../shared/link';
 import { localPart } from '../remote/scope';
 import { SessionContextIcon } from '../sessions/SessionContextIcon';
+import { outcomeLabels } from '../sessions/SessionOutcomeBadge';
 import { cleanPreview, providerLabels, relativeTime, sessionActivityAt, sessionState, sessionTitle } from '../common/lib';
 import { ProjectGroupHeader, type ProjectGroupHeaderData } from '../project-groups/ProjectGroupHeader';
 import { ProviderUsage } from '../providers/ProviderUsage';
@@ -27,14 +28,6 @@ function linkLabel(link: HostLink): string {
   if (link.status === 'connected') return !link.live ? t("불러오는 중") : link.canWork === false ? t("보기 전용") : t("연결됨");
   return t("오프라인");
 }
-
-/** How a finished conversation's last turn ended, as the fast judgment read it. */
-export const outcomeLabels: Record<SessionOutcome, string> = {
-  get done() { return t("작업 완료"); },
-  get needsOwner() { return t("확인 필요"); },
-  get blocked() { return t("작업 끊김"); },
-  get progress() { return t("이어서 진행 예정"); },
-};
 
 export const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentData>>) {
   useI18n();

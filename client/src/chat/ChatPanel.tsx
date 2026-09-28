@@ -6,6 +6,7 @@ import { ProviderIcon } from '../common/Icons';
 import { WorkspaceActions } from '../workspace/WorkspaceActions';
 import { SessionTitleEditor } from '../sessions/SessionTitleEditor';
 import { SessionFamilyNav } from '../sessions/SessionFamilyNav';
+import { SessionOutcomeBadge } from '../sessions/SessionOutcomeBadge';
 import { ResumeCommandButton } from '../sessions/ResumeCommandButton';
 import { resumeCommand } from '../sessions/resume-command';
 import { absoluteTime, api, copyText, providerLabels, statusLabels } from '../common/lib';
@@ -26,9 +27,9 @@ import { RemoteContent } from '../remote/remote-content';
 
 const emptyMessages: readonly ChatMessage[] = [];
 
-export function ChatPanel({ sessionId, session, allSessions, provider, host, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, sessionClosed = false, changingClosed = false, readRevision = '', onRead, contextBanner }: { contextBanner?: ReactNode; sessionId: string; session?: Session; allSessions: Session[]; provider?: ProviderHealth;
+export function ChatPanel({ sessionId, session, allSessions, provider, host, runs, token, connected, onClose, onNavigate, onSnapshotRefresh, onSessionUpdate, onSessionClose, onAcknowledgeOutcome, sessionClosed = false, changingClosed = false, readRevision = '', onRead, contextBanner }: { contextBanner?: ReactNode; sessionId: string; session?: Session; allSessions: Session[]; provider?: ProviderHealth;
   /** The joined computer this conversation lives on; absent for this computer. */
-  host?: { name: string; live: boolean; canWork: boolean; problem?: string; workspace: boolean; workspaceNote?: string }; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
+  host?: { name: string; live: boolean; canWork: boolean; problem?: string; workspace: boolean; workspaceNote?: string }; runs: Run[]; token: string; connected: boolean; onClose: () => void; onNavigate: (id: string) => void; onSnapshotRefresh: () => void; onSessionUpdate: (session: Session) => void; onSessionClose?: () => void; onAcknowledgeOutcome?: () => Promise<void>; sessionClosed?: boolean; changingClosed?: boolean; readRevision?: string; onRead?: (id: string, revision: string) => void }) {
   useI18n();
   // Changes to a joined computer's conversation need that computer reachable, not only this Tower.
   const reachable = connected && (!host || host.canWork);
@@ -235,6 +236,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
       </div>
       <div className="chat-context-row">
         {current && <span className={`status-badge ${current.status}`} title={translateMessage(current.statusReason)}><i />{statusLabels[current.status]}</span>}
+        {current?.status !== 'working' && current?.outcome && <SessionOutcomeBadge outcome={current.outcome} disabled={!reachable || !token} onAcknowledge={onAcknowledgeOutcome} onError={setSendError} />}
         <button className="chat-project" onClick={() => setShowMetadata(!showMetadata)} aria-expanded={showMetadata}><Folder size={12} /><span className="folder-tail" title={(current?.cwd && localPart(current.cwd)) || current?.project || t("세션 정보")}><bdi dir="ltr">{current?.project || t("세션 정보")}</bdi></span><ChevronDown size={12} className={showMetadata ? 'rotate' : ''} /></button>
         {current?.cwd && <WorkspaceActions key={current.cwd} cwd={current.cwd} token={token} disabled={!connected || (host ? !host.workspace : false)} note={host?.workspaceNote} machine={host?.name} />}
         <SessionFamilyNav sessions={allSessions} selectedId={sessionId} onNavigate={onNavigate} />

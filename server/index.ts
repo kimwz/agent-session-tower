@@ -353,6 +353,12 @@ async function main() {
       changed();
       return titles.apply(updated);
     },
+    acknowledgeOutcome: async id => {
+      const session = sessionViews().find(item => item.id === id);
+      if (!session) return undefined;
+      if (outcomes.acknowledge(session)) changed();
+      return outcomes.apply(session);
+    },
     createSession: async (input, context) => { await repositories.prepareRun(input.cwd); return runs.create(input, admit(context)); },
     startAutoPrompt: (input, context) => runs.submitAutoPrompt(input, admit(context)),
     getAutoPrompt: id => runs.getAutoPrompt(id),

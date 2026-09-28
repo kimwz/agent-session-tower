@@ -412,6 +412,17 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       await stillVisible(found.id);
       return json(res, 200, { session: remoteSession(updated) });
     }
+    const acknowledge = path.match(/^\/api\/sessions\/([^/]+)\/acknowledge$/);
+    if (acknowledge) {
+      const found = await confirm(acknowledge[1]);
+      await readJson(req);
+      if (!backend.acknowledgeOutcome) throw httpError(503, '세션 상태를 저장할 수 없습니다.');
+      const updated = await backend.acknowledgeOutcome(found.id);
+      if (!updated) throw notFound();
+      note('acknowledge', about(updated));
+      await stillVisible(found.id);
+      return json(res, 200, { session: remoteSession(updated) });
+    }
     const approval = url.pathname.match(/^\/api\/runs\/([^/]+)\/approvals\/([^/]+)$/);
     if (approval) {
       const found = await run(decodeURIComponent(approval[1]));

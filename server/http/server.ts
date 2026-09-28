@@ -44,6 +44,8 @@ export interface Backend {
   detail(id: string, before?: number, limit?: number): Promise<SessionDetail | undefined>;
   setTitle?(id: string, title: string): Promise<Session | undefined>;
   setClosed?(id: string, closed: boolean): Promise<Session | undefined>;
+  /** Marks the conversation's current last turn, judged as needing the owner or broken off, as done. */
+  acknowledgeOutcome?(id: string): Promise<Session | undefined>;
   setGroup?(patch: ProjectGroupPatch): Promise<ProjectGroup>;
   repositoryAction?(cwd: string, action: RepositoryAction): Promise<RepositoryStatus>;
   createSession?(input: CreateSessionRequest, context?: RequestContext): Promise<{ session: Session; run: Run }>;
@@ -556,6 +558,14 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         await readJson(req);
         if (!backend.setClosed) return json(res, 503, { error: '세션 표시 상태를 저장할 수 없습니다.' });
         const session = await backend.setClosed(closedMatch[1], closedMatch[2] === 'close');
+        if (!session) return json(res, 404, { error: '세션을 찾을 수 없습니다. 원본 기록이 이동되었을 수 있습니다.' });
+        return json(res, 200, { session: publicSession(session) });
+      }
+      const acknowledgeMatch = path.match(/^\/api\/sessions\/([^/]+)\/acknowledge$/);
+      if (req.method === 'POST' && acknowledgeMatch) {
+        await readJson(req);
+        if (!backend.acknowledgeOutcome) return json(res, 503, { error: '세션 상태를 저장할 수 없습니다.' });
+        const session = await backend.acknowledgeOutcome(acknowledgeMatch[1]);
         if (!session) return json(res, 404, { error: '세션을 찾을 수 없습니다. 원본 기록이 이동되었을 수 있습니다.' });
         return json(res, 200, { session: publicSession(session) });
       }

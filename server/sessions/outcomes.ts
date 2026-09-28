@@ -97,6 +97,18 @@ export class SessionOutcomes {
     return judged && judged.mark === outcomeMark(session) ? { ...session, outcome: judged.outcome } : session;
   }
 
+  /**
+   * The owner looked at a conversation marked as needing them or broken off and found nothing to do: its current last
+   * turn now shows as done. A new turn is judged as usual. Answers whether the mark changed.
+   */
+  acknowledge(session: Session): boolean {
+    const judged = this.judged.get(session.id);
+    if (!judged || judged.mark !== outcomeMark(session) || (judged.outcome !== 'needsOwner' && judged.outcome !== 'blocked')) return false;
+    this.judged.set(session.id, { mark: judged.mark, outcome: 'done' });
+    this.save();
+    return true;
+  }
+
   /** Sessions changed: judge what has settled, once it has. Constant changes elsewhere never hold a pass back. */
   changed(): void {
     if (this.closed || this.timer || !this.dependencies.engine()) return;
@@ -152,6 +164,10 @@ export class SessionOutcomes {
     }
     if (!changed) return;
     while (this.judged.size > KEPT) this.judged.delete(this.judged.keys().next().value!);
+    this.save();
+  }
+
+  private save(): void {
     const data = `${JSON.stringify(Object.fromEntries(this.judged))}\n`;
     const write = this.writes.then(() => writePrivateJson(this.path, data));
     this.writes = write.catch(error => console.error(`Session outcomes were not saved: ${error instanceof Error ? error.message : String(error)}`));

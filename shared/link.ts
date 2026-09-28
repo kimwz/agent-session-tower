@@ -82,7 +82,7 @@ export interface LinkOverview {
   errors?: string[];
 }
 /** A change a controlling computer made on this one, as this computer's owner reads it. */
-export type RemoteAction = 'joined' | 'update' | 'session' | 'message' | 'title' | 'close' | 'reopen' | 'approval' | 'steer' | 'cancel' | 'dismiss' | 'auto-prompt'
+export type RemoteAction = 'joined' | 'update' | 'session' | 'message' | 'title' | 'close' | 'reopen' | 'acknowledge' | 'approval' | 'steer' | 'cancel' | 'dismiss' | 'auto-prompt'
   | 'auto-prompt-cancel' | 'repository' | 'folder-name' | 'file' | 'directory' | 'terminal-open' | 'terminal-close' | 'trigger';
 export interface RemoteChange {
   at: string; controllerId: string; action: RemoteAction;

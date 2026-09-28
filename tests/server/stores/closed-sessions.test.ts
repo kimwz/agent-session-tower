@@ -67,6 +67,7 @@ test('session creation, closure and reopen HTTP routes authenticate, validate, a
   const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, auth, remote: { origins }, backend: {
     snapshot, detail: async () => ({ session: store.apply(session), messages: [], hasMore: false }),
     setClosed: async (id, closed) => { if (id !== session.id) return undefined; const result = await store.set(session, closed); changed(); return result; },
+    acknowledgeOutcome: async id => id === session.id ? { ...store.apply(session), outcome: 'done' } : undefined,
     createSession: async input => { created.push(input); return { session, run }; },
     enqueue: async () => { throw new Error('Session actions must not resume a conversation'); },
     cancel: async () => { throw new Error('Closing must not stop a native process'); },
@@ -97,6 +98,11 @@ test('session creation, closure and reopen HTTP routes authenticate, validate, a
   const reopened = await send(`/api/sessions/${session.id}/reopen`);
   assert.equal(reopened.status, 200);
   assert.equal((await reopened.json()).session.closed, undefined);
+  const acknowledged = await send(`/api/sessions/${session.id}/acknowledge`);
+  assert.equal(acknowledged.status, 200);
+  assert.equal((await acknowledged.json()).session.outcome, 'done');
+  assert.equal((await send('/api/sessions/missing/acknowledge')).status, 404);
+  assert.equal((await send(`/api/sessions/${session.id}/acknowledge`, '{}', { 'X-Agent-Monitor-Token': '' })).status, 403);
   for (const input of [{}, { provider: 'bad', cwd: '/tmp', prompt: 'hello' }, { provider: 'codex', cwd: 12, prompt: 'hi' }, { provider: 'codex', cwd: '/tmp', prompt: '' }, { provider: 'codex', cwd: '/tmp', prompt: 'hi', title: [] }]) {
     assert.equal((await send('/api/sessions', JSON.stringify(input))).status, 400);
   }

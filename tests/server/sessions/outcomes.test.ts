@@ -90,3 +90,17 @@ test('a failed judgment is recorded, shows nothing and is not retried at once', 
   assert.equal(records[0].result, 'failed');
   assert.equal(outcomes.apply(list[0]).outcome, undefined);
 });
+
+test('the owner can mark a turn that needs them as done; the mark is kept and a new turn is judged again', async t => {
+  const { outcomes, list, settled, stateDir } = await setup(t, { engine: () => answering('asks_owner') });
+  await outcomes.start();
+  await settled();
+  assert.equal(outcomes.apply(list[0]).outcome, 'needsOwner');
+  assert.equal(outcomes.acknowledge({ ...list[0], messageCount: 5, lastMessage: 'Next' }), false, 'a turn that was not judged is left alone');
+  assert.equal(outcomes.acknowledge(list[0]), true);
+  assert.equal(outcomes.apply(list[0]).outcome, 'done');
+  assert.equal(outcomes.acknowledge(list[0]), false, 'already done');
+  await outcomes.close();
+  const saved = JSON.parse(await readFile(join(stateDir, 'session-outcomes.json'), 'utf8'));
+  assert.equal(saved.a.outcome, 'done');
+});
