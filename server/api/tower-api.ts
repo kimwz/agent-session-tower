@@ -372,12 +372,12 @@ export class TowerApi {
       }
       read++;
       const result = await search(session.id, { terms, since, until, tools: value.tools === true, keep: 3, maxBytes: Math.max(1, SEARCH_BYTES - bytes), deadline,
-        ...(session === resumed ? { from: after!.offset } : {}) }).catch(() => undefined);
+        ...(session === resumed ? { from: after!.offset, file: after!.file } : {}) }).catch(() => undefined);
       if (!result) continue;
       bytes += result.bytes;
       if (result.count) found.push({ ...sessionSummary(session), matchCount: result.count,
         matches: result.matches.reverse().map(({ message, cursor }) => ({ ...shownMessage(message, 0), text: excerpt(message.text, terms), cursor: String(cursor) })) });
-      if (result.next !== undefined) return { sessions: found, searched: read, nextCursor: encodeCursor(place(session), result.next) };
+      if (result.next !== undefined) return { sessions: found, searched: read, nextCursor: encodeCursor(place(session), { offset: result.next, file: result.file }) };
     }
     return { sessions: found, searched: read };
   }
@@ -421,13 +421,18 @@ function ordered(sessions: Session[], after?: { updatedAt: string; id: string })
   const sorted = [...sessions].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id));
   return after ? sorted.filter(session => session.updatedAt < after.updatedAt || (session.updatedAt === after.updatedAt && session.id < after.id)) : sorted;
 }
-/** Where a page ended: after a conversation, or at `offset` inside one a search had not finished. */
-const encodeCursor = (session: { updatedAt: string; id: string }, offset?: number) => Buffer.from(JSON.stringify([session.updatedAt, session.id, ...(offset === undefined ? [] : [offset])])).toString('base64url');
-function decodeCursor(cursor: string): { updatedAt: string; id: string; offset?: number } {
+/**
+ * Where a page ended: after a conversation, or at `offset` inside the `file` of one a search had not finished. A
+ * conversation whose file was replaced since is read again from its start, and may then be read once more in its new place.
+ */
+const encodeCursor = (session: { updatedAt: string; id: string }, inside?: { offset: number; file?: number }) =>
+  Buffer.from(JSON.stringify([session.updatedAt, session.id, ...(inside ? [inside.offset, inside.file ?? null] : [])])).toString('base64url');
+function decodeCursor(cursor: string): { updatedAt: string; id: string; offset?: number; file?: number } {
+  const index = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
   try {
-    const [updatedAt, id, offset] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown[];
-    if (typeof updatedAt === 'string' && typeof id === 'string' && (offset === undefined || (Number.isSafeInteger(offset) && (offset as number) >= 0))) {
-      return { updatedAt, id, ...(offset === undefined ? {} : { offset: offset as number }) };
+    const [updatedAt, id, offset, file] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown[];
+    if (typeof updatedAt === 'string' && typeof id === 'string' && (offset === undefined || (index(offset) && (file === undefined || file === null || index(file))))) {
+      return { updatedAt, id, ...(index(offset) ? { offset, ...(index(file) ? { file } : {}) } : {}) };
     }
   } catch { /* Reported below. */ }
   throw failure('Invalid request: cursor: Pass nextCursor unchanged.', 400);

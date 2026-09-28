@@ -131,15 +131,17 @@ test('a long conversation is searched in parts, going on where the last part sto
   assert.ok(first!.next !== undefined && first!.count < 4, 'stopped early at a line boundary');
   let count = first!.count;
   for (let next: number | undefined = first!.next; next !== undefined;) {
-    const part = await f.sessions.search(session, { terms: ['checkpoint'], keep: 10, maxBytes: 1, from: next });
+    const part = await f.sessions.search(session, { terms: ['checkpoint'], keep: 10, maxBytes: 1, from: next, file: first!.file });
     assert.ok(part!.next === undefined || part!.next > next, 'always moves forward');
     count += part!.count; next = part!.next;
   }
   assert.equal(count, 4, 'every match found exactly once');
   // The same through the tool: a cursor inside the conversation finishes it before going on.
-  const cursor = Buffer.from(JSON.stringify(['2026-09-01T10:39:00.000Z', session, first!.next])).toString('base64url');
+  const cursor = Buffer.from(JSON.stringify(['2026-09-01T10:39:00.000Z', session, first!.next, first!.file])).toString('base64url');
   const rest = await f.call<{ sessions: Array<{ id: string; matchCount: number }> }>('sessions.search', { query: 'checkpoint', cursor });
   assert.deepEqual(rest.sessions.map(item => [item.id, item.matchCount]), [[session, 4 - first!.count]]);
+  // A place in another file (this one replaced since) is read again from the start.
+  assert.equal((await f.sessions.search(session, { terms: ['checkpoint'], keep: 10, from: first!.next, file: first!.file! + 1 }))!.count, 4);
 });
 
 test('every search word counts, and letters outside ASCII match in either case', async t => {
@@ -185,8 +187,9 @@ test('a search stops inside a line too long to hold chat once its budget is spen
   const session = `claude:${id(1)}`;
   let count = 0;
   let parts = 0;
-  for (let from: number | undefined = 0; from !== undefined; parts++) {
-    const part = await f.sessions.search(session, { terms: ['needle'], keep: 5, maxBytes: 1, deadline: 0, from });
+  for (let from: number | undefined = 0, file: number | undefined; from !== undefined; parts++) {
+    const part = await f.sessions.search(session, { terms: ['needle'], keep: 5, maxBytes: 1, deadline: 0, from, file });
+    file = part!.file;
     assert.ok(part!.bytes <= 17 * 1024 * 1024, 'never reads much past the longest line kept');
     count += part!.count; from = part!.next;
   }

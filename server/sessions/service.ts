@@ -10,10 +10,10 @@ import { appendFile, applyStatus, initial, ownHistory, parseMessages, walk, CHUN
 
 /**
  * Every term is lowercase; times are milliseconds, `until` excluded. Tool calls and results are searched only with `tools`.
- * `from` is a line start an earlier search stopped at; `maxBytes` and `deadline` bound one call.
+ * `from` is where an earlier search of the same `file` stopped; `maxBytes` and `deadline` bound one call.
  */
-export interface SessionSearch { terms: string[]; since?: number; until?: number; tools?: boolean; keep: number; from?: number; maxBytes?: number; deadline?: number }
-export interface SessionSearchResult { count: number; matches: Array<{ message: ChatMessage; cursor: number }>; bytes: number; next?: number }
+export interface SessionSearch { terms: string[]; since?: number; until?: number; tools?: boolean; keep: number; from?: number; file?: number; maxBytes?: number; deadline?: number }
+export interface SessionSearchResult { count: number; matches: Array<{ message: ChatMessage; cursor: number }>; bytes: number; file?: number; next?: number }
 
 /** A term as the JSONL writers store it inside a string: JSON-escaped, ASCII letters lowercased like the line it is looked for in. */
 function rawNeedle(term: string): Buffer {
@@ -209,7 +209,7 @@ export class SessionService extends EventEmitter {
   async search(id: string, query: SessionSearch): Promise<SessionSearchResult | undefined> {
     const state = this.index.get(id);
     if (!state) return undefined;
-    const result: SessionSearchResult = { count: 0, matches: [], bytes: 0 };
+    const result: SessionSearchResult = { count: 0, matches: [], bytes: 0, file: state.ino };
     if (state.historyStartOrdinal !== undefined && state.historyStartOffset === undefined) return result;
     // A term whose letters outside ASCII have case cannot be found in the raw bytes; any other can.
     const plain = query.terms.find(term => ![...term].some(letter => letter > '\x7f' && letter.toUpperCase() !== letter));
@@ -242,8 +242,8 @@ export class SessionService extends EventEmitter {
       }
     };
     try {
-      // A place past the end means the file was replaced since: it is read again from its start.
-      const first = Math.max(state.historyStartOffset ?? 0, query.from !== undefined && query.from <= state.offset ? query.from : 0);
+      // A place in a file that was replaced since means nothing there: it is read again from its start.
+      const first = Math.max(state.historyStartOffset ?? 0, query.from !== undefined && query.file === state.ino && query.from <= state.offset ? query.from : 0);
       let position = first;
       let fragments: Buffer[] = [];
       let pending = 0;
