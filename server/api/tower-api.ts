@@ -422,7 +422,7 @@ function ordered(sessions: Session[], after?: { updatedAt: string; id: string })
   return after ? sorted.filter(session => session.updatedAt < after.updatedAt || (session.updatedAt === after.updatedAt && session.id < after.id)) : sorted;
 }
 /**
- * Where a page ended: after a conversation, or at `offset` inside the `file` of one a search had not finished. A
+ * Where a page ended: after a conversation, or at `offset` inside one (`file` names which reading of its file) a search had not finished. A
  * conversation whose file was replaced since is read again from its start, and may then be read once more in its new place.
  */
 const encodeCursor = (session: { updatedAt: string; id: string }, inside?: { offset: number; file?: number }) =>

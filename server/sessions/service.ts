@@ -22,6 +22,8 @@ function rawNeedle(term: string): Buffer {
   return needle;
 }
 
+const GENERATION_BASE = Math.floor(Math.random() * 2 ** 31) * 2 ** 20;
+
 interface SessionOptions { codexHome?: string; claudeHome?: string; pollIntervalMs?: number; inspectProcesses?: () => Promise<ProcessSnapshot> }
 
 export class SessionService extends EventEmitter {
@@ -41,6 +43,8 @@ export class SessionService extends EventEmitter {
   private readonly launchers = new Map<string, string[]>();
   /** Non-interactive sessions whose process was already looked at once after they appeared. */
   private readonly checked = new Set<string>();
+  private readonly generations = new WeakMap<RecordState, number>();
+  private generationCount = 0;
 
   constructor(options: SessionOptions = {}) {
     super();
@@ -209,7 +213,7 @@ export class SessionService extends EventEmitter {
   async search(id: string, query: SessionSearch): Promise<SessionSearchResult | undefined> {
     const state = this.index.get(id);
     if (!state) return undefined;
-    const result: SessionSearchResult = { count: 0, matches: [], bytes: 0, file: state.ino };
+    const result: SessionSearchResult = { count: 0, matches: [], bytes: 0, file: this.generation(state) };
     if (state.historyStartOrdinal !== undefined && state.historyStartOffset === undefined) return result;
     // A term whose letters outside ASCII have case cannot be found in the raw bytes; any other can.
     const plain = query.terms.find(term => ![...term].some(letter => letter > '\x7f' && letter.toUpperCase() !== letter));
@@ -243,7 +247,7 @@ export class SessionService extends EventEmitter {
     };
     try {
       // A place in a file that was replaced since means nothing there: it is read again from its start.
-      const first = Math.max(state.historyStartOffset ?? 0, query.from !== undefined && query.file === state.ino && query.from <= state.offset ? query.from : 0);
+      const first = Math.max(state.historyStartOffset ?? 0, query.from !== undefined && query.file === result.file && query.from <= state.offset ? query.from : 0);
       let position = first;
       let fragments: Buffer[] = [];
       let pending = 0;
@@ -277,6 +281,16 @@ export class SessionService extends EventEmitter {
       }
     } finally { await file.close(); }
     return result;
+  }
+
+  /**
+   * Which reading of a file a state is: a file rewritten or replaced gets a new state, and so a new number. Numbers from
+   * before this process started never match, so a search resumed after a restart reads the conversation again.
+   */
+  private generation(state: RecordState): number {
+    let number = this.generations.get(state);
+    if (number === undefined) this.generations.set(state, number = GENERATION_BASE + ++this.generationCount);
+    return number;
   }
 
   /**

@@ -196,3 +196,20 @@ test('a search stops inside a line too long to hold chat once its budget is spen
   assert.equal(count, 2);
   assert.ok(parts > 2, 'the long line was read in parts');
 });
+
+test('a conversation rewritten in place is searched again from its start', async t => {
+  const f = await fixture(t);
+  const rows = (word: string) => Array.from({ length: 40 }, (_, n) => claudeRow(id(1), 'user', `${n === 0 ? word : 'x'} ${'filler '.repeat(4000)}`, `2026-09-01T10:${String(n).padStart(2, '0')}:00.000Z`, `r${n}`));
+  await f.write(1, rows('old'));
+  await f.sessions.refresh();
+  const session = `claude:${id(1)}`;
+  const first = await f.sessions.search(session, { terms: ['fresh'], keep: 5, maxBytes: 1 });
+  assert.ok(first!.next !== undefined);
+  // Same file, same inode, shorter content that now matches near its start.
+  const { truncate, appendFile } = await import('node:fs/promises');
+  const path = f.sessions.get(session)!.filePath!;
+  await truncate(path, 0);
+  await appendFile(path, rows('fresh').slice(0, 20).map(row => JSON.stringify(row)).join('\n') + '\n');
+  await f.sessions.refresh();
+  assert.equal((await f.sessions.search(session, { terms: ['fresh'], keep: 5, from: first!.next, file: first!.file }))!.count, 1);
+});
