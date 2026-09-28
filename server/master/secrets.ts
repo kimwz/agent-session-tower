@@ -28,6 +28,8 @@ const MAX_PASTED = 1_000;
 const MAX_READ = 20_000;
 /** Secret-by-nature values from answers (join codes) hidden everywhere; the oldest go first past this. */
 const MAX_ANSWERED = 200;
+/** Values typed into secret cards while the host runs; a card takes no more past this (none is ever dropped). */
+const MAX_CARDS = 200;
 /** Values shorter than this are not searched for in text: they would match ordinary words. A card takes no shorter value. */
 export const SHORTEST_SECRET = 8;
 
@@ -78,6 +80,8 @@ export class SecretVault {
   /** Each kept value's reference. */
   private readonly refs = new Map<string, string>();
   private readonly counts: Record<Source, number> = { card: 0, answer: 0, pasted: 0, read: 0 };
+  /** References given out for keys hidden while full, which cannot be put back but are still references. */
+  private readonly issued = new Set<string>();
   private everywhere?: RegExp | null;
 
   /**
@@ -85,13 +89,28 @@ export class SecretVault {
    * owner's own message (`source` 'pasted') a recognised key is kept as theirs.
    */
   hide(text: string, source: 'pasted' | 'read' = 'read'): string {
-    return outsideReferences(this.redact(text), part => PATTERNS.reduce((result, pattern) => result.replace(pattern, match => `{{secret:${this.keep(match, source)}}}`), part));
+    return this.outsideReferences(this.redact(text), part => PATTERNS.reduce((result, pattern) => result.replace(pattern, match => `{{secret:${this.keep(match, source)}}}`), part));
   }
 
   /** Hides only the values hidden everywhere (cards, secret answer fields), whatever the settings. */
   redact(text: string): string {
     const pattern = this.pattern();
-    return pattern ? outsideReferences(text, part => part.replace(pattern, match => `{{secret:${this.refs.get(match)}}}`)) : text;
+    return pattern ? this.outsideReferences(text, part => part.replace(pattern, match => `{{secret:${this.refs.get(match)}}}`)) : text;
+  }
+
+  /**
+   * Applies `change` to the text around the references this vault gave out, so none of them is altered by what
+   * replaces values. Text that only looks like a reference is text like any other.
+   */
+  private outsideReferences(text: string, change: (part: string) => string): string {
+    let result = '';
+    let last = 0;
+    for (const match of text.matchAll(REFERENCE)) {
+      if (!this.kept.has(match[1]) && !this.issued.has(match[1])) continue;
+      result += change(text.slice(last, match.index)) + match[0];
+      last = match.index! + match[0].length;
+    }
+    return result + change(text.slice(last));
   }
 
   /** `redact` over any JSON value, names of fields included. */
@@ -141,8 +160,14 @@ export class SecretVault {
     return walk(value, []);
   }
 
-  /** A reference for a value the owner typed into a secret card, whatever its format. */
-  reference(value: string): string { return `{{secret:${this.keep(value, 'card')}}}`; }
+  /** A reference for a value the owner typed into a secret card, whatever its format; none past `MAX_CARDS`. */
+  reference(value: string): string {
+    const known = this.refs.get(value);
+    if (!(known && this.kept.get(known)!.source === 'card') && this.counts.card >= MAX_CARDS) {
+      throw Object.assign(new Error('이번 마스터 실행에서 받을 수 있는 비밀 값 수를 넘었습니다. Tower 화면에서 직접 입력해 주세요.'), { statusCode: 409 });
+    }
+    return `{{secret:${this.keep(value, 'card')}}}`;
+  }
 
   private keep(value: string, source: Source): string {
     const now = Date.now();
@@ -152,7 +177,7 @@ export class SecretVault {
       // A value seen again is the most recent; one the owner now gives on a card is theirs from then on.
       this.kept.delete(known);
       kept.at = now;
-      if (rank(source) > rank(kept.source)) {
+      if (rank(source) > rank(kept.source) && this.room(source)) {
         this.counts[kept.source]--;
         this.counts[source]++;
         kept.source = source;
@@ -161,16 +186,27 @@ export class SecretVault {
       this.kept.set(known, kept);
       return known;
     }
-    const limit = source === 'pasted' ? MAX_PASTED : source === 'read' ? MAX_READ : source === 'answer' ? MAX_ANSWERED : Infinity;
-    if (this.counts[source] >= limit) this.drop(source, source === 'answer' ? Infinity : LIFETIME_MS);
     const ref = randomBytes(8).toString('hex');
     // Full of references still in use: the key is hidden all the same, under a reference that cannot be put back.
-    if (this.counts[source] >= limit) return ref;
+    if (!this.room(source)) {
+      this.issued.add(ref);
+      if (this.issued.size > MAX_READ) this.issued.delete(this.issued.values().next().value!);
+      return ref;
+    }
     this.kept.set(ref, { value, at: now, source });
     this.refs.set(value, ref);
     this.counts[source]++;
     if (HIDDEN_EVERYWHERE.has(source)) this.everywhere = undefined;
     return ref;
+  }
+
+  /** Whether one more value of `source` can be kept, dropping what its rule allows first. */
+  private room(source: Source): boolean {
+    const limit = source === 'pasted' ? MAX_PASTED : source === 'read' ? MAX_READ : source === 'answer' ? MAX_ANSWERED : MAX_CARDS;
+    if (this.counts[source] < limit) return true;
+    // Join codes: the oldest goes. Keys: those whose reference expired go. Card values: none ever goes.
+    if (source !== 'card') this.drop(source, source === 'answer' ? Infinity : LIFETIME_MS);
+    return this.counts[source] < limit;
   }
 
   /** Drops values of `source` not seen for longer than `olderThan` (join codes: the oldest one), oldest first. */
@@ -198,14 +234,3 @@ export class SecretVault {
 
 /** Which source a value counts as when seen from several: a card is the strongest claim. */
 function rank(source: Source): number { return source === 'card' ? 3 : source === 'answer' ? 2 : source === 'pasted' ? 1 : 0; }
-
-/** Applies `change` to the text between references, so a reference is never altered by what replaces values. */
-function outsideReferences(text: string, change: (part: string) => string): string {
-  let result = '';
-  let last = 0;
-  for (const match of text.matchAll(REFERENCE)) {
-    result += change(text.slice(last, match.index)) + match[0];
-    last = match.index! + match[0].length;
-  }
-  return result + change(text.slice(last));
-}

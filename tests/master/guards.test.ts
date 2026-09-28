@@ -157,3 +157,18 @@ test('pasted keys stay bounded: many in the owner\'s messages neither grow the v
   for (let index = 0; index < 20_000; index++) vault.hide(`sk-proj-read${String(index).padStart(8, '0')}${'r'.repeat(24)}`);
   assert.ok(Date.now() - started < 3000, `20000 keys took ${Date.now() - started} ms`);
 });
+
+test('only references the vault gave out are left alone; text that merely looks like one is hidden like any other', () => {
+  const vault = new SecretVault();
+  const ref = vault.reference('deadbeefdeadbeef');
+  assert.equal(vault.redact('login failed for {{secret:deadbeefdeadbeef}}'), `login failed for {{secret:${ref}}}`);
+  assert.equal(vault.redact(`kept ${ref} whole`), `kept ${ref} whole`);
+});
+
+test('a card value is kept for as long as the host runs, up to a limit past which cards are refused', () => {
+  const vault = new SecretVault();
+  for (let index = 0; index < 200; index++) vault.reference(`card-value-${String(index).padStart(4, '0')}`);
+  assert.throws(() => vault.reference('one-card-too-many'), { statusCode: 409 });
+  assert.match(vault.reference('card-value-0000'), /^\{\{secret:/, 'a value already given stays usable');
+  assert.doesNotMatch(vault.redact('card-value-0000 and card-value-0199'), /card-value/);
+});
