@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.61.0] - 2026-09-28
+
+### Added
+- **Send the master any file.** The attach button, paste and drop now take any file, not only pictures. Pictures and PDFs are read by the model itself. Short text files (code, logs, configs, Markdown, JSON and the like, up to 100 KB) reach it as their text, with keys hidden like anything you type. Other files are kept on this computer, so the master can hand them to a session by their path. Sent files show in the conversation: pictures as thumbnails, other files as links to download.
+- **Choose the model and reasoning for a message.** A row above the message box sets the model and reasoning for what you send next, instead of the ones in the settings. The choice stays for later messages until you press **설정대로**. A message with its own choice gets a turn of its own and shows what it used.
+- **Send a request again.** A request that failed, or that you stopped, is marked under your message with **다시 보내기** and **고쳐 쓰기**. Send again posts it as a new message with the same text, files and choices, once however often it is pressed. Edit puts it back in the message box to change first.
+
+### Changed
+- **The draft stays.** What you are writing to the master, with its files and choices, stays when you close the panel and open it again; the text and choices also stay after reloading the tab.
+- **Long messages fold.** Very long requests and answers in the master conversation show their start with **더 보기**.
+
 ## [1.60.1] - 2026-09-28
 
 ### Fixed
