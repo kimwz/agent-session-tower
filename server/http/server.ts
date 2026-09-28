@@ -332,7 +332,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (path === '/api/skills/summary') return json(res, 200, await backend.skills.summary());
         return json(res, 200, path === '/api/skills' ? await backend.skills.overview(input) : await backend.skills.detail(input));
       }
-      const skillAction = path.match(/^\/api\/skills\/(save|pin|link|delete|dismiss|settings|backfill)$/);
+      const skillAction = path.match(/^\/api\/skills\/(save|pin|link|merge|delete|dismiss|settings|backfill)$/);
       if (skillAction && req.method === 'POST') {
         if (!backend.skills) return json(res, 503, { error: '스킬을 사용할 수 없습니다.' });
         return json(res, 200, await backend.skills.mutate(skillAction[1], await readJson(req, 200_000)));

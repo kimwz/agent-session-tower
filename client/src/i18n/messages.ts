@@ -1,5 +1,14 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  "{0} 스킬의 복사본을 하나로 합쳤습니다.": "Merged the copies of the {0} skill into one.",
+  "Claude Code와 Codex가 각자 다른 폴더의 복사본을 씁니다. 내용이 조금 달라(보통 각자 자기 이름을 적음) 합치지 않았습니다.": "Claude Code and Codex each use their own copy in a different folder. The contents differ slightly (usually each names its own agent), so they were not merged.",
+  "같은 내용의 복사본이 Claude Code와 Codex 폴더에 따로 있습니다. 하나로 합치면 고칠 때 한 번에 바뀝니다.": "Identical copies sit in the Claude Code and Codex folders. Merge them so an edit changes both at once.",
+  "에이전트별 복사본": "Copy per agent",
+  "복사본 {0}개": "{0} copies",
+  "복사본을 하나로 합치기": "Merge copies into one",
+  "{0} 복사본을 하나로 합치기": "Merge the copies of {0} into one",
+  "이 스킬은 에이전트마다 따로 복사본이 있습니다. 저장하면 {0}가 쓰는 복사본만 바뀝니다.": "This skill has a separate copy per agent. Saving changes only the copy {0} uses.",
+  "복사본의 내용이 달라 합칠 수 없습니다.": "The copies differ, so they cannot be merged.",
   "스킬 · 추천 {0}개": "Skills · {0} suggested",
   "스킬": "Skills",
   "{0} 스킬을 등록했습니다.": "Added the {0} skill.",

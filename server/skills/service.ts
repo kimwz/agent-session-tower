@@ -141,6 +141,7 @@ export class SkillService {
         break;
       }
       case 'link': await this.files.link(text(body.dir), cwd); break;
+      case 'merge': await this.files.merge(text(body.dir), cwd); break;
       case 'delete': {
         const dir = text(body.dir);
         await this.files.remove(dir, cwd);

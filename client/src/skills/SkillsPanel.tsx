@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, Eye, Link2, LoaderCircle, Pencil, Pin, PinOff, Plus, RefreshCw, Sparkles, Trash2, X } from 'lucide-react';
+import { Check, Eye, Link2, LoaderCircle, Merge, Pencil, Pin, PinOff, Plus, RefreshCw, Sparkles, Trash2, X } from 'lucide-react';
 import type { Skill, SkillDetail, SkillOverview, SkillProposal, SkillScope, SkillSummary } from '../../../shared/skills';
 import { MAX_SKILL_DESCRIPTION, proposalReady, SKILL_NAME } from '../../../shared/skills';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
@@ -27,7 +27,7 @@ export function SkillsButton({ token, projects, onOpenSession }: { token: string
   </button>{open && <SkillsPanel token={token} cwd={open.cwd} projects={projects} onOpenSession={id => { setOpen(null); onOpenSession(id); }} onClose={() => { setOpen(null); refresh(); }} />}</>;
 }
 
-type Draft = { dir?: string; revision?: string; name: string; description: string; body: string; scope: SkillScope; projectCwd?: string; pinned: boolean; proposalId?: string; external?: boolean };
+type Draft = { dir?: string; revision?: string; name: string; description: string; body: string; scope: SkillScope; projectCwd?: string; pinned: boolean; proposalId?: string; external?: boolean; separate?: string };
 type Tab = 'skills' | 'proposals' | 'settings';
 
 /** The owner's skills where the panel was opened (every skill, or one project's with the global ones), proposals and settings. */
@@ -67,7 +67,9 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
     setError('');
     try {
       const detail = await api<SkillDetail>(`/api/skills/detail${query(cwd, { dir: skill.dir })}`);
-      setDraft({ dir: detail.dir, revision: detail.revision, name: detail.name, description: detail.description, body: detail.body, scope: detail.scope, projectCwd: detail.cwd, pinned: detail.pinned, external: detail.external });
+      const kept = detail.copies?.find(copy => copy.dir === detail.dir)?.providers;
+      setDraft({ dir: detail.dir, revision: detail.revision, name: detail.name, description: detail.description, body: detail.body, scope: detail.scope, projectCwd: detail.cwd, pinned: detail.pinned, external: detail.external,
+        ...(detail.copies && kept ? { separate: kept.map(provider => provider === 'claude' ? 'Claude Code' : 'Codex').join('·') } : {}) });
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
   }
   const review = (proposal: SkillProposal) => setDraft({ name: proposal.name, description: proposal.description, body: proposal.body, scope: proposal.scope, projectCwd: proposal.cwd, pinned: true, proposalId: proposal.id });
@@ -93,6 +95,7 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
       {tab === 'skills' && <SkillList overview={overview} cwd={cwd} busy={busy} onNew={() => setDraft({ name: '', description: '', body: '', scope: cwd ? 'project' : 'global', ...(cwd ? { projectCwd: cwd } : {}), pinned: false })}
         onEdit={skill => void edit(skill)} onPin={skill => void mutate('pin', { dir: skill.dir, pinned: !skill.pinned })}
         onLink={skill => void mutate('link', { dir: skill.dir }, t('{0} 스킬을 Claude Code와 Codex 모두에 연결했습니다.', { 0: skill.name }))}
+        onMerge={skill => void mutate('merge', { dir: skill.dir }, t('{0} 스킬의 복사본을 하나로 합쳤습니다.', { 0: skill.name }))}
         onDelete={skill => { if (window.confirm(t('{0} 스킬을 삭제할까요? 폴더는 Tower 상태 폴더의 skills-trash로 옮겨집니다.', { 0: skill.name }))) void mutate('delete', { dir: skill.dir }, t('{0} 스킬을 삭제했습니다.', { 0: skill.name })); }} />}
       {tab === 'proposals' && <section className="skills-proposals">
         {ready.length ? ready.map(proposal => <ProposalCard key={proposal.id} proposal={proposal} busy={busy} onReview={review} onAccept={accept} onOpenSession={onOpenSession}
@@ -113,7 +116,7 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
   </div></dialog>, document.body);
 }
 
-function SkillList({ overview, cwd, busy, onNew, onEdit, onPin, onLink, onDelete }: { overview: SkillOverview; cwd?: string; busy: boolean; onNew: () => void; onEdit: (skill: Skill) => void; onPin: (skill: Skill) => void; onLink: (skill: Skill) => void; onDelete: (skill: Skill) => void }) {
+function SkillList({ overview, cwd, busy, onNew, onEdit, onPin, onLink, onMerge, onDelete }: { overview: SkillOverview; cwd?: string; busy: boolean; onNew: () => void; onEdit: (skill: Skill) => void; onPin: (skill: Skill) => void; onLink: (skill: Skill) => void; onMerge: (skill: Skill) => void; onDelete: (skill: Skill) => void }) {
   const { t } = useI18n();
   const [filter, setFilter] = useState('');
   const shown = useMemo(() => overview.skills.filter(skill => !filter.trim() || `${skill.name} ${skill.description}`.toLowerCase().includes(filter.trim().toLowerCase())), [overview.skills, filter]);
@@ -126,10 +129,12 @@ function SkillList({ overview, cwd, busy, onNew, onEdit, onPin, onLink, onDelete
         <div className="skill-row-main"><strong>{skill.name}</strong>
           <span className="skill-badges">{skill.providers.map(provider => <span key={provider} className={`skill-badge ${provider}`}>{provider === 'claude' ? 'Claude' : 'Codex'}</span>)}
             {skill.pinned && <span className="skill-badge pinned">{t('항상 확인')}</span>}{skill.external && <span className="skill-badge external" title={t('skills 명령으로 설치한 스킬입니다. 다시 설치하면 여기서 고친 내용이 바뀝니다.')}>{t('외부 설치')}</span>}
+            {skill.copies && <span className="skill-badge copies" title={skill.copiesDiffer ? t('Claude Code와 Codex가 각자 다른 폴더의 복사본을 씁니다. 내용이 조금 달라(보통 각자 자기 이름을 적음) 합치지 않았습니다.') : t('같은 내용의 복사본이 Claude Code와 Codex 폴더에 따로 있습니다. 하나로 합치면 고칠 때 한 번에 바뀝니다.')}>{skill.copiesDiffer ? t('에이전트별 복사본') : t('복사본 {0}개', { 0: skill.copies.length })}</span>}
             {skill.scope === 'project' && skill.cwd && skill.cwd !== cwd && <span className="skill-badge" title={skill.cwd}>{folderName(skill.cwd)}</span>}</span>
           <p>{skill.description || t('설명 없음')}</p></div>
         <div className="skill-row-actions">
           <button className="icon-button" title={skill.pinned ? t('항상 확인 끄기') : t('항상 확인: 모든 턴 시작 때 에이전트에게 알려 줍니다')} aria-label={skill.pinned ? t('항상 확인 끄기') : t('항상 확인 켜기')} aria-pressed={skill.pinned} disabled={busy} onClick={() => onPin(skill)}>{skill.pinned ? <PinOff size={15} /> : <Pin size={15} />}</button>
+          {skill.copies && !skill.copiesDiffer && <button className="icon-button" title={t('복사본을 하나로 합치기')} aria-label={t('{0} 복사본을 하나로 합치기', { 0: skill.name })} disabled={busy} onClick={() => onMerge(skill)}><Merge size={15} /></button>}
           {skill.providers.length < 2 && <button className="icon-button" title={t('Claude Code와 Codex 모두에 연결')} aria-label={t('Claude Code와 Codex 모두에 연결')} disabled={busy} onClick={() => onLink(skill)}><Link2 size={15} /></button>}
           <button className="icon-button" title={t('편집')} aria-label={t('{0} 편집', { 0: skill.name })} disabled={busy} onClick={() => onEdit(skill)}><Pencil size={15} /></button>
           <button className="icon-button" title={t('삭제')} aria-label={t('{0} 삭제', { 0: skill.name })} disabled={busy} onClick={() => onDelete(skill)}><Trash2 size={15} /></button>
@@ -149,6 +154,7 @@ function SkillEditor({ draft: initial, cwd, projects, busy, onCancel, onSave }: 
   const set = (patch: Partial<Draft>) => setDraft(value => ({ ...value, ...patch }));
   return <form className="skill-editor" onSubmit={event => { event.preventDefault(); if (!nameError) onSave(draft); }}>
     <h3>{editing ? t('{0} 편집', { 0: draft.name }) : draft.proposalId ? t('추천 검토 후 등록') : t('새 스킬')}</h3>
+    {draft.separate && <p className="auth-hint">{t('이 스킬은 에이전트마다 따로 복사본이 있습니다. 저장하면 {0}가 쓰는 복사본만 바뀝니다.', { 0: draft.separate })}</p>}
     {draft.external && <p className="auth-hint">{t('skills 명령으로 설치한 스킬입니다. 다시 설치하면 여기서 고친 내용이 바뀝니다.')}</p>}
     <label>{t('이름')}<input value={draft.name} disabled={editing || busy} required maxLength={64} placeholder="cross-verified-delivery" spellCheck={false} onChange={event => set({ name: event.target.value.toLowerCase().replace(/\s+/g, '-') })} />
       {nameError ? <small className="auth-error">{nameError}</small> : <small>{t('폴더 이름이 됩니다. 영어 소문자, 숫자, 하이픈.')}</small>}</label>

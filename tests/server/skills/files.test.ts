@@ -152,3 +152,40 @@ test('a skills state file that cannot be read is set aside, not overwritten, and
   assert.ok(aside);
   assert.equal(await readFile(join(dir, aside!), 'utf8'), '{not json');
 });
+
+async function copy(root: string, name: string, text: string) {
+  await mkdir(join(root, 'skills', name, 'references'), { recursive: true });
+  await writeFile(join(root, 'skills', name, 'SKILL.md'), `---\nname: ${name}\ndescription: d\n---\n${text}\n`);
+  await writeFile(join(root, 'skills', name, 'references', 'a.md'), 'ref');
+}
+
+test('a skill copied into each agent’s folder is listed once, and identical copies merge into one folder', async t => {
+  const f = await homes(t);
+  await copy(f.agentsHome, 'wrangler', 'Same text');
+  await copy(f.claudeHome, 'wrangler', 'Same text');
+  const [listed] = await f.files.list();
+  assert.equal((await f.files.list()).length, 1);
+  assert.equal(listed.dir, join(f.agentsHome, 'skills', 'wrangler'), 'the shared folder is the one edited');
+  assert.deepEqual(listed.providers, ['claude', 'codex']);
+  assert.deepEqual(listed.copies?.map(item => item.providers), [['codex'], ['claude']]);
+  assert.equal(listed.copiesDiffer, false);
+  const merged = await f.files.merge(listed.dir);
+  assert.equal(merged.copies, undefined);
+  assert.deepEqual(merged.providers, ['claude', 'codex']);
+  assert.equal(await readlink(join(f.claudeHome, 'skills', 'wrangler')), '../../.agents/skills/wrangler');
+  const [kept] = await readdir(f.trash);
+  assert.equal(await readFile(join(f.trash, kept, 'references', 'a.md'), 'utf8'), 'ref', 'the removed copy is kept in the trash');
+});
+
+test('copies whose contents differ stay separate, and deleting the skill removes every copy', async t => {
+  const f = await homes(t);
+  await copy(f.agentsHome, 'tmux', 'Talk to other Codex instances');
+  await copy(f.claudeHome, 'tmux', 'Talk to other Claude instances');
+  const [listed] = await f.files.list();
+  assert.equal(listed.copiesDiffer, true);
+  await assert.rejects(f.files.merge(listed.dir), { statusCode: 409 });
+  assert.equal((await f.files.detail(join(f.claudeHome, 'skills', 'tmux'))).dir, listed.dir, 'either copy finds the skill');
+  await f.files.remove(listed.dir);
+  assert.deepEqual(await f.files.list(), []);
+  assert.equal((await readdir(f.trash)).length, 2);
+});

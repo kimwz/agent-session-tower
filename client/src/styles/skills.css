@@ -27,6 +27,7 @@
 .skill-badge.codex { color:#9fd0ff; }
 .skill-badge.pinned { color:#9ee0ba; background:#1b3a2d; }
 .skill-badge.external { color:#e7c77f; }
+.skill-badge.copies { color:#c9b3ff; }
 .skill-editor { display:flex; flex-direction:column; gap:14px; margin-top:16px; }
 .skill-editor h3 { margin:0; }
 .skill-editor label { display:flex; flex-direction:column; gap:6px; font-size:12px; color:#b7c5d8; }

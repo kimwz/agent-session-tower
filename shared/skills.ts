@@ -22,7 +22,15 @@ export interface Skill {
   external: boolean;
   /** Hash of the SKILL.md this listing read; a save sends it back so a newer edit is never overwritten. */
   revision: string;
+  /**
+   * The same skill kept as separate folders, one per agent (an older install copied it instead of linking it). `dir`
+   * is the one edited; the list shows it once. Absent when there is a single folder.
+   */
+  copies?: SkillCopy[];
+  /** The copies' contents differ (usually each names its own agent), so they are not merged. */
+  copiesDiffer?: boolean;
 }
+export interface SkillCopy { dir: string; providers: SkillProvider[] }
 export interface SkillDetail extends Skill { body: string }
 
 export interface SkillEvidence { sessionId: string; title: string; at: string }

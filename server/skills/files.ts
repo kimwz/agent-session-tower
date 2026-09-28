@@ -87,7 +87,22 @@ export class SkillFiles {
         });
       }
     }
-    return [...found.values()].map(skill => ({ ...skill, providers: [...skill.providers].sort() }))
+    // One skill in one place is one entry, however many folders hold a copy of it.
+    const groups = new Map<string, Skill[]>();
+    for (const skill of found.values()) {
+      const key = `${skill.scope}\0${skill.cwd ?? ''}\0${skill.name}`;
+      groups.set(key, [...groups.get(key) ?? [], skill]);
+    }
+    const skills: Skill[] = [];
+    for (const [first, ...others] of groups.values()) {
+      if (!others.length) { skills.push(first); continue; }
+      const all = [first, ...others];
+      const digests = await Promise.all(all.map(skill => folderDigest(skill.dir)));
+      skills.push({ ...first, providers: [...new Set(all.flatMap(skill => skill.providers))],
+        copies: all.map(skill => ({ dir: skill.dir, providers: [...skill.providers].sort() })),
+        copiesDiffer: digests.some(digest => !digest || digest !== digests[0]) });
+    }
+    return skills.map(skill => ({ ...skill, providers: [...skill.providers].sort() }))
       .sort((a, b) => a.scope === b.scope ? a.name.localeCompare(b.name) : a.scope === 'project' ? -1 : 1);
   }
 
@@ -109,6 +124,40 @@ export class SkillFiles {
   save(input: SkillWrite): Promise<Skill> { return this.serial(() => this.write(input)); }
   link(dir: string, cwd?: string): Promise<Skill> { return this.serial(() => this.linkNow(dir, cwd)); }
   remove(dir: string, cwd?: string): Promise<void> { return this.serial(() => this.removeNow(dir, cwd)); }
+  merge(dir: string, cwd?: string): Promise<Skill> { return this.serial(() => this.mergeNow(dir, cwd)); }
+
+  /**
+   * Keeps one folder of a skill whose copies are identical: the others go to Tower's trash and a link to the kept one
+   * takes their place, so every agent still finds it and an edit reaches all of them.
+   */
+  private async mergeNow(dir: string, cwd?: string): Promise<Skill> {
+    const skill = await this.find(dir, cwd);
+    if (!skill.copies) return skill;
+    if (skill.copiesDiffer) throw new SkillError('복사본의 내용이 달라 합칠 수 없습니다.', 409);
+    const roots = await this.realRoots(skill.cwd);
+    for (const copy of skill.copies) {
+      if (copy.dir === skill.dir || !roots.has(dirname(copy.dir))) continue;
+      await this.trash(copy.dir);
+      await symlink(relative(dirname(copy.dir), skill.dir), copy.dir, 'dir');
+    }
+    return this.find(skill.dir, cwd);
+  }
+
+  private async realRoots(cwd?: string): Promise<Set<string>> {
+    return new Set((await Promise.all(this.roots(cwd).map(root => realpath(root.dir).catch(() => '')))).filter(Boolean));
+  }
+
+  private async trash(dir: string): Promise<void> {
+    await mkdir(this.homes.trash, { recursive: true, mode: 0o700 });
+    const target = join(this.homes.trash, `${new Date().toISOString().replace(/[:.]/g, '-')}-${basename(dir)}-${randomUUID().slice(0, 8)}`);
+    try { await rename(dir, target); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
+      // Another volume (a project on an external disk): the folder is removed after its copy is kept.
+      await cp(dir, target, { recursive: true, verbatimSymlinks: true });
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
 
   private async write(input: SkillWrite): Promise<Skill> {
     const name = input.name.trim(), description = input.description.trim().replace(/\s*\n\s*/g, ' ');
@@ -154,18 +203,9 @@ export class SkillFiles {
   private async removeNow(dir: string, cwd?: string): Promise<void> {
     const skill = await this.find(dir, cwd);
     const roots = this.roots(skill.cwd);
-    const owned = (await Promise.all(roots.map(root => realpath(root.dir).catch(() => '')))).includes(dirname(skill.dir));
-    if (owned) {
-      await mkdir(this.homes.trash, { recursive: true, mode: 0o700 });
-      const target = join(this.homes.trash, `${new Date().toISOString().replace(/[:.]/g, '-')}-${basename(skill.dir)}-${randomUUID().slice(0, 8)}`);
-      try { await rename(skill.dir, target); }
-      catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
-        // Another volume (a project on an external disk): the folder is removed after its copy is kept.
-        await cp(skill.dir, target, { recursive: true, verbatimSymlinks: true });
-        await rm(skill.dir, { recursive: true, force: true });
-      }
-    }
+    const owned = await this.realRoots(skill.cwd);
+    const folders = skill.copies?.map(copy => copy.dir) ?? [skill.dir];
+    for (const folder of folders) if (owned.has(dirname(folder))) await this.trash(folder);
     for (const root of roots) {
       let names: string[];
       try { names = await readdir(root.dir); } catch { continue; }
@@ -174,7 +214,8 @@ export class SkillFiles {
         const path = join(root.dir, name);
         if (!(await lstat(path).catch(() => undefined))?.isSymbolicLink()) continue;
         const target = await readlink(path);
-        if (resolve(real, target) === skill.dir || resolve(root.dir, target) === skill.dir || await realpath(path).catch(() => '') === skill.dir) await unlink(path);
+        const leads = [resolve(real, target), resolve(root.dir, target), await realpath(path).catch(() => '')];
+        if (leads.some(lead => folders.includes(lead))) await unlink(path);
       }
     }
   }
@@ -198,7 +239,7 @@ export class SkillFiles {
   /** Only a skill this listing shows can be read or changed, whatever path a request names. */
   private async find(dir: string, cwd?: string): Promise<Skill> {
     const real = await realpath(dir).catch(() => undefined);
-    const skill = real && (await this.list(cwd)).find(item => item.dir === real);
+    const skill = real && (await this.list(cwd)).find(item => item.dir === real || item.copies?.some(copy => copy.dir === real));
     if (!skill) throw new SkillError('스킬을 찾을 수 없습니다.', 404);
     return skill;
   }
@@ -242,6 +283,25 @@ export function projectFolders(cwd: string | undefined, home: string): string[] 
     folders.push(dir = parent);
   }
   return folders;
+}
+
+/** A folder's files and contents in one hash; undefined when it is too large to compare. */
+async function folderDigest(dir: string): Promise<string | undefined> {
+  const hash = createHash('sha256');
+  let files = 0, bytes = 0;
+  const walk = async (folder: string, prefix: string): Promise<boolean> => {
+    for (const entry of (await readdir(folder, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+      const path = join(folder, entry.name), name = `${prefix}${entry.name}`;
+      if (entry.isDirectory()) { if (!await walk(path, `${name}/`)) return false; continue; }
+      if (entry.isSymbolicLink()) { hash.update(`link:${name}:${await readlink(path)}\0`); continue; }
+      if (!entry.isFile()) continue;
+      const content = await readFile(path);
+      if (++files > 500 || (bytes += content.length) > 8_000_000) return false;
+      hash.update(`file:${name}:${content.length}\0`).update(content);
+    }
+    return true;
+  };
+  try { return await walk(dir, '') ? hash.digest('hex') : undefined; } catch { return undefined; }
 }
 
 async function readSkillText(file: string): Promise<string | undefined> {
