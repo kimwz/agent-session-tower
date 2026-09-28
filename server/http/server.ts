@@ -110,8 +110,8 @@ export interface HttpOptions {
     handle(req: IncomingMessage, res: ServerResponse, path: string, url: URL, identity: { local: boolean }): Promise<boolean>;
   };
 }
-/** What a voice call's page sends while the call runs (not starting one, which makes a paid call). */
-const VOICE_REPORT = /^\/api\/master\/voice\/(activity|ready|stop|notice)$/;
+/** What the page where voice is on sends while it listens and plays (turning voice on counts as an ordinary change). */
+const VOICE_REPORT = /^\/api\/master\/voice\/(presence|token|usage|request|activity|played|off)$/;
 /** Suggestions follow the owner's typing; they change nothing, so they have their own budget apart from changes. */
 const SUGGESTION_PATH = '/api/auto-prompt-suggestions';
 const SUGGESTIONS_PER_MINUTE = 60;
@@ -188,7 +188,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' wss://api.elevenlabs.io; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
     const address = server.address();
     const effectivePort = address && typeof address === 'object' ? address.port : port;
     const hosts = new Set([`localhost:${effectivePort}`, `127.0.0.1:${effectivePort}`, `[::1]:${effectivePort}`]);
@@ -250,15 +250,15 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
           // The master agent's own calls count apart, so they never use up the owner's budget (or the other way round).
           const caller = req.headers['x-tower-master'];
           const masterCall = Boolean(master && typeof caller === 'string' && caller.length === master.callerSecret.length && timingSafeEqual(Buffer.from(caller), Buffer.from(master.callerSecret)));
-          // A voice call's page reports what it hears every few seconds, and ends its call; each has a budget of its own,
-          // so neither uses up the owner's changes and a flood of reports never keeps a call from ending.
+          // The page where voice is on reports every few seconds, and turns voice off; each has a budget of its own,
+          // so neither uses up the owner's changes and a flood of reports never keeps voice from turning off.
           const voice = master && !masterCall ? VOICE_REPORT.exec(path)?.[1] : undefined;
           const address = req.socket.remoteAddress || 'local';
-          const key = masterCall ? '\0master' : voice === 'stop' ? `\0voice-stop ${address}` : voice ? `\0voice ${address}` : address;
+          const key = masterCall ? '\0master' : voice === 'off' ? `\0voice-off ${address}` : voice ? `\0voice ${address}` : address;
           const now = Date.now();
           const rate = rates.get(key);
           if (!rate || now - rate.at > 60_000) rates.set(key, { count: 1, at: now });
-          else if (++rate.count > (masterCall ? 120 : voice === 'stop' ? 60 : voice ? 240 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+          else if (++rate.count > (masterCall ? 120 : voice === 'off' ? 60 : voice ? 240 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
         }
       }
       if (master && path.startsWith('/api/master')) {

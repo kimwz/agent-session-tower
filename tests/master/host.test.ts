@@ -81,16 +81,22 @@ test('the host answers a page\'s voice requests, refusing what is not its call, 
   cleanup.push(() => client.dispose());
   await client.call('settings', { body: { apiKey: 'sk-test-0123456789abcdef' } });
   const overview = await client.call('overview') as MasterOverview;
-  assert.deepEqual(overview.voice?.today, { seconds: 0, dollars: 0 });
-  assert.deepEqual(overview.settings.voice, { voice: 'marin', silenceSeconds: 15, dailyMinutes: 0, autoWake: true });
-  const attemptId = '0190f1c2-3d4e-7f00-8a00-000000000003';
-  assert.equal(await client.call('voiceStop', { attemptId, reason: 'owner' }), false);
-  assert.equal(await client.call('voiceReady', { attemptId }), false);
-  assert.equal(await client.call('voiceActivity', { attemptId, speaking: true, playing: false }), false);
-  assert.equal(await client.call('voiceNotice', { noticeId: 'n', result: 'played' }), false);
-  await assert.rejects(client.call('voiceStart', { attemptId: 'x', sdp: 'v=0', tabId: attemptId, wake: false }), { statusCode: 400 });
-  await assert.rejects(client.call('settings', { body: { voice: { voice: 'nobody' } } }), { statusCode: 400 });
-  assert.equal(((await client.call('settings', { body: { voice: { silenceSeconds: 30 } } })) as MasterOverview).settings.voice.silenceSeconds, 30);
+  assert.deepEqual(overview.voice?.today, { sttSeconds: 0, ttsChars: 0, dollars: 0 });
+  assert.deepEqual(overview.settings.voice, { voiceId: 'cgSgspJ2msm6clMCkdW9', model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0 });
+  assert.equal(overview.voiceConfigured, false);
+  const session = '0190f1c2-3d4e-7f00-8a00-000000000003';
+  await assert.rejects(client.call('voiceOn', { tabId: session }), { statusCode: 409 }, 'no ElevenLabs key yet');
+  assert.equal(await client.call('voiceOff', { session }), false);
+  assert.equal(await client.call('voicePresence', { session, listening: true, panelOpen: true }), false);
+  assert.equal(await client.call('voiceActivity', { session, speaking: true }), false);
+  assert.equal(await client.call('voicePlayed', { session, id: 'x', result: 'played' }), false);
+  assert.equal(await client.call('voiceUsage', { tokenId: 'x', seconds: 1 }), false);
+  assert.deepEqual(await client.call('voiceRequest', { session, clientMessageId: 'message-0001', text: '안녕' }), { stale: true });
+  await assert.rejects(client.call('settings', { body: { voice: { model: 'nobody' } } }), { statusCode: 400 });
+  const saved = await client.call('settings', { body: { voiceKey: 'el-test-0123456789abcdef', voice: { endSilenceMs: 1200 } } }) as MasterOverview;
+  assert.equal(saved.settings.voice.endSilenceMs, 1200);
+  assert.equal(saved.voiceKeyHint, '…cdef');
+  assert.doesNotMatch(JSON.stringify(saved), /0123456789ab/);
 });
 
 test('the master stays removable: only three existing files reach into it', async () => {

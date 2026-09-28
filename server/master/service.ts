@@ -14,7 +14,6 @@ import { SecretVault, SHORTEST_SECRET } from './secrets.js';
 import type { MasterSettingsStore } from './settings.js';
 import type { TowerClient, TowerResponse } from './tower-client.js';
 import type { MasterVoice, VoiceHooks } from './voice.js';
-import { VOICE_FIXED_TEXT } from './voice-text.js';
 
 const MAX_ROUNDS = 12;
 const MAX_TOOL_CALLS = 24;
@@ -36,16 +35,15 @@ const ACK_MS = 5_000;
 const TERMINAL_READ_MS = 1_500;
 const TERMINAL_OUTPUT = 4_000;
 const NODE_ID = /^[a-f0-9]{32}$/;
-/** A spoken request that takes this long hears that it is still being worked on; progress is told this often at most. */
+/** A spoken request that takes this long hears, once, that it is still being worked on. */
 const STILL_WORKING_MS = 20_000;
-const PROGRESS_MS = 5_000;
-const VOICE_TURN = 'The owner said this request in a voice call: your first paragraph is read aloud, so make it one or two short spoken sentences, with details after.';
+const VOICE_TURN = 'The owner said this request by voice: your first paragraph is read aloud, so make it one or two short spoken sentences, with details after.';
 /**
  * Everything the model is given that Tower does not hide: the standing instructions (with and without lookups) and
  * every text of the tools' descriptions, as the model reads them.
  */
 let fixedText: string | undefined;
-const FIXED_TEXT = () => fixedText ??= [masterInstructions(true), masterInstructions(false), ...texts(TOOLS), VOICE_TURN, VOICE_FIXED_TEXT].join('\n');
+const FIXED_TEXT = () => fixedText ??= [masterInstructions(true), masterInstructions(false), ...texts(TOOLS), VOICE_TURN].join('\n');
 function texts(value: unknown): string[] {
   if (typeof value === 'string') return [value];
   if (Array.isArray(value)) return value.flatMap(texts);
@@ -174,8 +172,10 @@ export class MasterService {
   overview(): MasterOverview {
     const settings = this.options.settings.current();
     const configured = Boolean(this.options.settings.key());
+    const voiceConfigured = Boolean(this.options.settings.voiceKey());
     return {
       available: true, version: APP_VERSION, settings, configured, ...(configured ? { keyHint: this.options.settings.keyHint() } : {}),
+      voiceConfigured, ...(voiceConfigured ? { voiceKeyHint: this.options.settings.voiceKeyHint() } : {}),
       state: !settings.enabled ? 'disabled' : !configured ? 'unconfigured' : this.turn ? 'thinking' : 'idle',
       activeTasks: this.options.journal.tasks.filter(task => task.state === 'running').length,
       lastOrder: this.options.room.lastOrder(),
@@ -186,34 +186,11 @@ export class MasterService {
   /** The voice, once the host made it; it reaches the master through `voiceHooks`. */
   setVoice(voice: MasterVoice): void { this.voice = voice; }
 
-  /** What the voice needs from the master: hiding, the inbox, and the conversation. */
+  /** What the voice needs from the master: hiding, the inbox, and when a new web arrived. */
   voiceHooks(): VoiceHooks {
-    const { journal, room } = this.options;
     return {
       hide: text => this.hideText(text),
-      holdBack: () => this.vault.holdBack(),
-      partialEnd: text => this.vault.partialEnd(text),
-      delegate: async ({ key, text, local, tabId, origin }) => {
-        // One request per delegation, even when GPT-Live says it twice.
-        if (journal.inbox.some(item => item.clientMessageId === key)) return;
-        journal.inbox.push({ id: randomUUID(), kind: 'owner', clientMessageId: key, text, local, viewContext: { tabId }, at: new Date().toISOString(), state: 'queued', retries: 0, voice: origin });
-        this.lastTab = tabId;
-        await journal.save('inbox');
-        this.pump();
-      },
-      openRequest: attempt => [...journal.inbox].reverse().find(item => item.kind === 'owner' && item.voice?.attempt === attempt && (item.state === 'queued' || item.state === 'processing'))?.voice,
-      join: async (key, delegationId) => {
-        const item = journal.inbox.find(input => input.clientMessageId === key && input.voice);
-        if (!item?.voice || item.voice.delegationIds.includes(delegationId) || item.voice.delegationIds.length >= 20) return;
-        item.voice.delegationIds.push(delegationId);
-        await journal.save('inbox');
-      },
-      seed: () => room.recent(60).flatMap((entry): Array<{ role: 'user' | 'assistant'; text: string }> => {
-        const data = entry.data;
-        if (data.kind === 'owner') return [{ role: 'user' as const, text: data.text }];
-        if (data.kind === 'master' || data.kind === 'voice' || data.kind === 'event') return [{ role: 'assistant' as const, text: data.text }];
-        return [];
-      }),
+      send: input => this.send(input),
       connectedSince: () => this.options.tower.connectedSince(),
     };
   }
@@ -254,7 +231,7 @@ export class MasterService {
 
   async updateSettings(body: Record<string, unknown>): Promise<MasterOverview> {
     // Settings are shown on pages and sent with every model request; a value typed into a secret card has no place there.
-    const { apiKey: _key, ...shown } = body;
+    const { apiKey: _key, voiceKey: _voiceKey, ...shown } = body;
     const text = JSON.stringify(shown);
     if (this.vault.redact(text) !== text) throw Object.assign(new Error('설정에 비밀 카드로 받은 값을 넣을 수 없습니다.'), { statusCode: 400 });
     await this.options.settings.update(body);
@@ -311,8 +288,7 @@ export class MasterService {
     this.broadcastOverview();
     let final = '';
     // A spoken request that takes a while hears so once; its progress is told quietly as it goes.
-    const slow = voice && turn.scope.cause === 'owner' ? setTimeout(() => this.voice?.stillWorking(voice), STILL_WORKING_MS) : undefined;
-    let progressAt = 0;
+    const slow = voice && turn.scope.cause === 'owner' ? setTimeout(() => { void this.voice?.working(voice); }, STILL_WORKING_MS) : undefined;
     try {
       await journal.save('inbox');
       const settings = store.current();
@@ -379,7 +355,6 @@ export class MasterService {
           // After "stop thinking", nothing more is sent; a change already on its way finishes and is recorded.
           if (turn.abort.signal.aborted || turn.halt) break;
           toolCalls++;
-          if (voice && turn.scope.cause === 'owner' && Date.now() - progressAt >= PROGRESS_MS) { progressAt = Date.now(); this.voice?.progress(voice, progressLine(String(call.name), String(call.arguments ?? '{}'))); }
           const output = toolCalls > MAX_TOOL_CALLS
             ? { error: '이번 요청에서 부를 수 있는 도구 수를 넘었습니다. 지금까지 한 일을 소유자에게 보고하세요.' }
             : await this.tool(String(call.name), String(call.arguments ?? '{}'), turn).catch(error => ({ error: error instanceof Error ? error.message : String(error) }));
@@ -417,7 +392,7 @@ export class MasterService {
       if (slow) clearTimeout(slow);
       room.setDraft(null);
       this.turn = undefined;
-      void this.voice?.deliver();
+      this.voice?.deliver();
       await journal.save('inbox').catch(() => {});
       this.broadcastOverview();
       this.pump();
@@ -460,9 +435,10 @@ export class MasterService {
    * delegation), and a report of finished work; only while a call is on or the last one ended on silence.
    */
   private speakFor(turn: Turn, answer: boolean): MasterSpeak | undefined {
-    if (!this.voice?.wantsSpeech()) return undefined;
-    if (turn.voice && turn.scope.cause === 'owner') return { state: 'pending', tries: 0, attempt: turn.voice.attempt, ...(turn.voice.delegationIds.length ? { delegationIds: [...turn.voice.delegationIds] } : {}) };
-    if (turn.voice || (answer && turn.scope.cause === 'event')) return { state: 'pending', tries: 0 };
+    if (!this.voice) return undefined;
+    // A spoken request's answer, stop or failure is read where voice is on; so is a report, when reports are read.
+    if (turn.voice && turn.scope.cause === 'owner') return this.voice.speaks(false) ? { state: 'pending', ...(turn.voice.session ? { session: turn.voice.session } : {}) } : undefined;
+    if ((turn.voice || answer) && turn.scope.cause === 'event') return this.voice.speaks(true) ? { state: 'pending' } : undefined;
     return undefined;
   }
 
@@ -728,7 +704,7 @@ export class MasterService {
     const purpose = typeof args.purpose === 'string' ? args.purpose.trim() : '';
     if (!purpose || purpose.length > 200) return { error: '무엇에 쓸 값인지 200자 안으로 적어 주세요.' };
     // A card asked for in a spoken request carries where it came from to the answer typed into it.
-    this.options.room.add({ kind: 'card', card: { type: 'secret', purpose: this.hideText(purpose), state: 'waiting', ...(turn.voice ? { voice: { attempt: turn.voice.attempt, key: turn.voice.key } } : {}) } });
+    this.options.room.add({ kind: 'card', card: { type: 'secret', purpose: this.hideText(purpose), state: 'waiting', ...(turn.voice ? { voice: { key: turn.voice.key, ...(turn.voice.session ? { session: turn.voice.session } : {}) } } : {}) } });
     return { result: 'card-shown', note: 'When the owner enters it, a new message brings a reference to use; tell them to type it into the card.' };
   }
 
@@ -765,7 +741,7 @@ export class MasterService {
       const updated = room.update(id, { kind: 'card', card: { ...card, purpose, state: 'provided' } }) ?? entry;
       // The tab that answered is where the owner is now: what follows is shown there.
       const tabId = typeof body.tabId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(body.tabId) ? body.tabId : undefined;
-      await this.send({ clientMessageId: `secret-${id}`, text: `비밀 값을 입력했습니다 (${purpose}): ${reference}`, local, ...(tabId ? { viewContext: { tabId } } : {}), ...(card.voice ? { voice: { attempt: card.voice.attempt, key: card.voice.key, delegationIds: [] } } : {}) });
+      await this.send({ clientMessageId: `secret-${id}`, text: `비밀 값을 입력했습니다 (${purpose}): ${reference}`, local, ...(tabId ? { viewContext: { tabId } } : {}), ...(card.voice ? { voice: { key: card.voice.key, ...(card.voice.session ? { session: card.voice.session } : {}) } } : {}) });
       return updated;
     }
     throw Object.assign(new Error('이 카드에는 답할 것이 없습니다.'), { statusCode: 400 });
@@ -824,7 +800,7 @@ export class MasterService {
     else if (target.local === '/api/auto-prompts' && value.job?.id) task = { jobId: value.job.id };
     else if (target.local === '/api/v1/autoPrompt.submit' && value.result?.job?.id) task = { jobId: value.result.job.id };
     if (!task) return undefined;
-    const record: TaskRecord = { id: randomUUID(), entryId: '', ...task, ...(target.node ? { node: target.node } : {}), title, ...(prompt ? { prompt } : {}), state: 'running', createdAt: new Date().toISOString(), ...(turn.voice ? { voice: { attempt: turn.voice.attempt, key: turn.voice.key, delegationIds: [] } } : {}) };
+    const record: TaskRecord = { id: randomUUID(), entryId: '', ...task, ...(target.node ? { node: target.node } : {}), title, ...(prompt ? { prompt } : {}), state: 'running', createdAt: new Date().toISOString(), ...(turn.voice ? { voice: { key: turn.voice.key, ...(turn.voice.session ? { session: turn.voice.session } : {}) } } : {}) };
     const entry = this.options.room.add({ kind: 'task', title, state: 'running', ...(record.sessionId ? { sessionId: record.sessionId } : {}), ...(record.runId ? { runId: record.runId } : {}), ...(record.jobId ? { jobId: record.jobId } : {}), ...(record.node ? { node: record.node } : {}) });
     record.entryId = entry.id;
     record.entryOrder = entry.order;
@@ -956,13 +932,6 @@ const normalize = (text: string) => text.replace(/\s+/g, ' ').trim();
 function sameRequest(message: string, prompt: string): boolean {
   const text = normalize(message);
   return text === prompt || text.startsWith(`${prompt}${ATTACHED}`);
-}
-/** What a spoken request's turn is doing, told quietly to the voice model. */
-function progressLine(name: string, rawArguments: string): string {
-  let args: Record<string, unknown> = {};
-  try { args = JSON.parse(rawArguments) as Record<string, unknown>; } catch { /* Named only. */ }
-  const target = name === 'tower_api' && typeof args.path === 'string' ? ` ${String(args.method ?? '')} ${truncate(args.path, 120)}` : '';
-  return `Working on the owner's request: ${name}${target}.`;
 }
 /** A short account of a call's result, secrets hidden before it is shortened. */
 function summary(response: TowerResponse, hide: (text: string) => string): string {

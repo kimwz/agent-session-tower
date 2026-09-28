@@ -49,15 +49,27 @@ export function masterRoutes(client: MasterClient) {
       return true;
     }
     if (req.method === 'POST' && path === '/api/master/settings') { await call('settings', { body: await readJson(req, 16 * 1024) }); return true; }
-    // A voice call: the page makes it with its own connection, the host follows it with the owner's key.
-    const voice = /^\/api\/master\/voice\/(start|ready|stop|activity|notice)$/.exec(path);
+    // Voice: the page turns it on, writes down what is said with a token from here, and plays what is read aloud.
+    const voice = /^\/api\/master\/voice\/(on|off|presence|token|usage|request|activity|played)$/.exec(path);
     if (req.method === 'POST' && voice) {
-      const body = await readJson(req, voice[1] === 'start' ? 160 * 1024 : 4 * 1024);
-      if (voice[1] === 'start') await call('voiceStart', { attemptId: body.attemptId, sdp: body.sdp, tabId: body.tabId, wake: body.wake, local: identity.local });
-      else if (voice[1] === 'ready') await call('voiceReady', { attemptId: body.attemptId });
-      else if (voice[1] === 'stop') await call('voiceStop', { attemptId: body.attemptId, reason: body.reason });
-      else if (voice[1] === 'activity') await call('voiceActivity', { attemptId: body.attemptId, speaking: body.speaking, playing: body.playing, sinceSpeechMs: body.sinceSpeechMs, sincePlaybackMs: body.sincePlaybackMs });
-      else await call('voiceNotice', { noticeId: body.noticeId, result: body.result });
+      const body = await readJson(req, voice[1] === 'request' ? 16 * 1024 : 4 * 1024);
+      switch (voice[1]) {
+        case 'on': await call('voiceOn', { tabId: body.tabId, local: identity.local }); break;
+        case 'off': await call('voiceOff', { session: body.session }); break;
+        case 'presence': await call('voicePresence', { session: body.session, listening: body.listening, panelOpen: body.panelOpen }); break;
+        case 'token': await call('voiceToken', { session: body.session }); break;
+        case 'usage': await call('voiceUsage', { tokenId: body.tokenId, seconds: body.seconds }); break;
+        case 'request': await call('voiceRequest', { session: body.session, clientMessageId: body.clientMessageId, text: body.text, viewContext: body.viewContext, local: identity.local }); break;
+        case 'activity': await call('voiceActivity', { session: body.session, speaking: body.speaking, sinceSpeechMs: body.sinceSpeechMs }); break;
+        default: await call('voicePlayed', { session: body.session, id: body.id, result: body.result });
+      }
+      return true;
+    }
+    if (req.method === 'GET' && path === '/api/master/voice/voices') { await call('voiceVoices'); return true; }
+    const audio = /^\/api\/master\/voice\/audio\/((?:clip-[a-f0-9]{64})|[0-9a-f-]{36})$/.exec(path);
+    if (req.method === 'GET' && audio) {
+      try { await client.pipeAudio(res, audio[1]); }
+      catch (error) { if (!res.headersSent) json(res, 503, { error: (error as Error).message }); else res.destroy(); }
       return true;
     }
     json(res, 404, { error: '찾을 수 없습니다.' });

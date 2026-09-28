@@ -3,8 +3,11 @@ import { basename, join } from 'node:path';
 import type { MasterCallState, MasterTaskState, MasterViewContext } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
-/** Where a request came from when the owner said it in a voice call; it follows everything that request leads to. */
-export interface VoiceOrigin { attempt: string; key: string; delegationIds: string[] }
+/**
+ * Where a request came from when the owner said it; it follows everything that request leads to. `session` is the
+ * digest of the voice session it was said in; `attempt` and `delegationIds` are left from GPT-Live calls (1.52–1.55).
+ */
+export interface VoiceOrigin { key: string; session?: string; attempt?: string; delegationIds?: string[] }
 
 /** A message from the owner, or news of finished work, waiting for or given to a turn. */
 export interface InboxItem {

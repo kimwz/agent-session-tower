@@ -95,6 +95,33 @@ export class MasterClient {
     });
   }
 
+  /**
+   * Relays audio the master is reading aloud, as it is made. Audio whose making failed is cut off here too, so the
+   * page never takes part of it for the whole.
+   */
+  async pipeAudio(response: ServerResponse, id: string): Promise<void> {
+    await this.ensureHost();
+    const token = await this.credential();
+    const paths = await this.hostPaths();
+    await new Promise<void>((resolve, reject) => {
+      const req = request({ socketPath: paths.socket, path: `/audio/${encodeURIComponent(id)}`, headers: { authorization: `Bearer ${token}` } }, upstream => {
+        if (response.destroyed || response.writableEnded) { upstream.destroy(); resolve(); return; }
+        if (upstream.statusCode !== 200) { upstream.resume(); response.writeHead(upstream.statusCode === 404 ? 404 : 502).end(); resolve(); return; }
+        response.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', ...(upstream.headers['content-length'] ? { 'Content-Length': upstream.headers['content-length'] } : {}) });
+        upstream.on('error', () => response.destroy());
+        upstream.on('aborted', () => response.destroy());
+        upstream.on('close', () => { if (!upstream.complete) response.destroy(); });
+        upstream.pipe(response);
+        resolve();
+      });
+      this.streams.add(req);
+      req.once('close', () => this.streams.delete(req));
+      response.once('close', () => req.destroy());
+      req.once('error', error => { if (!response.headersSent) reject(error); else response.destroy(); });
+      req.end();
+    });
+  }
+
   dispose(): void {
     this.closed = true;
     if (this.heartbeat) clearInterval(this.heartbeat);

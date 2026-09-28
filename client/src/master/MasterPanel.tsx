@@ -104,8 +104,8 @@ export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose
       <VoiceBar voice={voice} />
       <div className="master-composer">
         <textarea ref={input} value={text} rows={2} maxLength={32_000} disabled={disabled} placeholder={disabled ? words('마스터가 꺼져 있습니다', 'The master is turned off') : words('마스터에게 시킬 일', 'What should Tower do?')} onChange={event => setText(event.target.value)} onKeyDown={onKeyDown} aria-label={words('마스터에게 보낼 메시지', 'Message to the master')} />
-        {!voice.view && <button className="master-mic" onClick={voice.start} disabled={!voice.supported || disabled || !configured}
-          title={voice.supported ? words('말로 대화하기 (GPT-Live, 분당 $0.05)', 'Talk by voice (GPT-Live, $0.05/min)') : words('음성은 https 주소나 이 컴퓨터(localhost)에서만 쓸 수 있습니다', 'Voice needs an https address or this computer (localhost)')}
+        {!voice.view && <button className="master-mic" onClick={voice.start} disabled={Boolean(voice.unavailable) || disabled || !configured}
+          title={voice.unavailable ?? words('말로 시키기 (ElevenLabs 받아쓰기·읽어 주기)', 'Talk to the master (ElevenLabs speech to text and reading aloud)')}
           aria-label={words('음성 대화 시작', 'Start voice')}><Mic size={16} /></button>}
         {thinking ? <button className="master-stop" onClick={stop} title={words('생각 멈추기 (보낸 작업은 계속됩니다)', 'Stop thinking (work already sent continues)')}><Square size={14} />{words('생각 멈춤', 'Stop')}</button>
           : <button className="master-send" onClick={() => void send()} disabled={!text.trim() || sending || disabled} aria-label={words('보내기', 'Send')}>{sending ? <LoaderCircle size={15} className="spin" /> : <ArrowUp size={16} />}</button>}
@@ -182,7 +182,7 @@ function Entry({ entry, token, tabId, onOpenSession, onCommand }: { entry: Maste
 /** News the master could not tell by voice says so; it is all on the screen. */
 function Spoken({ speak }: { speak?: MasterSpeak }) {
   const words = useWords();
-  if (speak?.state !== 'undelivered') return null;
+  if (speak?.state !== 'unspoken' && speak?.state !== 'undelivered') return null;
   return <small className="master-unspoken"><VolumeX size={11} />{words('음성으로 전하지 못함', 'Not said aloud')}</small>;
 }
 

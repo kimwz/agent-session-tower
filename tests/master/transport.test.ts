@@ -185,12 +185,13 @@ test('Tower\'s server gives the master routes only after sign-in, and the master
   assert.equal((await post('/api/sessions/x/messages')).status, 429);
   assert.equal((await post('/api/sessions/x/messages', { 'X-Tower-Master': 'f'.repeat(64) })).status, 429, 'a wrong marker counts as the owner');
   assert.notEqual((await post('/api/sessions/x/messages', { 'X-Tower-Master': callerSecret })).status, 429, 'the master has its own budget');
-  // A voice call's page reports every few seconds (240 a minute) and can always end its call.
+  // The page where voice is on reports every few seconds (240 a minute) and can always turn voice off.
   for (let index = 0; index < 240; index++) assert.notEqual((await post('/api/master/voice/activity')).status, 429);
   assert.equal((await post('/api/master/voice/activity')).status, 429);
-  assert.equal((await post('/api/master/voice/notice')).status, 429, 'reports share their budget');
-  assert.notEqual((await post('/api/master/voice/stop')).status, 429, 'ending a call has a budget of its own');
-  assert.equal((await post('/api/master/voice/start')).status, 429, 'starting a paid call counts as a change');
+  assert.equal((await post('/api/master/voice/played')).status, 429, 'reports share their budget');
+  assert.equal((await post('/api/master/voice/token')).status, 429);
+  assert.notEqual((await post('/api/master/voice/off')).status, 429, 'turning voice off has a budget of its own');
+  assert.equal((await post('/api/master/voice/on')).status, 429, 'turning voice on counts as a change');
   assert.equal((await post('/api/master/voice/activity/')).status, 429, 'nothing else looks like a report');
 });
 
@@ -243,9 +244,13 @@ test('a page\'s answers to screen commands and cards reach the host, a card with
   assert.deepEqual(calls, [['ack', { id, result: 'done', note: 'ok' }], ['card', { id, body: { value: 'x' }, local: false }]]);
 });
 
-test('a page\'s voice call goes to the host through the master routes, its start with whether the page is on this computer', async t => {
+test('voice goes to the host through the master routes, turning it on with whether the page is on this computer, and its audio is relayed', async t => {
   const calls: Array<[string, Record<string, unknown>]> = [];
-  const client = { call: async (method: string, args: Record<string, unknown>) => { calls.push([method, args]); return method === 'voiceStart' ? { sdp: 'v=0 answer', attempt: 'a' } : true; } } as unknown as MasterClient;
+  const piped: string[] = [];
+  const client = {
+    call: async (method: string, args: Record<string, unknown>) => { calls.push([method, args]); return method === 'voiceOn' ? { session: 's' } : true; },
+    pipeAudio: async (res: import('node:http').ServerResponse, id: string) => { piped.push(id); res.writeHead(200, { 'Content-Type': 'audio/mpeg' }).end('mp3'); },
+  } as unknown as MasterClient;
   const handle = masterRoutes(client);
   const server = createServer(async (req, res) => {
     const url = new URL(req.url!, 'http://tower.invalid');
@@ -254,16 +259,22 @@ test('a page\'s voice call goes to the host through the master routes, its start
   t.after(() => stop(server));
   const port = await listen(server);
   const post = (path: string, body: unknown) => fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-  const attemptId = '0190f1c2-3d4e-7f00-8a00-000000000002';
-  const start = await post('/api/master/voice/start', { attemptId, sdp: `v=0 ${'x'.repeat(90_000)}`, tabId: 'tab', wake: true, local: true });
-  assert.deepEqual(await start.json(), { sdp: 'v=0 answer', attempt: 'a' });
-  await post('/api/master/voice/ready', { attemptId });
-  await post('/api/master/voice/activity', { attemptId, speaking: true, playing: false, sinceSpeechMs: 0, extra: 'ignored' });
-  await post('/api/master/voice/notice', { noticeId: 'n', result: 'played' });
-  await post('/api/master/voice/stop', { attemptId, reason: 'silence' });
+  const tabId = '0190f1c2-3d4e-7f00-8a00-000000000002';
+  assert.deepEqual(await (await post('/api/master/voice/on', { tabId, local: true })).json(), { session: 's' });
+  await post('/api/master/voice/presence', { session: 's', listening: true, panelOpen: true });
+  await post('/api/master/voice/token', { session: 's' });
+  await post('/api/master/voice/usage', { tokenId: 't', seconds: 3 });
+  await post('/api/master/voice/request', { session: 's', clientMessageId: 'message-0001', text: '안녕', viewContext: { sessionId: 'x' }, local: true });
+  await post('/api/master/voice/activity', { session: 's', speaking: true, sinceSpeechMs: 0, extra: 'ignored' });
+  await post('/api/master/voice/played', { session: 's', id: 'n', result: 'played' });
+  await post('/api/master/voice/off', { session: 's' });
   assert.equal((await post('/api/master/voice/other', {})).status, 404);
-  assert.deepEqual(calls.map(([method]) => method), ['voiceStart', 'voiceReady', 'voiceActivity', 'voiceNotice', 'voiceStop']);
+  assert.deepEqual(calls.map(([method]) => method), ['voiceOn', 'voicePresence', 'voiceToken', 'voiceUsage', 'voiceRequest', 'voiceActivity', 'voicePlayed', 'voiceOff']);
   assert.equal(calls[0][1].local, false, 'the server says where the page is, not the page');
-  assert.equal(calls[0][1].wake, true);
-  assert.deepEqual(calls[2][1], { attemptId, speaking: true, playing: false, sinceSpeechMs: 0, sincePlaybackMs: undefined });
+  assert.equal(calls[4][1].local, false);
+  assert.deepEqual(calls[5][1], { session: 's', speaking: true, sinceSpeechMs: 0 });
+  const audio = await fetch(`http://127.0.0.1:${port}/api/master/voice/audio/clip-${'a'.repeat(64)}`);
+  assert.equal(await audio.text(), 'mp3');
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/master/voice/audio/../secret`)).status, 404);
+  assert.deepEqual(piped, [`clip-${'a'.repeat(64)}`]);
 });

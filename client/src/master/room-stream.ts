@@ -1,4 +1,4 @@
-import type { MasterCheckpoint, MasterDirective, MasterDraft, MasterEntry, MasterOverview, MasterStreamEvent, MasterVoiceStatus } from '../../../shared/master';
+import type { MasterCheckpoint, MasterDirective, MasterDraft, MasterEntry, MasterOverview, MasterSay, MasterStreamEvent, MasterVoiceStatus } from '../../../shared/master';
 import { api } from '../common/lib';
 
 export interface RoomState {
@@ -6,15 +6,15 @@ export interface RoomState {
   hasMore: boolean;
   draft?: MasterDraft;
   overview?: MasterOverview;
-  /** The voice call as the host sees it, kept current between overviews. */
+  /** Voice as the host sees it, kept current between overviews. */
   voice?: MasterVoiceStatus;
   error?: string;
 }
 
-/** What a voice call in this page hears from the host besides the conversation. */
+/** What voice in this page hears from the host besides the conversation. */
 export interface VoiceListener {
   status(voice: MasterVoiceStatus): void;
-  notice(notice: { id: string; attempt: string; text: string }): void;
+  say(say: MasterSay): void;
   connected(up: boolean): void;
 }
 
@@ -45,7 +45,7 @@ export function followRoom(onState: (state: RoomState) => void, onDirective: (di
     else if (event.type === 'overview') { overview = event.overview; heard(event.overview.voice); }
     else if (event.type === 'directive') { onDirective(event.directive); return; }
     else if (event.type === 'voice') heard(event.voice);
-    else if (event.type === 'notice') { voiceListener?.notice(event.notice); return; }
+    else if (event.type === 'say') { voiceListener?.say(event.say); return; }
     publish();
   };
   const connect = () => {

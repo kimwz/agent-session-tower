@@ -1,12 +1,13 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { Bot, LoaderCircle, Mic } from 'lucide-react';
-import { DEFAULT_MASTER_VOICE, type MasterDirective, type MasterScreenCommand } from '../../../shared/master';
+import { APP_VERSION } from '../../../shared/app-identity';
+import { DEFAULT_MASTER_VOICE, type MasterDirective, type MasterScreenCommand, type MasterViewContext } from '../../../shared/master';
+import { splitScopedId } from '../remote/scope';
 import { post } from './api';
 import { followRoom, type RoomState } from './room-stream';
 import { runScreenCommand, type MasterControls } from './screen';
 import { useWords } from './strings';
-import { VoiceCall, type CallView } from './voice-client';
-import { digest, shouldWake } from './voice-sound';
+import { VoiceSession, type VoiceView } from './voice-client';
 import type { VoiceControls } from './VoiceBar';
 import './master.css';
 
@@ -46,17 +47,16 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   tokenRef.current = token;
   /** Commands already done here, until they expire, so one sent again after a reconnect is not done twice. */
   const done = useRef(new Map<string, number>());
-  // The voice call lives here, not in the panel: closing the panel does not end it.
-  const call = useRef<VoiceCall | null>(null);
-  const [callView, setCallView] = useState<CallView | null>(null);
-  const [voiceEnd, setVoiceEnd] = useState<{ reason: string; error?: string } | null>(null);
-  /** The host's last call in this tab, dismissed from view. */
-  const [dismissed, setDismissed] = useState<string>();
-  const [tabHash, setTabHash] = useState<string>();
-  const [visible, setVisible] = useState(() => document.visibilityState === 'visible');
-  /** A call news tried to start here failed: no more of that until the owner starts one. */
-  const wakeFailed = useRef(false);
-  const silence = useRef(DEFAULT_MASTER_VOICE.silenceSeconds);
+  // Voice lives here, not in the panel: closing the panel does not turn it off (news is then not read aloud).
+  const voiceRef = useRef<VoiceSession | null>(null);
+  const [voiceView, setVoiceView] = useState<VoiceView | null>(null);
+  const [voiceEnded, setVoiceEnded] = useState<{ reason: string; error?: string } | null>(null);
+  const openRef = useRef(open);
+  openRef.current = open;
+  const voiceSettings = useRef(DEFAULT_MASTER_VOICE);
+  const viewContext = useRef<MasterViewContext | undefined>(undefined);
+  const { node: viewNode, id: viewSession } = sessionId ? splitScopedId(sessionId) : { node: undefined, id: undefined };
+  viewContext.current = { tabId: tab.current, ...(viewSession ? { sessionId: viewSession } : {}), ...(viewNode ? { node: viewNode } : {}) };
 
   useEffect(() => {
     let cancelled = false;
@@ -74,55 +74,45 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
         catch (error) { answer = { result: 'failed' as const, note: error instanceof Error ? error.message : String(error) }; }
         void post(`/api/master/directives/${directive.id}`, tokenRef.current, answer).catch(() => {});
       }, {
-        status: voice => call.current?.lease(voice),
-        notice: notice => call.current?.say(notice),
-        connected: up => call.current?.stream(up),
+        status: voice => voiceRef.current?.status(voice),
+        say: say => voiceRef.current?.say(say),
+        connected: () => {},
       });
     }).catch(() => { if (!cancelled) retry = setTimeout(() => probe(Math.min(wait * 2, 30_000)), wait); });
     probe(2000);
-    return () => { cancelled = true; if (retry) clearTimeout(retry); follow.current?.stop(); void call.current?.stop('owner'); };
+    return () => { cancelled = true; if (retry) clearTimeout(retry); follow.current?.stop(); voiceRef.current?.stop(); };
   }, []);
 
-  const voiceSupported = typeof window !== 'undefined' && window.isSecureContext && Boolean(navigator.mediaDevices?.getUserMedia) && typeof RTCPeerConnection !== 'undefined';
-  useEffect(() => { if (voiceSupported) void digest(tab.current).then(setTabHash).catch(() => {}); }, [voiceSupported]);
-  useEffect(() => {
-    const onVisibility = () => setVisible(document.visibilityState === 'visible');
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, []);
-  const startVoice = useCallback((wake: boolean) => {
-    if (call.current) return;
-    if (!wake) wakeFailed.current = false;
-    const current: VoiceCall = new VoiceCall({
-      token: () => tokenRef.current, tabId: tab.current, wake, silenceSeconds: () => silence.current,
-      onView: view => { if (call.current === current) setCallView(view); },
+  const overview = room.overview;
+  voiceSettings.current = overview?.settings.voice ?? DEFAULT_MASTER_VOICE;
+  // Called straight from the owner's click, so the browser lets what is read aloud play later.
+  const startVoice = useCallback(() => {
+    if (voiceRef.current) return;
+    const current: VoiceSession = new VoiceSession({
+      token: () => tokenRef.current, tabId: tab.current, settings: () => voiceSettings.current, panelOpen: () => openRef.current, viewContext: () => viewContext.current,
+      onView: view => { if (voiceRef.current === current) setVoiceView(view); },
       onEnded: (reason, error) => {
-        if (call.current !== current) return;
-        call.current = null;
-        setCallView(null);
-        setVoiceEnd({ reason, ...(error ? { error } : {}) });
-        if (wake && reason === 'failed') wakeFailed.current = true;
+        if (voiceRef.current !== current) return;
+        voiceRef.current = null;
+        setVoiceView(null);
+        setVoiceEnded({ reason, ...(error ? { error } : {}) });
       },
     });
-    call.current = current;
-    setVoiceEnd(null);
-    setCallView({ phase: 'starting', speaking: false, playing: false });
-    void current.start().catch(() => { /* Shown by onEnded. */ });
+    voiceRef.current = current;
+    setVoiceEnded(null);
+    setVoiceView({ listening: false, capturing: false });
+    void current.start().catch(() => { /* Shown through onEnded. */ });
   }, []);
-
-  const voiceSettings = room.overview?.settings.voice ?? DEFAULT_MASTER_VOICE;
-  silence.current = voiceSettings.silenceSeconds;
-  // News the master has to tell wakes a call that ended on silence here, while the panel is open and in view.
-  useEffect(() => {
-    if (shouldWake({ status: room.voice, tabHash, panelOpen: open, autoWake: voiceSettings.autoWake, visible, busy: Boolean(call.current), failed: wakeFailed.current })) startVoice(true);
-  }, [room.voice, tabHash, open, voiceSettings.autoWake, visible, startVoice]);
-  // After a reload, how this tab's last call ended comes from the host.
-  const hostEnd = room.voice && room.voice.tab === tabHash && room.voice.attempt !== dismissed && (room.voice.phase === 'closed' || room.voice.phase === 'unconfirmed') && room.voice.reason
-    ? { reason: room.voice.reason } : null;
+  // Whether the master is open here matters for reading news aloud: told at once.
+  useEffect(() => { voiceRef.current?.touch(); }, [open]);
+  const unavailable = !VoiceSession.supported() ? words('음성은 https 주소나 이 컴퓨터(localhost)에서 마이크를 쓸 수 있을 때만 됩니다.', 'Voice needs an https address or this computer (localhost), and a microphone.')
+    : overview && overview.version !== APP_VERSION ? words('마스터가 업데이트를 기다리는 중입니다. 진행 중인 일이 끝나면 음성을 쓸 수 있습니다.', 'The master is waiting to update; voice is available once its current work ends.')
+    : overview && !overview.voiceConfigured ? words('마스터 설정에 ElevenLabs API 키를 넣으면 음성을 쓸 수 있습니다.', 'Add an ElevenLabs API key in the master settings to use voice.')
+    : undefined;
   const voice: VoiceControls = {
-    supported: voiceSupported, view: callView, end: voiceEnd ?? hostEnd, ...(room.voice ? { status: room.voice } : {}),
-    start: () => startVoice(false), stop: () => { void call.current?.stop('owner'); },
-    dismiss: () => { setVoiceEnd(null); setDismissed(room.voice?.attempt); },
+    ...(unavailable ? { unavailable } : {}), view: voiceView, ended: voiceEnded, ...(room.voice ? { status: room.voice } : {}),
+    start: startVoice, stop: () => voiceRef.current?.stop(), listen: () => { void voiceRef.current?.listen(); }, mute: () => voiceRef.current?.mute(),
+    skip: () => voiceRef.current?.skip(), dismiss: () => setVoiceEnded(null),
   };
 
   const lastOrder = room.entries.at(-1)?.order ?? -1;
@@ -149,13 +139,12 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   const position = useDockPosition();
   const close = useCallback(() => { setOpen(false); requestAnimationFrame(() => button.current?.focus()); }, []);
   if (absent) return null;
-  const overview = room.overview;
   const thinking = overview?.state === 'thinking' || Boolean(room.draft);
   const attention = overview && (overview.state === 'unconfigured');
   return <>
-    <button ref={button} className={`master-fab ${thinking ? 'thinking' : ''} ${attention ? 'attention' : ''} ${open ? 'open' : ''} ${callView ? 'voice' : ''}`} style={fabStyle(position)} onClick={() => setOpen(value => !value)}
+    <button ref={button} className={`master-fab ${thinking ? 'thinking' : ''} ${attention ? 'attention' : ''} ${open ? 'open' : ''} ${voiceView ? 'voice' : ''}`} style={fabStyle(position)} onClick={() => setOpen(value => !value)}
       aria-label={words('마스터 에이전트', 'Master agent')} title={`${words('마스터 에이전트', 'Master agent')} (Shift+M)`} aria-expanded={open} aria-keyshortcuts="Shift+M">
-      {callView ? <Mic size={22} /> : thinking ? <LoaderCircle size={22} className="spin" /> : <Bot size={22} />}
+      {voiceView ? <Mic size={22} /> : thinking ? <LoaderCircle size={22} className="spin" /> : <Bot size={22} />}
       {unread > 0 && <span className="master-fab-badge">{unread > 9 ? '9+' : unread}</span>}
       {!unread && (overview?.activeTasks ?? 0) > 0 && <span className="master-fab-tasks">{overview!.activeTasks}</span>}
     </button>

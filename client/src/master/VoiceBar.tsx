@@ -1,50 +1,72 @@
-import { LoaderCircle, Mic, PhoneOff, X } from 'lucide-react';
+import { Mic, MicOff, Square, Volume2, VolumeX, X } from 'lucide-react';
 import type { MasterVoiceStatus } from '../../../shared/master';
-import type { CallView } from './voice-client';
-import { endReason } from './voice-sound';
+import type { VoiceView } from './voice-client';
 import { useWords } from './strings';
 
-/** The call as the panel shows it, and what the owner can do about it. */
+/** Voice as the panel shows it, and what the owner can do about it. */
 export interface VoiceControls {
-  supported: boolean;
-  view: CallView | null;
-  /** How the last call in this tab ended, until the next one starts. */
-  end: { reason: string; error?: string } | null;
+  /** Why voice cannot be turned on here, if it cannot. */
+  unavailable?: string;
+  view: VoiceView | null;
+  /** How voice last ended in this tab, until it is turned on again or dismissed. */
+  ended: { reason: string; error?: string } | null;
   status?: MasterVoiceStatus;
   start(): void;
   stop(): void;
+  listen(): void;
+  mute(): void;
+  skip(): void;
   dismiss(): void;
 }
 
-/** Today's voice use on this computer, always in view with the call. */
+/** Today's voice use on this computer (estimated), always in view with voice. */
 export function voiceUsage(status: MasterVoiceStatus | undefined, words: (ko: string, en: string) => string): string {
   if (!status) return '';
-  const minutes = Math.floor(status.today.seconds / 60), seconds = status.today.seconds % 60;
-  const time = minutes ? words(`${minutes}분 ${seconds}초`, `${minutes}m ${seconds}s`) : words(`${seconds}초`, `${seconds}s`);
-  return `${words('오늘', 'Today')} ${time} · $${status.today.dollars.toFixed(2)}${status.limitMinutes ? ` / ${words(`${status.limitMinutes}분`, `${status.limitMinutes}m`)}` : ''}`;
+  const limit = status.limitDollars ? ` / $${status.limitDollars.toFixed(2)}` : '';
+  return `${words('오늘', 'Today')} $${status.today.dollars.toFixed(2)}${limit} · ${words(`받아쓰기 ${Math.round(status.today.sttSeconds)}초, 읽기 ${status.today.ttsChars}자`, `${Math.round(status.today.sttSeconds)}s heard, ${status.today.ttsChars} chars read`)}`;
 }
 
-/** The running call (who is talking, today's use, end), or how the last one ended with a restart right there. */
+function endText(ended: { reason: string; error?: string }, words: (ko: string, en: string) => string): string {
+  switch (ended.reason) {
+    case 'owner': return words('음성을 껐습니다.', 'Voice is off.');
+    case 'replaced': return words('다른 탭에서 음성을 켰습니다.', 'Voice was turned on in another tab.');
+    case 'host': return words('마스터가 다시 시작해 음성이 꺼졌습니다. 다시 켜 주세요.', 'The master restarted and voice turned off. Turn it on again.');
+    default: return `${words('음성을 켜지 못했습니다', 'Voice could not start')}${ended.error ? `: ${ended.error}` : '.'}`;
+  }
+}
+
+/** Voice in this tab: listening or not, what is being heard or read aloud, and today's use. */
 export function VoiceBar({ voice }: { voice: VoiceControls }) {
   const words = useWords();
   const usage = voiceUsage(voice.status, words);
   const view = voice.view;
   if (view) {
-    const label = view.phase === 'starting' ? words('음성 연결 중…', 'Connecting voice…') : view.phase === 'ending' ? words('음성 끝내는 중…', 'Ending voice…')
-      : view.notice ? `${words('안내', 'Notice')}: ${view.notice}` : view.speaking ? words('듣는 중', 'Listening') : view.playing ? words('말하는 중', 'Speaking') : words('음성 켜짐', 'Voice on');
-    return <div className={`master-voice live ${view.speaking ? 'speaking' : view.playing ? 'playing' : ''}`} role="status">
-      {view.phase === 'live' ? <span className="master-voice-dot" aria-hidden /> : <LoaderCircle size={13} className="spin" />}
+    const playing = view.playing;
+    const label = playing ? (playing.kind === 'notice' ? `${words('되돌릴 수 없는 작업', 'Irreversible change')}: ${playing.text}` : playing.text)
+      : view.capturing ? `${words('듣고 있어요', 'Listening')}: ${view.heard || '…'}`
+      : view.listening ? (view.heard ? `${words('들은 말', 'Heard')}: ${view.heard}` : words('듣는 중 — 말씀하세요', 'Listening — go ahead'))
+      : words('음성 켜짐 · 맡긴 일 소식은 읽어 드려요', 'Voice on · news of finished work is read aloud');
+    return <div className={`master-voice live ${view.capturing ? 'speaking' : playing ? 'playing' : ''}`} role="status">
+      <span className="master-voice-dot" aria-hidden />
+      {playing ? <Volume2 size={13} /> : view.listening ? <Mic size={13} /> : <MicOff size={13} />}
       <span className="master-voice-label">{label}</span>
+      {view.error && <small className="master-voice-error">{view.error}</small>}
       {usage && <small>{usage}</small>}
-      <button className="master-voice-end" onClick={voice.stop} disabled={view.phase === 'ending'} title={words('음성 끊기 (맡긴 일은 계속됩니다)', 'End voice (work already sent continues)')}><PhoneOff size={13} />{words('끊기', 'End')}</button>
+      <div className="master-voice-actions">
+        {playing && <button className="master-voice-restart" onClick={voice.skip}><Square size={12} />{playing.kind === 'notice' ? words('취소', 'Cancel') : words('멈춤', 'Stop')}</button>}
+        {!playing && (view.listening
+          ? <button className="secondary-button" onClick={voice.mute}><MicOff size={12} />{words('듣기 끄기', 'Stop listening')}</button>
+          : <button className="master-voice-restart" onClick={voice.listen}><Mic size={12} />{words('다시 듣기', 'Listen')}</button>)}
+        <button className="master-voice-end" onClick={voice.stop} title={words('음성 끄기 (맡긴 일은 계속됩니다)', 'Voice off (work already sent continues)')}><VolumeX size={12} />{words('음성 끄기', 'Voice off')}</button>
+      </div>
     </div>;
   }
-  if (!voice.end) return usage ? <div className="master-voice idle"><small>{words('음성', 'Voice')} · {usage}</small></div> : null;
-  const pending = voice.status?.pending ?? 0;
-  return <div className="master-voice ended" role="status">
-    <span className="master-voice-label">{voice.end.error ?? endReason(voice.end.reason, words)}{pending ? words(` 전할 소식 ${pending}개가 기다립니다.`, ` ${pending} update${pending > 1 ? 's' : ''} waiting.`) : ''}</span>
-    {usage && <small>{usage}</small>}
-    <button className="master-voice-restart" onClick={voice.start} disabled={!voice.supported}><Mic size={13} />{words('다시 시작', 'Restart')}</button>
-    <button className="icon-button" onClick={voice.dismiss} aria-label={words('닫기', 'Dismiss')}><X size={13} /></button>
-  </div>;
+  if (voice.ended && voice.ended.reason !== 'owner') {
+    return <div className="master-voice ended" role="status">
+      <span className="master-voice-label">{endText(voice.ended, words)}</span>
+      <button className="master-voice-restart" onClick={voice.start} disabled={Boolean(voice.unavailable)}><Mic size={13} />{words('다시 켜기', 'Turn on')}</button>
+      <button className="icon-button" onClick={voice.dismiss} aria-label={words('닫기', 'Dismiss')}><X size={13} /></button>
+    </div>;
+  }
+  return usage && !voice.unavailable ? <div className="master-voice idle"><small>{words('음성', 'Voice')} · {usage}</small></div> : null;
 }

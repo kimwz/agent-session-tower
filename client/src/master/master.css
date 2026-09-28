@@ -113,3 +113,6 @@
 .master-message.master.voice { color:var(--text); }
 .master-unspoken { display:inline-flex; align-items:center; gap:4px; margin-left:6px; color:var(--subtle); font-size:11px; }
 .master-message.master .master-unspoken { display:flex; margin:4px 0 0; }
+.master-voice-actions { display:flex; gap:6px; flex-wrap:wrap; margin-left:auto; }
+.master-voice-actions .secondary-button { height:28px; display:inline-flex; align-items:center; gap:5px; font-size:12px; }
+.master-voice-error { flex-basis:100%; color:var(--danger); }

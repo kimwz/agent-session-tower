@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { KeyRound, LoaderCircle, Mic, Trash2 } from 'lucide-react';
-import { DEFAULT_MASTER_VOICE, MASTER_EFFORTS, MASTER_MODELS, MASTER_VOICES, type MasterOverview, type MasterSettings, type MasterVoiceSettings } from '../../../shared/master';
+import { DEFAULT_MASTER_VOICE, MASTER_EFFORTS, MASTER_MODELS, MASTER_TTS_MODELS, type MasterOverview, type MasterSettings, type MasterVoiceSettings } from '../../../shared/master';
 import type { LinkOverview } from '../../../shared/link';
 import { api } from '../common/lib';
 import { post } from './api';
@@ -31,7 +31,13 @@ export function MasterSettingsView({ token, overview, onDone }: { token: string;
   };
   const guards = (patch: Partial<MasterSettings['guards']>) => save({ guards: patch });
   const voice = (patch: Partial<MasterVoiceSettings>) => save({ voice: patch });
-  const number = (value: string, max: number) => Math.max(0, Math.min(max, Math.floor(Number(value) || 0)));
+  const [voiceKey, setVoiceKey] = useState('');
+  const [voices, setVoices] = useState<Array<{ id: string; name: string; category?: string }>>([]);
+  const voiceConfigured = Boolean(overview?.voiceConfigured);
+  useEffect(() => {
+    if (!voiceConfigured) { setVoices([]); return; }
+    void api<Array<{ id: string; name: string; category?: string }>>('/api/master/voice/voices').then(setVoices).catch(() => setVoices([]));
+  }, [voiceConfigured]);
   if (!overview || !settings) return <div className="master-settings"><LoaderCircle className="spin" size={16} /></div>;
   return <div className="master-settings">
     <section>
@@ -59,17 +65,33 @@ export function MasterSettingsView({ token, overview, onDone }: { token: string;
     </section>
     <section>
       <h3><Mic size={14} />{words('음성', 'Voice')}</h3>
-      <p>{words('입력창의 마이크 버튼으로 마스터와 말로 대화합니다 (OpenAI GPT-Live, 분당 약 $0.05). 한국어 음성 품질은 직접 확인해 주세요.', 'Talk to the master with the microphone button by the message box (OpenAI GPT-Live, about $0.05 a minute).')}</p>
+      <p>{words('입력창의 마이크 버튼으로 말로 시킵니다. 말한 것은 ElevenLabs가 받아쓰고, 답과 맡긴 일 소식은 ElevenLabs 목소리로 읽어 드립니다. 읽는 동안에는 마이크를 쉬게 합니다.', 'Talk to the master with the microphone button. ElevenLabs writes down what you say and reads answers and news aloud; the microphone rests while it reads.')}</p>
+      {voiceConfigured ? <div className="master-key-row"><span>{words('ElevenLabs 키 등록됨', 'ElevenLabs key saved')} {overview.voiceKeyHint}</span><button className="secondary-button" disabled={busy} onClick={() => void save({ voiceKey: null })}><Trash2 size={13} />{words('삭제', 'Remove')}</button></div> : null}
+      <form className="master-key-row" onSubmit={event => { event.preventDefault(); if (voiceKey.trim()) void save({ voiceKey: voiceKey.trim() }).then(() => setVoiceKey('')); }}>
+        <input type="password" autoComplete="off" value={voiceKey} onChange={event => setVoiceKey(event.target.value)} placeholder={voiceConfigured ? words('새 ElevenLabs 키로 바꾸기', 'Replace the ElevenLabs key') : words('ElevenLabs API 키', 'ElevenLabs API key')} aria-label={words('ElevenLabs API 키', 'ElevenLabs API key')} />
+        <button className="master-primary" disabled={busy || !voiceKey.trim()}>{words('저장', 'Save')}</button>
+      </form>
       <p>{voiceUsage(overview.voice, words)}</p>
       <label className="master-field">{words('목소리', 'Voice')}
-        <select value={(settings.voice ?? DEFAULT_MASTER_VOICE).voice} disabled={busy} onChange={event => void voice({ voice: event.target.value })}>{MASTER_VOICES.map(name => <option key={name} value={name}>{name}</option>)}</select>
+        <select value={(settings.voice ?? DEFAULT_MASTER_VOICE).voiceId} disabled={busy || !voices.length} onChange={event => void voice({ voiceId: event.target.value })}>
+          {!voices.some(item => item.id === (settings.voice ?? DEFAULT_MASTER_VOICE).voiceId) && <option value={(settings.voice ?? DEFAULT_MASTER_VOICE).voiceId}>{voices.length ? words('기본 목소리', 'Default voice') : words('키를 넣으면 목록이 나옵니다', 'Add a key to list voices')}</option>}
+          {voices.map(item => <option key={item.id} value={item.id}>{item.name}{item.category && item.category !== 'premade' ? ` (${item.category})` : ''}</option>)}
+        </select>
       </label>
-      <label className="master-field">{words('말이 없으면 끄기 (초, 0 = 끄지 않음)', 'End after silence (seconds, 0 = never)')}
-        <input type="number" min={0} max={600} value={(settings.voice ?? DEFAULT_MASTER_VOICE).silenceSeconds} disabled={busy} onChange={event => void voice({ silenceSeconds: number(event.target.value, 600) })} />
+      <label className="master-field">{words('읽어 주기 모델', 'Reading model')}
+        <select value={(settings.voice ?? DEFAULT_MASTER_VOICE).model} disabled={busy} onChange={event => void voice({ model: event.target.value as MasterVoiceSettings['model'] })}>
+          {MASTER_TTS_MODELS.map(model => <option key={model} value={model}>{model === 'eleven_v3_conversational' ? words('v3 대화형 (빠름, 추천)', 'v3 conversational (fast, recommended)') : model === 'eleven_v3' ? words('v3 (표현력, 느림, 두 배 비쌈)', 'v3 (expressive, slower, twice the price)') : words('flash v2.5 (가장 빠름)', 'flash v2.5 (fastest)')}</option>)}
+        </select>
       </label>
-      <label className="master-toggle"><input type="checkbox" checked={(settings.voice ?? DEFAULT_MASTER_VOICE).autoWake} disabled={busy} onChange={event => void voice({ autoWake: event.target.checked })} />{words('말이 없어 꺼진 뒤 전할 소식이 오면 다시 켜서 말하기 (마스터 창이 열려 있을 때만)', 'After a quiet end, turn back on to tell news (only while the master panel is open)')}</label>
-      <label className="master-field">{words('하루 음성 한도 (분, 0 = 없음)', 'Daily voice limit (minutes, 0 = none)')}
-        <input type="number" min={0} max={1440} value={(settings.voice ?? DEFAULT_MASTER_VOICE).dailyMinutes} disabled={busy} onChange={event => void voice({ dailyMinutes: number(event.target.value, 1440) })} />
+      <label className="master-field">{words('말 끝으로 볼 멈춤 (밀리초, 600–3000)', 'Pause that ends what you say (ms, 600–3000)')}
+        <input type="number" min={600} max={3000} step={100} value={(settings.voice ?? DEFAULT_MASTER_VOICE).endSilenceMs} disabled={busy} onChange={event => void voice({ endSilenceMs: Math.max(600, Math.min(3000, Math.round(Number(event.target.value) / 100) * 100 || 1000)) })} />
+      </label>
+      <label className="master-field">{words('요청이 없으면 듣기 끄기 (분, 1–30)', 'Stop listening after no request for (minutes, 1–30)')}
+        <input type="number" min={1} max={30} value={(settings.voice ?? DEFAULT_MASTER_VOICE).listenMinutes} disabled={busy} onChange={event => void voice({ listenMinutes: Math.max(1, Math.min(30, Math.floor(Number(event.target.value) || 5))) })} />
+      </label>
+      <label className="master-toggle"><input type="checkbox" checked={(settings.voice ?? DEFAULT_MASTER_VOICE).readReports} disabled={busy} onChange={event => void voice({ readReports: event.target.checked })} />{words('음성을 켠 탭에서 마스터 창이 열려 있으면 맡긴 일 소식을 읽어 주고 다시 듣기', 'Read news of finished work aloud (and listen again) while voice is on with the master open')}</label>
+      <label className="master-field">{words('하루 음성 비용 한도 ($, 0 = 없음)', 'Daily voice limit ($, 0 = none)')}
+        <input type="number" min={0} max={1000} step={0.5} value={(settings.voice ?? DEFAULT_MASTER_VOICE).dailyDollars} disabled={busy} onChange={event => void voice({ dailyDollars: Math.max(0, Math.min(1000, Math.round((Number(event.target.value) || 0) * 100) / 100)) })} />
       </label>
     </section>
     <section>

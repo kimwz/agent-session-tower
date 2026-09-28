@@ -27,19 +27,25 @@ export interface MasterGuards {
 }
 export const DEFAULT_MASTER_GUARDS: MasterGuards = { hideSecrets: true, localOnlyPages: true, eventTurnsReadOnly: false, readOnlyNodes: [], maxIrreversiblePerTurn: 0 };
 
-/** GPT-Live's built-in voices; the first is its default. */
-export const MASTER_VOICES = ['marin', 'cedar', 'alloy', 'ash', 'ballad', 'beacon', 'bossa', 'cinder', 'coral', 'delta', 'echo', 'gleam', 'meridian', 'quartz', 'ripple', 'sage', 'shimmer', 'stone', 'tempo', 'verse', 'vesper', 'willow'] as const;
-/** Talking to the master: its voice, when it hangs up on silence, how much a day, and whether news wakes it. */
+/** ElevenLabs voices the master reads aloud with; the first is the default (fast, natural Korean). */
+export const MASTER_TTS_MODELS = ['eleven_v3_conversational', 'eleven_v3', 'eleven_flash_v2_5'] as const;
+export type MasterTtsModel = typeof MASTER_TTS_MODELS[number];
+/** A premade ElevenLabs voice every account has. */
+export const DEFAULT_MASTER_VOICE_ID = 'cgSgspJ2msm6clMCkdW9';
+/** Talking to the master: what the owner says is written down and answers are read aloud, both by ElevenLabs. */
 export interface MasterVoiceSettings {
-  voice: string;
-  /** Seconds without anyone speaking before the call ends; 0 keeps it open. */
-  silenceSeconds: number;
-  /** Minutes of voice a day; 0 means no limit. */
-  dailyMinutes: number;
-  /** After a call ended on silence, news the master should tell starts it again while the master panel is open. */
-  autoWake: boolean;
+  voiceId: string;
+  model: MasterTtsModel;
+  /** How long a pause ends what the owner is saying, in milliseconds. */
+  endSilenceMs: number;
+  /** Minutes without a request or a report after which listening turns off. */
+  listenMinutes: number;
+  /** Read news of finished work aloud while voice is on in a tab with the master open. */
+  readReports: boolean;
+  /** Dollars of voice a day; 0 means no limit. */
+  dailyDollars: number;
 }
-export const DEFAULT_MASTER_VOICE: MasterVoiceSettings = { voice: 'marin', silenceSeconds: 15, dailyMinutes: 0, autoWake: true };
+export const DEFAULT_MASTER_VOICE: MasterVoiceSettings = { voiceId: DEFAULT_MASTER_VOICE_ID, model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0 };
 
 export interface MasterSettings {
   enabled: boolean;
@@ -60,6 +66,9 @@ export interface MasterOverview {
   settings: MasterSettings;
   configured: boolean;
   keyHint?: string;
+  /** An ElevenLabs key is saved, so voice can be turned on. */
+  voiceConfigured: boolean;
+  voiceKeyHint?: string;
   state: MasterState;
   activeTasks: number;
   lastOrder: number;
@@ -67,34 +76,39 @@ export interface MasterOverview {
   voice?: MasterVoiceStatus;
 }
 
-export type MasterVoicePhase = 'reserved' | 'creating' | 'attached' | 'ready' | 'closing' | 'closed' | 'unconfirmed';
 /**
- * The voice call as pages see it. Pages recognise their own call and tab by hashing their ids; nothing a page sent is
- * shown back as it came.
+ * Voice as pages see it. The session is the tab where voice is on; pages know their own by its digest, and nothing a
+ * page sent is shown back as it came.
  */
 export interface MasterVoiceStatus {
-  /** The current or last call. */
-  attempt?: string;
-  tab?: string;
-  phase?: MasterVoicePhase;
-  /** Why it ended or is ending: owner, silence, failed, taken-over, connection, daily-limit, expired, … */
-  reason?: string;
-  /** Voice used today on this computer: seconds and dollars (GPT-Live only). */
-  today: { seconds: number; dollars: number };
-  limitMinutes: number;
-  /** News waiting to be told, and how much of it may still wake a call. */
-  pending: number;
-  wakeable: number;
+  /** Digest of the voice session in use, if voice is on somewhere. */
+  session?: string;
+  listening: boolean;
+  /** Voice used today on this computer (estimated): seconds written down, characters read aloud, and dollars. */
+  today: { sttSeconds: number; ttsChars: number; dollars: number };
+  limitDollars: number;
+  /** Today's limit is reached: nothing more is written down or read aloud today. */
+  limited: boolean;
 }
-/** How news the master should tell by voice is getting there. */
+/**
+ * How an answer or a report is getting read aloud. `sent`, `delivered` and `undelivered` are left from GPT-Live calls
+ * (1.52–1.55) in conversations kept since.
+ */
 export interface MasterSpeak {
-  state: 'pending' | 'sent' | 'delivered' | 'undelivered';
-  tries: number;
-  /** Already used to wake a call. */
-  woke?: boolean;
-  /** The call and requests it answers, when it answers a voice request. */
-  attempt?: string;
-  delegationIds?: string[];
+  state: 'pending' | 'playing' | 'played' | 'unspoken' | 'sent' | 'delivered' | 'undelivered';
+  tries?: number;
+  /** Digest of the voice session a spoken request came from, when this answers one. */
+  session?: string;
+}
+/** Something the page of the voice session plays: a short reply, an answer, a report, or a notice before a change. */
+export interface MasterSay {
+  id: string;
+  session: string;
+  kind: 'ack' | 'working' | 'answer' | 'report' | 'notice';
+  text: string;
+  /** Where the page fetches the audio (same origin). */
+  audio: string;
+  expiresAt: number;
 }
 
 export type MasterCallState = 'sending' | 'succeeded' | 'failed' | 'uncertain' | 'not-admitted';
@@ -103,7 +117,7 @@ export type MasterTaskState = 'running' | 'completed' | 'error' | 'cancelled' | 
 export type MasterEntryData =
   | { kind: 'owner'; text: string; clientId?: string; voice?: true }
   | { kind: 'master'; text: string; turnId: string; final: boolean; speak?: MasterSpeak }
-  /** What the master said aloud in a voice call. */
+  /** What the master said aloud in a GPT-Live call (1.52–1.55), kept in conversations since. */
   | { kind: 'voice'; text: string }
   | { kind: 'action'; turnId: string; method: string; path: string; node?: string; state: MasterCallState; summary?: string; write: boolean }
   | { kind: 'task'; sessionId?: string; runId?: string; jobId?: string; node?: string; title: string; state: MasterTaskState; answer?: string }
@@ -157,7 +171,7 @@ export type MasterDirectiveResult = 'done' | 'unavailable' | 'failed';
 export type MasterCard =
   | { type: 'open'; label: string; command: MasterScreenCommand }
   | { type: 'push'; state: 'waiting' | 'subscribed' | 'failed'; note?: string }
-  | { type: 'secret'; purpose: string; state: 'waiting' | 'provided' | 'dismissed'; voice?: { attempt: string; key: string } };
+  | { type: 'secret'; purpose: string; state: 'waiting' | 'provided' | 'dismissed'; voice?: { key: string; session?: string; attempt?: string } };
 
 export type MasterStreamEvent =
   | { type: 'entry'; seq: number; entry: MasterEntry }
@@ -165,8 +179,7 @@ export type MasterStreamEvent =
   | { type: 'overview'; seq: number; overview: MasterOverview }
   | { type: 'directive'; seq: number; directive: MasterDirective }
   | { type: 'voice'; seq: number; voice: MasterVoiceStatus }
-  /** A sentence the call's page says itself before an irreversible change goes out. */
-  | { type: 'notice'; seq: number; notice: { id: string; attempt: string; text: string } };
+  | { type: 'say'; seq: number; say: MasterSay };
 
 /** Where the owner is looking when they send a message, so "this session" means something. */
 export interface MasterViewContext { tabId?: string; sessionId?: string; node?: string; cwd?: string }

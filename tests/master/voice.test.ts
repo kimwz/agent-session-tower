@@ -1,91 +1,67 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server } from 'node:http';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer, request as httpRequest, type IncomingMessage, type Server } from 'node:http';
+import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { WebSocketServer, type WebSocket } from 'ws';
+import { ElevenLabs } from '../../server/master/elevenlabs.js';
 import { MasterJournal } from '../../server/master/journal.js';
 import type { ModelCall, ModelItem, ModelRequest } from '../../server/master/model-openai.js';
 import { MasterRoom } from '../../server/master/room.js';
 import { MasterService } from '../../server/master/service.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/master/tower-client.js';
-import { MasterVoice, spread, type VoiceTiming } from '../../server/master/voice.js';
-import { VOICE_INSTRUCTIONS, VOICE_PHRASES } from '../../server/master/voice-text.js';
+import { MasterVoice, migrate, type VoiceTiming } from '../../server/master/voice.js';
+import { isNoise, VOICE_ACKS } from '../../server/master/voice-text.js';
 import type { MasterEntry, MasterSpeak, MasterStreamEvent } from '../../shared/master.js';
 import { until } from '../helpers/until.js';
 
 const TOKEN = 'a'.repeat(64);
 const SECRET = 'b'.repeat(64);
 const KEY = 'sk-test-0123456789abcdef';
+const VOICE_KEY = 'el-test-0123456789abcdef';
 const TAB = randomUUID();
 const digestOf = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32);
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-const FAST: Partial<VoiceTiming> = {
-  createMs: 2_000, attachMs: 2_000, readyMs: 5_000, closeWaitMs: 300, ackMs: 300, deliveredMs: 150, backstopMs: 60_000, leaseMs: 60_000,
-  probeMs: 60_000, quietMs: 30, quietMaxMs: 100, noticeMs: 2_000, resyncMs: 600, limitNoticeMs: 50,
-};
-
-type Json = Record<string, any>;
-interface LiveSession { id: string; sockets: WebSocket[]; received: Json[]; headers: IncomingHttpHeaders[] }
-
-/** GPT-Live as far as the host uses it: making a call, and the call's own connection for events and commands. */
-async function fakeLive() {
-  const state = {
-    creates: [] as Array<{ body: Json; auth?: string }>, sessions: new Map<string, LiveSession>(), order: [] as string[], log: [] as string[],
-    ack: 'ok' as 'ok' | 'error' | 'none', closeUsage: 20 as number | undefined, closeAnswer: true, closeDelayMs: 0, createStatus: 201, attachStatus: 0, events: 0,
-  };
-  const send = (socket: WebSocket, event: Json) => socket.send(JSON.stringify({ event_id: `evt_${++state.events}`, ...event }));
-  const server = createServer(async (req: IncomingMessage, res) => {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk as Buffer);
-    if (req.method !== 'POST' || req.url !== '/v1/live/sessions') { res.writeHead(404).end(); return; }
-    const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Json;
-    state.creates.push({ body, auth: req.headers.authorization });
-    if (state.createStatus !== 201) { res.writeHead(state.createStatus, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'refused' } })); return; }
-    const id = `live_${state.creates.length}`;
-    state.log.push(`create ${id}`);
-    state.sessions.set(id, { id, sockets: [], received: [], headers: [] });
-    state.order.push(id);
-    res.writeHead(201, { 'Content-Type': 'application/json' }).end(JSON.stringify({ session: { id }, transport: { sdp: `v=0 answer ${id}` } }));
-  });
-  const sockets = new WebSocketServer({ noServer: true });
-  server.on('upgrade', (req, socket, head) => {
-    const id = /^\/v1\/live\/sessions\/([^/]+)\/attach$/.exec(req.url ?? '')?.[1];
-    const session = id ? state.sessions.get(decodeURIComponent(id)) : undefined;
-    if (!session || state.attachStatus) { socket.end(`HTTP/1.1 ${state.attachStatus || 404} Refused\r\nConnection: close\r\n\r\n`); return; }
-    sockets.handleUpgrade(req, socket, head, ws => {
-      session.sockets.push(ws);
-      session.headers.push(req.headers);
-      ws.on('message', data => {
-        const command = JSON.parse(String(data)) as Json;
-        session.received.push(command);
-        if (String(command.type).endsWith('.append')) {
-          if (state.ack === 'ok') send(ws, { type: String(command.type).replace(/append$/, 'appended'), client_event_id: command.event_id, start_ms: 0, end_ms: 0 });
-          else if (state.ack === 'error') send(ws, { type: 'error', error: { type: 'invalid_request_error', code: 'refused', message: 'no', client_event_id: command.event_id } });
-        } else if (command.type === 'session.close') {
-          state.log.push(`close ${session.id}`);
-          const answer = () => send(ws, { type: 'session.closed', client_event_id: command.event_id, reason: 'close_requested', session: { id: session.id }, ...(state.closeUsage !== undefined ? { usage: { seconds: state.closeUsage } } : {}) });
-          if (state.closeAnswer) { if (state.closeDelayMs) setTimeout(answer, state.closeDelayMs); else answer(); }
-        }
-      });
-    });
-  });
-  const port = await listen(server);
-  return Object.assign(state, {
-    base: `http://127.0.0.1:${port}`,
-    emit(session: string, event: Json) { send(state.sessions.get(session)!.sockets.at(-1)!, event); },
-    close: async () => { for (const client of sockets.clients) client.terminate(); await stop(server); },
-  });
-}
+const FAST: Partial<VoiceTiming> = { firstChunkMs: 1_000, synthMs: 2_000, playMs: 2_000, noticeMs: 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 };
 
 async function listen(server: Server): Promise<number> {
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   return (server.address() as { port: number }).port;
 }
 const stop = (server: Server) => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); });
+
+/** ElevenLabs as far as the master uses it: tokens, reading aloud (as a stream), voices, and history removal. */
+async function fakeElevenLabs() {
+  const state = {
+    tokens: 0, speeches: [] as Array<{ voice: string; body: Record<string, unknown>; key?: string }>, deletes: [] as string[], keys: [] as string[],
+    mode: 'ok' as 'ok' | 'cut' | 'error', chunks: [Buffer.from('ID3-first-'), Buffer.from('second-part')], gapMs: 20,
+  };
+  const server = createServer(async (req: IncomingMessage, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk as Buffer);
+    state.keys.push(String(req.headers['xi-api-key']));
+    const url = new URL(req.url!, 'http://x');
+    if (req.method === 'POST' && url.pathname === '/v1/single-use-token/realtime_scribe') { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ token: `sutkn_${++state.tokens}` })); return; }
+    if (req.method === 'GET' && url.pathname === '/v2/voices') { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ voices: [{ voice_id: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica', category: 'premade' }, { voice_id: 'bad id', name: 'x' }], has_more: false })); return; }
+    if (req.method === 'DELETE' && url.pathname.startsWith('/v1/history/')) { state.deletes.push(url.pathname.slice('/v1/history/'.length)); res.writeHead(200).end(); return; }
+    const speech = /^\/v1\/text-to-speech\/([^/]+)\/stream$/.exec(url.pathname);
+    if (req.method === 'POST' && speech) {
+      state.speeches.push({ voice: speech[1], body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>, key: req.headers['xi-api-key'] as string });
+      if (state.mode === 'error') { res.writeHead(500).end('no'); return; }
+      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `h${state.speeches.length}` });
+      res.write(state.chunks[0]);
+      await sleep(state.gapMs);
+      if (state.mode === 'cut') { res.destroy(); return; }
+      res.end(state.chunks[1]);
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  const port = await listen(server);
+  return Object.assign(state, { base: `http://127.0.0.1:${port}`, close: () => stop(server) });
+}
 
 type Step = ModelItem[] | ((request: ModelRequest) => ModelItem[] | Promise<ModelItem[]>);
 function scripted(steps: Step[]) {
@@ -103,395 +79,305 @@ function scripted(steps: Step[]) {
 const say = (text: string): ModelItem => ({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] });
 const call = (name: string, args: unknown): ModelItem => ({ type: 'function_call', call_id: `c${Math.random().toString(16).slice(2)}`, name, arguments: JSON.stringify(args) });
 
-interface Seen { method: string; path: string; body: unknown }
-interface Options {
-  steps?: Step[];
-  tower?: (seen: Seen) => { status?: number; body: unknown };
-  settings?: Record<string, unknown>;
-  prepare?: (room: MasterRoom, journal: MasterJournal) => void | Promise<void>;
-  timing?: Partial<VoiceTiming>;
-}
+interface Options { steps?: Step[]; settings?: Record<string, unknown>; prepare?: (dir: string, room: MasterRoom) => void | Promise<void>; timing?: Partial<VoiceTiming>; voiceKey?: boolean }
 
-/** The master's service and voice in one folder, with a fake Tower, a scripted model and a fake GPT-Live. */
+/** The master's service and voice in one folder, with a fake Tower, a scripted model and a fake ElevenLabs. */
 async function harness(t: test.TestContext, options: Options = {}) {
   const cleanup: Array<() => unknown> = [];
-  const dir = await mkdtemp(join(tmpdir(), 'tower-master-voice-'));
-  // In order: servers stop, then the master flushes, then its folder goes.
+  const dir = await mkdtemp(join(tmpdir(), 'tower-master-voice6-'));
   t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(dir, { recursive: true, force: true }); });
-  const live = await fakeLive();
-  cleanup.push(() => live.close());
-  const seen: Seen[] = [];
-  const towerServer = createServer(async (req, res) => {
-    const chunks: Buffer[] = [];
-    for await (const chunk of req) chunks.push(chunk as Buffer);
-    const text = Buffer.concat(chunks).toString('utf8');
-    const entry = { method: req.method!, path: req.url!, body: text ? JSON.parse(text) : undefined };
-    seen.push(entry);
-    const answer = options.tower?.(entry) ?? { body: {} };
-    res.writeHead(answer.status ?? 200, { 'Content-Type': 'application/json' }).end(JSON.stringify(answer.body));
+  const labs = await fakeElevenLabs();
+  cleanup.push(() => labs.close());
+  const seen: Array<{ method: string; path: string }> = [];
+  const tower = createServer(async (req, res) => {
+    for await (const _chunk of req) { /* Read the body. */ }
+    seen.push({ method: req.method!, path: req.url! });
+    res.writeHead(200, { 'Content-Type': 'application/json' }).end('{}');
   });
-  const towerPort = await listen(towerServer);
-  cleanup.push(() => stop(towerServer));
+  const towerPort = await listen(tower);
+  cleanup.push(() => stop(tower));
   const settings = new MasterSettingsStore(dir);
   await settings.start();
-  await settings.update({ apiKey: KEY, ...options.settings });
+  await settings.update({ apiKey: KEY, ...(options.voiceKey === false ? {} : { voiceKey: VOICE_KEY }), ...options.settings });
   const room = new MasterRoom(dir);
   await room.start();
   const journal = new MasterJournal(dir);
   await journal.start();
-  await options.prepare?.(room, journal);
-  const tower = new TowerClient(2_000);
-  tower.setCredentials({ port: towerPort, token: TOKEN, callerSecret: SECRET });
+  await options.prepare?.(dir, room);
+  const client = new TowerClient(2_000);
+  client.setCredentials({ port: towerPort, token: TOKEN, callerSecret: SECRET });
   const script = scripted(options.steps ?? []);
-  const service = new MasterService({ settings, room, journal, tower, model: script.model, taskPollMs: 40, ackMs: 200 });
-  const voice = new MasterVoice({ dataDir: dir, settings, room, hooks: service.voiceHooks(), apiBase: live.base, socketBase: live.base.replace('http', 'ws'), timing: { ...FAST, ...options.timing } });
+  const service = new MasterService({ settings, room, journal, tower: client, model: script.model, taskPollMs: 40, ackMs: 200 });
+  const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), apiBase: labs.base, sttBase: labs.base.replace('http', 'ws'), historyDelaysMs: [10] });
+  const voice = new MasterVoice({ dataDir: dir, settings, room, hooks: service.voiceHooks(), elevenLabs, timing: { ...FAST, ...options.timing } });
   service.setVoice(voice);
   await voice.start();
   await service.start();
   cleanup.push(async () => { await voice.close(); await service.close(); });
   const events: MasterStreamEvent[] = [];
   room.subscribe(event => events.push(event));
+  const says = () => events.flatMap(event => event.type === 'say' ? [event.say] : []);
   const speakOf = (id: string): MasterSpeak | undefined => { const data = room.get(id)?.data; return data && (data.kind === 'master' || data.kind === 'event' || data.kind === 'error') ? data.speak : undefined; };
   const queueEvent = async (text: string) => {
     journal.inbox.push({ id: randomUUID(), kind: 'event', text, local: false, at: new Date().toISOString(), state: 'queued', retries: 0 });
     await journal.save('inbox');
     (service as unknown as { pump(): void }).pump();
   };
-  return { dir, live, room, journal, service, voice, script, tower, towerPort, seen, events, speakOf, queueEvent, settings };
+  return { dir, labs, room, journal, service, voice, script, client, towerPort, seen, events, says, speakOf, queueEvent, settings };
 }
 type Harness = Awaited<ReturnType<typeof harness>>;
+const masterEntry = (h: Harness, pattern: RegExp) => until(() => h.room.recent(200).find((entry): entry is MasterEntry => entry.data.kind === 'master' && pattern.test(entry.data.text)));
+const on = (h: Harness, tab = TAB) => h.voice.voiceOn({ tabId: tab, local: true }).session;
+const request = (h: Harness, session: string, text: string) => h.voice.voiceRequest({ session, clientMessageId: randomUUID(), text, local: true });
+/** A page that plays every answer and report it is given through to the end. */
+const autoPlay = (h: Harness, session: string) => h.room.subscribe(event => {
+  if (event.type === 'say' && (event.say.kind === 'answer' || event.say.kind === 'report')) setTimeout(() => h.voice.voicePlayed({ session, id: event.say.id, result: 'played' }), 10);
+});
 
-/** A page starting a call and, unless told not to, saying it plays. */
-async function startCall(h: Harness, options: { tab?: string; wake?: boolean; ready?: boolean } = {}) {
-  const attemptId = randomUUID();
-  const started = await h.voice.voiceStart({ attemptId, sdp: 'v=0 offer', tabId: options.tab ?? TAB, local: true, wake: options.wake ?? false });
-  const session = h.live.order.at(-1)!;
-  if (options.ready ?? true) assert.equal(await h.voice.voiceReady({ attemptId }), true);
-  return { attemptId, started, session, received: () => h.live.sessions.get(session)!.received };
+/** Reads a GET as the page would, through an HTTP server that hands the request to the voice. */
+async function audioServer(t: test.TestContext, voice: MasterVoice) {
+  const server = createServer((req, res) => { void voice.serveAudio(req.url!.slice(1), res); });
+  const port = await listen(server);
+  t.after(() => stop(server));
+  const fetchAudio = (id: string) => new Promise<{ status: number; body: Buffer; complete: boolean }>(resolve => {
+    const chunks: Buffer[] = [];
+    httpRequest({ host: '127.0.0.1', port, path: `/${id}` }, res => {
+      res.on('data', chunk => chunks.push(chunk as Buffer));
+      res.on('end', () => resolve({ status: res.statusCode!, body: Buffer.concat(chunks), complete: res.complete }));
+      res.on('error', () => resolve({ status: res.statusCode!, body: Buffer.concat(chunks), complete: false }));
+      res.on('aborted', () => resolve({ status: res.statusCode!, body: Buffer.concat(chunks), complete: false }));
+    }).on('error', () => resolve({ status: 0, body: Buffer.concat(chunks), complete: false })).end();
+  });
+  return { port, fetchAudio };
 }
-const said = (h: Harness, session: string, text: string, startMs: number) => h.live.emit(session, { type: 'session.input_transcript.delta', delta: text, start_ms: startMs, end_ms: startMs + 400 });
-const delegated = (h: Harness, session: string, id: string, offsetMs: number) => h.live.emit(session, { type: 'session.delegation.created', offset_ms: offsetMs, delegation: { id, type: 'delegation', target: 'client' } });
-const speakOfIn = (room: MasterRoom, id: string) => { const data = room.get(id)?.data; return data?.kind === 'master' ? data.speak : undefined; };
-const masterEntry = (h: Harness, pattern: RegExp) => until(() => h.room.recent(100).find((entry): entry is MasterEntry => entry.data.kind === 'master' && pattern.test(entry.data.text)));
 
-test('a call is made and followed by the host with the owner\'s key: the page gets only the answer, and its ids are kept as digests', async t => {
-  const h = await harness(t, { prepare: room => {
-    room.add({ kind: 'owner', text: '어제 뭐 했지?' });
-    room.add({ kind: 'master', text: '세션 두 개를 끝냈습니다.', turnId: 'turn-0', final: true });
-    room.add({ kind: 'action', turnId: 'turn-0', method: 'GET', path: '/api/snapshot', state: 'succeeded', write: false });
-  } });
-  await assert.rejects(h.voice.voiceStart({ attemptId: 'not-a-uuid', sdp: 'v=0', tabId: TAB, local: true, wake: false }), { statusCode: 400 });
-  await assert.rejects(h.voice.voiceStart({ attemptId: randomUUID(), sdp: 'v=0', tabId: TAB, local: true, wake: true }), { statusCode: 409 }, 'news wakes only a call that ended on silence');
-  const first = await startCall(h, { ready: false });
-  assert.equal(first.started.sdp, 'v=0 answer live_1');
-  const { body, auth } = h.live.creates[0];
-  assert.equal(auth, `Bearer ${KEY}`);
-  assert.equal(body.session.model, 'gpt-live-1');
-  assert.equal(body.session.instructions, VOICE_INSTRUCTIONS);
-  assert.deepEqual(body.session.delegation, { type: 'client' });
-  assert.equal(body.session.store, false);
-  assert.deepEqual(body.session.client.data_channel.allowed_client_events, [], 'the page sends nothing to the call');
-  assert.deepEqual(body.transport, { type: 'webrtc', sdp: 'v=0 offer' });
-  // The conversation so far, in its roles; what was not said is left out.
-  assert.deepEqual(body.session.input.map((item: Json) => [item.role, item.content[0].type, item.content[0].text]), [['user', 'input_text', '어제 뭐 했지?'], ['assistant', 'output_text', '세션 두 개를 끝냈습니다.']]);
-  assert.equal(h.live.sessions.get('live_1')!.headers[0].authorization, `Bearer ${KEY}`);
-  assert.equal(h.voice.status().phase, 'attached');
-  assert.equal(await h.voice.voiceReady({ attemptId: first.attemptId }), true);
-  assert.equal(h.service.overview().voice?.phase, 'ready');
-  assert.equal(h.service.overview().voice?.attempt, digestOf(first.attemptId));
-
-  h.live.emit(first.session, { type: 'session.started', session: { id: first.session, expires_at: 1_788_555_600 } });
-  await sleep(50);
+test('voice is one session at a time: a new one ends the one before, whose page is refused from then on and cannot take it back', async t => {
+  const h = await harness(t);
+  assert.throws(() => h.voice.voiceOn({ tabId: 'not-a-uuid', local: true }), { statusCode: 400 });
+  const first = on(h);
+  assert.equal(h.voice.status().session, digestOf(first));
+  assert.equal(h.voice.voicePresence({ session: first, listening: true, panelOpen: true }), true);
+  const second = on(h, randomUUID());
+  assert.equal(h.voice.status().session, digestOf(second));
+  assert.equal(h.voice.voicePresence({ session: first, listening: true, panelOpen: true }), false, 'presence never takes voice back');
+  assert.deepEqual(await request(h, first, '지금 뭐 돌아가?'), { stale: true });
+  await assert.rejects(h.voice.voiceToken({ session: first }), { statusCode: 409 });
+  assert.equal(h.voice.voiceActivity({ session: first, speaking: true }), false);
+  assert.equal(h.voice.voiceOff({ session: first }), false);
+  assert.equal(h.voice.voiceOff({ session: second }), true);
+  assert.equal(h.voice.status().session, undefined);
   const saved = await readFile(join(h.dir, 'voice.json'), 'utf8');
-  assert.match(saved, /1788555600000/);
-  assert.ok(saved.includes(digestOf(first.attemptId)) && saved.includes(digestOf(TAB)));
-  assert.ok(!saved.includes(first.attemptId) && !saved.includes(TAB), 'the page\'s own ids are never kept');
-
-  assert.equal(await h.voice.voiceStop({ attemptId: randomUUID(), reason: 'owner' }), false, 'another call\'s stop is ignored');
-  assert.equal(await h.voice.voiceStop({ attemptId: first.attemptId, reason: 'owner' }), true);
-  assert.ok(first.received().some(command => command.type === 'session.close'));
-  const status = h.voice.status();
-  assert.equal(status.phase, 'closed');
-  assert.equal(status.reason, 'owner');
-  assert.equal(status.today.seconds, 20, 'final use from GPT-Live');
-  assert.equal(await h.voice.voiceReady({ attemptId: first.attemptId }), false);
+  assert.ok(!saved.includes(first) && !saved.includes(second) && !saved.includes(TAB), 'session and tab ids stay in memory');
 });
 
-test('starting by hand while a call runs closes it before the next is made; a page that never plays it loses its call', async t => {
-  const h = await harness(t, { timing: { readyMs: 300 } });
-  const first = await startCall(h);
-  const second = await startCall(h, { ready: false });
-  assert.deepEqual(h.live.log, ['create live_1', 'close live_1', 'create live_2'], 'never two calls paid for at once');
-  const attempts = (JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8')) as { attempts: Json[] }).attempts;
-  assert.equal(attempts[0].appReason, 'taken-over');
-  assert.equal(attempts[0].phase, 'closed');
-  assert.equal(await h.voice.voiceStop({ attemptId: first.attemptId, reason: 'owner' }), false, 'the old page cannot end the new call');
-  await until(() => h.voice.status().phase === 'closed' && h.voice.status().reason === 'failed', 3_000);
-  assert.deepEqual(h.live.log.at(-1), 'close live_2');
-  assert.equal(await h.voice.voiceReady({ attemptId: second.attemptId }), false);
-  assert.equal(h.voice.busy(), false);
+test('voice needs an ElevenLabs key; tokens come from it, each reserving an utterance until settled once, from any session', async t => {
+  const h = await harness(t, { voiceKey: false });
+  assert.throws(() => on(h), { statusCode: 409 });
+  await h.settings.update({ voiceKey: VOICE_KEY });
+  const session = on(h);
+  const first = await h.voice.voiceToken({ session });
+  assert.match(first.url, /\/v1\/speech-to-text\/realtime\?model_id=scribe_v2_realtime&language_code=kor&audio_format=pcm_16000&token=sutkn_1$/);
+  assert.equal(h.labs.keys.at(-1), VOICE_KEY, 'the key stays on the host; the page gets a single-use token');
+  assert.ok(!first.url.includes(VOICE_KEY));
+  const reserved = h.voice.status().today.dollars;
+  assert.ok(reserved > 0, 'a token holds a whole utterance');
+  await h.voice.voiceToken({ session });
+  await assert.rejects(h.voice.voiceToken({ session }), { statusCode: 409 }, 'at most two unsettled a session');
+  // Voice moves to another tab: the first page's utterance is still settled.
+  const other = on(h, randomUUID());
+  assert.equal(await h.voice.voiceUsage({ tokenId: first.tokenId, seconds: 6 }), true);
+  assert.equal(await h.voice.voiceUsage({ tokenId: first.tokenId, seconds: 6 }), false, 'once');
+  assert.equal(h.voice.status().today.sttSeconds, 6);
+  await h.voice.voiceToken({ session: other });
+  // A token never settled counts as a whole utterance once it can no longer be used, on the day it runs out.
+  const file = (h.voice as unknown as { file: { tokens: Array<{ issuedAt: number }> } }).file;
+  for (const token of file.tokens) token.issuedAt -= 17 * 60_000;
+  (h.voice as unknown as { settleExpired(now: number): void }).settleExpired(Date.now());
+  assert.equal(h.voice.status().today.sttSeconds, 6 + 60 * 2);
+  assert.equal(file.tokens.length, 0);
 });
 
-test('a spoken request is the owner\'s words up to where it was delegated: once per delegation, joined or asked again without new words, alone in its turn', async t => {
-  let release!: () => void;
-  const held = new Promise<void>(resolve => { release = resolve; });
-  const h = await harness(t, { steps: [async () => { await held; return [say('작업 중인 세션은 두 개입니다.\n\n- a\n- b')]; }, [say('타이핑한 요청의 답')], [say('천만에요.')]] });
-  const live = await startCall(h);
-  said(h, live.session, '지금 작업 중인 ', 100);
-  said(h, live.session, '세션 알려줘', 500);
-  delegated(h, live.session, 'del_1', 1_000);
-  delegated(h, live.session, 'del_1', 1_000);
-  const request = await until(() => h.journal.inbox.find(item => item.voice));
-  assert.equal(request.text, '지금 작업 중인 세션 알려줘');
-  assert.equal(request.kind, 'owner');
-  assert.equal(request.viewContext?.tabId, TAB, 'screen commands of a spoken request go to the calling tab');
-  await h.service.send({ clientMessageId: 'typed-0001', text: '타이핑한 요청', local: true });
-  // A delegation without new words joins the request still being answered.
-  delegated(h, live.session, 'del_2', 1_500);
-  await until(() => request.voice!.delegationIds.includes('del_2'));
-  await until(() => h.script.requests.length === 1);
-  assert.equal(h.journal.inbox.filter(item => item.voice).length, 1, 'one request per delegation');
-  const first = h.script.requests[0];
-  assert.match(String(first.input[0].content), /voice call/);
-  assert.equal(first.input.at(-1)!.content, '지금 작업 중인 세션 알려줘', 'a spoken request has its turn to itself');
-  release();
-  const told = await until(() => live.received().find(command => command.type === 'session.commentary.append' && command.delegation_id === 'del_2'));
-  assert.equal(told.content, '작업 중인 세션은 두 개입니다.', 'the first paragraph, under the latest delegation');
+test('a daily limit holds every unsettled token and every reading before it starts, so it is never passed', async t => {
+  const long = '오늘 끝난 일은 세 가지입니다. 첫째는 배포 준비, 둘째는 테스트 정리, 셋째는 문서 수정입니다. 남은 일은 없습니다. 더 알고 싶으시면 말씀해 주세요.';
+  const h = await harness(t, { settings: { voice: { dailyDollars: 0.01 } }, steps: [[say(long)]] });
+  const session = on(h);
+  const token = await h.voice.voiceToken({ session });
+  // 60 seconds held (about $0.0065): a second would pass one cent.
+  await assert.rejects(h.voice.voiceToken({ session }), { statusCode: 409 });
+  await h.voice.voiceUsage({ tokenId: token.tokenId, seconds: 2 });
+  await h.voice.voiceToken({ session });
+  assert.equal(h.voice.status().limited, false);
+  // The short reply fits; an answer whose reading would pass the limit is not made, and says so.
+  const answer = await request(h, session, '오늘 한 일 알려줘');
+  assert.ok(answer.ack);
+  const entry = await masterEntry(h, /세 가지입니다/);
+  await until(() => h.speakOf(entry.id)?.state === 'unspoken');
+  assert.equal(h.labs.speeches.filter(item => item.body.text === long).length, 0);
+  assert.ok(h.voice.status().today.dollars <= 0.01);
+});
+
+test('what the owner said is a request like a typed one, answered first with a recorded reply that is made once', async t => {
+  const h = await harness(t, { steps: [[say('작업 두 개입니다.\n\n- a\n- b')], [say('두 번째 답')]] });
+  const session = on(h);
+  assert.deepEqual(await request(h, session, '감사합니다.'), { ignored: true }, 'known phantom transcripts are noise');
+  assert.deepEqual(await request(h, session, '(음악)'), { ignored: true });
+  const first = await request(h, session, '지금 작업 중인 세션 알려줘');
+  assert.ok(first.ack && (VOICE_ACKS as readonly string[]).includes(first.ack.text));
+  assert.match(first.ack.audio, /^\/api\/master\/voice\/audio\/clip-[a-f0-9]{64}$/);
+  assert.equal(first.ack.session, digestOf(session));
+  const owner = h.room.recent(20).find(entry => entry.data.kind === 'owner');
+  assert.deepEqual(owner?.data, { kind: 'owner', text: '지금 작업 중인 세션 알려줘', clientId: TAB });
+  const item = h.journal.inbox.find(input => input.voice);
+  assert.equal(item?.voice?.session, digestOf(session));
+  assert.equal(item?.viewContext?.tabId, TAB, 'screen commands go to the tab where voice is on');
+  await masterEntry(h, /두 개입니다/);
+  const made = h.labs.speeches.length;
+  // The same short reply again is played from its recording.
+  for (let index = 0; index < 6; index++) await request(h, session, `요청 ${index}`);
+  const clips = await readdir(join(h.dir, 'voice-clips'));
+  assert.ok(clips.length <= VOICE_ACKS.length);
+  assert.ok(h.labs.speeches.length - made <= VOICE_ACKS.length, 'each reply is made once');
+  assert.equal(h.labs.speeches[0].body.model_id, 'eleven_v3_conversational');
+  assert.equal(h.labs.speeches[0].body.language_code, 'ko');
+  assert.equal(isNoise('네 알겠어요'), false);
+});
+
+test('an answer to a spoken request is read aloud where voice is on and marked played; with nobody to hear it, it is marked so', async t => {
+  const h = await harness(t, { steps: [[say('작업 두 개입니다.\n\n자세한 목록은 화면에.')], [say('보고 A 끝.')], [say('보고 B 끝.')]] });
+  const session = on(h);
+  await request(h, session, '최근 작업 알려줘');
   const answer = await masterEntry(h, /두 개입니다/);
-  await until(() => h.speakOf(answer.id)?.state === 'delivered');
-  await until(() => h.script.requests.length === 2);
-  assert.equal(h.script.requests[1].input.at(-1)!.content, '타이핑한 요청');
-  assert.doesNotMatch(String(h.script.requests[1].input[0].content), /voice call/);
-  const typed = await masterEntry(h, /타이핑한 요청의 답/);
-  assert.equal(h.speakOf(typed.id), undefined, 'a typed request is answered on screen only');
-  // Words after the delegation belong to the next request; a delegation with none and nothing open asks again.
-  said(h, live.session, '고마워', 2_600);
-  delegated(h, live.session, 'del_3', 3_000);
-  await until(() => h.journal.inbox.filter(item => item.voice).length === 2);
-  assert.equal(h.journal.inbox.filter(item => item.voice)[1].text, '고마워');
-  await until(() => h.journal.inbox.filter(item => item.voice)[1].state === 'answered');
-  delegated(h, live.session, 'del_4', 3_500);
-  const asked = await until(() => live.received().find(command => command.delegation_id === 'del_4'));
-  assert.equal(asked.type, 'session.commentary.append');
-  assert.equal(asked.content, VOICE_PHRASES.askAgain);
-});
-
-test('what is said is shown hidden as a whole: a card\'s value said across a pause never appears, not even in the request', async t => {
-  const VALUE = 'Qx7-value-for-card-99';
-  const h = await harness(t, { steps: [[say('받았습니다.')], [say('확인했습니다.')]] });
-  const card = h.room.add({ kind: 'card', card: { type: 'secret', purpose: '배포 토큰', state: 'waiting' } });
-  await h.service.card(card.id, { value: VALUE }, true);
-  await masterEntry(h, /받았습니다/);
-  const live = await startCall(h);
-  said(h, live.session, '토큰은 Qx7-value', 100);
-  await sleep(1_400);
-  said(h, live.session, '-for-card-99 입니다', 2_600);
-  delegated(h, live.session, 'del_1', 3_000);
-  const request = await until(() => h.journal.inbox.find(item => item.voice));
-  assert.match(request.text, /^토큰은 \{\{secret:[a-f0-9]{16}\}\} 입니다$/);
-  await masterEntry(h, /확인했습니다/);
-  await sleep(400);
-  await h.voice.voiceStop({ attemptId: live.attemptId, reason: 'owner' });
-  const shown = JSON.stringify(h.room.recent(100)) + JSON.stringify(h.events) + JSON.stringify(h.script.requests);
-  for (const piece of ['Qx7-v', 'card-99', VALUE]) assert.ok(!shown.includes(piece), `no piece of the value: ${piece}`);
-  const lines = h.room.recent(100).flatMap(entry => entry.data.kind === 'owner' && entry.data.voice ? [entry.data.text] : []);
-  assert.equal(lines.length, 2, 'the pause started a new line');
-  assert.equal(lines[0], '토큰은');
-  assert.match(lines[1], /^\{\{secret:[a-f0-9]{16}\}\} 입니다$/);
-  assert.ok(!JSON.stringify(live.received()).includes('card-99'));
-});
-
-test('news is told from its conversation entry: sent, then delivered unless the call ends at once; not taken in is tried three times', async t => {
-  let ready!: () => void;
-  const callReady = new Promise<void>(resolve => { ready = resolve; });
-  const h = await harness(t, { timing: { deliveredMs: 1_000 }, steps: [async () => { await callReady; return [say('작업 A가 끝났습니다.\n\n자세한 내용은 화면에.')]; }], prepare: (_room, journal) => {
-    journal.inbox.push({ id: randomUUID(), kind: 'event', text: 'Delegated work ended: "A" — completed.', local: false, at: new Date().toISOString(), state: 'queued', retries: 0 });
-  } });
-  h.live.ack = 'error';
-  const first = await startCall(h);
-  ready();
-  const news = await masterEntry(h, /작업 A가 끝났습니다/);
-  await until(() => h.speakOf(news.id)?.tries === 1 && h.speakOf(news.id)?.state === 'pending');
-  const tried = first.received().find(command => command.type === 'session.commentary.append');
-  assert.equal(tried?.delegation_id, null, 'news of other work is told without a delegation');
-  assert.equal(tried?.content, '작업 A가 끝났습니다.');
-  h.live.ack = 'ok';
-  await h.voice.deliver();
-  assert.equal(h.speakOf(news.id)?.state, 'sent');
-  await h.voice.voiceStop({ attemptId: first.attemptId, reason: 'owner' });
-  assert.deepEqual(h.speakOf(news.id), { state: 'pending', tries: 2 }, 'a call cut off right after may not have told it');
-  h.live.ack = 'error';
-  await startCall(h);
-  await until(() => h.speakOf(news.id)?.state === 'undelivered');
-  assert.equal(h.speakOf(news.id)?.tries, 3);
-});
-
-test('a call that ended on silence is woken once by news while its page is open; a failed wake stops waking', async t => {
-  const h = await harness(t, { steps: [[say('A 끝.')], [say('B 끝.')], [say('C 끝.')]] });
+  const reading = await until(() => h.says().find(item => item.kind === 'answer'));
+  assert.equal(reading.text, '작업 두 개입니다.', 'the first paragraph');
+  assert.equal(h.speakOf(answer.id)?.state, 'playing');
+  assert.equal(h.voice.voicePlayed({ session, id: reading.id, result: 'played' }), true);
+  await until(() => h.speakOf(answer.id)?.state === 'played');
+  // A report of finished work is read when reports are read.
   await h.queueEvent('A ended');
-  const quiet = await masterEntry(h, /A 끝/);
-  assert.equal(h.speakOf(quiet.id), undefined, 'without a call or one that went quiet, nothing is marked to tell');
-  const first = await startCall(h);
-  await h.voice.voiceStop({ attemptId: first.attemptId, reason: 'silence' });
-  assert.equal(h.voice.status().reason, 'silence');
-  assert.equal(h.voice.status().wakeable, 0);
+  const report = await masterEntry(h, /보고 A/);
+  const reportSay = await until(() => h.says().find(item => item.kind === 'report'));
+  h.voice.voicePlayed({ session, id: reportSay.id, result: 'played' });
+  await until(() => h.speakOf(report.id)?.state === 'played');
+  // Voice turned off: news is shown only.
+  h.voice.voiceOff({ session });
   await h.queueEvent('B ended');
-  const news = await masterEntry(h, /B 끝/);
-  assert.deepEqual(h.speakOf(news.id), { state: 'pending', tries: 0 });
-  const status = h.voice.status();
-  assert.equal(status.wakeable, 1);
-  assert.equal(status.tab, digestOf(TAB));
-  await assert.rejects(startCall(h, { wake: true, tab: randomUUID() }), { statusCode: 409 }, 'only the tab that went quiet');
-  const woken = await startCall(h, { wake: true });
-  assert.equal(h.speakOf(news.id)?.woke, true);
-  await until(() => woken.received().some(command => command.type === 'session.instructions.append'));
-  const told = woken.received().filter(command => command.type !== 'session.close');
-  assert.deepEqual(told.map(command => [command.type, command.content]), [['session.commentary.append', 'B 끝.'], ['session.instructions.append', VOICE_PHRASES.tellFirst]]);
-  await h.voice.voiceStop({ attemptId: woken.attemptId, reason: 'silence' });
-  await h.queueEvent('C ended');
-  await masterEntry(h, /C 끝/);
-  assert.equal(h.voice.status().wakeable, 1);
-  h.live.createStatus = 400;
-  await assert.rejects(startCall(h, { wake: true }), { statusCode: 409 });
-  assert.equal(h.voice.status().wakeable, 0, 'a wake that failed stops waking until the owner starts a call');
-  await assert.rejects(startCall(h, { wake: true }), { statusCode: 409 });
+  const quiet = await masterEntry(h, /보고 B/);
+  assert.equal(h.speakOf(quiet.id), undefined);
+  await until(() => h.labs.deletes.length >= 2);
+  assert.ok(h.labs.deletes.every(id => /^h\d+$/.test(id)), 'what ElevenLabs kept of a reading is removed');
 });
 
-test('an irreversible change asked by voice is said first, and goes only if it was heard through and the owner said nothing until it went out', async t => {
+test('audio streams to the page as it is made; cut-off audio cuts the page off, and a page gone leaves nothing waiting', async t => {
+  const h = await harness(t, { steps: [[say('답 하나.')], [say('답 둘.')], [say('답 셋.')]] });
+  const { fetchAudio, port: audioPort } = await audioServer(t, h.voice);
+  const session = on(h);
+  h.labs.gapMs = 200;
+  await request(h, session, '하나');
+  const first = await until(() => h.says().find(item => item.kind === 'answer'));
+  const id = first.audio.split('/').at(-1)!;
+  const whole = await fetchAudio(id);
+  assert.equal(whole.status, 200);
+  assert.equal(whole.body.toString(), 'ID3-first-second-part');
+  assert.ok(whole.complete);
+  h.voice.voicePlayed({ session, id: first.id, result: 'played' });
+  // Failed after its first part: the page's connection is cut, never cleanly ended.
+  h.labs.mode = 'cut';
+  await request(h, session, '두 번째');
+  const second = await until(() => h.says().filter(item => item.kind === 'answer')[1]);
+  const cut = await fetchAudio(second.audio.split('/').at(-1)!);
+  assert.equal(cut.complete, false);
+  assert.equal(cut.body.toString(), 'ID3-first-');
+  assert.equal(h.voice.listeners(second.audio.split('/').at(-1)!), 0);
+  // A slow page that stops reading and then goes away leaves nothing waiting.
+  h.labs.mode = 'ok';
+  h.labs.chunks = [Buffer.alloc(900_000, 1), Buffer.alloc(900_000, 2)];
+  h.voice.voicePlayed({ session, id: second.id, result: 'played' });
+  await request(h, session, '세 번째');
+  const third = await until(() => h.says().filter(item => item.kind === 'answer')[2]);
+  const thirdId = third.audio.split('/').at(-1)!;
+  await new Promise<void>(resolve => {
+    const req = httpRequest({ host: '127.0.0.1', port: (audioPort), path: `/${thirdId}` }, res => { res.pause(); setTimeout(() => { req.destroy(); resolve(); }, 300); });
+    req.end();
+  });
+  await until(() => h.voice.listeners(thirdId) === 0, 3_000);
+  assert.equal((await fetchAudio(randomUUID())).status, 404);
+  assert.equal((await fetchAudio(`clip-${'0'.repeat(64)}`)).status, 404);
+});
+
+test('an irreversible change asked by voice is read first, and goes only if the whole sentence played, nobody objected, and the page said so afterwards', async t => {
   const closeSession = (id: string) => [call('tower_api', { method: 'POST', path: `/api/sessions/${id}/close` })];
-  const h = await harness(t, { steps: [closeSession('s1'), [say('닫았습니다.')], closeSession('s2'), closeSession('s3')] });
+  const h = await harness(t, { steps: [closeSession('s1'), [say('닫았습니다.')], closeSession('s2'), closeSession('s3'), closeSession('s4')] });
   const closes = () => h.seen.filter(seen => seen.path.endsWith('/close')).map(seen => seen.path);
-  const notices = () => h.events.flatMap(event => event.type === 'notice' ? [event.notice] : []);
-  const live = await startCall(h);
-  h.voice.voiceActivity({ attemptId: live.attemptId, speaking: false, playing: false });
-  said(h, live.session, 's1 세션 닫아', 100);
-  delegated(h, live.session, 'del_1', 1_000);
+  const notices = () => h.says().filter(item => item.kind === 'notice');
+  const session = on(h);
+  autoPlay(h, session);
+  await request(h, session, 's1 닫아');
   const notice = await until(() => notices()[0]);
-  assert.equal(notice.attempt, digestOf(live.attemptId), 'said by the page of this call');
   assert.match(notice.text, /세션을 닫습니다/);
-  assert.deepEqual(closes(), [], 'nothing goes before the notice was heard');
-  assert.equal(h.voice.voiceNotice({ noticeId: notice.id, result: 'played' }), true);
-  await sleep(150);
-  assert.deepEqual(closes(), [], 'a report from before the notice may have missed the owner speaking');
-  h.voice.voiceActivity({ attemptId: live.attemptId, speaking: false, playing: false });
+  assert.deepEqual(closes(), []);
+  h.voice.voicePlayed({ session, id: notice.id, result: 'played' });
+  await sleep(100);
+  assert.deepEqual(closes(), [], 'a report from before the notice played does not count');
+  h.voice.voiceActivity({ session, speaking: false });
   await until(() => closes().length === 1);
   await masterEntry(h, /닫았습니다/);
 
-  // Talked over while it was said: not sent, and the turn ends with why.
-  said(h, live.session, 's2도 닫아', 3_000);
-  delegated(h, live.session, 'del_2', 4_000);
+  // Talked over (or cancelled) in the moment after: not sent.
+  await request(h, session, 's2 닫아');
   const second = await until(() => notices()[1]);
-  h.voice.voiceNotice({ noticeId: second.id, result: 'interrupted' });
-  await masterEntry(h, /소유자가 말해서 보내지 않았습니다/);
+  h.voice.voicePlayed({ session, id: second.id, result: 'interrupted' });
+  await masterEntry(h, /취소해서 보내지 않았습니다/);
 
-  // Spoken over after it began (the page heard the owner), though it played to the end: not sent either.
-  said(h, live.session, 's3도', 6_000);
-  delegated(h, live.session, 'del_3', 7_000);
+  // Cut off while it was being made: not a notice, so not sent, even if the page says it played.
+  h.labs.mode = 'cut';
+  await request(h, session, 's3 닫아');
   const third = await until(() => notices()[2]);
-  h.voice.voiceActivity({ attemptId: live.attemptId, speaking: true, playing: false });
-  h.voice.voiceNotice({ noticeId: third.id, result: 'played' });
-  await until(() => h.room.recent(100).filter(entry => entry.data.kind === 'master' && /보내지 않았습니다/.test(entry.data.text)).length === 2);
+  await sleep(100);
+  h.voice.voicePlayed({ session, id: third.id, result: 'played' });
+  await masterEntry(h, /들려 드리지 못해/);
+  h.labs.mode = 'ok';
+
+  // Not listening: nobody could object, so it is not sent.
+  h.voice.voicePresence({ session, listening: false, panelOpen: true });
+  await request(h, session, 's4 닫아');
+  await masterEntry(h, /듣는 중이 아니라/);
   assert.deepEqual(closes(), ['/api/sessions/s1/close']);
-  assert.equal(h.script.requests.length, 4, 'a refused change ends the turn without asking the model again');
 });
 
-test('after a web restart an announced change waits for the page\'s next word; speech in the gap, no call, or no word keeps it unsent, for work a spoken request started too', async t => {
-  const closeSession = (id: string) => [call('tower_api', { method: 'POST', path: `/api/sessions/${id}/close` })];
-  const now = () => new Date().toISOString();
-  const h = await harness(t, {
-    tower: seen => {
-      if (seen.path === '/api/sessions' && seen.method === 'POST') return { body: { session: { id: 's9' }, run: { id: 'r9', sessionId: 's9' } } };
-      if (seen.path === '/api/snapshot') return { body: { sessions: [], runs: [{ id: 'r9', sessionId: 's9', status: 'completed', prompt: '빌드 고쳐', createdAt: new Date(Date.now() - 1_000).toISOString(), finishedAt: now() }] } };
-      if (seen.path.startsWith('/api/sessions/s9?')) return { body: { session: { id: 's9', updatedAt: new Date(Date.now() + 1_000).toISOString() }, messages: [{ role: 'user', text: '빌드 고쳐', timestamp: now() }, { role: 'assistant', text: '고쳤습니다.', timestamp: now() }], hasMore: false } };
-      return { body: {} };
-    },
-    steps: [closeSession('s4'), closeSession('s5'), [say('보냈습니다.')], [call('tower_api', { method: 'POST', path: '/api/sessions', body: { cwd: '/tmp/project', prompt: '빌드 고쳐' } })], [say('맡겼습니다.')], closeSession('s6')],
-  });
-  const closes = () => h.seen.filter(seen => seen.path.endsWith('/close')).map(seen => seen.path);
-  const notices = () => h.events.flatMap(event => event.type === 'notice' ? [event.notice] : []);
-  const live = await startCall(h);
-  h.voice.voiceActivity({ attemptId: live.attemptId, speaking: false, playing: false });
+test('voice records from GPT-Live calls become dollars once, counted and not yet counted, and settings keep everything but their old voice keys', async t => {
+  const now = Date.now();
+  const today = new Date(now);
+  const day = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+  const old = { attempts: [
+    { folded: true, createdAt: now - 60_000, usage: { seconds: 40, final: true } },
+    { createdAt: now - 60_000, answered: true, readyAt: now - 50_000, usage: { seconds: 20, final: true } },
+    { createdAt: now - 60_000, unbilled: true, usage: { seconds: 0 } },
+    { createdAt: now - 60_000, answered: false, usage: { seconds: 0 } },
+    { createdAt: now - 60_000, answered: true, readyAt: now - 60_000, closedAt: now - 30_000, usage: { seconds: 10, observedAt: now - 40_000 } },
+  ], days: { [day]: 40 }, silence: null };
+  const once = migrate(old, now);
+  // 40 folded + 20 final + 0 unbilled + 15 never reached the page + (10 + 10 since its last report).
+  assert.equal(Math.round(once.days[day].dollars / (0.05 / 60)), 40 + 20 + 15 + 20);
+  assert.deepEqual(migrate(JSON.parse(JSON.stringify(once)), now + 3_600_000), once, 'read again, nothing is added');
 
-  // A new web took over after the notice began: the page's next report says the owner spoke meanwhile.
-  said(h, live.session, 's4 닫아', 100);
-  delegated(h, live.session, 'del_1', 1_000);
-  const first = await until(() => notices()[0]);
-  h.tower.setCredentials({ port: h.towerPort, token: 'c'.repeat(64), callerSecret: SECRET });
-  h.voice.voiceNotice({ noticeId: first.id, result: 'played' });
-  await sleep(100);
-  assert.deepEqual(closes(), [], 'waiting for the page\'s word after the new web');
-  h.voice.voiceActivity({ attemptId: live.attemptId, speaking: false, playing: false, sinceSpeechMs: 30 });
-  await masterEntry(h, /보내지 않았습니다/);
-  assert.deepEqual(closes(), []);
-
-  // The same, and the page's next word says nobody spoke: it goes.
-  said(h, live.session, 's5 닫아', 3_000);
-  delegated(h, live.session, 'del_2', 4_000);
-  const second = await until(() => notices()[1]);
-  h.tower.setCredentials({ port: h.towerPort, token: 'd'.repeat(64), callerSecret: SECRET });
-  h.voice.voiceNotice({ noticeId: second.id, result: 'played' });
-  await sleep(100);
-  h.voice.voiceActivity({ attemptId: live.attemptId, speaking: false, playing: false });
-  await until(() => closes().length === 1);
-  await masterEntry(h, /보냈습니다/);
-
-  // Work a spoken request started reports back with its origin; with no call to say it on, its change does not go.
-  said(h, live.session, '빌드 고쳐', 6_000);
-  delegated(h, live.session, 'del_3', 7_000);
-  await masterEntry(h, /맡겼습니다/);
-  assert.equal(h.journal.tasks[0]?.voice?.attempt, digestOf(live.attemptId));
-  await h.voice.voiceStop({ attemptId: live.attemptId, reason: 'owner' });
-  const report = await until(() => h.journal.inbox.find(item => item.kind === 'event'), 5_000);
-  assert.equal(report.voice?.attempt, digestOf(live.attemptId));
-  await masterEntry(h, /음성으로 먼저 알릴 수 없어/);
-  assert.deepEqual(closes(), ['/api/sessions/s5/close']);
-  assert.equal(notices().length, 2);
-});
-
-test('voice time counts what GPT-Live reports, at least fifteen seconds a call, spread over days; calls never confirmed ended keep counting, and a daily limit stops new calls', async t => {
-  const h = await harness(t, { settings: { voice: { dailyMinutes: 1 } } });
-  const first = await startCall(h);
-  h.live.emit(first.session, { type: 'session.usage.updated', usage: { seconds: 30 } });
-  await until(() => h.voice.status().today.seconds === 30);
-  h.live.closeUsage = 40;
-  await h.voice.voiceStop({ attemptId: first.attemptId, reason: 'owner' });
-  assert.equal(h.voice.status().today.seconds, 40);
-  h.live.closeUsage = 5;
-  const second = await startCall(h);
-  await h.voice.voiceStop({ attemptId: second.attemptId, reason: 'owner' });
-  assert.equal(h.voice.status().today.seconds, 55, 'a short call is billed fifteen seconds');
-  assert.equal(h.voice.status().today.dollars, 0.05);
-  await assert.rejects(startCall(h), { statusCode: 409 }, 'fifteen more would pass the minute');
-  assert.equal(h.live.creates.length, 2);
-
-  await h.settings.update({ voice: { dailyMinutes: 0 } });
-  const third = await startCall(h);
-  h.live.emit(third.session, { type: 'session.usage.updated', usage: { seconds: 16 } });
-  await until(() => h.voice.status().today.seconds === 71);
-  h.live.closeAnswer = false;
-  await h.voice.voiceStop({ attemptId: third.attemptId, reason: 'owner' });
-  assert.equal(h.voice.status().phase, 'unconfirmed');
-  const before = h.voice.status().today.seconds;
-  await sleep(1_100);
-  assert.ok(h.voice.status().today.seconds > before, 'a call not known to be over keeps counting');
-  // Checked later: GPT-Live no longer knows it, so it ended; its time stops there.
-  h.live.attachStatus = 404;
-  await h.voice.probe();
-  assert.equal(h.voice.status().phase, 'closed');
-  const fixed = h.voice.status().today.seconds;
-  await sleep(1_100);
-  assert.equal(h.voice.status().today.seconds, fixed);
-
-  const days: Record<string, number> = {};
-  const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
-  const yesterday = new Date(midnight.getTime() - 1);
-  spread(days, 100, midnight.getTime() - 25_000, midnight.getTime() + 75_000);
-  const day = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-  assert.deepEqual(days, { [day(yesterday)]: 25, [day(midnight)]: 75 });
+  const h = await harness(t, { prepare: async dir => {
+    await writeFile(join(dir, 'voice.json'), JSON.stringify(old));
+    await writeFile(join(dir, 'settings.json'), JSON.stringify({ enabled: true, model: 'gpt-6-sol', effort: 'high', showResults: false, guards: { hideSecrets: true, localOnlyPages: true, eventTurnsReadOnly: true, readOnlyNodes: [], maxIrreversiblePerTurn: 3 }, voice: { voice: 'marin', silenceSeconds: 15, dailyMinutes: 30, autoWake: true } }));
+  } });
+  const restarted = new MasterSettingsStore(h.dir);
+  await restarted.start();
+  const settings = restarted.current();
+  assert.equal(settings.model, 'gpt-6-sol');
+  assert.equal(settings.guards.maxIrreversiblePerTurn, 3);
+  assert.equal(settings.voice.model, 'eleven_v3_conversational');
+  assert.equal(h.voice.status().today.dollars, Math.round(95 * (0.05 / 60) * 100) / 100);
+  const saved = JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8')) as Record<string, unknown>;
+  assert.equal(saved.version, 6);
+  assert.equal(saved.attempts, undefined);
 });
 
 test('the text master keeps roles apart: only Tower speaks as developer, the conversation keeps its roles, and everything else is marked data', async t => {
-  const h = await harness(t, { steps: [[say('답')]], prepare: room => {
+  const h = await harness(t, { steps: [[say('답')]], prepare: (_dir, room) => {
     room.add({ kind: 'owner', text: '이전 질문' });
     room.add({ kind: 'master', text: '이전 답', turnId: 'turn-0', final: true });
     room.add({ kind: 'action', turnId: 'turn-0', method: 'GET', path: '/api/runs', state: 'succeeded', write: false });
@@ -513,159 +399,3 @@ test('the text master keeps roles apart: only Tower speaks as developer, the con
   ]);
 });
 
-test('ending a call stops a change waiting on it at once, even while the host is still closing it; news taken in as it ends is told again', async t => {
-  const h = await harness(t, { timing: { closeWaitMs: 1_500, deliveredMs: 150 }, steps: [[call('tower_api', { method: 'POST', path: '/api/sessions/s7/close' })], [say('다음 답')]] });
-  const closes = () => h.seen.filter(seen => seen.path.endsWith('/close'));
-  const live = await startCall(h);
-  h.voice.voiceActivity({ attemptId: live.attemptId, speaking: false, playing: false });
-  said(h, live.session, 's7 닫아', 100);
-  delegated(h, live.session, 'del_1', 1_000);
-  const notice = await until(() => h.events.flatMap(event => event.type === 'notice' ? [event.notice] : [])[0]);
-  // A new web: the change waits for the page's next word, and the owner ends the call meanwhile.
-  h.tower.setCredentials({ port: h.towerPort, token: 'e'.repeat(64), callerSecret: SECRET });
-  h.voice.voiceNotice({ noticeId: notice.id, result: 'played' });
-  h.live.closeAnswer = false;
-  const stopping = h.voice.voiceStop({ attemptId: live.attemptId, reason: 'owner' });
-  await masterEntry(h, /보내지 않았습니다/);
-  assert.equal(closes().length, 0);
-  await stopping;
-
-  // News taken in just before the call began to end, whose end GPT-Live confirms late, is not counted as told.
-  h.live.closeAnswer = true;
-  h.live.closeDelayMs = 600;
-  const second = await startCall(h);
-  await h.queueEvent('D ended');
-  const news = await masterEntry(h, /다음 답/);
-  await until(() => h.speakOf(news.id)?.state === 'sent');
-  const ending = h.voice.voiceStop({ attemptId: second.attemptId, reason: 'owner' });
-  await sleep(300);
-  assert.deepEqual(h.speakOf(news.id), { state: 'pending', tries: 1 });
-  await ending;
-  assert.deepEqual(h.speakOf(news.id), { state: 'pending', tries: 1 });
-});
-
-test('the day\'s voice time survives many calls and counts the fifteen seconds once; a call that may still run keeps counting until it is confirmed or its end passes', async t => {
-  const h = await harness(t);
-  for (let index = 0; index < 101; index++) {
-    const live = await startCall(h);
-    await h.voice.voiceStop({ attemptId: live.attemptId, reason: 'owner' });
-  }
-  assert.equal(h.voice.status().today.seconds, 101 * 20, 'more calls than are kept one by one still count');
-  const kept = JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8')) as { attempts: unknown[] };
-  assert.ok(kept.attempts.length <= 100);
-
-  let base = h.voice.status().today.seconds;
-  const short = await startCall(h);
-  h.live.emit(short.session, { type: 'session.usage.updated', usage: { seconds: 5 } });
-  await sleep(1_050);
-  assert.equal(h.voice.status().today.seconds - base, 15, 'five seconds used and one more since: still the fifteen billed');
-  h.live.closeUsage = 5;
-  await h.voice.voiceStop({ attemptId: short.attemptId, reason: 'owner' });
-  assert.equal(h.voice.status().today.seconds - base, 15);
-
-  // The answer to making a call was lost: the page never got it, so the call never ran and costs its fifteen seconds.
-  base = h.voice.status().today.seconds;
-  h.live.createStatus = 500;
-  await assert.rejects(startCall(h), { statusCode: 502 });
-  h.live.createStatus = 201;
-  assert.equal(h.voice.status().phase, 'closed');
-  assert.equal(h.voice.status().today.seconds - base, 15);
-
-  // A call that reached the page and whose end GPT-Live never confirmed may still run: it keeps counting.
-  base = h.voice.status().today.seconds;
-  const open = await startCall(h);
-  h.live.emit(open.session, { type: 'session.usage.updated', usage: { seconds: 20 } });
-  h.live.emit(open.session, { type: 'session.started', session: { id: open.session, expires_at: Math.floor(Date.now() / 1000) + 3 } });
-  await until(() => h.voice.status().today.seconds - base === 20);
-  h.live.closeAnswer = false;
-  await h.voice.voiceStop({ attemptId: open.attemptId, reason: 'owner' });
-  assert.equal(h.voice.status().phase, 'unconfirmed');
-  h.live.attachStatus = 503;
-  await h.voice.probe();
-  assert.equal(h.voice.status().phase, 'unconfirmed', 'not being able to check is not an end');
-  const before = h.voice.status().today.seconds;
-  await sleep(1_100);
-  assert.ok(h.voice.status().today.seconds > before, 'and it keeps counting');
-  await sleep(2_500);
-  await h.voice.probe();
-  assert.equal(h.voice.status().phase, 'closed', 'past the end GPT-Live gave it');
-  const fixed = h.voice.status().today.seconds;
-  await sleep(1_100);
-  assert.equal(h.voice.status().today.seconds, fixed);
-  assert.ok(fixed - base >= 22 && fixed - base <= 25, `counted up to its end (${fixed - base} s)`);
-});
-
-test('a start called off while it waits its turn makes nothing, even while the call before it is being closed', async t => {
-  const h = await harness(t, { timing: { closeWaitMs: 1_500 } });
-  const first = await startCall(h);
-  h.live.closeDelayMs = 400;
-  const attemptId = randomUUID();
-  const starting = h.voice.voiceStart({ attemptId, sdp: 'v=0 offer', tabId: randomUUID(), local: true, wake: false });
-  await sleep(100);
-  assert.equal(await h.voice.voiceStop({ attemptId, reason: 'owner' }), true);
-  await assert.rejects(starting, { statusCode: 409 });
-  assert.equal(h.live.creates.length, 1, 'no second call was made');
-  assert.equal(h.voice.busy(), false);
-  assert.ok(h.live.log.includes(`close ${first.session}`), 'the call it was taking over was already ending');
-  assert.equal(h.voice.status().today.seconds, 20);
-});
-
-test('news waiting to be told is found however much the conversation grew, and after the host restarts', async t => {
-  const h = await harness(t, { steps: [[say('E 끝.')]] });
-  const first = await startCall(h);
-  await h.voice.voiceStop({ attemptId: first.attemptId, reason: 'silence' });
-  await h.queueEvent('E ended');
-  const news = await masterEntry(h, /E 끝/);
-  for (let index = 0; index < 1_100; index++) h.room.add({ kind: 'event', text: `기록 ${index}` });
-  assert.equal(h.voice.status().wakeable, 1);
-  // A host that stopped while it was being told tells it again.
-  h.live.ack = 'none';
-  const woken = await startCall(h, { wake: true });
-  await until(() => woken.received().some(command => command.type === 'session.commentary.append'));
-  h.room.update(news.id, { ...(h.room.get(news.id)!.data as Extract<MasterEntry['data'], { kind: 'master' }>), speak: { state: 'sent', tries: 0, woke: true } });
-  await h.voice.close();
-  await h.room.flush();
-  // A new host reads the conversation from disk; the news sits in a part it does not read by itself.
-  const restart = async () => {
-    const room = new MasterRoom(h.dir);
-    await room.start();
-    assert.equal(room.get(news.id), undefined);
-    const voice = new MasterVoice({ dataDir: h.dir, settings: h.settings, room, hooks: h.service.voiceHooks(), apiBase: h.live.base, socketBase: h.live.base.replace('http', 'ws'), timing: FAST });
-    await voice.start();
-    return { room, voice };
-  };
-  const again = await restart();
-  assert.deepEqual(speakOfIn(again.room, news.id), { state: 'pending', tries: 1, woke: true });
-  assert.equal(again.voice.status().pending, 1);
-  await again.voice.close();
-  await again.room.flush();
-  // Records from before the list existed: rebuilt from what the conversation holds.
-  const saved = JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8')) as Record<string, unknown>;
-  delete saved.speaking;
-  await writeFile(join(h.dir, 'voice.json'), JSON.stringify(saved));
-  const older = new MasterRoom(h.dir);
-  await older.start();
-  const rebuilt = new MasterVoice({ dataDir: h.dir, settings: h.settings, room: older, hooks: h.service.voiceHooks(), apiBase: h.live.base, socketBase: h.live.base.replace('http', 'ws'), timing: FAST });
-  await rebuilt.start();
-  assert.equal(rebuilt.status().pending, 1);
-  await rebuilt.close();
-  await older.flush();
-});
-
-test('a call that reached the page and was never confirmed ended keeps counting without a known end, even with no key to check it', async t => {
-  const h = await harness(t);
-  const open = await startCall(h);
-  h.live.emit(open.session, { type: 'session.usage.updated', usage: { seconds: 20 } });
-  await until(() => h.voice.status().today.seconds === 20);
-  h.live.closeAnswer = false;
-  await h.voice.voiceStop({ attemptId: open.attemptId, reason: 'owner' });
-  assert.equal(h.voice.status().phase, 'unconfirmed');
-  await h.settings.update({ apiKey: null });
-  // Long past what any rule of thumb would allow: without GPT-Live's word it is not over.
-  (h.voice as unknown as { file: { attempts: Array<{ createdAt: number }> } }).file.attempts.at(-1)!.createdAt -= 3 * 3_600_000;
-  await h.voice.probe();
-  assert.equal(h.voice.status().phase, 'unconfirmed');
-  const before = h.voice.status().today.seconds;
-  await sleep(1_100);
-  assert.ok(h.voice.status().today.seconds > before);
-});

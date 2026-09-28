@@ -13,6 +13,7 @@ import { MasterRoom } from './room.js';
 import { MasterService } from './service.js';
 import { MasterSettingsStore } from './settings.js';
 import { TowerClient, type WebCredentials } from './tower-client.js';
+import { ElevenLabs, type ElevenLabsOptions } from './elevenlabs.js';
 import { MasterVoice, type VoiceTiming } from './voice.js';
 
 export const MASTER_PROTOCOL = 1;
@@ -29,7 +30,7 @@ export interface MasterHostOptions {
   taskPollMs?: number;
   onClosed?: () => void;
   /** Tests talk to fake GPT-Live servers, faster. */
-  voice?: { apiBase?: string; socketBase?: string; fetcher?: typeof fetch; timing?: Partial<VoiceTiming> };
+  voice?: { elevenLabs?: Omit<ElevenLabsOptions, 'key'>; timing?: Partial<VoiceTiming> };
 }
 
 const failure = (message: string, statusCode: number) => Object.assign(new Error(message), { statusCode });
@@ -63,7 +64,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       tower.setCredentials({ port: web.port!, token: web.token, callerSecret: web.callerSecret });
     }
   };
-  const busy = () => service!.busy() || Boolean(voice?.busy());
+  const busy = () => service!.busy();
   const dispatch = async (method: string, args: Record<string, unknown>) => {
     const master = service!;
     const speech = voice!;
@@ -99,11 +100,15 @@ export async function startMasterHost(options: MasterHostOptions) {
         speech.broadcast();
         return overview;
       }
-      case 'voiceStart': return speech.voiceStart({ attemptId: args.attemptId, sdp: args.sdp, tabId: args.tabId, wake: args.wake, local: args.local === true });
-      case 'voiceReady': return speech.voiceReady({ attemptId: args.attemptId });
-      case 'voiceStop': return speech.voiceStop({ attemptId: args.attemptId, reason: args.reason });
-      case 'voiceActivity': return speech.voiceActivity({ attemptId: args.attemptId, speaking: args.speaking, playing: args.playing, sinceSpeechMs: args.sinceSpeechMs, sincePlaybackMs: args.sincePlaybackMs });
-      case 'voiceNotice': return speech.voiceNotice({ noticeId: args.noticeId, result: args.result });
+      case 'voiceOn': return speech.voiceOn({ tabId: args.tabId, local: args.local === true });
+      case 'voiceOff': return speech.voiceOff({ session: args.session });
+      case 'voicePresence': return speech.voicePresence({ session: args.session, listening: args.listening, panelOpen: args.panelOpen });
+      case 'voiceToken': return speech.voiceToken({ session: args.session });
+      case 'voiceUsage': return speech.voiceUsage({ tokenId: args.tokenId, seconds: args.seconds });
+      case 'voiceRequest': return speech.voiceRequest({ session: args.session, clientMessageId: args.clientMessageId, text: args.text, local: args.local === true, ...(args.viewContext && typeof args.viewContext === 'object' ? { viewContext: viewContext(args.viewContext) } : {}) });
+      case 'voiceActivity': return speech.voiceActivity({ session: args.session, speaking: args.speaking, sinceSpeechMs: args.sinceSpeechMs });
+      case 'voicePlayed': return speech.voicePlayed({ session: args.session, id: args.id, result: args.result });
+      case 'voiceVoices': return speech.voiceVoices();
       case 'shutdown': {
         if (busy()) return false;
         setImmediate(() => { void close(true); });
@@ -119,6 +124,9 @@ export async function startMasterHost(options: MasterHostOptions) {
     if (closing || !service || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) { res.writeHead(403); res.end(); return; }
     const url = new URL(req.url ?? '/', 'http://master.invalid');
     if (req.method === 'GET' && url.pathname === '/events') { lastRequest = Date.now(); events(res, url.searchParams.get('epoch') ?? '', Number(url.searchParams.get('after') ?? '-1')); return; }
+    // Audio read aloud, streamed to the page through the web as it is made.
+    const audio = /^\/audio\/((?:clip-[a-f0-9]{64})|[0-9a-f-]{36})$/.exec(url.pathname);
+    if (req.method === 'GET' && audio) { lastRequest = Date.now(); void voice!.serveAudio(audio[1], res).catch(() => { if (!res.headersSent) res.writeHead(500); res.destroy(); }); return; }
     if (req.method !== 'POST' || url.pathname !== '/rpc') { res.writeHead(404); res.end(); return; }
     pending++;
     const reply: MasterHostReply = { protocol: MASTER_PROTOCOL, stateDir: paths.stateDir, version: APP_VERSION };
@@ -133,7 +141,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       if (input.protocol !== MASTER_PROTOCOL || typeof input.method !== 'string') throw failure('Incompatible master request.', 409);
       credentials(input.web);
       // A web's heartbeat or version check is not use: an idle master may still exit while pages are open.
-      if (input.method !== 'hello' && input.method !== 'ping' && input.method !== 'voiceActivity') lastRequest = Date.now();
+      if (!['hello', 'ping', 'voiceActivity', 'voicePresence'].includes(input.method)) lastRequest = Date.now();
       reply.result = await dispatch(input.method, input.args && typeof input.args === 'object' ? input.args : {}) ?? null;
     } catch (error) {
       const value = error as { message?: string; statusCode?: number };
@@ -181,7 +189,8 @@ export async function startMasterHost(options: MasterHostOptions) {
     await room.start();
     await journal.start();
     service = new MasterService({ settings, room, journal, tower, live, readDb, model: options.model ?? openAiResponses(() => settings.key()), ...(options.taskPollMs ? { taskPollMs: options.taskPollMs } : {}) });
-    voice = new MasterVoice({ dataDir: paths.data, settings, room, hooks: service.voiceHooks(), ...options.voice });
+    const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), ...options.voice?.elevenLabs });
+    voice = new MasterVoice({ dataDir: paths.data, settings, room, hooks: service.voiceHooks(), elevenLabs, ...(options.voice?.timing ? { timing: options.voice.timing } : {}) });
     service.setVoice(voice);
     // The voice's records first: what the master answers from the start knows whether to be spoken.
     await voice.start();
