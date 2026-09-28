@@ -1,3 +1,4 @@
+import { towerInstructionsBlock } from '../sessions/parser.js';
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
@@ -15,6 +16,8 @@ type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutS
 export type CodexStdioResult = { status: 'completed' | 'error' | 'cancelled'; error?: string; finishedAt?: string };
 export interface CodexStdioOptions {
   mcpServers?: SessionMcpServers;
+  /** Tower's instructions for this turn, sent as a block of their own after the request (see towerInstructionsBlock). */
+  instructions?: string;
   executable: string;
   cwd: string;
   env?: NodeJS.ProcessEnv;
@@ -208,7 +211,9 @@ class StdioRun implements CodexStdioRun {
     this.submitted = true;
     const started = await this.request('turn/start', {
       threadId: id,
-      input: [{ type: 'text', text: this.options.prompt, text_elements: [] }, ...(this.options.imagePaths || []).map(path => ({ type: 'localImage', path }))],
+      input: [{ type: 'text', text: this.options.prompt, text_elements: [] },
+        ...(this.options.instructions ? [{ type: 'text', text: towerInstructionsBlock(this.options.instructions), text_elements: [] }] : []),
+        ...(this.options.imagePaths || []).map(path => ({ type: 'localImage', path }))],
       ...(this.options.effort ? { effort: this.options.effort } : {}),
     });
     if (this.result) return;

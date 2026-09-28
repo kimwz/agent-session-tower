@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path';
-import type { Run, RunInstructions, Session } from '../../shared/types.js';
+import type { Run, Session } from '../../shared/types.js';
 import { attachmentMetadata } from '../stores/attachments.js';
 import { validEffort, validModelId } from '../providers/models.js';
 import { PROVIDERS } from '../providers/discovery.js';
@@ -16,12 +16,6 @@ export interface CreatedSession {
   title?: string;
   /** Absent in records written before provenance existed; the worker fills it once at startup. */
   origin?: SessionOrigin;
-}
-
-export function isSavedInstructions(value: unknown): value is RunInstructions {
-  const instructions = value as Partial<RunInstructions> | null;
-  return !!instructions && typeof instructions === 'object' && typeof instructions.text === 'string' && instructions.text.length <= 48_000
-    && (instructions.required === undefined || typeof instructions.required === 'boolean');
 }
 
 export function isSavedRun(value: unknown): value is Run {

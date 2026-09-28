@@ -18,8 +18,8 @@ import { claudeInputTokens, contextCapacity, modelContextWindow, nativeContextOb
 import { defaultStateDir } from '../state-dir.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { findExecutable, providerDirectories, PROVIDERS } from '../providers/discovery.js';
-import { TOWER_INSTRUCTIONS_CLOSE, TOWER_INSTRUCTIONS_OPEN } from '../sessions/parser.js';
-import { isCreatedSession, isSavedInstructions, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
+import { towerInstructionsBlock } from '../sessions/parser.js';
+import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { automatedOrigin, ownerOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
@@ -91,14 +91,9 @@ export interface RunAdmission {
 
 const MAX_OUTPUT = 64_000;
 const MAX_INSTRUCTIONS = 48_000;
+/** Marks, in runs.json, a turn still to run whose instructions (kept only in memory) it cannot go without. */
+const NEEDS_INSTRUCTIONS = 'needsInstructions';
 const FIRST_TURN_NOTES_MS = 6_000;
-/**
- * A Codex turn's instructions ride at the end of its message, in a block the conversation view leaves out
- * (TOWER_INSTRUCTIONS in the parser). Developer instructions given on resume do not reliably reach the next request.
- */
-function withInstructions(prompt: string, instructions: RunInstructions | undefined): string {
-  return instructions ? `${prompt}\n\n${TOWER_INSTRUCTIONS_OPEN}\n${instructions.text}\n${TOWER_INSTRUCTIONS_CLOSE}` : prompt;
-}
 /** A run as anything outside the worker sees it: without its hidden instructions. */
 function shown(run: Run): Run { const { instructions: _hidden, ...rest } = run; return { ...rest }; }
 function checkedInstructions(value: RunInstructions): RunInstructions {
@@ -130,7 +125,6 @@ export class RunManager extends EventEmitter {
   private readonly options: RunnerOptions;
   private readonly stateFile: string;
   private readonly createdFile: string;
-  private readonly instructionsFile: string;
   private readonly attachments: AttachmentStore;
   private readonly createdSessions = new Map<string, CreatedSession>();
   private readonly runs = new Map<string, Run>();
@@ -147,7 +141,7 @@ export class RunManager extends EventEmitter {
   private notifyTimer?: ReturnType<typeof setTimeout>;
   private outputPersistTimer?: ReturnType<typeof setTimeout>;
   /** The last content each file holds. Updated only inside the write queue, after a successful write. */
-  private readonly saved: { runs?: string; created?: string; instructions?: string } = {};
+  private readonly saved: { runs?: string; created?: string } = {};
   private pumping = false;
   private automationLimit = Infinity;
   private launchGate?: (run: Run) => string | undefined;
@@ -162,7 +156,6 @@ export class RunManager extends EventEmitter {
     this.options = options;
     this.stateFile = join(options.stateDir ?? defaultStateDir(), 'runs.json');
     this.createdFile = join(options.stateDir ?? defaultStateDir(), 'created-sessions.json');
-    this.instructionsFile = join(options.stateDir ?? defaultStateDir(), 'run-instructions.json');
     this.attachments = new AttachmentStore(options.stateDir ?? defaultStateDir());
   }
 
@@ -270,13 +263,20 @@ export class RunManager extends EventEmitter {
         // A permission request belongs to a live process, never a restored run.
         delete run.approvals;
         delete run.instructions;
+        const needsInstructions = (value as unknown as Record<string, unknown>)[NEEDS_INSTRUCTIONS] === true;
+        delete (run as unknown as Record<string, unknown>)[NEEDS_INSTRUCTIONS];
         delete run.canSteer;
         delete run.backgroundWait;
         if (run.steering?.state === 'sending') run.steering.state = 'uncertain';
         const context = nativeContextObservation(run.contextUsage);
         if (context) run.contextUsage = context; else delete run.contextUsage;
-        // A continuation that has not started is only a time and the agent's own prompt; it waits again.
-        if (run.status === 'queued' && run.scheduled && Date.parse(run.scheduled.at) > Date.now() - SCHEDULE_GRACE_MS) run.output = scheduledOutput;
+        // A continuation that has not started is only a time and the agent's own prompt; it waits again, unless it needed
+        // instructions, which did not survive the restart.
+        if (run.status === 'queued' && run.scheduled && needsInstructions) {
+          run.status = 'cancelled';
+          run.error = 'Agent Session Tower restarted before this continuation, and it would have run without the instructions Tower gave its turn. It was not started; send an instruction to continue.';
+          run.finishedAt = new Date().toISOString();
+        } else if (run.status === 'queued' && run.scheduled && Date.parse(run.scheduled.at) > Date.now() - SCHEDULE_GRACE_MS) run.output = scheduledOutput;
         else if (run.status === 'running' || run.status === 'queued') {
           const missedSchedule = run.status === 'queued' && run.scheduled;
           run.status = run.status === 'running' ? 'error' : 'cancelled';
@@ -291,17 +291,6 @@ export class RunManager extends EventEmitter {
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    }
-    try {
-      const saved = await readPrivateJson(this.instructionsFile, 4_000_000);
-      if (Array.isArray(saved)) for (const entry of saved) {
-        const run = Array.isArray(entry) && typeof entry[0] === 'string' ? this.runs.get(entry[0]) : undefined;
-        if (run && !FINISHED.has(run.status) && isSavedInstructions(entry[1])) run.instructions = { text: entry[1].text, ...(entry[1].required ? { required: true } : {}) };
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      // Without any instructions to keep, the file is never created.
-      this.saved.instructions = '[]';
     }
     this.started = true;
     this.persist();
@@ -777,12 +766,14 @@ export class RunManager extends EventEmitter {
   private async launchBridge(run: Run, session: Session): Promise<boolean> {
     // The desktop app owns its tools; only turns that can do without Tower's tools are forwarded.
     const tools = this.runTools(run, session);
-    if (tools.required) return false;
+    if (tools.required || run.instructions?.required) return false;
     if (!this.options.openCodexBridge) return false;
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     let started = false;
     const bridge = await this.options.openCodexBridge({
-      threadId: session.nativeId, runId: run.id, prompt: withInstructions(attachmentPrompt(run.prompt, attachments), run.instructions),
+      // The desktop app shows every block it is sent: a turn goes there only without instructions it must have, and without
+      // its notes.
+      threadId: session.nativeId, runId: run.id, prompt: attachmentPrompt(run.prompt, attachments),
       ...(ownerOrigin(run.origin) ? { approvalsReviewer: 'auto_review' as const } : {}),
       ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
       ...(attachments.length ? { imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) } : {}),
@@ -863,7 +854,8 @@ export class RunManager extends EventEmitter {
       ...(approvalsReviewer ? { approvalsReviewer } : {}),
       ...(owner && !mcpServers?.tower_slack ? { approvalsReviewerPreferred: true } : {}),
       ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
-      prompt: withInstructions(attachmentPrompt(run.prompt, attachments), run.instructions),
+      prompt: attachmentPrompt(run.prompt, attachments),
+      ...(run.instructions ? { instructions: run.instructions.text } : {}),
       imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path),
       onSession: async id => {
         if (!UUID.test(id) || (!creating && id !== session.nativeId)) throw new Error('Codex returned a different or invalid conversation ID. No message was submitted.');
@@ -926,7 +918,6 @@ export class RunManager extends EventEmitter {
     const images = attachments.filter(item => isImageAttachment(item.metadata.mimeType));
     if (creating) await this.addFirstTurnNotes(run, session);
     const args = creating ? buildCreateArgs(session, run.model, run.effort) : buildResumeArgs(session, run.model, run.effort);
-    if (run.instructions) args.push('--append-system-prompt', run.instructions.text);
     const tools = this.runTools(run, session);
     const mcpServers = tools.servers;
     if (tools.towerTools) run.towerTools = tools.towerTools;
@@ -939,6 +930,8 @@ export class RunManager extends EventEmitter {
       type: 'user', session_id: session.nativeId, parent_tool_use_id: null,
       message: { role: 'user', content: [
         { type: 'text', text: prompt },
+        // A block of its own, not the system prompt: Claude keeps a conversation's first system prompt for every later turn.
+        ...(run.instructions ? [{ type: 'text', text: towerInstructionsBlock(run.instructions.text) }] : []),
         ...images.map(item => ({ type: 'image', source: { type: 'base64', media_type: item.metadata.mimeType, data: item.content.toString('base64') } })),
       ] },
     };
@@ -1351,16 +1344,16 @@ export class RunManager extends EventEmitter {
   private persist(): void {
     // This save includes any streamed output that was waiting for its slower cadence.
     this.cancelOutputPersist();
-    const data = JSON.stringify(this.list().map(({ approvals: _liveApprovals, canSteer: _liveSteering, ...run }) => run));
-    // Instructions of turns still to run live in their own file, which no older Tower reads: it could show them.
-    const instructions = JSON.stringify([...this.runs.values()].filter(run => run.instructions && !FINISHED.has(run.status)).map(run => [run.id, run.instructions]));
+    // Instruction text never reaches disk, where an older Tower could show it. A turn still to run records only that it
+    // needs instructions; after a restart it is cancelled rather than started without them.
+    const data = JSON.stringify(this.list().map(({ approvals: _liveApprovals, canSteer: _liveSteering, ...run }) =>
+      this.runs.get(run.id)?.instructions?.required && !FINISHED.has(run.status) ? { ...run, [NEEDS_INSTRUCTIONS]: true } : run));
     const created = JSON.stringify([...this.createdSessions.values()]);
     this.writes = this.writes.then(async () => {
       // Compare inside the queue: an earlier queued write may still change what a file holds.
       // Write identities first. A crash between commits may leave an orphaned
       // placeholder, which recovery displays as failed and never submits again.
       if (created !== this.saved.created) { await writePrivateJson(this.createdFile, created); this.saved.created = created; }
-      if (instructions !== this.saved.instructions) { await writePrivateJson(this.instructionsFile, instructions); this.saved.instructions = instructions; }
       if (data !== this.saved.runs) { await writePrivateJson(this.stateFile, data); this.saved.runs = data; }
       this.persistenceError = undefined;
     }).catch((error: Error) => { this.persistenceError = error; });

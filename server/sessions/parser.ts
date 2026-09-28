@@ -67,12 +67,17 @@ function validTime(value: unknown): string | undefined {
 function latestTime(previous: string | undefined, candidate: string | undefined): string | undefined {
   return candidate && (!previous || candidate > previous) ? candidate : previous;
 }
-export const TOWER_INSTRUCTIONS_OPEN = '<tower-instructions>';
-export const TOWER_INSTRUCTIONS_CLOSE = '</tower-instructions>';
-/** A user message without the instructions Tower added to a Codex turn; the agent saw them, the conversation does not. */
-function withoutTowerInstructions(value: string): string {
-  const start = value.lastIndexOf(`\n\n${TOWER_INSTRUCTIONS_OPEN}\n`);
-  return start === -1 ? value : value.slice(0, start);
+const TOWER_INSTRUCTIONS_OPEN = '<tower-instructions>\n';
+const TOWER_INSTRUCTIONS_CLOSE = '\n</tower-instructions>';
+/**
+ * Tower's instructions for a turn travel as a text block of their own after the request, so the agent reads them and the
+ * conversation leaves them out. Only a whole block in this exact form is left out; text the user or a channel wrote is
+ * always part of the request's own block.
+ */
+export function towerInstructionsBlock(text: string): string { return `${TOWER_INSTRUCTIONS_OPEN}${text}${TOWER_INSTRUCTIONS_CLOSE}`; }
+function isTowerInstructions(block: unknown): boolean {
+  const value = block && typeof block === 'object' ? (block as { text?: unknown }).text : undefined;
+  return typeof value === 'string' && value.startsWith(TOWER_INSTRUCTIONS_OPEN) && value.endsWith(TOWER_INSTRUCTIONS_CLOSE);
 }
 function isInjectedUser(value: string): boolean {
   return /^(?:# AGENTS\.md instructions|<environment_context>|<recommended_plugins>|<INSTRUCTIONS>|<system-reminder>|\[Request interrupted by user)/.test(value.trim());
@@ -104,7 +109,7 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
       const kinds: string[] = value.internal_chat_message_metadata_passthrough?.content_item_kinds ?? [];
       const parts = Array.isArray(value.content) ? value.content.filter((_: unknown, index: number) =>
         value.role !== 'user' || !kinds[index] || /^(user\.|unknown)/.test(kinds[index]!)) : value.content;
-      const content = value.role === 'user' ? withoutTowerInstructions(text(parts)) : text(parts);
+      const content = text(value.role === 'user' && Array.isArray(parts) ? parts.filter((part: unknown) => !isTowerInstructions(part)) : parts);
       if (!content || (value.role === 'user' && isInjectedUser(content))) return [];
       return [{ id, role: value.role, text: content, timestamp }];
     }
@@ -141,6 +146,7 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
     prose = '';
   };
   for (const block of blocks) {
+    if (block.type === 'text' && value.role === 'user' && isTowerInstructions(block)) continue;
     if (block.type === 'text') prose += `${text(block.text)}\n`;
     else if (block.type === 'image') prose += '[Image attachment]\n';
     else if (block.type === 'tool_use') {
