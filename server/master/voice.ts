@@ -8,7 +8,7 @@ import type { ElevenLabs, VoiceInfo } from './elevenlabs.js';
 import type { VoiceOrigin } from './journal.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
-import { isNoise, VOICE_ACKS, VOICE_NUDGE, VOICE_WORKING, voiced } from './voice-text.js';
+import { isNoise, speakable, VOICE_ACKS, VOICE_NUDGE, VOICE_WORKING, voiced, voicedParts } from './voice-text.js';
 
 /** Estimated prices: ElevenLabs realtime speech-to-text per second, text-to-speech per character by model. */
 const STT_DOLLARS_PER_SECOND = 0.39 / 3600;
@@ -20,15 +20,19 @@ const UTTERANCE_SECONDS = 60;
 const TOKEN_LIFE_MS = 16 * 60_000;
 const TOKENS_PER_SESSION = 2;
 const TOKENS_PER_MINUTE = 20;
-const SAY_CHARS = 300;
 const SAY_QUEUE = 20;
 const KEEP_DAYS = 40;
 const KEEP_SPEAKING = 500;
 const CLIPS = 30;
 const CLIP_BYTES = 5 * 1024 * 1024;
-const LIVE_COUNT = 20;
-const LIVE_MS = 10 * 60_000;
+const LIVE_COUNT = 40;
+/** Audio is kept longer than the longest answer read takes (`READ_CHARS` at `MS_PER_CHAR`). */
+const LIVE_MS = 20 * 60_000;
+/** Audio kept for one thing said: at least this, and more for a long answer (128 kbps is about 3 KB a character). */
 const LIVE_BYTES = 2 * 1024 * 1024;
+const LIVE_BYTES_PER_CHAR = 4 * 1024;
+/** How long reading aloud may take a character, at most: the page gives up on a player later than this too. */
+const MS_PER_CHAR = 200;
 /** News older than this is not read aloud any more: it is on the screen. */
 const STALE_MS = 60 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -94,11 +98,32 @@ const fail = (message: string, statusCode: number) => Object.assign(new Error(me
 const localDay = (time: number) => { const date = new Date(time); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; };
 const speakOf = (data: MasterEntryData | undefined): MasterSpeak | undefined => data && (data.kind === 'master' || data.kind === 'error' || data.kind === 'event') ? data.speak : undefined;
 const wake = (live: Live) => { for (const waiter of [...live.waiters]) waiter(); };
-/** The first paragraph of an answer, without markdown marks, as something to say. */
-function spoken(text: string): string {
-  const first = text.split(/\n\s*\n/).find(part => part.trim()) ?? text;
-  const plain = first.replace(/\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/[`*_#>|]/g, '').replace(/\s+/g, ' ').trim();
-  return plain.length > SAY_CHARS ? `${plain.slice(0, SAY_CHARS)}…` : plain;
+/**
+ * An mp3 stream without the ID3 tag it starts with. The parts of a long answer are made one after another into one
+ * stream, and only the first part's tag may stand at its start.
+ */
+async function* withoutTag(stream: AsyncIterable<Buffer>): AsyncGenerator<Buffer> {
+  let head = Buffer.alloc(0);
+  let skip = -1;
+  for await (const chunk of stream) {
+    if (skip < 0) {
+      head = Buffer.concat([head, chunk]);
+      if (head.length < 10) continue;
+      // An ID3v2 header: "ID3", version, flags (0x10: a footer follows), then the tag's size in 7-bit bytes.
+      skip = head.subarray(0, 3).toString('latin1') === 'ID3'
+        ? 10 + (((head[6] & 0x7f) << 21) | ((head[7] & 0x7f) << 14) | ((head[8] & 0x7f) << 7) | (head[9] & 0x7f)) + (head[5] & 0x10 ? 10 : 0)
+        : 0;
+      const rest = head.subarray(Math.min(skip, head.length));
+      skip = Math.max(0, skip - head.length);
+      if (rest.length) yield rest;
+      continue;
+    }
+    if (skip >= chunk.length) { skip -= chunk.length; continue; }
+    const rest = skip ? chunk.subarray(skip) : chunk;
+    skip = 0;
+    yield rest;
+  }
+  if (skip < 0 && head.length) yield head;
 }
 
 /**
@@ -350,14 +375,16 @@ export class MasterVoice {
     if (!speak || speak.state !== 'pending') return;
     const text = this.content(entry.data);
     const model = this.options.settings.current().voice.model;
-    // The tone tag goes only to speech; the page is sent the text as it is.
-    const sent = text ? voiced(text, model, entry.data.kind === 'error' ? 'error' : speak.session ? 'answer' : 'report') : '';
+    // All of it is read, in parts of whole sentences made into one stream; the tone tag goes only to speech, and the
+    // page is sent the text as it is.
+    const parts = voicedParts(text, model, entry.data.kind === 'error' ? 'error' : speak.session ? 'answer' : 'report');
+    const chars = parts.reduce((sum, part) => sum + part.length, 0);
     // Judged and recorded together: nothing else can start making audio in between.
-    if (!text || this.session !== session || !this.alive(session) || this.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) { this.setSpeak(entry, { ...speak, state: 'unspoken' }); return; }
-    const live = this.synthesize(sent);
+    if (!parts.length || this.session !== session || !this.alive(session) || this.limited(Date.now(), chars * ttsDollarsPerChar(model))) { this.setSpeak(entry, { ...speak, state: 'unspoken' }); return; }
+    const live = this.synthesize(parts);
     if (!await this.firstChunk(live) || this.session !== session) { this.setSpeak(entry, { ...speak, state: 'unspoken' }); return; }
     this.setSpeak(entry, { ...speak, state: 'playing' });
-    const result = await this.play(session, { kind: speak.session ? 'answer' : 'report', text, audio: live.id }, this.timing.playMs + text.length * 120);
+    const result = await this.play(session, { kind: speak.session ? 'answer' : 'report', text, audio: live.id }, this.timing.playMs + chars * MS_PER_CHAR);
     const later = speakOf(this.options.room.get(entry.id)?.data) ?? speak;
     this.setSpeak(entry, { ...later, state: result === 'played' && !live.failed ? 'played' : 'unspoken' });
   }
@@ -418,38 +445,57 @@ export class MasterVoice {
     return { ok: true, signal: gate.controller.signal, check, done };
   }
 
-  /** What is read of an entry: hidden whole, then its first paragraph without markdown, shortened, and hidden again. */
+  /** What is read of an entry: hidden whole, then all of it as it is heard (without markdown), and hidden again. */
   private content(data: MasterEntryData): string {
     const hide = this.options.hooks.hide;
     const raw = data.kind === 'master' ? data.text : data.kind === 'error' ? `요청을 처리하지 못했습니다: ${data.text}` : data.kind === 'event' ? data.text : '';
-    return hide(spoken(hide(raw)));
+    return hide(speakable(hide(raw)));
   }
 
   // ─── audio ───────────────────────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Starts making audio for text; the page can play it while it is still being made. The caller has checked the
-   * limit in the same step: the characters are counted here, before anything is awaited.
+   * Starts making audio for text, given whole or in parts made one after another into one stream; the page can play
+   * it while it is still being made. The caller has checked the limit in the same step: the characters are counted
+   * here, before anything is awaited.
    */
-  private synthesize(text: string): Live {
+  private synthesize(text: string | string[]): Live {
     const settings = this.options.settings.current().voice;
+    const parts = typeof text === 'string' ? [text] : text;
+    const chars = parts.reduce((sum, part) => sum + part.length, 0);
+    const most = Math.max(LIVE_BYTES, chars * LIVE_BYTES_PER_CHAR);
     const live: Live = { id: randomUUID(), chunks: [], bytes: 0, done: false, failed: false, createdAt: Date.now(), waiters: new Set(), readers: new Set() };
     this.lives.set(live.id, live);
     while (this.lives.size > LIVE_COUNT) this.drop(this.lives.values().next().value!);
     // Characters sent are paid for, whether or not the audio comes back whole.
-    this.add(Date.now(), { ttsChars: text.length, model: settings.model });
+    this.add(Date.now(), { ttsChars: chars, model: settings.model });
     void this.save();
     this.broadcast();
-    const controller = new AbortController();
-    const deadline = setTimeout(() => controller.abort(new Error('시간 초과')), this.timing.synthMs);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
     void (async () => {
       try {
-        for await (const chunk of this.options.elevenLabs.speak(text, settings.voiceId, settings.model, controller.signal)) {
-          if (live.failed) return;
-          if (live.bytes + chunk.length > LIVE_BYTES) throw new Error('too large');
-          live.chunks.push(chunk);
-          live.bytes += chunk.length;
-          wake(live);
+        for (const [index, part] of parts.entries()) {
+          // Each part has its own time; a part that failed before any of its sound came is asked for once more.
+          for (let attempt = 0; ; attempt++) {
+            const controller = new AbortController();
+            deadline = setTimeout(() => controller.abort(new Error('시간 초과')), this.timing.synthMs);
+            let got = false;
+            try {
+              const stream = this.options.elevenLabs.speak(part, settings.voiceId, settings.model, controller.signal);
+              for await (const chunk of index ? withoutTag(stream) : stream) {
+                if (live.failed) return;
+                if (live.bytes + chunk.length > most) throw new Error('too large');
+                got = true;
+                live.chunks.push(chunk);
+                live.bytes += chunk.length;
+                wake(live);
+              }
+              break;
+            } catch (error) {
+              if (got || attempt > 0 || live.failed || (error as Error).message === 'too large') throw error;
+              this.add(Date.now(), { ttsChars: part.length, model: settings.model });
+            } finally { clearTimeout(deadline); }
+          }
         }
         live.done = true;
       } catch {
@@ -533,7 +579,9 @@ export class MasterVoice {
       const drained = () => done(true);
       const ended = () => done(true);
       const more = () => { if (!drain || live.failed) done(true); };
-      const timer = setTimeout(() => done(false), this.timing.waitMs);
+      // A player takes a long answer as it plays, so it may not read for a while; it is waited for while its
+      // connection is open and the audio is kept. More audio is waited for a while, then looked at again.
+      const timer = setTimeout(() => done(false), drain ? Math.max(this.timing.waitMs, live.createdAt + LIVE_MS - Date.now()) : this.timing.waitMs);
       if (drain) res.once('drain', drained);
       res.once('close', ended);
       res.once('error', ended);

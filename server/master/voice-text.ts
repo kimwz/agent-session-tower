@@ -32,14 +32,107 @@ const SERIOUS = /실패|오류|에러|못\s?했|못\s?합|못\s?해|안\s?돼|�
 const GOOD_NEWS = /완료|끝났|끝냈|마쳤|성공|해결|통과|배포했|배포됐|올렸|반영됐|됐어요|됐습니다|축하|좋은 소식|잘 됐|잘 돼/;
 
 /**
- * The text sent to speech for something the master says: a tone tag in front, for models that follow tags. A
- * sentence before an irreversible change, a failure, and anything serious keep the plain voice; clear good news
- * sounds excited; the rest is bright. Brackets already in the text become parentheses so they are read, not taken
- * as directions. The tag is only in what is synthesized: what the page shows and the conversation keep the text.
+ * The tone tag for something the master says, for models that follow tags: none before an irreversible change, for
+ * a failure, or for anything serious; excited for clear good news; bright otherwise. Judged on the whole text.
  */
-export function voiced(text: string, model: string, kind: 'answer' | 'report' | 'error' | 'notice' | 'ack'): string {
-  if (!TAGGED_MODELS.has(model)) return text;
-  const plain = text.replace(/\[/g, '(').replace(/\]/g, ')');
-  if (kind === 'notice' || kind === 'error' || SERIOUS.test(plain)) return plain;
-  return `${kind !== 'ack' && GOOD_NEWS.test(plain) ? VOICE_TONES.excited : VOICE_TONES.bright} ${plain}`;
+function tone(plain: string, model: string, kind: VoiceKind): string {
+  if (!TAGGED_MODELS.has(model) || kind === 'notice' || kind === 'error' || SERIOUS.test(plain)) return '';
+  return kind !== 'ack' && GOOD_NEWS.test(plain) ? VOICE_TONES.excited : VOICE_TONES.bright;
+}
+type VoiceKind = 'answer' | 'report' | 'error' | 'notice' | 'ack';
+/** Brackets already in the text become parentheses on tagged models, so they are read, not taken as directions. */
+const untagged = (text: string, model: string) => TAGGED_MODELS.has(model) ? text.replace(/\[/g, '(').replace(/\]/g, ')') : text;
+
+/**
+ * The text sent to speech for something the master says: a tone tag in front, for models that follow tags. The tag
+ * sets how it is read, never how much of it is read, and is only in what is synthesized: what the page shows and the
+ * conversation keep the text.
+ */
+export function voiced(text: string, model: string, kind: VoiceKind): string {
+  const plain = untagged(text, model);
+  const tag = tone(plain, model, kind);
+  return tag ? `${tag} ${plain}` : plain;
+}
+
+/** Said at the end when an answer is too long to read whole: what was read ends at a sentence. */
+export const VOICE_REST = '나머지는 화면에 있어요.';
+/** At most this much of an answer is read aloud, about ten minutes. */
+export const READ_CHARS = 5_000;
+/** The first part is short so its sound starts soon; the rest go in parts of whole sentences up to this long. */
+const FIRST_PART = 120;
+const PART = 500;
+
+/**
+ * An answer as it is heard: all of it, in order, without markdown. Each line and list item becomes a sentence, a
+ * table's cells are read across, a link is read by its words; code, bare addresses and pictographs, which cannot be
+ * said, are pointed to or left out.
+ */
+export function speakable(text: string): string {
+  const lines = text
+    .replace(/```[\s\S]*?(```|$)/g, '\n코드는 화면에 있어요.\n')
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/<?https?:\/\/[^\s)>]+>?/g, '링크')
+    .replace(/\p{Extended_Pictographic}\uFE0F?/gu, '')
+    .split('\n');
+  const said: string[] = [];
+  for (const raw of lines) {
+    // A table's divider row says nothing.
+    if (/^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(raw)) continue;
+    let line = raw.trim().replace(/^#{1,6}\s+/, '').replace(/^(>\s*)+/, '').replace(/^[-*+•]\s+/, '').replace(/^(\[[ xX]\])\s+/, '');
+    if (line.includes('|')) line = line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim()).filter(Boolean).join(', ');
+    line = line.replace(/\*\*|__|~~|`|\*/g, '').replace(/(\w)_(?=\w)/g, '$1 ').replace(/_/g, '').replace(/\s+/g, ' ').trim();
+    if (!line) continue;
+    said.push(/[.!?…。:;]["'”’)]*$/.test(line) ? line : `${line}.`);
+  }
+  return said.join(' ');
+}
+
+/** Sentences of spoken text, each with the space after it, so that joined they are the text again. */
+function sentences(text: string): string[] {
+  // A sentence ends at its mark and the space after it: "1.5" goes on, and a list's number stays with its item.
+  const found = text.match(/[\s\S]*?(?:[.!?…。]+["'”’)]*(?:\s+|$)|$)/g)?.filter(Boolean) ?? [];
+  const out: string[] = [];
+  for (const item of found) {
+    if (out.length && /^\s*\d{1,3}[.)]\s*$/.test(out[out.length - 1])) out[out.length - 1] += item;
+    else out.push(item);
+  }
+  return out;
+}
+/** A sentence longer than a part is broken after a comma or a space, or cut only when it has neither. */
+function pieces(sentence: string, limit: number): string[] {
+  const out: string[] = [];
+  let rest = sentence;
+  while (rest.length > limit) {
+    const head = rest.slice(0, limit);
+    const at = Math.max(head.lastIndexOf(', '), head.lastIndexOf(' '));
+    const cut = at > limit / 3 ? at + 1 : limit;
+    out.push(rest.slice(0, cut));
+    rest = rest.slice(cut);
+  }
+  if (rest) out.push(rest);
+  return out;
+}
+
+/**
+ * What is sent to speech for an answer, part by part: whole sentences, in order, each part with the answer's tone
+ * tag in front (a tag holds only within the text it is sent with). Nothing is repeated or dropped between parts.
+ * Past `READ_CHARS` the reading ends at a sentence and says the rest is on the screen.
+ */
+export function voicedParts(text: string, model: string, kind: VoiceKind): string[] {
+  const plain = untagged(text, model).trim();
+  if (!plain) return [];
+  const tag = tone(plain, model, kind);
+  const parts: string[] = [];
+  let part = '';
+  let total = 0;
+  for (const sentence of sentences(plain).flatMap(item => pieces(item, PART))) {
+    if (total + sentence.length > READ_CHARS) { part += (part && !/\s$/.test(part) ? ' ' : '') + VOICE_REST; break; }
+    total += sentence.length;
+    const limit = parts.length ? PART : FIRST_PART;
+    if (part && part.length + sentence.length > limit) { parts.push(part); part = ''; }
+    part += sentence;
+  }
+  if (part.trim()) parts.push(part);
+  return parts.map(item => item.trim()).filter(Boolean).map(item => tag ? `${tag} ${item}` : item);
 }

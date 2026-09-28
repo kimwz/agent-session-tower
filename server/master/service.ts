@@ -40,7 +40,7 @@ const TERMINAL_OUTPUT = 4_000;
 const NODE_ID = /^[a-f0-9]{32}$/;
 /** A spoken request that takes this long hears, once, that it is still being worked on. */
 const STILL_WORKING_MS = 20_000;
-const VOICE_TURN = 'The owner said this request by voice: your first paragraph is read aloud, so make it one or two short spoken sentences, with details after.';
+const VOICE_TURN = 'The owner said this request by voice: your whole answer is read aloud as written, so write it to be heard: short spoken sentences, the point first, no tables or code unless asked, and nothing that only makes sense on screen.';
 /**
  * Everything Tower sends out without hiding: the model's standing instructions (with and without lookups), every
  * text of the tools' descriptions, and the fixed sentences read aloud.
