@@ -117,6 +117,15 @@ Tower validates the selection again before sending the original prompt and attac
 
 See [Auto Prompt architecture and API](auto-prompt.md) for integration details.
 
+## Skills
+
+Skills keep the ways you often work (how a new feature is designed and reviewed, how a code review is done, how a project is deployed) so Claude Code and Codex handle the same kind of request the same way without being told again. They are standard `SKILL.md` folders both agents load by themselves, inside and outside Tower.
+
+- The **Skills** button in the header lists every skill on this computer; **이 폴더의 스킬** in a project folder's menu lists the skills usable there: that project's own (from its folder up to its repository root) and the global ones.
+- **새 스킬** writes a global skill to `~/.agents/skills/<name>/SKILL.md` and links it into `~/.claude/skills`; a project skill goes to `<project>/.agents/skills` and `<project>/.claude/skills`. Editing keeps any frontmatter Tower does not manage. Deleting moves the folder to `<state>/skills-trash`.
+- **항상 확인** (always check) pins a skill: Tower names it at the start of every turn it runs (chats, triggers, Slack, the master), so agents follow it even when the request does not mention it. A project's pinned skills are named only in that project, and never to work from a controlling computer.
+- **추천**: when a session you worked in on this computer has been quiet for 10 minutes, a light model (Claude Sonnet or Codex GPT-5.6 Terra, no tools, nothing saved as a conversation) sums up how you worked and may propose a skill. A proposal is shown once the same way of working appears in two sessions, or at once when you state it as a rule. Review and edit it, add it, or dismiss it for good. **최근 7일 분석** reads the last week at once. Work started by triggers, Slack, other agents or other computers, and closed sessions, are never read.
+
 ## Account usage
 
 The machine node shows separate usage indicators for the Claude Code and Codex accounts connected on that machine. Percentages represent **used capacity**, not remaining capacity. These are account-wide limits, so activity on other devices can count toward them.

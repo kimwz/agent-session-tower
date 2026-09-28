@@ -161,13 +161,17 @@ export class SkillAdvisor {
   private async reflect(session: Session): Promise<void> {
     const state = this.deps.state.get();
     const marker = state.reflected[session.id] ?? state.startedAt;
+    // Checked again right before reading and right before sending: someone else may have joined it meanwhile.
+    if (!this.eligible(session)) return;
     const messages = await this.deps.history(session, 200).catch(() => undefined);
     const requests = ownerRequests(messages ?? [], marker);
     const upTo = requests.at(-1)?.timestamp ?? session.lastRequestAt ?? new Date(this.now()).toISOString();
     const text = requests.map(item => item.text.trim()).join('');
     if (text.length < 30) { await this.deps.state.update(next => { next.reflected[session.id] = upTo; }); return; }
     try {
-      const result = await this.deps.model({ ...this.request(), prompt: await this.reflectPrompt(session, requests, messages ?? []), schema: REFLECT_SCHEMA as unknown as Record<string, unknown> }, { timeoutMs: REFLECT_TIMEOUT_MS });
+      const prompt = await this.reflectPrompt(session, requests, messages ?? []);
+      if (!this.eligible(session)) return;
+      const result = await this.deps.model({ ...this.request(), prompt, schema: REFLECT_SCHEMA as unknown as Record<string, unknown> }, { timeoutMs: REFLECT_TIMEOUT_MS });
       await this.apply(session, result, upTo);
       this.failures.delete(session.id);
       this.lastRunAt = new Date(this.now()).toISOString(); this.lastError = undefined;
@@ -250,6 +254,7 @@ export class SkillAdvisor {
       let budget = BACKFILL_CHARS;
       for (const session of sessions) {
         if (budget < 2_000) break;
+        if (!this.eligible(session)) continue;
         const requests = ownerRequests(await this.deps.history(session, 200).catch(() => undefined) ?? [], since).slice(-BACKFILL_REQUESTS_PER_SESSION);
         if (!requests.length) continue;
         const label = `S${labels.size + 1}`;
@@ -260,9 +265,12 @@ export class SkillAdvisor {
         labels.set(label, session);
         blocks.push(block);
       }
+      const context = await this.context();
+      // Sessions someone else joined while the requests were being read are left out of what is sent.
+      for (const [label, session] of [...labels]) if (!this.eligible(session)) { labels.delete(label); blocks.splice(blocks.findIndex(block => block.startsWith(`${label} · `)), 1); }
       if (!blocks.length) { this.backfillStatus = { at: new Date(this.now()).toISOString(), proposals: 0 }; return 0; }
       const result = await this.deps.model({ ...this.request(), schema: BACKFILL_SCHEMA as unknown as Record<string, unknown>, prompt: [
-        await this.context(),
+        context,
         `The owner's requests over the last ${days} days, by session (newest sessions first):\n\n${blocks.join('\n\n')}`,
         'Find the ways of working the owner repeats across these sessions (the same procedure, review or verification habit, delivery rule or report style asked for again and again) and write each as a skill. Only patterns seen in at least two sessions, or stated by the owner as a standing rule. At most 8.',
       ].join('\n\n') }, { timeoutMs: BACKFILL_TIMEOUT_MS });

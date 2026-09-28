@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.69.0] - 2026-09-29
+
+### Added
+- **Skills.** Keep the ways you often work as skills, and Claude Code and Codex handle the same kind of request in the same order without being told again. A new **Skills** button in the header lists every skill on this computer, and **이 폴더의 스킬** in a project folder's menu lists the skills usable in that project: its own and the global ones.
+  - Skills are standard `SKILL.md` folders. A global skill is written to `~/.agents/skills` and linked into `~/.claude/skills`, a project skill to the project's `.agents/skills` and `.claude/skills`, so both agents load it by themselves, in Tower and outside it. Skills installed before are listed too, and a skill only one agent had can be linked for the other.
+  - **항상 확인** (always check): Tower names a pinned skill at the start of every turn it runs, whether it came from a chat, a trigger, Slack or the master, so a workflow such as "design → cross review → implement → cross review" is followed for every new task. A project's pinned skills are named only in that project.
+  - **Proposals**: when a session you worked in has been quiet for 10 minutes, a light model (Claude Sonnet by default, or Codex GPT-5.6 Terra) sums up how you worked, and proposes a skill once the same way of working shows up in two sessions, or at once when you state it as a rule. Review and edit a proposal, add it with one click, or dismiss it for good. **최근 7일 분석** reads the last week at once. The call has no tools and saves no conversation; work started by triggers, Slack, other agents or other computers, and closed sessions, are never read.
+  - Deleted skills are moved to `<state>/skills-trash`, and a skill that is a link to another folder only loses its link.
+  - Every agent's guidance now says to check the owner's skills before starting a task, and how to save a new one when asked.
+  - The master can open the skills panel.
+
 ## [1.68.0] - 2026-09-29
 
 ### Changed

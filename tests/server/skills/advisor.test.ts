@@ -193,3 +193,32 @@ test('a session someone else worked in stays excluded after its runs are gone, e
   await f.tick();
   assert.equal(f.calls.length, 0);
 });
+
+test('a session someone else joins while the advisor is busy is not read or sent afterwards', async t => {
+  let joined: (() => void) | undefined;
+  const f = await fixture(t, async () => { joined?.(); return reflection({ action: 'none' }); });
+  f.sessions.push(session('first', f.project, { updatedAt: minutes(31) }), session('second', f.project));
+  for (const item of f.sessions) f.histories.set(item.id, [message('user', 'A request long enough to be worth reading.', 40)]);
+  const read: string[] = [];
+  const history = (f.service as unknown as { advisor: { deps: { history: (session: Session, limit: number) => Promise<ChatMessage[] | undefined> } } }).advisor.deps;
+  const original = history.history;
+  history.history = async (item, limit) => { read.push(item.id); return original(item, limit); };
+  // While the first session's answer is awaited, a controlling computer sends a turn into the second one.
+  joined = () => { joined = undefined; f.runs.push({ id: 'r', sessionId: 'claude:second', origin: { kind: 'owner', controllerId: 'c'.repeat(32) }, prompt: '', status: 'queued', createdAt: minutes(1), output: '' }); f.service.recordRuns(); };
+  await f.tick();
+  assert.deepEqual(read, ['claude:first']);
+  assert.equal(f.calls.length, 1);
+
+  // The 7-day analysis leaves out a session joined while it was reading the others.
+  f.runs.length = 0;
+  f.sessions.push(session('third', f.other));
+  f.histories.set('claude:third', [message('user', 'Another request long enough to be worth reading.', 40)]);
+  history.history = async (item, limit) => {
+    if (item.id === 'claude:third') { f.runs.push({ id: 'r3', sessionId: 'claude:first', origin: { kind: 'slack', workflowId: 'w' }, prompt: '', status: 'queued', createdAt: minutes(1), output: '' }); f.service.recordRuns(); }
+    return original(item, limit);
+  };
+  await (f.service as unknown as { advisor: { backfill(days: number): Promise<number> } }).advisor.backfill(7).catch(() => 0);
+  const sent = f.calls.at(-1)!.prompt;
+  assert.doesNotMatch(sent, /Session first/);
+  assert.match(sent, /Session third/);
+});
