@@ -468,6 +468,7 @@ export class MasterVoice {
       if (signal.aborted) { finish('stopped'); return; }
       this.options.room.broadcast({ type: 'notice', seq: 0, notice: { id, attempt: live.attempt.attempt, text: cutBytes(this.options.hooks.hide(text), 600) } });
     });
+    const playedAt = Date.now();
     if (result !== 'played' || gate.controller.signal.aborted || live.closing) {
       done();
       const reason = result === 'interrupted' || (result === 'played' && gate.controller.signal.aborted && !live.closing) ? '안내하는 동안 소유자가 말해서 보내지 않았습니다. 무엇을 원하는지 다시 들어 주세요.'
@@ -475,9 +476,10 @@ export class MasterVoice {
       return { ok: false, reason };
     }
     const check = async () => {
-      // A web restart may have kept the page's word from arriving: only a report made after it counts.
+      // Only the page's word from after the notice played counts: an older one may have missed the owner speaking
+      // (a web restart, a report that did not get through).
       const deadline = Date.now() + this.timing.resyncMs;
-      const heard = () => (live.activity?.receivedAt ?? 0) > this.options.hooks.connectedSince();
+      const heard = () => (live.activity?.receivedAt ?? 0) > Math.max(this.options.hooks.connectedSince(), playedAt);
       while (!live.closing && !heard() && !gate.controller.signal.aborted && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
       return this.live === live && !live.closing && live.attempt.phase === 'ready' && heard() && !gate.controller.signal.aborted && (live.activity?.lastSpeechAt ?? 0) < since;
     };

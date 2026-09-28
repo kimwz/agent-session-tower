@@ -371,6 +371,9 @@ test('an irreversible change asked by voice is said first, and goes only if it w
   assert.match(notice.text, /세션을 닫습니다/);
   assert.deepEqual(closes(), [], 'nothing goes before the notice was heard');
   assert.equal(h.voice.voiceNotice({ noticeId: notice.id, result: 'played' }), true);
+  await sleep(150);
+  assert.deepEqual(closes(), [], 'a report from before the notice may have missed the owner speaking');
+  h.voice.voiceActivity({ attemptId: live.attemptId, speaking: false, playing: false });
   await until(() => closes().length === 1);
   await masterEntry(h, /닫았습니다/);
 

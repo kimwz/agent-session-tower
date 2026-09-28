@@ -108,6 +108,8 @@ export interface HttpOptions {
     handle(req: IncomingMessage, res: ServerResponse, path: string, url: URL, identity: { local: boolean }): Promise<boolean>;
   };
 }
+/** What a voice call's page sends while the call runs (not starting one, which makes a paid call). */
+const VOICE_REPORT = /^\/api\/master\/voice\/(activity|ready|stop|notice)$/;
 /** Suggestions follow the owner's typing; they change nothing, so they have their own budget apart from changes. */
 const SUGGESTION_PATH = '/api/auto-prompt-suggestions';
 const SUGGESTIONS_PER_MINUTE = 60;
@@ -246,11 +248,14 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
           // The master agent's own calls count apart, so they never use up the owner's budget (or the other way round).
           const caller = req.headers['x-tower-master'];
           const masterCall = Boolean(master && typeof caller === 'string' && caller.length === master.callerSecret.length && timingSafeEqual(Buffer.from(caller), Buffer.from(master.callerSecret)));
-          const key = masterCall ? '\0master' : req.socket.remoteAddress || 'local';
+          // A voice call's page reports what it hears every few seconds and ends the call; that has a budget of its own too.
+          const voiceReport = Boolean(master) && !masterCall && VOICE_REPORT.test(path);
+          const address = req.socket.remoteAddress || 'local';
+          const key = masterCall ? '\0master' : voiceReport ? `\0voice ${address}` : address;
           const now = Date.now();
           const rate = rates.get(key);
           if (!rate || now - rate.at > 60_000) rates.set(key, { count: 1, at: now });
-          else if (++rate.count > (masterCall ? 120 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+          else if (++rate.count > (masterCall ? 120 : voiceReport ? 240 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
         }
       }
       if (master && path.startsWith('/api/master')) {

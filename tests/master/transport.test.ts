@@ -185,6 +185,10 @@ test('Tower\'s server gives the master routes only after sign-in, and the master
   assert.equal((await post('/api/sessions/x/messages')).status, 429);
   assert.equal((await post('/api/sessions/x/messages', { 'X-Tower-Master': 'f'.repeat(64) })).status, 429, 'a wrong marker counts as the owner');
   assert.notEqual((await post('/api/sessions/x/messages', { 'X-Tower-Master': callerSecret })).status, 429, 'the master has its own budget');
+  // A voice call's page reports every few seconds and must still be able to end its call.
+  for (let index = 0; index < 100; index++) assert.notEqual((await post('/api/master/voice/activity')).status, 429);
+  assert.notEqual((await post('/api/master/voice/stop')).status, 429, 'ending a call is never out of budget during it');
+  assert.equal((await post('/api/master/voice/start')).status, 429, 'starting a paid call counts as a change');
 });
 
 test('without a master, Tower\'s server answers as before', async t => {

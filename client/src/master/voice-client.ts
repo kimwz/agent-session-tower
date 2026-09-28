@@ -128,8 +128,11 @@ export class VoiceCall {
     if (this.audio) this.audio.muted = true;
     window.speechSynthesis?.cancel();
     this.show();
-    try { await post('/api/master/voice/stop', this.options.token(), { attemptId: this.attemptId, reason }); }
-    catch { /* The host ends it anyway once the connection closes. */ }
+    // Tried twice: the host must hear why the call ended (a quiet end may be woken by news later).
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { await post('/api/master/voice/stop', this.options.token(), { attemptId: this.attemptId, reason }); break; }
+      catch { if (attempt === 0) await new Promise(resolve => setTimeout(resolve, 1_000)); }
+    }
     this.end(reason);
   }
 
@@ -213,7 +216,8 @@ export class VoiceCall {
       const result = now - this.notice.startedAt > NOTICE_MS && !this.notice.endedAt ? 'failed' : noticeResult({ ...this.notice, lastSpeechAt: this.lastSpeechAt, now });
       if (result) this.decide(result);
     }
-    if (this.speaking !== wasSpeaking || this.playing !== wasPlaying || now - this.lastReportAt >= REPORT_MS) this.report(now);
+    // The owner starting to speak is told at once (it may hold back a change); the rest every two seconds.
+    if ((this.speaking && !wasSpeaking && now - this.lastReportAt >= 250) || now - this.lastReportAt >= REPORT_MS) this.report(now);
     if (this.speaking !== wasSpeaking || this.playing !== wasPlaying) this.show();
     if (this.phase === 'live' && silenceDue({ now, readyAt: this.readyAt, lastSpeechAt: this.lastSpeechAt, lastPlaybackAt: this.lastPlaybackAt, seconds: this.options.silenceSeconds() })) void this.stop('silence');
     this.check();
@@ -226,6 +230,8 @@ export class VoiceCall {
     if (!notice.endedAt) window.speechSynthesis?.cancel();
     if (this.audio) this.audio.volume = notice.volume;
     void post('/api/master/voice/notice', this.options.token(), { noticeId: notice.id, result }).catch(() => {});
+    // A fresh word on what was heard, which a change waiting on the notice needs before it goes.
+    this.lastReportAt = 0;
     this.show();
   }
 
