@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.63.0] - 2026-09-28
+
+### Added
+- **The master can answer with Claude Opus.** The model list in the master settings, and the model row above the message box, now offer **Claude Opus 5** (`claude-opus-5`) and **Claude Opus 5.5** (`claude-opus-5-5`) next to the GPT models. Claude models are asked through the Anthropic API with an **Anthropic API key** from platform.claude.com, entered in its own field in the settings. It is kept in its own owner-only file on this computer, shown only by its last four characters, and never sent to the model. A Claude Code sign-in (subscription) cannot be used for this. Claude thinks adaptively; the reasoning setting becomes its effort (none and low are low, medium, high), and its tools, pictures and PDFs work as with GPT.
+
+### Changed
+- The OpenAI key is now used for GPT models only, and the two keys are saved and removed separately. The conversation stays open when either key is saved: if the key for the settings' model is missing, the settings say which key to add, a message can still choose a model whose key is saved, and a message sent to a model without its key is marked as not answered at once, with the reason, instead of waiting. News of finished work still waits until the key is there.
+
 ## [1.62.2] - 2026-09-28
 
 ### Fixed
