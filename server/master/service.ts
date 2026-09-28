@@ -41,12 +41,13 @@ const NODE_ID = /^[a-f0-9]{32}$/;
 /** A spoken request that takes this long hears, once, that it is still being worked on. */
 const STILL_WORKING_MS = 20_000;
 const VOICE_TURN = 'The owner said this request by voice: your whole answer is read aloud as written, so write it to be heard: short spoken sentences, the point first, no tables or code unless asked, and nothing that only makes sense on screen.';
+const VOICE_NEWS = 'Voice is on: your whole answer to this news is read aloud as written, so keep it short and write it to be heard: spoken sentences, the point first, no tables or code.';
 /**
  * Everything Tower sends out without hiding: the model's standing instructions (with and without lookups), every
  * text of the tools' descriptions, and the fixed sentences read aloud.
  */
 let fixedText: string | undefined;
-const FIXED_TEXT = () => fixedText ??= [masterInstructions(true), masterInstructions(false), ...texts(TOOLS), VOICE_TURN, ...VOICE_ACKS, VOICE_WORKING].join('\n');
+const FIXED_TEXT = () => fixedText ??= [masterInstructions(true), masterInstructions(false), ...texts(TOOLS), VOICE_TURN, VOICE_NEWS, ...VOICE_ACKS, VOICE_WORKING].join('\n');
 function texts(value: unknown): string[] {
   if (typeof value === 'string') return [value];
   if (Array.isArray(value)) return value.flatMap(texts);
@@ -377,7 +378,8 @@ export class MasterService {
       };
 
       // Only what Tower itself says is the developer's; the conversation keeps its roles, and everything else read is data.
-      const developer = [`Now: ${new Date().toISOString()}`, voice && turn.scope.cause === 'owner' ? VOICE_TURN : ''].filter(Boolean).join('\n');
+      const spoken = turn.scope.cause === 'owner' ? voice && VOICE_TURN : this.voice?.speaks(true) === 'pending' && VOICE_NEWS;
+      const developer = [`Now: ${new Date().toISOString()}`, spoken || ''].filter(Boolean).join('\n');
       const data = [digest ? `[data] ${digest}` : '', this.context(inputs)].filter(Boolean).join('\n\n');
       const attached = await this.files(inputs);
       const request = inputs.map(item => [item.kind === 'event' ? `[event] ${item.text}` : item.text, attached.notes.get(item.id) ?? ''].filter(Boolean).join('\n')).join('\n\n');

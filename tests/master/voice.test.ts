@@ -297,6 +297,14 @@ test('an answer to a spoken request is read aloud where voice is on and marked p
   await h.queueEvent('B ended');
   const quiet = await masterEntry(h, /보고 B/);
   assert.equal(h.speakOf(quiet.id), undefined);
+  // News is written to be heard only when it will be read aloud whole.
+  const told = (event: string) => {
+    const asked = h.script.requests.find(item => JSON.stringify(item.input).includes(`[event] ${event}`))!;
+    return String((asked.input[0] as unknown as { content: unknown }).content);
+  };
+  assert.match(told('A ended'), /read aloud as written/);
+  assert.doesNotMatch(told('C ended'), /read aloud/);
+  assert.doesNotMatch(told('B ended'), /read aloud/);
   // A spoken request answered after voice went off is marked as not said aloud.
   later = on(h, randomUUID());
   await request(h, later, '마지막 질문');
@@ -414,6 +422,29 @@ test('a later part that fails before any sound is asked for once more; one that 
   assert.ok(!readings(h).some(text => text.includes('30번째 문장은 조금 길게 이어지는 이야기')));
   const asked = () => h.labs.speeches.reduce((sum, item) => sum + String(item.body.text).length, 0);
   await until(() => h.voice.status().today.ttsChars === asked());
+});
+
+test('a long answer skipped partway stops being made: the parts not yet asked for are not asked for, nor paid for', async t => {
+  const answer = Array.from({ length: 60 }, (_, index) => `${index + 1}번째 문장은 조금 길게 이어지는 설명입니다.`).join(' ');
+  const h = await harness(t, { steps: [[say(answer)]], timing: { playMs: 60_000 } });
+  const session = on(h);
+  h.labs.chunks = [mp3('a'), Buffer.from('b')];
+  h.labs.gapMs = 150;
+  await request(h, session, '길게 알려줘');
+  const entry = await masterEntry(h, /60번째/);
+  const reading = await until(() => h.says().find(item => item.kind === 'answer'));
+  h.voice.voicePlayed({ session, id: reading.id, result: 'stopped' });
+  await until(() => h.speakOf(entry.id)?.state === 'unspoken');
+  const made = readings(h).length;
+  await sleep(600);
+  assert.equal(readings(h).length, made, 'nothing more is asked for');
+  const all = voicedParts(speakable(answer), 'eleven_v3_conversational', 'answer');
+  assert.ok(made < all.length);
+  // Paid for: what was asked for, and at most the one part whose request the skip cut short on its way.
+  const asked = h.labs.speeches.reduce((sum, item) => sum + String(item.body.text).length, 0);
+  const paid = h.voice.status().today.ttsChars;
+  assert.ok(paid >= asked && paid <= asked + 520, `${paid} for ${asked} asked`);
+  assert.ok(paid < all.reduce((sum, part) => sum + part.length, 0) / 2);
 });
 
 test('a later part that comes back without sound is asked for again, never skipped', async t => {
@@ -557,6 +588,10 @@ test('an answer is heard whole: every paragraph, list item and table cell, witho
   // Backticks within a line are not a fence: the rest of the answer is still read.
   assert.equal(speakable('Use `` ``` `` to start a code fence. Keep the remaining explanation.'), 'Use to start a code fence. Keep the remaining explanation.');
   assert.equal(speakable('앞\n~~~\nx\n~~~\n뒤'), '앞. 코드는 화면에 있어요. 뒤.');
+  // Arithmetic keeps its sign, markup tags are not read, and a bar in a sentence is not a table.
+  assert.equal(speakable('*참고*: 2*3=6'), '참고: 2*3=6.');
+  assert.equal(speakable('<details><summary>로그</summary>내용</details>'), '로그 내용.');
+  assert.equal(speakable('A | B 중 하나예요.'), 'A | B 중 하나예요.');
 });
 
 test('the parts of an answer are whole sentences that join back into it; a number stays with its item, and past the limit reading ends at a sentence', () => {
@@ -575,6 +610,11 @@ test('the parts of an answer are whole sentences that join back into it; a numbe
   const broken = voicedParts(run, 'eleven_flash_v2_5', 'answer');
   assert.equal(broken.join(' '), run);
   assert.ok(broken.every(part => part.length <= 500 && !part.startsWith(' ')));
+  // A long sentence breaks after a comma when it has one.
+  const commas = `${Array.from({ length: 40 }, (_, index) => `항목 ${index}번과 그 설명`).join(', ')}.`;
+  const atCommas = voicedParts(commas, 'eleven_flash_v2_5', 'answer');
+  assert.equal(atCommas.join(' '), commas);
+  assert.ok(atCommas.slice(0, -1).every(part => part.endsWith(',')), 'each part but the last ends at a comma');
   // Too long to read whole: reading ends at a sentence, then says the rest is on the screen.
   const huge = Array.from({ length: 800 }, (_, index) => `문장 ${index}번입니다.`).join(' ');
   const capped = voicedParts(huge, 'eleven_flash_v2_5', 'answer');

@@ -91,6 +91,8 @@ interface Live {
   createdAt: number;
   waiters: Set<() => void>;
   readers: Set<ServerResponse>;
+  /** Stops the request for sound under way. */
+  stop?: () => void;
 }
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32);
@@ -385,6 +387,8 @@ export class MasterVoice {
     if (!await this.firstChunk(live) || this.session !== session) { this.setSpeak(entry, { ...speak, state: 'unspoken' }); return; }
     this.setSpeak(entry, { ...speak, state: 'playing' });
     const result = await this.play(session, { kind: speak.session ? 'answer' : 'report', text, audio: live.id }, this.timing.playMs + chars * MS_PER_CHAR);
+    // Not heard to the end (skipped, voice ended, or given up on): the parts not made yet are not asked for.
+    if (result !== 'played') this.abandon(live);
     const later = speakOf(this.options.room.get(entry.id)?.data) ?? speak;
     this.setSpeak(entry, { ...later, state: result === 'played' && !live.failed ? 'played' : 'unspoken' });
   }
@@ -477,18 +481,23 @@ export class MasterVoice {
     void (async () => {
       try {
         for (const [index, part] of parts.entries()) {
+          if (live.failed) throw new Error('stopped');
           sent = index + 1;
           // Each part has its own time; a part that failed before any of its sound came is asked for once more, if
           // the daily limit allows paying for it again. A part that comes back without sound has failed.
           for (let attempt = 0; ; attempt++) {
             const controller = new AbortController();
-            deadline = setTimeout(() => controller.abort(new Error('시간 초과')), this.timing.synthMs);
+            live.stop = () => controller.abort(new Error('stopped'));
+            // Timed from the last sound that came: a long part is given its time as long as sound keeps coming.
+            const idle = () => { clearTimeout(deadline); deadline = setTimeout(() => controller.abort(new Error('시간 초과')), this.timing.synthMs); };
+            idle();
             let got = false;
             try {
               const stream = this.options.elevenLabs.speak(part, settings.voiceId, settings.model, controller.signal);
               for await (const chunk of index ? withoutTag(stream) : stream) {
-                if (live.failed) return;
+                if (live.failed) throw new Error('stopped');
                 if (live.bytes + chunk.length > most) throw new Error('too large');
+                idle();
                 got = true;
                 live.chunks.push(chunk);
                 live.bytes += chunk.length;
@@ -518,6 +527,14 @@ export class MasterVoice {
       }
     })();
     return live;
+  }
+
+  /** Audio nobody will hear any more: the request under way stops, and no further part is asked for. */
+  private abandon(live: Live): void {
+    if (live.done) return;
+    live.failed = true;
+    live.stop?.();
+    wake(live);
   }
 
   private firstChunk(live: Live): Promise<boolean> {

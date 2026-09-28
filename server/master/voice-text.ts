@@ -72,6 +72,7 @@ export function speakable(text: string): string {
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/<?https?:\/\/[^\s)>]+>?/g, '링크')
+    .replace(/<\/?[a-zA-Z][\w-]*(\s[^<>]*)?\/?>/g, ' ')
     .replace(/\p{Extended_Pictographic}\uFE0F?/gu, '')
     .split('\n');
   const said: string[] = [];
@@ -83,8 +84,9 @@ export function speakable(text: string): string {
     // A table's divider row says nothing.
     if (/^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(raw)) continue;
     let line = raw.trim().replace(/^#{1,6}\s+/, '').replace(/^(>\s*)+/, '').replace(/^[-*+•]\s+/, '').replace(/^(\[[ xX]\])\s+/, '');
-    if (line.includes('|')) line = line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim()).filter(Boolean).join(', ');
-    line = line.replace(/\*\*|__|~~|`|\*/g, '').replace(/(\w)_(?=\w)/g, '$1 ').replace(/_/g, '').replace(/\s+/g, ' ').trim();
+    // A table row starts with a bar or has several; a bar in a sentence is read as it is.
+    if (line.startsWith('|') || (line.match(/\|/g)?.length ?? 0) >= 2) line = line.replace(/^\|/, '').replace(/\|$/, '').split('|').map(cell => cell.trim()).filter(Boolean).join(', ');
+    line = line.replace(/\*\*|__|~~|`/g, '').replace(/\*(?!\d)|(?<!\d)\*/g, '').replace(/(\w)_(?=\w)/g, '$1 ').replace(/_/g, '').replace(/\s+/g, ' ').trim();
     if (!line) continue;
     said.push(/[.!?…。:;]["'”’)]*$/.test(line) ? line : `${line}.`);
   }
@@ -108,8 +110,9 @@ function pieces(sentence: string, limit: number): string[] {
   let rest = sentence;
   while (rest.length > limit) {
     const head = rest.slice(0, limit);
-    const at = Math.max(head.lastIndexOf(', '), head.lastIndexOf(' '));
-    const cut = at > limit / 3 ? at + 1 : limit;
+    const comma = head.lastIndexOf(', ');
+    const space = head.lastIndexOf(' ');
+    const cut = comma > limit / 3 ? comma + 2 : space > limit / 3 ? space + 1 : limit;
     out.push(rest.slice(0, cut));
     rest = rest.slice(cut);
   }
