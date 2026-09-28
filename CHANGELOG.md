@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.49.0] - 2026-09-28
+
+### Added
+- **Agents look for earlier work before redoing it.** Tower's agent guidance, which every Claude Code and Codex session here receives, now says when to search earlier sessions: a follow-up, a trigger or Slack report about a known issue, the same game, customer, incident, pull request or error. It says to search with a few distinctive words, read what was concluded, check that it still holds, and name the session it came from. Self-contained tasks skip the lookup. The Slack coordinator checks for earlier work before delegating and passes the related session ids and findings to the project agent, so it builds on them instead of starting over.
+
+### Fixed
+- **Session lookups find Slack work after it is done.** They searched only what the canvas shows, which leaves out Slack coordinator conversations and the work they delegated once it finishes. That was often exactly the earlier investigation an agent needed. They now search every conversation on this computer. A controlling computer still sees only what it saw before.
+
 ## [1.48.0] - 2026-09-28
 
 ### Added
