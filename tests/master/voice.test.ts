@@ -13,7 +13,7 @@ import { MasterService } from '../../server/master/service.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/master/tower-client.js';
 import { MasterVoice, migrate, type VoiceTiming } from '../../server/master/voice.js';
-import { isNoise, VOICE_ACKS, VOICE_NUDGE } from '../../server/master/voice-text.js';
+import { isNoise, VOICE_ACKS, VOICE_NUDGE, voiced } from '../../server/master/voice-text.js';
 import type { MasterEntry, MasterSpeak, MasterStreamEvent } from '../../shared/master.js';
 import { until } from '../helpers/until.js';
 
@@ -212,7 +212,7 @@ test('a daily limit holds every unsettled token and every reading before it star
   assert.ok(answer.ack);
   const entry = await masterEntry(h, /세 가지입니다/);
   await until(() => h.speakOf(entry.id)?.state === 'unspoken');
-  assert.equal(h.labs.speeches.filter(item => item.body.text === long).length, 0);
+  assert.equal(h.labs.speeches.filter(item => String(item.body.text).includes('세 가지입니다')).length, 0);
   assert.ok(h.voice.status().today.dollars <= 0.01);
 });
 
@@ -246,6 +246,7 @@ test('what the owner said is a request like a typed one, answered first with a r
   assert.ok(h.labs.speeches.length - made <= VOICE_ACKS.length, 'each reply is made once');
   assert.equal(h.labs.speeches[0].body.model_id, 'eleven_v3_conversational');
   assert.equal(h.labs.speeches[0].body.language_code, 'ko');
+  assert.equal(h.labs.speeches[0].body.text, `[cheerfully] ${first.ack.text}`, 'a short reply is recorded brightly');
   assert.equal(isNoise('네 알겠어요'), false);
 });
 
@@ -275,6 +276,7 @@ test('an answer to a spoken request is read aloud where voice is on and marked p
   const answer = await masterEntry(h, /두 개입니다/);
   const reading = await until(() => h.says().find(item => item.kind === 'answer'));
   assert.equal(reading.text, '작업 두 개입니다.', 'the first paragraph');
+  assert.ok(h.labs.speeches.some(item => item.body.text === '[cheerfully] 작업 두 개입니다.'), 'the tone tag goes only to speech');
   assert.equal(h.speakOf(answer.id)?.state, 'playing');
   assert.equal(h.voice.voicePlayed({ session, id: reading.id, result: 'played' }), true);
   await until(() => h.speakOf(answer.id)?.state === 'played');
@@ -350,6 +352,7 @@ test('an irreversible change asked by voice is read first, and goes only if the 
   await request(h, session, 's1 닫아');
   const notice = await until(() => notices()[0]);
   assert.match(notice.text, /세션을 닫습니다/);
+  assert.ok(h.labs.speeches.some(item => item.body.text === notice.text), 'a notice keeps the plain voice');
   assert.deepEqual(closes(), []);
   h.voice.voicePlayed({ session, id: notice.id, result: 'played' });
   await sleep(100);
@@ -442,3 +445,15 @@ test('the text master keeps roles apart: only Tower speaks as developer, the con
   ]);
 });
 
+
+test('a tone tag goes only to models that follow tags, and never to failures, notices or serious news', () => {
+  assert.equal(voiced('작업 두 개입니다.', 'eleven_v3_conversational', 'answer'), '[cheerfully] 작업 두 개입니다.');
+  assert.equal(voiced('배포까지 끝났어요!', 'eleven_v3', 'report'), '[excited] 배포까지 끝났어요!');
+  assert.equal(voiced('네, 확인해 볼게요.', 'eleven_v3_conversational', 'ack'), '[cheerfully] 네, 확인해 볼게요.');
+  assert.equal(voiced('배포까지 끝났어요!', 'eleven_flash_v2_5', 'answer'), '배포까지 끝났어요!', 'a tag would be read out');
+  assert.equal(voiced('세션을 닫습니다.', 'eleven_v3_conversational', 'notice'), '세션을 닫습니다.');
+  assert.equal(voiced('요청을 처리하지 못했습니다: 시간 초과', 'eleven_v3_conversational', 'error'), '요청을 처리하지 못했습니다: 시간 초과');
+  assert.equal(voiced('테스트가 실패했어요.', 'eleven_v3_conversational', 'report'), '테스트가 실패했어요.');
+  assert.equal(voiced('죄송해요, 찾지 못했어요.', 'eleven_v3_conversational', 'answer'), '죄송해요, 찾지 못했어요.');
+  assert.equal(voiced('[WIP] 브랜치 두 개예요.', 'eleven_v3_conversational', 'answer'), '[cheerfully] (WIP) 브랜치 두 개예요.', 'brackets in the text are read, not followed');
+});

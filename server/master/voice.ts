@@ -8,7 +8,7 @@ import type { ElevenLabs, VoiceInfo } from './elevenlabs.js';
 import type { VoiceOrigin } from './journal.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
-import { isNoise, VOICE_ACKS, VOICE_NUDGE, VOICE_WORKING } from './voice-text.js';
+import { isNoise, VOICE_ACKS, VOICE_NUDGE, VOICE_WORKING, voiced } from './voice-text.js';
 
 /** Estimated prices: ElevenLabs realtime speech-to-text per second, text-to-speech per character by model. */
 const STT_DOLLARS_PER_SECOND = 0.39 / 3600;
@@ -350,9 +350,11 @@ export class MasterVoice {
     if (!speak || speak.state !== 'pending') return;
     const text = this.content(entry.data);
     const model = this.options.settings.current().voice.model;
+    // The tone tag goes only to speech; the page is sent the text as it is.
+    const sent = text ? voiced(text, model, entry.data.kind === 'error' ? 'error' : speak.session ? 'answer' : 'report') : '';
     // Judged and recorded together: nothing else can start making audio in between.
-    if (!text || this.session !== session || !this.alive(session) || this.limited(Date.now(), text.length * ttsDollarsPerChar(model))) { this.setSpeak(entry, { ...speak, state: 'unspoken' }); return; }
-    const live = this.synthesize(text);
+    if (!text || this.session !== session || !this.alive(session) || this.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) { this.setSpeak(entry, { ...speak, state: 'unspoken' }); return; }
+    const live = this.synthesize(sent);
     if (!await this.firstChunk(live) || this.session !== session) { this.setSpeak(entry, { ...speak, state: 'unspoken' }); return; }
     this.setSpeak(entry, { ...speak, state: 'playing' });
     const result = await this.play(session, { kind: speak.session ? 'answer' : 'report', text, audio: live.id }, this.timing.playMs + text.length * 120);
@@ -389,8 +391,10 @@ export class MasterVoice {
     const hidden = this.options.hooks.hide(text).slice(0, 200);
     const result = await this.onLine(async () => {
       if (this.session !== session || signal.aborted) return 'stopped';
-      if (this.limited(Date.now(), hidden.length * ttsDollarsPerChar(this.options.settings.current().voice.model))) return 'failed';
-      const live = this.synthesize(hidden);
+      const model = this.options.settings.current().voice.model;
+      const sent = voiced(hidden, model, 'notice');
+      if (this.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) return 'failed';
+      const live = this.synthesize(sent);
       if (!await this.firstChunk(live)) return 'failed';
       const heard = await this.play(session, { kind: 'notice', text: hidden, audio: live.id }, this.timing.noticeMs, AbortSignal.any([signal, gate.controller.signal]));
       // Played only counts for the whole sentence: one cut off by a failed synthesis is not a notice.
@@ -548,11 +552,12 @@ export class MasterVoice {
     const settings = this.options.settings.current().voice;
     // A card's value found in a fixed sentence would go out as it is: such a sentence is not said.
     if (this.options.hooks.hide(text) !== text) throw new Error('hidden');
-    const key = createHash('sha256').update(JSON.stringify([settings.voiceId, settings.model, text])).digest('hex');
+    const sent = voiced(text, settings.model, 'ack');
+    const key = createHash('sha256').update(JSON.stringify([settings.voiceId, settings.model, sent])).digest('hex');
     const path = join(this.clips, `${key}.mp3`);
     if (!await stat(path).then(() => true, () => false)) {
-      if (this.limited(Date.now(), text.length * ttsDollarsPerChar(settings.model))) throw new Error('limited');
-      const live = this.synthesize(text);
+      if (this.limited(Date.now(), sent.length * ttsDollarsPerChar(settings.model))) throw new Error('limited');
+      const live = this.synthesize(sent);
       await this.finished(live);
       if (live.failed || !live.done) throw new Error('clip failed');
       await mkdir(this.clips, { recursive: true, mode: 0o700 });

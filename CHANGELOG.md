@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.62.0] - 2026-09-28
+
+### Changed
+- **The master's voice sounds brighter.** Answers, reports of finished work and short replies are read with an ElevenLabs v3 audio tag in front: `[cheerfully]` for most, and `[excited]` for clear good news such as finished work or a deploy that went out. On the Yuna voice, `[excited]` raised the pitch about 1.6 semitones and read a little faster. The tag goes only to speech. It never appears on screen or in the conversation, and it is not read aloud. Failures, warnings, apologies, deletions, security matters and the sentence read before an irreversible change keep the voice's plain tone. The flash v2.5 model does not follow tags, so with it answers are read as before, and the settings say so.
+- Square brackets in an answer, such as `[WIP]`, are read as words and no longer taken as reading directions.
+
 ## [1.61.0] - 2026-09-28
 
 ### Added
