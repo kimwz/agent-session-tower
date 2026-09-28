@@ -757,6 +757,31 @@ test('with key hiding off, a value typed into a secret card is still hidden when
   assert.ok(room.recent(30).every(entry => !JSON.stringify(entry.data).includes('card-password-never-public')));
 });
 
+test('a card value in where the owner is looking is hidden too, and a card that cannot take another value stays open', async t => {
+  const { service, room, dir, said, script } = await master(t, () => ({ body: {} }), [
+    [call('request_secret', { purpose: 'password' }), call('request_secret', { purpose: 'another' })],
+    [say('카드 두 장을 드렸습니다.')],
+    [say('받았습니다.')],
+    request => { assert.doesNotMatch(JSON.stringify(request.input), /card-password-never-public/); return [say('폴더를 봤습니다.')]; },
+  ], undefined, { guards: { hideSecrets: false } });
+  await service.send({ clientMessageId: 'message-0210', text: '비밀번호 두 개 받아줘', local: true });
+  await said(/두 장/);
+  const [first, second] = room.recent(20).filter(entry => entry.data.kind === 'card');
+  await service.card(first.id, { value: 'card-password-never-public' }, true);
+  await said(/받았습니다/);
+  await service.send({ clientMessageId: 'message-0211', text: '이 폴더 봐줘', local: true, viewContext: { tabId: 'tab-x', cwd: '/work/card-password-never-public' } });
+  await said(/폴더를 봤습니다/);
+  assert.equal(script.requests.length, 4);
+  await service.close();
+  assert.doesNotMatch(await readFile(join(dir, 'inbox.json'), 'utf8'), /card-password-never-public/);
+  // Full: the vault refuses, and the card still waits for a value instead of reading as entered.
+  const vault = (service as unknown as { vault: { reference(value: string): string } }).vault;
+  for (let index = 0; index < 199; index++) vault.reference(`card-value-${String(index).padStart(4, '0')}`);
+  await assert.rejects(service.card(second.id, { value: 'one-card-too-many' }, true), { statusCode: 409 });
+  const still = room.get(second.id)!;
+  assert.equal(still.data.kind === 'card' && still.data.card.type === 'secret' && still.data.card.state, 'waiting');
+});
+
 test('a notifications card records how it went on the device that pressed it', async t => {
   const { service, room, said } = await master(t, () => ({ body: {} }), [
     [call('browser_action', { kind: 'push-subscribe' })],

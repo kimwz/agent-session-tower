@@ -166,10 +166,13 @@ export class MasterService {
     const existing = known && room.get(known.id);
     if (existing) return existing;
     // Keys the owner pastes are theirs; values typed into a secret card are hidden here too, whatever the setting.
-    const text = settings.current().guards.hideSecrets ? this.vault.hide(input.text, 'pasted') : this.vault.redact(input.text);
-    const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: input.clientMessageId, text, local: input.local, ...(input.viewContext ? { viewContext: input.viewContext } : {}), at: new Date().toISOString(), state: 'queued', retries: 0 };
-    if (input.viewContext?.tabId) this.lastTab = input.viewContext.tabId;
-    const entry = room.add({ kind: 'owner', text, ...(input.viewContext?.tabId ? { clientId: input.viewContext.tabId } : {}) }, item.id);
+    const hide = (value: string) => settings.current().guards.hideSecrets ? this.vault.hide(value, 'pasted') : this.vault.redact(value);
+    const text = hide(input.text);
+    // Where the owner is looking is kept and read by the model too: its names are hidden the same way.
+    const viewContext = input.viewContext && Object.fromEntries(Object.entries(input.viewContext).map(([key, value]) => [key, typeof value === 'string' ? hide(value) : value])) as MasterViewContext;
+    const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: input.clientMessageId, text, local: input.local, ...(viewContext ? { viewContext } : {}), at: new Date().toISOString(), state: 'queued', retries: 0 };
+    if (viewContext?.tabId) this.lastTab = viewContext.tabId;
+    const entry = room.add({ kind: 'owner', text, ...(viewContext?.tabId ? { clientId: viewContext.tabId } : {}) }, item.id);
     journal.inbox.push(item);
     await journal.save('inbox');
     this.pump();
@@ -548,10 +551,12 @@ export class MasterService {
       // A shorter value could not be found and hidden reliably wherever it shows up, nor one that reads like a reference.
       if (value.length < SHORTEST_SECRET) throw Object.assign(new Error(`비밀 값은 ${SHORTEST_SECRET}자 이상이어야 합니다.`), { statusCode: 400 });
       if (value.includes('{{secret:')) throw Object.assign(new Error('비밀 값에 {{secret:를 넣을 수 없습니다.'), { statusCode: 400 });
+      // Taken first, so a card that cannot take one more value stays open with the reason.
+      const reference = this.vault.reference(value);
       const updated = room.update(id, { kind: 'card', card: { ...card, state: 'provided' } }) ?? entry;
       // The tab that answered is where the owner is now: what follows is shown there.
       const tabId = typeof body.tabId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(body.tabId) ? body.tabId : undefined;
-      await this.send({ clientMessageId: `secret-${id}`, text: `비밀 값을 입력했습니다 (${card.purpose}): ${this.vault.reference(value)}`, local, ...(tabId ? { viewContext: { tabId } } : {}) });
+      await this.send({ clientMessageId: `secret-${id}`, text: `비밀 값을 입력했습니다 (${card.purpose}): ${reference}`, local, ...(tabId ? { viewContext: { tabId } } : {}) });
       return updated;
     }
     throw Object.assign(new Error('이 카드에는 답할 것이 없습니다.'), { statusCode: 400 });
