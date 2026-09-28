@@ -8,9 +8,12 @@ import { sortSessions } from '../../shared/session-activity.js';
 import { inspectProcesses, type ProcessSnapshot } from './processes.js';
 import { appendFile, applyStatus, initial, ownHistory, parseMessages, walk, CHUNK, MAX_LINE, type RecordState } from './parser.js';
 
-/** Every term is lowercase; times are milliseconds, `until` excluded. Tool calls and results are searched only with `tools`. */
-export interface SessionSearch { terms: string[]; since?: number; until?: number; tools?: boolean; keep: number }
-export interface SessionSearchResult { count: number; matches: Array<{ message: ChatMessage; cursor: number }>; bytes: number }
+/**
+ * Every term is lowercase; times are milliseconds, `until` excluded. Tool calls and results are searched only with `tools`.
+ * `from` is a line start an earlier search stopped at; `maxBytes` and `deadline` bound one call.
+ */
+export interface SessionSearch { terms: string[]; since?: number; until?: number; tools?: boolean; keep: number; from?: number; maxBytes?: number; deadline?: number }
+export interface SessionSearchResult { count: number; matches: Array<{ message: ChatMessage; cursor: number }>; bytes: number; next?: number }
 
 /** A term as the JSONL writers store it inside a string: JSON-escaped, ASCII letters lowercased like the line it is looked for in. */
 function rawNeedle(term: string): Buffer {
@@ -198,25 +201,30 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * The messages of one conversation that contain every term (lowercase), read from its start. Only lines whose raw bytes
-   * could hold the first term are parsed, so a search costs little more than reading the file. Keeps the last `keep`
-   * matches, each with the cursor that pages `detail` back from just after it.
+   * The messages of one conversation that contain every term (lowercase), read forward from its start or from `from`.
+   * Only lines whose raw bytes could hold a term are parsed, so a search costs little more than reading the file. Keeps
+   * the last `keep` matches, each with the cursor that pages `detail` back to just after it. Stops at a line boundary
+   * once `maxBytes` or the `deadline` is reached, and says where to go on (`next`).
    */
   async search(id: string, query: SessionSearch): Promise<SessionSearchResult | undefined> {
     const state = this.index.get(id);
     if (!state) return undefined;
     const result: SessionSearchResult = { count: 0, matches: [], bytes: 0 };
     if (state.historyStartOrdinal !== undefined && state.historyStartOffset === undefined) return result;
-    const needle = rawNeedle(query.terms[0]!);
-    const escapes = /[^\x00-\x7f]/.test(query.terms[0]!) ? Buffer.from('\\u') : undefined;
+    // A term whose letters outside ASCII have case cannot be found in the raw bytes; any other can.
+    const plain = query.terms.find(term => ![...term].some(letter => letter > '\x7f' && letter.toUpperCase() !== letter));
+    const needle = plain === undefined ? undefined : rawNeedle(plain);
+    const escapes = plain !== undefined && /[^\x00-\x7f]/.test(plain) ? Buffer.from('\\u') : undefined;
     const file = await open(state.session.filePath!, 'r');
     let lowered = Buffer.alloc(0);
     const test = (line: Buffer, start: number): void => {
-      if (line.length < needle.length) return;
-      if (lowered.length < line.length) lowered = Buffer.allocUnsafe(Math.max(line.length, lowered.length * 2));
-      for (let index = 0; index < line.length; index++) { const byte = line[index]!; lowered[index] = byte >= 65 && byte <= 90 ? byte + 32 : byte; }
-      const view = lowered.subarray(0, line.length);
-      if (view.indexOf(needle) === -1 && !(escapes && view.indexOf(escapes) !== -1)) return;
+      if (needle) {
+        if (line.length < needle.length) return;
+        if (lowered.length < line.length) lowered = Buffer.allocUnsafe(Math.max(line.length, lowered.length * 2));
+        for (let index = 0; index < line.length; index++) { const byte = line[index]!; lowered[index] = byte >= 65 && byte <= 90 ? byte + 32 : byte; }
+        const view = lowered.subarray(0, line.length);
+        if (view.indexOf(needle) === -1 && !(escapes && view.indexOf(escapes) !== -1)) return;
+      }
       let row: Record<string, any>;
       try { row = JSON.parse(line.toString('utf8')); } catch { return; }
       if (!ownHistory(state, row, start)) return;
@@ -232,7 +240,8 @@ export class SessionService extends EventEmitter {
       }
     };
     try {
-      let position = state.historyStartOffset ?? 0;
+      const first = Math.max(state.historyStartOffset ?? 0, query.from ?? 0);
+      let position = first;
       let fragments: Buffer[] = [];
       let pending = 0;
       let lineStart = position;
@@ -256,6 +265,11 @@ export class SessionService extends EventEmitter {
         }
         position += bytesRead;
         result.bytes += bytesRead;
+        // Past the first line, so going on from here always moves forward.
+        if (position < state.offset && lineStart > first && ((query.maxBytes !== undefined && result.bytes >= query.maxBytes) || (query.deadline !== undefined && Date.now() >= query.deadline))) {
+          result.next = lineStart;
+          break;
+        }
       }
     } finally { await file.close(); }
     return result;

@@ -169,9 +169,12 @@ export class TowerApi {
       case 'sessions.search': {
         // Only conversations it can see are searched, and only those it can still see after are shown.
         const view = await this.view(held);
-        const found = await this.search(held.sessions.filter(session => view.sessions.has(session.id)), value);
+        const shared = held.sessions.filter(session => view.sessions.has(session.id));
+        const found = await this.search(shared, value);
+        // If sharing changed while it searched, nothing is answered: not even how far it read or where it stopped.
         const after = await this.view(this.held());
-        return { ...found, sessions: found.sessions.filter(session => after.sessions.has(session.id)) };
+        if (shared.some(session => !after.sessions.has(session.id))) throw failure('What this computer shares changed during the search. Search again.', 409);
+        return found;
       }
       case 'projects.list': {
         const projects = this.services.projects?.() ?? [];
@@ -339,36 +342,40 @@ export class TowerApi {
 
   /**
    * Searches conversations newest first until `limit` of them match or the read budget is spent; the cursor then
-   * continues after the last conversation read. Conversations whose activity lies wholly outside the period are skipped
-   * without being read.
+   * continues after the last conversation read, or inside a long one where the budget ran out. Conversations whose
+   * activity lies wholly outside the period are skipped without being read.
    */
   private async search(list: Session[], value: Record<string, any>) {
     const search = this.services.sessions?.search;
     if (!search) throw failure('Session search is unavailable.', 503);
-    const terms = [...new Set(String(value.query).toLowerCase().split(/\s+/).filter(Boolean))].sort((a, b) => b.length - a.length).slice(0, 8);
+    const terms = [...new Set(String(value.query).toLowerCase().split(/\s+/).filter(Boolean))].sort((a, b) => b.length - a.length);
     const since = value.since ? boundary(value.since, false) : undefined;
     const until = value.until ? boundary(value.until, true) : undefined;
     if (since !== undefined && until !== undefined && since >= until) throw failure('Invalid request: since must be before until.', 400);
     const after = value.cursor === undefined ? undefined : decodeCursor(value.cursor);
     const limit = value.limit ?? 10;
-    const candidates = ordered(list.filter(session => !session.isSubagent && !session.launchedByAgent && (!value.sessionId || session.id === value.sessionId)
+    const eligible = list.filter(session => !session.isSubagent && !session.launchedByAgent && (!value.sessionId || session.id === value.sessionId)
       && (!value.provider || session.provider === value.provider) && (!value.cwd || session.cwd === value.cwd)
-      && (since === undefined || !(Date.parse(session.updatedAt) < since)) && (until === undefined || !(Date.parse(session.createdAt) >= until))), after);
+      && (since === undefined || !(Date.parse(session.updatedAt) < since)) && (until === undefined || !(Date.parse(session.createdAt) >= until)));
+    // A conversation the last page stopped inside is finished first, from where it stopped.
+    const resumed = after?.offset !== undefined ? eligible.find(session => session.id === after.id) : undefined;
+    const candidates = [...(resumed ? [resumed] : []), ...ordered(eligible, after)];
     const found: Array<ReturnType<typeof sessionSummary> & { matchCount: number; matches: unknown[] }> = [];
-    const started = Date.now();
+    const deadline = Date.now() + SEARCH_MS;
     let bytes = 0;
     let read = 0;
     for (const session of candidates) {
-      if (found.length >= limit || (read && (bytes >= SEARCH_BYTES || Date.now() - started >= SEARCH_MS))) {
-        const last = candidates[read - 1]!;
-        return { sessions: found, searched: read, nextCursor: encodeCursor(last) };
+      if (found.length >= limit || (read && (bytes >= SEARCH_BYTES || Date.now() >= deadline))) {
+        return { sessions: found, searched: read, nextCursor: encodeCursor(candidates[read - 1]!) };
       }
       read++;
-      const result = await search(session.id, { terms, since, until, tools: value.tools === true, keep: 3 }).catch(() => undefined);
+      const result = await search(session.id, { terms, since, until, tools: value.tools === true, keep: 3, maxBytes: Math.max(1, SEARCH_BYTES - bytes), deadline,
+        ...(session === resumed ? { from: after!.offset } : {}) }).catch(() => undefined);
       if (!result) continue;
       bytes += result.bytes;
       if (result.count) found.push({ ...sessionSummary(session), matchCount: result.count,
         matches: result.matches.reverse().map(({ message, cursor }) => ({ ...shownMessage(message, 0), text: excerpt(message.text, terms), cursor: String(cursor) })) });
+      if (result.next !== undefined) return { sessions: found, searched: read, nextCursor: encodeCursor(session, result.next) };
     }
     return { sessions: found, searched: read };
   }
@@ -412,11 +419,14 @@ function ordered(sessions: Session[], after?: { updatedAt: string; id: string })
   const sorted = [...sessions].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id.localeCompare(a.id));
   return after ? sorted.filter(session => session.updatedAt < after.updatedAt || (session.updatedAt === after.updatedAt && session.id < after.id)) : sorted;
 }
-const encodeCursor = (session: Session) => Buffer.from(JSON.stringify([session.updatedAt, session.id])).toString('base64url');
-function decodeCursor(cursor: string): { updatedAt: string; id: string } {
+/** Where a page ended: after a conversation, or at `offset` inside one a search had not finished. */
+const encodeCursor = (session: Session, offset?: number) => Buffer.from(JSON.stringify([session.updatedAt, session.id, ...(offset === undefined ? [] : [offset])])).toString('base64url');
+function decodeCursor(cursor: string): { updatedAt: string; id: string; offset?: number } {
   try {
-    const [updatedAt, id] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown[];
-    if (typeof updatedAt === 'string' && typeof id === 'string') return { updatedAt, id };
+    const [updatedAt, id, offset] = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as unknown[];
+    if (typeof updatedAt === 'string' && typeof id === 'string' && (offset === undefined || (Number.isSafeInteger(offset) && (offset as number) >= 0))) {
+      return { updatedAt, id, ...(offset === undefined ? {} : { offset: offset as number }) };
+    }
   } catch { /* Reported below. */ }
   throw failure('Invalid request: cursor: Pass nextCursor unchanged.', 400);
 }

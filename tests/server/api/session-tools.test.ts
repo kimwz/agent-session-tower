@@ -119,3 +119,35 @@ test('a search term with quotes matches what the JSONL file stores escaped', asy
   const found = await f.call<{ sessions: Array<{ id: string }> }>('sessions.search', { query: '"old name"' });
   assert.deepEqual(found.sessions.map(item => item.id), [`claude:${id(1)}`]);
 });
+
+test('a long conversation is searched in parts, going on where the last part stopped', async t => {
+  const f = await fixture(t);
+  const rows = Array.from({ length: 40 }, (_, n) => claudeRow(id(1), 'user', `step ${n} ${n % 10 === 0 ? 'checkpoint' : 'filler '.repeat(4000)}`, `2026-09-01T10:${String(n).padStart(2, '0')}:00.000Z`, `r${n}`));
+  await f.write(1, rows);
+  await f.sessions.refresh();
+  const session = `claude:${id(1)}`;
+  const first = await f.sessions.search(session, { terms: ['checkpoint'], keep: 10, maxBytes: 1 });
+  assert.ok(first!.next !== undefined && first!.count < 4, 'stopped early at a line boundary');
+  let count = first!.count;
+  for (let next: number | undefined = first!.next; next !== undefined;) {
+    const part = await f.sessions.search(session, { terms: ['checkpoint'], keep: 10, maxBytes: 1, from: next });
+    assert.ok(part!.next === undefined || part!.next > next, 'always moves forward');
+    count += part!.count; next = part!.next;
+  }
+  assert.equal(count, 4, 'every match found exactly once');
+  // The same through the tool: a cursor inside the conversation finishes it before going on.
+  const cursor = Buffer.from(JSON.stringify(['2026-09-01T10:39:00.000Z', session, first!.next])).toString('base64url');
+  const rest = await f.call<{ sessions: Array<{ id: string; matchCount: number }> }>('sessions.search', { query: 'checkpoint', cursor });
+  assert.deepEqual(rest.sessions.map(item => [item.id, item.matchCount]), [[session, 4 - first!.count]]);
+});
+
+test('every search word counts, and letters outside ASCII match in either case', async t => {
+  const f = await fixture(t);
+  await f.write(1, [claudeRow(id(1), 'user', 'ÉCHEC du déploiement', '2026-09-01T10:00:00.000Z', 'a')]);
+  await f.write(2, [claudeRow(id(2), 'user', 'alpha bravo charlie delta echo foxtrot golf hotel', '2026-09-02T10:00:00.000Z', 'b')]);
+  await f.sessions.refresh();
+  type Found = { sessions: Array<{ id: string }> };
+  assert.deepEqual((await f.call<Found>('sessions.search', { query: 'échec' })).sessions.map(item => item.id), [`claude:${id(1)}`]);
+  assert.deepEqual((await f.call<Found>('sessions.search', { query: 'alpha bravo charlie delta echo foxtrot golf hotel' })).sessions.map(item => item.id), [`claude:${id(2)}`]);
+  assert.deepEqual((await f.call<Found>('sessions.search', { query: 'alpha bravo charlie delta echo foxtrot golf hotel india' })).sessions, []);
+});

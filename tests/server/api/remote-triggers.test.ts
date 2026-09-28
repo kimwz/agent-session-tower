@@ -316,3 +316,12 @@ test('an agent in a turn started from a controlling computer sees and starts onl
   assert.deepEqual(created.trigger.remoteEdited, { controllerId: CONTROLLER });
   assert.equal(created.trigger.createdBy.controllerId, CONTROLLER);
 });
+
+test('a search from a controlling computer answers nothing if sharing changed while it searched', async t => {
+  const f = await fixture(t);
+  assert.deepEqual((await f.call<{ sessions: Array<{ id: string }> }>('sessions.search', { query: 'release' })).sessions.map(item => item.id), ['codex:shared']);
+  f.looking.skip = 1;
+  f.looking.during = async () => { f.excluded.add(f.open); };
+  await assert.rejects(f.call('sessions.search', { query: 'release', limit: 1 }), { statusCode: 409 });
+  assert.deepEqual((await f.call<{ sessions: unknown[]; nextCursor?: string }>('sessions.search', { query: 'release' })), { sessions: [], searched: 0 });
+});
