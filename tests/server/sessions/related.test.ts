@@ -60,7 +60,7 @@ test('sessions in the same folder are offered first when there are more than can
 
 test('each earlier session is described by its latest user requests, newest first, as many as fit its share', async () => {
   const seen: Array<{ state: any; questions: Record<string, any> }> = [];
-  const requests = new Map([['codex:long', Array.from({ length: 8 }, (_, i) => `${String(8 - i)} ${'x'.repeat(290)}`)], ['codex:short', ['결제 아이템 서버 지급 확인', '용사단 키우기 결제 조사']]]);
+  const requests = new Map([['codex:long', Array.from({ length: 8 }, (_, i) => `${String(8 - i)} ${'x'.repeat(298)}`)], ['codex:short', ['결제 아이템 서버 지급 확인', '용사단 키우기 결제 조사']]]);
   const all = [fresh, session('codex:short', 'Payments', '/work', 0.1), ...Array.from({ length: 38 }, (_, i) => session(`codex:long${i}`, `busy ${i}`, '/work', 0.2 + i / 100)), session('codex:long', 'Long', '/work', 0.05)];
   await relatedSessionNotes(engine('nothing', seen), run, fresh, all, id => requests.get(id) ?? [], now);
   const earlier = Object.values(seen[0]!.state.earlierSessions) as Array<{ title: string; latestUserRequests: string[]; lastMessage?: string }>;
@@ -74,11 +74,11 @@ test('each earlier session is described by its latest user requests, newest firs
 
 test('what is sent stays within the judgment’s limit even when every request is full of characters JSON escapes', async () => {
   const seen: Array<{ state: any; questions: Record<string, any> }> = [];
-  const escaped = '\\"'.repeat(150);
+  const escaped = '\\"\u001b'.repeat(100);
   const all = [fresh, ...Array.from({ length: 45 }, (_, i) => session(`codex:e${i}`, `${escaped} ${i}`.repeat(3), `/w/${escaped.repeat(20)}`, 0.01 * (i + 1)))];
-  await relatedSessionNotes(engine('nothing', seen), { ...run, prompt: escaped.repeat(20) }, fresh, all, () => Array.from({ length: 8 }, () => escaped), now);
+  await relatedSessionNotes(engine('nothing', seen), { ...run, prompt: escaped.repeat(20) }, fresh, all, id => id.endsWith('e0') ? ['plain request'] : Array.from({ length: 8 }, () => escaped), now);
   const state = JSON.stringify(seen[0]!.state);
   const longestQuestion = Math.max(...Object.values(seen[0]!.questions).map(question => JSON.stringify(question).length));
   assert.ok(state.length + longestQuestion <= 110_000, `${state.length + longestQuestion} characters`);
-  assert.ok((Object.values(seen[0]!.state.earlierSessions)[0] as { latestUserRequests: string[] }).latestUserRequests.length > 0, 'still describes each session');
+  assert.deepEqual((Object.values(seen[0]!.state.earlierSessions)[0] as { latestUserRequests: string[] }).latestUserRequests, ['plain request'], 'what fits is still sent');
 });
