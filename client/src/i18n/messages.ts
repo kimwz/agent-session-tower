@@ -1422,6 +1422,7 @@ export const english: Record<string, string> = {
   "다른 컴퓨터에서 보낸 턴이라 이 대화의 도구를 연결하지 않았습니다.": "This turn came from another computer, so this conversation’s tools were not attached.",
   "{0}의 트리거입니다. 정한 때가 되면 그 컴퓨터에서 실행됩니다.": "These are {0}’s triggers. They run on that computer when their time comes.",
   "이 컴퓨터": "This computer",
+  "화면 v{0} · 실행 워커 v{1}": "Page v{0} · execution worker v{1}",
   "{0}의 연결과 비밀 값은 그 컴퓨터의 Tower에서 설정합니다.": "{0}’s connections and secrets are set up in Tower on that computer.",
   "{0}의 트리거 한도는 그 컴퓨터의 Tower에서 설정합니다.": "{0}’s trigger limits are set in Tower on that computer.",
   "다른 컴퓨터에서 마지막으로 바꾼 트리거는 이 컴퓨터가 원격 공유에서 제외한 폴더를 쓰지 않습니다.": "A trigger last changed from another computer never uses folders this computer keeps out of sharing.",

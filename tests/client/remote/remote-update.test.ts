@@ -43,3 +43,8 @@ test('a computer restarting into a new version is shown as updating, not offline
   assert.equal(hostState(view.hosts[1]), 'updating');
   assert.match(hostProblem(view.hosts[1])!, /새 버전으로 다시 시작하는 중입니다/);
 });
+
+test('this computer carries its execution worker version for the canvas', () => {
+  const view = combinedView({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'here', version: '1.56.0', runnerVersion: '1.53.2', updatedAt: at }, new Map());
+  assert.equal(view.hosts[0].runnerVersion, '1.53.2');
+});

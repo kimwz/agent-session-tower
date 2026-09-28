@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.58.3] - 2026-09-28
+
+### Added
+- **The execution worker's version shows when you point at this computer's version.** On the canvas, hovering **이 컴퓨터 · v…** now shows both versions, for example "화면 v1.58.3 · 실행 워커 v1.53.2". Features the worker runs, such as Slack follow-ups, apply only once the worker reaches the page's version.
+
 ## [1.58.2] - 2026-09-28
 
 ### Changed

@@ -108,6 +108,7 @@ test('this computer’s host node shows its own Tower version', () => {
   const local = host({ version: '1.55.1' });
   assert.match(local, /class="host-link local"><i><\/i>이 컴퓨터 · v1\.55\.1<\/span>/);
   assert.doesNotMatch(local, /is-remote/);
+  assert.match(host({ version: '1.56.0', runnerVersion: '1.53.2' }), /class="host-link local" title="화면 v1\.56\.0 · 실행 워커 v1\.53\.2">/, 'hovering it shows the execution worker version');
   assert.doesNotMatch(host({ version: '1.55.1', link: { status: 'connected', live: true, version: '1.23.0' } }), /이 컴퓨터/, 'a joined computer shows its own version only');
 });
 
