@@ -181,6 +181,15 @@ export class SecretVault {
   /** Whether text holds, as it is, a value hidden everywhere. */
   holds(text: string): boolean { return this.redact(text) !== text; }
 
+  /** Whether any name or value in a plain value holds a value hidden everywhere. */
+  holdsIn(value: unknown): boolean {
+    if (typeof value === 'string') return this.holds(value);
+    if (typeof value === 'number') return this.holds(String(value));
+    if (Array.isArray(value)) return value.some(item => this.holdsIn(item));
+    if (value && typeof value === 'object') return Object.entries(value).some(([key, item]) => this.holds(key) || this.holdsIn(item));
+    return false;
+  }
+
   /** A reference for a value the owner typed into a secret card, whatever its format; none past `MAX_CARDS`. */
   reference(value: string): string {
     const known = this.refs.get(value);

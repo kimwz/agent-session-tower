@@ -869,6 +869,40 @@ test('a card value the model writes out itself goes nowhere: not into requests, 
   assert.doesNotMatch(JSON.stringify(seen[0]), /12345678/);
 });
 
+test('Tower never hands the model a card value: not in results, errors, earlier lines or the card\'s own description', async t => {
+  const value = 'password';
+  const quoted = 'abcd"efgh-ijkl';
+  const { service, room, tower, said } = await master(t, () => ({ body: {} }), [
+    [call('request_secret', { purpose: 'account password' }), call('request_secret', { purpose: 'quoted' })],
+    [say('카드를 드렸습니다.')],
+    [say('첫째.')],
+    [say('둘째.')],
+    [call('tower_api', { method: 'POST', path: '/api/sessions', body: { provider: 'claude', cwd: '/w', prompt: quoted } }),
+      call('session_read', { sessionId: 'password' }),
+      call('ui', { action: 'filter', filter: { [value]: true } })],
+    request => {
+      const text = JSON.stringify(request.input.filter(item => item.type !== 'function_call'));
+      assert.doesNotMatch(text, /password|abcd\\"efgh/);
+      const [post, read] = toolOutputs(request);
+      assert.match(String(post.error), /그대로 들어 있습니다/);
+      assert.match(String(read.error), /그대로 들어 있습니다/);
+      return [say('끝.')];
+    },
+  ]);
+  await service.send({ clientMessageId: 'message-0216', text: '비밀번호 두 개 받아줘', local: true });
+  await said(/카드를 드렸습니다/);
+  const [first, second] = room.recent(20).filter(entry => entry.data.kind === 'card');
+  await service.card(first.id, { value }, true);
+  await said(/첫째/);
+  await service.card(second.id, { value: quoted }, true);
+  await said(/둘째/);
+  const card = room.get(first.id)!;
+  assert.doesNotMatch(JSON.stringify(card.data), /password/);
+  await service.send({ clientMessageId: 'message-0217', text: '진행해', local: true, viewContext: { tabId: 'tab-r' } });
+  await said(/끝/);
+  assert.equal(tower.seen.length, 0, 'nothing went out with a card value in it');
+});
+
 test('a notifications card records how it went on the device that pressed it', async t => {
   const { service, room, said } = await master(t, () => ({ body: {} }), [
     [call('browser_action', { kind: 'push-subscribe' })],

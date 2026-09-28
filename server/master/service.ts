@@ -247,7 +247,7 @@ export class MasterService {
       const digest = live ? statusDigest(await live.fresh(), live.nodeSnapshots(), Date.now(), live.missing(), text => this.hideText(text)) : '';
       const items: ModelItem[] = [
         { type: 'message', role: 'developer', content: [digest ? this.hideText(digest) : '', this.context(inputs)].filter(Boolean).join('\n\n') },
-        { type: 'message', role: 'user', content: inputs.map(item => item.kind === 'event' ? `[event] ${item.text}` : item.text).join('\n\n') },
+        { type: 'message', role: 'user', content: this.hideText(inputs.map(item => item.kind === 'event' ? `[event] ${item.text}` : item.text).join('\n\n')) },
       ];
       const started = Date.now();
       const turnMs = this.options.turnMs ?? TURN_MS;
@@ -281,7 +281,8 @@ export class MasterService {
           const output = toolCalls > MAX_TOOL_CALLS
             ? { error: '이번 요청에서 부를 수 있는 도구 수를 넘었습니다. 지금까지 한 일을 소유자에게 보고하세요.' }
             : await this.tool(String(call.name), String(call.arguments ?? '{}'), turn).catch(error => ({ error: error instanceof Error ? error.message : String(error) }));
-          items.push({ type: 'function_call_output', call_id: String(call.call_id), output: truncate(JSON.stringify(output), MAX_TOOL_OUTPUT) });
+          // Every result is hidden as a whole before the model reads it, and only then shortened.
+          items.push({ type: 'function_call_output', call_id: String(call.call_id), output: truncate(this.hideText(JSON.stringify(output)), MAX_TOOL_OUTPUT) });
         }
         turn.abort.signal.throwIfAborted();
       }
@@ -329,10 +330,11 @@ export class MasterService {
         return `[${at} ${data.kind}] ${truncate(data.text, 500)}`;
       });
     const running = this.options.journal.tasks.filter(task => task.state === 'running').map(task => `- ${task.title} (session ${task.sessionId ?? '?'}${task.node ? `, node ${task.node}` : ''})`);
-    return [`Now: ${new Date().toISOString()}`,
+    // Hidden again with what is known now: an earlier line may hold a value the owner has since given on a card.
+    return this.hideText([`Now: ${new Date().toISOString()}`,
       view ? `The owner is looking at: ${JSON.stringify(view)}` : '',
       running.length ? `Work you delegated that is still running:\n${running.join('\n')}` : '',
-      lines.length ? `Conversation so far (oldest first):\n${lines.join('\n')}` : 'This is the start of the conversation.'].filter(Boolean).join('\n\n');
+      lines.length ? `Conversation so far (oldest first):\n${lines.join('\n')}` : 'This is the start of the conversation.'].filter(Boolean).join('\n\n'));
   }
 
   private async tool(name: string, rawArguments: string, turn: Turn): Promise<unknown> {
@@ -362,7 +364,7 @@ export class MasterService {
     const given = target.method === 'POST' ? (args.body && typeof args.body === 'object' ? args.body as Record<string, unknown> : {}) : undefined;
     // A value from a secret card goes out only through its reference, in the request's secret field; written out as
     // it is (in a path, a title or a prompt), it would be kept and shown openly.
-    if (this.vault.holds(target.path) || this.vault.holds(JSON.stringify(given ?? null))) return { error: '요청에 비밀 카드로 받은 값이 그대로 들어 있습니다. 값 대신 참조를 이 요청의 비밀 칸에 넣으세요.' };
+    if (this.vault.holds(target.path) || this.vault.holds(target.route) || this.vault.holdsIn(given)) return { error: '요청에 비밀 카드로 받은 값이 그대로 들어 있습니다. 값 대신 참조를 이 요청의 비밀 칸에 넣으세요.' };
     let body: unknown = given;
     // References come only from values the owner gave (pasted, or typed into a secret card), whatever the settings,
     // and go back only into the request's secret fields.
@@ -472,6 +474,7 @@ export class MasterService {
   private async sessionRead(args: Record<string, unknown>, turn: Turn): Promise<unknown> {
     const id = typeof args.sessionId === 'string' ? args.sessionId : '';
     if (!id) return { error: 'sessionId가 필요합니다.' };
+    if (this.vault.holdsIn(args)) return { error: '요청에 비밀 카드로 받은 값이 그대로 들어 있습니다.' };
     const limit = typeof args.limit === 'number' ? Math.min(Math.max(Math.floor(args.limit), 1), 60) : 20;
     const target = apiTarget('GET', `/api/sessions/${encodeURIComponent(id)}?limit=${limit}`, typeof args.node === 'string' && args.node ? args.node : undefined);
     const response = await this.options.tower.call('GET', target.path, undefined, { write: false, signal: turn.abort.signal });
@@ -566,10 +569,11 @@ export class MasterService {
       if (value.includes('{{secret:')) throw Object.assign(new Error('비밀 값에 {{secret:를 넣을 수 없습니다.'), { statusCode: 400 });
       // Taken first, so a card that cannot take one more value stays open with the reason.
       const reference = this.vault.reference(value);
-      const updated = room.update(id, { kind: 'card', card: { ...card, state: 'provided' } }) ?? entry;
+      const purpose = this.hideText(card.purpose);
+      const updated = room.update(id, { kind: 'card', card: { ...card, purpose, state: 'provided' } }) ?? entry;
       // The tab that answered is where the owner is now: what follows is shown there.
       const tabId = typeof body.tabId === 'string' && /^[a-zA-Z0-9-]{1,80}$/.test(body.tabId) ? body.tabId : undefined;
-      await this.send({ clientMessageId: `secret-${id}`, text: `비밀 값을 입력했습니다 (${card.purpose}): ${reference}`, local, ...(tabId ? { viewContext: { tabId } } : {}) });
+      await this.send({ clientMessageId: `secret-${id}`, text: `비밀 값을 입력했습니다 (${purpose}): ${reference}`, local, ...(tabId ? { viewContext: { tabId } } : {}) });
       return updated;
     }
     throw Object.assign(new Error('이 카드에는 답할 것이 없습니다.'), { statusCode: 400 });
@@ -581,6 +585,7 @@ export class MasterService {
     if (!id) return { error: 'terminalId가 필요합니다. GET /api/workspace/terminals?cwd=로 찾으세요.' };
     const node = typeof args.node === 'string' && args.node ? args.node : undefined;
     if (node && !NODE_ID.test(node)) return { error: '연결된 컴퓨터 ID가 올바르지 않습니다.' };
+    if (this.vault.holdsIn(args)) return { error: '요청에 비밀 카드로 받은 값이 그대로 들어 있습니다.' };
     const path = `${node ? `/api/nodes/${node}` : '/api'}/workspace/terminals/${id}/events`;
     const listening = new AbortController();
     const stop = () => listening.abort();
