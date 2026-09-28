@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.52.1] - 2026-09-28
+
+### Fixed
+- **A voice call that goes quiet is woken again by news.** While a call ran, the page's reports of what it heard used up its 30 changes a minute, so the page's own "end on silence" was refused. The call was recorded as dropped, and news could not wake it. A call's reports and its ending now have budgets of their own. The page reports the moment you start speaking and otherwise every two seconds, and tries its ending twice.
+- **An announced irreversible change waits for fresh word from your page.** It goes only after your page reports, after the sentence has played, that you did not speak. A report that did not get through can no longer let it go.
+
 ## [1.52.0] - 2026-09-28
 
 ### Added
