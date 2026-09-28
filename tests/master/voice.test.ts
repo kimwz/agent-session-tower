@@ -216,6 +216,13 @@ test('a daily limit holds every unsettled token and every reading before it star
   assert.ok(h.voice.status().today.dollars <= 0.01);
 });
 
+test('a card never takes a value found in a sentence read aloud, which goes out as it is', async t => {
+  const h = await harness(t);
+  const card = h.room.add({ kind: 'card', card: { type: 'secret', purpose: '토큰', state: 'waiting' } });
+  await assert.rejects(h.service.card(card.id, { value: '아직 하고 있어요. 끝나면' }, true), { statusCode: 400 });
+  await assert.rejects(h.service.card(card.id, { value: '네, 확인해 볼게요.' }, true), { statusCode: 400 });
+});
+
 test('what the owner said is a request like a typed one, answered first with a recorded reply that is made once', async t => {
   const h = await harness(t, { steps: [[say('작업 두 개입니다.\n\n- a\n- b')], [say('두 번째 답')]] });
   const session = on(h);
@@ -226,7 +233,7 @@ test('what the owner said is a request like a typed one, answered first with a r
   assert.match(first.ack.audio, /^\/api\/master\/voice\/audio\/clip-[a-f0-9]{64}$/);
   assert.equal(first.ack.session, digestOf(session));
   const owner = h.room.recent(20).find(entry => entry.data.kind === 'owner');
-  assert.deepEqual(owner?.data, { kind: 'owner', text: '지금 작업 중인 세션 알려줘', clientId: TAB });
+  assert.deepEqual(owner?.data, { kind: 'owner', text: '지금 작업 중인 세션 알려줘', clientId: TAB, voice: true });
   const item = h.journal.inbox.find(input => input.voice);
   assert.equal(item?.voice?.session, digestOf(session));
   assert.equal(item?.viewContext?.tabId, TAB, 'screen commands go to the tab where voice is on');
@@ -359,6 +366,13 @@ test('voice records from GPT-Live calls become dollars once, counted and not yet
   // 40 folded + 20 final + 0 unbilled + 15 never reached the page + (10 + 10 since its last report).
   assert.equal(Math.round(once.days[day].dollars / (0.05 / 60)), 40 + 20 + 15 + 20);
   assert.deepEqual(migrate(JSON.parse(JSON.stringify(once)), now + 3_600_000), once, 'read again, nothing is added');
+  // A call that ran across midnight keeps what it reported on each day, and its unreported end falls on its days.
+  const midnight = new Date(now); midnight.setHours(0, 0, 0, 0);
+  const yesterday = new Date(midnight.getTime() - 1);
+  const dayOf = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  const across = migrate({ attempts: [{ createdAt: midnight.getTime() - 120_000, answered: true, readyAt: midnight.getTime() - 120_000, closedAt: midnight.getTime() + 30_000, usage: { seconds: 50, observedAt: midnight.getTime() - 10_000, byDay: { [dayOf(yesterday)]: 50 } } }] }, midnight.getTime() + 60_000);
+  assert.equal(Math.round(across.days[dayOf(yesterday)].dollars / (0.05 / 60)), 50 + 10);
+  assert.equal(Math.round(across.days[dayOf(midnight)].dollars / (0.05 / 60)), 30);
 
   const h = await harness(t, { prepare: async dir => {
     await writeFile(join(dir, 'voice.json'), JSON.stringify(old));

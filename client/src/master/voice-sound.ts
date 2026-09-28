@@ -74,6 +74,15 @@ export class SpeechGate {
   }
 }
 
+/** One utterance is at most 60 seconds of 16 kHz 16-bit audio: what each token reserves. */
+export const UTTERANCE_BYTES = 60 * 32_000;
+
+/** How much of a chunk (in bytes, whole samples) still fits an utterance, leaving room for the tail that commits it. */
+export function fitUtterance(sent: number, size: number, tail: number): number {
+  const room = UTTERANCE_BYTES - tail - sent;
+  return Math.max(0, Math.min(size, room - (room % 2)));
+}
+
 /** Listening turns off after the owner's minutes with neither a request nor a report. */
 export function listenExpired(lastActivityAt: number, minutes: number, now: number): boolean {
   return now - lastActivityAt >= minutes * 60_000;

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { base64, listenExpired, noticeOutcome, SpeechGate, toPcm16 } from '../../client/src/master/voice-sound.js';
+import { base64, fitUtterance, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from '../../client/src/master/voice-sound.js';
 
 /** Feeds the gate a loudness for a while, 10 ms a frame (about what an audio worklet gives), and returns its events. */
 function feed(gate: SpeechGate, rms: number, ms: number, from: number): { events: Array<{ at: number; event: string }>; end: number } {
@@ -44,4 +44,12 @@ test('listening ends after its minutes, a notice is judged with its moment to ob
   assert.deepEqual([...pcm], [0, 16383, -16384, 32767, -32768, 32767]);
   assert.equal(toPcm16(new Float32Array(48_000), 48_000).length, 16_000, 'resampled to 16 kHz');
   assert.equal(base64(new Uint8Array([104, 105])), 'aGk=');
+  // An utterance never sends more than its 60 seconds, the silent tail that commits it included.
+  assert.equal(UTTERANCE_BYTES, 1_920_000);
+  assert.equal(fitUtterance(0, 3_200, 640), 3_200);
+  assert.equal(fitUtterance(UTTERANCE_BYTES - 640 - 1_001, 3_200, 640), 1_000, 'whole samples only');
+  assert.equal(fitUtterance(UTTERANCE_BYTES - 640, 3_200, 640), 0);
+  let sent = 0;
+  for (let chunk = 0; chunk < 700; chunk++) sent += fitUtterance(sent, 3_200, 640);
+  assert.equal(sent + 640, UTTERANCE_BYTES);
 });

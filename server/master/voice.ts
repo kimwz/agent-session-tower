@@ -41,7 +41,7 @@ const TIMING: VoiceTiming = { firstChunkMs: 10_000, synthMs: 30_000, playMs: 60_
 /** What the voice needs from the master: its hiding, its inbox, and when a new web arrived. */
 export interface VoiceHooks {
   hide(text: string): string;
-  send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean; voice: VoiceOrigin }): Promise<MasterEntry>;
+  send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean; voice: VoiceOrigin; spoken: true }): Promise<MasterEntry>;
   connectedSince(): number;
 }
 
@@ -268,7 +268,7 @@ export class MasterVoice {
     await this.options.hooks.send({
       clientMessageId: input.clientMessageId, text: input.text.trim(), local: input.local,
       viewContext: { ...input.viewContext, tabId: session.tabId },
-      voice: { session: session.digest, key: hash(input.clientMessageId) },
+      voice: { session: session.digest, key: hash(input.clientMessageId) }, spoken: true,
     });
     const ack = await this.clipSay(session, VOICE_ACKS[Math.floor(Math.random() * VOICE_ACKS.length)], 'ack').catch(() => undefined);
     return ack ? { ack } : {};
@@ -482,7 +482,8 @@ export class MasterVoice {
     try {
       while (!res.destroyed && !res.writableEnded) {
         while (index < live.chunks.length && !res.destroyed) {
-          if (!res.write(live.chunks[index++])) await this.wait(res, live, true);
+          // A page that does not take what it was sent in a while is cut off.
+          if (!res.write(live.chunks[index++]) && !await this.wait(res, live, true)) { res.destroy(); return; }
         }
         if (res.destroyed) return;
         if (live.failed) { res.destroy(); return; }
@@ -492,20 +493,26 @@ export class MasterVoice {
     } finally { live.readers.delete(res); }
   }
 
-  /** Until the page drains (or new audio comes), its connection ends, or a while passes; leaves nothing registered. */
-  private wait(res: ServerResponse, live: Live, drain: boolean): Promise<void> {
+  /**
+   * Waits for the page to drain what it was sent (`drain`), or for more audio (otherwise); either way also for its
+   * connection ending or a while passing, which is the only false answer. Leaves nothing registered.
+   */
+  private wait(res: ServerResponse, live: Live, drain: boolean): Promise<boolean> {
     return new Promise(resolve => {
-      const done = () => {
+      const done = (value: boolean) => {
         clearTimeout(timer);
-        res.off('drain', done); res.off('close', done); res.off('error', done);
-        live.waiters.delete(done);
-        resolve();
+        res.off('drain', drained); res.off('close', ended); res.off('error', ended);
+        live.waiters.delete(more);
+        resolve(value);
       };
-      const timer = setTimeout(done, this.timing.waitMs);
-      if (drain) res.once('drain', done);
-      res.once('close', done);
-      res.once('error', done);
-      live.waiters.add(done);
+      const drained = () => done(true);
+      const ended = () => done(true);
+      const more = () => { if (!drain || live.failed) done(true); };
+      const timer = setTimeout(() => done(false), this.timing.waitMs);
+      if (drain) res.once('drain', drained);
+      res.once('close', ended);
+      res.once('error', ended);
+      live.waiters.add(more);
     });
   }
 
@@ -518,6 +525,8 @@ export class MasterVoice {
   /** A short fixed sentence, made once per voice and model and kept on disk; played from there each time. */
   private async clipSay(session: Session, text: string, kind: 'ack' | 'working'): Promise<MasterSay> {
     const settings = this.options.settings.current().voice;
+    // A card's value found in a fixed sentence would go out as it is: such a sentence is not said.
+    if (this.options.hooks.hide(text) !== text) throw new Error('hidden');
     const key = createHash('sha256').update(JSON.stringify([settings.voiceId, settings.model, text])).digest('hex');
     const path = join(this.clips, `${key}.mp3`);
     if (!await stat(path).then(() => true, () => false)) {
@@ -702,19 +711,32 @@ export function migrate(saved: Record<string, unknown> | undefined, now: number)
   if (saved.days && typeof saved.days === 'object') {
     for (const [day, seconds] of Object.entries(saved.days as Record<string, unknown>)) if (/^\d{4}-\d{2}-\d{2}$/.test(day) && typeof seconds === 'number' && seconds > 0) liveDollars(day, seconds);
   }
-  interface OldAttempt { folded?: boolean; unbilled?: boolean; answered?: boolean; readyAt?: number; createdAt?: number; closedAt?: number; expiresAt?: number; usage?: { seconds?: number; observedAt?: number; final?: boolean } }
+  interface OldAttempt { folded?: boolean; unbilled?: boolean; answered?: boolean; readyAt?: number; createdAt?: number; closedAt?: number; expiresAt?: number; usage?: { seconds?: number; observedAt?: number; final?: boolean; byDay?: Record<string, unknown> } }
   for (const attempt of Array.isArray(saved.attempts) ? saved.attempts as OldAttempt[] : []) {
     if (!attempt || typeof attempt !== 'object' || attempt.folded || attempt.unbilled || !Number.isFinite(attempt.createdAt)) continue;
-    // Not yet in the days: what it reported (its per-day parts included), and, for a call whose answer reached the
-    // page, the time since its last report until it ended (or now); at least the 15 seconds every call is billed.
-    let seconds = Number(attempt.usage?.seconds) || 0;
+    // Not yet in the days: what it reported, on the days it reported it; for a call whose answer reached the page,
+    // the time since its last report until it ended (or now), on the days that time fell; and at least the 15
+    // seconds every call is billed, on the day it was made.
+    const days: Record<string, number> = {};
+    let seconds = 0;
+    for (const [day, value] of Object.entries(attempt.usage?.byDay ?? {})) if (/^\d{4}-\d{2}-\d{2}$/.test(day) && typeof value === 'number' && value > 0) { days[day] = (days[day] ?? 0) + value; seconds += value; }
+    // Reported without its days (or only partly): the rest goes on the day the call was made.
+    const reported = Number(attempt.usage?.seconds) || 0;
+    if (reported > seconds) { days[localDay(attempt.createdAt!)] = (days[localDay(attempt.createdAt!)] ?? 0) + reported - seconds; seconds = reported; }
     const reachedPage = attempt.answered ?? attempt.readyAt !== undefined;
     if (!attempt.usage?.final && reachedPage) {
       const from = attempt.usage?.observedAt ?? attempt.readyAt ?? attempt.createdAt!;
       const to = Math.min(attempt.closedAt ?? now, attempt.expiresAt ?? Number.MAX_SAFE_INTEGER, now);
-      if (to > from) seconds += (to - from) / 1000;
+      for (let at = from; at < to;) {
+        const midnight = new Date(at); midnight.setHours(24, 0, 0, 0);
+        const end = Math.min(to, midnight.getTime());
+        days[localDay(at)] = (days[localDay(at)] ?? 0) + (end - at) / 1000;
+        seconds += (end - at) / 1000;
+        at = end;
+      }
     }
-    liveDollars(localDay(attempt.createdAt!), Math.max(15, seconds));
+    if (seconds < 15) days[localDay(attempt.createdAt!)] = (days[localDay(attempt.createdAt!)] ?? 0) + 15 - seconds;
+    for (const [day, value] of Object.entries(days)) liveDollars(day, value);
   }
   return file;
 }

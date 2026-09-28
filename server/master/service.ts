@@ -14,6 +14,7 @@ import { SecretVault, SHORTEST_SECRET } from './secrets.js';
 import type { MasterSettingsStore } from './settings.js';
 import type { TowerClient, TowerResponse } from './tower-client.js';
 import type { MasterVoice, VoiceHooks } from './voice.js';
+import { VOICE_ACKS, VOICE_WORKING } from './voice-text.js';
 
 const MAX_ROUNDS = 12;
 const MAX_TOOL_CALLS = 24;
@@ -39,11 +40,11 @@ const NODE_ID = /^[a-f0-9]{32}$/;
 const STILL_WORKING_MS = 20_000;
 const VOICE_TURN = 'The owner said this request by voice: your first paragraph is read aloud, so make it one or two short spoken sentences, with details after.';
 /**
- * Everything the model is given that Tower does not hide: the standing instructions (with and without lookups) and
- * every text of the tools' descriptions, as the model reads them.
+ * Everything Tower sends out without hiding: the model's standing instructions (with and without lookups), every
+ * text of the tools' descriptions, and the fixed sentences read aloud.
  */
 let fixedText: string | undefined;
-const FIXED_TEXT = () => fixedText ??= [masterInstructions(true), masterInstructions(false), ...texts(TOOLS), VOICE_TURN].join('\n');
+const FIXED_TEXT = () => fixedText ??= [masterInstructions(true), masterInstructions(false), ...texts(TOOLS), VOICE_TURN, ...VOICE_ACKS, VOICE_WORKING].join('\n');
 function texts(value: unknown): string[] {
   if (typeof value === 'string') return [value];
   if (Array.isArray(value)) return value.flatMap(texts);
@@ -201,7 +202,8 @@ export class MasterService {
     return Boolean(this.turn) || this.polling || inbox.some(item => item.state === 'queued') || tasks.some(task => task.state === 'running');
   }
 
-  async send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean; voice?: VoiceOrigin }): Promise<MasterEntry> {
+  /** `spoken`: said aloud (shown so), not typed; `voice`: where a spoken request, or what followed from one, came from. */
+  async send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean; voice?: VoiceOrigin; spoken?: boolean }): Promise<MasterEntry> {
     const { journal, room, settings } = this.options;
     // Only a digest of the page's message id is kept: it says nothing, whatever the page put in it.
     const messageKey = createHash('sha256').update(input.clientMessageId).digest('hex').slice(0, 32);
@@ -215,7 +217,7 @@ export class MasterService {
     const viewContext = input.viewContext && Object.fromEntries(Object.entries(input.viewContext).map(([key, value]) => [key, typeof value === 'string' ? hide(value) : value])) as MasterViewContext;
     const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: messageKey, text, local: input.local, ...(viewContext ? { viewContext } : {}), at: new Date().toISOString(), state: 'queued', retries: 0, ...(input.voice ? { voice: input.voice } : {}) };
     if (viewContext?.tabId) this.lastTab = viewContext.tabId;
-    const entry = room.add({ kind: 'owner', text, ...(viewContext?.tabId ? { clientId: viewContext.tabId } : {}) }, item.id);
+    const entry = room.add({ kind: 'owner', text, ...(viewContext?.tabId ? { clientId: viewContext.tabId } : {}), ...(input.spoken ? { voice: true as const } : {}) }, item.id);
     journal.inbox.push(item);
     await journal.save('inbox');
     this.pump();
