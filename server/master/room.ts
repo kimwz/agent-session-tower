@@ -126,6 +126,52 @@ export class MasterRoom {
 
   flush(): Promise<void> { return this.writes; }
 
+  /**
+   * Passes every entry, in memory and in every file, through `change` (a value has just become secret). Live
+   * changes already sent are forgotten, so a page that reconnects starts again from a checkpoint; pages connected now
+   * get the changed entries.
+   */
+  async scrub(change: (data: MasterEntryData) => MasterEntryData): Promise<void> {
+    this.buffer.splice(0);
+    const names = (await readdir(this.directory)).filter(name => /^\d{6}\.json$/.test(name)).sort();
+    for (const name of names) {
+      const index = Number(name.slice(0, 6));
+      const loaded = this.loaded.get(index);
+      if (loaded) {
+        let changed = false;
+        loaded.forEach((entry, position) => {
+          const data = change(entry.data);
+          if (JSON.stringify(data) === JSON.stringify(entry.data)) return;
+          const next: MasterEntry = { ...entry, revision: entry.revision + 1, data };
+          loaded[position] = next;
+          this.byId.set(next.id, next);
+          this.emit({ type: 'entry', seq: 0, entry: next });
+          changed = true;
+        });
+        if (changed) this.persist(index);
+        continue;
+      }
+      // A file not in memory is rewritten in place, in turn with the other writes, and stays out of memory.
+      const path = join(this.directory, name);
+      const rewrite = async () => {
+        const saved = await readPrivateJson(path, SEGMENT_BYTES) as { entries?: MasterEntry[] };
+        if (!Array.isArray(saved?.entries)) return;
+        let changed = false;
+        const entries = saved.entries.map(entry => {
+          const data = change(entry.data);
+          if (JSON.stringify(data) === JSON.stringify(entry.data)) return entry;
+          changed = true;
+          return { ...entry, revision: entry.revision + 1, data };
+        });
+        if (changed) await writePrivateJson(path, JSON.stringify({ entries }));
+      };
+      this.writes = this.writes.then(rewrite, rewrite).catch(error => {
+        console.error(`Master conversation was not rewritten: ${(error as NodeJS.ErrnoException)?.code ?? 'error'}`);
+      });
+    }
+    await this.writes;
+  }
+
   /** Waits until `entry` is on disk: its file is written once more if the last try failed, then a failure is an error. */
   async saved(entry: MasterEntry): Promise<void> {
     const index = Math.floor(entry.order / SEGMENT);

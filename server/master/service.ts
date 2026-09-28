@@ -262,7 +262,9 @@ export class MasterService {
         const deadline = AbortSignal.timeout(Math.max(1, turnMs - (Date.now() - started)));
         let result: Awaited<ReturnType<ModelCall>>;
         try {
-          result = await model({ model: settings.model, effort: settings.effort, instructions: masterInstructions(Boolean(this.options.readDb)), input: items, tools: this.options.readDb ? TOOLS : TOOLS.filter(tool => tool.name !== 'tower_query') }, delta => {
+          // What Tower gave the model is hidden again with what is known now: a card may have been answered meanwhile.
+          const input = items.map(item => item.type === 'function_call_output' || (item.type === 'message' && item.role !== 'assistant') ? this.hideValue(item) as ModelItem : item);
+          result = await model({ model: settings.model, effort: settings.effort, instructions: masterInstructions(Boolean(this.options.readDb)), input, tools: this.options.readDb ? TOOLS : TOOLS.filter(tool => tool.name !== 'tower_query') }, delta => {
             draft += delta;
             // Shown as it is written, hidden like the answer, and without the very end, where a secret may not be whole yet.
             if (Date.now() - lastDraft > 150) { lastDraft = Date.now(); const shown = this.hideText(draft); room.setDraft({ turnId, text: shown.slice(0, Math.max(0, shown.length - this.vault.holdBack())) }); }
@@ -282,7 +284,7 @@ export class MasterService {
             ? { error: '이번 요청에서 부를 수 있는 도구 수를 넘었습니다. 지금까지 한 일을 소유자에게 보고하세요.' }
             : await this.tool(String(call.name), String(call.arguments ?? '{}'), turn).catch(error => ({ error: error instanceof Error ? error.message : String(error) }));
           // Every result is hidden as a whole before the model reads it, and only then shortened.
-          items.push({ type: 'function_call_output', call_id: String(call.call_id), output: truncate(this.hideText(JSON.stringify(output)), MAX_TOOL_OUTPUT) });
+          items.push({ type: 'function_call_output', call_id: String(call.call_id), output: truncate(this.hideText(JSON.stringify(this.hideValue(output))), MAX_TOOL_OUTPUT) });
         }
         turn.abort.signal.throwIfAborted();
       }
@@ -416,6 +418,28 @@ export class MasterService {
   private hideText(text: string): string {
     // Values the owner typed into a secret card are hidden whatever the setting.
     return this.options.settings.current().guards.hideSecrets ? this.vault.hide(text) : this.vault.redact(text);
+  }
+
+  /** `hideText` over a structured value, names of fields and numbers included, before it is written out as text. */
+  private hideValue(value: unknown): unknown {
+    return this.options.settings.current().guards.hideSecrets ? this.vault.hideInResponse('', value) : this.vault.redactInResponse(value);
+  }
+
+  /**
+   * A value just became secret: everything already kept (the conversation, its files, the records) is rewritten
+   * without it. What was kept is changed in place, so work holding those records sees the change.
+   */
+  private async scrub(): Promise<void> {
+    const redact = (text: string) => this.vault.redact(text);
+    await this.options.room.scrub(data => hideStrings(data, redact));
+    const { journal } = this.options;
+    for (const item of journal.inbox) {
+      item.text = redact(item.text);
+      if (item.viewContext) item.viewContext = hideStrings(item.viewContext, redact);
+    }
+    for (const task of journal.tasks) { task.title = redact(task.title); if (task.prompt) task.prompt = redact(task.prompt); }
+    for (const call of journal.calls) { call.path = redact(call.path); if (call.summary) call.summary = redact(call.summary); }
+    await journal.save('inbox', 'calls', 'tasks');
   }
 
   /** How much work an irreversible change stops: closing a session also cancels its queued runs. Unknown when Tower cannot say. */
@@ -569,6 +593,7 @@ export class MasterService {
       if (value.includes('{{secret:')) throw Object.assign(new Error('비밀 값에 {{secret:를 넣을 수 없습니다.'), { statusCode: 400 });
       // Taken first, so a card that cannot take one more value stays open with the reason.
       const reference = this.vault.reference(value);
+      await this.scrub();
       const purpose = this.hideText(card.purpose);
       const updated = room.update(id, { kind: 'card', card: { ...card, purpose, state: 'provided' } }) ?? entry;
       // The tab that answered is where the owner is now: what follows is shown there.
