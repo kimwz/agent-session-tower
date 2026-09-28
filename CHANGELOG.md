@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.51.0] - 2026-09-28
+
+### Added
+- **New conversations hear of related earlier sessions.** When a conversation starts, from Tower, Auto Prompt, a trigger or Slack, a fast judgment looks at the titles and last messages of the 40 most recent sessions, starting with the same folder. It tells the agent which ones look like the same work: the same issue, customer, incident, pull request or error. The agent gets their ids in a note only it sees, and decides itself whether to read them. The conversation shows nothing extra. It never delays a turn by more than a few seconds and is skipped whenever the judgment is unavailable. Turn it off under **빠른 판단 → 새 세션에 관련 세션 알려주기**.
+
+### Changed
+- **Slack and GitHub conversations are readable.** The coordinator's policy, your rules and the tone guide no longer fill the conversation. It shows the request with its thread, a delegated task's result, and what you typed, exactly as written. Tower's instructions and receipts still reach the agent as a separate block the conversation leaves out. They are kept only in the worker's memory: pages and saved state never hold them. A continuation that needed them is not started without them after a restart.
+
 ## [1.50.0] - 2026-09-28
 
 ### Added
