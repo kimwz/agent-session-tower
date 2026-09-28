@@ -142,18 +142,33 @@ export class SlackClient {
   }
 
   /** Only explicit user mentions of the given IDs and web links stay live; everything else, including broadcasts, is escaped. */
-  async reply(channel: string, threadTs: string, text: string, mentionable: string[] = []): Promise<{ ts: string }> {
+  /** A `note` is shown under the reply as Slack's small grey context line. */
+  async reply(channel: string, threadTs: string, text: string, mentionable: string[] = [], note?: string): Promise<{ ts: string }> {
     if (!text.trim() || text.length > 12_000) throw new SlackApiError('invalid_reply');
     // With mrkdwn off Slack shows bare URLs as text, so web links are sent in explicit <url> link syntax.
     const escape = (part: string) => part.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+    // A note needs blocks, so the same reply is also built as rich text: literal text, allowed mentions and links.
+    const elements: Record<string, string>[] = [];
     const escaped = text.split(/(https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+)/).map((part, index) => {
-      if (index % 2 === 0) return escape(part).replace(/&lt;@([UW][A-Z0-9]+)&gt;/g, (match, id: string) => mentionable.includes(id) ? `<@${id}>` : match);
+      if (index % 2 === 0) {
+        part.split(/(<@[UW][A-Z0-9]+>)/).forEach((piece, at) => {
+          if (at % 2 && mentionable.includes(piece.slice(2, -1))) elements.push({ type: 'user', user_id: piece.slice(2, -1) });
+          else if (piece) elements.push({ type: 'text', text: piece });
+        });
+        return escape(part).replace(/&lt;@([UW][A-Z0-9]+)&gt;/g, (match, id: string) => mentionable.includes(id) ? `<@${id}>` : match);
+      }
       let url = part.replace(/[.,;:!?'"]+$/, '');
       while (url.endsWith(')') && url.split(')').length > url.split('(').length) url = url.slice(0, -1);
+      elements.push({ type: 'link', url });
+      if (part.length > url.length) elements.push({ type: 'text', text: part.slice(url.length) });
       return `<${escape(url)}>${escape(part.slice(url.length))}`;
     }).join('');
+    const blocks = note ? JSON.stringify([
+      { type: 'rich_text', elements: [{ type: 'rich_text_section', elements }] },
+      { type: 'context', elements: [{ type: 'plain_text', text: note, emoji: false }] },
+    ]) : undefined;
     const data = await this.call('chat.postMessage', {
-      channel, thread_ts: threadTs, text: escaped,
+      channel, thread_ts: threadTs, text: escaped, ...(blocks ? { blocks } : {}),
       mrkdwn: 'false', parse: 'none', link_names: 'false', reply_broadcast: 'false', unfurl_links: 'false', unfurl_media: 'false',
     }, false);
     if (typeof data.ts !== 'string') throw new SlackApiError('invalid_response');

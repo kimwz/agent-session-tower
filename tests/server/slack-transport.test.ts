@@ -46,6 +46,13 @@ test('Slack reads retry rate limits; replies never retry and escape mentions', a
   assert.equal(sent!.get('text'),'<@U2> &lt;@U3&gt; &lt;!channel&gt; &lt;@U2|x&gt;');
   await assert.rejects(writer.reply('C','1','확인\nhttps://github.com/o/r/pull/1#issuecomment-2 (see https://x.io/a?b=1&c=<2>). https://x.io/wiki/A_(b))'), /ratelimited/);
   assert.equal(sent!.get('text'),'확인\n<https://github.com/o/r/pull/1#issuecomment-2> (see <https://x.io/a?b=1&amp;c=>&lt;2&gt;). <https://x.io/wiki/A_(b)>)');
+  assert.equal(sent!.get('blocks'), null);
+  await assert.rejects(writer.reply('C','1','<@U2> <@U3> 확인 https://x.io/a. 끝', ['U2'], "Sent by karl's agent"), /ratelimited/);
+  assert.equal(sent!.get('text'),'<@U2> &lt;@U3&gt; 확인 <https://x.io/a>. 끝');
+  assert.deepEqual(JSON.parse(sent!.get('blocks')!), [
+    { type: 'rich_text', elements: [{ type: 'rich_text_section', elements: [{ type: 'user', user_id: 'U2' }, { type: 'text', text: ' ' }, { type: 'text', text: '<@U3>' }, { type: 'text', text: ' 확인 ' }, { type: 'link', url: 'https://x.io/a' }, { type: 'text', text: '.' }, { type: 'text', text: ' 끝' }] }] },
+    { type: 'context', elements: [{ type: 'plain_text', text: "Sent by karl's agent", emoji: false }] },
+  ]);
 });
 test('Slack reactions treat existing and already removed reactions as done', async () => {
   const calls: string[] = [];

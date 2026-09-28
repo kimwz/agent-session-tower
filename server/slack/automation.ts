@@ -61,7 +61,8 @@ export interface SlackAutomationOptions {
   getAutoPrompt(id: string): AutoPromptJob | undefined;
   getRun(id: string): Run | undefined;
   composeReply(input: SlackReplyInput): Promise<unknown>;
-  sendReply(mention: SlackMention, text: string, mentionable: string[]): Promise<{ ts: string }>;
+  /** `automatic` marks a reply sent under a rule's standing permission, with no owner instruction or approval for it. */
+  sendReply(mention: SlackMention, text: string, mentionable: string[], automatic: boolean): Promise<{ ts: string }>;
   react?(mention: SlackMention, name: string, action: 'add' | 'remove'): Promise<void>;
   /**
    * How likely a later thread message that does not mention the owner is for them, 0–1. Nothing when fast judgments
@@ -786,7 +787,7 @@ export class SlackAutomationManager extends EventEmitter {
       // Durable claim before network I/O: storage failures also fail closed.
       await this.save(item, {});
       try {
-        const sent = await this.options.sendReply(structuredClone(item.mention), reply.text, [...new Set([item.mention.user, ...(item.thread ?? []).map(message => message.user)])]);
+        const sent = await this.options.sendReply(structuredClone(item.mention), reply.text, [...new Set([item.mention.user, ...(item.thread ?? []).map(message => message.user)])], reply.requestKey.startsWith('rule-auto-'));
         if (!text(sent.ts, 200)) throw new Error('Unconfirmed Slack send.');
         reply.status = 'sent'; reply.ts = sent.ts;
         await this.save(item, { reply: reply.text, replyTs: sent.ts });

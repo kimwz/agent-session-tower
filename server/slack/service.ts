@@ -98,7 +98,9 @@ export class SlackService extends EventEmitter {
         const request = thread.find(item => item.ts === mention.ts) ?? { user: mention.user, text: mention.text, ts: mention.ts };
         return (await judgeSlackFollowUp(engine, { owner, request, thread, message }, AbortSignal.timeout(FOLLOW_UP_JUDGMENT_MS))).addressed;
       },
-      sendReply: (mention, text, mentionable) => this.client(mention.teamId).reply(mention.channel, mention.threadTs, text, mentionable),
+      // A reply nobody instructed or approved says so; one the owner asked for or approved is theirs.
+      sendReply: (mention, text, mentionable, automatic) => this.client(mention.teamId).reply(mention.channel, mention.threadTs, text, mentionable,
+        automatic ? `Sent by ${this.settings.account?.userName ? `${this.settings.account.userName}'s` : 'an'} agent` : undefined),
       react: async (mention, name, action) => {
         const client = this.client(mention.teamId);
         if (!client.react) throw new Error('Slack reactions are unavailable.');
