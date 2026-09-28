@@ -36,18 +36,23 @@ class FakeSocket {
 class FakeAudio {
   static all: FakeAudio[] = [];
   static refuse = false;
+  /** Holds the unlocking silence's play() until the test lets it finish. */
+  static slowSilence?: () => void;
   src = '';
   preload = '';
   played: string[] = [];
   onended: (() => void) | null = null;
   onerror: (() => void) | null = null;
   constructor() { FakeAudio.all.push(this); }
+  paused: string[] = [];
   play(): Promise<void> {
     if (FakeAudio.refuse && this.src !== '/master-silence.wav') return Promise.reject(new DOMException('Autoplay refused', 'NotAllowedError'));
     this.played.push(this.src);
+    if (this.src === '/master-silence.wav' && FakeAudio.slow) return new Promise(resolve => { FakeAudio.slowSilence = resolve; });
     return Promise.resolve();
   }
-  pause(): void {}
+  static slow = false;
+  pause(): void { this.paused.push(this.src); }
   removeAttribute(): void { this.src = ''; }
 }
 
@@ -63,7 +68,8 @@ class FakeNode {
 /** The audio's own clock (`currentTime`) moves only as the microphone is captured, whatever the page's clock does. */
 class FakeContext {
   static last?: FakeContext;
-  sampleRate = 16_000;
+  static rate = 16_000;
+  sampleRate = FakeContext.rate;
   currentTime = 0;
   constructor() { FakeContext.last = this; }
   audioWorklet = { addModule: async () => {} };
@@ -99,10 +105,13 @@ type View = import('../../client/src/master/voice-client.js').VoiceView;
 
 const flush = async () => { for (let round = 0; round < 5; round++) await new Promise(resolve => setImmediate(resolve)); };
 
-async function harness() {
+/** A fake page; `frame` samples at `rate` a microphone frame (a real worklet: 128 at 44.1 or 48 kHz). */
+async function harness({ rate = 16_000, frame = 160 } = {}) {
   FakeSocket.all = [];
   FakeAudio.all = [];
   FakeAudio.refuse = false;
+  FakeAudio.slow = false;
+  FakeContext.rate = rate;
   posts.length = 0;
   requestAnswer = {};
   mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 1_000_000 });
@@ -117,15 +126,26 @@ async function harness() {
   const session = await digest('session-1');
   const audio = FakeAudio.all[0];
   const context = FakeContext.last!;
-  /** The microphone captured at a loudness for a while, 10 ms a frame (the audio's clock goes with it). */
+  /** The microphone captured at a loudness for a while, frame by frame (the audio's clock goes with it). */
+  let captured = 0;
   const frames = (rms: number, ms: number): Frame[] => {
-    const captured: Frame[] = [];
-    for (let at = 0; at < ms; at += 10) { captured.push({ samples: new Float32Array(160).fill(rms), time: context.currentTime }); context.currentTime += 0.01; }
-    return captured;
+    const list: Frame[] = [];
+    for (const end = captured + Math.round(ms / 1000 * rate); captured < end; captured += frame) {
+      list.push({ samples: new Float32Array(frame).fill(rms), time: context.currentTime });
+      context.currentTime = (captured + frame) / rate;
+    }
+    return list;
   };
   /** Frames handed to the page: as they come (the page's clock going with them), or all at once after a stall. */
-  const deliver = (captured: Frame[], burst = false) => {
-    for (const frame of captured) { FakeNode.last!.port.onmessage?.({ data: frame }); if (!burst) mock.timers.tick(10); }
+  let owed = 0;
+  const deliver = (list: Frame[], burst = false) => {
+    for (const item of list) {
+      FakeNode.last!.port.onmessage?.({ data: item });
+      if (burst) continue;
+      owed += frame / rate * 1000;
+      const whole = Math.floor(owed);
+      if (whole) { mock.timers.tick(whole); owed -= whole; }
+    }
   };
   const hear = async (rms: number, ms: number) => { deliver(frames(rms, ms)); await flush(); };
   const say = (id: string, kind: MasterSay['kind']): MasterSay => ({ id, session, kind, text: `${kind} ${id}`, audio: `/api/master/voice/audio/${id}`, expiresAt: Date.now() + 600_000 });
@@ -210,8 +230,8 @@ test('what the microphone captured while something played is never heard, even w
   } finally { page.end(); }
 });
 
-test('a notice\'s moment to object is timed on the audio\'s clock: speech during a stall objects, and what was captured before it is not heard', async () => {
-  const page = await harness();
+for (const audio of [{ rate: 16_000, frame: 160 }, { rate: 48_000, frame: 128 }, { rate: 44_100, frame: 128 }]) test(`a notice's moment to object is timed on the audio's clock: speech during a stall objects, and what was captured before it is not heard (${audio.frame} samples at ${audio.rate} Hz)`, async () => {
+  const page = await harness(audio);
   try {
     page.voice.say(page.say('n1', 'notice'));
     page.audio.onended!();
@@ -297,5 +317,30 @@ test('what the browser will not play by itself can be played with a click, told 
     await flush();
     assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/r2');
     assert.deepEqual(page.results(), ['r1:failed', 'r2:failed']);
+    page.audio.onended!();
+    mock.timers.tick(400);
+
+    // The unlocking silence finishes only after the reading has started: it does not stop the reading.
+    FakeAudio.refuse = true;
+    page.voice.say(page.say('r3', 'report'));
+    await flush();
+    FakeAudio.refuse = false;
+    FakeAudio.slow = true;
+    mock.timers.tick(400);
+    await page.hear(0.002, 200);
+    await page.hear(0.1, 400);
+    const third = FakeSocket.all.at(-1)!;
+    third.open();
+    page.voice.replay();
+    await page.hear(0.002, 1_500);
+    third.message({ message_type: 'committed_transcript', text: '' });
+    await flush();
+    third.closed();
+    await flush();
+    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/r3');
+    const paused = page.audio.paused.length;
+    FakeAudio.slowSilence!();
+    await flush();
+    assert.equal(page.audio.paused.length, paused, 'the reading plays on');
   } finally { page.end(); }
 });
