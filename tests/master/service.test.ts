@@ -956,6 +956,29 @@ test('a result gathered before a card was answered reaches the model hidden if i
   await said(/받았습니다/);
 });
 
+test('a large result gathered before a card is answered is hidden again by its values, quotes and all', async t => {
+  const value = 'card-"hidden"-928xyz';
+  let submit: (() => Promise<unknown>) | undefined;
+  const { service, room, said } = await master(t, async seen => {
+    if (seen.path.startsWith('/api/workspace/file')) return { body: { content: `start ${value} ${'z'.repeat(1_200_000)}` } };
+    if (seen.path === '/api/link') { await submit?.(); return { body: {} }; }
+    return { body: {} };
+  }, [
+    [call('request_secret', { purpose: 'token' })],
+    [say('카드를 드렸습니다.')],
+    [call('tower_api', { method: 'GET', path: '/api/workspace/file?cwd=/w&path=big.txt' }), call('tower_api', { method: 'GET', path: '/api/link' })],
+    request => { assert.doesNotMatch(JSON.stringify(request.input), /hidden\\+"-928xyz|928xyz/); return [say('읽었습니다.')]; },
+    [say('받았습니다.')],
+  ]);
+  await service.send({ clientMessageId: 'message-0226', text: '토큰 받아줘', local: true });
+  await said(/카드를 드렸습니다/);
+  const card = room.recent(20).find(entry => entry.data.kind === 'card')!;
+  submit = () => service.card(card.id, { value }, true);
+  await service.send({ clientMessageId: 'message-0227', text: '큰 파일 읽어줘', local: true });
+  await said(/읽었습니다/);
+  await said(/받았습니다/);
+});
+
 test('a notifications card records how it went on the device that pressed it', async t => {
   const { service, room, said } = await master(t, () => ({ body: {} }), [
     [call('browser_action', { kind: 'push-subscribe' })],
