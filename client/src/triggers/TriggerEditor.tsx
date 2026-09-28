@@ -36,7 +36,10 @@ export function TriggerEditor({ trigger, kind, token, providers, projects, sessi
   // A coordinator exists only for GitHub; any other source runs a task.
   const task: TaskHandler = input.handler.kind === 'task' ? input.handler : { ...blankTrigger().handler as TaskHandler, approvals: input.handler.approvals };
   const coordinator = input.handler.kind === 'coordinator' ? input.handler : undefined;
-  const setSource = (next: Source) => setInput(previous => ({ ...previous, source: next }));
+  // Each review request is its own pull request, so one waiting for a review does not hold back the next.
+  const reviews = (value: Source) => value.kind === 'github' && value.watch.type === 'review-requested';
+  const setSource = (next: Source) => setInput(previous => ({ ...previous, source: next,
+    ...(reviews(next) && !reviews(previous.source) && previous.policy.overlap === 'skip' ? { policy: { ...previous.policy, overlap: 'parallel' as const } } : {}) }));
   const setTask = (patch: Partial<TaskHandler>) => setInput({ ...input, handler: { ...task, ...patch } });
   const setMode = (mode: 'task' | 'coordinator') => setInput({ ...input, handler: mode === 'coordinator'
     ? { kind: 'coordinator', rules: coordinator?.rules ?? [newRule()], approvals: input.handler.approvals } : { ...task, approvals: input.handler.approvals } });
@@ -241,10 +244,11 @@ function GitHubFields({ token, source, onChange, onAccount }: { token: string; s
   };
   return <>
     <Choice label={t('무엇을 볼까요')} value={watch.type} onChange={switchWatch}
-      options={[['issue-opened', t('저장소에 새로 열린 이슈')], ['assigned-to-me', t('나에게 새로 할당된 이슈')]]} />
+      options={[['issue-opened', t('저장소에 새로 열린 이슈')], ['assigned-to-me', t('나에게 새로 할당된 이슈')], ['review-requested', t('나에게 리뷰를 요청한 풀 리퀘스트')]]} />
     <label>{t('저장소')}<textarea rows={2} required={watch.type === 'issue-opened'} placeholder="owner/name" value={repos} onChange={event => { setRepos(event.target.value); const names = list(event.target.value);
       setWatch(watch.type === 'issue-opened' ? { ...watch, repos: names } : { ...watch, ...(names.length ? { repos: names } : { repos: undefined }) }); }} />
       <small>{watch.type === 'issue-opened' ? t('한 줄에 하나씩 owner/name. 처음 확인할 때 이미 있던 이슈로는 실행하지 않습니다.') : t('비우면 모든 저장소. 한 줄에 하나씩 owner/name.')}</small></label>
+    {watch.type === 'review-requested' && <p className="trigger-note">{t('리뷰어로 지정되거나 Draft가 Ready for review로 바뀌면 실행하고, 리뷰를 남긴 뒤 다시 요청받으면 또 실행합니다. 처음 확인할 때 이미 요청된 PR로는 실행하지 않습니다.')}</p>}
     <div className="trigger-account">
       {/* The sign-in is checked on the computer that uses it, so on another computer it stays as it is. */}
       <label>{t('GitHub 계정')}<select disabled={Boolean(machine.node)} value={source.auth.type} onChange={event => { reset(); onChange({ ...source, account: '', auth: event.target.value === 'token' ? { type: 'token', secretId: secrets[0]?.id ?? '' } : { type: 'gh' } }); }}>
@@ -286,6 +290,13 @@ function AdvancedSettings({ input, onChange }: { input: TriggerInput; onChange: 
       {/* Keyed by the kind of watch, so what the fields show always matches what is saved. */}
       {watch?.type === 'issue-opened' && <IssueFilters key={watch.type} watch={watch} onChange={setWatch} />}
       {watch?.type === 'assigned-to-me' && <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.includePullRequests} onChange={event => setWatch({ ...watch, includePullRequests: event.target.checked })} />{t('풀 리퀘스트도 포함')}</label>}
+      {watch?.type === 'review-requested' && <>
+        <label className="wide">{t('리뷰 판정')}<select value={watch.verdicts} onChange={event => setWatch({ ...watch, verdicts: event.target.value as 'comment' | 'any' })}>
+          <option value="comment">{t('Comment 리뷰만 게시')}</option><option value="any">{t('Approve와 Request changes도 허용')}</option></select>
+          <small>{t('코디네이터가 게시하는 리뷰가 내릴 수 있는 판정입니다. 승인 없이 게시할지는 처리 지침의 “승인 없이 결과 자동 답변”으로 정합니다.')}</small></label>
+        <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.includeTeams} onChange={event => setWatch({ ...watch, includeTeams: event.target.checked })} />{t('내가 속한 팀으로 온 리뷰 요청도 포함')}</label>
+        {watch.includeTeams && <p className="trigger-note trigger-warn">{t('팀 요청은 내가 리뷰한 뒤에도 남는 경우가 많아, 다시 요청받아도 실행되지 않을 수 있습니다.')}</p>}
+      </>}
     </div>
   </details>;
 }

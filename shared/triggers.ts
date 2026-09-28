@@ -82,6 +82,18 @@ export const GitHubWatchSchema = z.discriminatedUnion('type', [
   }).strict(),
   /** Open issues newly assigned to the connected account. */
   z.object({ type: z.literal('assigned-to-me'), repos: z.array(repository).max(20).optional(), includePullRequests: z.boolean().default(false) }).strict(),
+  /**
+   * Open, ready pull requests that newly ask the connected account for a review: a new request, a draft marked
+   * ready, and a request again after a review all count, since GitHub drops the request once the review is in.
+   */
+  z.object({
+    type: z.literal('review-requested'),
+    repos: z.array(repository).max(20).optional(),
+    /** Requests made to a team the account is in count too; those often stay after the account's review. */
+    includeTeams: z.boolean().default(false),
+    /** What a posted review may decide: `comment` only comments; `any` may also approve or request changes. */
+    verdicts: z.enum(['comment', 'any']).default('comment'),
+  }).strict(),
 ]);
 export type GitHubWatch = z.infer<typeof GitHubWatchSchema>;
 export const GitHubSourceSchema = z.object({
@@ -203,6 +215,8 @@ export interface TriggerEvent {
   input: { instructions: string; provider: 'claude' | 'codex'; model?: string; effort?: string; approvals: 'auto' | 'owner'; target: TriggerTarget; untrustedInput: boolean; overlap: TriggerPolicy['overlap'];
     /** A coordinator event carries the rules in force when it fired. */
     handler?: 'task' | 'coordinator'; rules?: CoordinatorRule[];
+    /** A coordinator event for a review request: its replies are reviews, with the verdicts allowed when it fired. */
+    review?: { verdicts: 'comment' | 'any' };
     /** Started from, or set up from, a controlling computer: it never uses a folder kept out of sharing. */
     remote?: { controllerId: string } };
   summary: string;

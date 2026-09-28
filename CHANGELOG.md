@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.54.0] - 2026-09-28
+
+### Added
+- **Review pull requests that ask for your review.** GitHub triggers can now watch **나에게 리뷰를 요청한 풀 리퀘스트**. A pull request runs when you are added as a reviewer, when a draft that asks for you is marked ready for review, and again when your review is requested again after you reviewed. Requests already there when the trigger starts do not run. With a coordinator, the conversation reads the pull request's branches, earlier reviews and line comments. What it sends or proposes is posted as a review of the pull request, not as an issue comment. Choosing this watch sets overlapping runs to run in parallel, so one review does not hold back the next.
+- **Choose what reviews may decide and whose requests count.** Under **고급 설정**, **리뷰 판정** posts comment reviews only (the default), or also allows **Approve** and **Request changes**. With these allowed, a first line `Verdict: approve` or `Verdict: request changes` decides the review. **내가 속한 팀으로 온 리뷰 요청도 포함** adds requests made to your teams. Whether reviews are posted without your approval is still set per rule by **승인 없이 결과 자동 답변**.
+
 ## [1.53.2] - 2026-09-28
 
 ### Fixed

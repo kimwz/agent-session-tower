@@ -693,7 +693,7 @@ export class TriggerService extends EventEmitter {
       position.failures = 0; delete position.lastError; delete position.blockedUntil;
       const fired: TriggerEvent[] = [];
       for (const issue of result.issues) {
-        const key = source.watch.type === 'issue-opened' ? `issue:${issue.repository}#${issue.number}` : `assigned:${issue.repository}#${issue.number}:${slot}`;
+        const key = source.watch.type === 'issue-opened' ? `issue:${issue.repository}#${issue.number}` : `${source.watch.type === 'review-requested' ? 'review' : 'assigned'}:${issue.repository}#${issue.number}:${slot}`;
         const event = this.fire(state, current, manual ? `manual:${randomUUID()}:${key}` : key, slot, manual ? 'manual' : 'github', manual);
         if (!event) continue;
         event.payload = issue;
@@ -868,7 +868,8 @@ export class TriggerService extends EventEmitter {
       ? { instructions: handler.instructions, provider: handler.provider, ...(handler.model ? { model: handler.model } : {}), ...(handler.effort ? { effort: handler.effort } : {}),
         approvals: handler.approvals, target: handler.target, untrustedInput, overlap: trigger.policy.overlap, ...(remote ? { remote: { controllerId: remote.controllerId } } : {}) }
       : { instructions: '', provider: handler.rules[0].provider, approvals: handler.approvals, target: { node: 'local', mode: 'auto' }, untrustedInput, overlap: trigger.policy.overlap,
-        handler: 'coordinator', rules: structuredClone(handler.rules) };
+        handler: 'coordinator', rules: structuredClone(handler.rules),
+        ...(trigger.source.kind === 'github' && trigger.source.watch.type === 'review-requested' ? { review: { verdicts: trigger.source.watch.verdicts } } : {}) };
     const event: TriggerEvent = { id: randomUUID(), triggerId: trigger.id, triggerName: trigger.name, triggerRevision: trigger.revision, kind, dedupKey,
       occurredAt: new Date(at).toISOString(), receivedAt: iso, updatedAt: iso, status: 'queued', requestId: triggerRequestId(trigger.id, dedupKey),
       input,
@@ -1323,6 +1324,8 @@ function keptGitHub(before: Trigger, after: Trigger, cursor: Cursor | undefined)
     const repos = Object.fromEntries(Object.entries(cursor.github.repos ?? {}).filter(([repo]) => b.watch.type === 'issue-opened' && b.watch.repos.includes(repo)));
     return { repos };
   }
+  // What a review may decide does not change which requests are seen.
+  if (a.watch.type === 'review-requested' && b.watch.type === 'review-requested') return JSON.stringify([a.watch.repos, a.watch.includeTeams]) === JSON.stringify([b.watch.repos, b.watch.includeTeams]) ? cursor.github : undefined;
   return JSON.stringify(a.watch) === JSON.stringify(b.watch) ? cursor.github : undefined;
 }
 

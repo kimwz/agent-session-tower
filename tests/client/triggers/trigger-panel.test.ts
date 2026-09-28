@@ -80,5 +80,9 @@ test('switching what a GitHub trigger watches and back keeps the filters the own
   kept['assigned-to-me'] = { type: 'assigned-to-me', repos: ['octo/app'], includePullRequests: true };
   assert.deepEqual(switchedWatch(kept, 'issue-opened', ['octo/app', 'octo/lib']), { ...opened, repos: ['octo/app', 'octo/lib'] }, 'labels, authors and author scope come back');
   assert.deepEqual(switchedWatch(kept, 'assigned-to-me', []), { type: 'assigned-to-me', includePullRequests: true }, 'so does including pull requests');
+  const review = switchedWatch(kept, 'review-requested', ['octo/app']);
+  assert.deepEqual(review, { type: 'review-requested', repos: ['octo/app'], includeTeams: false, verdicts: 'comment' }, 'review requests start from comment reviews to me only');
+  kept['review-requested'] = { type: 'review-requested', includeTeams: true, verdicts: 'any' };
+  assert.deepEqual(switchedWatch(kept, 'review-requested', []), { type: 'review-requested', includeTeams: true, verdicts: 'any' }, 'and keep their choices');
   assert.deepEqual(switchedWatch({}, 'issue-opened', []), { type: 'issue-opened', repos: [], authorAssociation: ['OWNER', 'MEMBER', 'COLLABORATOR'] }, 'a first switch starts from the members-only default');
 });

@@ -18,6 +18,8 @@ export interface GitHubIssue {
   url: string;
   createdAt: string;
   isPullRequest: boolean;
+  /** Found because it asks the connected account for a review. */
+  reviewRequested?: boolean;
 }
 
 /** What a trigger remembers between checks. */
@@ -27,6 +29,8 @@ export interface GitHubCursor {
   /** Issues assigned at the last complete check, as `owner/name#number`. */
   assigned?: string[];
   assignedEtag?: string;
+  /** Pull requests asking for a review at the last complete check, as `owner/name#number`. */
+  reviews?: string[];
 }
 
 /** A failed check. `retryAt` is when GitHub's rate limit allows the next one. */
@@ -39,6 +43,9 @@ const ISSUE_PAGES = 10;
 const ASSIGNED_PAGE = 100;
 const ASSIGNED_PAGES = 10;
 const MAX_ASSIGNED = 2000;
+const SEARCH_PAGE = 100;
+/** GitHub's search never returns more than this many results. */
+const SEARCH_MAX = 1000;
 const BODY_CHARS = 8000;
 
 type Item = Record<string, unknown>;
@@ -66,7 +73,7 @@ function items(response: GitHubResponse, what: string): Item[] {
 }
 
 export function issueOf(item: Item, repository?: string): GitHubIssue {
-  const fromUrl = /repos\/([^/]+\/[^/]+)\/issues/.exec(text(item.repository_url))?.[1] ?? '';
+  const fromUrl = /\/repos\/([^/]+\/[^/?#]+)/.exec(text(item.repository_url))?.[1] ?? '';
   const body = text(item.body);
   return {
     repository: repository || (record(item.repository) ? text(item.repository.full_name) : '') || fromUrl,
@@ -101,6 +108,7 @@ export function wanted(watch: Extract<GitHubWatch, { type: 'issue-opened' }>, is
  * never starts runs for issues that already existed. A check that does not finish throws and changes nothing.
  */
 export async function checkGitHub(watch: GitHubWatch, previous: GitHubCursor, fetch: GitHubFetch): Promise<{ issues: GitHubIssue[]; cursor: GitHubCursor }> {
+  if (watch.type === 'review-requested') return checkReviews(watch, previous, fetch);
   if (watch.type === 'issue-opened') {
     const repos: NonNullable<GitHubCursor['repos']> = {};
     const found: GitHubIssue[] = [];
@@ -149,4 +157,33 @@ export async function checkGitHub(watch: GitHubWatch, previous: GitHubCursor, fe
   if (!previous.assigned) return { issues: [], cursor: { assigned: remembered, ...etag } };
   const before = new Set(previous.assigned);
   return { issues: current.filter(issue => !before.has(keyOf(issue))), cursor: { assigned: remembered, ...etag } };
+}
+
+/**
+ * Review requests are read whole from GitHub's search each time, and a pull request that enters the list runs.
+ * It leaves the list when the review is in, or while it is a draft, so a request again, or marking it ready, runs again.
+ */
+async function checkReviews(watch: Extract<GitHubWatch, { type: 'review-requested' }>, previous: GitHubCursor, fetch: GitHubFetch): Promise<{ issues: GitHubIssue[]; cursor: GitHubCursor }> {
+  const query = encodeURIComponent(`is:pr is:open draft:false archived:false ${watch.includeTeams ? 'review-requested' : 'user-review-requested'}:@me`);
+  const all: Item[] = [];
+  for (let page = 1; ; page++) {
+    const response = await fetch(`/search/issues?q=${query}&sort=created&order=asc&per_page=${SEARCH_PAGE}&page=${page}`);
+    refused(response);
+    if (response.status < 200 || response.status > 299) throw new GitHubError(`GitHub answered HTTP ${response.status} for your review requests.`);
+    if (response.truncated) throw new GitHubError("GitHub's answer for your review requests was too large to read completely.");
+    const body = response.body;
+    if (!record(body) || !Array.isArray(body.items)) throw new GitHubError("GitHub's answer for your review requests was not a search result.");
+    // An incomplete search could leave a request out, and it would then run again when it came back.
+    if (body.incomplete_results === true) throw new GitHubError('GitHub could not search all your review requests in time; checking tries again next time.');
+    const total = Number(body.total_count) || 0;
+    if (total > SEARCH_MAX) throw new GitHubError(`More than ${SEARCH_MAX} pull requests ask for your review, more than GitHub's search returns; narrow the trigger to some repositories.`);
+    all.push(...body.items.filter(record));
+    if (body.items.length < SEARCH_PAGE || all.length >= total) break;
+  }
+  const repos = lower(watch.repos);
+  const current = all.map(item => ({ ...issueOf(item), reviewRequested: true })).filter(issue => issue.isPullRequest && (!repos?.length || repos.includes(issue.repository.toLowerCase())));
+  const keys = current.map(keyOf);
+  if (!previous.reviews) return { issues: [], cursor: { reviews: keys } };
+  const before = new Set(previous.reviews);
+  return { issues: current.filter(issue => !before.has(keyOf(issue))).sort((a, b) => a.createdAt.localeCompare(b.createdAt)), cursor: { reviews: keys } };
 }

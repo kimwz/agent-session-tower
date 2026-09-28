@@ -118,6 +118,36 @@ test('issues newly assigned to me are found once; one assigned again later is fo
   assert.deepEqual((await checkGitHub(everything, first.cursor, long.fetch())).issues.map(issue => issue.number), [1000]);
 });
 
+test('pull requests newly asking for my review are found, again after a review, and a draft only once it is ready', async () => {
+  const requests: Array<{ number: number; repo: string }> = [{ number: 1, repo: 'octo/app' }];
+  const paths: string[] = [];
+  let incomplete = false;
+  const fetch: GitHubFetch = async path => {
+    paths.push(path);
+    return { status: 200, body: { total_count: requests.length, incomplete_results: incomplete, items: requests.map(request => ({ ...item({ number: request.number, repo: request.repo, pr: true }), repository: undefined, repository_url: `https://api.github.com/repos/${request.repo}` })) } };
+  };
+  const watch = GitHubSourceSchema.shape.watch.parse({ type: 'review-requested' });
+  assert.deepEqual(watch, { type: 'review-requested', includeTeams: false, verdicts: 'comment' });
+  const baseline = await checkGitHub(watch, {}, fetch);
+  assert.deepEqual(baseline.issues, [], 'requests already there are only noted');
+  assert.match(decodeURIComponent(paths[0]), /is:pr is:open draft:false archived:false user-review-requested:@me/);
+  requests.push({ number: 2, repo: 'octo/lib' });
+  const next = await checkGitHub(watch, baseline.cursor, fetch);
+  assert.deepEqual(next.issues.map(issue => [issue.repository, issue.number, issue.reviewRequested]), [['octo/lib', 2, true]]);
+  requests.splice(1, 1);
+  const reviewed = await checkGitHub(watch, next.cursor, fetch);
+  requests.push({ number: 2, repo: 'octo/lib' });
+  assert.deepEqual((await checkGitHub(watch, reviewed.cursor, fetch)).issues.map(issue => issue.number), [2], 'asked again after a review');
+  incomplete = true;
+  await assert.rejects(checkGitHub(watch, reviewed.cursor, fetch), GitHubError, 'an incomplete search changes nothing');
+  const teams = GitHubSourceSchema.shape.watch.parse({ type: 'review-requested', repos: ['octo/app'], includeTeams: true });
+  incomplete = false;
+  const start = await checkGitHub(teams, {}, fetch);
+  assert.match(decodeURIComponent(paths.at(-1)!), / review-requested:@me/);
+  requests.push({ number: 3, repo: 'octo/lib' }, { number: 4, repo: 'octo/app' });
+  assert.deepEqual((await checkGitHub(teams, start.cursor, fetch)).issues.map(issue => issue.number), [4], 'other repositories do not count');
+});
+
 async function fixture(t: TestContext, github: ReturnType<typeof fakeGitHub>) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-github-triggers-'));
   const project = join(directory, 'project');

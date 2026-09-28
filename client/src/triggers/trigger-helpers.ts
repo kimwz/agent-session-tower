@@ -69,7 +69,7 @@ export function scheduleLabel(trigger: Pick<Trigger, 'source'>, t: Translate): s
   if (trigger.source.kind === 'github') {
     const watch = trigger.source.watch;
     const repos = watch.repos?.length ? ` · ${watch.repos[0]}${watch.repos.length > 1 ? ` +${watch.repos.length - 1}` : ''}` : '';
-    return `GitHub · ${watch.type === 'issue-opened' ? t('새 이슈') : t('나에게 할당')}${repos} · ${when}`;
+    return `GitHub · ${watch.type === 'issue-opened' ? t('새 이슈') : watch.type === 'review-requested' ? t('리뷰 요청') : t('나에게 할당')}${repos} · ${when}`;
   }
   if (trigger.source.kind !== 'http') return when;
   let host = trigger.source.request.url;
@@ -92,7 +92,9 @@ export function switchedWatch(kept: Partial<Record<Watch['type'], Watch>>, type:
   const earlier = kept[type];
   return type === 'assigned-to-me'
     ? { type, ...(repos.length ? { repos } : {}), includePullRequests: earlier?.type === type && earlier.includePullRequests }
-    : { ...(earlier?.type === type ? earlier : { authorAssociation: [...MEMBERS] }), type, repos };
+    : type === 'review-requested'
+      ? { type, ...(repos.length ? { repos } : {}), includeTeams: earlier?.type === type && earlier.includeTeams, verdicts: earlier?.type === type ? earlier.verdicts : 'comment' }
+      : { ...(earlier?.type === type ? earlier : { authorAssociation: [...MEMBERS] }), type, repos };
 }
 
 /** A new trigger of one kind, with the defaults its editor starts from. */

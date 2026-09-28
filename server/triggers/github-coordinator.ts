@@ -43,7 +43,30 @@ export function issueMention(event: TriggerEvent): SlackMention {
   const issue = event.payload as GitHubIssue | undefined;
   if (!issue || typeof issue.repository !== 'string' || !Number.isInteger(issue.number)) throw new Error('This event carries no GitHub issue.');
   const text = `${issue.title}\n\n${issue.body}`.trim().slice(0, 40_000) || `Issue #${issue.number}`;
-  return { id: event.id, teamId: `github:${event.triggerId}`, channel: issue.repository, user: issue.author || 'unknown', ts: String(issue.number), threadTs: String(issue.number), text };
+  const review = issue.reviewRequested && issue.isPullRequest && event.input.review ? { review: { verdicts: event.input.review.verdicts } } : {};
+  return { id: event.id, teamId: `github:${event.triggerId}`, channel: issue.repository, user: issue.author || 'unknown', ts: String(issue.number), threadTs: String(issue.number), text, ...review };
+}
+
+const VERDICT = /^[ \t]*verdict:[ \t]*(approve|request[ _-]changes|comment)[ \t]*(?:\r?\n|$)/i;
+/** A reply as a pull request review: a first line `Verdict: approve` or `Verdict: request changes` decides it, when allowed. */
+export function reviewOf(text: string, verdicts: 'comment' | 'any'): { event: 'COMMENT' | 'APPROVE' | 'REQUEST_CHANGES'; body: string } {
+  const match = VERDICT.exec(text);
+  const word = match?.[1].toLowerCase().replace(/[ _-]/, '_');
+  const event = word === 'approve' ? 'APPROVE' : word === 'request_changes' ? 'REQUEST_CHANGES' : 'COMMENT';
+  const body = (match ? text.slice(match[0].length) : text).trim();
+  if (event !== 'COMMENT' && verdicts !== 'any') throw new GitHubError('This trigger posts comment reviews only; remove the Verdict line. Nothing was posted.');
+  if (!body && event !== 'APPROVE') throw new GitHubError('The review has no text. Nothing was posted.');
+  return { event, body };
+}
+
+/** Tower's policy for a review conversation, given with each of its turns. */
+export function reviewInstructions(verdicts: 'comment' | 'any'): string {
+  return ['This GitHub event is a pull request that asks the owner\'s account for a review. Every reply you send or propose is posted as a review of this pull request, not as an issue comment.',
+    verdicts === 'any'
+      ? 'A reply whose first line is exactly "Verdict: approve" or "Verdict: request changes" is posted with that decision, without that line; any other reply is a comment review. Approve only when the delegated review found nothing that should block merging.'
+      : 'This trigger allows comment reviews only: never start a reply with a Verdict line.',
+    'When delegating, ask the project agent to review the pull request\'s changes against its base in the rule\'s folder, for example with gh pr checkout or gh pr diff, and to report concrete findings with file and line; it must not post to GitHub itself.',
+    'A request can come again after an earlier review. Then read the pull request\'s earlier reviews in the thread and look up earlier sessions for it, check whether what was raised then is resolved, and focus on what changed since.'].join(' ');
 }
 
 export interface GitHubCoordinatorOptions {
@@ -72,13 +95,16 @@ export class GitHubCoordinator extends EventEmitter {
     const origin = (workflow: Pick<SlackWorkflow, 'id' | 'mention'>): RunOrigin => ({ kind: 'trigger', triggerId: triggerOf(workflow.mention), eventId: workflow.mention.id, workflowId: workflow.id });
     const workflowOf = (id: string) => this.automation.list().find(item => item.id === id);
     const issuePath = (mention: SlackMention) => `/repos/${mention.channel}/issues/${mention.threadTs}`;
+    const pullPath = (mention: SlackMention) => `/repos/${mention.channel}/pulls/${mention.threadTs}`;
+    const withReview = (workflow: SlackWorkflow, given?: string) => workflow.mention.review ? [given, reviewInstructions(workflow.mention.review.verdicts)].filter(Boolean).join('\n\n') : given;
     this.automation = new SlackAutomationManager({
       stateDir: options.stateDir,
       channel: GITHUB_CHANNEL,
       language: () => options.language?.() ?? 'ko',
       // The approval choice was fixed when the conversation began; later edits of the trigger do not change it.
       autoReview: workflow => workflow.approvals === 'auto',
-      startConversation: async (workflow, prompt, instructions) => {
+      startConversation: async (workflow, prompt, given) => {
+        const instructions = withReview(workflow, given);
         const rule = workflow.rules[0];
         const provider = rule?.provider ?? 'codex';
         const created = await options.runs.create({ provider, model: rule?.model, cwd: join(options.stateDir, 'github-sessions', workflow.id), prompt,
@@ -86,7 +112,8 @@ export class GitHubCoordinator extends EventEmitter {
           ...(provider === 'codex' && workflow.approvals === 'auto' ? { codexApprovalsReviewer: 'auto_review' as const } : {}) }, { autoPromptId: workflow.id, origin: origin(workflow), untrustedInput: true, ...(instructions ? { instructions: { text: instructions, required: true } } : {}) });
         return { sessionId: created.session.id, runId: created.run.id };
       },
-      resumeConversation: async (workflow, prompt, correlationId, instructions) => {
+      resumeConversation: async (workflow, prompt, correlationId, given) => {
+        const instructions = withReview(workflow, given);
         const run = await options.runs.enqueue(workflow.sessionId!, prompt, { model: workflow.rules[0]?.model }, { autoPromptId: correlationId, origin: origin(workflow), untrustedInput: true, ...(instructions ? { instructions: { text: instructions, required: true } } : {}) });
         return { runId: run.id };
       },
@@ -97,18 +124,34 @@ export class GitHubCoordinator extends EventEmitter {
         const issue = await get(issuePath(mention));
         if (issue.status !== 200 || !issue.body || typeof issue.body !== 'object') throw new GitHubError(`GitHub answered HTTP ${issue.status} for the issue.`);
         const item = issue.body as { user?: { login?: string }; title?: string; body?: string | null };
-        const messages: SlackMessage[] = [{ user: item.user?.login || mention.user, ts: 'issue', text: `${item.title ?? ''}\n\n${item.body ?? ''}`.trim().slice(0, 40_000) }];
-        // The coordinator decides from the whole conversation: a partial read starts nothing.
-        for (let page = 1; ; page++) {
-          const response = await get(`${issuePath(mention)}/comments?per_page=100&page=${page}`);
-          if (response.status !== 200 || !Array.isArray(response.body)) throw new GitHubError(`GitHub answered HTTP ${response.status} for the issue comments.`);
-          for (const comment of response.body as Array<{ id?: number; user?: { login?: string }; body?: string }>) {
-            messages.push({ user: comment.user?.login || 'unknown', ts: String(comment.id ?? ''), text: (comment.body ?? '').slice(0, 40_000) });
-          }
-          if (response.body.length < 100) break;
-          if (page >= MAX_COMMENT_PAGES) throw new GitHubError(`The issue has more than ${MAX_COMMENT_PAGES * 100} comments, more than the coordinator reads.`);
+        let opening = `${item.title ?? ''}\n\n${item.body ?? ''}`.trim();
+        if (mention.review) {
+          const pull = await get(pullPath(mention));
+          if (pull.status !== 200 || !pull.body || typeof pull.body !== 'object') throw new GitHubError(`GitHub answered HTTP ${pull.status} for the pull request.`);
+          const pr = pull.body as { html_url?: string; head?: { label?: string; sha?: string }; base?: { ref?: string }; changed_files?: number; additions?: number; deletions?: number };
+          opening = `${opening}\n\nPull request ${pr.html_url ?? ''}: ${pr.head?.label ?? '?'} (${pr.head?.sha ?? '?'}) into ${pr.base?.ref ?? '?'}, ${pr.changed_files ?? '?'} files, +${pr.additions ?? '?'} -${pr.deletions ?? '?'}`;
         }
-        return messages.filter(message => message.text && message.ts);
+        const messages: SlackMessage[] = [{ user: item.user?.login || mention.user, ts: 'issue', text: opening.slice(0, 40_000) }];
+        // The coordinator decides from the whole conversation: a partial read starts nothing.
+        const read = async (path: string, what: string, add: (entry: Record<string, unknown>) => SlackMessage) => {
+          for (let page = 1; ; page++) {
+            const response = await get(`${path}?per_page=100&page=${page}`);
+            if (response.status !== 200 || !Array.isArray(response.body)) throw new GitHubError(`GitHub answered HTTP ${response.status} for the ${what}.`);
+            for (const entry of response.body as Array<Record<string, unknown>>) messages.push(add(entry));
+            if (response.body.length < 100) break;
+            if (page >= MAX_COMMENT_PAGES) throw new GitHubError(`The ${mention.review ? 'pull request' : 'issue'} has more than ${MAX_COMMENT_PAGES * 100} ${what}, more than the coordinator reads.`);
+          }
+        };
+        const author = (entry: Record<string, unknown>) => (entry.user as { login?: string } | undefined)?.login || 'unknown';
+        const body = (entry: Record<string, unknown>) => typeof entry.body === 'string' ? entry.body : '';
+        await read(`${issuePath(mention)}/comments`, 'comments', entry => ({ user: author(entry), ts: String(entry.id ?? ''), text: body(entry).slice(0, 40_000) }));
+        if (mention.review) {
+          await read(`${pullPath(mention)}/reviews`, 'reviews', entry => ({ user: author(entry), ts: `review-${entry.id ?? ''}`,
+            text: `[review ${String(entry.state ?? '').toLowerCase()} at ${String(entry.commit_id ?? '').slice(0, 12)}] ${body(entry)}`.trim().slice(0, 40_000) }));
+          await read(`${pullPath(mention)}/comments`, 'review comments', entry => ({ user: author(entry), ts: `line-${entry.id ?? ''}`,
+            text: `[${String(entry.path ?? '')}:${String(entry.line ?? entry.original_line ?? '')}] ${body(entry)}`.slice(0, 40_000) }));
+        }
+        return messages.filter(message => message.text && message.ts && !/-$/.test(message.ts));
       },
       // Conversation coordinators never use the one-shot classifier or composer.
       match: async () => { throw new Error('Not used by conversation coordinators.'); },
@@ -134,12 +177,15 @@ export class GitHubCoordinator extends EventEmitter {
         const notSent = (error: unknown, known = true) => Object.assign(error instanceof Error ? error : new Error(String(error)), { notSent: known });
         let post: GitHubFetch;
         try { post = await options.github(triggerOf(mention), true); } catch (error) { throw notSent(error); }
+        let review: ReturnType<typeof reviewOf> | undefined;
+        try { review = mention.review ? reviewOf(text, mention.review.verdicts) : undefined; } catch (error) { throw notSent(error); }
+        const what = review ? 'review' : 'comment';
         let response;
-        try { response = await post(`${issuePath(mention)}/comments`, undefined, { method: 'POST', body: { body: text } }); }
+        try { response = await post(review ? `${pullPath(mention)}/reviews` : `${issuePath(mention)}/comments`, undefined, { method: 'POST', body: review ? { event: review.event, ...(review.body ? { body: review.body } : {}) } : { body: text } }); }
         catch (error) { throw notSent(error, (error as { uncertain?: boolean }).uncertain === false); }
         const id = response.body && typeof response.body === 'object' ? (response.body as { id?: unknown }).id : undefined;
-        if (response.status >= 400 && response.status < 500) throw notSent(new GitHubError(`GitHub refused the comment (HTTP ${response.status}); nothing was posted.`));
-        if (response.status !== 201 || (typeof id !== 'number' && typeof id !== 'string')) throw new GitHubError(`GitHub answered HTTP ${response.status}; the comment may have been posted. Check the issue before posting again.`);
+        if (response.status >= 400 && response.status < 500) throw notSent(new GitHubError(`GitHub refused the ${what} (HTTP ${response.status}); nothing was posted.`));
+        if (response.status !== (review ? 200 : 201) || (typeof id !== 'number' && typeof id !== 'string')) throw new GitHubError(`GitHub answered HTTP ${response.status}; the ${what} may have been posted. Check the ${review ? 'pull request' : 'issue'} before posting again.`);
         return { ts: String(id) };
       },
       react: async (mention, name, action) => {

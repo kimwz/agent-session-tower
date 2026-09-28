@@ -22,6 +22,8 @@ export interface SlackMention {
   ts: string;
   threadTs: string;
   text: string;
+  /** GitHub: a pull request that asked for a review; replies are posted as reviews, with the verdicts allowed then. */
+  review?: { verdicts: 'comment' | 'any' };
 }
 export type SlackWorkflowState = 'received' | 'matching' | 'ignored' | 'dispatching' | 'running' | 'composing' | 'sending' | 'completed' | 'error' | 'reply-uncertain';
 export interface SlackWorkflow {

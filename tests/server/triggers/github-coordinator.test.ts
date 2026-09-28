@@ -27,11 +27,13 @@ async function fixture(t: TestContext, options: { login?: string; postStatus?: n
   const submitted: Array<{ request: AutoPromptRequest; internal: unknown }> = [];
   const posts: Array<{ path: string; body: unknown }> = [];
   const issues = [{ number: 1 }];
+  /** Pull requests asking for my review, as the search shows them. */
+  const requested: number[] = [10];
   const github: GitHubFetch = async (path, _etag, send) => {
     if (send) {
       posts.push({ path, body: send.body });
       if (options.postFails) throw Object.assign(new GitHubError('Connection reset'), { uncertain: true });
-      return { status: options.postStatus ?? 201, body: { id: 9001 } };
+      return { status: options.postStatus ?? (path.endsWith('/reviews') ? 200 : 201), body: { id: 9001 } };
     }
     const url = new URL(path, 'https://api.github.com');
     if (url.pathname === '/user') return { status: 200, body: { login: options.login ?? 'me' } };
@@ -39,6 +41,13 @@ async function fixture(t: TestContext, options: { login?: string; postStatus?: n
       return { status: 200, body: [...issues].reverse().map(issue => ({ number: issue.number, state: 'open', title: `Bug ${issue.number}`, body: 'It crashes', author_association: 'MEMBER',
         user: { login: 'reporter' }, labels: [], assignees: [], html_url: `https://github.com/octo/app/issues/${issue.number}`, created_at: '' })) };
     }
+    if (url.pathname === '/search/issues') {
+      return { status: 200, body: { total_count: requested.length, incomplete_results: false, items: requested.map(number => ({ number, state: 'open', title: `Change ${number}`, body: 'Adds caching',
+        user: { login: 'author' }, author_association: 'MEMBER', labels: [], assignees: [], html_url: `https://github.com/octo/app/pull/${number}`, created_at: '',
+        repository_url: 'https://api.github.com/repos/octo/app', pull_request: { url: 'x' } })) } };
+    }
+    if (/^\/repos\/octo\/app\/pulls\/\d+$/.test(url.pathname)) return { status: 200, body: { html_url: 'https://github.com/octo/app/pull/11', head: { label: 'author:cache', sha: 'abc123' }, base: { ref: 'main' }, changed_files: 3, additions: 40, deletions: 2 } };
+    if (url.pathname.endsWith('/reviews')) return { status: 200, body: [{ id: 7, user: { login: 'me' }, state: 'CHANGES_REQUESTED', commit_id: 'old456', body: 'Please add a test' }] };
     if (/^\/repos\/octo\/app\/issues\/\d+$/.test(url.pathname)) return { status: 200, body: { title: 'Bug 2', body: 'It crashes', user: { login: 'reporter' } } };
     if (url.pathname.endsWith('/comments')) return { status: 200, body: [{ id: 5, user: { login: 'teammate' }, body: 'Seen on main too' }] };
     return { status: 404, body: {} };
@@ -73,7 +82,7 @@ async function fixture(t: TestContext, options: { login?: string; postStatus?: n
   await coordinator.start();
   t.after(async () => { coordinator.close(); service!.close(); await service!.settle(); await rm(directory, { recursive: true, force: true }); });
   const settle = async () => { for (let index = 0; index < 5; index++) { await service!.tick(); await coordinator.automation.tick(); } };
-  return { directory, project, clock, runs, created, submitted, posts, issues, service, coordinator, settle };
+  return { directory, project, clock, runs, created, submitted, posts, issues, requested, service, coordinator, settle };
 }
 
 const coordinatorTrigger = (values: Partial<TriggerInput> = {}): TriggerInput => ({
@@ -238,3 +247,49 @@ test('a comment refused before it leaves (rate limit) can be approved again', as
   assert.deepEqual((react.inputSchema.properties as { action: { enum: string[] } }).action.enum, ['add']);
 });
 
+
+const reviewTrigger = (verdicts: 'comment' | 'any'): TriggerInput => coordinatorTrigger({ name: 'Reviews',
+  source: GitHubSourceSchema.parse({ kind: 'github', schedule: { type: 'interval', everySeconds: 300 }, auth: { type: 'gh' }, account: 'me', watch: { type: 'review-requested', verdicts } }) });
+
+test('a review request opens a conversation that reads the pull request and its reviews, and posts a review with an allowed verdict', async t => {
+  const f = await fixture(t);
+  const trigger = await f.service.create(reviewTrigger('any'), OWNER);
+  await assert.rejects(f.service.run(trigger.id, OWNER), /nothing new/, 'a request already there when the trigger starts does not run');
+  f.requested.push(11);
+  await f.service.run(trigger.id, OWNER);
+  await f.settle();
+  assert.equal(f.created.length, 1);
+  const [{ input, internal }] = f.created;
+  assert.match(internal.instructions!.text, /posted as a review of this pull request/);
+  assert.match(internal.instructions!.text, /Verdict: approve/);
+  assert.match(input.prompt, /author:cache \(abc123\) into main/);
+  assert.match(input.prompt, /\[review changes_requested at old456\] Please add a test/);
+  const workflowId = f.service.events()[0].dispatch!.workflowId!;
+  await f.coordinator.tool(workflowId, 'github_reply', { requestKey: 'review-1', text: 'Verdict: request changes\n\nThe cache never expires.' });
+  await f.coordinator.approveReply(workflowId, 'review-1', 'Verdict: request changes\n\nThe cache never expires.');
+  assert.deepEqual(f.posts, [{ path: '/repos/octo/app/pulls/11/reviews', body: { event: 'REQUEST_CHANGES', body: 'The cache never expires.' } }]);
+  // The review is in, so GitHub drops the request; asked again, the pull request runs again.
+  f.requested.splice(f.requested.indexOf(11), 1);
+  await assert.rejects(f.service.run(trigger.id, OWNER), /nothing new/);
+  f.requested.push(11);
+  await f.service.run(trigger.id, OWNER);
+  await f.settle();
+  assert.equal(f.created.length, 2, 'a request again starts a new review');
+});
+
+test('a trigger that allows comment reviews only posts no verdict, and says so before sending', async t => {
+  const f = await fixture(t);
+  const trigger = await f.service.create(reviewTrigger('comment'), OWNER);
+  await assert.rejects(f.service.run(trigger.id, OWNER), /nothing new/);
+  f.requested.push(12);
+  await f.service.run(trigger.id, OWNER);
+  await f.settle();
+  assert.match(f.created[0].internal.instructions!.text, /comment reviews only/);
+  const workflowId = f.service.events()[0].dispatch!.workflowId!;
+  await f.coordinator.tool(workflowId, 'github_reply', { requestKey: 'approve', text: 'Verdict: approve\nLooks good.' });
+  await assert.rejects(f.coordinator.approveReply(workflowId, 'approve', 'Verdict: approve\nLooks good.'), /comment reviews only/);
+  assert.equal(f.posts.length, 0);
+  await f.coordinator.tool(workflowId, 'github_reply', { requestKey: 'comment', text: 'Two small notes on naming.' });
+  await f.coordinator.approveReply(workflowId, 'comment', 'Two small notes on naming.');
+  assert.deepEqual(f.posts, [{ path: '/repos/octo/app/pulls/12/reviews', body: { event: 'COMMENT', body: 'Two small notes on naming.' } }]);
+});
