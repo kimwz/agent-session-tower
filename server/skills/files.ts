@@ -19,7 +19,8 @@ export interface SkillHomes {
   /** Where deleted skills are moved, so a deletion can be undone by hand. */
   trash: string;
 }
-interface Root { dir: string; scope: SkillScope; provider: SkillProvider; cwd?: string; canonical: boolean }
+/** `base` is the folder the root must stay inside: no link between it and the root may lead elsewhere. */
+interface Root { dir: string; base: string; scope: SkillScope; provider: SkillProvider; cwd?: string; canonical: boolean }
 export interface SkillWrite {
   /** An existing skill's folder; absent to create one. */
   dir?: string;
@@ -52,13 +53,13 @@ export class SkillFiles {
 
   private roots(cwd?: string): Root[] {
     const roots: Root[] = [
-      { dir: join(this.homes.agentsHome, 'skills'), scope: 'global', provider: 'codex', canonical: true },
-      { dir: join(this.homes.claudeHome, 'skills'), scope: 'global', provider: 'claude', canonical: false },
-      { dir: join(this.homes.codexHome, 'skills'), scope: 'global', provider: 'codex', canonical: false },
+      { dir: join(this.homes.agentsHome, 'skills'), base: this.homes.agentsHome, scope: 'global', provider: 'codex', canonical: true },
+      { dir: join(this.homes.claudeHome, 'skills'), base: this.homes.claudeHome, scope: 'global', provider: 'claude', canonical: false },
+      { dir: join(this.homes.codexHome, 'skills'), base: this.homes.codexHome, scope: 'global', provider: 'codex', canonical: false },
     ];
     for (const dir of projectFolders(cwd, this.homes.home)) roots.push(
-      { dir: join(dir, '.agents', 'skills'), scope: 'project', provider: 'codex', cwd: dir, canonical: dir === cwd },
-      { dir: join(dir, '.claude', 'skills'), scope: 'project', provider: 'claude', cwd: dir, canonical: false },
+      { dir: join(dir, '.agents', 'skills'), base: dir, scope: 'project', provider: 'codex', cwd: dir, canonical: dir === cwd },
+      { dir: join(dir, '.claude', 'skills'), base: dir, scope: 'project', provider: 'claude', cwd: dir, canonical: false },
     );
     return roots;
   }
@@ -97,7 +98,19 @@ export class SkillFiles {
     return { ...skill, revision: revisionOf(text), body: parseSkillFile(text).body };
   }
 
-  async save(input: SkillWrite): Promise<Skill> {
+  private queue: Promise<unknown> = Promise.resolve();
+  /** Changes run one at a time, so two saves of the same revision can never both succeed. */
+  private serial<T>(change: () => Promise<T>): Promise<T> {
+    const next = this.queue.catch(() => {}).then(change);
+    this.queue = next;
+    return next;
+  }
+
+  save(input: SkillWrite): Promise<Skill> { return this.serial(() => this.write(input)); }
+  link(dir: string, cwd?: string): Promise<Skill> { return this.serial(() => this.linkNow(dir, cwd)); }
+  remove(dir: string, cwd?: string): Promise<void> { return this.serial(() => this.removeNow(dir, cwd)); }
+
+  private async write(input: SkillWrite): Promise<Skill> {
     const name = input.name.trim(), description = input.description.trim().replace(/\s*\n\s*/g, ' ');
     if (!SKILL_NAME.test(name)) throw new SkillError('스킬 이름은 영어 소문자, 숫자, 하이픈으로 64자 이내로 쓰세요.');
     if (!description || description.length > MAX_SKILL_DESCRIPTION) throw new SkillError('언제 쓰는 스킬인지 1024자 이내로 쓰세요.');
@@ -110,15 +123,15 @@ export class SkillFiles {
     for (const root of roots) {
       if (await lstat(join(root.dir, name)).catch(() => undefined)) throw new SkillError('같은 이름의 스킬이 이미 있습니다.', 409);
     }
-    await mkdir(canonical.dir, { recursive: true });
+    await ensureRoot(canonical);
     await mkdir(dir);
     await writeFile(join(dir, 'SKILL.md'), formatSkillFile({ name, description, body: input.body }), { flag: 'wx' });
-    await this.link(dir, input.scope === 'project' ? input.cwd : undefined);
+    await this.linkNow(dir, input.scope === 'project' ? input.cwd : undefined);
     return this.find(dir, input.cwd);
   }
 
   /** Links a skill into every agent's folder of its scope that does not have it yet. */
-  async link(dir: string, cwd?: string): Promise<Skill> {
+  private async linkNow(dir: string, cwd?: string): Promise<Skill> {
     const skill = await this.find(dir, cwd);
     const roots = this.roots(skill.cwd).filter(root => root.scope === skill.scope && (root.canonical || root.provider === 'claude'));
     for (const provider of ['claude', 'codex'] as const) {
@@ -127,33 +140,42 @@ export class SkillFiles {
       if (!root) continue;
       const path = join(root.dir, basename(skill.dir));
       if (await lstat(path).catch(() => undefined)) throw new SkillError('연결할 스킬 폴더에 같은 이름이 이미 있습니다.', 409);
-      await mkdir(root.dir, { recursive: true });
-      await symlink(relative(root.dir, skill.dir), path, 'dir');
+      await ensureRoot(root);
+      // Relative to the folder's real place, so the link holds when part of the path is itself a link (/tmp on macOS).
+      await symlink(relative(await realpath(root.dir), skill.dir), path, 'dir');
     }
     return this.find(skill.dir, cwd);
   }
 
-  /** Moves the skill folder to Tower's trash and removes the links to it. */
-  async remove(dir: string, cwd?: string): Promise<void> {
+  /**
+   * Moves the skill folder to Tower's trash, then removes the links to it. A skill that is only a link to a folder
+   * outside the skill folders (a whole project, say) loses its links; that folder is never moved.
+   */
+  private async removeNow(dir: string, cwd?: string): Promise<void> {
     const skill = await this.find(dir, cwd);
-    for (const root of this.roots(skill.cwd)) {
-      let names: string[];
-      try { names = await readdir(root.dir); } catch { continue; }
-      for (const name of names) {
-        const path = join(root.dir, name);
-        const info = await lstat(path).catch(() => undefined);
-        if (!info?.isSymbolicLink()) continue;
-        if (resolve(root.dir, await readlink(path)) === skill.dir || await realpath(path).catch(() => '') === skill.dir) await unlink(path);
+    const roots = this.roots(skill.cwd);
+    const owned = (await Promise.all(roots.map(root => realpath(root.dir).catch(() => '')))).includes(dirname(skill.dir));
+    if (owned) {
+      await mkdir(this.homes.trash, { recursive: true, mode: 0o700 });
+      const target = join(this.homes.trash, `${new Date().toISOString().replace(/[:.]/g, '-')}-${basename(skill.dir)}-${randomUUID().slice(0, 8)}`);
+      try { await rename(skill.dir, target); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
+        // Another volume (a project on an external disk): the folder is removed after its copy is kept.
+        await cp(skill.dir, target, { recursive: true, verbatimSymlinks: true });
+        await rm(skill.dir, { recursive: true, force: true });
       }
     }
-    await mkdir(this.homes.trash, { recursive: true, mode: 0o700 });
-    const target = join(this.homes.trash, `${new Date().toISOString().replace(/[:.]/g, '-')}-${basename(skill.dir)}-${randomUUID().slice(0, 8)}`);
-    try { await rename(skill.dir, target); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
-      // Another volume (a project on an external disk): the folder is removed after its copy is kept.
-      await cp(skill.dir, target, { recursive: true, verbatimSymlinks: true });
-      await rm(skill.dir, { recursive: true, force: true });
+    for (const root of roots) {
+      let names: string[];
+      try { names = await readdir(root.dir); } catch { continue; }
+      const real = await realpath(root.dir).catch(() => root.dir);
+      for (const name of names) {
+        const path = join(root.dir, name);
+        if (!(await lstat(path).catch(() => undefined))?.isSymbolicLink()) continue;
+        const target = await readlink(path);
+        if (resolve(real, target) === skill.dir || resolve(root.dir, target) === skill.dir || await realpath(path).catch(() => '') === skill.dir) await unlink(path);
+      }
     }
   }
 
@@ -186,6 +208,22 @@ export class SkillFiles {
       const lock = JSON.parse(await readFile(join(this.homes.agentsHome, '.skill-lock.json'), 'utf8')) as { skills?: Record<string, unknown> };
       return new Set(Object.keys(lock.skills ?? {}));
     } catch { return new Set(); }
+  }
+}
+
+/**
+ * Creates a skills folder where it belongs. No folder between its base and it may be a link, so a write can never
+ * land outside (a project's `.agents` linked to another disk, say).
+ */
+async function ensureRoot(root: Root): Promise<void> {
+  await mkdir(root.base, { recursive: true });
+  const parts = relative(root.base, root.dir).split(/[\\/]/).filter(Boolean);
+  let path = root.base;
+  for (const part of parts) {
+    path = join(path, part);
+    const info = await lstat(path).catch(() => undefined);
+    if (info?.isSymbolicLink() || info && !info.isDirectory()) throw new SkillError('스킬 폴더가 다른 곳을 가리키는 링크라 쓸 수 없습니다.', 409);
+    if (!info) await mkdir(path);
   }
 }
 

@@ -34,6 +34,12 @@ const BACKFILL_REQUEST_CHARS = 600;
 const BACKFILL_REQUESTS_PER_SESSION = 8;
 const BACKFILL_CHARS = 150_000;
 const MAX_FAILURES = 2;
+/**
+ * An analysis is Tower's own tool-less call, like Auto Prompt routing: nobody started it, so one that hangs is ended
+ * after this long rather than holding the worker's handoff forever. Generous, since a finished answer is only late.
+ */
+const REFLECT_TIMEOUT_MS = 10 * 60_000;
+const BACKFILL_TIMEOUT_MS = 30 * 60_000;
 
 const SYSTEM = `You watch how the owner of this computer works with coding agents (Claude Code and Codex) and turn their recurring ways of working into agent skills.
 A skill is a folder with SKILL.md: a "name" (lowercase words joined by hyphens), a "description" that says what it does and exactly when an agent should use it, and a Markdown body with the steps the owner expects, in order, with concrete commands, checks and rules they insisted on.
@@ -161,7 +167,7 @@ export class SkillAdvisor {
     const text = requests.map(item => item.text.trim()).join('');
     if (text.length < 30) { await this.deps.state.update(next => { next.reflected[session.id] = upTo; }); return; }
     try {
-      const result = await this.deps.model({ ...this.request(), prompt: await this.reflectPrompt(session, requests, messages ?? []), schema: REFLECT_SCHEMA as unknown as Record<string, unknown> });
+      const result = await this.deps.model({ ...this.request(), prompt: await this.reflectPrompt(session, requests, messages ?? []), schema: REFLECT_SCHEMA as unknown as Record<string, unknown> }, { timeoutMs: REFLECT_TIMEOUT_MS });
       await this.apply(session, result, upTo);
       this.failures.delete(session.id);
       this.lastRunAt = new Date(this.now()).toISOString(); this.lastError = undefined;
@@ -223,7 +229,8 @@ export class SkillAdvisor {
       if (note) state.notes.push({ at, sessionId: session.id, title: evidence.title, cwd: session.cwd, note: clip(note, 600) });
       const draft = proposalDraft(result, session.cwd);
       if (result.action === 'reinforce') {
-        const proposal = state.proposals.find(item => item.id === result.proposalId && item.status === 'open');
+        // Only a proposal this session can speak for: a global one, or one of this session's own project.
+        const proposal = state.proposals.find(item => item.id === result.proposalId && item.status === 'open' && (item.scope === 'global' || item.cwd === session.cwd));
         if (proposal) { reinforce(proposal, evidence, draft, at); return; }
       }
       if ((result.action === 'new' || result.action === 'reinforce') && draft) addProposal(state.proposals, skills, draft, [evidence], at);
@@ -258,7 +265,7 @@ export class SkillAdvisor {
         await this.context(),
         `The owner's requests over the last ${days} days, by session (newest sessions first):\n\n${blocks.join('\n\n')}`,
         'Find the ways of working the owner repeats across these sessions (the same procedure, review or verification habit, delivery rule or report style asked for again and again) and write each as a skill. Only patterns seen in at least two sessions, or stated by the owner as a standing rule. At most 8.',
-      ].join('\n\n') }, { timeoutMs: 10 * 60_000 });
+      ].join('\n\n') }, { timeoutMs: BACKFILL_TIMEOUT_MS });
       if (!record(result) || !Array.isArray(result.proposals)) throw new Error('The advisor returned no proposals.');
       const skills = await this.deps.skills().catch(() => []);
       const byId = new Map([...labels.values()].map(session => [session.id, session]));
@@ -298,7 +305,7 @@ function proposalDraft(result: Record<string, unknown>, cwd: string | undefined)
   const body = typeof result.body === 'string' ? result.body.trim() : '';
   if (!SKILL_NAME.test(name) || !description || !body) return undefined;
   const project = result.scope === 'project' && cwd;
-  return { name, description: clip(description, 1000), body: clip(body, 60_000), scope: project ? 'project' : 'global', ...(project ? { cwd } : {}),
+  return { name, description: clip(description, 1000), body: clip(body, 16_000), scope: project ? 'project' : 'global', ...(project ? { cwd } : {}),
     reason: typeof result.reason === 'string' ? clip(result.reason.trim(), 2000) : '', explicit: result.explicit === true };
 }
 

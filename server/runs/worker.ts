@@ -477,12 +477,13 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const publicAgents = new PublicAgentService({ stateDir, runs });
     await publicAgents.start();
     // Skill files live in the account's home; only the Tower on its own state folder proposes new ones.
-    const skills = new SkillService({ stateDir, homes: skillHomes(stateDir), sessions: () => visible.allSessions(), runs: () => runs.list(),
+    const skills = new SkillService({ stateDir, homes: skillHomes(stateDir), sessions: () => visible.allSessions(), runs: () => runs.list(), origin: id => runs.sessionOrigin(id),
       projects: () => (visible.snapshot().groups ?? []).map(group => group.cwd),
       history: async (session, limit) => (await sessions.detail(runs.nativeSessionId(session.id), undefined, limit))?.messages,
       model: (request, options) => runAutoPromptModel(request, { stateDir, ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) }),
       advise: resolve(stateDir) === resolve(defaultStateDir()) });
-    await skills.start();
+    // Skills never keep the worker from starting.
+    await skills.start().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
     runs.setTurnNotes((_run, session) => skills.turnNotes(session));
     const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), publicAgents: () => publicAgents.projection(), ownPorts,
       // A trigger set up from a controlling computer checks the sharing list as it is when it runs.

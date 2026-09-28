@@ -33,6 +33,13 @@ test('a new global skill is written once in ~/.agents/skills and linked into Cla
   assert.equal(skill.dir, join(f.agentsHome, 'skills', 'cross-review'));
   assert.deepEqual(skill.providers, ['claude', 'codex']);
   assert.equal(await readlink(join(f.claudeHome, 'skills', 'cross-review')), '../../.agents/skills/cross-review');
+  // Reached through a linked folder (like /tmp on macOS), the link still leads to the skill.
+  const linkedHome = join(f.home, '..', 'linked-home');
+  await symlink(f.home, linkedHome);
+  const through = new SkillFiles({ ...f, home: linkedHome, agentsHome: join(linkedHome, '.agents'), claudeHome: join(linkedHome, '.claude'), codexHome: join(linkedHome, '.codex') });
+  const second = await through.save({ scope: 'global', name: 'second', description: 'd', body: '' });
+  assert.deepEqual(second.providers, ['claude', 'codex']);
+  assert.match(await readFile(join(linkedHome, '.claude', 'skills', 'second', 'SKILL.md'), 'utf8'), /name: "second"/);
   assert.match(await readFile(join(skill.dir, 'SKILL.md'), 'utf8'), /^---\nname: "cross-review"\ndescription: "Use for new work."\n---\n\n1\. Design/);
   await assert.rejects(f.files.save({ scope: 'global', name: 'cross-review', description: 'x', body: '' }), { statusCode: 409 });
   await assert.rejects(f.files.save({ scope: 'global', name: 'Bad Name', description: 'x', body: '' }), { statusCode: 400 });
@@ -97,4 +104,51 @@ test('a project shows its own skills, those of folders up to its repository root
   const external = (await f.files.list()).find(skill => skill.name === 'find-skills');
   assert.equal(external?.external, true);
   assert.deepEqual(external?.providers, ['claude', 'codex']);
+});
+
+test('deleting a skill that is only a link to another folder removes the link and never moves that folder', async t => {
+  const f = await homes(t);
+  const project = join(f.home, 'shared-project');
+  await mkdir(join(project, 'src'), { recursive: true });
+  await writeFile(join(project, 'SKILL.md'), '---\nname: shared\ndescription: d\n---\n');
+  await mkdir(join(f.agentsHome, 'skills'), { recursive: true });
+  await symlink(project, join(f.agentsHome, 'skills', 'shared'));
+  const [skill] = await f.files.list();
+  assert.equal(skill.dir, project);
+  await f.files.remove(skill.dir);
+  await assert.rejects(lstat(join(f.agentsHome, 'skills', 'shared')));
+  assert.ok((await lstat(join(project, 'src'))).isDirectory(), 'the folder the link led to stays where it is');
+  await assert.rejects(readdir(f.trash), 'nothing was moved to the trash');
+});
+
+test('a new skill is never written through a linked skills folder that leads outside the project', async t => {
+  const f = await homes(t);
+  const project = join(f.home, 'work', 'app'), elsewhere = join(f.home, 'elsewhere');
+  await mkdir(project, { recursive: true }); await mkdir(elsewhere, { recursive: true });
+  await symlink(elsewhere, join(project, '.agents'));
+  await assert.rejects(f.files.save({ scope: 'project', cwd: project, name: 'x', description: 'd', body: '' }), { statusCode: 409 });
+  assert.deepEqual(await readdir(elsewhere), [], 'nothing was created on the other side of the link');
+});
+
+test('two saves of the same revision at once: one wins, the other is told the skill changed', async t => {
+  const f = await homes(t);
+  const skill = await f.files.save({ scope: 'global', name: 'race', description: 'd', body: 'start' });
+  const results = await Promise.allSettled(['first', 'second'].map(body => f.files.save({ dir: skill.dir, revision: skill.revision, scope: 'global', name: 'race', description: 'd', body })));
+  assert.deepEqual(results.map(result => result.status).sort(), ['fulfilled', 'rejected']);
+  const kept = (results.find(result => result.status === 'fulfilled') as PromiseFulfilledResult<unknown>) && await readFile(join(skill.dir, 'SKILL.md'), 'utf8');
+  assert.match(kept, /first|second/);
+});
+
+test('a skills state file that cannot be read is set aside, not overwritten, and skills start over', async t => {
+  const { SkillStateStore } = await import('../../../server/skills/state.js');
+  const dir = await mkdtemp(join(tmpdir(), 'tower-skill-state-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, 'skills.json'), '{not json', { mode: 0o600 });
+  const store = new SkillStateStore(dir);
+  await store.start();
+  assert.deepEqual(store.get().proposals, []);
+  const names = await readdir(dir);
+  const aside = names.find(name => name.startsWith('skills.json.unreadable-'));
+  assert.ok(aside);
+  assert.equal(await readFile(join(dir, aside!), 'utf8'), '{not json');
 });

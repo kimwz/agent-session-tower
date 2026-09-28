@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SkillAdvisorSettings, SkillNote, SkillProposal } from '../../shared/skills.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -11,6 +11,8 @@ export interface SkillState {
   settings: SkillAdvisorSettings;
   proposals: SkillProposal[];
   notes: SkillNote[];
+  /** Sessions someone other than the owner here worked in once; kept after their runs are gone. */
+  excluded: string[];
   /** Per session, the time of the last owner request the advisor has read. */
   reflected: Record<string, string>;
   /** Requests before this were never read one by one; the 7-day analysis covers them. */
@@ -20,10 +22,12 @@ export interface SkillState {
 
 export const MAX_PROPOSALS = 60;
 export const MAX_NOTES = 200;
+/** Far above what the limits below can add up to (60 drafts of 16,000 characters, 200 notes). */
+const MAX_BYTES = 12_000_000;
 const MAX_REFLECTED = 2_000;
 
 export function emptySkillState(now = new Date()): SkillState {
-  return { version: 1, pinned: [], settings: { enabled: true, provider: 'claude' }, proposals: [], notes: [], reflected: {}, startedAt: now.toISOString(), calls: { day: '', count: 0 } };
+  return { version: 1, pinned: [], settings: { enabled: true, provider: 'claude' }, proposals: [], notes: [], excluded: [], reflected: {}, startedAt: now.toISOString(), calls: { day: '', count: 0 } };
 }
 
 export class SkillStateStore {
@@ -36,10 +40,14 @@ export class SkillStateStore {
   async start(): Promise<void> {
     await mkdir(this.stateDir, { recursive: true, mode: 0o700 });
     let saved: unknown;
-    try { saved = await readPrivateJson(this.path, 4_000_000); }
+    try { saved = await readPrivateJson(this.path, MAX_BYTES); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') { await this.save(); return; }
-      throw error;
+      // A file this build cannot read is kept aside, never overwritten, and skills start over; the worker still starts.
+      await rename(this.path, `${this.path}.unreadable-${Date.now()}`).catch(() => {});
+      console.error(`Skill state was set aside: ${error instanceof Error ? error.message : String(error)}`);
+      await this.save();
+      return;
     }
     this.state = normalize(saved);
   }
@@ -62,6 +70,7 @@ export class SkillStateStore {
 
 function trim(state: SkillState): void {
   state.notes = state.notes.slice(-MAX_NOTES);
+  state.excluded = [...new Set(state.excluded)].slice(-5_000);
   // Accepted and dismissed proposals go first; they only keep the advisor from proposing them again.
   while (state.proposals.length > MAX_PROPOSALS) {
     const index = state.proposals.findIndex(item => item.status !== 'open');
@@ -83,7 +92,7 @@ function normalize(value: unknown): SkillState {
   if (settings && typeof settings === 'object') state.settings = { enabled: settings.enabled !== false, provider: settings.provider === 'codex' ? 'codex' : 'claude' };
   if (Array.isArray(input.proposals)) state.proposals = input.proposals.filter(item => item && typeof item.id === 'string' && typeof item.name === 'string')
     .map(item => ({
-      id: item.id, name: text(item.name, 64), description: text(item.description, 1024), body: text(item.body, 64 * 1024),
+      id: item.id, name: text(item.name, 64), description: text(item.description, 1024), body: text(item.body, 16_000),
       scope: item.scope === 'project' && typeof item.cwd === 'string' ? 'project' as const : 'global' as const,
       ...(item.scope === 'project' && typeof item.cwd === 'string' ? { cwd: item.cwd } : {}),
       reason: text(item.reason, 2000), explicit: item.explicit === true,
@@ -95,6 +104,7 @@ function normalize(value: unknown): SkillState {
     }));
   if (Array.isArray(input.notes)) state.notes = input.notes.filter(item => item && typeof item.note === 'string')
     .map(item => ({ at: text(item.at, 40), sessionId: text(item.sessionId, 200), title: text(item.title, 200), cwd: text(item.cwd, 4096), note: text(item.note, 600) }));
+  if (Array.isArray(input.excluded)) state.excluded = input.excluded.filter((id): id is string => typeof id === 'string');
   if (input.reflected && typeof input.reflected === 'object') state.reflected = Object.fromEntries(Object.entries(input.reflected).filter(([, at]) => typeof at === 'string'));
   if (input.calls && typeof input.calls.day === 'string' && Number.isSafeInteger(input.calls.count)) state.calls = { day: input.calls.day, count: input.calls.count };
   trim(state);

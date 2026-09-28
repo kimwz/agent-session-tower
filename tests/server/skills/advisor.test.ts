@@ -159,3 +159,34 @@ test('the 7-day analysis proposes only patterns backed by sessions it was shown'
   assert.deepEqual(byName.get('shop-deploy')?.evidence.map(item => item.sessionId), ['claude:shop'], 'a project proposal rests only on that project’s sessions');
   assert.equal(byName.get('elsewhere')?.scope, 'global', 'a folder the advisor was not shown never becomes a project');
 });
+
+test('a project proposal is never reinforced from another project’s session', async t => {
+  let answer: Record<string, unknown> = reflection({ name: 'deploy', scope: 'project', description: 'Deploy the shop', body: 'shop steps' });
+  const f = await fixture(t, () => answer);
+  const advisor = (f.service as unknown as { advisor: { reflect(session: Session): Promise<void> } }).advisor;
+  f.sessions.push(session('shop', f.project), session('blog', f.other));
+  f.histories.set('claude:shop', [message('user', 'Deploy the shop with the release script after merging, as always.', 40)]);
+  f.histories.set('claude:blog', [message('user', 'Deploy the blog by pushing to the pages branch, as always.', 40)]);
+  await advisor.reflect(f.sessions[0]);
+  const [shop] = (await f.service.overview()).proposals;
+  answer = reflection({ action: 'reinforce', proposalId: shop.id, name: 'deploy', scope: 'project', description: 'Deploy the blog', body: 'blog steps' });
+  await advisor.reflect(f.sessions[1]);
+  const proposals = (await f.service.overview()).proposals;
+  const kept = proposals.find(item => item.id === shop.id)!;
+  assert.equal(kept.body, 'shop steps');
+  assert.deepEqual(kept.evidence.map(item => item.sessionId), ['claude:shop']);
+  assert.deepEqual(proposals.find(item => item.id !== shop.id)?.cwd, f.other, 'the blog gets its own proposal instead');
+});
+
+test('a session someone else worked in stays excluded after its runs are gone, and one Tower created for automation too', async t => {
+  const f = await fixture(t, () => reflection({ action: 'none' }));
+  f.sessions.push(session('remote', f.project), session('made', f.project));
+  for (const item of f.sessions) f.histories.set(item.id, [message('user', 'A request long enough to be worth reading.', 40)]);
+  f.runs.push({ id: 'r', sessionId: 'claude:remote', origin: { kind: 'owner', controllerId: 'c'.repeat(32) }, prompt: '', status: 'completed', createdAt: minutes(50), output: '' });
+  (f.service as unknown as { options: { origin: (id: string) => unknown } }).options.origin = id => id === 'claude:made' ? { kind: 'trigger', untrustedInput: false } : undefined;
+  await f.tick();
+  f.runs.length = 0;
+  f.sessions.forEach(item => { item.lastRequestAt = minutes(35); });
+  await f.tick();
+  assert.equal(f.calls.length, 0);
+});

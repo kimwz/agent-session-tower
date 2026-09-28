@@ -14,6 +14,8 @@ export interface SkillServiceOptions {
   /** Every conversation on this computer, closed ones marked. */
   sessions: () => Session[];
   runs: () => Run[];
+  /** How Tower created the session, kept as long as the session is known; absent for sessions started elsewhere. */
+  origin?: (sessionId: string) => { kind: string; controllerId?: string; untrustedInput?: boolean } | undefined;
   /** Project folders the owner set up (named or pinned) beside those sessions work in. */
   projects?: () => string[];
   /** Whether the advisor reads finished sessions by itself; off for Towers on another state folder, such as tests. */
@@ -56,8 +58,16 @@ export class SkillService {
    * computer. Only conversations the owner had on this computer teach the advisor how they work.
    */
   private automated(session: Session): boolean {
-    const ids = new Set([session.id, `${session.provider}:${session.nativeId}`]);
-    return this.options.runs().some(run => ids.has(run.sessionId) && (run.origin?.kind !== undefined && run.origin.kind !== 'owner' || Boolean(run.origin?.controllerId)));
+    const ids = [session.id, `${session.provider}:${session.nativeId}`];
+    const state = this.state.get();
+    if (ids.some(id => state.excluded.includes(id))) return true;
+    const origin = this.options.origin?.(session.id);
+    const foreign = (kind: string | undefined, controllerId: unknown) => kind !== undefined && kind !== 'owner' || Boolean(controllerId);
+    const seen = origin && (foreign(origin.kind, origin.controllerId) || origin.untrustedInput)
+      || this.options.runs().some(run => ids.includes(run.sessionId) && foreign(run.origin?.kind, run.origin?.controllerId));
+    // Runs are pruned after a while; the mark stays, so such a session is never read later as the owner's own.
+    if (seen) void this.state.update(next => { next.excluded.push(session.id); }).catch(() => {});
+    return Boolean(seen);
   }
 
   private async project(cwd: unknown): Promise<string | undefined> {
