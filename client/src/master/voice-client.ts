@@ -52,6 +52,8 @@ export class VoiceCall {
   private readyAt = 0;
   private lastReportAt = 0;
   private reporting = false;
+  /** The owner began to speak since the last report went out: told as soon as nothing else is on its way. */
+  private speechToTell = false;
   private notice?: { id: string; text: string; startedAt: number; endedAt?: number; failed?: boolean; volume: number };
   private status?: MasterVoiceStatus;
   private lastLeaseAt = Date.now();
@@ -217,7 +219,8 @@ export class VoiceCall {
       if (result) this.decide(result);
     }
     // The owner starting to speak is told at once (it may hold back a change); the rest every two seconds.
-    if ((this.speaking && !wasSpeaking && now - this.lastReportAt >= 250) || now - this.lastReportAt >= REPORT_MS) this.report(now);
+    if (this.speaking && !wasSpeaking) this.speechToTell = true;
+    if (this.speechToTell || now - this.lastReportAt >= REPORT_MS) this.report(now);
     if (this.speaking !== wasSpeaking || this.playing !== wasPlaying) this.show();
     if (this.phase === 'live' && silenceDue({ now, readyAt: this.readyAt, lastSpeechAt: this.lastSpeechAt, lastPlaybackAt: this.lastPlaybackAt, seconds: this.options.silenceSeconds() })) void this.stop('silence');
     this.check();
@@ -239,11 +242,12 @@ export class VoiceCall {
   private report(now: number): void {
     if (this.reporting || this.phase !== 'live') return;
     this.reporting = true;
+    this.speechToTell = false;
     this.lastReportAt = now;
     void post<boolean>('/api/master/voice/activity', this.options.token(), { attemptId: this.attemptId, ...activityReport({ speaking: this.speaking, playing: this.playing, lastSpeechAt: this.lastSpeechAt, lastPlaybackAt: this.lastPlaybackAt }, Date.now()) })
       .then(known => { if (known === false) this.end('closed'); })
       .catch(() => { /* The web may be restarting: the next report carries what was missed. */ })
-      .finally(() => { this.reporting = false; });
+      .finally(() => { this.reporting = false; if (this.speechToTell) this.report(Date.now()); });
   }
 
   private check(): void {
