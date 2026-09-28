@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.58.5] - 2026-09-28
+
+### Changed
+- **The usage donut marks elapsed time the same way as the details.** The grey inner ring is gone. A small triangle outside the donut points at how much of the period has passed, with a short line across the ring at that point, in a muted shade just darker than the empty ring so it stays in the background.
+
 ## [1.58.4] - 2026-09-28
 
 ### Changed

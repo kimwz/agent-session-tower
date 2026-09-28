@@ -20,7 +20,7 @@ test('the meter shows the five-hour limit as the headline number', () => {
 test('the ring shows how much of the window has passed and warns when usage runs ahead of it', () => {
   const resetsAt = new Date(Date.now() + 2 * 3_600_000).toISOString();
   const onPace = meter({ usage: { status: 'available', windows: [{ id: 'five_hour', usedPercent: 30, windowMinutes: 300, resetsAt }] } });
-  assert.match(onPace, /class="usage-time"[^>]*stroke-dasharray="60(\.\d+)? 100"/);
+  assert.match(onPace, /class="usage-time" transform="rotate\(21[56](\.\d+)? 18 18\)"/);
   assert.match(onPace, /aria-label="Claude Code 계정 사용량: 30% 5시간 사용 · 기간 60% 경과"/);
   assert.doesNotMatch(onPace, /ahead/);
   const ahead = meter({ usage: { status: 'available', windows: [{ id: 'five_hour', usedPercent: 80, windowMinutes: 300, resetsAt }] } });
