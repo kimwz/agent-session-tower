@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.48.0] - 2026-09-28
+
+### Added
+- **Every turn Tower runs can look up earlier sessions**, not only the ones you start: trigger, Slack, GitHub, Auto Prompt work started by agents, and conversations holding outside content get `sessions_list`, `sessions_read` and `sessions_search` too, from a `tower_sessions` tool server. They read nothing an agent's shell could not. Its key is kept owner-only in Tower's state directory and opens only these three read-only lookups. Work started from a controlling computer keeps to what that computer may see, through Tower's tools as before.
+- A session can be named by its bare Claude or Codex session UUID (as `claude --resume` or Codex shows it), in `sessions_read` and in a search's `sessionId`.
+
 ## [1.47.0] - 2026-09-28
 
 ### Added
