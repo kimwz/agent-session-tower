@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import type { MasterCallState, MasterTaskState, MasterViewContext } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
@@ -109,7 +109,7 @@ async function load<T>(path: string): Promise<T[]> {
     return Array.isArray(saved?.items) ? saved.items.filter(item => item && typeof item === 'object') as T[] : [];
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-    console.error(`Master records in ${path} were unreadable and start empty: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(`Master records in ${basename(path)} were unreadable and start empty: ${(error as NodeJS.ErrnoException)?.code ?? (error instanceof SyntaxError ? 'invalid JSON' : 'error')}`);
     return [];
   }
 }

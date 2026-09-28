@@ -782,6 +782,59 @@ test('a card value in where the owner is looking is hidden too, and a card that 
   assert.equal(still.data.kind === 'card' && still.data.card.type === 'secret' && still.data.card.state, 'waiting');
 });
 
+test('a card value never shows through settings, message ids, page notes or the answer as it is written', async t => {
+  const value = 'card-password-never-public';
+  const { service, room, dir, said } = await master(t, () => ({ body: {} }), [
+    [call('request_secret', { purpose: 'password' })],
+    [say('받았습니다.')],
+    [call('ui', { action: 'close' })],
+    request => { assert.doesNotMatch(JSON.stringify(request.input), /card-password/); return [say('닫았습니다.')]; },
+  ]);
+  const seen = screen(room, () => ({ result: 'done', note: `closed; the page says ${value}${'!'.repeat(290)}` }), () => service);
+  await service.send({ clientMessageId: 'message-0212', text: '비밀번호 받아줘', local: true });
+  await said(/받았습니다/);
+  const card = room.recent(20).find(entry => entry.data.kind === 'card')!;
+  await service.card(card.id, { value }, true);
+  await said(/받았습니다/);
+  await assert.rejects(service.updateSettings({ model: value }), /비밀 카드/);
+  await service.send({ clientMessageId: `id-${value}`, text: '대화 닫아', local: true, viewContext: { tabId: 'tab-z' } });
+  await said(/닫았습니다/);
+  assert.equal(seen.length, 1);
+  await service.close();
+  assert.doesNotMatch(await readFile(join(dir, 'inbox.json'), 'utf8'), /card-password/);
+  assert.doesNotMatch(await readFile(join(dir, 'settings.json'), 'utf8').catch(() => ''), /card-password/);
+});
+
+test('the answer as it is written never shows a card value, not even the start of one', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-master-draft-'));
+  const settings = new MasterSettingsStore(dir); await settings.start(); await settings.update({ apiKey: 'sk-test-0123456789abcdef' });
+  const room = new MasterRoom(dir); await room.start();
+  const journal = new MasterJournal(dir); await journal.start();
+  const drafts: string[] = [];
+  room.subscribe(event => { if (event.type === 'draft' && event.draft) drafts.push(event.draft.text); });
+  let turn = 0;
+  const model: ModelCall = async (_request, onText) => {
+    turn++;
+    if (turn === 1) return { output: [call('request_secret', { purpose: 'password' })], text: '' };
+    if (turn === 2) return { output: [say('카드를 드렸습니다.')], text: '카드를 드렸습니다.' };
+    // The model happens to write the value, in pieces, as a stream does.
+    for (const piece of ['the pass is card-pass', 'word-never-', 'public, done']) { onText(piece); await new Promise(resolve => setTimeout(resolve, 200)); }
+    return { output: [say('the pass is card-password-never-public, done')], text: 'the pass is card-password-never-public, done' };
+  };
+  const service = new MasterService({ settings, room, journal, tower: new TowerClient(), model, taskPollMs: 40 });
+  await service.start();
+  t.after(async () => { await service.close(); await rm(dir, { recursive: true, force: true }); });
+  await service.send({ clientMessageId: 'message-0213', text: '비밀번호 받아줘', local: true });
+  await until(() => room.recent(10).some(entry => entry.data.kind === 'master'));
+  const card = room.recent(20).find(entry => entry.data.kind === 'card')!;
+  await service.card(card.id, { value: 'card-password-never-public' }, true);
+  await until(() => room.recent(20).filter(entry => entry.data.kind === 'master').length === 2);
+  assert.ok(drafts.length >= 2);
+  for (const draft of drafts) assert.doesNotMatch(draft, /card-pass/);
+  const answer = room.recent(20).filter(entry => entry.data.kind === 'master').at(-1)!;
+  assert.doesNotMatch(JSON.stringify(answer.data), /card-password/);
+});
+
 test('a notifications card records how it went on the device that pressed it', async t => {
   const { service, room, said } = await master(t, () => ({ body: {} }), [
     [call('browser_action', { kind: 'push-subscribe' })],

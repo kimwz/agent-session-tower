@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { MASTER_PANELS, type MasterCard, type MasterDirectiveResult, type MasterEntry, type MasterFilter, type MasterOverview, type MasterPanel, type MasterScreenCommand, type MasterTaskState, type MasterViewContext } from '../../shared/master.js';
 import type { AutoPromptJob, ChatMessage, Run, SessionDetail, Snapshot } from '../../shared/types.js';
@@ -162,7 +162,9 @@ export class MasterService {
 
   async send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean }): Promise<MasterEntry> {
     const { journal, room, settings } = this.options;
-    const known = journal.inbox.find(item => item.clientMessageId === input.clientMessageId);
+    // Only a digest of the page's message id is kept: it says nothing, whatever the page put in it.
+    const messageKey = createHash('sha256').update(input.clientMessageId).digest('hex').slice(0, 32);
+    const known = journal.inbox.find(item => item.clientMessageId === messageKey || item.clientMessageId === input.clientMessageId);
     const existing = known && room.get(known.id);
     if (existing) return existing;
     // Keys the owner pastes are theirs; values typed into a secret card are hidden here too, whatever the setting.
@@ -170,7 +172,7 @@ export class MasterService {
     const text = hide(input.text);
     // Where the owner is looking is kept and read by the model too: its names are hidden the same way.
     const viewContext = input.viewContext && Object.fromEntries(Object.entries(input.viewContext).map(([key, value]) => [key, typeof value === 'string' ? hide(value) : value])) as MasterViewContext;
-    const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: input.clientMessageId, text, local: input.local, ...(viewContext ? { viewContext } : {}), at: new Date().toISOString(), state: 'queued', retries: 0 };
+    const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: messageKey, text, local: input.local, ...(viewContext ? { viewContext } : {}), at: new Date().toISOString(), state: 'queued', retries: 0 };
     if (viewContext?.tabId) this.lastTab = viewContext.tabId;
     const entry = room.add({ kind: 'owner', text, ...(viewContext?.tabId ? { clientId: viewContext.tabId } : {}) }, item.id);
     journal.inbox.push(item);
@@ -187,6 +189,10 @@ export class MasterService {
   }
 
   async updateSettings(body: Record<string, unknown>): Promise<MasterOverview> {
+    // Settings are shown on pages and sent with every model request; a value typed into a secret card has no place there.
+    const { apiKey: _key, ...shown } = body;
+    const text = JSON.stringify(shown);
+    if (this.vault.redact(text) !== text) throw Object.assign(new Error('설정에 비밀 카드로 받은 값을 넣을 수 없습니다.'), { statusCode: 400 });
     await this.options.settings.update(body);
     const overview = this.overview();
     this.options.room.broadcast({ type: 'overview', seq: 0, overview });
@@ -258,7 +264,8 @@ export class MasterService {
         try {
           result = await model({ model: settings.model, effort: settings.effort, instructions: masterInstructions(Boolean(this.options.readDb)), input: items, tools: this.options.readDb ? TOOLS : TOOLS.filter(tool => tool.name !== 'tower_query') }, delta => {
             draft += delta;
-            if (Date.now() - lastDraft > 150) { lastDraft = Date.now(); room.setDraft({ turnId, text: draft }); }
+            // Shown as it is written, hidden like the answer, and without the very end, where a secret may not be whole yet.
+            if (Date.now() - lastDraft > 150) { lastDraft = Date.now(); const shown = this.hideText(draft); room.setDraft({ turnId, text: shown.slice(0, Math.max(0, shown.length - this.vault.holdBack())) }); }
           }, AbortSignal.any([turn.abort.signal, deadline]));
         } catch (error) {
           if (deadline.aborted && !turn.abort.signal.aborted) { final = TIMED_OUT; break; }
@@ -503,13 +510,14 @@ export class MasterService {
       turn.abort.signal.addEventListener('abort', stopped, { once: true });
       this.options.room.broadcast({ type: 'directive', seq: 0, directive: { ...command, id, tabId, expiresAt: Date.now() + 30_000 } });
     });
-    return answer ? { result: answer.result, ...(answer.note ? { note: this.hideText(answer.note) } : {}) } : { result: 'no-answer', note: 'The page did not confirm; it may be closed or in the background.' };
+    return answer ? { result: answer.result, ...(answer.note ? { note: truncate(this.hideText(answer.note), 300) } : {}) } : { result: 'no-answer', note: 'The page did not confirm; it may be closed or in the background.' };
   }
 
   /** The page's word on a screen command. */
   ack(id: string, result: MasterDirectiveResult, note?: string): boolean {
     const waiting = this.acks.get(id);
-    waiting?.({ result, ...(note ? { note: note.slice(0, 300) } : {}) });
+    // Hidden, then shortened, where the command waits.
+    waiting?.({ result, ...(note ? { note: note.slice(0, 4000) } : {}) });
     return Boolean(waiting);
   }
 
@@ -642,7 +650,7 @@ export class MasterService {
         for (const task of running.filter(item => (item.node ?? '') === node)) await this.check(task, snapshot);
       }
     } catch (error) {
-      console.error(`Master could not check delegated work: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`Master could not check delegated work: ${this.hideText(error instanceof Error ? error.message : String(error))}`);
     } finally { this.polling = false; }
   }
 

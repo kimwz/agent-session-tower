@@ -113,6 +113,16 @@ export class SecretVault {
     return result + change(text.slice(last));
   }
 
+  /**
+   * How much of the end of a text still being written to hold back: a value hidden everywhere could be cut there
+   * before its end, where it cannot be recognised yet.
+   */
+  holdBack(): number {
+    let longest = 0;
+    for (const kept of this.kept.values()) if (HIDDEN_EVERYWHERE.has(kept.source)) longest = Math.max(longest, kept.value.length);
+    return Math.max(0, longest - 1);
+  }
+
   /** `redact` over any JSON value, names of fields included. */
   redactInResponse(value: unknown): unknown {
     const walk = (item: unknown): unknown => typeof item === 'string' ? this.redact(item) : Array.isArray(item) ? item.map(walk)

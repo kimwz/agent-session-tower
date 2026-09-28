@@ -166,7 +166,8 @@ export class MasterRoom {
     };
     this.writes = this.writes.then(write, write).catch(error => {
       this.unsaved.add(index);
-      console.error(`Master conversation was not saved: ${error instanceof Error ? error.message : String(error)}`);
+      // The reason, not the message: a file error names paths, and logs are not hidden.
+      console.error(`Master conversation was not saved: ${(error as NodeJS.ErrnoException)?.code ?? 'error'}`);
     });
   }
 }

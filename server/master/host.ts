@@ -175,7 +175,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     await writeFile(paths.token, token, { flag: 'wx', mode: 0o600 });
     idleTimer = setInterval(() => {
       if (closing || pending || streams.size || service!.busy() || Date.now() - lastRequest < (options.idleMs ?? IDLE_MS)) return;
-      void close(true).catch(error => { console.error('Master host idle cleanup failed:', error); });
+      void close(true).catch(error => { console.error(`Master host idle cleanup failed: ${(error as NodeJS.ErrnoException)?.code ?? 'error'}`); });
     }, 1000);
     idleTimer.unref();
     return { socketPath: paths.socket, close, service };

@@ -44,7 +44,7 @@ export class MasterClient {
     const tell = () => { void this.exchange('hello').catch(() => {}); };
     tell();
     void this.pendingWork().then(pending => pending && !this.closed ? this.ensureHost() : undefined).catch(error => {
-      console.error(`Master could not resume waiting work: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`Master could not resume waiting work: ${(error as NodeJS.ErrnoException)?.code ?? (error as { statusCode?: number })?.statusCode ?? 'error'}`);
     });
     this.heartbeat = setInterval(tell, 15_000);
     this.heartbeat.unref();
