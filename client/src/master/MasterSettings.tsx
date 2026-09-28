@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { LoaderCircle, Mic, RefreshCw, Trash2 } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { LoaderCircle, Mic, Play, RefreshCw, Square, Trash2 } from 'lucide-react';
 import { DEFAULT_MASTER_VOICE, MASTER_TTS_MODELS, type MasterOverview, type MasterVoiceSettings } from '../../../shared/master';
 import { api } from '../common/lib';
 import { post } from './api';
@@ -21,11 +21,11 @@ export function MasterSettingsView({ token, overview, onNewSession }: { token: s
   };
   const voice = (patch: Partial<MasterVoiceSettings>) => save({ voice: patch });
   const [voiceKey, setVoiceKey] = useState('');
-  const [voices, setVoices] = useState<Array<{ id: string; name: string; category?: string }>>([]);
+  const [voices, setVoices] = useState<VoiceChoice[]>([]);
   const voiceConfigured = Boolean(overview?.voiceConfigured);
   useEffect(() => {
     if (!voiceConfigured) { setVoices([]); return; }
-    void api<Array<{ id: string; name: string; category?: string }>>('/api/master/voice/voices').then(setVoices).catch(() => setVoices([]));
+    void api<VoiceChoice[]>('/api/master/voice/voices').then(setVoices).catch(() => setVoices([]));
   }, [voiceConfigured]);
   if (!overview || !settings) return <div className="master-settings"><LoaderCircle className="spin" size={16} /></div>;
   return <div className="master-settings">
@@ -45,12 +45,7 @@ export function MasterSettingsView({ token, overview, onNewSession }: { token: s
         <button className="master-primary" disabled={busy || !voiceKey.trim()}>{words('저장', 'Save')}</button>
       </form>
       <p>{voiceUsage(overview.voice, words)}</p>
-      <label className="master-field">{words('목소리', 'Voice')}
-        <select value={(settings.voice ?? DEFAULT_MASTER_VOICE).voiceId} disabled={busy || !voices.length} onChange={event => void voice({ voiceId: event.target.value })}>
-          {!voices.some(item => item.id === (settings.voice ?? DEFAULT_MASTER_VOICE).voiceId) && <option value={(settings.voice ?? DEFAULT_MASTER_VOICE).voiceId}>{voices.length ? words('기본 목소리', 'Default voice') : words('키를 넣으면 목록이 나옵니다', 'Add a key to list voices')}</option>}
-          {voices.map(item => <option key={item.id} value={item.id}>{item.name}{item.category && item.category !== 'premade' ? ` (${item.category})` : ''}</option>)}
-        </select>
-      </label>
+      <VoicePicker token={token} voices={voices} current={(settings.voice ?? DEFAULT_MASTER_VOICE).voiceId} model={(settings.voice ?? DEFAULT_MASTER_VOICE).model} busy={busy} onChoose={voiceId => void voice({ voiceId })} />
       <label className="master-field">{words('읽어 주기 모델', 'Reading model')}
         <select value={(settings.voice ?? DEFAULT_MASTER_VOICE).model} disabled={busy} onChange={event => void voice({ model: event.target.value as MasterVoiceSettings['model'] })}>
           {MASTER_TTS_MODELS.map(model => <option key={model} value={model}>{model === 'eleven_v3_conversational' ? words('v3 대화형 (빠름, 추천)', 'v3 conversational (fast, recommended)') : model === 'eleven_v3' ? words('v3 (표현력, 느림, 두 배 비쌈)', 'v3 (expressive, slower, twice the price)') : words('flash v2.5 (가장 빠름, 밝은 말투 없음)', 'flash v2.5 (fastest, no bright tone)')}</option>)}
@@ -68,5 +63,67 @@ export function MasterSettingsView({ token, overview, onNewSession }: { token: s
       </label>
     </section>
     {error && <div className="master-error" role="alert">{error}</div>}
+  </div>;
+}
+
+interface VoiceChoice { id: string; name: string; category?: string }
+
+/** The account's voices, each with a short Korean sample to hear before choosing it. */
+function VoicePicker({ token, voices, current, model, busy, onChoose }: { token: string; voices: VoiceChoice[]; current: string; model: string; busy: boolean; onChoose(voiceId: string): void }) {
+  const words = useWords();
+  const player = useRef<HTMLAudioElement | null>(null);
+  /** Counts clicks: a sample that arrives after another was asked for (or stopped) is not played. */
+  const asked = useRef(0);
+  const [playing, setPlaying] = useState<{ id: string; loading: boolean }>();
+  const [error, setError] = useState('');
+  const stop = () => { asked.current++; player.current?.pause(); setPlaying(undefined); };
+  // Stopped when the settings close, and when the model changes: a sample shows how the chosen model reads.
+  useEffect(() => stop, [model]);
+  const preview = async (id: string) => {
+    const again = playing?.id === id;
+    stop(); setError('');
+    if (again) return;
+    const mine = asked.current;
+    const element = (player.current ??= new Audio());
+    element.onended = element.onerror = null;
+    // Started by the click itself: phones play later sound only from an element a click already played.
+    element.src = '/master-silence.wav';
+    void element.play().catch(() => {});
+    setPlaying({ id, loading: true });
+    try {
+      const { audio } = await post<{ audio: string }>('/api/master/voice/preview', token, { voiceId: id });
+      if (asked.current !== mine) return;
+      element.onended = () => { if (asked.current === mine) setPlaying(undefined); };
+      element.onerror = () => { if (asked.current === mine) { setPlaying(undefined); setError(words('미리 듣기를 재생하지 못했습니다.', 'Could not play the sample.')); } };
+      element.src = audio;
+      setPlaying({ id, loading: false });
+      await element.play();
+    } catch (reason) {
+      if (asked.current !== mine) return;
+      setPlaying(undefined);
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+  const listed = voices.some(item => item.id === current);
+  const rows: VoiceChoice[] = listed || !voices.length ? voices : [{ id: current, name: words('지금 목소리 (목록에 없음)', 'Current voice (not listed)') }, ...voices];
+  return <div className="master-field">
+    {words('목소리', 'Voice')}
+    {!voices.length ? <p>{words('ElevenLabs 키를 넣으면 이 계정의 목소리 목록과 미리 듣기가 나옵니다.', 'Add an ElevenLabs key to list and hear the account\'s voices.')}</p>
+      : <div className="master-voices" role="radiogroup" aria-label={words('목소리', 'Voice')}>
+        {rows.map(item => {
+          const chosen = item.id === current;
+          const state = playing?.id === item.id ? (playing.loading ? 'loading' : 'playing') : undefined;
+          return <div key={item.id} className={chosen ? 'chosen' : undefined}>
+            <label className="master-voice-choose">
+              <input type="radio" name="master-voice" value={item.id} checked={chosen} disabled={busy} onChange={() => onChoose(item.id)} />
+              <span>{item.name}{item.category && item.category !== 'premade' ? ` (${item.category})` : ''}</span>
+            </label>
+            <button type="button" className="master-voice-preview" disabled={state === 'loading'} onClick={() => void preview(item.id)} aria-label={state === 'playing' ? words(`${item.name} 미리 듣기 멈추기`, `Stop ${item.name} sample`) : words(`${item.name} 미리 듣기`, `Hear ${item.name}`)} title={words('미리 듣기', 'Hear a sample')}>
+              {state === 'loading' ? <LoaderCircle className="spin" size={13} /> : state === 'playing' ? <Square size={12} /> : <Play size={13} />}
+            </button>
+          </div>;
+        })}
+      </div>}
+    {error && <span className="master-error" role="alert">{error}</span>}
   </div>;
 }

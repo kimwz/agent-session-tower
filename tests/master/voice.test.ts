@@ -12,7 +12,7 @@ import { MasterSession } from '../../server/master/session.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/master/tower-client.js';
 import { MasterVoice, migrate, type VoiceTiming } from '../../server/master/voice.js';
-import { isNoise, READ_CHARS, speakable, VOICE_ACKS, VOICE_NUDGE, VOICE_REST, voiced, voicedParts } from '../../server/master/voice-text.js';
+import { isNoise, READ_CHARS, speakable, VOICE_ACKS, VOICE_NUDGE, VOICE_REST, VOICE_SAMPLE, voiced, voicedParts } from '../../server/master/voice-text.js';
 import type { MasterEntry, MasterSpeak, MasterStreamEvent } from '../../shared/master.js';
 import type { ChatMessage, Run, Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
@@ -269,6 +269,50 @@ test('what the owner said is a request like a typed one, answered first with a r
   assert.equal(h.labs.speeches[0].body.language_code, 'ko');
   assert.equal(h.labs.speeches[0].body.text, `[cheerfully] ${first.ack.text}`, 'a short reply is recorded brightly');
   assert.equal(isNoise('네 알겠어요'), false);
+});
+
+test('a voice is heard before it is chosen: a Korean sample read brightly in that voice, made once, paid for, and served from disk', async t => {
+  const h = await harness(t, { steps: [] });
+  const { fetchAudio } = await audioServer(t, h.voice);
+  const OTHER = 'bv62BmVlrpG0pQegOpuN';
+  await assert.rejects(h.voice.voicePreview({ voiceId: 'bad id' }), { statusCode: 400 });
+  const first = await h.voice.voicePreview({ voiceId: OTHER });
+  assert.match(first.audio, /^\/api\/master\/voice\/audio\/preview-[a-f0-9]{64}$/);
+  assert.equal(h.labs.speeches.length, 1);
+  assert.equal(h.labs.speeches[0].voice, OTHER, 'read in the voice asked about, not the one chosen');
+  assert.equal(h.labs.speeches[0].body.text, `[cheerfully] ${VOICE_SAMPLE}`);
+  assert.equal(h.labs.speeches[0].body.language_code, 'ko');
+  assert.equal(h.settings.current().voice.voiceId, 'cgSgspJ2msm6clMCkdW9', 'hearing a voice does not choose it');
+  assert.ok(h.voice.status().today.ttsChars >= VOICE_SAMPLE.length);
+  const heard = await fetchAudio(first.audio.split('/').at(-1)!);
+  assert.equal(heard.status, 200);
+  assert.equal(heard.body.toString(), 'ID3-first-second-part');
+  // Asked twice at once, and again later: made once.
+  const [again, twice] = await Promise.all([h.voice.voicePreview({ voiceId: OTHER }), h.voice.voicePreview({ voiceId: OTHER })]);
+  assert.equal(again.audio, first.audio);
+  assert.equal(twice.audio, first.audio);
+  assert.equal(h.labs.speeches.length, 1);
+  // Another model reads it differently: a new sample.
+  await h.settings.update({ voice: { model: 'eleven_flash_v2_5' } });
+  const flash = await h.voice.voicePreview({ voiceId: OTHER });
+  assert.notEqual(flash.audio, first.audio);
+  assert.equal(h.labs.speeches[1].body.text, VOICE_SAMPLE, 'no tag for a model that would read it out');
+  // Samples are kept apart from the recorded replies.
+  assert.deepEqual(await readdir(join(h.dir, 'voice-clips')).catch(() => []), []);
+  assert.equal((await readdir(join(h.dir, 'voice-previews'))).length, 2);
+  h.labs.mode = 'error';
+  await assert.rejects(h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' }), { statusCode: 502 });
+  assert.equal((await fetchAudio(`preview-${'0'.repeat(64)}`)).status, 404);
+});
+
+test('voices are listed and heard with only a key, before the master session starts; without a key neither is', async t => {
+  const h = await harness(t, { steps: [], voiceKey: false });
+  await assert.rejects(h.voice.voiceVoices(), { statusCode: 409 });
+  await assert.rejects(h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' }), { statusCode: 409 });
+  await h.settings.update({ voiceKey: VOICE_KEY });
+  await h.settings.bind(undefined);
+  assert.deepEqual(await h.voice.voiceVoices(), [{ id: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica', category: 'premade' }]);
+  assert.match((await h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' })).audio, /preview-/);
 });
 
 test('a long pause gets a recorded sign that the owner is still heard: made once, never a request, and only for the voice session now', async t => {

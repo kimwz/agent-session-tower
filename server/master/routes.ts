@@ -66,7 +66,9 @@ export function masterRoutes(client: MasterClient, options: { turnEnd?: VoiceTur
       return true;
     }
     if (req.method === 'GET' && path === '/api/master/voice/voices') { await call('voiceVoices'); return true; }
-    const audio = /^\/api\/master\/voice\/audio\/((?:clip-[a-f0-9]{64})|[0-9a-f-]{36})$/.exec(path);
+    // A sample in a voice, before the owner chooses it.
+    if (req.method === 'POST' && path === '/api/master/voice/preview') { const body = await readJson(req, 1024); await call('voicePreview', { voiceId: body.voiceId }); return true; }
+    const audio = /^\/api\/master\/voice\/audio\/((?:(?:clip|preview)-[a-f0-9]{64})|[0-9a-f-]{36})$/.exec(path);
     if (req.method === 'GET' && audio) {
       try { await client.pipeAudio(res, audio[1]); }
       catch (error) { if (!res.headersSent) json(res, 503, { error: (error as Error).message }); else res.destroy(); }

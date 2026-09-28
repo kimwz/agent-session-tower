@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.66.0] - 2026-09-29
+
+### Added
+- **Hear a voice before choosing it.** The master's **Voice** setting is now a list of the voices your ElevenLabs account can use, each with a play button. It reads a short Korean sample in that voice, with the reading model and bright tone set now. Choosing a voice saves it at once, and spoken answers and reports of finished work are read in it. The voice you already chose stays chosen.
+  - A sample is made once per voice and model and kept in `<state>/master/voice-previews` (at most 60, 5 MB), apart from the recorded short replies. It counts toward the daily voice limit like anything else read aloud.
+  - Voices can be listed and heard with only an ElevenLabs key saved, before the master session starts.
+
+### Fixed
+- A recorded short reply that took too long to make now stops its request to ElevenLabs instead of letting it run on.
+
 ## [1.65.1] - 2026-09-28
 
 ### Changed

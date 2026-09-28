@@ -132,6 +132,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'voiceNudge': return speech.voiceNudge({ session: args.session });
       case 'voicePlayed': return speech.voicePlayed({ session: args.session, id: args.id, result: args.result });
       case 'voiceVoices': return speech.voiceVoices();
+      case 'voicePreview': return speech.voicePreview({ voiceId: args.voiceId });
       case 'shutdown': {
         if (working()) return false;
         setImmediate(() => { void close(true); });
@@ -148,7 +149,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     const url = new URL(req.url ?? '/', 'http://master.invalid');
     if (req.method === 'GET' && url.pathname === '/events') { lastRequest = Date.now(); events(res, url.searchParams.get('epoch') ?? '', Number(url.searchParams.get('after') ?? '-1')); return; }
     // Audio read aloud, streamed to the page through the web as it is made.
-    const audio = /^\/audio\/((?:clip-[a-f0-9]{64})|[0-9a-f-]{36})$/.exec(url.pathname);
+    const audio = /^\/audio\/((?:(?:clip|preview)-[a-f0-9]{64})|[0-9a-f-]{36})$/.exec(url.pathname);
     if (req.method === 'GET' && audio) { lastRequest = Date.now(); void voice!.serveAudio(audio[1], res).catch(() => { if (!res.headersSent) res.writeHead(500); res.destroy(); }); return; }
     if (req.method !== 'POST' || url.pathname !== '/rpc') { res.writeHead(404); res.end(); return; }
     pending++;

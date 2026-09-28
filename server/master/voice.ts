@@ -7,7 +7,7 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { ElevenLabs, VoiceInfo } from './elevenlabs.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
-import { isNoise, speakable, VOICE_ACKS, VOICE_NUDGE, VOICE_WORKING, voiced, voicedParts } from './voice-text.js';
+import { isNoise, speakable, VOICE_ACKS, VOICE_NUDGE, VOICE_SAMPLE, VOICE_WORKING, voiced, voicedParts } from './voice-text.js';
 
 /** Estimated prices: ElevenLabs realtime speech-to-text per second, text-to-speech per character by model. */
 const STT_DOLLARS_PER_SECOND = 0.39 / 3600;
@@ -24,6 +24,8 @@ const KEEP_DAYS = 40;
 const KEEP_SPEAKING = 500;
 const CLIPS = 30;
 const CLIP_BYTES = 5 * 1024 * 1024;
+/** Voice samples kept for the settings: about one per voice an account lists. */
+const PREVIEWS = 60;
 const LIVE_COUNT = 40;
 /** Audio is kept longer than the longest answer read takes (`READ_CHARS` at `MS_PER_CHAR`). */
 const LIVE_MS = 20 * 60_000;
@@ -152,11 +154,15 @@ export class MasterVoice {
   private readonly timing: VoiceTiming;
   private readonly path: string;
   private readonly clips: string;
+  private readonly previews: string;
+  /** Recordings being made, by digest. */
+  private readonly recording = new Map<string, Promise<string>>();
 
   constructor(private readonly options: MasterVoiceOptions) {
     this.timing = { ...TIMING, ...options.timing };
     this.path = join(options.dataDir, 'voice.json');
     this.clips = join(options.dataDir, 'voice-clips');
+    this.previews = join(options.dataDir, 'voice-previews');
   }
 
   async start(): Promise<void> {
@@ -421,8 +427,8 @@ export class MasterVoice {
    * it while it is still being made. The caller has checked the limit in the same step: the characters are counted
    * here, before anything is awaited.
    */
-  private synthesize(text: string | string[]): Live {
-    const settings = this.options.settings.current().voice;
+  private synthesize(text: string | string[], voice?: { voiceId: string; model: string }): Live {
+    const settings = voice ?? this.options.settings.current().voice;
     const parts = typeof text === 'string' ? [text] : text;
     const chars = parts.reduce((sum, part) => sum + part.length, 0);
     const most = Math.max(LIVE_BYTES, chars * LIVE_BYTES_PER_CHAR);
@@ -522,9 +528,9 @@ export class MasterVoice {
    * waited for, but never past its connection closing or a while; nothing waiting is left behind either way.
    */
   async serveAudio(id: string, res: ServerResponse): Promise<void> {
-    const clip = /^clip-([a-f0-9]{64})$/.exec(id);
+    const clip = /^(clip|preview)-([a-f0-9]{64})$/.exec(id);
     if (clip) {
-      const data = await readFile(join(this.clips, `${clip[1]}.mp3`)).catch(() => undefined);
+      const data = await readFile(join(clip[1] === 'clip' ? this.clips : this.previews, `${clip[2]}.mp3`)).catch(() => undefined);
       if (!data) { res.writeHead(404).end(); return; }
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', 'Content-Length': data.length }).end(data);
       return;
@@ -597,36 +603,72 @@ export class MasterVoice {
     const settings = this.options.settings.current().voice;
     // A card's value found in a fixed sentence would go out as it is: such a sentence is not said.
     if (this.options.hooks.hide(text) !== text) throw new Error('hidden');
-    const sent = voiced(text, settings.model, 'ack');
-    const key = createHash('sha256').update(JSON.stringify([settings.voiceId, settings.model, sent])).digest('hex');
-    const path = join(this.clips, `${key}.mp3`);
-    if (!await stat(path).then(() => true, () => false)) {
-      if (this.limited(Date.now(), sent.length * ttsDollarsPerChar(settings.model))) throw new Error('limited');
-      const live = this.synthesize(sent);
-      await this.finished(live);
-      if (live.failed || !live.done) throw new Error('clip failed');
-      await mkdir(this.clips, { recursive: true, mode: 0o700 });
-      await writeFile(path, Buffer.concat(live.chunks), { mode: 0o600 });
-      this.drop(live);
-      await this.pruneClips(key);
-    }
+    const key = await this.record(this.clips, voiced(text, settings.model, 'ack'), settings.voiceId, settings.model, CLIPS);
     return { id: randomUUID(), session: session.digest, kind, text, audio: `/api/master/voice/audio/clip-${key}`, expiresAt: Date.now() + 60_000 };
   }
 
-  /** At most `CLIPS` recordings and `CLIP_BYTES` in all, the newest kept (and the one just made, always). */
-  private async pruneClips(keep: string): Promise<void> {
-    const names = (await readdir(this.clips).catch(() => [] as string[])).filter(name => /^[a-f0-9]{64}\.mp3$/.test(name));
-    const files = await Promise.all(names.map(async name => ({ name, info: await stat(join(this.clips, name)).catch(() => undefined) })));
+  /**
+   * Audio of a fixed sentence in a voice and model, kept in `dir` under its digest and made only when it is not there;
+   * the same recording asked for twice at once is made once. Made with exactly the voice and model it is kept under.
+   */
+  private record(dir: string, sent: string, voiceId: string, model: string, keep: number): Promise<string> {
+    const key = createHash('sha256').update(JSON.stringify([voiceId, model, sent])).digest('hex');
+    const known = this.recording.get(key);
+    if (known) return known;
+    const work = (async () => {
+      const path = join(dir, `${key}.mp3`);
+      if (await stat(path).then(() => true, () => false)) return key;
+      if (this.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) throw new Error('limited');
+      const live = this.synthesize(sent, { voiceId, model });
+      await this.finished(live);
+      // Not done in time: nothing more is asked for, and what came is not kept.
+      if (live.failed || !live.done) { this.abandon(live); this.drop(live); throw new Error('clip failed'); }
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      await writeFile(path, Buffer.concat(live.chunks), { mode: 0o600 });
+      this.drop(live);
+      await this.prune(dir, key, keep);
+      return key;
+    })();
+    this.recording.set(key, work);
+    void work.catch(() => {}).finally(() => this.recording.delete(key));
+    return work;
+  }
+
+  /** At most `keep` recordings and `CLIP_BYTES` in all, the newest kept (and the one just made, always). */
+  private async prune(dir: string, keep: string, most: number): Promise<void> {
+    const names = (await readdir(dir).catch(() => [] as string[])).filter(name => /^[a-f0-9]{64}\.mp3$/.test(name));
+    const files = await Promise.all(names.map(async name => ({ name, info: await stat(join(dir, name)).catch(() => undefined) })));
     const known = files.filter((file): file is { name: string; info: NonNullable<typeof file.info> } => Boolean(file.info))
       .sort((a, b) => (b.name === `${keep}.mp3` ? 1 : 0) - (a.name === `${keep}.mp3` ? 1 : 0) || b.info.mtimeMs - a.info.mtimeMs);
     let bytes = 0;
     for (const [index, file] of known.entries()) {
       bytes += file.info.size;
-      if (index > 0 && (index >= CLIPS || bytes > CLIP_BYTES)) await unlink(join(this.clips, file.name)).catch(() => {});
+      if (index > 0 && (index >= most || bytes > CLIP_BYTES)) await unlink(join(dir, file.name)).catch(() => {});
     }
   }
 
-  async voiceVoices(): Promise<VoiceInfo[]> { this.ready(); return this.options.elevenLabs.voices(); }
+  /**
+   * A short sample in a voice, for the owner choosing one in the settings: read with the model and bright tone set
+   * now, made once per voice and model, and paid for like anything else read aloud. Needs only the key.
+   */
+  async voicePreview(input: { voiceId: unknown }): Promise<{ audio: string }> {
+    if (!this.options.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 409);
+    if (typeof input.voiceId !== 'string' || !/^[A-Za-z0-9]{10,64}$/.test(input.voiceId)) throw fail('목소리가 올바르지 않습니다.', 400);
+    const { model } = this.options.settings.current().voice;
+    try {
+      const key = await this.record(this.previews, voiced(VOICE_SAMPLE, model, 'answer'), input.voiceId, model, PREVIEWS);
+      return { audio: `/api/master/voice/audio/preview-${key}` };
+    } catch (error) {
+      if ((error as Error).message === 'limited') throw fail('오늘 음성 한도에 닿았습니다.', 409);
+      throw fail('미리 듣기를 만들지 못했습니다. 이 계정에서 쓸 수 있는 목소리인지 확인해 주세요.', 502);
+    }
+  }
+
+  /** Voices the account can use; needs only the key, so a voice can be chosen before the master session starts. */
+  async voiceVoices(): Promise<VoiceInfo[]> {
+    if (!this.options.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 409);
+    return this.options.elevenLabs.voices();
+  }
 
   // ─── cost ────────────────────────────────────────────────────────────────────────────────────────────────────
 
