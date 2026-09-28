@@ -643,5 +643,5 @@ test('a spoken request steered into a report\'s turn is answered aloud even when
   for (const run of [report, spoken]) { run.status = 'completed'; run.finishedAt = h.tick(); }
   kept.updatedAt = h.tick();
   await masterEntry(h, /W가 끝났습니다/);
-  assert.equal(h.says().filter(item => item.kind === 'answer').length >= 1, true);
+  await until(() => h.says().find(item => item.kind === 'answer' && item.text.includes('W가 끝났습니다')));
 });
