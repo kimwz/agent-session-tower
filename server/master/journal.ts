@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { basename, join } from 'node:path';
-import type { MasterCallState, MasterTaskState, MasterViewContext } from '../../shared/master.js';
+import type { MasterCallState, MasterEffort, MasterTaskState, MasterViewContext } from '../../shared/master.js';
 import type { Attachment } from '../../shared/types.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
@@ -22,6 +22,9 @@ export interface InboxItem {
   viewContext?: MasterViewContext;
   /** Pictures sent with the message, kept in the master's attachment store. */
   attachments?: Attachment[];
+  /** Model and reasoning chosen for this message instead of the settings'. */
+  model?: string;
+  effort?: MasterEffort;
   at: string;
   state: 'queued' | 'processing' | 'answered' | 'failed' | 'cancelled';
   turnId?: string;

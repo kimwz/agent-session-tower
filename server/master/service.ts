@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { APP_VERSION } from '../../shared/app-identity.js';
-import { MASTER_PANELS, type MasterCard, type MasterDirectiveResult, type MasterEntry, type MasterFilter, type MasterOverview, type MasterPanel, type MasterScreenCommand, type MasterSpeak, type MasterTaskState, type MasterViewContext } from '../../shared/master.js';
+import { MASTER_PANELS, type MasterCard, type MasterEffort, type MasterDirectiveResult, type MasterEntry, type MasterFilter, type MasterOverview, type MasterPanel, type MasterScreenCommand, type MasterSpeak, type MasterTaskState, type MasterViewContext } from '../../shared/master.js';
 import type { Attachment, AutoPromptJob, ChatMessage, Run, SessionDetail, Snapshot } from '../../shared/types.js';
 import type { AttachmentStore } from '../stores/attachments.js';
-import { imagePart, MASTER_CONVERSATION } from './attachments.js';
+import { MASTER_CONVERSATION, MAX_TEXT_FILE, modelFile } from './attachments.js';
 import { statusDigest } from './digest.js';
 import { apiTarget, refusalFor, type ApiTarget, type TurnScope } from './guards.js';
 import { masterInstructions } from './instructions.js';
@@ -163,6 +163,7 @@ export class MasterService {
         for (const item of items) { item.state = 'queued'; item.retries++; delete item.turnId; }
       } else {
         for (const item of items) item.state = 'failed';
+        this.unanswered(items, 'failed');
         const done = calls.filter(call => call.state === 'succeeded').map(call => `${call.method} ${call.path}`);
         const unknown = calls.filter(call => call.state === 'uncertain').map(call => `${call.method} ${call.path}`);
         room.add({ kind: 'event', text: `마스터가 하던 일이 중단됐습니다.${done.length ? ` 실행된 것: ${done.join(', ')}.` : ''}${unknown.length ? ` 결과를 알 수 없는 것: ${unknown.join(', ')}.` : ''} 이어서 할지 말해 주세요.` });
@@ -214,7 +215,7 @@ export class MasterService {
   }
 
   /** `spoken`: said aloud (shown so), not typed; `voice`: where a spoken request, or what followed from one, came from. */
-  async send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean; voice?: VoiceOrigin; spoken?: boolean; attachments?: Attachment[] }): Promise<MasterEntry> {
+  async send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean; voice?: VoiceOrigin; spoken?: boolean; attachments?: Attachment[]; model?: string; effort?: MasterEffort }): Promise<MasterEntry> {
     const { journal, room, settings } = this.options;
     // Only a digest of the page's message id is kept: it says nothing, whatever the page put in it.
     const messageKey = createHash('sha256').update(input.clientMessageId).digest('hex').slice(0, 32);
@@ -227,13 +228,37 @@ export class MasterService {
     // Where the owner is looking is kept and read by the model too: its names are hidden the same way.
     const viewContext = input.viewContext && Object.fromEntries(Object.entries(input.viewContext).map(([key, value]) => [key, typeof value === 'string' ? hide(value) : value])) as MasterViewContext;
     const attachments = input.attachments?.length ? input.attachments : undefined;
-    const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: messageKey, text, local: input.local, ...(viewContext ? { viewContext } : {}), ...(attachments ? { attachments } : {}), at: new Date().toISOString(), state: 'queued', retries: 0, ...(input.voice ? { voice: input.voice } : {}) };
+    const chosen = { ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}) };
+    const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: messageKey, text, local: input.local, ...(viewContext ? { viewContext } : {}), ...(attachments ? { attachments } : {}), ...chosen, at: new Date().toISOString(), state: 'queued', retries: 0, ...(input.voice ? { voice: input.voice } : {}) };
     if (viewContext?.tabId) this.lastTab = viewContext.tabId;
-    const entry = room.add({ kind: 'owner', text, ...(viewContext?.tabId ? { clientId: viewContext.tabId } : {}), ...(input.spoken ? { voice: true as const } : {}), ...(attachments ? { attachments } : {}) }, item.id);
+    const entry = room.add({ kind: 'owner', text, ...(viewContext?.tabId ? { clientId: viewContext.tabId } : {}), ...(input.spoken ? { voice: true as const } : {}), ...(attachments ? { attachments } : {}), ...chosen }, item.id);
     journal.inbox.push(item);
     await journal.save('inbox');
     this.pump();
     return entry;
+  }
+
+  /**
+   * Sends a request that failed or was stopped again, as a new message with its text, files and choices, and with
+   * where and from what kind of place it is sent now. Pressed twice, it is sent once.
+   */
+  async retry(id: string, input: { local: boolean; viewContext?: MasterViewContext }): Promise<MasterEntry> {
+    const { room } = this.options;
+    const entry = room.get(id);
+    const data = entry?.data;
+    if (!entry || data?.kind !== 'owner' || !data.outcome) throw Object.assign(new Error('다시 보낼 요청을 찾을 수 없습니다.'), { statusCode: 404 });
+    const sent = await this.send({ clientMessageId: `retry-${id}`, text: data.text, local: input.local, ...(input.viewContext ? { viewContext: input.viewContext } : {}),
+      ...(data.attachments ? { attachments: data.attachments } : {}), ...(data.model ? { model: data.model } : {}), ...(data.effort ? { effort: data.effort } : {}) });
+    if (!data.retried) room.update(id, { ...data, retried: true });
+    return sent;
+  }
+
+  /** Marks the owner's requests a turn could not answer, so each can be sent again. */
+  private unanswered(inputs: InboxItem[], outcome: 'failed' | 'cancelled'): void {
+    for (const item of inputs) {
+      const data = item.kind === 'owner' ? this.options.room.get(item.id)?.data : undefined;
+      if (data?.kind === 'owner') this.options.room.update(item.id, { ...data, outcome });
+    }
   }
 
   /** The owner's "stop thinking": ends the model's work on this turn. Changes already sent finish and are recorded. */
@@ -287,7 +312,8 @@ export class MasterService {
     const first = owners[0] ?? queued[0];
     // Only inputs from the same kind of place share a turn, so what a turn may do follows every request in it. A
     // spoken request (or what follows from one) has a turn of its own: its changes are announced, its answer spoken.
-    const batch = first.voice ? [first] : (owners.length ? owners.filter(item => item.local === first.local) : queued).filter(item => !item.voice).slice(0, 10);
+    // Messages with their own model or reasoning share a turn only with messages that chose the same.
+    const batch = first.voice ? [first] : (owners.length ? owners.filter(item => item.local === first.local && item.model === first.model && item.effort === first.effort) : queued).filter(item => !item.voice).slice(0, 10);
     this.turnRun = this.run(batch);
   }
 
@@ -336,7 +362,7 @@ export class MasterService {
       // Only what Tower itself says is the developer's; the conversation keeps its roles, and everything else read is data.
       const developer = [`Now: ${new Date().toISOString()}`, voice && turn.scope.cause === 'owner' ? VOICE_TURN : ''].filter(Boolean).join('\n');
       const data = [digest ? `[data] ${digest}` : '', this.context(inputs)].filter(Boolean).join('\n\n');
-      const attached = await this.pictures(inputs);
+      const attached = await this.files(inputs);
       const request = inputs.map(item => [item.kind === 'event' ? `[event] ${item.text}` : item.text, attached.notes.get(item.id) ?? ''].filter(Boolean).join('\n')).join('\n\n');
       const asked: ModelItem = { type: 'message', role: 'user', content: '' };
       if (attached.parts.length) pictures.set(asked, attached.parts);
@@ -359,7 +385,7 @@ export class MasterService {
         const deadline = AbortSignal.timeout(Math.max(1, turnMs - (Date.now() - started)));
         let result: Awaited<ReturnType<ModelCall>>;
         try {
-          result = await model({ model: settings.model, effort: settings.effort, instructions: masterInstructions(Boolean(this.options.readDb)), input: items.map(render), tools: this.options.readDb ? TOOLS : TOOLS.filter(tool => tool.name !== 'tower_query') }, delta => {
+          result = await model({ model: inputs[0].model ?? settings.model, effort: inputs[0].effort ?? settings.effort, instructions: masterInstructions(Boolean(this.options.readDb)), input: items.map(render), tools: this.options.readDb ? TOOLS : TOOLS.filter(tool => tool.name !== 'tower_query') }, delta => {
             draft += delta;
             // Shown as it is written, hidden like the answer, and without the very end, where a secret may not be whole yet.
             if (Date.now() - lastDraft > 150) { lastDraft = Date.now(); const shown = this.hideText(draft); room.setDraft({ turnId, text: shown.slice(0, Math.max(0, shown.length - this.vault.holdBack())) }); }
@@ -396,6 +422,7 @@ export class MasterService {
       const message = truncate(this.hideText(error instanceof Error ? error.message : String(error)), 2000);
       if (turn.abort.signal.aborted) {
         for (const item of inputs) item.state = 'cancelled';
+        this.unanswered(inputs, 'cancelled');
         const speak = this.speakFor(turn, false);
         room.add({ kind: 'event', text: '마스터가 생각을 멈췄습니다. 이미 보낸 작업은 그대로 진행됩니다.', ...(speak ? { speak } : {}) });
       } else if (!journal.calls.some(call => call.turnId === turnId) && inputs.every(item => item.retries < 1)) {
@@ -405,6 +432,7 @@ export class MasterService {
         room.add({ kind: 'error', text: `${message} — 잠시 뒤 한 번 더 해 봅니다.` });
       } else {
         for (const item of inputs) item.state = 'failed';
+        this.unanswered(inputs, 'failed');
         const speak = this.speakFor(turn, false);
         room.add({ kind: 'error', text: message, ...(speak ? { speak } : {}) });
       }
@@ -429,7 +457,7 @@ export class MasterService {
       if (inputs.some(input => input.id === entry.id)) continue;
       const data = entry.data;
       const at = entry.at.slice(11, 16);
-      const line = data.kind === 'owner' ? { role: 'user' as const, data: false, text: [truncate(data.text, 1500), data.attachments?.length ? `[attached pictures, seen in that turn: ${data.attachments.map(item => JSON.stringify(item.name)).join(', ')}]` : ''].filter(Boolean).join('\n') }
+      const line = data.kind === 'owner' ? { role: 'user' as const, data: false, text: [truncate(data.text, 1500), data.attachments?.length ? `[attached files, seen in that turn: ${data.attachments.map(item => JSON.stringify(item.name)).join(', ')}]` : ''].filter(Boolean).join('\n') }
         : data.kind === 'master' || data.kind === 'voice' ? { role: 'assistant' as const, data: false, text: truncate(data.text, 1500) }
         : { role: 'user' as const, data: true, text: `[data ${at} ${data.kind === 'action' ? 'call' : data.kind === 'task' ? 'delegated' : data.kind}] ${
           data.kind === 'action' ? `${data.method} ${data.path}${data.node ? ` (node ${data.node})` : ''} → ${data.state}${data.summary ? `: ${truncate(data.summary, 200)}` : ''}`
@@ -443,22 +471,30 @@ export class MasterService {
   }
 
   /**
-   * The pictures sent with this turn's messages: each image for the model, and a line per message saying which they
-   * are and where they are kept, so a session on this computer can be given one by its path.
+   * The files sent with this turn's messages, and a line per message saying which they are and where they are kept, so
+   * a session on this computer can be given one by its path. Pictures and PDFs follow the text for the model to read,
+   * short text files are given as their text (hidden like the message), and anything else is named only.
    */
-  private async pictures(inputs: InboxItem[]): Promise<{ notes: Map<string, string>; parts: unknown[] }> {
+  private async files(inputs: InboxItem[]): Promise<{ notes: Map<string, string>; parts: unknown[] }> {
     const notes = new Map<string, string>();
     const parts: unknown[] = [];
+    let inlined = 0;
     for (const item of inputs) {
       if (!item.attachments?.length) continue;
       const lines: string[] = [];
       for (const attachment of item.attachments) {
-        const picture = this.options.attachments ? await this.options.attachments.read(attachment.id, MASTER_CONVERSATION).catch(() => undefined) : undefined;
-        if (!picture) { lines.push(`- ${JSON.stringify(attachment.name)}: could not be read (tell the owner to send it again)`); continue; }
-        parts.push(imagePart(picture));
-        lines.push(`- ${JSON.stringify(attachment.name)} (${attachment.mimeType}, ${attachment.size} bytes), picture ${parts.length} below, kept on this computer at ${JSON.stringify(picture.path)}`);
+        const file = this.options.attachments ? await this.options.attachments.read(attachment.id, MASTER_CONVERSATION).catch(() => undefined) : undefined;
+        const name = `- ${JSON.stringify(attachment.name)} (${attachment.mimeType}, ${attachment.size} bytes)`;
+        if (!file) { lines.push(`${name}: could not be read (tell the owner to send it again)`); continue; }
+        const where = `kept on this computer at ${JSON.stringify(file.path)}`;
+        const read = modelFile(file);
+        if (read.part) { parts.push(read.part); lines.push(`${name}, attachment ${parts.length} below, ${where}`); }
+        else if (read.text !== undefined && inlined + read.text.length <= 2 * MAX_TEXT_FILE) {
+          inlined += read.text.length;
+          lines.push(`${name}, ${where}. Its text:\n<file name=${JSON.stringify(attachment.name)}>\n${read.text}\n</file>`);
+        } else lines.push(`${name}, ${where}; its content is not shown to you (open it through a session if needed)`);
       }
-      notes.set(item.id, `[attached pictures]\n${lines.join('\n')}`);
+      notes.set(item.id, `[attached files]\n${lines.join('\n')}`);
     }
     return { notes, parts };
   }

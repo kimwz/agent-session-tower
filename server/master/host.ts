@@ -2,9 +2,9 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { chmod, mkdir, unlink, writeFile } from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
 import { APP_VERSION } from '../../shared/app-identity.js';
-import type { MasterStreamEvent } from '../../shared/master.js';
+import { MASTER_EFFORTS, type MasterEffort, type MasterStreamEvent } from '../../shared/master.js';
 import { acquireStateLock, MonitorAlreadyRunning } from '../instance/state-lock.js';
-import { imageList, masterAttachments } from './attachments.js';
+import { fileList, masterAttachments } from './attachments.js';
 import { MasterJournal } from './journal.js';
 import { LiveState } from './live-state.js';
 import { lookupsSupported, ReadDatabase } from './read-db.js';
@@ -86,9 +86,17 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'page': return room.page(typeof args.before === 'number' ? args.before : undefined, typeof args.limit === 'number' ? args.limit : 80);
       case 'send': {
         if (typeof args.clientMessageId !== 'string' || !/^[a-zA-Z0-9-]{8,64}$/.test(args.clientMessageId)) throw failure('메시지 ID가 올바르지 않습니다.', 400);
-        const attachments = imageList(args.attachments);
+        const attachments = fileList(args.attachments);
         if (typeof args.text !== 'string' || (!args.text.trim() && !attachments.length) || args.text.length > 32_000) throw failure('메시지가 비었거나 너무 깁니다.', 400);
-        return master.send({ clientMessageId: args.clientMessageId, text: args.text, local: args.local === true, ...(attachments.length ? { attachments } : {}), ...(args.viewContext && typeof args.viewContext === 'object' ? { viewContext: viewContext(args.viewContext) } : {}) });
+        if (args.model !== undefined && (typeof args.model !== 'string' || !/^[a-zA-Z0-9._:-]{1,80}$/.test(args.model))) throw failure('모델 이름이 올바르지 않습니다.', 400);
+        if (args.effort !== undefined && !(MASTER_EFFORTS as readonly unknown[]).includes(args.effort)) throw failure('추론 수준이 올바르지 않습니다.', 400);
+        return master.send({ clientMessageId: args.clientMessageId, text: args.text, local: args.local === true, ...(attachments.length ? { attachments } : {}),
+          ...(args.model !== undefined ? { model: args.model as string } : {}), ...(args.effort !== undefined ? { effort: args.effort as MasterEffort } : {}),
+          ...(args.viewContext && typeof args.viewContext === 'object' ? { viewContext: viewContext(args.viewContext) } : {}) });
+      }
+      case 'retry': {
+        if (typeof args.id !== 'string') throw failure('다시 보낼 요청이 올바르지 않습니다.', 400);
+        return master.retry(args.id, { local: args.local === true, ...(args.viewContext && typeof args.viewContext === 'object' ? { viewContext: viewContext(args.viewContext) } : {}) });
       }
       case 'stop': return master.stop();
       case 'ack': {

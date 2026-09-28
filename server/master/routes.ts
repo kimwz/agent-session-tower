@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { ATTACHMENT_BODY_BYTES, readJson } from '../http/requests.js';
-import { MASTER_CONVERSATION, onlyImages, sendPicture } from './attachments.js';
+import { MASTER_CONVERSATION, sendPicture } from './attachments.js';
 import type { MasterClient } from './client.js';
 import type { VoiceTurnEnd } from './voice-turn-end.js';
 
@@ -38,15 +38,18 @@ export function masterRoutes(client: MasterClient, options: { turnEnd?: VoiceTur
     }
     if (req.method === 'POST' && path === '/api/master/messages') {
       const body = await readJson(req, ATTACHMENT_BODY_BYTES);
-      const args = { clientMessageId: body.clientMessageId, text: body.text, viewContext: body.viewContext, local: identity.local };
-      if (body.attachments === undefined) { await call('send', args); return true; }
-      // Pictures are checked and kept here, and only their records go to the host; kept for nothing, they go again.
+      const args = { clientMessageId: body.clientMessageId, text: body.text, viewContext: body.viewContext, local: identity.local,
+        ...(body.model !== undefined ? { model: body.model } : {}), ...(body.effort !== undefined ? { effort: body.effort } : {}) };
+      const files = body.attachments !== undefined || body.attachmentIds !== undefined;
+      if (!files && body.model === undefined && body.effort === undefined) { await call('send', args); return true; }
+      // Files are checked and kept here, and only their records go to the host; kept for nothing, they go again.
       let created: string[] = [];
       try {
-        onlyImages(body.attachments);
-        if (!await client.sameBuild()) throw Object.assign(new Error('마스터가 새 버전으로 바뀌기를 기다리는 중입니다. 하던 일이 끝나면 사진을 보낼 수 있습니다.'), { statusCode: 503 });
+        // An older host still at work would drop what it does not know yet.
+        if (!await client.sameBuild()) throw Object.assign(new Error('마스터가 새 버전으로 바뀌기를 기다리는 중입니다. 하던 일이 끝나면 파일과 모델 선택을 보낼 수 있습니다.'), { statusCode: 503 });
+        if (!files) { json(res, 200, await client.call('send', args)); return true; }
         const store = await client.attachments();
-        const prepared = await store.prepare(MASTER_CONVERSATION, { attachments: body.attachments as never });
+        const prepared = await store.prepare(MASTER_CONVERSATION, { attachments: body.attachments as never, attachmentIds: body.attachmentIds as never });
         created = prepared.createdIds;
         const sent = await client.call('send', { ...args, attachments: prepared.attachments });
         json(res, 200, sent);
@@ -66,6 +69,13 @@ export function masterRoutes(client: MasterClient, options: { turnEnd?: VoiceTur
       return true;
     }
     if (req.method === 'POST' && path === '/api/master/stop') { await call('stop'); return true; }
+    // A request that failed or was stopped goes again as a new message, with what this page is allowed now.
+    const retry = /^\/api\/master\/retry\/([0-9a-f-]{36})$/.exec(path);
+    if (req.method === 'POST' && retry) {
+      const body = await readJson(req, 16 * 1024);
+      await call('retry', { id: retry[1], viewContext: body.viewContext, local: identity.local });
+      return true;
+    }
     // The page says whether it did a screen command, and answers cards (a secret typed into one goes to the host only).
     const answer = /^\/api\/master\/(directives|cards)\/([0-9a-f-]{36})$/.exec(path);
     if (req.method === 'POST' && answer) {

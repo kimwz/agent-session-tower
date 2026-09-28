@@ -115,8 +115,12 @@ export type MasterCallState = 'sending' | 'succeeded' | 'failed' | 'uncertain' |
 export type MasterTaskState = 'running' | 'completed' | 'error' | 'cancelled' | 'unknown';
 
 export type MasterEntryData =
-  /** `attachments`: pictures sent with the message, shown from `/api/master/attachments/<id>`. */
-  | { kind: 'owner'; text: string; clientId?: string; voice?: true; attachments?: Attachment[] }
+  /**
+   * `attachments`: files sent with the message, shown from `/api/master/attachments/<id>`. `model`/`effort`: chosen for
+   * this message instead of the settings'. `outcome`: the request was not answered (it can be sent again), and
+   * `retried` once it was.
+   */
+  | { kind: 'owner'; text: string; clientId?: string; voice?: true; attachments?: Attachment[]; model?: string; effort?: MasterEffort; outcome?: 'failed' | 'cancelled'; retried?: true }
   | { kind: 'master'; text: string; turnId: string; final: boolean; speak?: MasterSpeak }
   /** What the master said aloud in a GPT-Live call (1.52–1.55), kept in conversations since. */
   | { kind: 'voice'; text: string }
