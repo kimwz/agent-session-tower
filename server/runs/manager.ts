@@ -21,7 +21,7 @@ import { findExecutable, providerDirectories, PROVIDERS } from '../providers/dis
 import { towerInstructionsBlock } from '../sessions/parser.js';
 import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
-import { NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
+import { awaitToolServers, NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { automatedOrigin, ownerOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
 import { WakeupTracker, type Wakeup } from './wakeup.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
@@ -840,6 +840,11 @@ export class RunManager extends EventEmitter {
     let registered = false;
     if (creating) await this.addFirstTurnNotes(run, session);
     const tools = this.runTools(run, session);
+    await awaitToolServers(tools);
+    if (run.status !== 'queued' || this.stopping) {
+      this.reservedSessions.delete(session.id);
+      return;
+    }
     const mcpServers = tools.servers;
     if (tools.towerTools) run.towerTools = tools.towerTools;
     // The owner's own turns hand approvals to Codex's automatic reviewer, in new and resumed threads alike; if Codex
@@ -919,6 +924,7 @@ export class RunManager extends EventEmitter {
     if (creating) await this.addFirstTurnNotes(run, session);
     const args = creating ? buildCreateArgs(session, run.model, run.effort) : buildResumeArgs(session, run.model, run.effort);
     const tools = this.runTools(run, session);
+    await awaitToolServers(tools);
     const mcpServers = tools.servers;
     if (tools.towerTools) run.towerTools = tools.towerTools;
     // A capability in a tool server's environment would be visible in the process list as an argument,

@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.55.2] - 2026-09-28
+
+### Fixed
+- **Turns no longer start without their tools while Tower is rebuilt.** Building Tower emptied `dist/server` before compiling it again, and every turn starts its tool servers (Slack conversation tools, session lookups, Tower's tools) from that folder. A Slack conversation that started during the 1.55.1 build found `tower_slack` and `tower_sessions` unavailable and could not act. The build now compiles into a separate folder and replaces the files one by one, so no file is ever missing, and a failed build leaves the previous one in place. A turn whose tool server script is missing also waits up to two minutes for it; turns that require those tools fail instead of starting without them.
+
 ## [1.55.1] - 2026-09-28
 
 ### Changed
