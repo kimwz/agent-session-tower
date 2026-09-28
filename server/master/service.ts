@@ -34,9 +34,20 @@ const ACK_MS = 5_000;
 const TERMINAL_READ_MS = 1_500;
 const TERMINAL_OUTPUT = 4_000;
 const NODE_ID = /^[a-f0-9]{32}$/;
-/** Everything the model is given that Tower does not hide: the standing instructions and the tools' descriptions. */
+/**
+ * Everything the model is given that Tower does not hide: the standing instructions (with and without lookups) and
+ * every text of the tools' descriptions, as the model reads them.
+ */
 let fixedText: string | undefined;
-const FIXED_TEXT = () => fixedText ??= `${masterInstructions(true)}\n${JSON.stringify(TOOLS)}`;
+const FIXED_TEXT = () => fixedText ??= [masterInstructions(true), masterInstructions(false), ...texts(TOOLS)].join('\n');
+function texts(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(texts);
+  if (value && typeof value === 'object') return Object.entries(value).flatMap(([key, item]) => [key, ...texts(item)]);
+  return [];
+}
+/** Results larger than this are kept for the turn as hidden text rather than as they came. */
+const KEEP_WHOLE = 1_000_000;
 
 const TOOLS: ModelTool[] = [
   { type: 'function', name: 'tower_api', description: 'Call one of Tower\'s HTTP routes (see Routes), exactly as the owner\'s pages do. For a joined computer pass node.',
@@ -253,12 +264,26 @@ export class MasterService {
        * owner gives on a card meanwhile is hidden too; only the content is touched, never the item's own fields.
        */
       const given = new WeakMap<ModelItem, () => unknown>();
+      const shown = new WeakMap<ModelItem, { generation: number; item: ModelItem }>();
       const tell = (item: ModelItem, content: () => unknown) => { given.set(item, content); return item; };
+      // A result is written out once, and again only when a value to hide was added since.
       const render = (item: ModelItem): ModelItem => {
         const content = given.get(item);
         if (!content) return item;
-        if (item.type === 'function_call_output') return { ...item, output: truncate(this.hideText(JSON.stringify(this.hideValue(content()))), MAX_TOOL_OUTPUT) };
-        return { ...item, content: this.hideText(String(content())) };
+        const generation = this.vault.generation();
+        const known = shown.get(item);
+        if (known?.generation === generation) return known.item;
+        const value = content();
+        const next = item.type === 'function_call_output'
+          ? { ...item, output: truncate(this.hideText(typeof value === 'string' ? value : JSON.stringify(this.hideValue(value))), MAX_TOOL_OUTPUT) }
+          : { ...item, content: this.hideText(String(value)) };
+        shown.set(item, { generation, item: next });
+        return next;
+      };
+      // A very large result is kept as hidden text: it can be hidden again, without holding everything it came with.
+      const kept = (output: unknown): unknown => {
+        const text = JSON.stringify(this.hideValue(output));
+        return text.length > KEEP_WHOLE ? text : output;
       };
       const developer = [digest, this.context(inputs)].filter(Boolean).join('\n\n');
       const request = inputs.map(item => item.kind === 'event' ? `[event] ${item.text}` : item.text).join('\n\n');
@@ -299,7 +324,8 @@ export class MasterService {
             ? { error: '이번 요청에서 부를 수 있는 도구 수를 넘었습니다. 지금까지 한 일을 소유자에게 보고하세요.' }
             : await this.tool(String(call.name), String(call.arguments ?? '{}'), turn).catch(error => ({ error: error instanceof Error ? error.message : String(error) }));
           // Every result is hidden as a whole before the model reads it, and only then shortened.
-          items.push(tell({ type: 'function_call_output', call_id: String(call.call_id), output: '' }, () => output));
+          const gathered = kept(output);
+          items.push(tell({ type: 'function_call_output', call_id: String(call.call_id), output: '' }, () => gathered));
         }
         turn.abort.signal.throwIfAborted();
       }

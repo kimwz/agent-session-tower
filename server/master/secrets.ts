@@ -80,6 +80,8 @@ export class SecretVault {
   /** Each kept value's reference. */
   private readonly refs = new Map<string, string>();
   private readonly counts: Record<Source, number> = { card: 0, answer: 0, pasted: 0, read: 0 };
+  /** Changes whenever the values hidden everywhere change, so text hidden before can be hidden again. */
+  private changes = 0;
   /** References given out for keys hidden while full, which cannot be put back but are still references. */
   private readonly issued = new Set<string>();
   private everywhere?: RegExp | null;
@@ -181,6 +183,9 @@ export class SecretVault {
   /** Whether text holds, as it is, a value hidden everywhere. */
   holds(text: string): boolean { return this.redact(text) !== text; }
 
+  /** A number that changes whenever the values hidden everywhere change. */
+  generation(): number { return this.changes; }
+
   /** Whether any name or value in a plain value holds a value hidden everywhere. */
   holdsIn(value: unknown): boolean {
     if (typeof value === 'string') return this.holds(value);
@@ -211,7 +216,7 @@ export class SecretVault {
         this.counts[kept.source]--;
         this.counts[source]++;
         kept.source = source;
-        if (HIDDEN_EVERYWHERE.has(source)) this.everywhere = undefined;
+        if (HIDDEN_EVERYWHERE.has(source)) (this.everywhere = undefined, this.changes++);
       }
       this.kept.set(known, kept);
       return known;
@@ -226,7 +231,7 @@ export class SecretVault {
     this.kept.set(ref, { value, at: now, source });
     this.refs.set(value, ref);
     this.counts[source]++;
-    if (HIDDEN_EVERYWHERE.has(source)) this.everywhere = undefined;
+    if (HIDDEN_EVERYWHERE.has(source)) (this.everywhere = undefined, this.changes++);
     return ref;
   }
 
@@ -248,7 +253,7 @@ export class SecretVault {
       this.kept.delete(ref);
       this.refs.delete(kept.value);
       this.counts[source]--;
-      if (HIDDEN_EVERYWHERE.has(source)) this.everywhere = undefined;
+      if (HIDDEN_EVERYWHERE.has(source)) (this.everywhere = undefined, this.changes++);
       if (olderThan === Infinity) break;
     }
   }

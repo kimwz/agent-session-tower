@@ -920,6 +920,9 @@ test('a word from the master\'s own instructions cannot be a card value; a card 
   // Words the model is always told (a tool's name, "password") could never be kept from it.
   await assert.rejects(service.card(card.id, { value: 'openPanel' }, true), /안내문/);
   await assert.rejects(service.card(card.id, { value: 'password' }, true), /안내문/);
+  // As the model reads them: the instructions without lookups too, and descriptions with their quotes.
+  await assert.rejects(service.card(card.id, { value: 'tower_api, and session_read' }, true), /안내문/);
+  await assert.rejects(service.card(card.id, { value: '"all", "local"' }, true), /안내문/);
   await service.card(card.id, { value: 'sesame-open-9' }, true);
   await said(/받았습니다/);
   await service.send({ clientMessageId: 'message-0221', text: '새 세션 창 열어줘', local: true, viewContext: { tabId: 'tab-o' } });
