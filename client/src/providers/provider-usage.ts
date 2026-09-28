@@ -31,3 +31,14 @@ export function usageUnavailableReason(usage?: ProviderUsage): string {
 export function usagePercent(value: number): string {
   return `${Math.round(value)}%`;
 }
+/** How far the current window has run, from its length and reset time; undefined when either is unknown. */
+export function usageElapsedPercent(window: UsageWindow, now = Date.now()): number | undefined {
+  const resetsAt = window.resetsAt ? Date.parse(window.resetsAt) : NaN;
+  if (!window.windowMinutes || !Number.isFinite(resetsAt)) return undefined;
+  const length = window.windowMinutes * 60_000;
+  return Math.min(100, Math.max(0, (now - (resetsAt - length)) / length * 100));
+}
+/** Usage has outrun the time that has passed in its window. */
+export function usageAheadOfTime(window: UsageWindow, elapsed?: number): boolean {
+  return elapsed !== undefined && window.usedPercent > elapsed;
+}

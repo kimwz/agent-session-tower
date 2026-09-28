@@ -17,6 +17,18 @@ test('the meter shows the five-hour limit as the headline number', () => {
   assert.match(markup, /class="usage-fill"[^>]*stroke-dasharray="41.4 100"/);
 });
 
+test('the ring shows how much of the window has passed and warns when usage runs ahead of it', () => {
+  const resetsAt = new Date(Date.now() + 2 * 3_600_000).toISOString();
+  const onPace = meter({ usage: { status: 'available', windows: [{ id: 'five_hour', usedPercent: 30, windowMinutes: 300, resetsAt }] } });
+  assert.match(onPace, /class="usage-time"[^>]*stroke-dasharray="60(\.\d+)? 100"/);
+  assert.match(onPace, /aria-label="Claude Code 계정 사용량: 30% 5시간 사용 · 기간 60% 경과"/);
+  assert.doesNotMatch(onPace, /ahead/);
+  const ahead = meter({ usage: { status: 'available', windows: [{ id: 'five_hour', usedPercent: 80, windowMinutes: 300, resetsAt }] } });
+  assert.match(ahead, /class="provider-usage-meter claude  ahead/);
+  const unknown = meter({ usage: { status: 'available', windows: [{ id: 'five_hour', usedPercent: 80, windowMinutes: 300 }] } });
+  assert.doesNotMatch(unknown, /usage-time|ahead/);
+});
+
 test('an account without usage data reports that instead of showing zero', () => {
   const markup = meter({ usage: { status: 'unavailable', windows: [], reason: 'not_signed_in' } });
   assert.match(markup, /<strong>—<\/strong><small>Claude · 정보 없음<\/small>/);

@@ -1,9 +1,9 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import type { Provider, ProviderHealth } from '../../../shared/types';
+import type { Provider, ProviderHealth, UsageWindow } from '../../../shared/types';
 import { ProviderIcon } from '../common/Icons';
 import { absoluteTime, providerLabels, relativeTime } from '../common/lib';
 import { useI18n } from '../i18n/i18n';
-import { usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from './provider-usage';
+import { usageAheadOfTime, usageElapsedPercent, usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from './provider-usage';
 
 export function ProviderUsageMeter({ provider, health }: { provider: Provider; health?: ProviderHealth }) {
   const { t } = useI18n();
@@ -16,16 +16,23 @@ export function ProviderUsageMeter({ provider, health }: { provider: Provider; h
     document.addEventListener('pointerdown', closeOutside);
     return () => document.removeEventListener('pointerdown', closeOutside);
   }, [open]);
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
   const usage = health?.usage;
   const windows = usageWindows(usage);
   const primary = windows.find(window => window.windowMinutes === 300 || window.id === 'five_hour') || windows[0];
   const percent = primary ? usagePercent(primary.usedPercent) : '—';
+  const elapsed = primary && usageElapsedPercent(primary, now);
+  const ahead = !!primary && usageAheadOfTime(primary, elapsed);
   const stale = !!usage?.stale;
   const label = primary ? t('{0} 사용', { 0: usageWindowLabel(primary) }) : usage?.status === 'loading' ? t('확인 중') : t('정보 없음');
-  return <div ref={container} className={`provider-usage-meter ${provider} ${stale ? 'stale' : ''} nodrag nopan nowheel`} onMouseEnter={() => setOpen(true)} onMouseLeave={() => { if (!container.current?.contains(document.activeElement)) setOpen(false); }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}>
-    <button type="button" className="usage-trigger" aria-label={t('{0} 계정 사용량: {1}{2}', { 0: providerLabels[provider], 1: primary ? `${percent} ${label}` : label, 2: stale ? t(' · 이전 정보') : '' })} aria-describedby={open ? id : undefined} aria-expanded={open} onFocus={() => setOpen(true)} onClick={() => setOpen(true)} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); setOpen(false); } }}>
+  return <div ref={container} className={`provider-usage-meter ${provider} ${stale ? 'stale' : ''} ${ahead ? 'ahead' : ''} nodrag nopan nowheel`} onMouseEnter={() => setOpen(true)} onMouseLeave={() => { if (!container.current?.contains(document.activeElement)) setOpen(false); }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false); }}>
+    <button type="button" className="usage-trigger" aria-label={t('{0} 계정 사용량: {1}{2}', { 0: providerLabels[provider], 1: primary ? `${percent} ${label}${elapsed === undefined ? '' : t(' · 기간 {0} 경과', { 0: usagePercent(elapsed) })}` : label, 2: stale ? t(' · 이전 정보') : '' })} aria-describedby={open ? id : undefined} aria-expanded={open} onFocus={() => setOpen(true)} onClick={() => setOpen(true)} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); setOpen(false); } }}>
       <span className="usage-donut" aria-hidden="true">
-        <svg viewBox="0 0 36 36"><circle className="usage-track" cx="18" cy="18" r="15" />{primary && <circle className="usage-fill" cx="18" cy="18" r="15" pathLength="100" strokeDasharray={`${Math.min(100, primary.usedPercent)} 100`} />}</svg>
+        <svg viewBox="0 0 36 36"><circle className="usage-track" cx="18" cy="18" r="15" />{primary && <circle className="usage-fill" cx="18" cy="18" r="15" pathLength="100" strokeDasharray={`${Math.min(100, primary.usedPercent)} 100`} />}{elapsed !== undefined && <circle className="usage-time" cx="18" cy="18" r="11.5" pathLength="100" strokeDasharray={`${elapsed} 100`} />}</svg>
         <ProviderIcon provider={provider} size={14} />
       </span>
       <span className="usage-summary"><strong>{percent}{stale && <i aria-hidden="true">*</i>}</strong><small>{provider === 'claude' ? 'Claude' : 'Codex'} · {primary ? usageWindowLabel(primary) : label}</small></span>
@@ -33,11 +40,28 @@ export function ProviderUsageMeter({ provider, health }: { provider: Provider; h
     {open && <div className="usage-tooltip" id={id} role="tooltip">
       <strong>{t('{0} 계정 사용량', { 0: providerLabels[provider] })}</strong>
       <p>{t('모든 기기에서 공유하는 계정 한도입니다.')}</p>
-      {windows.length ? <dl>{windows.map(window => <div key={window.id}><dt>{usageWindowLabel(window)}</dt><dd><b>{t('{0} 사용', { 0: usagePercent(window.usedPercent) })}</b><span>{window.resetsAt && absoluteTime(window.resetsAt) ? t('초기화: {0}', { 0: absoluteTime(window.resetsAt) }) : t('초기화 시간 정보 없음')}</span></dd></div>)}</dl> : <p className="usage-unavailable">{usageUnavailableReason(usage)}</p>}
+      {windows.length ? <dl>{windows.map(window => <UsageWindowDetail key={window.id} window={window} now={now} />)}</dl> : <p className="usage-unavailable">{usageUnavailableReason(usage)}</p>}
       {stale && <p className="usage-stale">{t('이전 정보 · 새 사용량을 불러오지 못했습니다.')}</p>}
       {usage?.updatedAt && <small>{t('확인: {0}', { 0: relativeTime(usage.updatedAt) })}</small>}
     </div>}
   </div>;
+}
+
+function UsageWindowDetail({ window, now }: { window: UsageWindow; now: number }) {
+  const { t } = useI18n();
+  const elapsed = usageElapsedPercent(window, now);
+  const reset = window.resetsAt && absoluteTime(window.resetsAt);
+  return <div className={usageAheadOfTime(window, elapsed) ? 'ahead' : undefined}>
+    <dt>{usageWindowLabel(window)}<span>{reset ? t('초기화: {0}', { 0: reset }) : t('초기화 시간 정보 없음')}</span></dt>
+    <dd>
+      <UsageBar kind="used" label={t('사용')} percent={window.usedPercent} />
+      {elapsed !== undefined && <UsageBar kind="time" label={t('경과')} percent={elapsed} />}
+    </dd>
+  </div>;
+}
+
+function UsageBar({ kind, label, percent }: { kind: 'used' | 'time'; label: string; percent: number }) {
+  return <div className={`usage-bar ${kind}`}><span>{label}</span><i><b style={{ width: `${Math.min(100, percent)}%` }} /></i><em>{usagePercent(percent)}</em></div>;
 }
 
 export function ProviderUsage({ providers }: { providers: ProviderHealth[] }) {

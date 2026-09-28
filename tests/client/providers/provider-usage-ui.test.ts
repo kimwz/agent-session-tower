@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from '../../../client/src/providers/provider-usage.js';
+import { usageAheadOfTime, usageElapsedPercent, usagePercent, usageUnavailableReason, usageWindowLabel, usageWindows } from '../../../client/src/providers/provider-usage.js';
 import { clearHostPosition, HOST_HEIGHT } from '../../../client/src/graph/graph-layout.js';
 import { setLanguage } from '../../../client/src/i18n/i18n.js';
 import type { ProviderUsage } from '../../../shared/types.js';
@@ -27,6 +27,20 @@ test('stale usage retains the last valid windows while invalid values stay absen
   assert.equal(usagePercent(64.4), '64%');
   assert.equal(usagePercent(0), '0%');
   assert.deepEqual(usageWindows({ ...usage, stale: false }), []);
+});
+
+test('elapsed time is measured from the window length and its reset time', () => {
+  const now = Date.parse('2026-09-28T12:00:00Z');
+  const fiveHours = { id: 'five_hour', usedPercent: 50, windowMinutes: 300, resetsAt: '2026-09-28T14:00:00Z' };
+  assert.equal(usageElapsedPercent(fiveHours, now), 60);
+  assert.equal(usageAheadOfTime(fiveHours, 60), false);
+  assert.equal(usageAheadOfTime({ ...fiveHours, usedPercent: 61 }, 60), true);
+  assert.equal(usageElapsedPercent({ ...fiveHours, resetsAt: '2026-09-28T20:00:00Z' }, now), 0);
+  assert.equal(usageElapsedPercent({ ...fiveHours, resetsAt: '2026-09-28T11:00:00Z' }, now), 100);
+  assert.equal(Math.round(usageElapsedPercent({ id: 'seven_day', usedPercent: 10, windowMinutes: 10080, resetsAt: '2026-10-01T12:00:00Z' }, now)!), 57);
+  assert.equal(usageElapsedPercent({ ...fiveHours, resetsAt: undefined }, now), undefined);
+  assert.equal(usageElapsedPercent({ ...fiveHours, windowMinutes: undefined }, now), undefined);
+  assert.equal(usageAheadOfTime(fiveHours, undefined), false);
 });
 
 test('adding host usage clears saved project frames without rewriting manual positions', () => {

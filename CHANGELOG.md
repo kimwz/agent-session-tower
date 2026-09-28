@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.57.0] - 2026-09-28
+
+### Added
+- **Usage meters show how much of each limit's period has passed.** A thin, lighter inner ring on each usage donut shows how far the current window has run: the share of the five hours, or of the week, already elapsed, worked out from the window's length and its reset time. When usage runs ahead of the elapsed time, the usage ring turns red, so you can tell at a glance whether your pace is safe. The details shown on hover now draw each limit as two horizontal bars, usage and elapsed time, with the reset time beside the limit's name.
+
 ## [1.56.0] - 2026-09-28
 
 ### Changed
