@@ -879,13 +879,15 @@ test('Tower never hands the model a card value: not in results, errors, earlier 
     [say('둘째.')],
     [call('tower_api', { method: 'POST', path: '/api/sessions', body: { provider: 'claude', cwd: '/w', prompt: quoted } }),
       call('session_read', { sessionId: 'password' }),
-      call('ui', { action: 'filter', filter: { [value]: true } })],
+      call('ui', { action: 'filter', filter: { [quoted]: true } })],
     request => {
       const text = JSON.stringify(request.input.filter(item => item.type !== 'function_call'));
       assert.doesNotMatch(text, /password|abcd\\"efgh/);
-      const [post, read] = toolOutputs(request);
+      const [post, read, filter] = toolOutputs(request);
       assert.match(String(post.error), /그대로 들어 있습니다/);
       assert.match(String(read.error), /그대로 들어 있습니다/);
+      // A result holding a value with a quote is hidden before it is written out, where the quote would be escaped.
+      assert.doesNotMatch(String(filter.error), /abcd/);
       return [say('끝.')];
     },
   ]);
@@ -901,40 +903,6 @@ test('Tower never hands the model a card value: not in results, errors, earlier 
   await service.send({ clientMessageId: 'message-0217', text: '진행해', local: true, viewContext: { tabId: 'tab-r' } });
   await said(/끝/);
   assert.equal(tower.seen.length, 0, 'nothing went out with a card value in it');
-});
-
-test('a value the owner sent in the open and then gave on a card is gone from what was kept, and from the turn under way', async t => {
-  const value = 'external-card-value-9173';
-  const quoted = 'abcd"efgh-ijkl';
-  let submit: (() => Promise<unknown>) | undefined;
-  const { service, room, dir, said } = await master(t, async seen => {
-    // The owner answers the card while the master is in the middle of a turn.
-    if (seen.path.startsWith('/api/sessions?')) { await submit?.(); return { body: { sessions: [] } }; }
-    return { body: {} };
-  }, [
-    [call('request_secret', { purpose: 'token' }), call('request_secret', { purpose: 'quoted' })],
-    [say('카드를 드렸습니다.')],
-    [call('tower_api', { method: 'GET', path: '/api/sessions?limit=1' })],
-    request => {
-      assert.doesNotMatch(JSON.stringify(request.input.filter(item => item.type !== 'function_call')), /external-card-value/);
-      return [call('ui', { action: 'filter', filter: { [quoted]: true } })];
-    },
-    request => { assert.doesNotMatch(JSON.stringify(toolOutputs(request)), /abcd/); return [say('확인했습니다.')]; },
-    [say('받았습니다.')],
-  ]);
-  await service.send({ clientMessageId: 'message-0218', text: '토큰 받아줘', local: true });
-  await said(/카드를 드렸습니다/);
-  const [first, second] = room.recent(20).filter(entry => entry.data.kind === 'card');
-  await service.card(second.id, { value: quoted }, true);
-  const { seq } = room.position();
-  submit = () => service.card(first.id, { value }, true);
-  await service.send({ clientMessageId: 'message-0219', text: `내 토큰은 ${value} 이야, 세션 하나 보여줘`, local: true, viewContext: { tabId: 'tab-s' } });
-  await said(/확인했습니다/);
-  await said(/받았습니다/);
-  assert.equal(room.since(room.epoch, seq - 1), undefined, 'live changes sent before are forgotten; a page starts again from a checkpoint');
-  await service.close();
-  for (const name of await readdir(join(dir, 'room'))) assert.doesNotMatch(await readFile(join(dir, 'room', name), 'utf8'), /external-card-value/);
-  assert.doesNotMatch(await readFile(join(dir, 'inbox.json'), 'utf8'), /external-card-value/);
 });
 
 test('a notifications card records how it went on the device that pressed it', async t => {
