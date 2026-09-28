@@ -685,7 +685,10 @@ export class MasterVoice {
   }
 
   /** Whether today's limit is already reached, so nothing more would be read aloud. */
-  spentOut(): boolean { return this.limited(Date.now(), 0); }
+  spentOut(): boolean {
+    const limit = this.options.settings.current().voice.dailyDollars;
+    return limit > 0 && this.spent(Date.now()) >= limit - 1e-9;
+  }
 
   /** Whether spending `more` now would pass the daily limit (when there is one). */
   private limited(now: number, more: number): boolean {
