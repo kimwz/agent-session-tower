@@ -6,6 +6,15 @@ export const AGENT_GUIDANCE = `# Agent Session Tower
 
 Agent Session Tower maintains this text and replaces it when it starts. Project instructions take precedence over it.
 
+## Build on earlier sessions
+
+Tower's session tools (\`sessions_search\`, \`sessions_read\`, \`sessions_list\`) look up earlier Claude Code and Codex sessions on this computer, when they are available to you.
+
+- Look first when a task may continue or repeat earlier work: a follow-up, a report from a trigger or Slack about a known issue, the same game, customer, incident, pull request or error, or a request that refers to something discussed before.
+- Search with two or three distinctive words (a name, an identifier, an error text) over a recent period. If a session matches, read around its match and its conclusion.
+- Then build on what it found: check that it still holds, and say which session it came from. Do not repeat an investigation that is already done.
+- Skip the lookup for self-contained tasks whose context is all in the request or the repository.
+
 ## Keep git branches in sync
 
 Several agents can work in the same repository folder at once, and branches are often merged on the remote. Local branches then fall behind, or keep commits nobody pushed.

@@ -384,14 +384,17 @@ async function runnerContext({ stateDir, runs, sessions, slack, exclusions }: Pi
   };
   await metadata();
   const providers = await getProviderHealth();
+  const projectedSessions = () => projectSessionStates(runs.sessionList(sessions.list()), runs.list(), runs.settledRunIds());
   const visibleSessions = () => {
-    const projected = projectSessionStates(runs.sessionList(sessions.list()), runs.list(), runs.settledRunIds());
+    const projected = projectedSessions();
     const finished = finishedAutomationSessionIds(slack?.automation.list() ?? [], projected, runs.list());
     return projected.filter(session => !finished.has(session.id) && !slack?.coordinatorSessionIds().includes(session.id)).map(session => closed.apply(titles.apply(session)));
   };
+  /** Every conversation, also those the canvas leaves out once their work is done (Slack coordinators and the work they delegated). */
+  const allSessions = () => projectedSessions().map(session => closed.apply(titles.apply(session)));
   const snapshot = (): Snapshot => ({ sessions: visibleSessions(),
     runs: runs.list(), groups: groups.list(), providers, scanning: false, hostname: hostname(), version: APP_VERSION, updatedAt: new Date().toISOString() });
-  return { snapshot,
+  return { snapshot, allSessions,
     refresh: async () => { await Promise.all([sessions.refresh(true), metadata(), exclusions?.reload()]); },
     detail: async (id: string) => { const session = runs.getSession(id); if (!session) return undefined; const history = await sessions.detail(runs.nativeSessionId(id)); return { ...(history ?? { messages: [], hasMore: false }), session: closed.apply(titles.apply(session)) }; },
   };
@@ -490,7 +493,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         return [...counts].map(([cwd, sessions]) => ({ cwd, title: titles.get(cwd)?.title || cwd.split('/').filter(Boolean).at(-1) || cwd, sessions, pinned: titles.get(cwd)?.pinned === true }))
           .sort((a, b) => b.sessions - a.sessions);
       },
-      sessions: { list: () => visible.snapshot().sessions,
+      // Lookups reach every conversation: past work the canvas no longer shows is often the context an agent needs.
+      sessions: { list: () => visible.allSessions(),
         read: async (id, limit, before) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), before, limit)) ?? { messages: [], hasMore: false } : undefined,
         search: async (id, query) => runs.getSession(id) ? (await sessions.search(runs.nativeSessionId(id), query)) ?? { count: 0, matches: [], bytes: 0 } : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
