@@ -350,9 +350,10 @@ export class MasterService {
     if (refusal) return { error: refusal };
     const given = target.method === 'POST' ? (args.body && typeof args.body === 'object' ? args.body as Record<string, unknown> : {}) : undefined;
     let body: unknown = given;
-    // References come only from values the owner gave (pasted, or typed into a secret card), whatever the settings.
+    // References come only from values the owner gave (pasted, or typed into a secret card), whatever the settings,
+    // and go back only into the request's secret fields.
     if (body !== undefined) {
-      try { body = this.vault.reveal(body); } catch (error) { return { error: (error as Error).message }; }
+      try { body = this.vault.reveal(body, target.route); } catch (error) { return { error: (error as Error).message }; }
     }
     if (!target.write) {
       const response = await tower.call(target.method, target.path, body, { write: false, signal: turn.abort.signal });

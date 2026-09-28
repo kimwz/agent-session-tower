@@ -67,14 +67,33 @@ test('keys the owner pastes reach the model only as references, and go back into
   const hidden = vault.hide(`use ${key} for jev_abcdefghijklmnopqrstuv too`);
   assert.doesNotMatch(hidden, /abcdefghijklmnop/);
   const ref = /\{\{secret:[a-f0-9]{16}\}\}/.exec(hidden)![0];
-  assert.deepEqual(vault.reveal({ apiKey: ref, secret: { name: 'Auth', value: [ref] }, code: ref }), { apiKey: key, secret: { name: 'Auth', value: [key] }, code: key });
-  assert.throws(() => vault.reveal({ apiKey: '{{secret:0000000000000000}}' }), { statusCode: 400 });
-  // Only fields meant for secrets take one back: never a title or a prompt, where Tower keeps and shows it openly.
-  assert.throws(() => vault.reveal({ title: ref }), /비밀 칸/);
-  assert.throws(() => vault.reveal({ prompt: `use ${ref}` }), /비밀 칸/);
+  assert.deepEqual(vault.reveal({ apiKey: ref, features: {} }, '/api/decisions/settings'), { apiKey: key, features: {} });
+  assert.deepEqual(vault.reveal({ secret: { name: 'Auth', origin: 'https://api.example.com', value: `Bearer ${ref}` } }, `/api/nodes/${NODE}/v1/secrets.create`),
+    { secret: { name: 'Auth', origin: 'https://api.example.com', value: `Bearer ${key}` } });
+  assert.throws(() => vault.reveal({ apiKey: '{{secret:0000000000000000}}' }, '/api/decisions/settings'), { statusCode: 400 });
+  // Only each request's own secret fields take one back: never a title, a prompt, or a secret's name or address,
+  // which Tower keeps and shows openly.
+  assert.throws(() => vault.reveal({ title: ref }, '/api/sessions/s/title'), /비밀 값을 넣을 칸이 없습니다/);
+  assert.throws(() => vault.reveal({ secret: { name: ref, origin: 'https://a.example', value: 'x' } }, '/api/v1/secrets.create'), /secret\.value/);
+  assert.throws(() => vault.reveal({ secret: { name: 'n', origin: `https://${ref}.example`, value: 'x' } }, '/api/v1/secrets.create'), /secret\.value/);
   // A join code is secret by nature, here and on a joined computer.
   const invite = vault.hideInResponse(`/api/nodes/${NODE}/link/invite`, { id: 'i', code: 'JOIN-CODE-123', command: 'tower join JOIN-CODE-123', expiresAt: 1 }) as Record<string, string>;
   assert.match(invite.code, /^\{\{secret:/);
   assert.match(invite.command, /^\{\{secret:/);
   assert.equal(invite.id, 'i');
+});
+
+test('kept values stay hidden for as long as the host runs, without ever changing a reference or leaving part of a longer value', t => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-09-28T00:00:00Z') });
+  const vault = new SecretVault();
+  const short = vault.reference('hunter2-correct');
+  const long = vault.reference('hunter2-correct-horse');
+  const odd = vault.reference('{{secret:');
+  assert.equal(vault.redact('a hunter2-correct-horse b hunter2-correct c'), `a ${long} b ${short} c`);
+  // A reference already in the text is left whole, even when a kept value is part of it.
+  assert.equal(vault.redact(`use ${odd} here`), `use ${odd} here`);
+  // Past the time a reference may be used, the value is still hidden wherever it shows up.
+  t.mock.timers.setTime(Date.parse('2026-09-28T01:00:00Z'));
+  assert.equal(vault.hide('printed hunter2-correct-horse again'), `printed ${long} again`);
+  assert.throws(() => vault.reveal({ password: long }, '/api/public-agents/password'), /만료/);
 });

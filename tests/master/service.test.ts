@@ -683,7 +683,7 @@ test('a secret typed into a card reaches Tower but never the model, the conversa
       const text = JSON.stringify(request.input);
       assert.doesNotMatch(text, /hunter2/);
       const reference = /\{\{secret:[a-f0-9]{16}\}\}/.exec(text)![0];
-      return [call('tower_api', { method: 'POST', path: '/api/slack/connect', body: { botToken: reference } })];
+      return [call('tower_api', { method: 'POST', path: '/api/slack/connect', body: { appToken: 'xapp-1-A0-plain', userToken: reference } })];
     },
     [say('연결했습니다.')],
   ], undefined, { guards: { hideSecrets: false } });
@@ -693,7 +693,7 @@ test('a secret typed into a card reaches Tower but never the model, the conversa
   const answered = await service.card(card.id, { value }, true);
   assert.equal(answered.data.kind === 'card' && answered.data.card.type === 'secret' && answered.data.card.state, 'provided');
   await said(/연결했습니다/);
-  assert.deepEqual((tower.seen.find(seen => seen.path === '/api/slack/connect')!.body as { botToken: string }).botToken, value);
+  assert.deepEqual((tower.seen.find(seen => seen.path === '/api/slack/connect')!.body as { userToken: string }).userToken, value);
   assert.equal(script.requests.length, 4);
   // Answered once: a second answer changes nothing and starts nothing.
   await service.card(card.id, { value: 'another' }, true);
@@ -719,7 +719,7 @@ test('a secret from a card goes only into secret fields, is hidden when Tower ec
     },
     request => {
       const [title, password] = toolOutputs(request);
-      assert.match(String(title.error), /비밀 칸/);
+      assert.match(String(title.error), /비밀 값을 넣을 칸이 없습니다/);
       assert.doesNotMatch(JSON.stringify(request.input), /correct-horse/);
       assert.equal(password.state, 'succeeded');
       return [say('저장했습니다.')];
