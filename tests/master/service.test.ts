@@ -836,9 +836,9 @@ test('the answer as it is written never shows a card value, not even the start o
 });
 
 test('a card value the model writes out itself goes nowhere: not into requests, the screen, cards, notes or numbers it reads', async t => {
-  const value = '12345678';
+  const value = '97531864';
   const long = 'L'.repeat(4096);
-  const { service, room, tower, said } = await master(t, seen => seen.method === 'GET' ? { body: { payload: { selected: 12345678 } } } : { body: {} }, [
+  const { service, room, tower, said } = await master(t, seen => seen.method === 'GET' ? { body: { payload: { selected: 97531864 } } } : { body: {} }, [
     [call('request_secret', { purpose: 'pin' }), call('request_secret', { purpose: 'long' })],
     [say('카드를 드렸습니다.')],
     [say('첫째 받았습니다.')],
@@ -849,7 +849,7 @@ test('a card value the model writes out itself goes nowhere: not into requests, 
     request => {
       const [post, read, ui] = toolOutputs(request);
       assert.match(String(post.error), /그대로 들어 있습니다/);
-      assert.doesNotMatch(JSON.stringify(read), /12345678/);
+      assert.doesNotMatch(JSON.stringify(read), /97531864/);
       assert.doesNotMatch(JSON.stringify(ui), /LLLLLLLL/);
       return [say('끝.')];
     },
@@ -866,23 +866,23 @@ test('a card value the model writes out itself goes nowhere: not into requests, 
   await said(/끝/);
   assert.equal(tower.seen.filter(entry => entry.method === 'POST').length, 0, 'nothing was sent with the value in it');
   assert.equal(seen.length, 1);
-  assert.doesNotMatch(JSON.stringify(seen[0]), /12345678/);
+  assert.doesNotMatch(JSON.stringify(seen[0]), /97531864/);
 });
 
 test('Tower never hands the model a card value: not in results, errors, earlier lines or the card\'s own description', async t => {
-  const value = 'password';
+  const value = 'hunter2x';
   const quoted = 'abcd"efgh-ijkl';
   const { service, room, tower, said } = await master(t, () => ({ body: {} }), [
-    [call('request_secret', { purpose: 'account password' }), call('request_secret', { purpose: 'quoted' })],
+    [call('request_secret', { purpose: 'account hunter2x' }), call('request_secret', { purpose: 'quoted' })],
     [say('카드를 드렸습니다.')],
     [say('첫째.')],
     [say('둘째.')],
     [call('tower_api', { method: 'POST', path: '/api/sessions', body: { provider: 'claude', cwd: '/w', prompt: quoted } }),
-      call('session_read', { sessionId: 'password' }),
+      call('session_read', { sessionId: 'hunter2x' }),
       call('ui', { action: 'filter', filter: { [quoted]: true } })],
     request => {
       const text = JSON.stringify(request.input.filter(item => item.type !== 'function_call'));
-      assert.doesNotMatch(text, /password|abcd\\"efgh/);
+      assert.doesNotMatch(text, /hunter2x|abcd\\"efgh/);
       const [post, read, filter] = toolOutputs(request);
       assert.match(String(post.error), /그대로 들어 있습니다/);
       assert.match(String(read.error), /그대로 들어 있습니다/);
@@ -899,30 +899,58 @@ test('Tower never hands the model a card value: not in results, errors, earlier 
   await service.card(second.id, { value: quoted }, true);
   await said(/둘째/);
   const card = room.get(first.id)!;
-  assert.doesNotMatch(JSON.stringify(card.data), /password/);
+  assert.doesNotMatch(JSON.stringify(card.data), /hunter2x/);
   await service.send({ clientMessageId: 'message-0217', text: '진행해', local: true, viewContext: { tabId: 'tab-r' } });
   await said(/끝/);
   assert.equal(tower.seen.length, 0, 'nothing went out with a card value in it');
 });
 
-test('a card value that happens to be a command\'s name leaves the command working; only its text is hidden', async t => {
+test('a word from the master\'s own instructions cannot be a card value; a card value in a command\'s text is hidden, the command kept', async t => {
   const { service, room, said } = await master(t, () => ({ body: {} }), [
     [call('request_secret', { purpose: 'word' })],
     [say('카드를 드렸습니다.')],
     [say('받았습니다.')],
-    [call('ui', { action: 'openPanel', panel: 'newSession', cwd: '/w', prompt: 'openPanel please' })],
+    [call('ui', { action: 'openPanel', panel: 'newSession', cwd: '/w', prompt: 'sesame-open-9 please' })],
     [say('열었습니다.')],
   ]);
   const seen = screen(room, () => ({ result: 'done' }), () => service);
   await service.send({ clientMessageId: 'message-0220', text: '단어 받아줘', local: true });
   await said(/카드를 드렸습니다/);
-  await service.card(room.recent(20).find(entry => entry.data.kind === 'card')!.id, { value: 'openPanel' }, true);
+  const card = room.recent(20).find(entry => entry.data.kind === 'card')!;
+  // Words the model is always told (a tool's name, "password") could never be kept from it.
+  await assert.rejects(service.card(card.id, { value: 'openPanel' }, true), /안내문/);
+  await assert.rejects(service.card(card.id, { value: 'password' }, true), /안내문/);
+  await service.card(card.id, { value: 'sesame-open-9' }, true);
   await said(/받았습니다/);
   await service.send({ clientMessageId: 'message-0221', text: '새 세션 창 열어줘', local: true, viewContext: { tabId: 'tab-o' } });
   await said(/열었습니다/);
   assert.equal(seen[0].kind, 'openPanel');
   assert.equal(seen[0].kind === 'openPanel' && seen[0].panel, 'newSession');
   assert.match(seen[0].kind === 'openPanel' ? String(seen[0].prompt) : '', /^\{\{secret:[a-f0-9]{16}\}\} please$/);
+});
+
+test('a result gathered before a card was answered reaches the model hidden if it goes out after', async t => {
+  const value = 'card-only-value-928xyz';
+  let submit: (() => Promise<unknown>) | undefined;
+  const { service, room, said } = await master(t, async seen => {
+    if (seen.path.startsWith('/api/sessions/claude%3As1')) return { body: { session: { id: 'claude:s1' }, hasMore: false, messages: [{ id: 'm', role: 'user', text: `the token is ${value}`, timestamp: new Date().toISOString() }] } };
+    // The owner answers the card while the second lookup of the round is still running.
+    if (seen.path === '/api/link') { await submit?.(); return { body: {} }; }
+    return { body: {} };
+  }, [
+    [call('request_secret', { purpose: 'token' })],
+    [say('카드를 드렸습니다.')],
+    [call('session_read', { sessionId: 'claude:s1' }), call('tower_api', { method: 'GET', path: '/api/link' })],
+    request => { assert.doesNotMatch(JSON.stringify(request.input), /card-only-value/); return [say('읽었습니다.')]; },
+    [say('받았습니다.')],
+  ]);
+  await service.send({ clientMessageId: 'message-0224', text: '토큰 받아줘', local: true });
+  await said(/카드를 드렸습니다/);
+  const card = room.recent(20).find(entry => entry.data.kind === 'card')!;
+  submit = () => service.card(card.id, { value }, true);
+  await service.send({ clientMessageId: 'message-0225', text: '그 세션 읽어줘', local: true });
+  await said(/읽었습니다/);
+  await said(/받았습니다/);
 });
 
 test('a notifications card records how it went on the device that pressed it', async t => {

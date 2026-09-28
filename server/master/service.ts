@@ -34,6 +34,9 @@ const ACK_MS = 5_000;
 const TERMINAL_READ_MS = 1_500;
 const TERMINAL_OUTPUT = 4_000;
 const NODE_ID = /^[a-f0-9]{32}$/;
+/** Everything the model is given that Tower does not hide: the standing instructions and the tools' descriptions. */
+let fixedText: string | undefined;
+const FIXED_TEXT = () => fixedText ??= `${masterInstructions(true)}\n${JSON.stringify(TOOLS)}`;
 
 const TOOLS: ModelTool[] = [
   { type: 'function', name: 'tower_api', description: 'Call one of Tower\'s HTTP routes (see Routes), exactly as the owner\'s pages do. For a joined computer pass node.',
@@ -245,9 +248,23 @@ export class MasterService {
       const settings = store.current();
       const live = this.options.live;
       const digest = live ? statusDigest(await live.fresh(), live.nodeSnapshots(), Date.now(), live.missing(), text => this.hideText(text)) : '';
+      /**
+       * What Tower gives the model is kept as it was gathered and hidden anew for every model call, so a value the
+       * owner gives on a card meanwhile is hidden too; only the content is touched, never the item's own fields.
+       */
+      const given = new WeakMap<ModelItem, () => unknown>();
+      const tell = (item: ModelItem, content: () => unknown) => { given.set(item, content); return item; };
+      const render = (item: ModelItem): ModelItem => {
+        const content = given.get(item);
+        if (!content) return item;
+        if (item.type === 'function_call_output') return { ...item, output: truncate(this.hideText(JSON.stringify(this.hideValue(content()))), MAX_TOOL_OUTPUT) };
+        return { ...item, content: this.hideText(String(content())) };
+      };
+      const developer = [digest, this.context(inputs)].filter(Boolean).join('\n\n');
+      const request = inputs.map(item => item.kind === 'event' ? `[event] ${item.text}` : item.text).join('\n\n');
       const items: ModelItem[] = [
-        { type: 'message', role: 'developer', content: [digest ? this.hideText(digest) : '', this.context(inputs)].filter(Boolean).join('\n\n') },
-        { type: 'message', role: 'user', content: this.hideText(inputs.map(item => item.kind === 'event' ? `[event] ${item.text}` : item.text).join('\n\n')) },
+        tell({ type: 'message', role: 'developer', content: '' }, () => developer),
+        tell({ type: 'message', role: 'user', content: '' }, () => request),
       ];
       const started = Date.now();
       const turnMs = this.options.turnMs ?? TURN_MS;
@@ -262,7 +279,7 @@ export class MasterService {
         const deadline = AbortSignal.timeout(Math.max(1, turnMs - (Date.now() - started)));
         let result: Awaited<ReturnType<ModelCall>>;
         try {
-          result = await model({ model: settings.model, effort: settings.effort, instructions: masterInstructions(Boolean(this.options.readDb)), input: items, tools: this.options.readDb ? TOOLS : TOOLS.filter(tool => tool.name !== 'tower_query') }, delta => {
+          result = await model({ model: settings.model, effort: settings.effort, instructions: masterInstructions(Boolean(this.options.readDb)), input: items.map(render), tools: this.options.readDb ? TOOLS : TOOLS.filter(tool => tool.name !== 'tower_query') }, delta => {
             draft += delta;
             // Shown as it is written, hidden like the answer, and without the very end, where a secret may not be whole yet.
             if (Date.now() - lastDraft > 150) { lastDraft = Date.now(); const shown = this.hideText(draft); room.setDraft({ turnId, text: shown.slice(0, Math.max(0, shown.length - this.vault.holdBack())) }); }
@@ -282,7 +299,7 @@ export class MasterService {
             ? { error: '이번 요청에서 부를 수 있는 도구 수를 넘었습니다. 지금까지 한 일을 소유자에게 보고하세요.' }
             : await this.tool(String(call.name), String(call.arguments ?? '{}'), turn).catch(error => ({ error: error instanceof Error ? error.message : String(error) }));
           // Every result is hidden as a whole before the model reads it, and only then shortened.
-          items.push({ type: 'function_call_output', call_id: String(call.call_id), output: truncate(this.hideText(JSON.stringify(this.hideValue(output))), MAX_TOOL_OUTPUT) });
+          items.push(tell({ type: 'function_call_output', call_id: String(call.call_id), output: '' }, () => output));
         }
         turn.abort.signal.throwIfAborted();
       }
@@ -573,6 +590,9 @@ export class MasterService {
       // A shorter value could not be found and hidden reliably wherever it shows up, nor one that reads like a reference.
       if (value.length < SHORTEST_SECRET) throw Object.assign(new Error(`비밀 값은 ${SHORTEST_SECRET}자 이상이어야 합니다.`), { statusCode: 400 });
       if (value.includes('{{secret:')) throw Object.assign(new Error('비밀 값에 {{secret:를 넣을 수 없습니다.'), { statusCode: 400 });
+      // The master's standing instructions and tool descriptions go to the model as they are: a value found in them
+      // could not be kept from it.
+      if (FIXED_TEXT().includes(value)) throw Object.assign(new Error('이 값은 마스터의 안내문에 쓰이는 말이라 비밀로 받을 수 없습니다. 다른 값을 쓰세요.'), { statusCode: 400 });
       // Taken first, so a card that cannot take one more value stays open with the reason.
       const reference = this.vault.reference(value);
       const purpose = this.hideText(card.purpose);
