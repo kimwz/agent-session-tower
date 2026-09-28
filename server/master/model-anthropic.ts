@@ -46,8 +46,9 @@ export function anthropicMessages(apiKey: () => string | undefined, options: { f
       throw modelError(error);
     }
     if (message.stop_reason === 'refusal') throw new ModelError('Claude가 이 요청에 답하지 않았습니다. 다른 모델로 다시 보내 보세요.');
-    // An answer cut off by its length ends here with what it wrote; a tool call it could not finish is not run.
-    const content = message.stop_reason === 'max_tokens' ? message.content.filter(block => block.type !== 'tool_use') : message.content;
+    // An answer cut off by its length ends here with what it wrote; a tool call it could not finish is not run. Empty
+    // text is left out, as Claude refuses it when the answer is sent back; thinking stays exactly as it came.
+    const content = message.content.filter(block => !(block.type === 'text' && !block.text) && !(block.type === 'tool_use' && message.stop_reason === 'max_tokens'));
     const calls: ModelItem[] = content.filter(block => block.type === 'tool_use')
       .map(block => ({ type: 'function_call', call_id: block.id, name: block.name, arguments: JSON.stringify(block.input ?? {}), claude: true }));
     const text = content.filter(block => block.type === 'text').map(block => block.text).join('');

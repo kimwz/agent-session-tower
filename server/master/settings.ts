@@ -126,8 +126,6 @@ export class MasterSettingsStore {
   anthropicKeyHint(): string | undefined { return this.anthropicApiKey ? `…${this.anthropicApiKey.slice(-4)}` : undefined; }
   /** The key a model's requests are sent with: Anthropic's for Claude models, OpenAI's for the rest. */
   keyFor(model: string): string | undefined { return masterProvider(model) === 'anthropic' ? this.anthropicApiKey : this.apiKey; }
-  /** Some model can be asked: the master has at least one model key. */
-  anyKey(): boolean { return Boolean(this.apiKey || this.anthropicApiKey); }
 
   /** `apiKey`/`anthropicKey`/`voiceKey: null` removes that key; any other field goes through `mergeSettings`. */
   update(body: Record<string, unknown>): Promise<MasterSettings> {

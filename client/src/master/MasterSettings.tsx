@@ -121,6 +121,6 @@ export function MasterSettingsView({ token, overview, onDone }: { token: string;
       </fieldset>}
     </section>
     {error && <div className="master-error" role="alert">{error}</div>}
-    {overview.configured && <button className="secondary-button master-settings-done" onClick={onDone}>{words('대화로 돌아가기', 'Back to the conversation')}</button>}
+    {(overview.configured || overview.keyHint || overview.anthropicKeyHint) && <button className="secondary-button master-settings-done" onClick={onDone}>{words('대화로 돌아가기', 'Back to the conversation')}</button>}
   </div>;
 }

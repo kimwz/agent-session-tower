@@ -159,6 +159,12 @@ test('the Anthropic key is kept in its own file, never shown, and a Claude model
   assert.equal(overview.state, 'unconfigured');
   assert.equal(overview.keyHint, '…6789');
   assert.equal(overview.anthropicKeyHint, undefined);
+  // A message sent meanwhile is told at once that its model has no key, and nothing goes out.
+  const early = await service.send({ clientMessageId: 'message-claude-0', text: '먼저', local: true });
+  await until(() => room.recent(20).find(entry => entry.data.kind === 'error' && /Anthropic API 키가 없어/.test(entry.data.text)));
+  const unanswered = room.get(early.id)!.data;
+  assert.equal(unanswered.kind === 'owner' && unanswered.outcome, 'failed', 'it can be sent again');
+  assert.equal(sent.length, 0);
 
   overview = await service.updateSettings({ anthropicKey: KEY });
   assert.equal(overview.configured, true);
@@ -177,7 +183,7 @@ test('the Anthropic key is kept in its own file, never shown, and a Claude model
   const second = sent[1].body.messages as Array<{ role: string; content: Array<Record<string, unknown>> }>;
   const [assistant, results] = second.slice(-2);
   assert.equal(assistant.role, 'assistant');
-  assert.deepEqual(assistant.content.map(block => block.type), ['thinking', 'text', 'tool_use']);
+  assert.deepEqual(assistant.content.map(block => block.type), ['thinking', 'tool_use'], 'empty text is not sent back; Claude refuses it');
   assert.equal(assistant.content[0].signature, 'sig-kept-as-is');
   assert.equal(results.role, 'user');
   assert.equal(results.content[0].type, 'tool_result');

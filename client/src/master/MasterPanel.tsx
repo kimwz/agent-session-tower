@@ -108,8 +108,10 @@ export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose
   const stop = () => { void post('/api/master/stop', token, {}).catch(reason => setError(reason instanceof Error ? reason.message : String(reason))); };
 
   const configured = overview?.configured;
+  // With a key for some model the conversation stays open; a message may choose a model whose key is saved.
+  const usable = Boolean(overview && (configured || overview.keyHint || overview.anthropicKeyHint));
   const disabled = off;
-  const writing = !(settings || (overview && !configured));
+  const writing = !(settings || (overview && !usable));
   // "Edit" on a request that was not answered puts it back in the message box, files and choices included.
   const edit = (data: Extract<MasterEntry['data'], { kind: 'owner' }>) => {
     updateDraft({ text: data.text, files: (data.attachments ?? []).map(keptDraftFile), model: data.model, effort: data.effort });
@@ -123,7 +125,7 @@ export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose
       <button className={`icon-button ${settings ? 'active' : ''}`} onClick={() => setSettings(value => !value)} aria-label={words('마스터 설정', 'Master settings')} title={words('마스터 설정', 'Master settings')}><Settings size={16} /></button>
       <button className="icon-button" onClick={onClose} aria-label={words('닫기', 'Close')} title={words('닫기', 'Close')}><X size={16} /></button>
     </header>
-    {settings || (overview && !configured) ? <MasterSettingsView token={token} overview={overview} onDone={() => setSettings(false)} /> : <>
+    {settings || (overview && !usable) ? <MasterSettingsView token={token} overview={overview} onDone={() => setSettings(false)} /> : <>
       <div className="master-timeline" ref={timeline} onScroll={event => follower.scrolled(event.currentTarget)}><div className="master-timeline-body">
         {room.hasMore && <button className="master-earlier" onClick={earlier}>{words('이전 대화 보기', 'Show earlier')}</button>}
         {!room.entries.length && !room.draft && <div className="master-empty"><Bot size={26} /><p>{words('Tower에서 하던 일을 말로 시켜 보세요. 예: "지금 작업 중인 세션 알려줘", "monitor에 세션 열어서 로그인 버그 고쳐줘".', 'Ask Tower in plain words. For example: "What is working right now?", "Open a session in monitor and fix the login bug."')}</p></div>}

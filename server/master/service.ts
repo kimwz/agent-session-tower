@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { APP_VERSION } from '../../shared/app-identity.js';
-import { MASTER_PANELS, type MasterCard, type MasterEffort, type MasterDirectiveResult, type MasterEntry, type MasterFilter, type MasterOverview, type MasterPanel, type MasterScreenCommand, type MasterSpeak, type MasterTaskState, type MasterViewContext } from '../../shared/master.js';
+import { MASTER_PANELS, masterProvider, type MasterCard, type MasterEffort, type MasterDirectiveResult, type MasterEntry, type MasterFilter, type MasterOverview, type MasterPanel, type MasterScreenCommand, type MasterSpeak, type MasterTaskState, type MasterViewContext } from '../../shared/master.js';
 import type { Attachment, AutoPromptJob, ChatMessage, Run, SessionDetail, Snapshot } from '../../shared/types.js';
 import type { AttachmentStore } from '../stores/attachments.js';
 import { MASTER_CONVERSATION, MAX_TEXT_FILE, modelFile } from './attachments.js';
@@ -296,14 +296,27 @@ export class MasterService {
   private pump(): void {
     if (this.closed || this.turn) return;
     const settings = this.options.settings.current();
-    // A message may choose a model other than the settings'; one whose key is missing fails with that reason.
-    if (!settings.enabled || !this.options.settings.anyKey()) return;
+    if (!settings.enabled) return;
     const now = Date.now();
     const waiting = this.options.journal.inbox.filter(item => item.state === 'queued');
-    const queued = waiting.filter(item => !(item.notBefore && Date.parse(item.notBefore) > now));
+    const ready = waiting.filter(item => !(item.notBefore && Date.parse(item.notBefore) > now));
+    // Each input needs the key of its own model (a message may choose another than the settings'). The owner's message
+    // without one is told so at once; news of finished work waits until the key is there.
+    const keyed = (item: InboxItem) => Boolean(this.options.settings.keyFor(item.model ?? settings.model));
+    const unkeyed = ready.filter(item => item.kind === 'owner' && !keyed(item));
+    if (unkeyed.length) {
+      for (const item of unkeyed) item.state = 'failed';
+      this.unanswered(unkeyed, 'failed');
+      const models = [...new Set(unkeyed.map(item => item.model ?? settings.model))];
+      const keys = [...new Set(models.map(model => masterProvider(model) === 'anthropic' ? 'Anthropic' : 'OpenAI'))].join('·');
+      this.options.room.add({ kind: 'error', text: `${models.join(', ')} 모델에 쓸 ${keys} API 키가 없어 답하지 못했습니다. 마스터 설정에서 키를 넣거나 다른 모델로 다시 보내 주세요.` });
+      void this.options.journal.save('inbox').catch(() => {});
+      this.broadcastOverview();
+    }
+    const queued = ready.filter(keyed);
     if (!queued.length) {
       // A turn tried again later (also after a restart) is woken when it is due.
-      const due = Math.min(...waiting.map(item => Date.parse(item.notBefore ?? '')).filter(Number.isFinite));
+      const due = Math.min(...waiting.map(item => Date.parse(item.notBefore ?? '')).filter(at => Number.isFinite(at) && at > now));
       if (Number.isFinite(due)) {
         if (this.wake) clearTimeout(this.wake);
         this.wake = setTimeout(() => { this.wake = undefined; this.pump(); }, Math.max(0, due - now) + 10);
