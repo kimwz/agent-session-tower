@@ -3,7 +3,7 @@
  * Everything about it lives in `server/master`, `client/src/master` and this file, so it can be removed as a unit.
  */
 
-import type { SessionStatus } from './types.js';
+import type { Attachment, SessionStatus } from './types.js';
 
 export const MASTER_MODELS = ['gpt-6-luna', 'gpt-6-sol', 'gpt-6-astra'] as const;
 export const MASTER_EFFORTS = ['none', 'low', 'medium', 'high'] as const;
@@ -115,7 +115,8 @@ export type MasterCallState = 'sending' | 'succeeded' | 'failed' | 'uncertain' |
 export type MasterTaskState = 'running' | 'completed' | 'error' | 'cancelled' | 'unknown';
 
 export type MasterEntryData =
-  | { kind: 'owner'; text: string; clientId?: string; voice?: true }
+  /** `attachments`: pictures sent with the message, shown from `/api/master/attachments/<id>`. */
+  | { kind: 'owner'; text: string; clientId?: string; voice?: true; attachments?: Attachment[] }
   | { kind: 'master'; text: string; turnId: string; final: boolean; speak?: MasterSpeak }
   /** What the master said aloud in a GPT-Live call (1.52–1.55), kept in conversations since. */
   | { kind: 'voice'; text: string }

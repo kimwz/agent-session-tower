@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { MASTER_PANELS, type MasterCard, type MasterDirectiveResult, type MasterEntry, type MasterFilter, type MasterOverview, type MasterPanel, type MasterScreenCommand, type MasterSpeak, type MasterTaskState, type MasterViewContext } from '../../shared/master.js';
-import type { AutoPromptJob, ChatMessage, Run, SessionDetail, Snapshot } from '../../shared/types.js';
+import type { Attachment, AutoPromptJob, ChatMessage, Run, SessionDetail, Snapshot } from '../../shared/types.js';
+import type { AttachmentStore } from '../stores/attachments.js';
+import { imagePart, MASTER_CONVERSATION } from './attachments.js';
 import { statusDigest } from './digest.js';
 import { apiTarget, refusalFor, type ApiTarget, type TurnScope } from './guards.js';
 import { masterInstructions } from './instructions.js';
@@ -112,6 +114,8 @@ export interface MasterServiceOptions {
   /** What the owner's page sees, kept live: the status digest, quick queries and the task watcher read it. */
   live?: LiveState;
   readDb?: ReadDatabase;
+  /** Where pictures sent with the owner's messages are kept. */
+  attachments?: AttachmentStore;
 }
 
 /**
@@ -203,7 +207,7 @@ export class MasterService {
   }
 
   /** `spoken`: said aloud (shown so), not typed; `voice`: where a spoken request, or what followed from one, came from. */
-  async send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean; voice?: VoiceOrigin; spoken?: boolean }): Promise<MasterEntry> {
+  async send(input: { clientMessageId: string; text: string; viewContext?: MasterViewContext; local: boolean; voice?: VoiceOrigin; spoken?: boolean; attachments?: Attachment[] }): Promise<MasterEntry> {
     const { journal, room, settings } = this.options;
     // Only a digest of the page's message id is kept: it says nothing, whatever the page put in it.
     const messageKey = createHash('sha256').update(input.clientMessageId).digest('hex').slice(0, 32);
@@ -215,9 +219,10 @@ export class MasterService {
     const text = hide(input.text);
     // Where the owner is looking is kept and read by the model too: its names are hidden the same way.
     const viewContext = input.viewContext && Object.fromEntries(Object.entries(input.viewContext).map(([key, value]) => [key, typeof value === 'string' ? hide(value) : value])) as MasterViewContext;
-    const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: messageKey, text, local: input.local, ...(viewContext ? { viewContext } : {}), at: new Date().toISOString(), state: 'queued', retries: 0, ...(input.voice ? { voice: input.voice } : {}) };
+    const attachments = input.attachments?.length ? input.attachments : undefined;
+    const item: InboxItem = { id: randomUUID(), kind: 'owner', clientMessageId: messageKey, text, local: input.local, ...(viewContext ? { viewContext } : {}), ...(attachments ? { attachments } : {}), at: new Date().toISOString(), state: 'queued', retries: 0, ...(input.voice ? { voice: input.voice } : {}) };
     if (viewContext?.tabId) this.lastTab = viewContext.tabId;
-    const entry = room.add({ kind: 'owner', text, ...(viewContext?.tabId ? { clientId: viewContext.tabId } : {}), ...(input.spoken ? { voice: true as const } : {}) }, item.id);
+    const entry = room.add({ kind: 'owner', text, ...(viewContext?.tabId ? { clientId: viewContext.tabId } : {}), ...(input.spoken ? { voice: true as const } : {}), ...(attachments ? { attachments } : {}) }, item.id);
     journal.inbox.push(item);
     await journal.save('inbox');
     this.pump();
@@ -303,6 +308,8 @@ export class MasterService {
       const given = new WeakMap<ModelItem, () => unknown>();
       const shown = new WeakMap<ModelItem, { generation: number; item: ModelItem }>();
       const tell = (item: ModelItem, content: () => unknown) => { given.set(item, content); return item; };
+      // Pictures follow the text of the message they came with; only the text is hidden.
+      const pictures = new WeakMap<ModelItem, unknown[]>();
       // A result is written out once, and again only when a value to hide was added since.
       const render = (item: ModelItem): ModelItem => {
         const content = given.get(item);
@@ -313,6 +320,7 @@ export class MasterService {
         const value = content();
         const next = item.type === 'function_call_output'
           ? { ...item, output: truncate(this.hideText(JSON.stringify(this.hideValue(value))), MAX_TOOL_OUTPUT) }
+          : pictures.has(item) ? { ...item, content: [{ type: 'input_text', text: this.hideText(String(value)) }, ...pictures.get(item)!] }
           : { ...item, content: this.hideText(String(value)) };
         shown.set(item, { generation, item: next });
         return next;
@@ -321,12 +329,15 @@ export class MasterService {
       // Only what Tower itself says is the developer's; the conversation keeps its roles, and everything else read is data.
       const developer = [`Now: ${new Date().toISOString()}`, voice && turn.scope.cause === 'owner' ? VOICE_TURN : ''].filter(Boolean).join('\n');
       const data = [digest ? `[data] ${digest}` : '', this.context(inputs)].filter(Boolean).join('\n\n');
-      const request = inputs.map(item => item.kind === 'event' ? `[event] ${item.text}` : item.text).join('\n\n');
+      const attached = await this.pictures(inputs);
+      const request = inputs.map(item => [item.kind === 'event' ? `[event] ${item.text}` : item.text, attached.notes.get(item.id) ?? ''].filter(Boolean).join('\n')).join('\n\n');
+      const asked: ModelItem = { type: 'message', role: 'user', content: '' };
+      if (attached.parts.length) pictures.set(asked, attached.parts);
       const items: ModelItem[] = [
         tell({ type: 'message', role: 'developer', content: '' }, () => developer),
         ...this.history(inputs).map(message => tell({ type: 'message', role: message.role, content: '' }, () => message.text)),
         ...(data ? [tell({ type: 'message', role: 'user', content: '' }, () => data)] : []),
-        tell({ type: 'message', role: 'user', content: '' }, () => request),
+        tell(asked, () => request),
       ];
       const started = Date.now();
       const turnMs = this.options.turnMs ?? TURN_MS;
@@ -411,7 +422,7 @@ export class MasterService {
       if (inputs.some(input => input.id === entry.id)) continue;
       const data = entry.data;
       const at = entry.at.slice(11, 16);
-      const line = data.kind === 'owner' ? { role: 'user' as const, data: false, text: truncate(data.text, 1500) }
+      const line = data.kind === 'owner' ? { role: 'user' as const, data: false, text: [truncate(data.text, 1500), data.attachments?.length ? `[attached pictures, seen in that turn: ${data.attachments.map(item => JSON.stringify(item.name)).join(', ')}]` : ''].filter(Boolean).join('\n') }
         : data.kind === 'master' || data.kind === 'voice' ? { role: 'assistant' as const, data: false, text: truncate(data.text, 1500) }
         : { role: 'user' as const, data: true, text: `[data ${at} ${data.kind === 'action' ? 'call' : data.kind === 'task' ? 'delegated' : data.kind}] ${
           data.kind === 'action' ? `${data.method} ${data.path}${data.node ? ` (node ${data.node})` : ''} → ${data.state}${data.summary ? `: ${truncate(data.summary, 200)}` : ''}`
@@ -422,6 +433,27 @@ export class MasterService {
       else messages.push({ role: line.role, data: line.data, lines: [line.text] });
     }
     return messages.map(message => ({ role: message.role, text: message.lines.join(message.data ? '\n' : '\n\n') }));
+  }
+
+  /**
+   * The pictures sent with this turn's messages: each image for the model, and a line per message saying which they
+   * are and where they are kept, so a session on this computer can be given one by its path.
+   */
+  private async pictures(inputs: InboxItem[]): Promise<{ notes: Map<string, string>; parts: unknown[] }> {
+    const notes = new Map<string, string>();
+    const parts: unknown[] = [];
+    for (const item of inputs) {
+      if (!item.attachments?.length) continue;
+      const lines: string[] = [];
+      for (const attachment of item.attachments) {
+        const picture = this.options.attachments ? await this.options.attachments.read(attachment.id, MASTER_CONVERSATION).catch(() => undefined) : undefined;
+        if (!picture) { lines.push(`- ${JSON.stringify(attachment.name)}: could not be read (tell the owner to send it again)`); continue; }
+        parts.push(imagePart(picture));
+        lines.push(`- ${JSON.stringify(attachment.name)} (${attachment.mimeType}, ${attachment.size} bytes), picture ${parts.length} below, kept on this computer at ${JSON.stringify(picture.path)}`);
+      }
+      notes.set(item.id, `[attached pictures]\n${lines.join('\n')}`);
+    }
+    return { notes, parts };
   }
 
   /** What the model reads as data before the request: where the owner is looking and the work still running. */

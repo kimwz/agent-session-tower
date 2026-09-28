@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { readJson } from '../http/requests.js';
+import { ATTACHMENT_BODY_BYTES, readJson } from '../http/requests.js';
+import { MASTER_CONVERSATION, onlyImages, sendPicture } from './attachments.js';
 import type { MasterClient } from './client.js';
 
 const json = (res: ServerResponse, status: number, body: unknown) => {
@@ -35,8 +36,32 @@ export function masterRoutes(client: MasterClient) {
       return true;
     }
     if (req.method === 'POST' && path === '/api/master/messages') {
-      const body = await readJson(req, 64 * 1024);
-      await call('send', { clientMessageId: body.clientMessageId, text: body.text, viewContext: body.viewContext, local: identity.local });
+      const body = await readJson(req, ATTACHMENT_BODY_BYTES);
+      const args = { clientMessageId: body.clientMessageId, text: body.text, viewContext: body.viewContext, local: identity.local };
+      if (body.attachments === undefined) { await call('send', args); return true; }
+      // Pictures are checked and kept here, and only their records go to the host; kept for nothing, they go again.
+      let created: string[] = [];
+      try {
+        onlyImages(body.attachments);
+        if (!await client.sameBuild()) throw Object.assign(new Error('마스터가 새 버전으로 바뀌기를 기다리는 중입니다. 하던 일이 끝나면 사진을 보낼 수 있습니다.'), { statusCode: 503 });
+        const store = await client.attachments();
+        const prepared = await store.prepare(MASTER_CONVERSATION, { attachments: body.attachments as never });
+        created = prepared.createdIds;
+        const sent = await client.call('send', { ...args, attachments: prepared.attachments });
+        json(res, 200, sent);
+      } catch (error) {
+        const value = error as { message?: string; statusCode?: number };
+        // Only a message the host refused lets its pictures go; one whose answer was lost may have been taken.
+        const refused = !value.statusCode || (value.statusCode >= 400 && value.statusCode < 500);
+        if (created.length && refused) await client.attachments().then(store => store.rollback(created)).catch(() => {});
+        json(res, value.statusCode && value.statusCode >= 400 && value.statusCode < 600 ? value.statusCode : 503, { error: value.message ?? '마스터를 사용할 수 없습니다.' });
+      }
+      return true;
+    }
+    const picture = /^\/api\/master\/attachments\/([0-9a-f-]{36})$/.exec(path);
+    if ((req.method === 'GET' || req.method === 'HEAD') && picture) {
+      try { sendPicture(res, await (await client.attachments()).read(picture[1], MASTER_CONVERSATION), req.method === 'HEAD'); }
+      catch (error) { json(res, (error as { statusCode?: number }).statusCode === 404 ? 404 : 503, { error: (error as Error).message }); }
       return true;
     }
     if (req.method === 'POST' && path === '/api/master/stop') { await call('stop'); return true; }

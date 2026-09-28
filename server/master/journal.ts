@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { basename, join } from 'node:path';
 import type { MasterCallState, MasterTaskState, MasterViewContext } from '../../shared/master.js';
+import type { Attachment } from '../../shared/types.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 /**
@@ -19,6 +20,8 @@ export interface InboxItem {
   /** Typed on this computer itself, as Tower's server judged the request that carried it. */
   local: boolean;
   viewContext?: MasterViewContext;
+  /** Pictures sent with the message, kept in the master's attachment store. */
+  attachments?: Attachment[];
   at: string;
   state: 'queued' | 'processing' | 'answered' | 'failed' | 'cancelled';
   turnId?: string;

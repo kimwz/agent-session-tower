@@ -1,0 +1,11 @@
+.master-panel.master-dragging { box-shadow:0 0 0 2px #789ccd80; }
+.master-drop-hint { position:absolute; inset:48px 8px 8px; z-index:5; border:1px dashed #8aaedb; border-radius:10px; background:#1b314bed; display:flex; align-items:center; justify-content:center; gap:8px; font-size:13px; color:#c7dcf7; pointer-events:none; }
+.master-pictures { border-top:1px solid var(--line); }
+.master-pictures .draft-attachments { padding:8px 12px 0; }
+.master-attach { height:38px; width:38px; border-radius:9px; border:1px solid var(--line); background:var(--surface-raised); color:var(--text); display:inline-flex; align-items:center; justify-content:center; cursor:pointer; }
+.master-attach:hover:not(:disabled) { color:var(--bright); border-color:#5278a9; }
+.master-attach:disabled { opacity:.45; cursor:default; }
+.master-sent-pictures { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; margin-top:6px; }
+.master-sent-pictures:first-child { margin-top:0; }
+.master-sent-pictures a { display:block; border-radius:7px; overflow:hidden; border:1px solid #3a5a86; line-height:0; }
+.master-sent-pictures img { display:block; max-width:180px; max-height:140px; object-fit:cover; }

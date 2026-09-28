@@ -4,6 +4,7 @@ import { createServer, type ServerResponse } from 'node:http';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import type { MasterStreamEvent } from '../../shared/master.js';
 import { acquireStateLock, MonitorAlreadyRunning } from '../instance/state-lock.js';
+import { imageList, masterAttachments } from './attachments.js';
 import { MasterJournal } from './journal.js';
 import { LiveState } from './live-state.js';
 import { lookupsSupported, ReadDatabase } from './read-db.js';
@@ -83,8 +84,9 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'page': return room.page(typeof args.before === 'number' ? args.before : undefined, typeof args.limit === 'number' ? args.limit : 80);
       case 'send': {
         if (typeof args.clientMessageId !== 'string' || !/^[a-zA-Z0-9-]{8,64}$/.test(args.clientMessageId)) throw failure('메시지 ID가 올바르지 않습니다.', 400);
-        if (typeof args.text !== 'string' || !args.text.trim() || args.text.length > 32_000) throw failure('메시지가 비었거나 너무 깁니다.', 400);
-        return master.send({ clientMessageId: args.clientMessageId, text: args.text, local: args.local === true, ...(args.viewContext && typeof args.viewContext === 'object' ? { viewContext: viewContext(args.viewContext) } : {}) });
+        const attachments = imageList(args.attachments);
+        if (typeof args.text !== 'string' || (!args.text.trim() && !attachments.length) || args.text.length > 32_000) throw failure('메시지가 비었거나 너무 깁니다.', 400);
+        return master.send({ clientMessageId: args.clientMessageId, text: args.text, local: args.local === true, ...(attachments.length ? { attachments } : {}), ...(args.viewContext && typeof args.viewContext === 'object' ? { viewContext: viewContext(args.viewContext) } : {}) });
       }
       case 'stop': return master.stop();
       case 'ack': {
@@ -188,7 +190,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     await settings.start();
     await room.start();
     await journal.start();
-    service = new MasterService({ settings, room, journal, tower, live, readDb, model: options.model ?? openAiResponses(() => settings.key()), ...(options.taskPollMs ? { taskPollMs: options.taskPollMs } : {}) });
+    service = new MasterService({ settings, room, journal, tower, live, readDb, attachments: await masterAttachments(paths.data), model: options.model ?? openAiResponses(() => settings.key()), ...(options.taskPollMs ? { taskPollMs: options.taskPollMs } : {}) });
     const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), ...options.voice?.elevenLabs });
     voice = new MasterVoice({ dataDir: paths.data, settings, room, hooks: service.voiceHooks(), elevenLabs, ...(options.voice?.timing ? { timing: options.voice.timing } : {}) });
     service.setVoice(voice);

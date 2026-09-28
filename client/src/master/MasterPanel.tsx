@@ -12,6 +12,7 @@ import { useWords } from './strings';
 import { post } from './api';
 import { VoiceBar, type VoiceControls } from './VoiceBar';
 import { BottomFollower } from './follow-bottom';
+import { PictureButton, PictureDrafts, SentPictures, useMasterPictures } from './MasterAttachments';
 
 
 interface Props {
@@ -31,7 +32,7 @@ interface Props {
 
 /** The master's one conversation: what the owner asked, what the master did and said, and the work it handed out. */
 /** The last message whose sending was not confirmed (it may or may not have arrived), for as long as this tab lives. */
-let unconfirmed: { id: string; text: string } | undefined;
+let unconfirmed: { id: string; text: string; pictures: string } | undefined;
 
 export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose, onEarlier, onOpenSession, onCommand }: Props) {
   const words = useWords();
@@ -44,6 +45,8 @@ export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose
   const input = useRef<HTMLTextAreaElement>(null);
   const overview = room.overview;
   const thinking = overview?.state === 'thinking';
+  const off = overview?.settings.enabled === false;
+  const pictures = useMasterPictures(setError, !off && !sending);
 
   useEffect(() => { if (!settings) input.current?.focus(); }, [settings]);
   // The timeline opens on the latest and stays there while it grows, unless the owner scrolled up to read.
@@ -77,17 +80,20 @@ export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose
 
   const send = async () => {
     const value = text.trim();
-    if (!value || sending) return;
+    if ((!value && !pictures.pictures.length) || sending) return;
     setSending(true); setError('');
     const { node, id } = sessionId ? splitScopedId(sessionId) : { node: undefined, id: undefined };
     // Sent again after its answer was lost, the same message keeps its id, so the master takes it once.
-    const messageId = unconfirmed?.text === value ? unconfirmed.id : crypto.randomUUID();
-    unconfirmed = { id: messageId, text: value };
+    const chosen = pictures.pictures.map(item => item.key).join(',');
+    const messageId = unconfirmed?.text === value && unconfirmed.pictures === chosen ? unconfirmed.id : crypto.randomUUID();
+    unconfirmed = { id: messageId, text: value, pictures: chosen };
     try {
-      await post('/api/master/messages', token, { clientMessageId: messageId, text: value, viewContext: { tabId, ...(id ? { sessionId: id } : {}), ...(node ? { node } : {}) } });
+      const attachments = await pictures.prepare();
+      await post('/api/master/messages', token, { clientMessageId: messageId, text: value, ...(attachments ? { attachments } : {}), viewContext: { tabId, ...(id ? { sessionId: id } : {}), ...(node ? { node } : {}) } });
       // Only this message's own id is let go: another may have been sent from a panel opened meanwhile.
       if (unconfirmed?.id === messageId) unconfirmed = undefined;
       setText('');
+      pictures.clear();
       follower.follow(scroller.current ?? undefined);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setSending(false); }
@@ -98,8 +104,9 @@ export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose
   const stop = () => { void post('/api/master/stop', token, {}).catch(reason => setError(reason instanceof Error ? reason.message : String(reason))); };
 
   const configured = overview?.configured;
-  const disabled = overview?.settings.enabled === false;
-  return <aside ref={panel} className="master-panel" role="dialog" aria-label={words('마스터 에이전트', 'Master agent')} style={top !== undefined ? { '--master-top': `${top}px` } as React.CSSProperties : undefined}>
+  const disabled = off;
+  const writing = !(settings || (overview && !configured));
+  return <aside ref={panel} className={`master-panel ${pictures.dragging ? 'master-dragging' : ''}`} {...(writing ? pictures.drop : {})} role="dialog" aria-label={words('마스터 에이전트', 'Master agent')} style={top !== undefined ? { '--master-top': `${top}px` } as React.CSSProperties : undefined}>
     <header className="master-header">
       <Bot size={17} />
       <h2>{words('마스터', 'Master')}</h2>
@@ -117,13 +124,15 @@ export function MasterPanel({ token, room, tabId, sessionId, voice, top, onClose
       </div></div>
       {(error || room.error) && <div className="master-error" role="alert"><AlertTriangle size={13} />{error || room.error}</div>}
       <VoiceBar voice={voice} />
+      <PictureDrafts pictures={pictures} disabled={sending} />
       <div className="master-composer">
-        <textarea ref={input} value={text} rows={2} maxLength={32_000} disabled={disabled} placeholder={disabled ? words('마스터가 꺼져 있습니다', 'The master is turned off') : words('마스터에게 시킬 일', 'What should Tower do?')} onChange={event => setText(event.target.value)} onKeyDown={onKeyDown} aria-label={words('마스터에게 보낼 메시지', 'Message to the master')} />
+        <textarea ref={input} value={text} rows={2} maxLength={32_000} disabled={disabled} placeholder={disabled ? words('마스터가 꺼져 있습니다', 'The master is turned off') : words('마스터에게 시킬 일', 'What should Tower do?')} onChange={event => setText(event.target.value)} onKeyDown={onKeyDown} onPaste={pictures.onPaste} aria-label={words('마스터에게 보낼 메시지', 'Message to the master')} />
+        <PictureButton pictures={pictures} disabled={disabled || sending} />
         {!voice.view && <button className="master-mic" onClick={voice.start} disabled={Boolean(voice.unavailable) || disabled || !configured}
           title={voice.unavailable ?? words('말로 시키기 (ElevenLabs 받아쓰기·읽어 주기)', 'Talk to the master (ElevenLabs speech to text and reading aloud)')}
           aria-label={words('음성 대화 시작', 'Start voice')}><Mic size={16} /></button>}
         {thinking ? <button className="master-stop" onClick={stop} title={words('생각 멈추기 (보낸 작업은 계속됩니다)', 'Stop thinking (work already sent continues)')}><Square size={14} />{words('생각 멈춤', 'Stop')}</button>
-          : <button className="master-send" onClick={() => void send()} disabled={!text.trim() || sending || disabled} aria-label={words('보내기', 'Send')}>{sending ? <LoaderCircle size={15} className="spin" /> : <ArrowUp size={16} />}</button>}
+          : <button className="master-send" onClick={() => void send()} disabled={(!text.trim() && !pictures.pictures.length) || sending || disabled} aria-label={words('보내기', 'Send')}>{sending ? <LoaderCircle size={15} className="spin" /> : <ArrowUp size={16} />}</button>}
       </div>
     </>}
   </aside>;
@@ -177,7 +186,7 @@ function actionLabel(state: string, words: (ko: string, en: string) => string): 
 function Entry({ entry, token, tabId, onOpenSession, onCommand }: { entry: MasterEntry } & EntryProps) {
   const words = useWords();
   const data = entry.data;
-  if (data.kind === 'owner') return <div className={`master-message owner ${data.voice ? 'voice' : ''}`}>{data.voice && <Mic size={11} aria-label={words('말함', 'Said')} />}{showSecrets(data.text)}</div>;
+  if (data.kind === 'owner') return <div className={`master-message owner ${data.voice ? 'voice' : ''}`}>{data.voice && <Mic size={11} aria-label={words('말함', 'Said')} />}{showSecrets(data.text)}{data.attachments?.length ? <SentPictures attachments={data.attachments} /> : null}</div>;
   if (data.kind === 'voice') return <div className="master-message master voice"><Volume2 size={11} aria-label={words('음성', 'Spoken')} />{showSecrets(data.text)}</div>;
   if (data.kind === 'master') return <div className="master-message master"><Markdown>{showSecrets(data.text)}</Markdown><Spoken speak={data.speak} /></div>;
   if (data.kind === 'event') return <div className="master-event">{data.text}<Spoken speak={data.speak} /></div>;

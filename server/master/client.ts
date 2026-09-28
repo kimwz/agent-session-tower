@@ -7,6 +7,8 @@ import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { readPrivateJson } from '../stores/private-json.js';
+import type { AttachmentStore } from '../stores/attachments.js';
+import { masterAttachments } from './attachments.js';
 import { MASTER_PROTOCOL, type MasterHostReply } from './host.js';
 import { masterPaths, type MasterPaths } from './paths.js';
 import type { WebCredentials } from './tower-client.js';
@@ -32,8 +34,14 @@ export class MasterClient {
   private readonly streams = new Set<ClientRequest>();
   private heartbeat?: ReturnType<typeof setInterval>;
   private closed = false;
+  private pictures?: Promise<AttachmentStore>;
 
   constructor(private readonly options: MasterClientOptions) {}
+
+  /** Where pictures sent to the master are kept; the host reads the same folder. */
+  attachments(): Promise<AttachmentStore> {
+    return this.pictures ??= this.hostPaths().then(paths => masterAttachments(paths.data)).catch(error => { this.pictures = undefined; throw error; });
+  }
 
   /**
    * Keeps a running host told who this web is, so work it continues after a web restart can reach Tower. When no host
@@ -63,6 +71,12 @@ export class MasterClient {
   async call(method: string, args: Record<string, unknown> = {}): Promise<unknown> {
     await this.ensureHost();
     return (await this.exchange(method, args)).result;
+  }
+
+  /** Whether the host (started if none runs) is this build's: an older one, still busy, would drop what it does not know. */
+  async sameBuild(): Promise<boolean> {
+    await this.ensureHost();
+    return (await this.exchange('ping')).version === APP_VERSION;
   }
 
   /** The running host's version, without starting one: null when none runs; a failure to ask is an error. */
