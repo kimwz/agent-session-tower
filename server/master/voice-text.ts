@@ -69,14 +69,17 @@ const PART = 500;
  */
 export function speakable(text: string): string {
   const lines = text
-    .replace(/```[\s\S]*?(```|$)/g, '\n코드는 화면에 있어요.\n')
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/<?https?:\/\/[^\s)>]+>?/g, '링크')
     .replace(/\p{Extended_Pictographic}\uFE0F?/gu, '')
     .split('\n');
   const said: string[] = [];
+  let code = false;
   for (const raw of lines) {
+    // A code block, fenced on lines of its own, is pointed to once; backticks within a line are not a fence.
+    if (/^\s*(```|~~~)/.test(raw)) { if (!code) said.push('코드는 화면에 있어요.'); code = !code; continue; }
+    if (code) continue;
     // A table's divider row says nothing.
     if (/^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(raw)) continue;
     let line = raw.trim().replace(/^#{1,6}\s+/, '').replace(/^(>\s*)+/, '').replace(/^[-*+•]\s+/, '').replace(/^(\[[ xX]\])\s+/, '');
@@ -126,13 +129,21 @@ export function voicedParts(text: string, model: string, kind: VoiceKind): strin
   const parts: string[] = [];
   let part = '';
   let total = 0;
-  for (const sentence of sentences(plain).flatMap(item => pieces(item, PART))) {
-    if (total + sentence.length > READ_CHARS) { part += (part && !/\s$/.test(part) ? ' ' : '') + VOICE_REST; break; }
-    total += sentence.length;
-    const limit = parts.length ? PART : FIRST_PART;
-    if (part && part.length + sentence.length > limit) { parts.push(part); part = ''; }
-    part += sentence;
+  let cut = false;
+  for (const sentence of sentences(plain)) {
+    // Past the limit, reading ends before the sentence that would pass it; only a first sentence longer than the
+    // limit is read up to it, and then ends at a space.
+    if (total + sentence.length > READ_CHARS && total > 0) { cut = true; break; }
+    for (const piece of pieces(sentence, PART)) {
+      if (total + piece.length > READ_CHARS) { cut = true; break; }
+      total += piece.length;
+      const limit = parts.length ? PART : FIRST_PART;
+      if (part && part.length + piece.length > limit) { parts.push(part); part = ''; }
+      part += piece;
+    }
+    if (cut) break;
   }
+  if (cut) part += (part && !/\s$/.test(part) ? ' ' : '') + VOICE_REST;
   if (part.trim()) parts.push(part);
   return parts.map(item => item.trim()).filter(Boolean).map(item => tag ? `${tag} ${item}` : item);
 }

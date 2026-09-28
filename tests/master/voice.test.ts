@@ -36,7 +36,7 @@ const stop = (server: Server) => new Promise<void>(resolve => { server.closeAllC
 async function fakeElevenLabs() {
   const state = {
     tokens: 0, speeches: [] as Array<{ voice: string; body: Record<string, unknown>; key?: string }>, deletes: [] as string[], keys: [] as string[],
-    mode: 'ok' as 'ok' | 'cut' | 'error', fail: (_text: string) => false, chunks: [Buffer.from('ID3-first-'), Buffer.from('second-part')], gapMs: 20,
+    mode: 'ok' as 'ok' | 'cut' | 'error', fail: (_text: string) => false, silent: (_text: string) => false, chunks: [Buffer.from('ID3-first-'), Buffer.from('second-part')], gapMs: 20,
   };
   const server = createServer(async (req: IncomingMessage, res) => {
     const chunks: Buffer[] = [];
@@ -51,6 +51,7 @@ async function fakeElevenLabs() {
       state.speeches.push({ voice: speech[1], body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>, key: req.headers['xi-api-key'] as string });
       if (state.mode === 'error' || state.fail(String(state.speeches.at(-1)!.body.text))) { res.writeHead(500).end('no'); return; }
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `h${state.speeches.length}` });
+      if (state.silent(String(state.speeches.at(-1)!.body.text))) { res.end(); return; }
       res.write(state.chunks[0]);
       await sleep(state.gapMs);
       if (state.mode === 'cut') { res.destroy(); return; }
@@ -326,6 +327,10 @@ test('audio streams to the page as it is made; cut-off audio cuts the page off, 
   assert.equal(cut.complete, false);
   assert.equal(cut.body.toString(), 'ID3-first-');
   assert.equal(h.voice.listeners(second.audio.split('/').at(-1)!), 0);
+  // A page that comes only after the audio failed still gets what was made before its connection is cut.
+  const late = await fetchAudio(second.audio.split('/').at(-1)!);
+  assert.equal(late.complete, false);
+  assert.equal(late.body.toString(), 'ID3-first-');
   // A slow page that stops reading and then goes away leaves nothing waiting.
   h.labs.mode = 'ok';
   h.labs.chunks = [Buffer.alloc(900_000, 1), Buffer.alloc(900_000, 2)];
@@ -377,11 +382,12 @@ test('a long answer to a spoken request is read whole: parts of whole sentences,
 });
 
 test('a later part that fails before any sound is asked for once more; one that fails again cuts the answer off and marks it not said', async t => {
-  const answer = Array.from({ length: 12 }, (_, index) => `${index + 1}번째 문장은 조금 길게 이어지는 설명입니다.`).join(' ');
+  const answer = Array.from({ length: 40 }, (_, index) => `${index + 1}번째 문장은 조금 길게 이어지는 설명입니다.`).join(' ');
   const h = await harness(t, { steps: [[say(answer)], [say(answer.replace(/설명/g, '이야기'))]] });
   const { fetchAudio } = await audioServer(t, h.voice);
   const session = on(h);
   h.labs.gapMs = 5;
+  h.labs.chunks = [mp3('a'), Buffer.from('b')];
   // The answer's second part (from its fifth sentence) fails once.
   let failures = 0;
   h.labs.fail = text => text.includes('5번째') && failures++ === 0;
@@ -404,6 +410,27 @@ test('a later part that fails before any sound is asked for once more; one that 
   const failed = await masterEntry(h, /이야기입니다/);
   h.voice.voicePlayed({ session, id: second.id, result: 'failed' });
   await until(() => h.speakOf(failed.id)?.state === 'unspoken');
+  // What is counted is what was asked for: the parts after the one that failed were never sent, nor paid for.
+  assert.ok(!readings(h).some(text => text.includes('30번째 문장은 조금 길게 이어지는 이야기')));
+  const asked = () => h.labs.speeches.reduce((sum, item) => sum + String(item.body.text).length, 0);
+  await until(() => h.voice.status().today.ttsChars === asked());
+});
+
+test('a later part that comes back without sound is asked for again, never skipped', async t => {
+  const answer = Array.from({ length: 12 }, (_, index) => `${index + 1}번째 문장은 조금 길게 이어지는 설명입니다.`).join(' ');
+  const h = await harness(t, { steps: [[say(answer)]] });
+  const { fetchAudio } = await audioServer(t, h.voice);
+  const session = on(h);
+  h.labs.gapMs = 5;
+  h.labs.chunks = [mp3('a'), Buffer.from('b')];
+  let silences = 0;
+  h.labs.silent = text => text.includes('5번째') && silences++ === 0;
+  await request(h, session, '하나');
+  const reading = await until(() => h.says().find(item => item.kind === 'answer'));
+  assert.ok((await fetchAudio(reading.audio.split('/').at(-1)!)).complete);
+  const texts = readings(h).map(text => text.replace(/^\[cheerfully\] /, ''));
+  assert.equal(texts[1], texts[2], 'the silent part is asked for again');
+  assert.equal([texts[0], ...texts.slice(2)].join(' '), answer);
 });
 
 test('an irreversible change asked by voice is read first, and goes only if the whole sentence played, nobody objected, and the page said so afterwards', async t => {
@@ -527,6 +554,9 @@ test('an answer is heard whole: every paragraph, list item and table cell, witho
   assert.equal(speakable(joke), '좋아요, 신나게 하나 해볼게요! 냉장고가 친구한테 자랑했대요. “다들 하루에도 몇 번씩 나 보러 와!” 친구가 물었죠. “그래서 뭐라고 해?”');
   const md = '## 결과\n\n**두 개**예요:\n1. 첫째 작업, 1.5초\n2. 둘째 `foo_bar` [문서](https://x.y/z)\n- [x] 끝남\n> 인용\n\n| 이름 | 상태 |\n|---|:--:|\n| A | 완료 |\n\n```js\nconst secret = 1;\n```\n참고 https://example.com/a?b=1';
   assert.equal(speakable(md), '결과. 두 개예요: 1. 첫째 작업, 1.5초. 2. 둘째 foo bar 문서. 끝남. 인용. 이름, 상태. A, 완료. 코드는 화면에 있어요. 참고 링크.');
+  // Backticks within a line are not a fence: the rest of the answer is still read.
+  assert.equal(speakable('Use `` ``` `` to start a code fence. Keep the remaining explanation.'), 'Use to start a code fence. Keep the remaining explanation.');
+  assert.equal(speakable('앞\n~~~\nx\n~~~\n뒤'), '앞. 코드는 화면에 있어요. 뒤.');
 });
 
 test('the parts of an answer are whole sentences that join back into it; a number stays with its item, and past the limit reading ends at a sentence', () => {
@@ -552,6 +582,16 @@ test('the parts of an answer are whole sentences that join back into it; a numbe
   assert.ok(heard.endsWith(`입니다. ${VOICE_REST}`));
   assert.ok(heard.length <= READ_CHARS + VOICE_REST.length + capped.length);
   assert.ok(huge.startsWith(heard.slice(0, -VOICE_REST.length - 1)), 'what is read is the answer from its start');
+  // A sentence that would pass the limit is left out whole, never read in part.
+  const tail = `${'끝나지 않는 긴 문장 '.repeat(600).trim()}.`;
+  const before = `${'짧은 문장입니다. '.repeat(20).trim()} `;
+  const ended = voicedParts(before + tail, 'eleven_flash_v2_5', 'answer').join(' ');
+  assert.equal(ended, `${before.trim()} ${VOICE_REST}`);
+  // A first sentence longer than the limit is read up to it and ends at a space, not in a word.
+  const single = voicedParts(tail, 'eleven_flash_v2_5', 'answer').join(' ');
+  assert.ok(single.endsWith(` ${VOICE_REST}`) && single.length <= READ_CHARS + 20);
+  assert.ok(tail.startsWith(single.slice(0, -VOICE_REST.length - 1).replace(/ (?=[^ ]*$)/, ' ')));
+  assert.match(single.slice(0, -VOICE_REST.length - 1), /문장$/, 'ends at a whole word');
   // Serious news keeps the plain voice in every part; a model without tags gets no tag.
   assert.ok(voicedParts(`${'설명입니다. '.repeat(80)}마지막에 오류가 있었어요.`, 'eleven_v3', 'answer').every(part => !part.startsWith('[')));
   assert.deepEqual(voicedParts('', 'eleven_v3', 'answer'), []);

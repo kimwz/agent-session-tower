@@ -468,14 +468,18 @@ export class MasterVoice {
     this.lives.set(live.id, live);
     while (this.lives.size > LIVE_COUNT) this.drop(this.lives.values().next().value!);
     // Characters sent are paid for, whether or not the audio comes back whole.
-    this.add(Date.now(), { ttsChars: chars, model: settings.model });
+    const chargedAt = Date.now();
+    this.add(chargedAt, { ttsChars: chars, model: settings.model });
     void this.save();
     this.broadcast();
     let deadline: ReturnType<typeof setTimeout> | undefined;
+    let sent = 0;
     void (async () => {
       try {
         for (const [index, part] of parts.entries()) {
-          // Each part has its own time; a part that failed before any of its sound came is asked for once more.
+          sent = index + 1;
+          // Each part has its own time; a part that failed before any of its sound came is asked for once more, if
+          // the daily limit allows paying for it again. A part that comes back without sound has failed.
           for (let attempt = 0; ; attempt++) {
             const controller = new AbortController();
             deadline = setTimeout(() => controller.abort(new Error('시간 초과')), this.timing.synthMs);
@@ -490,10 +494,12 @@ export class MasterVoice {
                 live.bytes += chunk.length;
                 wake(live);
               }
+              if (!got) throw new Error('no sound');
               break;
             } catch (error) {
-              if (got || attempt > 0 || live.failed || (error as Error).message === 'too large') throw error;
+              if (got || attempt > 0 || live.failed || (error as Error).message === 'too large' || this.limited(Date.now(), part.length * ttsDollarsPerChar(settings.model))) throw error;
               this.add(Date.now(), { ttsChars: part.length, model: settings.model });
+              void this.save();
             } finally { clearTimeout(deadline); }
           }
         }
@@ -501,10 +507,13 @@ export class MasterVoice {
       } catch {
         live.failed = true;
         live.done = true;
+        // Parts never asked for are not paid for.
+        const unsent = parts.slice(sent).reduce((sum, part) => sum + part.length, 0);
+        if (unsent) { this.add(chargedAt, { ttsChars: -unsent, model: settings.model }); void this.save(); this.broadcast(); }
       } finally {
         clearTimeout(deadline);
         // A reader of audio that failed sees its connection cut, never a clean end.
-        if (live.failed) for (const reader of live.readers) reader.destroy();
+        if (live.failed) for (const reader of live.readers) this.cutOff(reader);
         wake(live);
       }
     })();
@@ -528,7 +537,7 @@ export class MasterVoice {
   /** Ends audio kept too long (or pushed out): readers still waiting are cut off, and it is gone. */
   private drop(live: Live): void {
     if (!live.done) { live.failed = true; live.done = true; }
-    for (const reader of live.readers) if (live.failed) reader.destroy();
+    for (const reader of live.readers) if (live.failed) this.cutOff(reader);
     wake(live);
     this.lives.delete(live.id);
   }
@@ -557,11 +566,22 @@ export class MasterVoice {
           if (!res.write(live.chunks[index++]) && !await this.wait(res, live, true)) { res.destroy(); return; }
         }
         if (res.destroyed) return;
-        if (live.failed) { res.destroy(); return; }
+        if (live.failed) { this.cutOff(res); return; }
         if (live.done && index >= live.chunks.length) { res.end(); return; }
         await this.wait(res, live, false);
       }
     } finally { live.readers.delete(res); }
+  }
+
+  /**
+   * Cuts a page off failed audio, never with a clean end, once what it was sent has left: cut at once, audio written
+   * just before would be thrown away, and a page that came late would get nothing of what was made.
+   */
+  private cutOff(res: ServerResponse): void {
+    const socket = res.socket;
+    if (!socket || socket.destroyed || (!socket.writableLength && !res.writableLength)) { res.destroy(); return; }
+    const timer = setTimeout(() => res.destroy(), this.timing.waitMs);
+    socket.once('drain', () => { clearTimeout(timer); res.destroy(); });
   }
 
   /**
