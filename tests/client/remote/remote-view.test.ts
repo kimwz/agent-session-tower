@@ -77,14 +77,13 @@ test('temporary folders stay off the canvas on every computer', () => {
   assert.deepEqual(canvasVisibleSessions(sessions, [], false).map(item => item.id), [`@${B}/codex:2`]);
 });
 
-test('hand-placed cards of a computer not heard from yet keep their places, and its host node keeps its own', () => {
-  const card = `@${B}/codex:1`;
+test('hand-placed folders of a computer not heard from yet keep their places, and its host node keeps its own', () => {
   const project = graphProjectId(`@${B}//work/app`);
-  const layout = { ...defaultGraphPreferences().layout, projects: { [project]: { position: { x: 400, y: 200 }, width: 282, height: 330 } }, agents: { [card]: { projectId: project, position: { x: 20, y: 106 } } } };
-  const kept = reconcileManualGraph(layout, [], true, [], [], { retain: id => id === card || id === project });
-  assert.ok(kept.agents[card] && kept.projects[project]);
-  const pruned = reconcileManualGraph(layout, [], true, [], []);
-  assert.equal(pruned.agents[card], undefined, 'a computer this page knows no longer has that session');
+  const layout = { ...defaultGraphPreferences().layout, projects: { [project]: { position: { x: 400, y: 200 }, width: 282, height: 336 } } };
+  const kept = reconcileManualGraph(layout, [], new Set(), id => id === project);
+  assert.ok(kept.projects[project]);
+  const pruned = reconcileManualGraph(layout, [], new Set());
+  assert.equal(pruned.projects[project], undefined, 'a computer this page knows no longer has that folder');
   const moved = moveManualGraphNodes(layout, [{ id: `host:${B}`, position: { x: 900, y: -40 } }]);
   assert.deepEqual(moved.hosts, { [B]: { x: 900, y: -40 } });
   const saved = parseGraphPreferences(JSON.stringify({ version: 1, mode: 'manual', layout: moved }));

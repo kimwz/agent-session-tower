@@ -37,8 +37,7 @@
 /* Top left of a card: the sidebar's unread dot marks new activity, apart from the outcome at the top right. */
 .agent-card > .unread-dot { position:absolute; top:15px; left:15px; margin:0; }
 .agent-card.has-unread:not(.selected) { border-color:#37618e; }
-.manual-layout .agent-card { cursor:grab; height:202px; min-height:202px; }
-.manual-layout .react-flow__node.dragging .agent-card,
+.manual-layout .agent-card { height:202px; min-height:202px; }
 .manual-layout .react-flow__node.dragging .project-drag-handle { cursor:grabbing; }
 .manual-project-lane {
   width:100%;
@@ -63,4 +62,3 @@
 .project-drag-handle:hover { background:#1c2c42; }
 .auto-layout .project-drag-handle { cursor:default; }
 .auto-layout .project-drag-handle:hover { background:none; }
-.project-drag-grip { flex-shrink:0; color:#6983a2; }

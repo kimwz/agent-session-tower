@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.56.0] - 2026-09-28
+
+### Changed
+- **Sessions in a folder line up in a grid.** Cards are no longer placed one by one. A folder shows its sessions most recent first, one per row by default: they stack from the top down. With two per row, the first two sit side by side and the third starts the next row at the left, and so on. Each folder keeps its own choice of one to four per row, in this browser. In **수동 배치**, folders are still dragged into place; the cards follow their folder. When a folder grows, from more sessions or more per row, the folders it would now cover move right or down out of its way. Saved layouts keep each folder where it was drawn; hand-placed card positions are dropped.
+- **A folder's header shows only pinning and a settings button.** The settings button opens a menu with a new session in the folder, the browser code editor and terminal, the group title, hiding the folder, and how many sessions go in a row. The drag grip is gone; the header itself is still the handle.
+
 ## [1.55.4] - 2026-09-28
 
 ### Fixed

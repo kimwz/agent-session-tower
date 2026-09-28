@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { ProjectGroup, Session } from '../../../shared/types.js';
 import { canvasVisibleSessions, includePinnedProjectGroups, projectGroupChoices, projectGroupLabel, visiblePinnedProjectGroups } from '../../../client/src/project-groups/project-groups.js';
 import { graphProjectId, graphSessionGroups } from '../../../client/src/graph/graph-layout.js';
-import { defaultGraphPreferences, manualSessionGroups, moveManualGraphNodes, reconcileManualGraph } from '../../../client/src/graph/graph-layout-preferences.js';
+import { defaultGraphPreferences, manualSessionGroups, moveManualGraphNodes, projectGrid, reconcileManualGraph } from '../../../client/src/graph/graph-layout-preferences.js';
 
 function session(id: string, cwd: string, project = cwd.split('/').at(-1)!): Session {
   return { id, nativeId: id, provider: 'codex', title: id, cwd, project, status: 'idle', statusReason: '', createdAt: '2026-09-15T00:00:00Z', updatedAt: '2026-09-15T00:00:00Z', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true };
@@ -123,17 +123,18 @@ test('revealed hidden folder headers survive the automatic card limit and sessio
   assert.deepEqual(visiblePinnedProjectGroups(metadata, filtered, '/other', 'needle', true, [old]), []);
 });
 
-test('hiding and revealing retains manual card positions and empty hidden folder positions', () => {
+test('hiding and revealing keeps every folder where it was dragged', () => {
   const a = session('visible', '/work/visible');
   const b = session('hidden', '/work/hidden');
   const metadata: ProjectGroup[] = [{ cwd: b.cwd, title: '', pinned: false, hidden: true }, { cwd: '/work/empty', title: '', pinned: false, hidden: true }];
   const all = [a, b];
-  const initial = reconcileManualGraph(defaultGraphPreferences().layout, all, true, all, metadata);
-  const moved = moveManualGraphNodes(initial, [{ id: b.id, position: { x: 1200, y: 900 } }, { id: graphProjectId('/work/empty'), position: { x: 1700, y: 400 } }]);
-  const concealed = reconcileManualGraph(moved, all, true, canvasVisibleSessions(all, metadata, false), metadata);
-  assert.deepEqual(concealed.agents[b.id], moved.agents[b.id]);
-  assert.deepEqual(concealed.projects[graphProjectId(b.cwd)], moved.projects[graphProjectId(b.cwd)]);
-  assert.deepEqual(concealed.projects[graphProjectId('/work/empty')], moved.projects[graphProjectId('/work/empty')]);
-  const revealed = reconcileManualGraph(concealed, all, true, canvasVisibleSessions(all, metadata, true), metadata);
-  assert.deepEqual(revealed, concealed);
+  const live = new Set([...all.map(item => graphProjectId(item.cwd)), ...metadata.map(group => graphProjectId(group.cwd))]);
+  const frames = (shown: Session[], pins: string[] = []) => includePinnedProjectGroups(manualSessionGroups(shown), pins.map(cwd => ({ cwd, title: '', pinned: false })))
+    .map(([cwd, members]) => { const grid = projectGrid(members.length, 1); return { id: graphProjectId(cwd), width: grid.width, height: grid.height }; });
+  const initial = reconcileManualGraph(defaultGraphPreferences().layout, frames(all, ['/work/empty']), live);
+  const moved = moveManualGraphNodes(initial, [{ id: graphProjectId(b.cwd), position: { x: 1200, y: 900 } }, { id: graphProjectId('/work/empty'), position: { x: 1700, y: 400 } }]);
+  const concealed = reconcileManualGraph(moved, frames(canvasVisibleSessions(all, metadata, false)), live);
+  assert.equal(concealed, moved);
+  const revealed = reconcileManualGraph(concealed, frames(canvasVisibleSessions(all, metadata, true), ['/work/empty']), live);
+  assert.equal(revealed, concealed);
 });

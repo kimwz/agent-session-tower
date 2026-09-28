@@ -21,7 +21,7 @@ const session = (patch: Partial<Session> = {}): Session => ({
 const agent = (patch: Partial<Session> = {}, data: Partial<AgentData> = {}): string =>
   node(AgentNode, { session: session(patch), selected: false, unread: false, onSelect() {}, ...data } satisfies AgentData);
 const projectData = (patch: Partial<ProjectData> = {}): ProjectData => ({
-  name: 'monitor', title: '', path: '/Users/me/monitor', count: 3, active: 1, pinned: false, hidden: false, manual: false,
+  name: 'monitor', title: '', path: '/Users/me/monitor', count: 3, active: 1, pinned: false, hidden: false, columns: 1, onColumnsChange() {},
   disabled: false, saving: false, onUpdate: async () => true, onCreate() {}, onAutoPrompt() {}, ...patch,
 });
 const host = (patch: Partial<HostData> = {}): string =>
@@ -71,7 +71,7 @@ test('a project lane offers Auto Prompt for a real folder and refuses a placehol
 });
 
 test('an empty project lane explains how to start a session there', () => {
-  assert.match(node(ProjectGroupNode, projectData({ count: 0 })), /class="project-group-empty">표시된 세션이 없습니다<span>\+ 버튼으로 이 폴더에서 시작하세요/);
+  assert.match(node(ProjectGroupNode, projectData({ count: 0 })), /class="project-group-empty">표시된 세션이 없습니다<span>폴더 설정 메뉴에서 새 세션을 시작하세요/);
   assert.doesNotMatch(node(ProjectGroupNode, projectData()), /project-group-empty/);
 });
 

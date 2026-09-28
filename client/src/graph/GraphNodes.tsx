@@ -53,7 +53,7 @@ export const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentD
 
 export const ProjectGroupNode = memo(function ProjectGroupNode({ data }: NodeProps<Node<ProjectData>>) {
   useI18n();
-  return <div className={`manual-project-lane ${data.hidden ? 'is-hidden' : ''}${data.stale ? ' is-stale' : ''}`}><div className="project-drag-handle"><Handle type="target" position={Position.Top} /><ProjectGroupHeader data={data} /></div><button type="button" className="auto-prompt-trigger nodrag nopan" aria-label={t("{0} 폴더에서 Auto Prompt 열기", { 0: data.name })} title="Auto Prompt" disabled={data.disabled || !localPart(data.path).startsWith('/')} onClick={() => data.onAutoPrompt(data.path)}><Sparkles size={32} aria-hidden="true" /></button>{!data.count && <p className="project-group-empty">{t("표시된 세션이 없습니다")}<span>{t("+ 버튼으로 이 폴더에서 시작하세요")}</span></p>}</div>;
+  return <div className={`manual-project-lane ${data.hidden ? 'is-hidden' : ''}${data.stale ? ' is-stale' : ''}`}><div className="project-drag-handle"><Handle type="target" position={Position.Top} /><ProjectGroupHeader data={data} /></div><button type="button" className="auto-prompt-trigger nodrag nopan" aria-label={t("{0} 폴더에서 Auto Prompt 열기", { 0: data.name })} title="Auto Prompt" disabled={data.disabled || !localPart(data.path).startsWith('/')} onClick={() => data.onAutoPrompt(data.path)}><Sparkles size={32} aria-hidden="true" /></button>{!data.count && <p className="project-group-empty">{t("표시된 세션이 없습니다")}<span>{t("폴더 설정 메뉴에서 새 세션을 시작하세요")}</span></p>}</div>;
 });
 export const HostNode = memo(function HostNode({ data }: NodeProps<Node<HostData>>) {
   useI18n();

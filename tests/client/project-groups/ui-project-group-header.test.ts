@@ -3,16 +3,19 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { WorkspaceContext } from '../../../client/src/workspace/WorkspaceOverlay.js';
-import { ProjectGroupHeader, type ProjectGroupHeaderData } from '../../../client/src/project-groups/ProjectGroupHeader.js';
+import { ProjectGroupHeader, ProjectGroupMenu, type ProjectGroupHeaderData } from '../../../client/src/project-groups/ProjectGroupHeader.js';
 import { repositoryAgentDraft, repositoryOutOfSync } from '../../../client/src/project-groups/RepositorySync.js';
 import type { RepositoryStatus } from '../../../shared/repositories.js';
 
 const data = (patch: Partial<ProjectGroupHeaderData> = {}): ProjectGroupHeaderData => ({
-  token: 'test-token', name: 'monitor', title: '', path: '/Users/me/monitor', count: 3, active: 0, pinned: false, hidden: false, manual: false,
+  token: 'test-token', name: 'monitor', title: '', path: '/Users/me/monitor', count: 3, active: 0, pinned: false, hidden: false, columns: 1, onColumnsChange() {},
   disabled: false, saving: false, onUpdate: async () => true, onCreate() {}, ...patch,
 });
-const header = (patch: Partial<ProjectGroupHeaderData> = {}) =>
-  renderToStaticMarkup(createElement(WorkspaceContext.Provider, { value: () => {} }, createElement(ProjectGroupHeader, { data: data(patch) })));
+const withWorkspace = (element: ReturnType<typeof createElement>) =>
+  renderToStaticMarkup(createElement(WorkspaceContext.Provider, { value: () => {} }, element));
+const header = (patch: Partial<ProjectGroupHeaderData> = {}) => withWorkspace(createElement(ProjectGroupHeader, { data: data(patch) }));
+const menu = (patch: Partial<ProjectGroupHeaderData> = {}) => withWorkspace(createElement(ProjectGroupMenu, { data: data(patch), onEditTitle() {}, onDone() {} }));
+const disabledCount = (markup: string) => (markup.match(/<button\b[^>]*\sdisabled=""[^>]*>/g) || []).length;
 
 test('a folder group shows its name, full path and how many sessions it holds', () => {
   const markup = header();
@@ -25,33 +28,51 @@ test('a folder group with running agents says how many are working', () => {
   assert.match(header({ active: 2 }), /<span>3개 세션 · 2개 작업 중<\/span>/);
 });
 
+test('the header keeps only pinning and a settings button; the other folder actions wait in the settings menu', () => {
+  const markup = header();
+  assert.equal((markup.match(/<button\b/g) || []).length, 2);
+  assert.match(markup, /aria-label="monitor 그룹 고정" aria-pressed="false"/);
+  assert.match(markup, /aria-label="monitor 폴더 설정" title="폴더 설정" aria-expanded="false"/);
+  assert.doesNotMatch(markup, /project-drag-grip|workspace-actions|폴더에 새 세션/);
+  const items = menu();
+  for (const label of ['이 폴더에 새 세션', '브라우저 코드 에디터 열기', '브라우저 터미널 열기', '그룹 제목 편집', '폴더와 세션을 캔버스에서 숨기기']) assert.match(items, new RegExp(`</svg>${label}</button>`));
+});
+
 test('pinning and hiding report their current state to assistive technology', () => {
-  const plain = header();
-  assert.match(plain, /aria-label="monitor 그룹 고정" aria-pressed="false"/);
-  assert.match(plain, /aria-label="monitor 폴더 숨기기" aria-pressed="false"/);
-  const marked = header({ pinned: true, hidden: true });
-  assert.match(marked, /aria-label="monitor 그룹 고정 해제" aria-pressed="true"/);
-  assert.match(marked, /aria-label="monitor 폴더 숨김 해제" aria-pressed="true"/);
+  assert.match(header(), /aria-label="monitor 그룹 고정" aria-pressed="false"/);
+  assert.match(menu(), /aria-pressed="false"[^>]*>.*폴더와 세션을 캔버스에서 숨기기/);
+  assert.match(header({ pinned: true }), /aria-label="monitor 그룹 고정 해제" aria-pressed="true"/);
+  assert.match(menu({ hidden: true }), /aria-pressed="true"[^>]*>.*폴더 숨김 해제/);
 });
 
-test('a group that is not a real folder cannot be renamed, pinned or hidden', () => {
-  const markup = header({ path: '알 수 없음', name: '알 수 없음' });
-  assert.equal((markup.match(/<button\b[^>]*\sdisabled=""[^>]*>/g) || []).length, 6);
+test('the settings menu offers one to four sessions per row and marks the folder’s current choice', () => {
+  const markup = menu({ columns: 2 });
+  assert.match(markup, /role="group" aria-label="한 줄에 놓을 세션 수"/);
+  assert.deepEqual([...markup.matchAll(/aria-pressed="(true|false)" aria-label="한 줄에 (\d)개"/g)].map(match => [match[2], match[1]]), [['1', 'false'], ['2', 'true'], ['3', 'false'], ['4', 'false']]);
 });
 
-test('a save still in flight blocks every group action', () => {
-  assert.equal((header({ saving: true }).match(/<button\b[^>]*\sdisabled=""[^>]*>/g) || []).length, 5);
-  assert.doesNotMatch(header(), /disabled=""/);
+test('a group that is not a real folder cannot be renamed, pinned, hidden or worked in, but its row width still changes', () => {
+  const unknown = { path: '알 수 없음', name: '알 수 없음' };
+  assert.equal(disabledCount(header(unknown)), 1);
+  assert.equal(disabledCount(menu(unknown)), 5);
+  assert.doesNotMatch(menu(unknown), /disabled=""[^>]*aria-label="한 줄에/);
+});
+
+test('a save still in flight blocks every group change', () => {
+  assert.equal(disabledCount(header({ saving: true })), 1);
+  assert.equal(disabledCount(menu({ saving: true })), 4);
+  assert.doesNotMatch(header() + menu(), /disabled=""/);
+});
+
+test('folder tools that are out of reach say why inside the menu', () => {
+  const markup = menu({ workspaceDisabled: true, workspaceNote: 'studio는 오프라인입니다.' });
+  assert.equal(disabledCount(markup), 2);
+  assert.match(markup, /class="project-group-menu-note">studio는 오프라인입니다\.<\/p>/);
 });
 
 test('a failed group change is announced where the group is shown', () => {
   assert.match(header({ error: '그룹을 저장하지 못했습니다. 다시 시도해 주세요.' }), /class="project-group-error nodrag nopan" role="alert">그룹을 저장하지 못했습니다/);
   assert.doesNotMatch(header(), /project-group-error/);
-});
-
-test('only a hand-arranged canvas shows the drag grip', () => {
-  assert.match(header({ manual: true }), /project-drag-grip/);
-  assert.doesNotMatch(header(), /project-drag-grip/);
 });
 
 const repository = (patch: Partial<RepositoryStatus> = {}): RepositoryStatus => ({
@@ -84,6 +105,5 @@ test('another computer’s folder shows its own path and offers that computer’
   const markup = header({ path: `@${node}//Users/me/monitor` });
   assert.match(markup, /class="project-group-path folder-tail" title="\/Users\/me\/monitor"><bdi dir="ltr">\/Users\/me\/monitor<\/bdi>/);
   assert.doesNotMatch(markup, new RegExp(node));
-  assert.match(markup, /aria-label="monitor 폴더에 새 세션"(?![^>]*disabled)/);
-  assert.match(markup, /workspace-actions/);
+  assert.doesNotMatch(menu({ path: `@${node}//Users/me/monitor` }), /disabled=""/);
 });

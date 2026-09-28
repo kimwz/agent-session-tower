@@ -17,7 +17,7 @@ import { slackWorkflowWorking } from '../slack/slack-monitor';
 import { monitorItems, monitorVisible, readMonitorPosition, TRIGGER_MONITOR_ID, TRIGGER_POSITION_KEY, triggerEventWorking } from '../triggers/trigger-monitor';
 const canvasNodeTypes = { ...nodeTypes, triggerMonitor: TriggerMonitorNode, slackMention: SlackMentionNode, triggerEvent: TriggerEventNode };
 import { graphProjectId, graphProjectKey, graphSessionGroups, clearHostPosition, HOST_HEIGHT } from './graph-layout';
-import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualProjectBounds, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, reconcileManualGraph, setGraphLayoutMode, type GraphLayoutMode, type GraphPreferences } from './graph-layout-preferences';
+import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, projectColumns, projectGrid, PROJECT_GAP, reconcileManualGraph, setGraphLayoutMode, setProjectColumns, type GraphLayoutMode, type GraphPreferences, type ProjectFrame } from './graph-layout-preferences';
 import { includePinnedProjectGroups, projectGroupLabel } from '../project-groups/project-groups';
 import { CanvasSettings } from './CanvasSettings';
 import { projectGroupMinimumWidth, projectGroupTitleMeasurer } from '../project-groups/project-group-title';
@@ -97,23 +97,19 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
   const retainedGroups = useMemo(() => groups.filter(group => group.pinned || group.hidden), [groups]);
   const groupMetadata = useMemo(() => new Map(groups.map(group => [group.cwd, group])), [groups]);
   const repositoryByPath = useMemo(() => new Map((repositories ?? []).map(repository => [repository.cwd, repository])), [repositories]);
-  const visibleAgentIds = useMemo(() => new Set(sessions.map(session => session.id)), [sessions]);
-  const seedSessions = useMemo(() => manual ? sessions : graphSessionGroups(sessions, graphLimit, selectedId).flatMap(([, members]) => members), [manual, sessions, graphLimit, selectedId]);
+  const grouped = useMemo(() => includePinnedProjectGroups(manual ? manualSessionGroups(sessions) : graphSessionGroups(sessions, graphLimit, selectedId), visiblePins), [manual, sessions, graphLimit, selectedId, visiblePins]);
   const minimumProjectWidths = useMemo(() => {
     const measure = projectGroupTitleMeasurer();
-    const widths = new Map<string, number>();
-    for (const session of seedSessions) {
-      const path = graphProjectKey(session);
-      const projectId = graphProjectId(path);
-      const width = projectGroupMinimumWidth(projectGroupLabel(path, groupMetadata.get(path)?.title, session.project), measure);
-      widths.set(projectId, Math.max(widths.get(projectId) || 0, width));
-    }
-    for (const group of visiblePins) {
-      const projectId = graphProjectId(group.cwd);
-      if (!widths.has(projectId)) widths.set(projectId, projectGroupMinimumWidth(projectGroupLabel(group.cwd, group.title), measure));
-    }
-    return widths;
-  }, [seedSessions, groupMetadata, visiblePins, language]);
+    return new Map(grouped.map(([path, members]) => [graphProjectId(path), projectGroupMinimumWidth(projectGroupLabel(path, groupMetadata.get(path)?.title, members[0]?.project), measure)]));
+  }, [grouped, groupMetadata, language]);
+  const columns = preferences.columns;
+  const frames = useMemo<ProjectFrame[]>(() => grouped.map(([path, members]) => {
+    const id = graphProjectId(path);
+    const grid = projectGrid(members.length, projectColumns(columns, id), minimumProjectWidths.get(id));
+    return { id, width: grid.width, height: grid.height };
+  }), [grouped, columns, minimumProjectWidths]);
+  // Until every session has been read, no saved folder is forgotten.
+  const liveProjects = useMemo(() => sessionsReady ? new Set([...allSessions.map(session => graphProjectId(graphProjectKey(session))), ...retainedGroups.map(group => graphProjectId(group.cwd))]) : undefined, [allSessions, sessionsReady, retainedGroups]);
   const machines = useMemo<Host[]>(() => hosts?.length ? hosts : [{ name: hostname, status: 'local', live: true, canWork: true, workspace: true, known: true, providers }], [hosts, hostname, providers]);
   // A computer this page has not heard from yet keeps its saved card and folder places until it has.
   const unknownNodes = useMemo(() => new Set((allHosts ?? machines).filter(host => host.node && !host.known).map(host => host.node!)), [allHosts, machines]);
@@ -121,15 +117,15 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     const node = nodeOf(id) ?? nodeOf(id.startsWith('project:') ? decodeURIComponent(id.slice('project:'.length)) : undefined);
     return node !== undefined && (!hostsComplete || unknownNodes.has(node));
   }, [unknownNodes, hostsComplete]);
-  const manualOptions = useMemo(() => ({ minimumProjectWidths, visibleProjectIds: new Set(minimumProjectWidths.keys()), repairHeaderWidths: manual, retain }), [minimumProjectWidths, manual, retain]);
-  const manualLayout = useMemo(() => reconcileManualGraph(preferences.layout, allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions), [preferences.layout, allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions]);
+  const manualLayout = useMemo(() => reconcileManualGraph(preferences.layout, frames, liveProjects, retain), [preferences.layout, frames, liveProjects, retain]);
 
   useEffect(() => {
     setPreferences(current => {
-      const layout = reconcileManualGraph(current.layout, allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions);
+      const layout = reconcileManualGraph(current.layout, frames, liveProjects, retain);
       return layout === current.layout ? current : { ...current, layout };
     });
-  }, [allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions]);
+  }, [frames, liveProjects, retain]);
+  const changeColumns = useCallback((projectId: string, value: number) => setPreferences(current => setProjectColumns(current, projectId, value)), []);
 
   useEffect(() => {
     try { window.localStorage.setItem(GRAPH_PREFERENCES_KEY, JSON.stringify(preferences)); }
@@ -137,7 +133,6 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
   }, [preferences]);
 
   const { modelNodes, edges, shown } = useMemo(() => {
-    const grouped = includePinnedProjectGroups(manual ? manualSessionGroups(sessions) : graphSessionGroups(sessions, graphLimit, selectedId), visiblePins);
     const ns: Node[] = [];
     const es: Edge[] = [];
     let x = 0;
@@ -153,28 +148,20 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
       const entries = grouped.filter(([path]) => nodeOf(path) === machine.node);
       const start = x;
       entries.forEach(([path, members]) => {
-        const columns = grouped.length === 1 && members.length > 6 ? 4 : members.length > 2 ? 2 : 1;
         const projectId = graphProjectId(path);
-        const width = Math.max(columns * 268 + 14, minimumProjectWidths.get(projectId) || 0);
-        const rows = Math.max(1, Math.ceil(members.length / columns));
+        const count = projectColumns(columns, projectId);
+        const grid = projectGrid(members.length, count, minimumProjectWidths.get(projectId));
         const metadata = groupMetadata.get(path);
-        const projectData: ProjectData = { token, name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, hidden: metadata?.hidden || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, manual, disabled, viewDisabled: groupActionsDisabled, workspaceDisabled: groupActionsDisabled || !machine.workspace, workspaceNote: workspaceNote(machine), ...(machine.node ? { machine: machine.name } : {}), saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate, onAutoPrompt, repository: repositoryByPath.get(path), onRepositoryAction, stale };
-        const savedProject = manualLayout.projects[projectId];
-        if (manual && savedProject) {
-          const bounds = manualProjectBounds(manualLayout, projectId, visibleAgentIds, minimumProjectWidths)!;
-          ns.push({ id: projectId, type: 'projectGroup', zIndex: 1, position: bounds.position, data: projectData, style: { width: bounds.width, height: bounds.height }, dragHandle: '.project-drag-handle', selectable: false, draggable: true, focusable: false });
-        } else {
-          ns.push({ id: projectId, type: 'projectGroup', zIndex: 1, position: { x, y: 185 }, data: projectData, style: { width, height: rows * 215 + 121 }, draggable: false, selectable: false, focusable: false });
-        }
+        const projectData: ProjectData = { token, name: projectGroupLabel(path, metadata?.title, members[0]?.project), title: metadata?.title || '', pinned: metadata?.pinned || false, hidden: metadata?.hidden || false, path, count: members.length, active: members.filter(s => s.status === 'working').length, columns: count, onColumnsChange: value => changeColumns(projectId, value), disabled, viewDisabled: groupActionsDisabled, workspaceDisabled: groupActionsDisabled || !machine.workspace, workspaceNote: workspaceNote(machine), ...(machine.node ? { machine: machine.name } : {}), saving: groupSaving.has(path), error: groupErrors[path], onUpdate: onGroupUpdate, onCreate: onGroupCreate, onAutoPrompt, repository: repositoryByPath.get(path), onRepositoryAction, stale };
+        const saved = manual ? manualLayout.projects[projectId] : undefined;
+        const origin = saved?.position ?? { x, y: 185 };
+        ns.push({ id: projectId, type: 'projectGroup', zIndex: 1, position: origin, data: projectData, style: { width: grid.width, height: grid.height }, ...(saved ? { dragHandle: '.project-drag-handle', draggable: true } : { draggable: false }), selectable: false, focusable: false });
         es.push({ id: `${hostId}-${projectId}`, source: hostId, target: projectId, type: 'smoothstep', zIndex: 0, animated: motion && !stale && members.some(s => s.status === 'working'), style: { stroke: '#2e3e52', strokeWidth: 1.2 }, pathOptions: { borderRadius: 14 } } as Edge);
+        // Cards keep flat world positions and follow their folder's corner in its grid.
         members.forEach((session, index) => {
-          const savedAgent = manualLayout.agents[session.id];
-          const placedManually = manual && savedProject && savedAgent;
-          // Flat world positions keep pointer and drag-stop coordinates independent
-          // from the enclosing rectangle as its origin follows moving cards.
-          ns.push({ id: session.id, type: 'agent', position: placedManually ? { x: savedProject.position.x + savedAgent.position.x, y: savedProject.position.y + savedAgent.position.y } : { x: x + 20 + (index % columns) * 268, y: 291 + Math.floor(index / columns) * 215 }, zIndex: 3, ...(placedManually ? { dragHandle: '.agent-card' } : {}), data: { session, selected: session.id === selectedId, unread: unreadIds?.has(session.id) || false, onSelect, stale }, style: { pointerEvents: 'all' }, draggable: !!placedManually, selectable: false, focusable: false });
+          ns.push({ id: session.id, type: 'agent', position: { x: origin.x + grid.cards[index].x, y: origin.y + grid.cards[index].y }, zIndex: 3, data: { session, selected: session.id === selectedId, unread: unreadIds?.has(session.id) || false, onSelect, stale }, style: { pointerEvents: 'all' }, draggable: false, selectable: false, focusable: false });
         });
-        x += width + 36;
+        x += grid.width + PROJECT_GAP;
       });
       // With several computers, one without shown folders still has its own place beside the others.
       if (!entries.length && machines.length > 1) x += 256 + 36;
@@ -208,7 +195,7 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
       es.push({ id: 'host-monitor', source: 'host', target: TRIGGER_MONITOR_ID, type: 'smoothstep', animated: motion && active > 0, style: { stroke: '#675077', strokeWidth: 1.2 } });
     }
     return { modelNodes: ns, edges: es, shown: grouped.reduce((total, [, members]) => total + members.length, 0) };
-  }, [slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, showMonitor, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, machines, language, motion, graphLimit, manual, manualLayout, unreadIds, visibleAgentIds, visiblePins, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt, repositoryByPath, onRepositoryAction]);
+  }, [slackUnreadIds, slack, slackLimit, slackPosition, selectedSlackId, onSelectSlack, showMoreSlack, showMonitor, monitorTotal, triggerOverview, triggerEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore, token, sessions, selectedId, onSelect, machines, language, motion, grouped, columns, changeColumns, manual, manualLayout, unreadIds, groupMetadata, minimumProjectWidths, groupActionsDisabled, groupSaving, groupErrors, onGroupUpdate, onGroupCreate, onAutoPrompt, repositoryByPath, onRepositoryAction]);
 
   const [nodes, setNodes] = useState(modelNodes);
   const visibleProjectKey = modelNodes.filter(node => node.type === 'projectGroup' || node.type === 'triggerMonitor').map(node => node.id).join('|');
@@ -229,14 +216,13 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
       }
     }
     if (!manual) return;
-    const moves = changes.flatMap(change => change.type === 'position' && change.id !== TRIGGER_MONITOR_ID && !change.id.startsWith('slack:mention:') && !change.id.startsWith('trigger:event:') && change.position ? [{ id: change.id, position: change.position }] : []);
+    const moves = changes.flatMap(change => change.type === 'position' && change.position && (change.id === 'host' || change.id.startsWith('host:') || change.id.startsWith('project:')) ? [{ id: change.id, position: change.position }] : []);
     if (!moves.length) return;
     setPreferences(current => {
-      const reconciled = reconcileManualGraph(current.layout, allSessions, sessionsReady, seedSessions, retainedGroups, manualOptions);
-      const layout = moveManualGraphNodes(reconciled, moves, visibleAgentIds, minimumProjectWidths);
+      const layout = moveManualGraphNodes(reconcileManualGraph(current.layout, frames, liveProjects, retain), moves);
       return layout === current.layout ? current : { ...current, layout };
     });
-  }, [manual, allSessions, sessionsReady, seedSessions, visibleAgentIds, retainedGroups, manualOptions, minimumProjectWidths]);
+  }, [manual, frames, liveProjects, retain]);
 
   const changeMode = (mode: GraphLayoutMode) => {
     if (mode === preferences.mode) return;
