@@ -117,11 +117,17 @@ export class SlackClient {
     return texts;
   }
 
-  /** Only explicit user mentions of the given IDs stay live; everything else, including broadcasts, is escaped. */
+  /** Only explicit user mentions of the given IDs and web links stay live; everything else, including broadcasts, is escaped. */
   async reply(channel: string, threadTs: string, text: string, mentionable: string[] = []): Promise<{ ts: string }> {
     if (!text.trim() || text.length > 12_000) throw new SlackApiError('invalid_reply');
-    const escaped = text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
-      .replace(/&lt;@([UW][A-Z0-9]+)&gt;/g, (match, id: string) => mentionable.includes(id) ? `<@${id}>` : match);
+    // With mrkdwn off Slack shows bare URLs as text, so web links are sent in explicit <url> link syntax.
+    const escape = (part: string) => part.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+    const escaped = text.split(/(https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+)/).map((part, index) => {
+      if (index % 2 === 0) return escape(part).replace(/&lt;@([UW][A-Z0-9]+)&gt;/g, (match, id: string) => mentionable.includes(id) ? `<@${id}>` : match);
+      let url = part.replace(/[.,;:!?'"]+$/, '');
+      while (url.endsWith(')') && url.split(')').length > url.split('(').length) url = url.slice(0, -1);
+      return `<${escape(url)}>${escape(part.slice(url.length))}`;
+    }).join('');
     const data = await this.call('chat.postMessage', {
       channel, thread_ts: threadTs, text: escaped,
       mrkdwn: 'false', parse: 'none', link_names: 'false', reply_broadcast: 'false', unfurl_links: 'false', unfurl_media: 'false',

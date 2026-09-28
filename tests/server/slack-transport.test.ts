@@ -30,6 +30,8 @@ test('Slack reads retry rate limits; replies never retry and escape mentions', a
   assert.equal(sent!.get('reply_broadcast'),'false');
   await assert.rejects(writer.reply('C','1','<@U2> <@U3> <!channel> <@U2|x>', ['U2']), /ratelimited/);
   assert.equal(sent!.get('text'),'<@U2> &lt;@U3&gt; &lt;!channel&gt; &lt;@U2|x&gt;');
+  await assert.rejects(writer.reply('C','1','확인\nhttps://github.com/o/r/pull/1#issuecomment-2 (see https://x.io/a?b=1&c=<2>). https://x.io/wiki/A_(b))'), /ratelimited/);
+  assert.equal(sent!.get('text'),'확인\n<https://github.com/o/r/pull/1#issuecomment-2> (see <https://x.io/a?b=1&amp;c=>&lt;2&gt;). <https://x.io/wiki/A_(b)>)');
 });
 test('Slack reactions treat existing and already removed reactions as done', async () => {
   const calls: string[] = [];

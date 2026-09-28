@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.55.3] - 2026-09-28
+
+### Fixed
+- **Links in Slack replies are clickable again.** Replies are sent without Slack formatting, so a URL in them, such as the pull request comment a review reply points to, showed as plain text. Web links in a reply are now sent as Slack links. Mentions and everything else stay escaped as before.
+
 ## [1.55.2] - 2026-09-28
 
 ### Fixed
