@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server } from 'node:http';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -171,6 +171,7 @@ async function startCall(h: Harness, options: { tab?: string; wake?: boolean; re
 }
 const said = (h: Harness, session: string, text: string, startMs: number) => h.live.emit(session, { type: 'session.input_transcript.delta', delta: text, start_ms: startMs, end_ms: startMs + 400 });
 const delegated = (h: Harness, session: string, id: string, offsetMs: number) => h.live.emit(session, { type: 'session.delegation.created', offset_ms: offsetMs, delegation: { id, type: 'delegation', target: 'client' } });
+const speakOfIn = (room: MasterRoom, id: string) => { const data = room.get(id)?.data; return data?.kind === 'master' ? data.speak : undefined; };
 const masterEntry = (h: Harness, pattern: RegExp) => until(() => h.room.recent(100).find((entry): entry is MasterEntry => entry.data.kind === 'master' && pattern.test(entry.data.text)));
 
 test('a call is made and followed by the host with the owner\'s key: the page gets only the answer, and its ids are kept as digests', async t => {
@@ -540,8 +541,8 @@ test('ending a call stops a change waiting on it at once, even while the host is
   assert.deepEqual(h.speakOf(news.id), { state: 'pending', tries: 1 });
 });
 
-test('the day\'s voice time survives many calls, counts the fifteen seconds once, and a call that cannot be checked keeps counting until it could no longer run', async t => {
-  const h = await harness(t, { timing: { callMaxMs: 3_000 } });
+test('the day\'s voice time survives many calls and counts the fifteen seconds once; a call that may still run keeps counting until it is confirmed or its end passes', async t => {
+  const h = await harness(t);
   for (let index = 0; index < 101; index++) {
     const live = await startCall(h);
     await h.voice.voiceStop({ attemptId: live.attemptId, reason: 'owner' });
@@ -550,7 +551,7 @@ test('the day\'s voice time survives many calls, counts the fifteen seconds once
   const kept = JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8')) as { attempts: unknown[] };
   assert.ok(kept.attempts.length <= 100);
 
-  const base = h.voice.status().today.seconds;
+  let base = h.voice.status().today.seconds;
   const short = await startCall(h);
   h.live.emit(short.session, { type: 'session.usage.updated', usage: { seconds: 5 } });
   await sleep(1_050);
@@ -559,21 +560,51 @@ test('the day\'s voice time survives many calls, counts the fifteen seconds once
   await h.voice.voiceStop({ attemptId: short.attemptId, reason: 'owner' });
   assert.equal(h.voice.status().today.seconds - base, 15);
 
-  // The answer to making a call was lost: nothing to check it by, so it is counted until it could no longer run.
+  // The answer to making a call was lost: the page never got it, so the call never ran and costs its fifteen seconds.
+  base = h.voice.status().today.seconds;
   h.live.createStatus = 500;
   await assert.rejects(startCall(h), { statusCode: 502 });
-  const lost = base + 15;
+  h.live.createStatus = 201;
+  assert.equal(h.voice.status().phase, 'closed');
+  assert.equal(h.voice.status().today.seconds - base, 15);
+
+  // A call that reached the page and whose end GPT-Live never confirmed may still run: it keeps counting.
+  base = h.voice.status().today.seconds;
+  const open = await startCall(h);
+  h.live.emit(open.session, { type: 'session.usage.updated', usage: { seconds: 20 } });
+  h.live.emit(open.session, { type: 'session.started', session: { id: open.session, expires_at: Math.floor(Date.now() / 1000) + 3 } });
+  await until(() => h.voice.status().today.seconds - base === 20);
+  h.live.closeAnswer = false;
+  await h.voice.voiceStop({ attemptId: open.attemptId, reason: 'owner' });
   assert.equal(h.voice.status().phase, 'unconfirmed');
+  h.live.attachStatus = 503;
   await h.voice.probe();
   assert.equal(h.voice.status().phase, 'unconfirmed', 'not being able to check is not an end');
-  await sleep(1_200);
+  const before = h.voice.status().today.seconds;
+  await sleep(1_100);
+  assert.ok(h.voice.status().today.seconds > before, 'and it keeps counting');
+  await sleep(2_500);
   await h.voice.probe();
-  assert.equal(h.voice.status().phase, 'unconfirmed');
-  await sleep(2_000);
-  await h.voice.probe();
-  assert.equal(h.voice.status().phase, 'closed', 'past the longest a call can run');
-  const counted = h.voice.status().today.seconds - lost;
-  assert.ok(counted >= 15 && counted <= 16, `billed for as long as it could have run (${counted} s)`);
+  assert.equal(h.voice.status().phase, 'closed', 'past the end GPT-Live gave it');
+  const fixed = h.voice.status().today.seconds;
+  await sleep(1_100);
+  assert.equal(h.voice.status().today.seconds, fixed);
+  assert.ok(fixed - base >= 22 && fixed - base <= 25, `counted up to its end (${fixed - base} s)`);
+});
+
+test('a start called off while it waits its turn makes nothing, even while the call before it is being closed', async t => {
+  const h = await harness(t, { timing: { closeWaitMs: 1_500 } });
+  const first = await startCall(h);
+  h.live.closeDelayMs = 400;
+  const attemptId = randomUUID();
+  const starting = h.voice.voiceStart({ attemptId, sdp: 'v=0 offer', tabId: randomUUID(), local: true, wake: false });
+  await sleep(100);
+  assert.equal(await h.voice.voiceStop({ attemptId, reason: 'owner' }), true);
+  await assert.rejects(starting, { statusCode: 409 });
+  assert.equal(h.live.creates.length, 1, 'no second call was made');
+  assert.equal(h.voice.busy(), false);
+  assert.ok(h.live.log.includes(`close ${first.session}`), 'the call it was taking over was already ending');
+  assert.equal(h.voice.status().today.seconds, 20);
 });
 
 test('news waiting to be told is found however much the conversation grew, and after the host restarts', async t => {
@@ -582,7 +613,7 @@ test('news waiting to be told is found however much the conversation grew, and a
   await h.voice.voiceStop({ attemptId: first.attemptId, reason: 'silence' });
   await h.queueEvent('E ended');
   const news = await masterEntry(h, /E 끝/);
-  for (let index = 0; index < 600; index++) h.room.add({ kind: 'event', text: `기록 ${index}` });
+  for (let index = 0; index < 1_100; index++) h.room.add({ kind: 'event', text: `기록 ${index}` });
   assert.equal(h.voice.status().wakeable, 1);
   // A host that stopped while it was being told tells it again.
   h.live.ack = 'none';
@@ -590,8 +621,31 @@ test('news waiting to be told is found however much the conversation grew, and a
   await until(() => woken.received().some(command => command.type === 'session.commentary.append'));
   h.room.update(news.id, { ...(h.room.get(news.id)!.data as Extract<MasterEntry['data'], { kind: 'master' }>), speak: { state: 'sent', tries: 0, woke: true } });
   await h.voice.close();
-  const again = new MasterVoice({ dataDir: h.dir, settings: h.settings, room: h.room, hooks: h.service.voiceHooks(), apiBase: h.live.base, socketBase: h.live.base.replace('http', 'ws'), timing: FAST });
-  await again.start();
-  assert.deepEqual(h.speakOf(news.id), { state: 'pending', tries: 1, woke: true });
-  await again.close();
+  await h.room.flush();
+  // A new host reads the conversation from disk; the news sits in a part it does not read by itself.
+  const restart = async () => {
+    const room = new MasterRoom(h.dir);
+    await room.start();
+    assert.equal(room.get(news.id), undefined);
+    const voice = new MasterVoice({ dataDir: h.dir, settings: h.settings, room, hooks: h.service.voiceHooks(), apiBase: h.live.base, socketBase: h.live.base.replace('http', 'ws'), timing: FAST });
+    await voice.start();
+    return { room, voice };
+  };
+  const again = await restart();
+  assert.deepEqual(speakOfIn(again.room, news.id), { state: 'pending', tries: 1, woke: true });
+  assert.equal(again.voice.status().pending, 1);
+  await again.voice.close();
+  await again.room.flush();
+  // Records from before the list existed: rebuilt from what the conversation holds.
+  const saved = JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8')) as Record<string, unknown>;
+  delete saved.speaking;
+  await writeFile(join(h.dir, 'voice.json'), JSON.stringify(saved));
+  const older = new MasterRoom(h.dir);
+  await older.start();
+  await older.load(news.order);
+  const rebuilt = new MasterVoice({ dataDir: h.dir, settings: h.settings, room: older, hooks: h.service.voiceHooks(), apiBase: h.live.base, socketBase: h.live.base.replace('http', 'ws'), timing: FAST });
+  await rebuilt.start();
+  assert.equal(rebuilt.status().pending, 1);
+  await rebuilt.close();
+  await older.flush();
 });

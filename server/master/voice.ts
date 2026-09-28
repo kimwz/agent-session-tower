@@ -35,13 +35,11 @@ export interface VoiceTiming {
   createMs: number; attachMs: number; readyMs: number; closeWaitMs: number; ackMs: number; deliveredMs: number;
   backstopMs: number; leaseMs: number; probeMs: number; quietMs: number; quietMaxMs: number;
   noticeMs: number; resyncMs: number; limitNoticeMs: number;
-  /** The longest a call can run (GPT-Live ends a connected call after two hours) when it has not said when it expires. */
-  callMaxMs: number;
 }
 const TIMING: VoiceTiming = {
   createMs: 20_000, attachMs: 10_000, readyMs: 30_000, closeWaitMs: 12_000, ackMs: 10_000, deliveredMs: 5_000,
   backstopMs: 60_000, leaseMs: 5_000, probeMs: 5 * 60_000, quietMs: 600, quietMaxMs: 2_000,
-  noticeMs: 15_000, resyncMs: 15_000, limitNoticeMs: 6_000, callMaxMs: 2 * 60 * 60_000,
+  noticeMs: 15_000, resyncMs: 15_000, limitNoticeMs: 6_000,
 };
 
 /** What the voice needs from the master: its hiding, its inbox and its conversation. */
@@ -85,6 +83,8 @@ interface Attempt {
   /** Its time is in the daily totals, so it may be forgotten. */
   folded?: boolean;
   sessionId?: string;
+  /** Its answer went to the page, which may have connected: until then the call cannot have started. */
+  answered?: boolean;
   createdAt: number;
   readyAt?: number;
   expiresAt?: number;
@@ -206,6 +206,8 @@ export class MasterVoice {
   private leaseTimer?: ReturnType<typeof setInterval>;
   private probeTimer?: ReturnType<typeof setInterval>;
   private probing?: Promise<void>;
+  /** Starts waiting their turn, which the page may call off before they make anything. */
+  private readonly starting = new Map<string, { cancelled: boolean }>();
   private unsubscribe?: () => void;
   private shownDay = localDay(Date.now());
   private closedHost = false;
@@ -229,9 +231,14 @@ export class MasterVoice {
     }
     // A call this host was following when it stopped cannot be followed again: it is closed if it still runs.
     for (const attempt of this.file.attempts) if (ACTIVE.has(attempt.phase)) { attempt.phase = 'unconfirmed'; attempt.appReason ??= 'host'; attempt.closedAt ??= Date.now(); }
+    for (const attempt of this.file.attempts) if (attempt.phase === 'unconfirmed' && !attempt.answered) this.closeAttempt(attempt);
     // News waiting to be told may sit in an older part of the conversation.
     for (const item of this.file.speaking) await this.options.room.load(item.order).catch(() => {});
     this.file.speaking = this.file.speaking.filter(item => speakOf(this.options.room.get(item.id)?.data));
+    // Records kept without that list: it is rebuilt from what the conversation holds.
+    if (saved && !Array.isArray(saved.speaking)) {
+      for (const entry of this.options.room.recent(Number.MAX_SAFE_INTEGER)) this.follow({ type: 'entry', seq: 0, entry });
+    }
     this.unsubscribe = this.options.room.subscribe(event => this.follow(event));
     // News sent just before the stop may not have been heard.
     for (const { entry, speak } of this.speakEntries()) if (speak.state === 'sent') this.retry(entry, speak);
@@ -284,7 +291,11 @@ export class MasterVoice {
     const tabId = input.tabId;
     const wake = input.wake === true;
     const sdp = input.sdp;
+    if (this.starting.has(attempt)) throw fail('이미 시작 중인 음성 시도입니다.', 409);
+    const pending = { cancelled: false };
+    this.starting.set(attempt, pending);
     return this.inTurn(async () => {
+      if (pending.cancelled) throw fail('음성 시작을 취소했습니다.', 409);
       const settings = this.options.settings.current();
       const key = this.options.settings.key();
       if (!settings.enabled || !key) throw fail('마스터가 꺼져 있거나 OpenAI 키가 없습니다.', 409);
@@ -307,15 +318,17 @@ export class MasterVoice {
       const live: Live = { attempt: record, key, tabId, seen: new Set(), input: emptySide(), output: emptySide(), words: [], cursor: 0, lastWordAt: 0, delegations: [], working: false, handled: new Set(), acks: new Map(), notices: new Map(), gates: new Set() };
       this.live = live;
       this.broadcast();
+      if (pending.cancelled) { record.appReason = 'owner'; record.unbilled = true; record.usage.final = true; this.closeAttempt(record); this.live = undefined; await this.save(); this.broadcast(); throw fail('음성 시작을 취소했습니다.', 409); }
       let created: { id: string; answer: string };
       try { created = await this.create(key, sdp, settings.voice.voice); }
       catch (error) {
-        // Refused outright, nothing was made; any other failure may have made a call this host cannot find.
+        // Refused outright, nothing was made. Any other failure may have made a call this host cannot find, but its
+        // answer never reached the page, so it never started: it costs the fifteen seconds of making it.
         const refused = (error as { refused?: boolean }).refused === true;
         record.appReason = 'failed';
         record.closedAt = Date.now();
-        if (refused) { record.closedConfirmed = true; record.unbilled = true; record.usage.final = true; this.closeAttempt(record); }
-        else record.phase = 'unconfirmed';
+        if (refused) { record.closedConfirmed = true; record.unbilled = true; record.usage.final = true; }
+        this.closeAttempt(record);
         this.live = undefined;
         await this.save();
         this.broadcast();
@@ -326,22 +339,29 @@ export class MasterVoice {
       await this.save();
       try { await this.attach(live); }
       catch (error) {
-        record.phase = 'unconfirmed';
+        // Not followed, the call is not handed to the page; it will not start.
         record.appReason = 'failed';
         record.closedAt = Date.now();
+        this.closeAttempt(record);
         this.release(live);
         await this.save();
         this.broadcast();
         throw fail(`음성 세션을 따라가지 못했습니다: ${this.options.hooks.hide(error instanceof Error ? error.message : String(error))}`, 502);
       }
+      // Called off while it was being made: it is closed, and its answer never goes to the page.
+      if (live.closing || pending.cancelled) {
+        await this.finish(live, 'owner');
+        throw fail('음성 시작을 취소했습니다.', 409);
+      }
       record.phase = 'attached';
+      record.answered = true;
       await this.save();
       this.broadcast();
       // The page must say it is ready (started and playing) in time, or the call is ended.
       live.readyTimer = setTimeout(() => { void this.inTurn(() => this.live === live && record.phase === 'attached' ? this.finish(live, 'failed') : Promise.resolve()); }, this.timing.readyMs);
       live.readyTimer.unref();
       return { sdp: created.answer, attempt };
-    });
+    }).finally(() => { this.starting.delete(attempt); });
   }
 
   /** The page heard the call start and plays it. */
@@ -369,8 +389,10 @@ export class MasterVoice {
    */
   async voiceStop(input: { attemptId: unknown; reason: unknown }): Promise<boolean> {
     const reason = input.reason === 'silence' || input.reason === 'failed' ? input.reason : 'owner';
+    const waiting = typeof input.attemptId === 'string' && UUID.test(input.attemptId) ? this.starting.get(hash(input.attemptId)) : undefined;
+    if (waiting) waiting.cancelled = true;
     const live = this.mine(input.attemptId);
-    if (!live) return false;
+    if (!live) return Boolean(waiting);
     await this.end(live, reason);
     return true;
   }
@@ -805,7 +827,7 @@ export class MasterVoice {
 
   /**
    * Calls whose end was never confirmed: attach and close them every few minutes. One GPT-Live no longer knows has
-   * ended; one that could not be checked (no id, no key) stays counted until it could no longer be running.
+   * ended; one that cannot be checked stays counted, up to the end GPT-Live gave it when it said.
    */
   probe(): Promise<void> {
     if (!this.probing && !this.closedHost) this.probing = this.probeAll().finally(() => { this.probing = undefined; });
@@ -817,8 +839,9 @@ export class MasterVoice {
     for (const attempt of this.file.attempts.filter(item => item.phase === 'unconfirmed')) {
       if (this.closedHost) return;
       const now = Date.now();
-      const limit = this.limitOf(attempt);
-      if (now >= limit) { attempt.closedAt = limit; this.closeAttempt(attempt); continue; }
+      // Past the end GPT-Live gave it, it cannot be running; a call that never got to the page never started.
+      if (attempt.expiresAt !== undefined && now >= attempt.expiresAt) { attempt.closedAt = attempt.expiresAt; this.closeAttempt(attempt); continue; }
+      if (!attempt.answered) { this.closeAttempt(attempt); continue; }
       if (!attempt.sessionId || !key) continue;
       attempt.lastProbeAt = now;
       const live: Live = { attempt, key, tabId: '', seen: new Set(), input: emptySide(), output: emptySide(), words: [], cursor: 0, lastWordAt: 0, delegations: [], working: false, handled: new Set(), acks: new Map(), notices: new Map(), gates: new Set(), closing: true };
@@ -841,8 +864,8 @@ export class MasterVoice {
     this.broadcast();
   }
 
-  /** When a call can be running no longer: when GPT-Live said it expires, or the longest a call can last. */
-  private limitOf(attempt: Attempt): number { return attempt.expiresAt ?? attempt.createdAt + this.timing.callMaxMs; }
+  /** When a call can be running no longer: when GPT-Live said it expires; unknown otherwise. */
+  private limitOf(attempt: Attempt): number { return attempt.expiresAt ?? Number.MAX_SAFE_INTEGER; }
 
   // ─── cost ────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -867,7 +890,8 @@ export class MasterVoice {
     if (attempt.unbilled) return {};
     const days = { ...attempt.usage.byDay };
     let total = attempt.usage.seconds;
-    if (!attempt.usage.final) {
+    // A call whose answer never reached the page never ran: only the seconds of making it.
+    if (!attempt.usage.final && attempt.answered) {
       const from = attempt.usage.observedAt ?? attempt.readyAt ?? attempt.createdAt;
       const open = ACTIVE.has(attempt.phase) || attempt.phase === 'unconfirmed';
       const to = Math.min(open ? now : attempt.closedAt ?? now, this.limitOf(attempt));
