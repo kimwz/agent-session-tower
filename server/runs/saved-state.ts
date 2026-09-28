@@ -29,6 +29,8 @@ export function isSavedRun(value: unknown): value is Run {
     && (run.autoPromptId === undefined || UUID.test(run.autoPromptId))
     && (run.steering === undefined || isSavedSteering(run.steering, run))
     && (run.scheduled === undefined || isSavedSchedule(run.scheduled, run))
+    && (run.instructions === undefined || (typeof run.instructions === 'object' && typeof run.instructions.text === 'string' && run.instructions.text.length <= 48_000
+      && (run.instructions.required === undefined || typeof run.instructions.required === 'boolean')))
     && (run.attachments === undefined || (Array.isArray(run.attachments) && run.attachments.length <= 10 && run.attachments.every(item => attachmentMetadata(item))))
     && ['queued', 'running', 'completed', 'error', 'cancelled'].includes(run.status ?? '');
 }

@@ -146,6 +146,12 @@ export interface Run {
   /** For a turn the owner started: whether Tower's tools reached it, and if not, why. */
   towerTools?: 'attached' | 'desktop-app' | 'external-input' | 'not-owner-session' | 'remote';
   prompt: string;
+  /**
+   * What Tower tells the agent for this turn beside the request: policy, receipts, hints. The provider receives it as
+   * system or developer instructions, so the conversation shows only the request. The worker keeps it; pages never
+   * receive it. A turn whose instructions are `required` never goes ahead without them.
+   */
+  instructions?: RunInstructions;
   status: 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
   createdAt: string;
   startedAt?: string;
@@ -176,6 +182,7 @@ export interface Run {
    */
   backgroundWait?: { since: string; tasks: number };
 }
+export interface RunInstructions { text: string; required?: boolean }
 export interface RunApproval {
   id: string;
   toolName: string;

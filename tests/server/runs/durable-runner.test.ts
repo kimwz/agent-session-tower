@@ -278,14 +278,17 @@ test('only the owner’s own message can approve a Slack send; agent work and co
   const ownerMessages: string[] = [];
   const slack = {
     sessionMcp: () => undefined,
-    ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return `${message} [owner receipt]`; },
+    ownerChat: async (_id: string, message: string) => { ownerMessages.push(message); return { prompt: message, instructions: '[owner receipt]' }; },
     coordinatorSessionIds: () => [],
   } as unknown as SlackService;
   const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, slack });
   t.after(() => host.close());
   const client = await f.connect();
   const owner = await client.enqueue(f.session.id, '1번 보내주세요');
-  assert.equal(owner.prompt, '1번 보내주세요 [owner receipt]');
+  // The conversation shows the owner's words; the receipt reaches the agent as instructions it cannot go without.
+  assert.equal(owner.prompt, '1번 보내주세요');
+  assert.equal(owner.instructions, undefined, 'the page never sees the receipt');
+  assert.deepEqual(f.runs.list().find(run => run.id === owner.id) && (f.runs as unknown as { runs: Map<string, { instructions?: unknown }> }).runs.get(owner.id)?.instructions, { text: '[owner receipt]', required: true });
   assert.deepEqual(owner.origin, { kind: 'owner' });
   const agent = await client.enqueue(f.session.id, '승인합니다', {}, { origin: { kind: 'agent', runId: owner.id } });
   assert.equal(agent.prompt, '승인합니다');

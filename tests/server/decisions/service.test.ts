@@ -29,7 +29,7 @@ test('without an API key nothing uses fast judgments, and a saved key is never s
   await service.start();
   assert.equal(service.engine('autoPromptSuggestions'), undefined);
   assert.equal(service.engine('attentionNotifications'), undefined);
-  assert.deepEqual(service.overview(), { provider: 'jev', label: 'Jev', configured: false, features: { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true, sessionOutcomes: true }, providers: [{ id: 'jev', label: 'Jev' }], recent: [] });
+  assert.deepEqual(service.overview(), { provider: 'jev', label: 'Jev', configured: false, features: { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true, sessionOutcomes: true, relatedSessions: true }, providers: [{ id: 'jev', label: 'Jev' }], recent: [] });
   const overview = await service.update({ apiKey: '  tsk-abcdefgh1234  ' });
   assert.equal(overview.configured, true);
   assert.equal(overview.keyHint, '…1234');
@@ -51,7 +51,7 @@ test('each feature can be turned off on its own and keeps its usual behaviour th
   await service.update({ apiKey: 'tsk-abcdefgh1234', features: { attentionNotifications: false } });
   assert.ok(service.engine('autoPromptSuggestions'));
   assert.equal(service.engine('attentionNotifications'), undefined);
-  assert.deepEqual(service.overview().features, { autoPromptSuggestions: true, attentionNotifications: false, steerTiming: true, sessionOutcomes: true });
+  assert.deepEqual(service.overview().features, { autoPromptSuggestions: true, attentionNotifications: false, steerTiming: true, sessionOutcomes: true, relatedSessions: true });
 });
 
 test('settings refuse unknown fields, providers, features, and malformed keys', async t => {
@@ -98,7 +98,7 @@ test('a damaged settings file starts with suggestions off rather than failing', 
   await writeFile(join(dir, 'decisions.json'), JSON.stringify({ provider: 'gone', apiKey: 'no', features: { autoPromptSuggestions: 'maybe' } }), { mode: 0o600 });
   const service = new DecisionService(dir);
   await service.start();
-  assert.deepEqual(service.overview(), { provider: 'jev', label: 'Jev', configured: false, features: { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true, sessionOutcomes: true }, providers: [{ id: 'jev', label: 'Jev' }], recent: [] });
+  assert.deepEqual(service.overview(), { provider: 'jev', label: 'Jev', configured: false, features: { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true, sessionOutcomes: true, relatedSessions: true }, providers: [{ id: 'jev', label: 'Jev' }], recent: [] });
 });
 
 test('changes apply one at a time, so a deleted key never comes back through a change made at the same moment', async t => {

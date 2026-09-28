@@ -1,3 +1,5 @@
+/** An owner turn as the agent receives it: the message, then Tower's instructions. */
+const chatText = (turn: { prompt: string; instructions?: string }) => `${turn.prompt}\n\n${turn.instructions ?? ''}`;
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -139,7 +141,11 @@ test('overbudget event admission rolls back and remains unacknowledged', async t
 
 test('conversation creates one native session, skips legacy matching and leaves replies to explicit tools', async t => {
   const f = await fixture(t); let creates = 0;
-  f.options.startConversation = async (workflow, prompt) => { creates++; assert.equal(workflow.mode, 'conversation'); assert.match(prompt, /tower_auto_prompt/); assert.match(prompt, /Let the project agent inspect its local context/); return { sessionId: 'session', runId: 'run' }; };
+  f.options.startConversation = async (workflow, prompt, instructions) => { creates++; assert.equal(workflow.mode, 'conversation');
+    // The conversation shows the request; Tower's policy and the owner's rules reach the agent as instructions.
+    assert.match(instructions!, /tower_auto_prompt/); assert.match(instructions!, /Let the project agent inspect its local context/);
+    assert.doesNotMatch(prompt, /tower_auto_prompt|coordinator/); assert.match(prompt, new RegExp(mention.text.slice(0, 20).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    return { sessionId: 'session', runId: 'run' }; };
   f.options.match = async () => { throw new Error('legacy classifier must not run'); };
   await f.manager.ingest(mention); await f.manager.tick(); await f.manager.tick();
   assert.equal(creates, 1); assert.equal(f.manager.list()[0].sessionId, 'session');
@@ -164,7 +170,7 @@ test('conversation tools scope task reads and deduplicate delegation with Auto r
   const restarted = new SlackAutomationManager(f.options); await restarted.start();
   await restarted.tool(id, 'tower_auto_prompt', args);
   assert.equal(f.counts().submissions, 1);
-  const followup = await restarted.ownerChat('session', '다음 PR도 같은 범위로 검토해주세요');
+  const followup = chatText(await restarted.ownerChat('session', '다음 PR도 같은 범위로 검토해주세요'));
   assert.match(followup, /Let the project agent inspect its local context/);
   assert.match(followup, /Preserve owner requirements such as read-only/);
   await assert.rejects(f.manager.tool(id, 'tower_task_status', { requestId: 'unrelated' }), /does not belong/);
@@ -202,9 +208,9 @@ test('delegated completion resumes an idle coordinator once and does not occupy 
   const coordinatorRuns = [coordinator]; let resumes = 0;
   f.options.startConversation = async () => ({ sessionId: coordinator.sessionId, runId: coordinator.id });
   f.options.getSessionRuns = () => coordinatorRuns;
-  f.options.resumeConversation = async (_workflow, prompt, correlationId) => {
+  f.options.resumeConversation = async (_workflow, prompt, correlationId, instructions) => {
     resumes++; assert.match(prompt, /Review finished/);
-    assert.match(prompt, /Let the project agent inspect its local context/);
+    assert.match(instructions!, /Let the project agent inspect its local context/); assert.doesNotMatch(prompt, /Let the project agent/);
     const run: Run = { ...coordinator, id: 'notification', status: 'queued', autoPromptId: correlationId };
     coordinatorRuns.push(run); return { runId: run.id };
   };
@@ -230,7 +236,7 @@ test('settled conversational ticks do not emit changes or rewrite history while 
   const path = join(f.directory, 'slack-automation.json'); const before = await readFile(path, 'utf8');
   await f.manager.tick(); await f.manager.tick();
   assert.equal(changes, 0); assert.equal(await readFile(path, 'utf8'), before);
-  assert.match(f.manager.list()[0].prompt!, /first whose condition clearly matches/);
+  assert.match(f.manager.list()[0].instructions!, /first whose condition clearly matches/);
 });
 
 test('rejected delegation becomes a durable visible error and the same key can retry successfully', async t => {
@@ -352,11 +358,11 @@ test('owner chat selects exact saved wording and explicit approval sends once ac
   await f.manager.ingest(mention); await f.manager.tick();
   const id = f.manager.list()[0].id;
   for (const [index, text] of ['First', 'Second', 'Third'].entries()) await f.manager.tool(id, 'slack_reply', { requestKey: `r${index}`, text });
-  await f.manager.ownerChat('owner-chat', '3번');
+  chatText(await f.manager.ownerChat('owner-chat', '3번'));
   assert.equal(f.counts().sends, 0);
   const restarted = new SlackAutomationManager(f.options); await restarted.start();
-  assert.match(await restarted.ownerChat('owner-chat', '승인합니다'), /status: sent/);
-  await restarted.ownerChat('owner-chat', '승인합니다');
+  assert.match(chatText(await restarted.ownerChat('owner-chat', '승인합니다')), /status: sent/);
+  chatText(await restarted.ownerChat('owner-chat', '승인합니다'));
   assert.equal(f.counts().sends, 1);
   assert.equal(restarted.list()[0].reply, 'Third');
 });
@@ -367,14 +373,14 @@ test('owner chat accepts direct send commands but never negation, quotation, que
   await f.manager.ingest(mention); await f.manager.tick();
   const id = f.manager.list()[0].id;
   for (const [index, text] of ['First', 'Second', 'Third'].entries()) await f.manager.tool(id, 'slack_reply', { requestKey: `r${index}`, text });
-  for (const message of ['3번으로 보내지 마세요', '3번으로 보내주세요?', '"3번으로 보내주세요"', '승인합니다', '3번은 아직 보내지 마세요']) await f.manager.ownerChat('owner-chat', message);
-  await f.manager.ownerChat('other-session', '3번으로 답변 달아주세요');
+  for (const message of ['3번으로 보내지 마세요', '3번으로 보내주세요?', '"3번으로 보내주세요"', '승인합니다', '3번은 아직 보내지 마세요']) chatText(await f.manager.ownerChat('owner-chat', message));
+  chatText(await f.manager.ownerChat('other-session', '3번으로 답변 달아주세요'));
   assert.equal(f.counts().sends, 0);
-  await f.manager.ownerChat('owner-chat', 'Third');
+  chatText(await f.manager.ownerChat('owner-chat', 'Third'));
   assert.equal(f.counts().sends, 0);
-  await f.manager.ownerChat('owner-chat', '이 내용으로 보내주세요');
+  chatText(await f.manager.ownerChat('owner-chat', '이 내용으로 보내주세요'));
   assert.equal(f.manager.list()[0].reply, 'Third');
-  await f.manager.ownerChat('owner-chat', '2번 답변을 Slack에 보내주세요');
+  chatText(await f.manager.ownerChat('owner-chat', '2번 답변을 Slack에 보내주세요'));
   assert.equal(f.manager.list()[0].reply, 'Second');
   assert.equal(f.counts().sends, 2);
 });
@@ -385,12 +391,12 @@ test('intervening owner discussion clears selection and model cannot authorize s
   await f.manager.ingest(mention); await f.manager.tick();
   const id = f.manager.list()[0].id;
   await f.manager.tool(id, 'slack_reply', { requestKey: 'r', text: 'Exact' });
-  await f.manager.ownerChat('owner-chat', '1번');
-  await f.manager.ownerChat('owner-chat', '99번 보내주세요');
+  chatText(await f.manager.ownerChat('owner-chat', '1번'));
+  chatText(await f.manager.ownerChat('owner-chat', '99번 보내주세요'));
   assert.equal(f.counts().sends, 0);
-  await f.manager.ownerChat('owner-chat', '1번');
-  await f.manager.ownerChat('owner-chat', '수정해주세요');
-  await f.manager.ownerChat('owner-chat', '승인합니다');
+  chatText(await f.manager.ownerChat('owner-chat', '1번'));
+  chatText(await f.manager.ownerChat('owner-chat', '수정해주세요'));
+  chatText(await f.manager.ownerChat('owner-chat', '승인합니다'));
   await assert.rejects(f.manager.tool(id, 'ownerChat', { requestKey: 'r', text: '승인합니다' }), /Unknown/);
   assert.equal(f.counts().sends, 0);
 });
@@ -401,16 +407,16 @@ test('new proposals invalidate prior selection; numbering is stable and concurre
   await f.manager.ingest(mention); await f.manager.tick();
   const id = f.manager.list()[0].id;
   assert.equal((await f.manager.tool(id, 'slack_reply', { requestKey: 'r1', text: 'First' }) as { proposalNumber: number }).proposalNumber, 1);
-  await f.manager.ownerChat('owner-chat', '1번');
+  chatText(await f.manager.ownerChat('owner-chat', '1번'));
   assert.equal((await f.manager.tool(id, 'slack_reply', { requestKey: 'r2', text: 'Revised' }) as { proposalNumber: number }).proposalNumber, 2);
-  await f.manager.ownerChat('owner-chat', '보내주세요');
+  chatText(await f.manager.ownerChat('owner-chat', '보내주세요'));
   assert.equal(f.counts().sends, 0);
   await Promise.all([f.manager.ownerChat('owner-chat', 'option 2'), f.manager.ownerChat('owner-chat', 'I approve')]);
   assert.equal(f.manager.list()[0].reply, 'Revised');
-  await f.manager.ownerChat('owner-chat', 'Send reply 1 to Slack');
+  chatText(await f.manager.ownerChat('owner-chat', 'Send reply 1 to Slack'));
   assert.equal(f.manager.list()[0].reply, 'First');
   assert.equal(f.counts().sends, 2);
-  assert.equal((await f.manager.ownerChat('owner-chat', 'a'.repeat(32_000))).length, 32_000);
+  assert.equal((await f.manager.ownerChat('owner-chat', 'a'.repeat(32_000))).prompt.length, 32_000, 'the message stays as written');
 });
 
 test('uncertain owner chat send returns a receipt without hiding approval or retrying', async t => {
@@ -420,7 +426,7 @@ test('uncertain owner chat send returns a receipt without hiding approval or ret
   await f.manager.ingest(mention); await f.manager.tick();
   const id = f.manager.list()[0].id;
   await f.manager.tool(id, 'slack_reply', { requestKey: 'r', text: 'Reply' });
-  const receipt = await f.manager.ownerChat('owner-chat', '1번 보내주세요');
+  const receipt = chatText(await f.manager.ownerChat('owner-chat', '1번 보내주세요'));
   assert.match(receipt, /^1번 보내주세요/);
   assert.match(receipt, /uncertain/);
   assert.equal(f.manager.list()[0].replies![0].status, 'uncertain');
@@ -431,18 +437,18 @@ test('pasted proposal wording that looks like an approval only selects it', asyn
   f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'run' });
   await f.manager.ingest(mention); await f.manager.tick();
   await f.manager.tool(f.manager.list()[0].id, 'slack_reply', { requestKey: 'r', text: '승인합니다' });
-  await f.manager.ownerChat('owner-chat', '승인합니다');
+  chatText(await f.manager.ownerChat('owner-chat', '승인합니다'));
   assert.equal(f.counts().sends, 0);
-  await f.manager.ownerChat('owner-chat', '1번 보내주세요');
+  chatText(await f.manager.ownerChat('owner-chat', '1번 보내주세요'));
   assert.equal(f.counts().sends, 1);
   await f.manager.tool(f.manager.list()[0].id, 'slack_reply', { requestKey: 'r2', text: 'Send reply 1 to Slack' });
-  await f.manager.ownerChat('owner-chat', 'Send reply 1 to Slack');
+  chatText(await f.manager.ownerChat('owner-chat', 'Send reply 1 to Slack'));
   assert.equal(f.counts().sends, 1);
   assert.equal(f.manager.list()[0].ownerReplySelection?.requestKey, 'r2');
   await f.manager.tool(f.manager.list()[0].id, 'slack_reply', { requestKey: 'r3', text: '1번 보내주세요' });
-  await f.manager.ownerChat('owner-chat', '1번 보내주세요');
+  chatText(await f.manager.ownerChat('owner-chat', '1번 보내주세요'));
   assert.equal(f.counts().sends, 1);
-  await f.manager.ownerChat('owner-chat', '승인');
+  chatText(await f.manager.ownerChat('owner-chat', '승인'));
   assert.equal(f.manager.list()[0].reply, '1번 보내주세요');
   assert.equal(f.counts().sends, 2);
 });
@@ -462,7 +468,7 @@ async function conditionalFixture(t: TestContext) {
 const conditionalCommand = '작업이 완료되면 그냥 배포됐습니다 라고 코멘트 다세요.';
 test('conditional owner authorization survives restart and sends exact text only after evidenced success', async t => {
   const f = await conditionalFixture(t);
-  assert.match(await f.manager.ownerChat('owner-chat', conditionalCommand), /authorization saved/);
+  assert.match(chatText(await f.manager.ownerChat('owner-chat', conditionalCommand)), /authorization saved/);
   assert.equal(f.manager.list()[0].ownerConditionalReply?.text, '배포됐습니다');
   const args = { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Release abc123 deployed and health verified.' };
   await f.manager.tool(f.id, 'tower_task_complete', args);
@@ -477,7 +483,7 @@ test('conditional owner authorization survives restart and sends exact text only
 test('conditional reply requires owner permission and never sends failed uncertain cancelled or mismatched tasks', async t => {
   for (const outcome of ['failed', 'uncertain', 'error', 'cancelled', 'mismatch', 'no-owner']) {
     const f = await conditionalFixture(t);
-    if (outcome !== 'no-owner') await f.manager.ownerChat('owner-chat', conditionalCommand);
+    if (outcome !== 'no-owner') chatText(await f.manager.ownerChat('owner-chat', conditionalCommand));
     f.run.status = outcome === 'error' || outcome === 'cancelled' ? outcome : 'completed';
     if (outcome === 'mismatch') f.run.autoPromptId = 'other';
     const work = f.manager.tool(f.id, 'tower_task_complete', { requestId: f.task.requestId, runId: f.run.id, outcome: outcome === 'failed' || outcome === 'uncertain' ? outcome : 'succeeded', evidence: 'Checked task result.' });
@@ -486,11 +492,11 @@ test('conditional reply requires owner permission and never sends failed uncerta
   }
 });
 test('owner cancellation is serialized before completion and uncertain delivery never retries after restart', async t => {
-  const f = await conditionalFixture(t); await f.manager.ownerChat('owner-chat', conditionalCommand); f.run.status = 'completed';
+  const f = await conditionalFixture(t); chatText(await f.manager.ownerChat('owner-chat', conditionalCommand)); f.run.status = 'completed';
   const args = { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Deployment verified.' };
   await Promise.all([f.manager.ownerChat('owner-chat', '댓글 취소해주세요'), f.manager.tool(f.id, 'tower_task_complete', args)]);
   assert.equal(f.counts().sends, 0);
-  const g = await conditionalFixture(t); await g.manager.ownerChat('owner-chat', conditionalCommand); g.run.status = 'completed';
+  const g = await conditionalFixture(t); chatText(await g.manager.ownerChat('owner-chat', conditionalCommand)); g.run.status = 'completed';
   let attempts = 0; g.options.sendReply = async () => { attempts++; throw Error('uncertain'); };
   await g.manager.tool(g.id, 'tower_task_complete', { ...args, requestId: g.task.requestId });
   const restarted = new SlackAutomationManager(g.options); await restarted.start();
@@ -500,22 +506,22 @@ test('owner cancellation is serialized before completion and uncertain delivery 
 test('conditional commands fail closed on ambiguity and exact proposal paste retains selection semantics', async t => {
   const f = await conditionalFixture(t);
   await f.manager.tool(f.id, 'slack_reply', { requestKey: 'literal', text: conditionalCommand });
-  await f.manager.ownerChat('owner-chat', conditionalCommand);
+  chatText(await f.manager.ownerChat('owner-chat', conditionalCommand));
   assert.equal(f.manager.list()[0].ownerConditionalReply, undefined);
   assert.equal(f.manager.list()[0].ownerReplySelection?.requestKey, 'literal');
   const g = await conditionalFixture(t);
   await g.manager.tool(g.id, 'tower_auto_prompt', { requestKey: 'second', prompt: 'Other task' });
-  assert.match(await g.manager.ownerChat('owner-chat', conditionalCommand), /not authorized/);
+  assert.match(chatText(await g.manager.ownerChat('owner-chat', conditionalCommand)), /not authorized/);
   assert.equal(g.manager.list()[0].ownerConditionalReply, undefined);
   for (const message of ['"' + conditionalCommand + '"', conditionalCommand + '?', '작업이 완료되면 보내지 마세요']) {
-    await g.manager.ownerChat('owner-chat', message); assert.equal(g.manager.list()[0].ownerConditionalReply, undefined);
+    chatText(await g.manager.ownerChat('owner-chat', message)); assert.equal(g.manager.list()[0].ownerConditionalReply, undefined);
   }
 });
 test('conditional replacement preserves only latest exact wording and rejects stale run evidence', async t => {
   const f = await conditionalFixture(t);
-  await f.manager.ownerChat('owner-chat', conditionalCommand);
-  await f.manager.ownerChat('owner-chat', '작업이 완료되면 그냥 수정했습니다 라고 코멘트 다세요.');
-  await f.manager.ownerChat('owner-chat', '진행 상황은 어떤가요?');
+  chatText(await f.manager.ownerChat('owner-chat', conditionalCommand));
+  chatText(await f.manager.ownerChat('owner-chat', '작업이 완료되면 그냥 수정했습니다 라고 코멘트 다세요.'));
+  chatText(await f.manager.ownerChat('owner-chat', '진행 상황은 어떤가요?'));
   assert.equal(f.manager.list()[0].ownerConditionalReply?.text, '수정했습니다');
   f.run.status = 'completed';
   const args = { requestId: f.task.requestId, runId: 'stale', outcome: 'succeeded', evidence: 'Verified.' };
@@ -530,21 +536,21 @@ test('coordinator language follows current preference on creation, owner followu
   let language: 'ko' | 'en' = 'ko';
   let initial = '', resumed = '';
   f.options.language = () => language;
-  f.options.startConversation = async (_workflow, prompt) => { initial = prompt; return { sessionId: 'coordinator', runId: 'initial' }; };
+  f.options.startConversation = async (_workflow, prompt, instructions) => { initial = `${instructions}\n${prompt}`; return { sessionId: 'coordinator', runId: 'initial' }; };
   f.options.getSessionRuns = () => [];
-  f.options.resumeConversation = async (_workflow, prompt) => { resumed = prompt; return { runId: 'result' }; };
+  f.options.resumeConversation = async (_workflow, prompt, _correlation, instructions) => { resumed = `${instructions}\n${prompt}`; return { runId: 'result' }; };
   await f.manager.ingest(mention); await f.manager.tick();
   assert.match(initial, /^\[Tower 대화 언어: 한국어\]/);
   const id = f.manager.list()[0].id;
   await f.manager.tool(id, 'slack_reply', { requestKey: 'exact', text: 'Keep this exact English wording.' });
   language = 'en';
-  assert.match(await f.manager.ownerChat('coordinator', 'explain'), /\[Tower conversation language: English\]/);
-  assert.equal(await f.manager.ownerChat('unrelated', 'explain'), 'explain');
+  assert.match(chatText(await f.manager.ownerChat('coordinator', 'explain')), /\[Tower conversation language: English\]/);
+  assert.deepEqual(await f.manager.ownerChat('unrelated', 'explain'), { prompt: 'explain' }, 'another conversation gets nothing added');
   await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'task', prompt: 'Review PR' });
   f.finish(); await f.manager.tick();
   assert.match(resumed, /^\[Tower conversation language: English\]/);
   language = 'ko';
-  assert.match(await f.manager.ownerChat('coordinator', '설명해주세요'), /\[Tower 대화 언어: 한국어\]/);
+  assert.match(chatText(await f.manager.ownerChat('coordinator', '설명해주세요')), /\[Tower 대화 언어: 한국어\]/);
   assert.equal(f.manager.list()[0].replies?.[0].text, 'Keep this exact English wording.');
   assert.equal(f.counts().sends, 0);
   assert.equal(f.submitted[0].prompt, 'Review PR', 'coordinator language/policy must not pollute delegated task prompt');
@@ -553,7 +559,7 @@ test('coordinator language follows current preference on creation, owner followu
 test('composed owner consent during work survives restart and sends once without exact wording or a click', async t => {
   const f = await conditionalFixture(t);
   await assert.rejects(f.manager.tool(f.id, 'slack_send', { text: 'Unauthorized' }), /No immediate owner/);
-  assert.match(await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요'), /authorization saved/);
+  assert.match(chatText(await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요')), /authorization saved/);
   assert.equal(f.manager.list()[0].ownerConditionalReply?.mode, 'composed');
   const args = { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Verified deployment.', text: '배포를 마쳤습니다. 확인 부탁드립니다.' };
   await f.manager.tool(f.id, 'tower_task_complete', args); assert.equal(f.counts().sends, 0);
@@ -568,7 +574,7 @@ test('polite immediate and edited-wording chat permissions allow an agent compos
   for (const message of ['슬랙에 보내주시겠어요?', '슬랙에 보내줄래요?', '슬랙에 보내도 됩니다', '이 문구로 슬랙에 보내주세요', '수정한 내용으로 답변 보내주세요']) {
     const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
     await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
-    assert.match(await f.manager.ownerChat('owner-chat', message), /authorization saved/);
+    assert.match(chatText(await f.manager.ownerChat('owner-chat', message)), /authorization saved/);
     await f.manager.tool(id, 'slack_send', { text: '수정 내용을 반영했습니다.' });
     await f.manager.tool(id, 'slack_send', { text: '수정 내용을 반영했습니다.' });
     assert.equal(f.counts().sends, 1);
@@ -578,18 +584,18 @@ test('polite immediate and edited-wording chat permissions allow an agent compos
 test('semantic owner classifier sees owner input only, handles compound permission and fails without blocking chat', async t => {
   const f = await conditionalFixture(t); let calls = 0;
   f.options.classifyOwnerReply = async message => { calls++; assert.equal(message, 'LGTM 달고 슬랙에도 알려주세요'); return { intent: 'after_work' }; };
-  await f.manager.ownerChat('owner-chat', 'LGTM 달고 슬랙에도 알려주세요');
+  chatText(await f.manager.ownerChat('owner-chat', 'LGTM 달고 슬랙에도 알려주세요'));
   assert.equal(calls, 1); assert.equal(f.manager.list()[0].ownerConditionalReply?.mode, 'composed');
   f.options.classifyOwnerReply = async () => { throw Error('timeout'); };
-  assert.match(await f.manager.ownerChat('owner-chat', '이런 말투가 좋아요'), /message was received/);
+  assert.match(chatText(await f.manager.ownerChat('owner-chat', '이런 말투가 좋아요')), /message was received/);
   assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'pending');
-  await f.manager.ownerChat('owner-chat', '아직 보내지 마세요');
+  chatText(await f.manager.ownerChat('owner-chat', '아직 보내지 마세요'));
   assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'cancelled');
 });
 
 test('composed completion reports truthful failures but cannot assert success or send while running', async t => {
   for (const status of ['error', 'cancelled'] as const) {
-    const f = await conditionalFixture(t); await f.manager.ownerChat('owner-chat', '끝나면 그냥 알려주시면 됩니다');
+    const f = await conditionalFixture(t); chatText(await f.manager.ownerChat('owner-chat', '끝나면 그냥 알려주시면 됩니다'));
     f.run.status = status; f.run.error = 'Deployment failed.';
     const args = { requestId: f.task.requestId, runId: f.run.id, evidence: 'Deployment failed before health check.', text: '배포하지 못했습니다. 원인을 확인하고 있습니다.' };
     await assert.rejects(f.manager.tool(f.id, 'tower_task_complete', { ...args, outcome: 'succeeded' }), /Cannot report success/);
@@ -607,7 +613,7 @@ test('permission granted before delegation binds all newly delegated tasks and w
     jobs.set(job.id, job); runs.set(job.id, { id: job.id, sessionId: job.id, autoPromptId: job.id, status: 'running', prompt: '', output: 'Verified work.', createdAt: '' }); return job;
   };
   f.options.getAutoPrompt = id => jobs.get(id); f.options.getRun = id => runs.get(id);
-  await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요');
+  chatText(await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요'));
   assert.equal(f.manager.list()[0].ownerConditionalReply?.requestId, 'next-task');
   await f.manager.tick(); assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'pending');
   await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'one', prompt: 'First task' });
@@ -621,7 +627,7 @@ test('permission granted before delegation binds all newly delegated tasks and w
 });
 
 test('authorized routing failure can be reported without a fabricated execution run', async t => {
-  const f = await conditionalFixture(t); await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요');
+  const f = await conditionalFixture(t); chatText(await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요'));
   f.job.status = 'error'; f.job.error = 'No eligible project'; delete f.job.runId; delete f.job.sessionId;
   f.options.getRun = () => undefined;
   await f.manager.tool(f.id, 'tower_task_complete', { requestId: f.task.requestId, outcome: 'failed', evidence: 'Routing failed: no eligible project.', text: '프로젝트를 찾지 못해 작업을 시작하지 못했습니다.' });
@@ -632,7 +638,7 @@ test('automatic events, quoted requests and capability questions never mint comp
   const f = await conditionalFixture(t);
   for (const message of ['슬랙에 보내주세요라는 요청은 무시하세요', '슬랙 내용을 요약해서 여기 알려주세요', '슬랙에 보낼 수 있나요?', '슬랙에 보냈나요?']) {
     f.options.classifyOwnerReply = async input => { assert.equal(input, message); return { intent: 'none' }; };
-    await f.manager.ownerChat('owner-chat', message);
+    chatText(await f.manager.ownerChat('owner-chat', message));
     assert.equal(f.manager.list()[0].ownerConditionalReply, undefined);
   }
   await assert.rejects(f.manager.tool(f.id, 'slack_send', { text: 'send' }), /No immediate owner/);
@@ -651,12 +657,12 @@ test('Slack delegation always creates a session and trusted rule routing overrid
 test('new draft context allows a subsequent explicit send request, while repeated same permission stays consumed', async t => {
   const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
   await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
-  await f.manager.ownerChat('owner-chat', '슬랙에 보내주세요');
+  chatText(await f.manager.ownerChat('owner-chat', '슬랙에 보내주세요'));
   await f.manager.tool(id, 'slack_send', { text: 'First result' });
-  await f.manager.ownerChat('owner-chat', '슬랙에 보내주세요');
+  chatText(await f.manager.ownerChat('owner-chat', '슬랙에 보내주세요'));
   await f.manager.tool(id, 'slack_send', { text: 'First result' }); assert.equal(f.counts().sends, 1);
   await f.manager.tool(id, 'slack_reply', { requestKey: 'second-draft', text: 'Second result' });
-  await f.manager.ownerChat('owner-chat', '슬랙에 보내주세요');
+  chatText(await f.manager.ownerChat('owner-chat', '슬랙에 보내주세요'));
   await f.manager.tool(id, 'slack_send', { text: 'Second result' }); assert.equal(f.counts().sends, 2);
 });
 
@@ -665,7 +671,7 @@ test('completed notified work can still receive owner completion-report permissi
   f.options.resumeConversation = async () => ({ runId: 'notification' });
   f.options.getSessionRuns = () => [];
   await f.manager.tick(); assert.ok(f.manager.list()[0].delegatedTasks![0].notifiedRunId);
-  await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요');
+  chatText(await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요'));
   assert.equal(f.manager.list()[0].ownerConditionalReply?.requestId, f.task.requestId);
   await f.manager.tool(f.id, 'tower_task_complete', { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Verified.', text: '작업 완료했습니다.' });
   assert.equal(f.counts().sends, 1);
@@ -675,7 +681,7 @@ test('owner completion permission can report a durable submission failure withou
   const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
   f.options.submitAutoPrompt = async () => { throw Error('Provider unavailable'); }; f.options.getRun = () => undefined;
   await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
-  await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요');
+  chatText(await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요'));
   await assert.rejects(f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'task', prompt: 'Review PR' }), /Provider unavailable/);
   const requestId = f.manager.list()[0].delegatedTasks![0].requestId;
   const args = { requestId, evidence: 'Task submission failed: provider unavailable.', text: '실행 환경 문제로 작업을 시작하지 못했습니다.' };
@@ -689,7 +695,7 @@ test('autoReply rule delegation grants one truthful report, reactions and partic
   const reactions: string[] = []; const mentionables: string[][] = [];
   f.options.react = async (target, name, action) => { assert.equal(target.ts, mention.ts); reactions.push(`${action}:${name}`); };
   f.options.sendReply = async (_mention, _text, mentionable) => { mentionables.push(mentionable); return { ts: '2.0' }; };
-  f.options.startConversation = async (_workflow, prompt) => { assert.match(prompt, /autoReply true/); return { sessionId: 'owner-chat', runId: 'coordinator' }; };
+  f.options.startConversation = async (_workflow, _prompt, instructions) => { assert.match(instructions!, /autoReply true/); return { sessionId: 'owner-chat', runId: 'coordinator' }; };
   await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
   await assert.rejects(f.manager.tool(id, 'slack_react', { name: 'hourglass_flowing_sand', action: 'add' }), /No reply authorization/);
   await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', ruleId: 'review', prompt: 'Deploy the fix' });
@@ -723,7 +729,7 @@ test('rules without autoReply never grant sending, and owner cancellation revoke
   g.options.react = async () => {}; g.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
   await g.manager.ingest(mention); await g.manager.tick(); const id = g.manager.list()[0].id;
   await g.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', prompt: 'Deploy the fix' });
-  await g.manager.ownerChat('owner-chat', '아직 보내지 마세요');
+  chatText(await g.manager.ownerChat('owner-chat', '아직 보내지 마세요'));
   assert.equal(g.manager.list()[0].ownerConditionalReply?.status, 'cancelled');
   await assert.rejects(g.manager.tool(id, 'slack_react', { name: 'eyes', action: 'add' }), /No reply authorization/);
   await assert.rejects(g.manager.setRules([{ ...rule, autoReply: 'yes' as unknown as boolean }]), /올바르지/);
@@ -776,7 +782,7 @@ test('the same coordinator serves another channel under its own name, tools and 
     aliases: ['깃허브', 'GitHub'], mentionGuide: 'To mention someone, write @login.' };
   let prompt = '';
   const reacted: string[] = [];
-  const options: SlackAutomationOptions = { ...f.options, channel, startConversation: async (_workflow, text) => { prompt = text; return { sessionId: 'gh-session', runId: 'run' }; },
+  const options: SlackAutomationOptions = { ...f.options, channel, startConversation: async (_workflow, text, instructions) => { prompt = `${instructions}\n${text}`; return { sessionId: 'gh-session', runId: 'run' }; },
     react: async (_mention, name) => { reacted.push(name); } };
   const github = new SlackAutomationManager(options);
   await github.start();
@@ -790,13 +796,14 @@ test('the same coordinator serves another channel under its own name, tools and 
   assert.doesNotMatch(prompt, /<@USER_ID>/);
   assert.match(prompt, /"id":"slack_review"[\s\S]*Fix slack_send in Slack[\s\S]*Slack is down/);
   assert.doesNotMatch(prompt.split('Owner configured rules')[0], /Slack|slack_/);
+  assert.match(prompt, /GitHub request from/, 'the request is named for its channel');
   const id = github.list()[0].id;
   await assert.rejects(github.tool(id, 'slack_reply', { requestKey: 'r', text: 'Done' }), /Unknown GitHub conversation tool/);
   assert.equal((await github.tool(id, 'github_reply', { requestKey: 'r', text: 'Done' }) as { proposalNumber: number }).proposalNumber, 1);
   // A command naming another channel creates no permission here; this channel's own name works.
-  await github.ownerChat('gh-session', 'send reply 1 to Slack');
+  chatText(await github.ownerChat('gh-session', 'send reply 1 to Slack'));
   assert.equal(f.counts().sends, 0);
-  const receipt = await github.ownerChat('gh-session', 'send reply 1 to GitHub');
+  const receipt = chatText(await github.ownerChat('gh-session', 'send reply 1 to GitHub'));
   assert.match(receipt, /GitHub/);
   assert.doesNotMatch(receipt, /Slack/);
   assert.equal(f.counts().sends, 1, 'the owner-approved proposal is sent through the channel');

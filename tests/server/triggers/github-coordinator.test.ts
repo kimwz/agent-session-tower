@@ -93,10 +93,15 @@ test('a new issue opens one coordinator conversation that reads the issue and co
   await f.settle();
   assert.equal(f.created.length, 1, 'one conversation for the event');
   const [{ input, internal }] = f.created;
-  assert.match(input.prompt, /GitHub conversation coordinator/);
-  assert.match(input.prompt, /github_reply/);
-  assert.doesNotMatch(input.prompt.split('Owner configured rules')[0], /Slack|slack_/);
-  assert.match(input.prompt, /Reproduce and fix the bug[\s\S]*"channel":"octo\/app"[\s\S]*Seen on main too/);
+  // Tower's policy and the rules reach the agent as instructions it must have; the conversation shows the issue.
+  const instructions = internal.instructions!;
+  assert.equal(instructions.required, true);
+  assert.match(instructions.text, /GitHub conversation coordinator/);
+  assert.match(instructions.text, /github_reply/);
+  assert.doesNotMatch(instructions.text.split('Owner configured rules')[0], /Slack|slack_/);
+  assert.match(instructions.text, /Reproduce and fix the bug/);
+  assert.match(input.prompt, /^GitHub request from [\s\S]* in octo\/app:[\s\S]*Seen on main too/);
+  assert.doesNotMatch(input.prompt, /coordinator|github_reply/);
   assert.equal(internal.untrustedInput, true);
   assert.deepEqual(internal.origin, { kind: 'trigger', triggerId: trigger.id, eventId: event.id, workflowId: f.service.events()[0].dispatch?.workflowId });
   // Handing the same event over again returns the same conversation.
@@ -200,8 +205,8 @@ test('with owner approvals, delegated work waits for the owner, fixed when the c
   await f.service.run(trigger.id, OWNER);
   await f.settle();
   assert.equal(f.created[0].input.codexApprovalsReviewer, undefined, 'the coordinator itself is not auto-reviewed either');
-  assert.match(f.created[0].input.prompt, /Codex tasks wait for the owner’s approvals in Tower/);
-  assert.doesNotMatch(f.created[0].input.prompt, /All Codex tasks use Auto approval review/);
+  assert.match(f.created[0].internal.instructions!.text, /Codex tasks wait for the owner’s approvals in Tower/);
+  assert.doesNotMatch(f.created[0].internal.instructions!.text, /All Codex tasks use Auto approval review/);
   const workflowId = f.service.events()[0].dispatch!.workflowId!;
   // The trigger is switched to automatic afterwards; this conversation keeps what it began with.
   const current = f.service.get(trigger.id).trigger;

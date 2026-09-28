@@ -45,15 +45,15 @@ export class SlackService extends EventEmitter {
       stateDir: options.stateDir,
       toneGuide: () => this.tone.instruction(),
       language: () => this.settings.language ?? 'ko',
-      ...(options.runs.create ? { startConversation: async (workflow, prompt) => {
+      ...(options.runs.create ? { startConversation: async (workflow, prompt, instructions) => {
         const provider = workflow.rules[0]?.provider ?? 'codex';
         const created = await options.runs.create!({ provider, model: workflow.rules[0]?.model, cwd: join(options.stateDir, 'slack-sessions', workflow.id), prompt,
           title: `Slack: ${workflow.mention.text.replace(/\s+/g, ' ').slice(0, 100)}`,
-          ...(provider === 'codex' ? { codexApprovalsReviewer: 'auto_review' as const } : {}) }, { autoPromptId: workflow.id, origin: slackOrigin(workflow.id), untrustedInput: true });
+          ...(provider === 'codex' ? { codexApprovalsReviewer: 'auto_review' as const } : {}) }, { autoPromptId: workflow.id, origin: slackOrigin(workflow.id), untrustedInput: true, ...(instructions ? { instructions: { text: instructions, required: true } } : {}) });
         return { sessionId: created.session.id, runId: created.run.id };
       } } : {}),
-      ...(options.runs.enqueue ? { resumeConversation: async (workflow, prompt, correlationId) => {
-        const run = await options.runs.enqueue!(workflow.sessionId!, prompt, { model: workflow.rules[0]?.model }, { autoPromptId: correlationId, origin: slackOrigin(workflow.id), untrustedInput: true });
+      ...(options.runs.enqueue ? { resumeConversation: async (workflow, prompt, correlationId, instructions) => {
+        const run = await options.runs.enqueue!(workflow.sessionId!, prompt, { model: workflow.rules[0]?.model }, { autoPromptId: correlationId, origin: slackOrigin(workflow.id), untrustedInput: true, ...(instructions ? { instructions: { text: instructions, required: true } } : {}) });
         return { runId: run.id };
       } } : {}),
       findConversation: id => { const run = options.runs.list().find(run => run.autoPromptId === id); return run ? { sessionId: run.sessionId, runId: run.id } : undefined; },

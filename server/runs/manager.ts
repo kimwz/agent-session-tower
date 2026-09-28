@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
-import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, RunOrigin, Session } from '../../shared/types.js';
+import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, RunInstructions, RunOrigin, Session } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { attachmentMetadata, attachmentPrompt, AttachmentStore } from '../stores/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
@@ -45,6 +45,11 @@ interface RunnerOptions {
   pollMs?: number;
   openCodexBridge?: (options: Omit<CodexBridgeOptions, 'codexHome'>) => Promise<CodexBridgeRun | undefined>;
   openCodexStdio?: (options: CodexStdioOptions) => Promise<CodexStdioRun>;
+  /**
+   * Notes for the first turn of a new conversation, such as earlier sessions that may be related. Asked just before
+   * the provider starts; whatever it cannot answer quickly is left out.
+   */
+  firstTurnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
   /** Pre-accepts the native folder trust prompt for a newly created session. */
   trustWorkspace?: (provider: Provider, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
   /** Streamed output alone is saved at most this often; state changes are saved at once. */
@@ -79,9 +84,19 @@ export interface RunAdmission {
   trustWorkspace?: boolean;
   /** A remote controller's ID for this request; the worker runs a retry with the same ID only once. */
   requestId?: string;
+  /** Hidden instructions for this turn (see Run.instructions). */
+  instructions?: RunInstructions;
 }
 
 const MAX_OUTPUT = 64_000;
+const MAX_INSTRUCTIONS = 48_000;
+const FIRST_TURN_NOTES_MS = 6_000;
+/** A run as anything outside the worker sees it: without its hidden instructions. */
+function shown(run: Run): Run { const { instructions: _hidden, ...rest } = run; return { ...rest }; }
+function checkedInstructions(value: RunInstructions): RunInstructions {
+  if (typeof value?.text !== 'string' || !value.text.trim() || value.text.length > MAX_INSTRUCTIONS) throw new RunError('Tower instructions for this turn are invalid or too long.', 413);
+  return { text: value.text, ...(value.required ? { required: true } : {}) };
+}
 const MAX_PROMPT = 32_000;
 const MAX_RUNS = 100;
 const MAX_QUEUED = 32;
@@ -164,6 +179,7 @@ export class RunManager extends EventEmitter {
     return true;
   }
 
+  setFirstTurnNotes(notes: NonNullable<RunnerOptions['firstTurnNotes']>): void { this.options.firstTurnNotes = notes; }
   setRunToolResolver(resolver: NonNullable<RunnerOptions['resolveRunTools']>): void {
     this.options.resolveRunTools = resolver;
   }
@@ -272,7 +288,7 @@ export class RunManager extends EventEmitter {
     this.pollTimer.unref();
   }
 
-  list(): Run[] { return [...this.runs.values()].map((run) => ({ ...run, canSteer: Boolean(this.steeringTarget(run)), ...(run.steering ? { steering: { ...run.steering } } : {}), ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
+  list(): Run[] { return [...this.runs.values()].map((run) => ({ ...shown(run), canSteer: Boolean(this.steeringTarget(run)), ...(run.steering ? { steering: { ...run.steering } } : {}), ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
     ...(run.contextUsage ? { contextUsage: { ...run.contextUsage } } : {}),
     ...(run.approvals ? { approvals: structuredClone(run.approvals) } : {}) })); }
   async attachment(id: string) {
@@ -387,7 +403,7 @@ export class RunManager extends EventEmitter {
     };
     const origin = internal.origin ?? { kind: 'unknown' as const };
     const run: Run = { id: randomUUID(), sessionId: id, origin, prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
-      ...(internal.unattended ? { unattended: true } : {}),
+      ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
       ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
     // Provenance commits with the session identity, before any provider starts.
@@ -411,7 +427,7 @@ export class RunManager extends EventEmitter {
       throw error;
     } finally { this.admissions.delete(run.id); }
     void this.pump();
-    return { session: this.getSession(id)!, run: { ...run } };
+    return { session: this.getSession(id)!, run: shown(run) };
   }
 
   private validateAdmission(prompt: string, hasAttachments = false): void {
@@ -453,7 +469,7 @@ export class RunManager extends EventEmitter {
       if (!created.origin?.untrustedInput) created.origin = { ...(created.origin ?? { kind: 'unknown' as const }), untrustedInput: true };
     }
     const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
-      ...(internal.unattended ? { unattended: true } : {}),
+      ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
       ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
@@ -467,11 +483,23 @@ export class RunManager extends EventEmitter {
     // An accepted instruction replaces the continuation the agent planned; its next turn can schedule again.
     for (const other of this.runs.values()) if (other.sessionId === sessionId && other.status === 'queued' && other.scheduled) this.supersede(other, 'A newer instruction was sent before the scheduled time.');
     void this.pump();
-    return { ...run };
+    return shown(run);
+  }
+
+  /** Adds `firstTurnNotes` to a new conversation's first turn. Never delays it by more than a few seconds, never fails it. */
+  private async addFirstTurnNotes(run: Run, session: Session): Promise<void> {
+    if (!this.options.firstTurnNotes || run.origin?.controllerId) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const notes = await Promise.race([this.options.firstTurnNotes(run, session).catch(() => undefined), new Promise<undefined>(resolve => { timer = setTimeout(() => resolve(undefined), FIRST_TURN_NOTES_MS); })]);
+    clearTimeout(timer);
+    if (!notes?.trim() || run.status !== 'queued') return;
+    const text = run.instructions ? `${run.instructions.text}\n\n${notes}` : notes;
+    if (text.length <= MAX_INSTRUCTIONS) run.instructions = { text, ...(run.instructions?.required ? { required: true } : {}) };
   }
 
   private steeringTarget(run: Run) {
-    if (this.stopping || run.status !== 'queued' || run.steering || run.scheduled || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
+    // Inserted text reaches the running turn alone: instructions it must not go without would be lost.
+    if (this.stopping || run.status !== 'queued' || run.steering || run.scheduled || run.instructions?.required || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
     const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering);
     if (!target || (run.model && run.model !== (target.model ?? this.getSession(run.sessionId)?.model)) || (run.effort && run.effort !== target.effort)) return undefined;
     // An inserted instruction runs with the active turn's tools and approvals. Tools follow origin and
@@ -727,7 +755,7 @@ export class RunManager extends EventEmitter {
   private async launchBridge(run: Run, session: Session): Promise<boolean> {
     // The desktop app owns its tools; only turns that can do without Tower's tools are forwarded.
     const tools = this.runTools(run, session);
-    if (tools.required) return false;
+    if (tools.required || run.instructions?.required) return false;
     if (!this.options.openCodexBridge) return false;
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     let started = false;
@@ -797,6 +825,7 @@ export class RunManager extends EventEmitter {
     delete env.CLAUDE_CODE_SESSION_ID;
     let started = false;
     let registered = false;
+    if (creating) await this.addFirstTurnNotes(run, session);
     const tools = this.runTools(run, session);
     const mcpServers = tools.servers;
     if (tools.towerTools) run.towerTools = tools.towerTools;
@@ -808,6 +837,7 @@ export class RunManager extends EventEmitter {
     const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
       executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
       mcpServers,
+      ...(run.instructions ? { developerInstructions: run.instructions.text } : {}),
       ...(!creating ? { threadId: session.nativeId } : {}),
       ...(approvalsReviewer ? { approvalsReviewer } : {}),
       ...(owner && !mcpServers?.tower_slack ? { approvalsReviewerPreferred: true } : {}),
@@ -873,7 +903,9 @@ export class RunManager extends EventEmitter {
     if (!(await stat(session.cwd)).isDirectory()) throw new Error('The session working directory no longer exists.');
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     const images = attachments.filter(item => isImageAttachment(item.metadata.mimeType));
+    if (creating) await this.addFirstTurnNotes(run, session);
     const args = creating ? buildCreateArgs(session, run.model, run.effort) : buildResumeArgs(session, run.model, run.effort);
+    if (run.instructions) args.push('--append-system-prompt', run.instructions.text);
     const tools = this.runTools(run, session);
     const mcpServers = tools.servers;
     if (tools.towerTools) run.towerTools = tools.towerTools;
@@ -1296,7 +1328,11 @@ export class RunManager extends EventEmitter {
   private persist(): void {
     // This save includes any streamed output that was waiting for its slower cadence.
     this.cancelOutputPersist();
-    const data = JSON.stringify(this.list().map(({ approvals: _liveApprovals, canSteer: _liveSteering, ...run }) => run));
+    // Hidden instructions are kept with their runs (pages never see this file), so a restart still gives them.
+    const data = JSON.stringify(this.list().map(({ approvals: _liveApprovals, canSteer: _liveSteering, ...run }) => {
+      const instructions = this.runs.get(run.id)?.instructions;
+      return instructions ? { ...run, instructions } : run;
+    }));
     const created = JSON.stringify([...this.createdSessions.values()]);
     this.writes = this.writes.then(async () => {
       // Compare inside the queue: an earlier queued write may still change what a file holds.

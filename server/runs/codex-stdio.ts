@@ -15,6 +15,8 @@ type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutS
 export type CodexStdioResult = { status: 'completed' | 'error' | 'cancelled'; error?: string; finishedAt?: string };
 export interface CodexStdioOptions {
   mcpServers?: SessionMcpServers;
+  /** Tower's hidden instructions for this turn; Codex keeps them out of the conversation. */
+  developerInstructions?: string;
   executable: string;
   cwd: string;
   env?: NodeJS.ProcessEnv;
@@ -177,6 +179,7 @@ class StdioRun implements CodexStdioRun {
     this.write({ method: 'initialized' });
     const open = (approvalsReviewer?: CodexApprovalsReviewer) => this.request(this.options.threadId ? 'thread/resume' : 'thread/start', {
       ...(this.options.mcpServers ? { config: { mcp_servers: this.options.mcpServers } } : {}),
+      ...(this.options.developerInstructions ? { developerInstructions: this.options.developerInstructions } : {}),
       ...(this.options.threadId ? { threadId: this.options.threadId, excludeTurns: true }
         : { cwd: this.options.cwd }),
       ...(approvalsReviewer ? { approvalsReviewer } : {}),

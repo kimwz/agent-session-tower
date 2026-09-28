@@ -29,6 +29,8 @@ import { PUBLIC_TRIGGER_PREFIX, PublicAgentService } from '../public-agents/serv
 import { TowerApi } from '../api/tower-api.js';
 import { CapabilityRegistry, handleMcpRequest } from '../api/mcp.js';
 import { sessionToolsKey } from '../api/session-tools.js';
+import { DecisionService } from '../decisions/service.js';
+import { relatedSessionNotes } from '../sessions/related.js';
 import { runToolResolver } from '../api/run-tools.js';
 import { RemoteExclusionStore } from '../remote/exclusions.js';
 import { remoteTriggerLaunch } from '../remote/visibility.js';
@@ -145,11 +147,13 @@ export async function startRunnerHost(options: RunnerHostOptions) {
             value => ({ kind: 'run', runId: value.id }), result => result.kind === 'run' ? findRun(result.runId) : undefined);
         }
         // Only the owner's own message may carry Slack send approval; the origin decides, never a correlation ID.
-        let prompt = options.slack && admitted.origin?.kind === 'owner'
-          ? await options.slack.ownerChat(args[0] as string, args[1] as string) : args[1] as string;
+        const owner = admitted.origin?.kind === 'owner';
+        const slackTurn = options.slack && owner ? await options.slack.ownerChat(args[0] as string, args[1] as string) : { prompt: args[1] as string };
         // The same holds in a GitHub coordinator conversation: only the owner's message can approve a comment.
-        if (options.github && admitted.origin?.kind === 'owner') prompt = await options.github.ownerChat(args[0] as string, prompt);
-        return options.runs.enqueue(args[0] as string, prompt, args[2] as MessageAttachments, admitted);
+        const turn = options.github && owner ? await options.github.ownerChat(args[0] as string, slackTurn.prompt) : slackTurn;
+        // The receipts Tower adds reach the agent as instructions the conversation does not show, and never without them.
+        const instructions = [slackTurn.instructions, turn === slackTurn ? undefined : turn.instructions].filter(Boolean).join('\n\n');
+        return options.runs.enqueue(args[0] as string, turn.prompt, args[2] as MessageAttachments, { ...admitted, ...(instructions ? { instructions: { text: instructions, required: true } } : {}) });
       }
       case 'steer': {
         const target = (args[1] as { targetRunId?: unknown } | undefined)?.targetRunId;
@@ -441,6 +445,12 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, github, capabilities }));
     const visible = await runnerContext({ stateDir, runs, sessions, slack, exclusions });
     autoPrompts.updateContext(visible);
+    // The owner's fast-judgment settings are read again each time, so a change on the settings page applies at once.
+    const decisions = new DecisionService(stateDir);
+    runs.setFirstTurnNotes(async (run, session) => {
+      await decisions.start();
+      return relatedSessionNotes(decisions.engine('relatedSessions'), run, session, visible.allSessions());
+    });
     await slack.start();
     // Sessions created before provenance existed are classified once from surviving ledger links.
     runs.setExternalLinkResolver(ids => { const linked = slack.linkedSessions().sessionIds; return ids.some(id => linked.has(id)); });

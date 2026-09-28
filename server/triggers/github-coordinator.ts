@@ -78,16 +78,16 @@ export class GitHubCoordinator extends EventEmitter {
       language: () => options.language?.() ?? 'ko',
       // The approval choice was fixed when the conversation began; later edits of the trigger do not change it.
       autoReview: workflow => workflow.approvals === 'auto',
-      startConversation: async (workflow, prompt) => {
+      startConversation: async (workflow, prompt, instructions) => {
         const rule = workflow.rules[0];
         const provider = rule?.provider ?? 'codex';
         const created = await options.runs.create({ provider, model: rule?.model, cwd: join(options.stateDir, 'github-sessions', workflow.id), prompt,
           title: `GitHub: ${workflow.mention.channel}#${workflow.mention.threadTs} ${workflow.mention.text.replace(/\s+/g, ' ')}`.slice(0, 120),
-          ...(provider === 'codex' && workflow.approvals === 'auto' ? { codexApprovalsReviewer: 'auto_review' as const } : {}) }, { autoPromptId: workflow.id, origin: origin(workflow), untrustedInput: true });
+          ...(provider === 'codex' && workflow.approvals === 'auto' ? { codexApprovalsReviewer: 'auto_review' as const } : {}) }, { autoPromptId: workflow.id, origin: origin(workflow), untrustedInput: true, ...(instructions ? { instructions: { text: instructions, required: true } } : {}) });
         return { sessionId: created.session.id, runId: created.run.id };
       },
-      resumeConversation: async (workflow, prompt, correlationId) => {
-        const run = await options.runs.enqueue(workflow.sessionId!, prompt, { model: workflow.rules[0]?.model }, { autoPromptId: correlationId, origin: origin(workflow), untrustedInput: true });
+      resumeConversation: async (workflow, prompt, correlationId, instructions) => {
+        const run = await options.runs.enqueue(workflow.sessionId!, prompt, { model: workflow.rules[0]?.model }, { autoPromptId: correlationId, origin: origin(workflow), untrustedInput: true, ...(instructions ? { instructions: { text: instructions, required: true } } : {}) });
         return { runId: run.id };
       },
       findConversation: id => { const run = options.runs.list().find(item => item.autoPromptId === id); return run ? { sessionId: run.sessionId, runId: run.id } : undefined; },

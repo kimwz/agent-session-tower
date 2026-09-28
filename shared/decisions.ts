@@ -12,8 +12,10 @@ export interface DecisionFeatures {
   steerTiming: boolean;
   /** Show on the canvas how each finished conversation's last turn ended. */
   sessionOutcomes: boolean;
+  /** A new conversation's first turn is told which earlier sessions may be about the same work. */
+  relatedSessions: boolean;
 }
-export const DEFAULT_DECISION_FEATURES: DecisionFeatures = { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true, sessionOutcomes: true };
+export const DEFAULT_DECISION_FEATURES: DecisionFeatures = { autoPromptSuggestions: true, attentionNotifications: true, steerTiming: true, sessionOutcomes: true, relatedSessions: true };
 
 /** One judgment a feature made, kept in memory so the owner can see what the service answered and what Tower did. */
 export interface DecisionRecord {
