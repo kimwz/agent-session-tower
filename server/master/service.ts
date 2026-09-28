@@ -184,7 +184,8 @@ export class MasterService {
     return {
       available: true, version: APP_VERSION, settings, configured, ...(keyHint ? { keyHint } : {}), ...(anthropicKeyHint ? { anthropicKeyHint } : {}),
       voiceConfigured, ...(voiceConfigured ? { voiceKeyHint: this.options.settings.voiceKeyHint() } : {}),
-      state: !settings.enabled ? 'disabled' : !configured ? 'unconfigured' : this.turn ? 'thinking' : 'idle',
+      // A message that chose a model with a key may be answered while the settings' model has none.
+      state: !settings.enabled ? 'disabled' : this.turn ? 'thinking' : !configured ? 'unconfigured' : 'idle',
       activeTasks: this.options.journal.tasks.filter(task => task.state === 'running').length,
       lastOrder: this.options.room.lastOrder(),
       ...(this.voice ? { voice: this.voice.status() } : {}),

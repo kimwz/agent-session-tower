@@ -149,7 +149,9 @@ test('the Anthropic key is kept in its own file, never shown, and a Claude model
     answer('', { id: 'toolu_1', name: 'tower_query', input: { sql: 'select 1' } }),
     answer('세션이 없습니다.'),
   ]);
-  const openai: ModelCall = async () => ({ output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'GPT 답' }] }], text: 'GPT 답' });
+  let release = () => {};
+  let gate = Promise.resolve();
+  const openai: ModelCall = async () => { await gate; return { output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'GPT 답' }] }], text: 'GPT 답' }; };
   const service = new MasterService({ settings, room, journal, tower: new TowerClient(), readDb: { query: async () => ({ rows: [{ one: 1 }] }) } as never, model: routedModel(openai, anthropicMessages(() => settings.anthropicKey(), { fetch: fetcher })), taskPollMs: 1000 });
   await service.start();
   t.after(() => service.close());
@@ -165,6 +167,13 @@ test('the Anthropic key is kept in its own file, never shown, and a Claude model
   const unanswered = room.get(early.id)!.data;
   assert.equal(unanswered.kind === 'owner' && unanswered.outcome, 'failed', 'it can be sent again');
   assert.equal(sent.length, 0);
+  // A message that chose GPT is answered with the OpenAI key, and shows as thinking so it can be stopped.
+  gate = new Promise(resolve => { release = resolve; });
+  await service.send({ clientMessageId: 'message-gpt-0', text: 'GPT로 먼저', local: true, model: 'gpt-6-luna' });
+  await until(() => service.overview().state === 'thinking' || undefined);
+  release();
+  await until(() => room.recent(20).find(entry => entry.data.kind === 'master' && entry.data.text === 'GPT 답'));
+  await until(() => service.overview().state === 'unconfigured' || undefined);
 
   overview = await service.updateSettings({ anthropicKey: KEY });
   assert.equal(overview.configured, true);
@@ -175,8 +184,8 @@ test('the Anthropic key is kept in its own file, never shown, and a Claude model
   assert.doesNotMatch(await readFile(join(dir, 'settings.json'), 'utf8'), /sk-/);
 
   await service.send({ clientMessageId: 'message-claude-1', text: '세션 있어?', local: true });
-  await until(() => room.recent(20).find(entry => entry.data.kind === 'master' && entry.data.final));
-  const final = room.recent(20).find(entry => entry.data.kind === 'master' && entry.data.final)!;
+  await until(() => room.recent(20).find(entry => entry.data.kind === 'master' && entry.data.text === '세션이 없습니다.'));
+  const final = room.recent(20).find(entry => entry.data.kind === 'master' && entry.data.text === '세션이 없습니다.')!;
   assert.equal(final.data.kind === 'master' && final.data.text, '세션이 없습니다.');
   assert.equal(sent.length, 2);
   // The second step sends Claude's first answer back unchanged (thinking signature included) and the tool result after it.
@@ -191,7 +200,7 @@ test('the Anthropic key is kept in its own file, never shown, and a Claude model
 
   // A message may still choose a GPT model; it goes to OpenAI with the OpenAI key untouched.
   await service.send({ clientMessageId: 'message-gpt-1', text: 'GPT로', local: true, model: 'gpt-6-luna' });
-  await until(() => room.recent(20).find(entry => entry.data.kind === 'master' && entry.data.text === 'GPT 답'));
+  await until(() => room.recent(30).filter(entry => entry.data.kind === 'master' && entry.data.text === 'GPT 답').length === 2 || undefined);
   assert.equal(sent.length, 2);
 
   // Removing the key leaves the OpenAI key, and the Claude model waits for a key again.
