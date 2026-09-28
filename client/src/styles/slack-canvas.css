@@ -39,7 +39,11 @@
 .slack-reply-proposals [role=status] { color:#c4b3d3; }
 
 .slack-mention-card.agent-card.unread, .slack-monitor-entry.unread { border-color:#ab8af7; box-shadow:0 0 0 1px #ab8af755; }
-.slack-mention-card.agent-card.replied, .slack-monitor-entry.replied { border-color:var(--green, #5ac99b); box-shadow:0 0 0 1px #5ac99b33; }
+/* A sent reply is marked beside the title; green borders belong to running work. */
+.slack-mention-card .agent-card-title:has(.slack-replied-mark) { display:flex; align-items:center; gap:4px; }
+.slack-mention-card .agent-card-title > span { min-width:0; overflow:hidden; text-overflow:ellipsis; }
+.slack-replied-mark { flex-shrink:0; color:var(--green, #5ac99b); }
+.slack-monitor-entry strong .slack-replied-mark { margin-left:5px; vertical-align:-2px; }
 
 .slack-tone-panel { margin-bottom: 16px; padding: 12px; border: 1px solid var(--border, #43516a); border-radius: 8px; }
 .slack-tone-panel summary { cursor: pointer; font-weight: 600; }

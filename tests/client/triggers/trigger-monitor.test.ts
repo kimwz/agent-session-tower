@@ -65,6 +65,7 @@ test('trigger run cards show their state, and working runs reuse the activity bo
   assert.match(failed, /title="The folder is gone"/);
   assert.match(node({ event: run('r', 1), selected: true, unread: true }), /읽지 않음/);
   assert.match(node({ event: run('r', 1, 'completed', { kind: 'http' }), selected: false }), /Nightly report/);
+  assert.doesNotMatch(node({ event: run('r', 1), selected: false }), /replied/, 'a finished run is not styled like a sent reply');
 });
 
 test('a run shows why it ran, what it saw and what went wrong, without executing markup', () => {

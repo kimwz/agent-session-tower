@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.58.1] - 2026-09-28
+
+### Changed
+- **A sent reply is marked with a green arrow instead of a green border.** In the trigger monitor, a Slack mention Tower had replied to, and every finished trigger run, got a green border that looked like a session at work. The border is gone. A mention whose reply was sent to Slack now shows a green arrow to the right of its title, on the canvas and in the monitor's mention list. Finished trigger runs keep their plain card and the 완료 label.
+
 ## [1.58.0] - 2026-09-28
 
 ### Changed

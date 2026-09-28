@@ -1,6 +1,7 @@
 import { SlackTonePanel } from './SlackTonePanel';
 import { slackCardState } from './slack-read-state';
 import { useEffect, useState } from 'react';
+import { CornerUpRight } from 'lucide-react';
 import type { SlackPublicStatus, SlackWorkflow } from '../../../shared/slack';
 import type { AutoPromptJob } from '../../../shared/types';
 import { SessionTail } from '../chat/SessionTail';
@@ -21,7 +22,8 @@ export function SlackOverview({ slack, token, unreadIds, onSelectMention }: { sl
     <p>{slack?.connected ? slack.enabled ? t('멘션 감시 중') : t('멘션 감시 꺼짐') : t('Slack 연결 없음')}</p>
     {slack?.error && <p role="alert">{translateMessage(slack.error)}</p>}
     {!slack?.events.length && <p>{t('아직 받은 멘션이 없습니다.')}</p>}
-    {visibleSlackMentions(slack?.events || [], mentionLimit).map(event => <button key={event.id} className={`slack-monitor-entry ${slackCardState(event, !!unreadIds?.has(event.id))}`} onClick={() => onSelectMention(event.id)}><strong>{slackMentionTitle(event)}</strong><span>{slackWorkflowLabel(event.status)}</span><time>{new Date(event.createdAt).toLocaleString()}</time></button>)}
+    {visibleSlackMentions(slack?.events || [], mentionLimit).map(event => { const state = slackCardState(event, !!unreadIds?.has(event.id));
+      return <button key={event.id} className={`slack-monitor-entry ${state}`} onClick={() => onSelectMention(event.id)}><strong>{slackMentionTitle(event)}{state === 'replied' && <CornerUpRight className="slack-replied-mark" size={13} aria-label={t('Slack에 전송됨')} />}</strong><span>{slackWorkflowLabel(event.status)}</span><time>{new Date(event.createdAt).toLocaleString()}</time></button>; })}
     {slack && slack.events.length > mentionLimit && <button className="slack-monitor-back" onClick={() => setMentionLimit(limit => limit + SLACK_PAGE_SIZE)}>{t('멘션 더 보기')} ({slack.events.length - mentionLimit})</button>}
   </>;
 }

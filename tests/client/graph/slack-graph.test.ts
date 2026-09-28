@@ -47,6 +47,13 @@ test('an active monitor and working mention cards reuse the session activity bor
   for (const status of ['ignored', 'completed', 'error', 'reply-uncertain'] as const) assert.doesNotMatch(node(SlackMentionNode, { event: event('1', status), selected: false }), /agent-activity-border/);
 });
 
+test('a mention answered in Slack is marked beside its title, not by a working-style border', () => {
+  const sent = node(SlackMentionNode, { event: { ...event('1', 'completed'), replyTs: '2' }, selected: false });
+  assert.match(sent, /agent-card slack-mention-card replied/);
+  assert.match(sent, /agent-card-title[^>]*><span>[^<]*<\/span><svg[^>]*slack-replied-mark/);
+  assert.doesNotMatch(node(SlackMentionNode, { event: event('1', 'completed'), selected: false }), /slack-replied-mark/);
+});
+
 test('with Slack connected, the monitor distinguishes transport failure and reconnecting from healthy waiting', () => {
   const base = { enabledTriggers: 2, count: 0, active: 0, remaining: 0, more: false, onMore() {} };
   const slack = { name: 'Team', enabled: true };

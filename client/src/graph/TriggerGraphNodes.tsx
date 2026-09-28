@@ -48,7 +48,7 @@ export const TriggerEventNode = memo(function TriggerEventNode({ data }: NodePro
   const event = data.event;
   const working = triggerEventWorking(event);
   const failed = event.status === 'error' || event.status === 'uncertain' || event.status === 'cancelled';
-  const state = working ? 'working' : data.unread ? 'unread' : failed ? 'failed' : event.status === 'completed' ? 'replied' : '';
+  const state = working ? 'working' : data.unread ? 'unread' : failed ? 'failed' : '';
   const label = state === 'unread' ? t('읽지 않음') : eventStatusLabel(event.status, t);
   const Icon = event.kind === 'http' ? Globe : event.kind === 'github' ? CircleDot : event.kind === 'manual' ? Play : CalendarClock;
   return <button className={`agent-card slack-mention-card trigger-event-card ${state} ${data.selected ? 'selected' : ''}`} onClick={() => data.onSelect?.(event.id)}
