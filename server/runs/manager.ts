@@ -298,7 +298,11 @@ export class RunManager extends EventEmitter {
         const run = Array.isArray(entry) && typeof entry[0] === 'string' ? this.runs.get(entry[0]) : undefined;
         if (run && !FINISHED.has(run.status) && isSavedInstructions(entry[1])) run.instructions = { text: entry[1].text, ...(entry[1].required ? { required: true } : {}) };
       }
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      // Without any instructions to keep, the file is never created.
+      this.saved.instructions = '[]';
+    }
     this.started = true;
     this.persist();
     await this.flush();
