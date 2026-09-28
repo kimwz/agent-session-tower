@@ -18,6 +18,7 @@ import { WorkspaceTerminals } from '../workspace-terminals.js';
 import { SessionTitleStore } from '../stores/session-titles.js';
 import { openCodexBridgeRun } from './codex-bridge.js';
 import { RunManager, type RunAdmission } from './manager.js';
+import { withoutMasterFolder } from './subscription.js';
 import { parseRunOrigin } from './origin.js';
 import { autoUpdateEnabled, ToolUpdates } from '../updates/tools.js';
 import { defaultStateDir } from '../state-dir.js';
@@ -397,7 +398,7 @@ async function runnerContext({ stateDir, runs, sessions, slack, exclusions }: Pi
   /** Every conversation, also those the canvas leaves out once their work is done (Slack coordinators and the work they delegated). */
   const allSessions = () => projectedSessions().map(session => closed.apply(titles.apply(session)));
   const snapshot = (): Snapshot => ({ sessions: visibleSessions(),
-    runs: runs.list(), groups: groups.list(), providers, scanning: false, hostname: hostname(), version: APP_VERSION, updatedAt: new Date().toISOString() });
+    runs: runs.list(), groups: withoutMasterFolder(groups.list(), stateDir), providers, scanning: false, hostname: hostname(), version: APP_VERSION, updatedAt: new Date().toISOString() });
   return { snapshot, allSessions,
     refresh: async () => { await Promise.all([sessions.refresh(true), metadata(), exclusions?.reload()]); },
     detail: async (id: string) => { const session = runs.getSession(id); if (!session) return undefined; const history = await sessions.detail(runs.nativeSessionId(id)); return { ...(history ?? { messages: [], hasMore: false }), session: closed.apply(titles.apply(session)) }; },
@@ -499,7 +500,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         const snapshot = visible.snapshot();
         const titles = new Map((snapshot.groups ?? []).map(group => [group.cwd, group]));
         const counts = new Map<string, number>();
-        for (const session of snapshot.sessions) if (!session.isSubagent && !session.launchedByAgent && session.cwd) counts.set(session.cwd, (counts.get(session.cwd) ?? 0) + 1);
+        for (const session of snapshot.sessions) if (!session.isSubagent && !session.launchedByAgent && !session.master && session.cwd) counts.set(session.cwd, (counts.get(session.cwd) ?? 0) + 1);
         for (const group of snapshot.groups ?? []) if (group.pinned && !counts.has(group.cwd)) counts.set(group.cwd, 0);
         return [...counts].map(([cwd, sessions]) => ({ cwd, title: titles.get(cwd)?.title || cwd.split('/').filter(Boolean).at(-1) || cwd, sessions, pinned: titles.get(cwd)?.pinned === true }))
           .sort((a, b) => b.sessions - a.sessions);

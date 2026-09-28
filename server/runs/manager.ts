@@ -21,7 +21,7 @@ import { findExecutable, providerDirectories, PROVIDERS } from '../providers/dis
 import { towerInstructionsBlock } from '../sessions/parser.js';
 import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
-import { checkClaudeSubscription, MASTER_TOOL_TIMEOUT_SECONDS, subscriptionOnly, withoutKeys } from './subscription.js';
+import { checkClaudeSubscription, markMaster, MASTER_TOOL_TIMEOUT_SECONDS, subscriptionOnly, withoutKeys } from './subscription.js';
 import { awaitToolServers, NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { automatedOrigin, ownerOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
 import { WakeupTracker, type Wakeup } from './wakeup.js';
@@ -373,8 +373,8 @@ export class RunManager extends EventEmitter {
       const session = this.getSession(id);
       if (session) sessions.set(id, session);
     }
-    return [...sessions.values()].map(session => this.sessionWithContext(session.parentId && aliases.has(session.parentId)
-      ? { ...session, parentId: aliases.get(session.parentId) } : session));
+    return markMaster([...sessions.values()].map(session => this.sessionWithContext(session.parentId && aliases.has(session.parentId)
+      ? { ...session, parentId: aliases.get(session.parentId) } : session)), this.options.stateDir ?? defaultStateDir());
   }
 
   async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {

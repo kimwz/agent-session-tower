@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.68.0] - 2026-09-29
+
+### Changed
+- **The master's session is no longer shown as a session.** The master's own conversation, its subagents, and its folder (`<state>/master-session`) are left out of the canvas, the session list, project and folder choices, session counts, and what a joined computer shows. You use the master only through its chat on the right and the floating voice controls. Work the master hands to sessions in other folders is shown as before.
+  - A master session replaced with **새 마스터 세션** is kept, but it is in the master's folder, so it is not listed either.
+  - The master's turns ending no longer send push notifications, since its chat and voice already give its answers. A master turn waiting on you still does.
+  - Session lookups (`sessions_list`, `sessions_search`) still find the master's conversations and mark them `master: true`.
+
 ## [1.67.0] - 2026-09-29
 
 ### Changed

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { isSea } from 'node:sea';
+import { withoutMasterFolder } from './runs/subscription.js';
 import { nativeHistory } from './sessions/native-history.js';
 import { SessionTitleStore } from './stores/session-titles.js';
 import { DismissedRunStore } from './stores/dismissed-runs.js';
@@ -259,7 +260,7 @@ async function main() {
   };
   runs.on('change', changed);
   const repositories = new RepositoryMonitor({
-    watched: () => watchedRepositoryPaths(runs.sessionList(), groups.list()),
+    watched: () => watchedRepositoryPaths(runs.sessionList(), withoutMasterFolder(groups.list(), stateDir)),
     busy: status => runs.sessionList().some(session => session.status === 'working' && overlapsRepository(status, session.cwd))
       || runs.list().some(run => (run.status === 'running' || (run.status === 'queued' && !(run.scheduled && Date.parse(run.scheduled.at) > Date.now()))) && overlapsRepository(status, runs.getSession(run.sessionId)?.cwd ?? '')),
     onChange: changed,
@@ -288,9 +289,9 @@ async function main() {
     const managed = runs.list();
     return {
       sessions: sessionViews(all, managed).map(session => outcomes.apply(session)),
-      groups: groups.list(),
+      groups: withoutMasterFolder(groups.list(), stateDir),
       repositories: repositories.list(),
-      providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider).length })),
+      providers: capabilities.list().map(provider => ({ ...provider, sessionCount: all.filter(session => session.provider === provider.provider && !session.master).length })),
       runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning: history.indexing, hostname: hostname(), version: APP_VERSION,
       ...(runs.triggerOverview() ? { triggers: runs.triggerOverview() } : {}),
       ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}),

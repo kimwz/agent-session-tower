@@ -50,7 +50,7 @@ const activity = (session: Session) => Date.parse(session.lastCompletedAt ?? ses
 
 /** A conversation the canvas shows as its own card and whose last turn has ended. */
 export function judgeable(session: Session, now = Date.now()): boolean {
-  return session.status !== 'working' && !session.closed && !session.creationPending && !session.isSubagent && !session.launchedByAgent
+  return session.status !== 'working' && !session.closed && !session.creationPending && !session.isSubagent && !session.launchedByAgent && !session.master
     && !session.launchedBy && !session.scheduledAt && now - activity(session) <= RECENT_MS;
 }
 

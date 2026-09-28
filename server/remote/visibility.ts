@@ -61,7 +61,7 @@ const pick = <T extends object, K extends keyof T>(value: T, keys: readonly K[])
   return result;
 };
 const SESSION_FIELDS = ['id', 'nativeId', 'provider', 'title', 'customTitle', 'closed', 'creationPending', 'cwd', 'project', 'parentId', 'parentLink',
-  'launchedByAgent', 'launchedBy', 'agentName', 'model', 'contextUsage', 'status', 'statusReason', 'createdAt', 'updatedAt', 'lastRequestAt',
+  'launchedByAgent', 'master', 'launchedBy', 'agentName', 'model', 'contextUsage', 'status', 'statusReason', 'createdAt', 'updatedAt', 'lastRequestAt',
   'lastCompletedAt', 'lastMessage', 'messageCount', 'readRevision', 'isSubagent', 'resumable', 'activeProcess', 'scheduledAt'] as const satisfies readonly (keyof Session)[];
 const RUN_FIELDS = ['id', 'sessionId', 'unattended', 'towerTools', 'prompt', 'status', 'createdAt', 'startedAt', 'finishedAt', 'output', 'error', 'attachments', 'model',
   'effort', 'codexApprovalsReviewer', 'autoPromptId', 'contextUsage', 'approvals', 'canSteer', 'steering', 'scheduled'] as const satisfies readonly (keyof Run)[];
@@ -114,7 +114,7 @@ export function remoteSnapshot(snapshot: Snapshot, scope: RemoteScope, controlle
   return {
     sessions,
     runs: snapshot.runs.filter(run => ids.has(run.sessionId)).map(remoteRun),
-    providers: snapshot.providers.map(provider => remoteProvider(provider, sessions.filter(session => session.provider === provider.provider).length)),
+    providers: snapshot.providers.map(provider => remoteProvider(provider, sessions.filter(session => session.provider === provider.provider && !session.master).length)),
     ...(snapshot.groups ? { groups: snapshot.groups.filter(group => !scope.matcher.excludes(group.cwd)).map(remoteGroup) } : {}),
     ...(snapshot.autoPrompts ? { autoPrompts: snapshot.autoPrompts.filter(job => remoteJobVisible(job, scope, ids, controllerId)).map(job => remoteJob(job, controllerId, scope.matcher.revision)) } : {}),
     ...(snapshot.repositories ? { repositories: snapshot.repositories.filter(status => !scope.matcher.excludes(status.cwd) && !scope.matcher.excludes(status.root)).map(remoteRepository) } : {}),

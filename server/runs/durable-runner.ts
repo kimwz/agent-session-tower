@@ -10,7 +10,7 @@ import type { PublicAgentOverview, PublicConversationView, PublicVisitorState } 
 import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunApprovalResponse, Session } from '../../shared/types.js';
 import type { RunAdmission } from './manager.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
-import { subscriptionOnly } from './subscription.js';
+import { markMaster, subscriptionOnly } from './subscription.js';
 import { MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerCapability, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 import { readHandoff } from './handoff.js';
 import type { TriggerOverview } from '../../shared/triggers.js';
@@ -144,10 +144,11 @@ export class DurableRunManager extends EventEmitter {
   settledRunIds(): ReadonlySet<string> { return new Set(this.snapshot?.settled ?? []); }
   /** Answers for the attached worker; after a proven handoff that is its successor. */
   supports(capability: RunnerCapability): boolean { return this.snapshot?.capabilities?.includes(capability) ?? false; }
-  sessionList(): Session[] { return structuredClone(this.snapshot?.sessions ?? []); }
+  /** Marked here as well, for a worker from before sessions were marked as the master's. */
+  sessionList(): Session[] { return markMaster(structuredClone(this.snapshot?.sessions ?? []), this.paths?.stateDir ?? this.options.stateDir); }
   getSession(id: string): Session | undefined {
     const found = this.snapshot?.sessions.find(session => session.id === id || this.snapshot?.nativeIds[session.id] === id);
-    return found && structuredClone(found);
+    return found && markMaster([structuredClone(found)], this.paths?.stateDir ?? this.options.stateDir)[0];
   }
   nativeSessionId(id: string): string { return this.snapshot?.nativeIds[id] ?? id; }
   /**

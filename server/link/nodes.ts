@@ -89,7 +89,8 @@ export class RemoteNodes extends EventEmitter {
  * computer currently shares take a pin or hide, so a folder it stopped sharing does not reappear as an empty frame.
  */
 export function withViews(snapshot: Snapshot, views: Readonly<Record<string, { pinned?: true; hidden?: true }>>): Snapshot {
-  const shared = new Set([...snapshot.sessions.map(session => session.cwd), ...(snapshot.groups ?? []).map(group => group.cwd)]);
+  // The master's folder is never a project there, so a pin or hide kept for it from before stays unused.
+  const shared = new Set([...snapshot.sessions.filter(session => !session.master).map(session => session.cwd), ...(snapshot.groups ?? []).map(group => group.cwd)]);
   const groups = new Map<string, ProjectGroup>((snapshot.groups ?? []).map(group => [group.cwd, { cwd: group.cwd, title: group.title, pinned: false }]));
   for (const [cwd, view] of Object.entries(views)) {
     if (!shared.has(cwd)) continue;

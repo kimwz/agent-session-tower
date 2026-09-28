@@ -118,3 +118,25 @@ test('after a restart, work that ended while the web server was down is announce
   await third.close();
   assert.equal(sent.length, 2);
 });
+
+test('the master\'s turns ending are not announced (its chat and voice give them), while work it asks the owner about is', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-notifications-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const sent: string[] = [];
+  const fetcher = (async (url: string | URL | Request) => { sent.push(String(url)); return new Response(null, { status: 201 }); }) as typeof fetch;
+  let runs: Run[] = [];
+  const master: Session = { ...session, id: 'm1', cwd: '/state/master-session', master: true };
+  const context: NotificationContext = { runs: () => runs, session: id => id === 'm1' ? master : session, project: () => 'app', trigger: () => undefined };
+  const service = new NotificationService(dir, context, fetcher);
+  await service.start();
+  t.after(() => service.close());
+  await service.subscribe({ subscription: subscription() });
+  runs = [run('answer', { sessionId: 'm1', origin: { kind: 'owner' }, status: 'completed', finishedAt: new Date(Date.now() + 1000).toISOString() })];
+  service.check();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(sent, []);
+  runs = [...runs, run('other', { origin: { kind: 'owner' }, status: 'completed', finishedAt: new Date(Date.now() + 1000).toISOString() })];
+  service.check();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(sent.length, 1, 'a handed-out or ordinary conversation still is');
+});

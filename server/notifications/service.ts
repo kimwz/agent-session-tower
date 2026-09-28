@@ -235,6 +235,8 @@ export class NotificationService {
 
   /** Decides whether an event still deserves a push, then sends it to the devices that chose its kind. */
   private async handle(event: NotificationEvent): Promise<void> {
+    // The master's answers come in its own chat and voice: its turns ending are not announced.
+    if (event.kind === 'runCompleted' && this.context.session(event.run.sessionId)?.master) return;
     const variant = await this.variant(event);
     if (variant && !this.stopped) await this.deliver(event, variant);
   }

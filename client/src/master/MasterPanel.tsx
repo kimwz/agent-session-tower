@@ -55,7 +55,7 @@ function MasterStart({ token, replace, current, onCancel, onStarted }: { token: 
       <h3>{replace ? words('새 마스터 세션', 'New master session') : words('마스터 시작', 'Start the master')}</h3>
       <p>{words('마스터는 Tower가 전용 폴더에 두는 Claude 또는 Codex 세션입니다. 구독 로그인으로만 대화하고 API 키는 쓰지 않습니다. 모든 도구를 쓸 수 있고, 프로젝트 작업은 다른 세션에 맡긴 뒤 끝나면 결과를 알려 줍니다.',
         'The master is a Claude or Codex session Tower keeps in its own folder. It talks only through your subscription sign-in, never an API key. It has every tool, hands project work to other sessions and reports when it ends.')}</p>
-      {replace && <p>{words('지금 마스터 세션은 일반 세션으로 남고, 이제부터 새 세션이 마스터가 됩니다.', 'The current master session stays as an ordinary session; the new one becomes the master.')}</p>}
+      {replace && <p>{words('이제부터 새 세션이 마스터가 됩니다. 지금 마스터 세션은 기록으로 남지만, 마스터 폴더의 세션이라 캔버스와 세션 목록에는 나오지 않습니다.', 'The new session becomes the master. The current one is kept, but as a session in the master\'s folder it is not shown on the canvas or in the session list.')}</p>}
       <label className="master-field">{words('도구', 'Tool')}
         <select value={provider} disabled={busy} onChange={event => setProvider(event.target.value as Provider)}>
           <option value="claude">Claude Code</option>

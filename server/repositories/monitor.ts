@@ -23,7 +23,7 @@ export function watchedRepositoryPaths(sessions: readonly Session[], groups: rea
   const latest = new Map<string, number>();
   for (const group of groups) if (group.pinned && !group.hidden) latest.set(group.cwd, Infinity);
   for (const session of sessions) {
-    if (!session.cwd.startsWith('/') || hidden.has(session.cwd) || session.launchedByAgent) continue;
+    if (!session.cwd.startsWith('/') || hidden.has(session.cwd) || session.launchedByAgent || session.master) continue;
     const at = Date.parse(session.updatedAt);
     if (!Number.isFinite(at) || now - at > RECENT_SESSION_MS) continue;
     latest.set(session.cwd, Math.max(latest.get(session.cwd) ?? 0, at));

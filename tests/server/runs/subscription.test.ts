@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import type { ChildProcessWithoutNullStreams, execFile } from 'node:child_process';
 import { PassThrough, Writable } from 'node:stream';
-import { mkdir, mkdtemp, rm, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { RunManager } from '../../../server/runs/manager.js';
-import { checkClaudeSubscription, checkCodexAccount, subscriptionOnly, SubscriptionError, withoutKeys } from '../../../server/runs/subscription.js';
+import { checkClaudeSubscription, checkCodexAccount, markMaster, subscriptionOnly, withoutMasterFolder, SubscriptionError, withoutKeys } from '../../../server/runs/subscription.js';
 import type { Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
 
@@ -90,4 +90,19 @@ test('the master\'s folder is recognised through a linked state directory too', 
   await symlink(away, join(base, 'state2', 'master-session'));
   assert.equal(subscriptionOnly(join(base, 'state2'), away), true);
   assert.equal(subscriptionOnly(join(base, 'state2'), join(base, 'state2', 'master-session')), true);
+});
+
+test('sessions in the master\'s folder, below it, or reached through a linked state folder are marked; others are not', async t => {
+  // A CLI records the folder it runs in with links followed (the temporary folder itself is one on macOS).
+  const base = await realpath(await mkdtemp(join(tmpdir(), 'tower-mark-master-')));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const real = join(base, 'real');
+  await mkdir(join(real, 'master-session'), { recursive: true });
+  await symlink(real, join(base, 'linked'));
+  const at = (cwd: string) => ({ id: cwd, cwd } as Session);
+  const marked = markMaster([at(join(real, 'master-session')), at(join(real, 'master-session', 'sub')), at(join(real, 'master-session-2')), at(join(real, 'other')), at('')], join(base, 'linked'));
+  assert.deepEqual(marked.map(session => Boolean(session.master)), [true, true, false, false, false]);
+  assert.deepEqual(markMaster([at('/state/master-session/')], '/state').map(session => session.master), [true]);
+  // A folder setting for it (such as hiding it by hand) is not shown as a project either.
+  assert.deepEqual(withoutMasterFolder([{ cwd: '/state/master-session', hidden: true }, { cwd: '/work', pinned: true }], '/state'), [{ cwd: '/work', pinned: true }]);
 });

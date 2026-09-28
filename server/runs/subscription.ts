@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { MASTER_FOLDER } from '../../shared/master.js';
+import type { Session } from '../../shared/types.js';
 
 /**
  * The master talks only through the owner's Claude or ChatGPT subscription sign-in, never through an API key. Its turns
@@ -39,6 +40,21 @@ export function subscriptionOnly(stateDir: string, cwd: string): boolean {
   if (resolve(cwd) === join(resolve(stateDir), MASTER_FOLDER)) return true;
   return canonical(cwd) === masterFolder(stateDir);
 }
+/**
+ * Whether a folder is the master's or inside it, for lists that leave the master out. Decided without asking the disk
+ * for each folder: the master's folder as written, and with links followed (as a CLI records where it runs).
+ */
+export function inMasterFolder(stateDir: string, cwd: string): boolean {
+  if (!cwd || !cwd.startsWith('/')) return false;
+  const path = resolve(cwd);
+  return [join(resolve(stateDir), MASTER_FOLDER), masterFolder(stateDir)].some(folder => path === folder || path.startsWith(`${folder}/`));
+}
+/** Sessions marked as the master's (and its subagents'). */
+export function markMaster(sessions: Session[], stateDir: string): Session[] {
+  return sessions.map(session => inMasterFolder(stateDir, session.cwd) ? { ...session, master: true } : session);
+}
+/** Folder settings without the master's folder, which is never shown as a project. */
+export const withoutMasterFolder = <T extends { cwd: string }>(groups: T[], stateDir: string): T[] => groups.filter(group => !inMasterFolder(stateDir, group.cwd));
 /** The master's folder with links followed (itself included), kept a little so busy callers do not ask the disk each time. */
 const folders = new Map<string, { path: string; at: number }>();
 function masterFolder(stateDir: string): string {

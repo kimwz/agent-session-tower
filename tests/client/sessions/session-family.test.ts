@@ -126,3 +126,14 @@ test('work another agent launched is never a main session: linked runs join the 
   assert.deepEqual(getMainSessions(sessions).map(item => item.id), ['user']);
   assert.deepEqual(getSessionFamily(sessions, user.id).members.map(item => item.id), ['user', 'linked', 'linked-thread']);
 });
+
+test('the master\'s own conversation and its subagents are never main sessions, while work it handed out elsewhere is', () => {
+  const master = session('claude:master', { provider: 'claude', cwd: '/state/master-session', master: true });
+  const helper = session('claude:helper', { provider: 'claude', cwd: '/state/master-session', parentId: 'claude:master', isSubagent: true, master: true });
+  const handedOut = session('codex:work', { cwd: '/work' });
+  const sessions = [master, helper, handedOut];
+  assert.deepEqual(getMainSessions(sessions).map(item => item.id), ['codex:work']);
+  // Its chat still opens it, with its subagents as its family.
+  assert.equal(getMainSessionId(sessions, 'claude:helper'), 'claude:master');
+  assert.deepEqual(getSessionFamily(sessions, 'claude:master').members.map(item => item.id), ['claude:master', 'claude:helper']);
+});

@@ -16,13 +16,13 @@ export function directories(snapshot: Snapshot): Directory[] {
     if (!value) { value = { id: '', cwd, title: titles.get(cwd) || basename(cwd) || cwd, sessions: [] }; values.set(cwd, value); }
     return value;
   };
-  for (const session of snapshot.sessions) if (!session.isSubagent && !session.launchedByAgent && session.cwd) add(session.cwd)?.sessions.push(session);
+  for (const session of snapshot.sessions) if (!session.isSubagent && !session.launchedByAgent && !session.master && session.cwd) add(session.cwd)?.sessions.push(session);
   for (const group of snapshot.groups || []) if (group.pinned || group.hidden) add(group.cwd);
   return [...values.values()].sort((a, b) => a.cwd.localeCompare(b.cwd)).map((value, index) => ({ ...value, id: `d${index + 1}` }));
 }
 
 /** A conversation of the owner's that new work for `provider` in `cwd` may continue. */
 export function eligible(session: Session, provider: Provider, cwd: string): boolean {
-  return session.provider === provider && session.cwd === cwd && !session.isSubagent && !session.launchedByAgent && !session.closed
+  return session.provider === provider && session.cwd === cwd && !session.isSubagent && !session.launchedByAgent && !session.master && !session.closed
     && !session.creationPending && session.resumable && UUID.test(session.nativeId);
 }

@@ -259,3 +259,11 @@ test('a request whose answer is lost after it left says it may have run, so the 
   const offline = await fetch(`${a.base}/api/nodes/${b.id}/sessions/codex:shared`);
   assert.equal((await offline.json() as { disposition: string }).disposition, 'not-admitted', 'nothing left for an offline computer');
 });
+
+test('a pin kept here for the other computer\'s master folder stays unused: that folder is never one of its projects', async () => {
+  const { withViews } = await import('../../../server/link/nodes.js');
+  const base = { id: 'x', nativeId: 'x', provider: 'claude', title: 't', project: 'p', status: 'idle', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true } as Session;
+  const snapshot = { sessions: [{ ...base, id: 'm', cwd: '/s/master-session', master: true }, { ...base, id: 'w', cwd: '/work' }], runs: [], providers: [], scanning: false, hostname: 'b', version: 't', updatedAt: '' } as Snapshot;
+  const viewed = withViews(snapshot, { '/s/master-session': { pinned: true }, '/work': { pinned: true } });
+  assert.deepEqual(viewed.groups?.map(group => group.cwd), ['/work']);
+});

@@ -185,7 +185,7 @@ export class TowerApi {
         const view = await this.view(held, projects.map(project => project.cwd));
         // Counted again from the conversations it can see.
         const counts = new Map<string, number>();
-        for (const session of held.sessions) if (view.sessions.has(session.id) && !session.isSubagent && !session.launchedByAgent) counts.set(session.cwd, (counts.get(session.cwd) ?? 0) + 1);
+        for (const session of held.sessions) if (view.sessions.has(session.id) && !session.isSubagent && !session.launchedByAgent && !session.master) counts.set(session.cwd, (counts.get(session.cwd) ?? 0) + 1);
         return { projects: projects.filter(project => view.folder(project.cwd) && (counts.has(project.cwd) || project.pinned)).map(project => ({ ...project, sessions: counts.get(project.cwd) ?? 0 })) };
       }
       case 'runs.list': {
@@ -457,7 +457,9 @@ function boundary(value: string, end: boolean): number {
 
 function sessionSummary(session: Session) {
   return { id: session.id, title: session.customTitle || session.title, provider: session.provider, cwd: session.cwd, status: session.status,
-    createdAt: session.createdAt, updatedAt: session.updatedAt, ...(session.launchedBy ? { launchedBy: session.launchedBy } : {}), ...(session.closed ? { closed: true } : {}) };
+    createdAt: session.createdAt, updatedAt: session.updatedAt, ...(session.launchedBy ? { launchedBy: session.launchedBy } : {}), ...(session.closed ? { closed: true } : {}),
+    // Lookups still find the master's conversations (they are not listed on any page), and say which they are.
+    ...(session.master ? { master: true } : {}) };
 }
 function shownMessage(message: ChatMessage, max: number) {
   return { role: message.role, text: message.text.length > max ? `${message.text.slice(0, max)}…` : message.text, timestamp: message.timestamp, ...(message.toolName ? { toolName: message.toolName } : {}) };

@@ -28,6 +28,11 @@ export interface Session {
    * It is that agent's work, not a user conversation: it never appears as its own canvas session.
    */
   launchedByAgent?: boolean;
+  /**
+   * The master agent's own conversation (or one of its subagents): run in the master's folder and used only through the
+   * master's chat and voice, so it is never listed as a session, counted, or shown on the canvas.
+   */
+  master?: boolean;
   /** Created by a trigger. Like agent-launched work, it leaves the canvas once its work is done. */
   launchedBy?: { kind: 'trigger'; triggerId: string };
   agentName?: string;

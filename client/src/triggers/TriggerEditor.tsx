@@ -99,7 +99,7 @@ function TaskFields({ task, kind, providers, projects, sessions, onChange }: { t
   const { t } = useI18n();
   const outside = kind !== 'schedule';
   const provider = providers.find(item => item.provider === task.provider);
-  const candidates = sessions.filter(session => session.provider === task.provider && !session.isSubagent && session.resumable).slice(0, 80);
+  const candidates = sessions.filter(session => session.provider === task.provider && !session.isSubagent && !session.master && session.resumable).slice(0, 80);
   return <>
     <label>{t('지시')}<textarea required rows={4} maxLength={8000} value={task.instructions} onChange={event => onChange({ instructions: event.target.value })}
       placeholder={t(kind === 'github' ? '예: 이슈를 재현하고 원인을 찾아 고친 뒤 결과를 정리해 주세요.' : kind === 'http' ? '예: 상태가 바뀐 이유를 확인하고 필요한 조치를 정리해 주세요.' : '예: 어제 머지된 PR을 요약해 주세요.')} />
