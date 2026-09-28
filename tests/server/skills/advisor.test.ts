@@ -251,3 +251,23 @@ test('a session the owner closes while the advisor is busy is not read or sent a
   assert.match(sent, /Session first/);
   assert.doesNotMatch(sent, /Session third/);
 });
+
+test('a pin on either copy of a skill pins it, and merging the copies keeps it pinned', async t => {
+  const f = await fixture(t, () => reflection());
+  const home = (f.service as unknown as { files: { homes: { agentsHome: string; claudeHome: string } } }).files.homes;
+  for (const root of [home.agentsHome, home.claudeHome]) {
+    await mkdir(join(root, 'skills', 'wrangler'), { recursive: true });
+    await writeFile(join(root, 'skills', 'wrangler', 'SKILL.md'), '---\nname: wrangler\ndescription: Deploy Workers.\n---\nSteps\n');
+  }
+  const claudeCopy = join(home.claudeHome, 'skills', 'wrangler');
+  await (f.service as unknown as { state: { update(change: (state: { pinned: { dir: string }[] }) => void): Promise<void> } }).state.update(state => { state.pinned.push({ dir: claudeCopy }); });
+  const [listed] = (await f.service.overview()).skills;
+  assert.equal(listed.pinned, true);
+  assert.match((await f.service.turnNotes(session('x', f.project)))!, /- wrangler: Deploy Workers\./);
+  const after = await f.service.mutate('merge', { dir: claudeCopy });
+  assert.equal(after.skills[0].copies, undefined);
+  assert.equal(after.skills[0].pinned, true);
+  assert.match((await f.service.turnNotes(session('x', f.project)))!, /wrangler/);
+  await f.service.mutate('pin', { dir: after.skills[0].dir, pinned: false });
+  assert.equal(await f.service.turnNotes(session('x', f.project)), undefined);
+});

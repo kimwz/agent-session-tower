@@ -189,3 +189,22 @@ test('copies whose contents differ stay separate, and deleting the skill removes
   assert.deepEqual(await f.files.list(), []);
   assert.equal((await readdir(f.trash)).length, 2);
 });
+
+test('copies with links inside are never called identical, and a merge that cannot finish leaves the copy as it was', async t => {
+  const f = await homes(t);
+  await copy(f.agentsHome, 'linked', 'Same text');
+  await copy(f.claudeHome, 'linked', 'Same text');
+  await symlink('../resource.txt', join(f.agentsHome, 'skills', 'linked', 'resource'));
+  await symlink('../resource.txt', join(f.claudeHome, 'skills', 'linked', 'resource'));
+  assert.equal((await f.files.list())[0].copiesDiffer, true, 'the same link text may lead to different files');
+
+  await copy(f.agentsHome, 'plain', 'Same text');
+  await copy(f.claudeHome, 'plain', 'Same text');
+  // The trash cannot be made (a file stands where its folder would go), so the copy must stay.
+  await mkdir(join(f.trash, '..'), { recursive: true });
+  await writeFile(f.trash, 'not a folder');
+  const plain = (await f.files.list()).find(skill => skill.name === 'plain')!;
+  await assert.rejects(f.files.merge(plain.dir));
+  assert.ok((await lstat(join(f.claudeHome, 'skills', 'plain'))).isDirectory());
+  assert.deepEqual((await readdir(join(f.claudeHome, 'skills'))).sort(), ['linked', 'plain'], 'no half-made link is left behind');
+});

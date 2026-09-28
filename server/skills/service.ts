@@ -27,6 +27,7 @@ export interface SkillServiceOptions {
 }
 
 const MAX_TURN_NOTES = 6_000;
+const folders = (skill: Skill) => [skill.dir, ...(skill.copies ?? []).map(copy => copy.dir)];
 /** Work a trigger, Slack or another agent started, or the owner at a controlling computer. */
 const foreign = (kind: string | undefined, controllerId: unknown) => kind !== undefined && kind !== 'owner' || Boolean(controllerId);
 const text = (value: unknown): string => typeof value === 'string' ? value : '';
@@ -92,7 +93,17 @@ export class SkillService {
 
   private withPins(skills: Skill[]): Skill[] {
     const pinned = new Set(this.state.get().pinned.map(item => item.dir));
-    return skills.map(skill => ({ ...skill, pinned: pinned.has(skill.dir) }));
+    // A pin set on any copy of a skill pins the skill.
+    return skills.map(skill => ({ ...skill, pinned: folders(skill).some(dir => pinned.has(dir)) }));
+  }
+
+  /** Replaces the pins of a skill (on any of its copies) with one on the folder that is edited, or none. */
+  private async pin(skill: Skill, pinned: boolean): Promise<void> {
+    const dirs = folders(skill);
+    await this.state.update(state => {
+      state.pinned = state.pinned.filter(item => !dirs.includes(item.dir));
+      if (pinned) state.pinned.push({ dir: skill.dir, ...(skill.cwd ? { cwd: skill.cwd } : {}) });
+    });
   }
 
   async overview(input: { cwd?: unknown } = {}): Promise<SkillOverview> {
@@ -123,29 +134,31 @@ export class SkillService {
         const skill = await this.files.save({ ...(typeof body.dir === 'string' && body.dir ? { dir: body.dir, revision: text(body.revision) } : {}),
           scope, ...(target ? { cwd: target } : {}), name: text(body.name), description: text(body.description), body: text(body.body) });
         const proposalId = text(body.proposalId);
+        await this.pin(skill, body.pinned === true);
         await this.state.update(state => {
-          state.pinned = state.pinned.filter(item => item.dir !== skill.dir);
-          if (body.pinned === true) state.pinned.push({ dir: skill.dir, ...(skill.cwd ? { cwd: skill.cwd } : {}) });
           const proposal = proposalId && state.proposals.find(item => item.id === proposalId && item.status === 'open');
           if (proposal) { proposal.status = 'accepted'; proposal.skillDir = skill.dir; proposal.updatedAt = new Date().toISOString(); }
         });
         break;
       }
       case 'pin': {
-        const skill = (await this.files.list(cwd)).find(item => item.dir === text(body.dir));
+        const skill = (await this.files.list(cwd)).find(item => folders(item).includes(text(body.dir)));
         if (!skill) throw new SkillError('스킬을 찾을 수 없습니다.', 404);
-        await this.state.update(state => {
-          state.pinned = state.pinned.filter(item => item.dir !== skill.dir);
-          if (body.pinned === true) state.pinned.push({ dir: skill.dir, ...(skill.cwd ? { cwd: skill.cwd } : {}) });
-        });
+        await this.pin(skill, body.pinned === true);
         break;
       }
       case 'link': await this.files.link(text(body.dir), cwd); break;
-      case 'merge': await this.files.merge(text(body.dir), cwd); break;
+      case 'merge': {
+        const before = this.withPins(await this.files.list(cwd)).find(item => folders(item).includes(text(body.dir)));
+        const merged = await this.files.merge(text(body.dir), cwd);
+        // A pin on a copy that is now a link moves to the kept folder.
+        if (before?.pinned) await this.pin({ ...merged, copies: before.copies }, true);
+        break;
+      }
       case 'delete': {
-        const dir = text(body.dir);
-        await this.files.remove(dir, cwd);
-        await this.state.update(state => { state.pinned = state.pinned.filter(item => item.dir !== dir); });
+        const skill = (await this.files.list(cwd)).find(item => folders(item).includes(text(body.dir)));
+        await this.files.remove(text(body.dir), cwd);
+        if (skill) await this.pin(skill, false);
         break;
       }
       case 'dismiss': {

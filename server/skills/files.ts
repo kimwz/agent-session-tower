@@ -137,8 +137,18 @@ export class SkillFiles {
     const roots = await this.realRoots(skill.cwd);
     for (const copy of skill.copies) {
       if (copy.dir === skill.dir || !roots.has(dirname(copy.dir))) continue;
-      await this.trash(copy.dir);
-      await symlink(relative(dirname(copy.dir), skill.dir), copy.dir, 'dir');
+      // The link is made first beside the copy, then swapped in; if that fails, the copy comes back from the trash.
+      const link = `${copy.dir}.tower-link-${randomUUID().slice(0, 8)}`;
+      await symlink(relative(dirname(copy.dir), skill.dir), link, 'dir');
+      let kept: string;
+      try { kept = await this.trash(copy.dir); }
+      catch (error) { await unlink(link).catch(() => {}); throw error; }
+      try { await rename(link, copy.dir); }
+      catch (error) {
+        await unlink(link).catch(() => {});
+        await rename(kept, copy.dir).catch(() => {});
+        throw error;
+      }
     }
     return this.find(skill.dir, cwd);
   }
@@ -147,7 +157,8 @@ export class SkillFiles {
     return new Set((await Promise.all(this.roots(cwd).map(root => realpath(root.dir).catch(() => '')))).filter(Boolean));
   }
 
-  private async trash(dir: string): Promise<void> {
+  /** Moves a folder to Tower's trash and says where it went. */
+  private async trash(dir: string): Promise<string> {
     await mkdir(this.homes.trash, { recursive: true, mode: 0o700 });
     const target = join(this.homes.trash, `${new Date().toISOString().replace(/[:.]/g, '-')}-${basename(dir)}-${randomUUID().slice(0, 8)}`);
     try { await rename(dir, target); }
@@ -157,6 +168,7 @@ export class SkillFiles {
       await cp(dir, target, { recursive: true, verbatimSymlinks: true });
       await rm(dir, { recursive: true, force: true });
     }
+    return target;
   }
 
   private async write(input: SkillWrite): Promise<Skill> {
@@ -293,7 +305,8 @@ async function folderDigest(dir: string): Promise<string | undefined> {
     for (const entry of (await readdir(folder, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
       const path = join(folder, entry.name), name = `${prefix}${entry.name}`;
       if (entry.isDirectory()) { if (!await walk(path, `${name}/`)) return false; continue; }
-      if (entry.isSymbolicLink()) { hash.update(`link:${name}:${await readlink(path)}\0`); continue; }
+      // A link's target may differ between copies even when its text is the same: such folders are never called equal.
+      if (entry.isSymbolicLink()) return false;
       if (!entry.isFile()) continue;
       const content = await readFile(path);
       if (++files > 500 || (bytes += content.length) > 8_000_000) return false;
