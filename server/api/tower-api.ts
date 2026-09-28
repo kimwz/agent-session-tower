@@ -22,7 +22,10 @@ export interface TowerServices {
   stateDir: string;
   triggers: TriggerService;
   sessions?: {
+    /** What the canvas shows; what a controlling computer is judged by. */
     list(): Session[];
+    /** Every conversation here, for this computer's own lookups; the canvas list when absent. */
+    all?(): Session[];
     /** A page of a conversation ending before the `before` byte cursor, or at its end. */
     read(id: string, limit: number, before?: number): Promise<Pick<SessionDetail, 'messages' | 'hasMore' | 'nextBefore'> | undefined>;
     search?(id: string, query: SessionSearch): Promise<SessionSearchResult | undefined>;
@@ -270,20 +273,20 @@ export class TowerApi {
     switch (name) {
       case 'sessions.list': {
         if (!sessions) throw failure('Sessions are unavailable.', 503);
-        return sessionList(sessions.list(), value);
+        return sessionList(sessions.all?.() ?? sessions.list(), value);
       }
       case 'sessions.read': {
         if (!sessions) throw failure('Sessions are unavailable.', 503);
         const before = value.cursor === undefined ? undefined : Number(value.cursor);
         if (before !== undefined && !(Number.isSafeInteger(before) && before >= 0)) throw failure('Invalid request: cursor: Pass a nextCursor or a search match’s cursor unchanged.', 400);
-        const page = await sessions.read(fullId(sessions.list(), value.id), value.limit ?? 20, before);
+        const page = await sessions.read(fullId(sessions.all?.() ?? sessions.list(), value.id), value.limit ?? 20, before);
         if (!page) throw failure('Session not found.', 404);
         return { messages: page.messages.filter(message => value.tools || message.role !== 'tool').map(message => shownMessage(message, 4000)),
           hasMore: page.hasMore, ...(page.hasMore && page.nextBefore !== undefined ? { nextCursor: String(page.nextBefore) } : {}) };
       }
       case 'sessions.search': {
         if (!sessions) throw failure('Sessions are unavailable.', 503);
-        return this.search(sessions.list(), value);
+        return this.search(sessions.all?.() ?? sessions.list(), value);
       }
       case 'projects.list': {
         if (!this.services.projects) throw failure('Projects are unavailable.', 503);

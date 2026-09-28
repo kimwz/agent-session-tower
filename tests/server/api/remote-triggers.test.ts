@@ -52,7 +52,7 @@ async function fixture(t: TestContext) {
   const submitted: Array<{ origin?: RunOrigin }> = [];
   // Runs during a look (after `skip` others), after what it judges was read: like a change made here at that moment.
   const looking: { during?: () => Promise<unknown>; skip?: number } = {};
-  const api = new TowerApi({ stateDir: root, triggers, runs: { list: () => runs }, sessions: { list: () => sessions, read: async () => ({ messages: [], hasMore: false }),
+  const api = new TowerApi({ stateDir: root, triggers, runs: { list: () => runs }, sessions: { list: () => sessions, all: () => [...sessions, session('codex:finished-slack-work', open)], read: async () => ({ messages: [], hasMore: false }),
       search: async () => ({ count: 1, matches: [{ message: { id: 'm', role: 'user', text: 'release notes', timestamp: new Date().toISOString() }, cursor: 10 }], bytes: 10 }) },
     projects: () => [{ cwd: open, title: 'open', sessions: 1, pinned: false }, { cwd: secret, title: 'secret', sessions: 1, pinned: false }],
     autoPrompts: { submit: async (request, internal) => { submitted.push(internal); return { ...job(request.requestId), ...(internal.origin ? { origin: internal.origin } : {}) }; }, get: () => undefined },
@@ -324,4 +324,15 @@ test('a search from a controlling computer answers nothing if sharing changed wh
   f.looking.during = async () => { f.excluded.add(f.open); };
   await assert.rejects(f.call('sessions.search', { query: 'release', limit: 1 }), { statusCode: 409 });
   assert.deepEqual((await f.call<{ sessions: unknown[]; nextCursor?: string }>('sessions.search', { query: 'release' })), { sessions: [], searched: 0 });
+});
+
+test('work the canvas no longer shows is looked up here, never by a controlling computer', async t => {
+  const f = await fixture(t);
+  const agent = { kind: 'agent' as const, via: 'mcp' as const, sessionId: 'codex:shared', runId: 'r' };
+  const ids = (answer: unknown) => (answer as { sessions: Array<{ id: string }> }).sessions.map(item => item.id).sort();
+  assert.deepEqual(ids(await f.api.call('sessions.list', {}, agent)), ['codex:finished-slack-work', 'codex:private', 'codex:shared']);
+  assert.deepEqual(ids(await f.api.call('sessions.search', { query: 'release' }, agent)), ['codex:finished-slack-work', 'codex:private', 'codex:shared']);
+  assert.deepEqual(ids(await f.call('sessions.list', {})), ['codex:shared']);
+  assert.deepEqual(ids(await f.call('sessions.search', { query: 'release' })), ['codex:shared']);
+  await assert.rejects(f.call('sessions.read', { id: 'codex:finished-slack-work' }), { statusCode: 404 });
 });

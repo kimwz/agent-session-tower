@@ -493,8 +493,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         return [...counts].map(([cwd, sessions]) => ({ cwd, title: titles.get(cwd)?.title || cwd.split('/').filter(Boolean).at(-1) || cwd, sessions, pinned: titles.get(cwd)?.pinned === true }))
           .sort((a, b) => b.sessions - a.sessions);
       },
-      // Lookups reach every conversation: past work the canvas no longer shows is often the context an agent needs.
-      sessions: { list: () => visible.allSessions(),
+      // Local lookups reach every conversation: past work the canvas no longer shows is often the context an agent needs.
+      sessions: { list: () => visible.snapshot().sessions, all: () => visible.allSessions(),
         read: async (id, limit, before) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), before, limit)) ?? { messages: [], hasMore: false } : undefined,
         search: async (id, query) => runs.getSession(id) ? (await sessions.search(runs.nativeSessionId(id), query)) ?? { count: 0, matches: [], bytes: 0 } : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
