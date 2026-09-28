@@ -44,8 +44,8 @@ interface Spare { token: Promise<Token | undefined>; at: number }
 /** `bytes` is the audio taken for the utterance (it may not pass 60 seconds); `sent` what actually went out. */
 interface Utterance { token?: Token; socket?: WebSocket; bytes: number; sent: number; queue: Array<{ message: string; bytes: number }>; open: boolean; closed: boolean; done: Promise<string>; settle(text: string | Error): void }
 /**
- * A say being played. A notice's moment to object starts at `armedAt`, when it really began (however late its timer
- * ran); with listening on, `heard` counts the microphone samples the speech gate has looked at since.
+ * A say being played. A notice's moment to object starts at `armedAt`; with listening on, `heard` counts the
+ * microphone samples heard since it began (on the audio's clock), which it must reach as well.
  */
 interface Playing { say: MasterSay; startedAt: number; replay?: boolean; failed?: boolean; cancelled?: boolean; spokeAt?: number; armedAt?: number; heard?: number; timers: Array<ReturnType<typeof setTimeout>> }
 
@@ -74,6 +74,8 @@ export class VoiceSession {
   private spare?: Spare;
   private listening = false;
   private armed = false;
+  /** The audio time (seconds) from which the microphone is heard: frames captured before it are not. */
+  private heardFrom = 0;
   private lastActivityAt = Date.now();
   private lastSpeechAt = 0;
   private lastReportAt = 0;
@@ -103,9 +105,7 @@ export class VoiceSession {
    */
   async start(): Promise<void> {
     this.context = new AudioContext();
-    void this.context.resume().catch(() => {});
-    this.audio.src = '/master-silence.wav';
-    void this.audio.play().then(() => this.audio.pause(), () => {});
+    this.unlock();
     try {
       const { session } = await post<{ session: string }>('/api/master/voice/on', this.options.token(), { tabId: this.options.tabId });
       this.session = session;
@@ -172,6 +172,15 @@ export class VoiceSession {
     this.queue.unshift({ say, replay: true });
     this.show({ error: undefined });
     this.next();
+    // It waits behind what is being said: the click lets sound play now, for when its turn comes.
+    if (!this.current) this.unlock();
+  }
+
+  /** Lets sound play later without another click; called straight from one. */
+  private unlock(): void {
+    void this.context?.resume().catch(() => {});
+    this.audio.src = '/master-silence.wav';
+    void this.audio.play().then(() => { if (!this.current) this.audio.pause(); }, () => {});
   }
 
   /** Tells the master at once where this page stands (the master panel opened or closed). */
@@ -236,6 +245,7 @@ export class VoiceSession {
     this.gate.reset();
     this.preroll = [];
     this.prerollLength = 0;
+    this.heardFrom = this.context.currentTime;
     this.ensureNode();
     this.armed = true;
   }
@@ -244,7 +254,7 @@ export class VoiceSession {
     if (this.node || !this.stream || !this.context) return;
     this.source = this.context.createMediaStreamSource(this.stream);
     this.node = new AudioWorkletNode(this.context, 'master-pcm-tap', { numberOfOutputs: 0 });
-    this.node.port.onmessage = (event: MessageEvent<Float32Array>) => this.frame(event.data);
+    this.node.port.onmessage = (event: MessageEvent<{ samples: Float32Array; time: number }>) => this.frame(event.data.samples, event.data.time);
     this.source.connect(this.node);
   }
 
@@ -255,11 +265,16 @@ export class VoiceSession {
     this.prerollLength = 0;
   }
 
-  private frame(data: Float32Array): void {
-    if (!this.armed || !this.context) return;
+  /**
+   * One frame from the microphone, captured at `time` on the audio's clock. Frames captured before hearing began
+   * (while something played) are not heard even when handled late, and speech is timed on that clock, so frames
+   * handled in a burst after the page was busy keep their real spacing.
+   */
+  private frame(data: Float32Array, time: number): void {
+    if (!this.armed || !this.context || time < this.heardFrom) return;
     let sum = 0;
     for (const sample of data) sum += sample * sample;
-    const event = this.gate.update(Math.sqrt(sum / data.length));
+    const event = this.gate.update(Math.sqrt(sum / data.length), time * 1000);
     const now = Date.now();
     if (this.gate.isSpeaking || event === 'speech-start') this.lastSpeechAt = now;
     if (event === 'speech-start') this.speechToTell = true;
@@ -360,8 +375,9 @@ export class VoiceSession {
   /** Sends audio on the utterance's connection, or keeps it until the connection opens; only what goes out is paid. */
   private transmit(utterance: Utterance, message: string, bytes: number): void {
     if (utterance.closed) return;
-    if (utterance.open && utterance.socket) { utterance.socket.send(message); utterance.sent += bytes; }
-    else utterance.queue.push({ message, bytes });
+    if (!utterance.open) utterance.queue.push({ message, bytes });
+    // A connection ElevenLabs has closed already takes nothing: what would go there is neither sent nor paid.
+    else if (utterance.socket?.readyState === WebSocket.OPEN) { utterance.socket.send(message); utterance.sent += bytes; }
   }
 
   /** The owner stopped (or ran out of time): what was said is committed, written down and sent as a request. */
@@ -470,22 +486,20 @@ export class VoiceSession {
   }
 
   /**
-   * A notice played through: a moment to object follows (speaking or cancelling). It starts when the microphone is
-   * heard again, not when it was meant to, and with listening on it lasts until two seconds of the microphone were
-   * actually looked at: a page that stalls does not skip it.
+   * A notice played through: a moment to object follows (speaking or cancelling), a short pause after it. With
+   * listening on it is measured on the audio's clock and lasts until two seconds of the microphone captured after the
+   * pause were heard, so a page that stalls neither skips it nor misses what was said meanwhile.
    */
   private noticeEnded(current: Playing): void {
-    current.timers.push(setTimeout(() => {
-      if (this.current !== current) return;
-      current.armedAt = Date.now();
-      if (this.listening && this.stream) {
-        this.gate.reset();
-        this.ensureNode();
-        current.heard = 0;
-        this.armed = true;
-      }
-      current.timers.push(setTimeout(() => this.decideNotice(current), OBJECTION_MS));
-    }, COOLDOWN_MS));
+    current.armedAt = Date.now() + COOLDOWN_MS;
+    if (this.listening && this.stream && this.context) {
+      this.gate.reset();
+      this.heardFrom = this.context.currentTime + COOLDOWN_MS / 1000;
+      this.ensureNode();
+      current.heard = 0;
+      this.armed = true;
+    }
+    current.timers.push(setTimeout(() => this.decideNotice(current), COOLDOWN_MS + OBJECTION_MS));
   }
 
   /** Settles this notice (and only this one) once its outcome is known; until then it keeps waiting. */
