@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.65.1] - 2026-09-28
+
+### Changed
+- **Fully automatic Slack replies say so.** A reply sent by a rule with **Auto-reply with the result without approval** has a small grey line under it: `Sent by <your Slack name>'s agent`. A reply you asked for in chat, or approved, has no such line and reads as your own.
+
 ## [1.65.0] - 2026-09-28
 
 ### Changed
