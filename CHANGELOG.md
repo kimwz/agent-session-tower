@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.62.1] - 2026-09-28
+
+### Fixed
+- **A finished spoken request is sent.** A long request with many pauses could be kept unsent: each pause was judged, the last judgment allowed for one request landed on the finished request just under the bar, and with none left to ask as the pause grew, it waited twenty seconds and was kept unsent. Out of judgments, the pause and how the sentence ends now decide, as when Jev is unavailable, and a request may have up to 20 judgments. Jev is also told that fillers earlier in speech (그, 어, 음) say nothing about the end, and that a reason or purpose said after a request ("…해 줄래? 그래서 신나게 말할 수 있도록.") finishes it. Held-out sentences measured against Jev: 14 of 14 right, against 12 before; mid-thought ones still score 0.03–0.21.
+- **Speaking softly is not a long pause.** When the microphone missed quiet speech but more words were still being written down, the pause kept growing: the words were judged as after a pause of several seconds, and "계속 말씀하세요" could play while you were talking. New words well into a pause now start it over.
+- **The first words are heard.** Speech used to count only after 0.28 seconds of unbroken sound, so syllables with short gaps between them started it late, and the 0.6 seconds kept from before could miss the first words. Short gaps between syllables no longer start the count over, the count is 0.24 seconds, and one second from before is kept. The voice bar shows **듣고 있어요** as soon as a voice is heard. Speaking when no transcription token was ready (after one failed to load) used to lose the whole utterance; it now waits for a new token.
+
 ## [1.62.0] - 2026-09-28
 
 ### Changed
