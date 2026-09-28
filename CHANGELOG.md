@@ -4,6 +4,21 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.58.0] - 2026-09-28
+
+### Changed
+- **Voice now works like SORI: what you say is written down, and answers are read aloud (ElevenLabs).** GPT-Live is gone. Voice costs about a tenth as much, and you are billed only while you speak and while the master reads. Add an ElevenLabs API key under **마스터 설정 → 음성**, then press the microphone by the message box.
+  - Your page listens for speech and writes it down with ElevenLabs as you speak. Your ElevenLabs key never leaves this computer: the page gets a single-use token for each thing you say. A short recorded reply ("네, 확인해 볼게요.") plays at once, and the master's answer is read aloud when it is ready.
+  - While something is read aloud the microphone rests, so the reading never becomes a request. **멈춤** stops a reading. If the browser will not play a reading by itself, **듣기** plays it.
+  - Listening turns off after 5 minutes without a request (a setting). Voice stays on in that tab: news of finished work is read aloud while the master panel is open, and listening turns back on so you can answer.
+  - Before something that cannot be undone, the sentence is read aloud first. The change goes only if the whole sentence played and you did not speak or press **취소** in the moment after.
+  - Today's estimated cost is always shown. A daily limit in dollars is optional; every reading and every utterance is counted against it before it starts.
+  - Settings: voice (from your ElevenLabs account), reading model, the pause that ends what you say, listening time, reading reports aloud, daily limit.
+  - Voice time from the earlier GPT-Live calls is kept in the day's cost.
+
+### Fixed
+- A voice request's answer, stop or failure, and reports of finished work, are marked on screen when they could not be read aloud.
+
 ## [1.57.0] - 2026-09-28
 
 ### Added
