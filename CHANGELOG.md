@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.47.0] - 2026-09-28
+
+### Added
+- **Agents can search earlier sessions.** The new `sessions_search` tool finds conversations whose messages contain every word of a query, case-insensitively, optionally within a period (`since`/`until`, a date alone meaning that whole day), a folder, a provider or one session. It returns the most recently active first, with the number of matches and excerpts of the latest ones. Tool calls and their output are searched only on request. One call reads at most about 1 GB or 10 seconds of history; a search that stops early returns a cursor that continues where it stopped, even inside a long conversation. It is read-only, so an agent can use it before starting a task to find related past work and pick up its context.
+- **Session lists and conversations come a page at a time.** `sessions_list` returns 20 sessions by default, most recently active first, with a cursor for the next page, and filters by title or folder text and by a period of last activity. `sessions_read` pages back through a conversation with a cursor, and a search match's cursor opens the conversation at that match. Tool calls are left out of a page unless asked for, which keeps answers small.
+- These tools are available to agents in turns you start from Tower, and to the master through Tower's API. The master is told to look for related earlier sessions this way. A controlling computer's agents search only conversations that computer may see. If sharing changes during a search, it answers nothing.
+
+### Changed
+- `sessions_list` no longer lists runs other agents started (such as `codex exec` reviews), matching the canvas.
+
 ## [1.46.2] - 2026-09-28
 
 ### Fixed
