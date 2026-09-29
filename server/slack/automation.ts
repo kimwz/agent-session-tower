@@ -477,16 +477,19 @@ export class SlackAutomationManager extends EventEmitter {
     finally { this.unsaved.delete(mark); }
     void this.sweepMarks().catch(() => {});
   }
-  /** Takes every working reaction off now, before the account that put them on is disconnected or replaced. */
-  async clearMarks(): Promise<void> {
+  /**
+   * Takes every working reaction off now, then runs `then` (dropping or replacing the account that put them on).
+   * No sweep puts one back until `then` is done, and a mark queued meanwhile is taken off too.
+   */
+  async clearMarks(then?: () => Promise<void>): Promise<void> {
     // Sweeps stand aside meanwhile, and this counts as the one reaction pass in flight.
     this.clearing = true;
     try {
       await this.marking?.catch(() => {});
       this.marking = (async () => {
-        for (const item of this.items) {
-          for (const mark of item.workingMarks ?? []) if (mark.state !== 'off') await this.settleMark(item, mark, 'remove');
-        }
+        const left = () => this.items.flatMap(item => (item.workingMarks ?? []).filter(mark => mark.state !== 'off').map(mark => ({ item, mark })));
+        for (let marks = left(); marks.length; marks = left()) for (const { item, mark } of marks) await this.settleMark(item, mark, 'remove');
+        await then?.();
       })().finally(() => { this.marking = undefined; });
       await this.marking;
     } finally { this.clearing = false; }

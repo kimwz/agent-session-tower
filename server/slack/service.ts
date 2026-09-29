@@ -236,12 +236,12 @@ export class SlackService extends EventEmitter {
       if (typeof body.appToken !== 'string' || !/^xapp-[\w-]{10,500}$/.test(body.appToken) || typeof body.userToken !== 'string' || !/^xoxp-[\w-]{10,500}$/.test(body.userToken)) throw invalid('Slack App 토큰(xapp)과 사용자 토큰(xoxp)을 입력하세요.');
       if (this.automation.hasPending()) throw invalid('진행 중인 Slack 작업이 끝난 뒤 계정을 변경하세요.');
       const account = await this.makeClient(body.userToken).auth();
-      if (this.settings.userToken) await this.automation.clearMarks();
       const next = { language: this.settings.language, enabled: false, appToken: body.appToken, userToken: body.userToken, account };
-      await writePrivateJson(this.path, JSON.stringify(next));
-      this.settings = next;
-      await this.tone.load(`${account.teamId}:${account.userId}`);
-      this.restartSocket();
+      await this.releaseAccount(async () => {
+        await writePrivateJson(this.path, JSON.stringify(next));
+        this.settings = next;
+        await this.tone.load(`${account.teamId}:${account.userId}`);
+      });
     } else if (action === 'settings') {
       if (!Object.keys(body).length || Object.entries(body).some(([key, value]) => key === 'language' ? value !== 'ko' && value !== 'en'
         : key === 'workingReaction' ? !(typeof value === 'string' && (value === '' || EMOJI_NAME.test(value.replace(/^:|:$/g, '')))) : typeof value !== 'boolean')) throw invalid('감시 설정이 올바르지 않습니다.');
@@ -257,15 +257,24 @@ export class SlackService extends EventEmitter {
       await this.automation.setRules(body.rules);
     } else if (action === 'disconnect') {
       if (this.automation.hasPending()) throw invalid('진행 중인 Slack 작업이 끝난 뒤 연결을 해제하세요. 새 멘션 감시는 지금 끌 수 있습니다.');
-      await this.automation.clearMarks();
-      await writePrivateJson(this.path, JSON.stringify({ enabled: false, language: this.settings.language }));
-      this.settings = { enabled: false, language: this.settings.language };
-      await this.tone.load('');
-      this.restartSocket();
+      await this.releaseAccount(async () => {
+        await writePrivateJson(this.path, JSON.stringify({ enabled: false, language: this.settings.language }));
+        this.settings = { enabled: false, language: this.settings.language };
+        await this.tone.load('');
+      });
     } else throw invalid('지원하지 않는 Slack 설정입니다.');
     this.changedAt = new Date().toISOString();
     this.emit('change');
     return this.overview();
+  }
+  /**
+   * Replaces or drops the connected account: with events and ticks stopped, Tower's working reactions come off with
+   * the account that put them on, and none goes back on before `change` is done.
+   */
+  private async releaseAccount(change: () => Promise<void>) {
+    this.pause();
+    try { await this.automation.clearMarks(change); }
+    finally { this.restartSocket(); this.startTicking(); }
   }
   private restartSocket() {
     this.socket?.stop(); this.socket = undefined; this.error = undefined;

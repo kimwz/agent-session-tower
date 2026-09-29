@@ -1098,3 +1098,30 @@ test('clearing waits for a reaction pass and no sweep puts a mark back meanwhile
   assert.deepEqual(calls, ['add:loading:1.1', 'remove:loading:1.1'], 'no add comes between or after the clearing');
   assert.equal(f.manager.list()[0].workingMarks?.[0].state, 'off');
 });
+
+test('a mark queued while clearing is taken off too, and nothing goes back on before the account change is done', async t => {
+  const f = await fixture(t);
+  const calls: string[] = [];
+  const answers: Array<() => void> = [];
+  f.options.react = (_mention, name, action, ts) => { calls.push(`${action}:${name}:${ts}`); return new Promise<void>(resolve => answers.push(resolve)); };
+  f.options.workingReaction = () => 'loading';
+  f.options.startConversation = () => new Promise(() => {});
+  const admitted = f.manager.ingest(mention);
+  for (let wait = 0; !calls.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  answers.shift()!(); await admitted;
+  let changed = false, release!: () => void;
+  const change = new Promise<void>(resolve => { release = resolve; });
+  const clearing = f.manager.clearMarks(async () => { await change; changed = true; });
+  for (let wait = 0; calls.length < 2 && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  // A second request arrives while the first mark is coming off.
+  const second = f.manager.ingest({ ...mention, id: 'event-2', ts: '2.1', threadTs: '2.0' });
+  answers.shift()!(); await second;
+  for (let wait = 0; calls.length < 3 && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  answers.shift()!();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  void f.manager.tick();
+  await new Promise(resolve => setTimeout(resolve, 20));
+  release(); await clearing;
+  assert.equal(changed, true);
+  assert.deepEqual(calls, ['add:loading:1.1', 'remove:loading:1.1', 'remove:loading:2.1'], 'the late mark is only taken off, never put on');
+});
