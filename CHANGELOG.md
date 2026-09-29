@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.74.0] - 2026-09-29
+
+### Added
+- **Reading speed in the master's voice settings.** Under the voice list, choose 1.0×, 1.2×, 1.4×, 1.6×, 1.8× or 2.0×; the choice is saved and a short sample of the current voice plays at once at that speed (clicking the chosen speed plays it again).
+  - It applies to everything read aloud: answers, answers read while they are written, the first words after a spoken request, news of finished work, notices and voice samples. A speed chosen while something is being read is heard within a second.
+  - The pitch stays the same: the browser plays faster with the pitch kept (also on iPhone Safari, where the speed is set again when sound starts).
+  - Audio cut off by a web restart is still fetched again from the right place, since the place is measured in the audio itself.
+  - The default stays 1.0× (as before). ElevenLabs' own speed setting is not used: it is not offered for the v3 voices and goes only to 1.2× elsewhere, so the audio made, its cost and the kept samples are unchanged.
+
 ## [1.73.0] - 2026-09-29
 
 ### Changed
