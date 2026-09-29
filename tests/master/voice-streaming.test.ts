@@ -243,7 +243,10 @@ test('an answer is read sentence by sentence while the master writes it; when th
   h.finish(run);
   const done = await h.entry(/결제가 아직 없어요/);
   await until(() => h.speakOf(done)?.state === 'played');
-  assert.deepEqual(h.spoken().join(' '), '지금 SORI 광고 성과를 확인했어요. 결제가 아직 없어요. 다음 단계를 말씀드릴게요.');
+  const whole = '지금 SORI 광고 성과를 확인했어요. 결제가 아직 없어요. 다음 단계를 말씀드릴게요.';
+  await until(() => h.spoken().join(' ').length >= whole.length || undefined);
+  await sleep(50);
+  assert.deepEqual(h.spoken().join(' '), whole, 'nothing twice');
   assert.equal(h.room.recent(200).filter(item => item.data.kind === 'master').length, 1, 'one entry, never waiting to be read again');
   // Its record is kept as it ends (written before the session's last save completes).
   await h.session.close();
@@ -265,6 +268,8 @@ test('what the master writes before a tool is read at once; its final answer aft
   const answers = h.says().filter(say => say.kind === 'answer');
   assert.equal(answers.length, 2, 'each message its own audio, so a tool call never holds audio open');
   assert.notEqual(answers[0].audio, answers[1].audio);
+  await until(() => h.spoken().length >= 2 || undefined);
+  await sleep(50);
   assert.deepEqual(h.spoken(), ['세션 목록을 볼게요.', '지금 두 개가 돌고 있어요. 하나는 배포, 하나는 리뷰예요.']);
   const data = done.data as { text: string };
   assert.equal(data.text, '지금 두 개가 돌고 있어요. 하나는 배포, 하나는 리뷰예요.', 'the answer is the last message, as history would give it');
@@ -324,6 +329,7 @@ test('many replies at once are all read in order, none of their audio pushed out
   h.finish(run);
   const done = await h.entry(/44번째/);
   await until(() => h.speakOf(done)?.state === 'played', 20_000);
+  await until(() => h.spoken().length >= 45 || undefined, 20_000);
   assert.deepEqual(h.spoken(), Array.from({ length: 45 }, (_, index) => `${index}번째 짧은 말이에요.`));
 });
 
@@ -453,5 +459,5 @@ test('a message steered into a turn being read that fails to arrive does not sto
   h.finish(run);
   const done = await h.entry(/끝까지 말씀드려요/);
   await until(() => h.speakOf(done)?.state === 'played');
-  assert.ok(h.spoken().includes('이어서 끝까지 말씀드려요.'));
+  await until(() => h.spoken().includes('이어서 끝까지 말씀드려요.') || undefined);
 });
