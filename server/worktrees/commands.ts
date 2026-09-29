@@ -6,7 +6,7 @@ import { basename, isAbsolute, join, normalize, resolve } from 'node:path';
  * be resolved to one absolute folder is left out. Leaving a path out only means Tower keeps that worktree.
  */
 
-interface Word { text: string; dynamic: boolean; quoted: boolean }
+interface Word { text: string; dynamic: boolean; quoted: boolean; /** Its first character was quoted or escaped. */ lead?: boolean }
 type Token = Word | { op: string };
 const isWord = (token: Token | undefined): token is Word => Boolean(token && 'text' in token);
 
@@ -14,11 +14,11 @@ const isWord = (token: Token | undefined): token is Word => Boolean(token && 'te
 function tokenize(command: string): Token[] | undefined {
   const tokens: Token[] = [];
   const heredocs: { delimiter: string; tabs: boolean }[] = [];
-  let word = '', active = false, dynamic = false, quoted = false;
+  let word = '', active = false, dynamic = false, quoted = false, lead = false;
   const finish = () => {
     // Brace expansion (`a{b,c}`, `{1..3}`) makes one word many.
-    if (active) tokens.push({ text: word, dynamic: dynamic || (!quoted && /\{[^}]*(?:,|\.\.)[^}]*\}/.test(word)), quoted });
-    word = ''; active = false; dynamic = false; quoted = false;
+    if (active) tokens.push({ text: word, dynamic: dynamic || (!quoted && /\{[^}]*(?:,|\.\.)[^}]*\}/.test(word)), quoted, lead });
+    word = ''; active = false; dynamic = false; quoted = false; lead = false;
   };
   for (let i = 0; i < command.length; i++) {
     const c = command[i]!;
@@ -39,9 +39,11 @@ function tokenize(command: string): Token[] | undefined {
     if (c === "'") {
       const end = command.indexOf("'", i + 1);
       if (end === -1) { word += command.slice(i + 1); i = command.length; active = true; dynamic = true; continue; }
+      if (!active) lead = true;
       word += command.slice(i + 1, end); i = end; active = true; quoted = true; continue;
     }
     if (c === '"') {
+      if (!active) lead = true;
       active = true; quoted = true;
       for (i++; i < command.length && command[i] !== '"'; i++) {
         const d = command[i]!;
@@ -53,7 +55,7 @@ function tokenize(command: string): Token[] | undefined {
       continue;
     }
     // An escaped character is quoted: `\~` is a folder named ~, not home.
-    if (c === '\\') { if (i + 1 < command.length && command[i + 1] !== '\n') { word += command[i + 1]; active = true; if (!word.slice(0, -1)) quoted = true; } i++; continue; }
+    if (c === '\\') { if (i + 1 < command.length && command[i + 1] !== '\n') { if (!active) lead = true; word += command[i + 1]; active = true; } i++; continue; }
     if (c === '#' && !active) { const end = command.indexOf('\n', i); i = (end === -1 ? command.length : end) - 1; continue; }
     if (/\s/.test(c)) { finish(); continue; }
     if (c === '$' || c === '`') { dynamic = true; word += c; active = true; continue; }
@@ -99,8 +101,9 @@ const REDIRECTS = new Set(['<', '>', '>>', '<&', '>&', '&>', '<<<', '<>']);
 function pathOf(word: Word, cwd: string | undefined, home: string, logical = false): string | undefined {
   if (word.dynamic || !word.text) return undefined;
   let text = word.text;
-  if (!word.quoted && (text === '~' || text.startsWith('~/'))) text = join(home, text.slice(1));
-  else if (!word.quoted && text.startsWith('~')) return undefined;
+  // Only a leading ~ that is not quoted or escaped is home, whatever follows it (`~/"x"` is still home).
+  if (!word.lead && (text === '~' || text.startsWith('~/'))) text = join(home, text.slice(1));
+  else if (!word.lead && text.startsWith('~')) return undefined;
   if (isAbsolute(text)) return logical ? normalize(text) : text;
   if (!cwd) return undefined;
   return logical ? resolve(cwd, text) : `${cwd.replace(/\/+$/, '')}/${text}`;
@@ -137,7 +140,7 @@ export function worktreeAddPaths(command: string, cwd: string | undefined, home:
     // Environment assignments and wrappers that run the rest as a command of its own.
     while (index < all.length) {
       const text = all[index]!.text;
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(text) && !all[index]!.quoted) { index++; continue; }
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(text) && !all[index]!.lead) { index++; continue; }
       // `then git …` still runs git, but from here on the folder depends on the condition.
       // Code run from a string or a file: its words are parsed again by the shell, so nothing here is evidence.
       if (text === 'eval' || text === 'source' || text === '.') { lost = true; return; }
@@ -153,7 +156,7 @@ export function worktreeAddPaths(command: string, cwd: string | undefined, home:
     if (name.text === 'cd' || name.text === 'chdir' || name.text === 'pushd' || name.text === 'popd') {
       const target = all.length === index + 2 ? all[index + 1] : undefined;
       // Exactly one folder: zsh's `cd old new` and options change what it means.
-      const plain = target && !target.dynamic && (isAbsolute(target.text) || /^\.\.?(?:\/|$)/.test(target.text) || (!target.quoted && /^~(?:\/|$)/.test(target.text)));
+      const plain = target && !target.dynamic && (isAbsolute(target.text) || /^\.\.?(?:\/|$)/.test(target.text) || (!target.lead && /^~(?:\/|$)/.test(target.text)));
       directory = !lost && first && !wrapped && name.text !== 'popd' && plain ? pathOf(target, directory, home, true) : undefined;
       moved = true;
       return;
@@ -275,6 +278,8 @@ function objectFields(source: string, start: number): Record<string, string | nu
       for (let depth = 0; i < source.length; i++) {
         const c = source[i];
         if (c === '"') { const literal = stringLiteral(source, i); if (!literal) return undefined; i = literal.end - 1; continue; }
+        // Other strings are skipped whole: a } or , inside one does not end the value.
+        if (c === "'" || c === '`') { for (i++; i < source.length && source[i] !== c; i++) if (source[i] === '\\') i++; if (i >= source.length) return undefined; continue; }
         if (c === '{' || c === '[' || c === '(') depth++;
         else if (c === '}' || c === ']' || c === ')') { if (depth === 0) break; depth--; }
         else if (c === ',' && depth === 0) break;

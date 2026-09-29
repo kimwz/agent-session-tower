@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { basename, dirname, join } from 'node:path';
@@ -63,27 +63,50 @@ export async function removalBlocker(git: GitRunner, worktree: LinkedWorktree): 
     else if (/^[12u?] /.test(line)) changes++;
   }
   if (changes) return { reason: 'changes', detail: String(changes) };
-  // Files git was told not to look at (`update-index --assume-unchanged` / `--skip-worktree`) may hold edits status hides.
-  const hidden = (await git(worktree.path, ['ls-files', '-v'], TIMEOUT_MS)).split('\n').filter(line => /^(?:[a-z]|S) /.test(line)).length;
-  if (hidden) return { reason: 'changes', detail: String(hidden) };
   // Branches are never deleted, so their commits stay; commits not yet published mean the work is not over.
   // An upstream that is gone was published and then deleted on the remote, as merged pull requests are.
-  if (branch && upstream) return ahead ? { reason: 'unpushed', detail: `${branch} (${ahead})` } : nestedBlocker(git, worktree.path);
+  if (branch && upstream) return ahead ? { reason: 'unpushed', detail: `${branch} (${ahead})` } : hiddenBlocker(git, worktree.path);
   // Without an upstream, and on a detached HEAD, which only the worktree holds: commits no remote (or branch or tag) has.
   const unpublished = Number((await git(worktree.path, ['rev-list', '--count', 'HEAD', '--not', '--remotes', ...(branch ? [] : ['--branches', '--tags'])], TIMEOUT_MS)).trim());
   if (!Number.isFinite(unpublished)) throw new Error('git rev-list gave no count');
   if (unpublished) return branch ? { reason: 'unpushed', detail: `${branch} (${unpublished})` } : { reason: 'unpublished', detail: String(unpublished) };
-  return nestedBlocker(git, worktree.path);
+  return hiddenBlocker(git, worktree.path);
 }
 
 const execute = promisify(execFile);
 
+/**
+ * Files git was told not to look at (`update-index --assume-unchanged`, or `--skip-worktree` outside a sparse checkout) may
+ * hold edits status does not show. Counted as git lists them, so a repository of any size fits.
+ */
+async function hiddenBlocker(git: GitRunner, path: string): Promise<Blocker | undefined> {
+  const hidden = await hiddenFiles(git, path);
+  if (hidden) return { reason: 'changes', detail: String(hidden) };
+  return nestedBlocker(git, path);
+}
+
+async function hiddenFiles(git: GitRunner, path: string): Promise<number> {
+  const sparse = (await git(path, ['config', '--bool', 'core.sparseCheckout'], TIMEOUT_MS).catch(() => '')).trim() === 'true';
+  return new Promise<number>((resolve, reject) => {
+    const child = spawn('git', ['-C', path, '--no-optional-locks', 'ls-files', '-v'], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' } });
+    const timer = setTimeout(() => child.kill(), TIMEOUT_MS * 6);
+    let count = 0, rest = '';
+    child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
+      const lines = (rest + chunk).split('\n');
+      rest = lines.pop()!;
+      for (const line of lines) if (/^[a-z] /.test(line) || (!sparse && line.startsWith('S '))) count++;
+    });
+    child.on('error', reject);
+    child.on('close', code => { clearTimeout(timer); if (code === 0) resolve(count); else reject(new Error(`git ls-files exited with ${code}`)); });
+  });
+}
+
 const MOST_NESTED = 100;
 
 /**
- * A repository inside the worktree, in a folder git ignores there, goes with it. That only loses nothing when it is a plain
- * repository with nothing uncommitted and nothing it was meant to publish unpublished: test fixtures and fetched copies go,
- * another repository's worktree or submodule (a `.git` file), or work in progress, keeps the worktree.
+ * A repository inside the worktree, in a folder git ignores there, goes with it like any ignored file. It keeps the worktree
+ * when it holds work of its own: uncommitted or hidden changes, commits no remote has, worktrees of its own, or it is another
+ * repository's worktree or submodule (a `.git` file), or a bare repository. Empty test fixtures and fetched copies go.
  */
 async function nestedBlocker(git: GitRunner, path: string): Promise<Blocker | undefined> {
   // `.git` folders and files, and the HEAD of any bare repository (one without a working tree, such as a backup).
@@ -101,11 +124,12 @@ async function nestedBlocker(git: GitRunner, path: string): Promise<Blocker | un
     const folder = dirname(dotGit);
     if (!(await stat(dotGit)).isDirectory()) return { reason: 'nested', detail: folder };
     const status = await git(folder, ['status', '--porcelain', '--untracked-files=normal'], TIMEOUT_MS);
-    if (status.trim()) return { reason: 'nested', detail: folder };
-    if ((await git(folder, ['remote'], TIMEOUT_MS)).trim()) {
-      const unpublished = Number((await git(folder, ['rev-list', '--count', '--all', '--not', '--remotes'], TIMEOUT_MS)).trim());
-      if (!Number.isFinite(unpublished) || unpublished) return { reason: 'nested', detail: folder };
-    }
+    if (status.trim() || await hiddenFiles(git, folder)) return { reason: 'nested', detail: folder };
+    // Commits no remote has (with or without one configured), or worktrees of its own elsewhere, are work of its own.
+    const unpublished = Number((await git(folder, ['rev-list', '--count', '--all', '--not', '--remotes'], TIMEOUT_MS)).trim());
+    if (!Number.isFinite(unpublished) || unpublished) return { reason: 'nested', detail: folder };
+    const worktrees = (await git(folder, ['worktree', 'list', '--porcelain'], TIMEOUT_MS)).split('\n').filter(line => line.startsWith('worktree ')).length;
+    if (worktrees > 1) return { reason: 'nested', detail: folder };
   }
   return undefined;
 }

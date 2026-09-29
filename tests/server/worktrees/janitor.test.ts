@@ -365,14 +365,14 @@ test('a repository inside an ignored folder of the worktree keeps it; so does a 
   assert.equal(existsSync(later), true, 'an open conversation that changed meanwhile is read again first');
 });
 
-test('a clean repository without a remote inside an ignored folder (a test fixture) does not keep the worktree', async t => {
+test('an empty repository inside an ignored folder (a test fixture) does not keep the worktree', async t => {
   const { dir, work, state, add, transcript, session } = await setup(t);
   const target = join(dir, 'work.wt-fixtures');
   const rows = add(`git worktree add --detach ${target} HEAD`, ['--detach', target, 'HEAD']);
   await writeFile(join(work, '.git', 'info', 'exclude'), 'tmp/\n');
   const fixture = join(target, 'tmp', 'fixture', 'repo');
+  // Like Tower's own fixtures: initialized, files written, nothing committed.
   execFileSync('git', ['init', '-q', fixture], { env });
-  await writeFile(join(fixture, 'f.txt'), 'fixture'); git(fixture, 'add', 'f.txt'); git(fixture, 'commit', '-qm', 'fixture');
   const world = { sessions: [session('f', await transcript('f', rows))], closed: new Set(['claude:f']) };
   const cleaner = janitor(state, world);
   await cleaner.start(); t.after(() => cleaner.close());
@@ -437,4 +437,61 @@ test('edits hidden from git status, and a bare repository inside, keep the workt
   const results = new Map((await worktreeCleanupFor(state, ['claude:h'])).map(item => [item.path, item.reason]));
   assert.deepEqual([results.get(hidden), results.get(bare), results.get(quoted)], ['changes', 'nested', 'openSession']);
   assert.deepEqual([hidden, bare, quoted].map(existsSync), [true, true, true]);
+});
+
+test('a repository inside with commits of its own, hidden edits, or worktrees of its own keeps the worktree', async t => {
+  const { dir, work, state, add, transcript, session } = await setup(t);
+  const [committed, hidden, linked] = ['committed', 'hidden', 'linked'].map(name => join(dir, `work.wt-${name}`));
+  const rows = [committed, hidden, linked].flatMap(path => add(`git worktree add --detach ${path} HEAD`, ['--detach', path, 'HEAD']));
+  await writeFile(join(work, '.git', 'info', 'exclude'), 'inner/\n');
+  for (const path of [committed, hidden, linked]) {
+    execFileSync('git', ['init', '-q', join(path, 'inner')], { env });
+    await writeFile(join(path, 'inner', 'f.txt'), 'x'); git(join(path, 'inner'), 'add', 'f.txt');
+  }
+  git(join(committed, 'inner'), 'commit', '-qm', 'only copy');
+  // The others publish their commit to a remote of their own first.
+  for (const path of [hidden, linked]) {
+    const remote = join(dir, `${path.split('-').pop()}-remote.git`);
+    execFileSync('git', ['init', '-q', '--bare', remote], { env });
+    git(join(path, 'inner'), 'commit', '-qm', 'published'); git(join(path, 'inner'), 'remote', 'add', 'origin', remote); git(join(path, 'inner'), 'push', '-q', 'origin', 'HEAD:main'); git(join(path, 'inner'), 'fetch', '-q');
+  }
+  git(join(hidden, 'inner'), 'update-index', '--skip-worktree', 'f.txt'); await writeFile(join(hidden, 'inner', 'f.txt'), 'edited');
+  git(join(linked, 'inner'), 'worktree', 'add', '-q', '--detach', join(dir, 'inner-elsewhere'), 'HEAD');
+  const world = { sessions: [session('n', await transcript('n', rows))], closed: new Set(['claude:n']) };
+  const cleaner = janitor(state, world);
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.deepEqual((await worktreeCleanupFor(state, ['claude:n'])).map(item => item.reason), ['nested', 'nested', 'nested']);
+  assert.deepEqual([committed, hidden, linked].map(existsSync), [true, true, true]);
+});
+
+test('incremental reads: a line still being written is read again once finished, and a replaced shorter file from the start', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-worktree-increment-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 't.jsonl');
+  const row = (content: string) => JSON.stringify({ type: 'user', message: { content } });
+  await writeFile(file, `${row('first')}\n${row('about work.wt-late').slice(0, 20)}`);
+  const first = await transcriptMentions(file, ['work.wt-late']);
+  assert.equal(first.found.size, 0);
+  await writeFile(file, `${row('first')}\n${row('about work.wt-late')}\n`);
+  assert.deepEqual([...(await transcriptMentions(file, ['work.wt-late'], first.end)).found], ['work.wt-late'], 'the unfinished line was not skipped');
+  await writeFile(file, `${row('now work.wt-late')}\n`);
+  assert.deepEqual([...(await transcriptMentions(file, ['work.wt-late'], 10_000)).found], ['work.wt-late'], 'a shorter file is read from the start');
+});
+
+test('a branch with an upstream is also checked for repositories inside, and a clean worktree of another repository inside keeps it', async t => {
+  const { dir, work, state, add, transcript, session } = await setup(t);
+  const branch = join(dir, 'work-branch');
+  const rows = add(`git worktree add -b topic ${branch} origin/main`, ['-b', 'topic', branch, 'origin/main']);
+  git(branch, 'push', '-q', '-u', 'origin', 'topic');
+  await writeFile(join(work, '.git', 'info', 'exclude'), 'other/\n');
+  const other = join(dir, 'other-repo');
+  execFileSync('git', ['init', '-q', '-b', 'main', other], { env });
+  await writeFile(join(other, 'o.txt'), 'o'); git(other, 'add', 'o.txt'); git(other, 'commit', '-qm', 'o');
+  git(other, 'worktree', 'add', '-q', '--detach', join(branch, 'other', 'wt'), 'HEAD');
+  const world = { sessions: [session('b', await transcript('b', rows))], closed: new Set(['claude:b']) };
+  const cleaner = janitor(state, world);
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.deepEqual((await worktreeCleanupFor(state, ['claude:b'])).map(item => [item.reason, item.detail]), [['nested', join(branch, 'other', 'wt')]]);
 });

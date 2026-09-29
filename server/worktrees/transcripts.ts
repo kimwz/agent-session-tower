@@ -16,7 +16,9 @@ type Json = Record<string, any>;
  */
 async function* rows(file: string, keep: (line: string) => boolean, from = 0, read: { end: number } = { end: 0 }): AsyncGenerator<Json> {
   const size = (await stat(file)).size;
-  read.end = Math.min(from, size);
+  // A file shorter than where the last read ended was replaced: it is read again from the start.
+  if (from > size) from = 0;
+  read.end = from;
   if (from >= size) return;
   const input = createReadStream(file, { encoding: 'utf8', start: from, end: size - 1 });
   const lines = createInterface({ input, crlfDelay: Infinity });
@@ -91,12 +93,14 @@ export async function transcriptCreations(file: string, provider: Provider, home
 export async function transcriptMentions(file: string, names: readonly string[], from = 0): Promise<{ found: Set<string>; end: number }> {
   const found = new Set<string>();
   // Transcripts are JSON: a name is found as JSON writes it (a quote or backslash in it is escaped there).
-  const written = new Map(names.map(name => [name, JSON.stringify(name).slice(1, -1)]));
-  const wanted = (line: string) => names.some(name => !found.has(name) && line.includes(written.get(name)!));
+  // Tool arguments are JSON inside JSON: there it is escaped twice.
+  const forms = new Map(names.map(name => { const once = JSON.stringify(name).slice(1, -1); return [name, [once, JSON.stringify(once).slice(1, -1)]]; }));
+  const has = (text: string, name: string) => forms.get(name)!.some(form => text.includes(form));
+  const wanted = (line: string) => names.some(name => !found.has(name) && has(line, name));
   const read = { end: from };
   for await (const row of rows(file, wanted, from, read)) {
     const text = JSON.stringify(withoutOutput(row)) ?? '';
-    for (const name of names) if (text.includes(written.get(name)!)) found.add(name);
+    for (const name of names) if (has(text, name)) found.add(name);
     if (found.size === names.length) break;
   }
   return { found, end: read.end };
