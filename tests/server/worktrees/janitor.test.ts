@@ -184,3 +184,29 @@ test('transcripts give Codex creations with their folders and results, and refer
   assert.deepEqual([...await transcriptMentions(codex, ['repo.wt', 'ok', 'missing'])], ['repo.wt']);
   await assert.rejects(transcriptCreations(join(dir, 'gone.jsonl'), 'claude', '/h'), { code: 'ENOENT' });
 });
+
+test('use is judged again right before each removal: a conversation reopened during another removal keeps its worktree', async t => {
+  const { dir, state, add, transcript, session } = await setup(t);
+  const first = join(dir, 'work.wt-first'), second = join(dir, 'work.wt-second'), third = join(dir, 'work.wt-third');
+  const world = {
+    sessions: [
+      session('a', await transcript('a', add(`git worktree add --detach ${first} HEAD`, ['--detach', first, 'HEAD']))),
+      session('b', await transcript('b', add(`git worktree add --detach ${second} HEAD`, ['--detach', second, 'HEAD']))),
+      session('c', await transcript('c', add(`git worktree add --detach ${third} HEAD`, ['--detach', third, 'HEAD']))),
+    ],
+    closed: new Set(['claude:a', 'claude:b', 'claude:c']), cwds: [] as string[] | undefined,
+  };
+  const real = gitRunner(env);
+  const cleaner = new WorktreeJanitor({ stateDir: state, sessions: () => world.sessions, closedIds: async () => world.closed, finishedAutomation: () => new Set(), runs: () => [],
+    home: '/nonexistent-home', cwds: async () => world.cwds, firstPassMs: 3_600_000,
+    git: async (cwd, args, timeout) => {
+      const output = await real(cwd, args, timeout);
+      // While the first is being removed, the owner reopens b and a shell starts in c.
+      if (args[0] === 'worktree' && args[1] === 'remove' && args[2] === first) { world.closed.delete('claude:b'); world.cwds = [third]; }
+      return output;
+    } });
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.deepEqual([first, second, third].map(existsSync), [false, true, true]);
+  assert.equal((await worktreeCleanupFor(state, ['claude:c']))[0]?.reason, 'process');
+});

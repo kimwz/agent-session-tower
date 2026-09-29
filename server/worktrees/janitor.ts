@@ -30,6 +30,7 @@ interface Entry {
   detail?: string;
   checkedAt: number;
 }
+interface World { sessions: Session[]; families: Map<string, Session[]>; finishedRoots: Set<string>; finished: Set<string>; open: Session[] }
 interface Saved { version: number; scanned: Record<string, string>; worktrees: Record<string, Entry> }
 
 export interface WorktreeJanitorOptions {
@@ -101,7 +102,8 @@ export class WorktreeJanitor {
     return this.running;
   }
 
-  private async work(): Promise<void> {
+  /** Which conversations' work is over, as things are right now. */
+  private async world(): Promise<World> {
     const now = this.now();
     const sessions = this.options.sessions();
     const closed = await this.options.closedIds();
@@ -115,11 +117,17 @@ export class WorktreeJanitor {
       if (closed.has(root) || (automation.has(root) && now - lastActive >= AUTOMATION_GRACE_MS)) finishedRoots.add(root);
     }
     const finished = new Set([...finishedRoots].flatMap(root => families.get(root)!.map(member => member.id)));
+    return { sessions, families, finishedRoots, finished, open: sessions.filter(session => !finished.has(session.id)) };
+  }
+
+  private async work(): Promise<void> {
+    const now = this.now();
+    const world = await this.world();
     let changed = false;
 
     let budget = FAMILIES_PER_PASS;
-    for (const root of finishedRoots) {
-      const members = families.get(root)!;
+    for (const root of world.finishedRoots) {
+      const members = world.families.get(root)!;
       if (members.every(member => this.saved.scanned[member.id] === member.updatedAt)) continue;
       if (budget-- <= 0 || this.closed || this.paused) break;
       try {
@@ -132,19 +140,16 @@ export class WorktreeJanitor {
       }
     }
 
-    const due = Object.entries(this.saved.worktrees).filter(([, entry]) => entry.state !== 'removed' && finishedRoots.has(entry.root)
+    const due = Object.entries(this.saved.worktrees).filter(([, entry]) => entry.state !== 'removed' && world.finishedRoots.has(entry.root)
       && (entry.state === 'pending' || now - entry.checkedAt >= RECHECK_MS));
-    if (due.length) {
-      const cwds = await (this.options.cwds ?? processCwds)();
-      const open = sessions.filter(session => !finished.has(session.id));
-      const referrers = await this.referrers(open, [...new Set(due.map(([path]) => basename(path)))]);
-      for (const [path, entry] of due) {
-        if (this.closed || this.paused) break;
-        await this.settle(path, entry, sessions, finished, open, referrers, cwds);
-        changed = true;
-      }
+    // Reads each open transcript once for every folder name; the checks before each removal then find them cached.
+    if (due.length) await this.referrers(world.open, [...new Set(due.map(([path]) => basename(path)))]);
+    for (const [path, entry] of due) {
+      if (this.closed || this.paused) break;
+      await this.settle(path, entry, world);
+      changed = true;
     }
-    if (changed) await this.save(sessions);
+    if (changed) await this.save(this.options.sessions());
   }
 
   /** Records every worktree a family's transcripts prove they created and that still exists. */
@@ -161,7 +166,7 @@ export class WorktreeJanitor {
     }
   }
 
-  private async settle(path: string, entry: Entry, sessions: Session[], finished: ReadonlySet<string>, open: Session[], referrers: ReadonlyMap<string, Session>, cwds: string[] | undefined): Promise<void> {
+  private async settle(path: string, entry: Entry, world: World): Promise<void> {
     const keep = (reason: WorktreeKeptReason, detail?: string) => Object.assign(entry, { state: 'kept', reason, detail, checkedAt: this.now() });
     try {
       const worktree = await linkedWorktree(this.git, path);
@@ -170,8 +175,8 @@ export class WorktreeJanitor {
       const name = basename(worktree.path);
       // Every session that ran a `git worktree add` for this folder around its creation must be done: a failed attempt
       // at a path someone else had just created, and a fork's copy of its original's command, look the same.
-      for (const session of sessions) {
-        if (finished.has(session.id) || !session.filePath) continue;
+      for (const session of world.open) {
+        if (!session.filePath) continue;
         const from = Date.parse(session.createdAt) - 60_000, to = Date.parse(session.updatedAt) + 60_000;
         if (!(from <= worktree.createdAt && worktree.createdAt <= to)) continue;
         const creations = await unlessGone(transcriptCreations(session.filePath, session.provider, this.home, session.cwd || undefined, name), []);
@@ -180,17 +185,22 @@ export class WorktreeJanitor {
           if (await realpath(creation.path).catch(() => creation.path) === worktree.path) { keep('otherCreator', session.title); return; }
         }
       }
+      const blocker = await removalBlocker(this.git, worktree);
+      if (blocker) { keep(blocker.reason, blocker.detail); return; }
+      // Use is judged as things are now, right before removing: another removal in this pass may have taken minutes, and the
+      // owner may have reopened the conversation, or started a shell in the folder, meanwhile.
+      const now = await this.world();
+      if (!now.finishedRoots.has(entry.root)) return;
       const inside = (folder: string) => folder === worktree.path || folder.startsWith(worktree.path + sep);
-      const referrer = referrers.get(name);
+      const referrer = (await this.referrers(now.open, [name])).get(name);
       if (referrer) { keep('openSession', referrer.title); return; }
-      for (const session of open) {
+      for (const session of now.open) {
         const cwd = session.cwd && await realpath(session.cwd).catch(() => session.cwd);
         if (cwd && inside(cwd)) { keep('openSession', session.title); return; }
       }
+      const cwds = await (this.options.cwds ?? processCwds)();
       if (!cwds) { keep('processesUnknown'); return; }
       if (cwds.some(inside)) { keep('process'); return; }
-      const blocker = await removalBlocker(this.git, worktree);
-      if (blocker) { keep(blocker.reason, blocker.detail); return; }
       this.removing = true;
       try { await removeWorktree(this.git, worktree); }
       finally { this.removing = false; }
