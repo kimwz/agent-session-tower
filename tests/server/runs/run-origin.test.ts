@@ -160,12 +160,13 @@ test('a damaged origin record never reads back as owner work', async t => {
   assert.deepEqual(manager.list().find(run => run.id === runId)?.origin, { kind: 'unknown' }, 'the run itself is kept');
 });
 
-test('trigger sessions never create folders, pre-trust only chosen folders, and run Claude in auto mode when unattended', async t => {
+test('trigger sessions never create folders, pre-trust only chosen folders, and run Claude in auto mode when unattended, without the owner\'s allow rules', async t => {
   const f = await fixture(t);
   const launches: string[][] = [];
   const trusted: string[] = [];
+  const allowed = JSON.stringify({ permissions: { allow: ['Bash(gh pr merge *)'] } });
   const manager = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000,
-    findExecutable: async provider => `/fixture/${provider}`, trustWorkspace: async (_provider, cwd) => { trusted.push(cwd); },
+    findExecutable: async provider => `/fixture/${provider}`, trustWorkspace: async (_provider, cwd) => { trusted.push(cwd); }, claudeSettings: cwd => cwd === f.directory ? allowed : undefined,
     spawnProcess: (_file, args) => { launches.push(args); throw new Error('stop after recording arguments'); } });
   await manager.start();
   t.after(async () => { await manager.close().catch(() => {}); });
@@ -182,6 +183,11 @@ test('trigger sessions never create folders, pre-trust only chosen folders, and 
   const unattendedArgs = launches.find(args => args.includes('--permission-mode'))!;
   assert.equal(unattendedArgs[unattendedArgs.indexOf('--permission-mode') + 1], 'auto');
   assert.equal(launches.filter(args => args.includes('--permission-mode')).length, 1);
+  assert.equal(launches.filter(args => args.includes('--settings')).length, 0, 'trigger work, public agents included, keeps the classifier\'s review');
+  // The owner's own turn in the same folder gets them.
+  await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Mine' }, { origin: { kind: 'owner' } });
+  await until(() => launches.length === 3);
+  assert.equal(launches[2][launches[2].indexOf('--settings') + 1], allowed);
   await manager.close();
 });
 
