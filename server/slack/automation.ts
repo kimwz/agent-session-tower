@@ -467,7 +467,8 @@ export class SlackAutomationManager extends EventEmitter {
    */
   private async queueMark(item: SlackWorkflow, ts: string): Promise<void> {
     const name = this.options.workingReaction?.();
-    if (!name || !validEmoji(name) || !this.options.react || item.workingMarks?.some(mark => mark.ts === ts && mark.state !== 'off')) return;
+    // While the account is being dropped or replaced, nothing new is marked.
+    if (this.clearing || !name || !validEmoji(name) || !this.options.react || item.workingMarks?.some(mark => mark.ts === ts && mark.state !== 'off')) return;
     if ((item.workingMarks?.length ?? 0) >= MAX_WORKING_MARKS) return;
     const mark = { ts, name, state: 'add' as const };
     item.workingMarks = [...(item.workingMarks ?? []), mark];
@@ -479,7 +480,7 @@ export class SlackAutomationManager extends EventEmitter {
   }
   /**
    * Takes every working reaction off now, then runs `then` (dropping or replacing the account that put them on).
-   * No sweep puts one back until `then` is done, and a mark queued meanwhile is taken off too.
+   * Meanwhile no sweep puts one back and no new mark is recorded.
    */
   async clearMarks(then?: () => Promise<void>): Promise<void> {
     // Sweeps stand aside meanwhile, and this counts as the one reaction pass in flight.
