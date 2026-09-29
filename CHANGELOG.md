@@ -4,6 +4,18 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.71.0] - 2026-09-29
+
+### Fixed
+- **A long spoken request no longer loses its end.** ElevenLabs' speech-to-text commits what it heard by itself after about 36 seconds of audio, and the master's voice chat took that first part as the whole request: everything said after it was dropped. Now every part is kept and the request goes once all of it is written down.
+  - The page commits parts itself at pauses (and before 36 seconds of unbroken speech), so a part rarely ends mid-word.
+  - What is shown and judged while you speak is the whole utterance, not only its latest part.
+  - If the last part is slow to come back, what was written down so far is sent instead of nothing.
+  - One utterance may run three minutes (was one), pauses included. Each still reserves its full length against the daily voice limit until it is settled.
+
+### Removed
+- **"계속 말씀하세요, 듣고 있어요." in a long pause.** Its own sound came back through the microphone and was written into the request ("…계속 말씀하세…"). A long pause still shows that the master is waiting and, after 20 seconds, keeps what was said unsent, as before.
+
 ## [1.70.0] - 2026-09-29
 
 ### Changed
