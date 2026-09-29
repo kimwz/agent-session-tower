@@ -1,11 +1,11 @@
 import { homedir } from 'node:os';
 import { basename, join, normalize, relative, sep } from 'node:path';
-import { cp, realpath, rm } from 'node:fs/promises';
+import { cp, lstat, readdir, realpath, rm, stat } from 'node:fs/promises';
 import type { Run, Session, WorktreeCleanup, WorktreeKeptReason } from '../../shared/types.js';
 import { gitRunner, type GitRunner } from '../repositories/git.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { ignoredWork, linkedWorktree, regenerable, removalBlocker, removeWorktree, type LinkedWorktree } from './git.js';
-import { namesFolder, processCommands, processCwds } from './process-cwds.js';
+import { ignoredWork, keepable, linkedWorktree, regenerable, removalBlocker, removeWorktree, type LinkedWorktree } from './git.js';
+import { namesFolder, pathArguments, processCommands, processCwds, type ProgramLine } from './process-cwds.js';
 import { transcriptCreations, transcriptMentions } from './transcripts.js';
 
 const VERSION = 1;
@@ -54,7 +54,7 @@ export interface WorktreeJanitorOptions {
   home?: string;
   now?: () => number;
   cwds?: () => Promise<string[] | undefined>;
-  commands?: () => Promise<string[] | undefined>;
+  commands?: () => Promise<ProgramLine[] | undefined>;
   firstPassMs?: number;
   passMs?: number;
 }
@@ -225,7 +225,11 @@ export class WorktreeJanitor {
       // A program started elsewhere may still work in it (`--directory ../preview`): its command line names the folder.
       const commands = await (this.options.commands ?? processCommands)();
       if (!commands) { keep('processesUnknown'); return; }
-      if (commands.some(command => namesFolder(command, name))) { keep('process'); return; }
+      if (commands.some(command => namesFolder(command.args, name))) { keep('process'); return; }
+      // Or reaches it through a symlink (`--directory /w/current` → the worktree): arguments are followed to where they lead.
+      for (const command of commands) for (const argument of pathArguments(command)) {
+        if (inside(await this.resolved(argument))) { keep('process'); return; }
+      }
       const reserved = await Promise.all((await this.options.reserved?.() ?? []).map(folder => this.resolved(folder)));
       if (reserved.some(inside)) { keep('reserved'); return; }
       // Files git ignores that no tool makes again (notes, review records, local settings) are moved to Tower's state folder
@@ -233,11 +237,15 @@ export class WorktreeJanitor {
       const work = await ignoredWork(this.git, worktree.path, MOST_KEPT);
       if (work.bytes > MOST_KEPT.bytes || work.files > MOST_KEPT.files) { keep('ignoredWork', `${work.files} files`); return; }
       const archive = work.entries.length ? join(this.options.stateDir, 'worktree-files', `${name}-${new Date(this.now()).toISOString().replace(/[:.]/g, '-')}`) : undefined;
-      if (archive) for (const entry of work.entries) {
-        await cp(join(worktree.path, entry), join(archive, entry), { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false, preserveTimestamps: true,
-          filter: source => !regenerable(relative(worktree.path, source)) });
-      }
       const discard = async () => { if (archive) await rm(archive, { recursive: true, force: true }); };
+      // A copy that fails partway is removed, so retries never pile up copies.
+      if (archive) try {
+        for (const entry of work.entries) {
+          await cp(join(worktree.path, entry), join(archive, entry), { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false, preserveTimestamps: true,
+            filter: async source => !regenerable(relative(worktree.path, source)) && keepable(await lstat(source)) });
+        }
+        await pruneArchives(join(this.options.stateDir, 'worktree-files'), archive);
+      } catch (error) { await discard(); throw error; }
       // Conversations are judged last, and again until nothing changed while their transcripts were read (a few tries; a
       // busy moment leaves the worktree for the next pass). Nothing waits between the last look and the removal.
       const revision = (session: Session) => `${session.id}\0${session.updatedAt}\0${session.cwd}`;
@@ -305,6 +313,27 @@ export class WorktreeJanitor {
     for (const [path] of removed.slice(KEEP_REMOVED)) delete this.saved.worktrees[path];
     await writePrivateJson(worktreeCleanupFile(this.options.stateDir), `${JSON.stringify(this.saved)}\n`)
       .catch(error => console.error(`Worktree cleanup state was not saved: ${error instanceof Error ? error.message : String(error)}`));
+  }
+}
+
+/** Moved-aside files kept at most, all worktrees together; the oldest folders go first, never the one just made. */
+const ARCHIVES_MOST_BYTES = 2 * 1024 * 1024 * 1024;
+
+async function pruneArchives(root: string, keep: string): Promise<void> {
+  const size = async (path: string): Promise<number> => {
+    const info = await lstat(path);
+    if (!info.isDirectory()) return info.size;
+    let total = 0;
+    for (const name of await readdir(path)) total += await size(join(path, name));
+    return total;
+  };
+  const folders = await Promise.all((await readdir(root)).map(async name => ({ path: join(root, name), at: (await stat(join(root, name))).mtimeMs, bytes: await size(join(root, name)) })));
+  let total = folders.reduce((sum, folder) => sum + folder.bytes, 0);
+  for (const folder of folders.sort((a, b) => a.at - b.at)) {
+    if (total <= ARCHIVES_MOST_BYTES) break;
+    if (folder.path === keep) continue;
+    await rm(folder.path, { recursive: true, force: true });
+    total -= folder.bytes;
   }
 }
 

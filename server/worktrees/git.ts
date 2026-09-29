@@ -3,6 +3,7 @@ import { lstat, readdir, realpath, stat } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { basename, dirname, join } from 'node:path';
 import type { GitRunner } from '../repositories/git.js';
+import { findExecutable } from '../providers/discovery.js';
 
 const TIMEOUT_MS = 20_000;
 /** Removing a worktree deletes its installed dependencies too, which can take minutes. */
@@ -85,10 +86,14 @@ async function hiddenBlocker(git: GitRunner, path: string): Promise<Blocker | un
   return nestedBlocker(git, path);
 }
 
+/** The git Tower's other git commands use. */
+const gitExecutable = findExecutable('git').then(found => found ?? 'git');
+
 async function hiddenFiles(git: GitRunner, path: string): Promise<number> {
   const sparse = (await git(path, ['config', '--bool', 'core.sparseCheckout'], TIMEOUT_MS).catch(() => '')).trim() === 'true';
+  const executable = await gitExecutable;
   return new Promise<number>((resolve, reject) => {
-    const child = spawn('git', ['-C', path, '--no-optional-locks', 'ls-files', '-v'], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' } });
+    const child = spawn(executable, ['-C', path, '--no-optional-locks', 'ls-files', '-v'], { stdio: ['ignore', 'pipe', 'ignore'], env: { ...process.env, GIT_TERMINAL_PROMPT: '0', LC_ALL: 'C' } });
     const timer = setTimeout(() => child.kill(), TIMEOUT_MS * 6);
     let count = 0, rest = '';
     child.stdout.setEncoding('utf8').on('data', (chunk: string) => {
@@ -134,10 +139,16 @@ async function nestedBlocker(git: GitRunner, path: string): Promise<Blocker | un
   return undefined;
 }
 
-/** Folders of files a tool makes again (dependencies, builds, caches): they go with a worktree and are never kept. */
-const REGENERABLE = new Set(['node_modules', 'bower_components', '.pnpm-store', 'vendor', 'dist', 'build', 'out', '.next', '.nuxt', '.svelte-kit', '.turbo',
-  '.cache', '.parcel-cache', '.vite', 'coverage', 'target', '__pycache__', '.pytest_cache', '.mypy_cache', '.venv', 'venv', '.gradle', '.DS_Store']);
-export const regenerable = (relative: string) => relative.split('/').some(part => REGENERABLE.has(part));
+/**
+ * Folders of files a tool makes again (dependencies, builds, caches): they go with a worktree and are never kept. Names only
+ * tools use count at any depth; common words (`build`, `out`) only at the top, so `tmp/review/out/notes.md` is kept.
+ */
+const TOOL_FOLDERS = new Set(['node_modules', 'bower_components', '.pnpm-store', '.next', '.nuxt', '.svelte-kit', '.turbo', '.parcel-cache', '.vite',
+  '__pycache__', '.pytest_cache', '.mypy_cache', '.venv', '.gradle', '.DS_Store']);
+const TOP_FOLDERS = new Set(['vendor', 'dist', 'build', 'out', 'target', 'coverage', '.cache', 'venv']);
+export const regenerable = (relative: string) => { const parts = relative.split('/'); return TOP_FOLDERS.has(parts[0]!) || parts.some(part => TOOL_FOLDERS.has(part)); };
+/** Sockets, pipes and devices hold nothing to keep, and cannot be copied. */
+export const keepable = (info: { isFile(): boolean; isDirectory(): boolean; isSymbolicLink(): boolean }) => info.isFile() || info.isDirectory() || info.isSymbolicLink();
 
 export interface IgnoredWork { entries: string[]; bytes: number; files: number }
 
@@ -152,6 +163,7 @@ export async function ignoredWork(git: GitRunner, path: string, most: { bytes: n
   const walk = async (relative: string): Promise<void> => {
     if (work.bytes > most.bytes || work.files > most.files) return;
     const info = await lstat(join(path, relative));
+    if (!keepable(info)) return;
     if (!info.isDirectory()) { work.files++; work.bytes += info.size; return; }
     for (const name of await readdir(join(path, relative))) if (!regenerable(`${relative}/${name}`)) await walk(`${relative}/${name}`);
   };

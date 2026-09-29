@@ -32,16 +32,49 @@ export async function processCwds(): Promise<string[] | undefined> {
   }
 }
 
-/** The command line of every process this account can see; undefined when they cannot be listed. */
-export async function processCommands(): Promise<string[] | undefined> {
+export interface ProgramLine { args: string; cwd?: string }
+
+/** The command line of every process this account can see, with its current folder when known; undefined when not listed. */
+export async function processCommands(): Promise<ProgramLine[] | undefined> {
+  let stdout: string;
   try {
-    const { stdout } = await execute(process.platform === 'darwin' ? '/bin/ps' : 'ps', ['-axww', '-o', 'args='], { timeout: 10_000, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } });
-    return stdout.split('\n').filter(Boolean);
+    ({ stdout } = await execute(process.platform === 'darwin' ? '/bin/ps' : 'ps', ['-axww', '-o', 'pid=,args='], { timeout: 10_000, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } }));
   } catch { return undefined; }
+  const cwds = await processCwdsByPid();
+  return stdout.split('\n').flatMap(line => {
+    const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+    return match ? [{ args: match[2]!, ...(cwds.get(Number(match[1])) ? { cwd: cwds.get(Number(match[1]))! } : {}) }] : [];
+  });
+}
+
+async function processCwdsByPid(): Promise<Map<number, string>> {
+  const cwds = new Map<number, string>();
+  try {
+    const { stdout } = await execute(process.platform === 'darwin' ? '/usr/sbin/lsof' : 'lsof', ['-nP', '-a', '-d', 'cwd', '-F', 'pn'], { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 })
+      .catch(error => ({ stdout: typeof (error as { stdout?: unknown }).stdout === 'string' ? (error as { stdout: string }).stdout : '' }));
+    let pid = 0;
+    for (const line of stdout.split('\n')) {
+      if (line.startsWith('p')) pid = Number(line.slice(1)) || 0;
+      else if (line.startsWith('n/') && pid) cwds.set(pid, line.slice(1));
+    }
+  } catch { /* Without folders, relative arguments are only matched by name. */ }
+  return cwds;
 }
 
 /** Whether a command line names this folder as a path segment (`--directory ../preview`, `/w/preview/server.js`). */
 export function namesFolder(command: string, name: string): boolean {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`(?:^|[\\s/="'])${escaped}(?:$|[\\s/"'])`).test(command);
+}
+
+/** Path-like arguments of a command line (`/abs`, `./x`, `../x`, `--opt=/abs`), resolved against the program's folder. */
+export function pathArguments(line: ProgramLine): string[] {
+  const paths: string[] = [];
+  for (const token of line.args.split(/\s+/)) {
+    const value = token.includes('=') ? token.slice(token.indexOf('=') + 1) : token;
+    const bare = value.replace(/^['"]|['"]$/g, '');
+    if (bare.startsWith('/')) paths.push(bare);
+    else if (line.cwd && (bare === '.' || bare === '..' || bare.startsWith('./') || bare.startsWith('../') || (bare.includes('/') && !bare.includes('://')))) paths.push(`${line.cwd}/${bare}`);
+  }
+  return paths;
 }

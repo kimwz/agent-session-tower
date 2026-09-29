@@ -7,12 +7,13 @@ format, and saved browser preferences are the compatibility surface.
 ## [1.80.0] - 2026-09-29
 
 ### Added
-- **Worktrees a conversation made are removed once its work is over.** Agents create git worktrees for reviews and parallel work and often leave them behind, each with a full checkout and installed dependencies (node_modules included). When you close a conversation, or 30 minutes after a trigger or Slack task finished its work, Tower removes the worktrees that conversation and the subagents and runs it launched created with `git worktree add`. It keeps a worktree, and says why on the conversation's page, when:
-  - an open conversation also made it, works in it, or refers to the folder in its requests, answers or commands;
-  - a program is working in the folder;
-  - it has uncommitted changes, is locked, or has commits not yet pushed (on a detached checkout: commits no branch or remote has).
+- **Worktrees a conversation made are removed once its work is over.** Agents create git worktrees for reviews and parallel work and often leave them behind, each with a full checkout and installed dependencies. When you close a conversation, or 30 minutes after a trigger or Slack task finished its work, Tower removes the worktrees that conversation, its subagents and the runs it launched created with `git worktree add`. It keeps a worktree, and says why on the conversation's page, when:
+  - an open conversation works in it or refers to the folder in its requests, answers or commands;
+  - a program works in it or names it on its command line (directly or through a symlink), a trigger works there, or you pinned it as a project;
+  - it has uncommitted changes (including edits hidden from `git status`), is locked, or has commits not yet pushed;
+  - it holds another repository with work of its own (uncommitted changes, commits no remote has, worktrees of its own).
 
-  Branches are never deleted, and git never removes a worktree with changes. Files git ignores in the worktree (installed dependencies, build output, a local `.env`) go with it. A kept worktree is checked again every hour. Worktrees an agent's run started on its own, without a conversation known to have launched it, are left alone.
+  Files git ignores that no tool makes again (notes, review records in `tmp/`, a local `.env`) are moved to `worktree-files/` in Tower's state folder first; installed dependencies and build output go. Branches are never deleted, and git never removes a worktree with changes. A kept worktree is checked again every hour. Runs an agent started on its own, without a conversation known to have launched them, are left alone.
 - The agents' guidance now asks them to remove a review worktree as soon as the review is done.
 
 ## [1.79.0] - 2026-09-29

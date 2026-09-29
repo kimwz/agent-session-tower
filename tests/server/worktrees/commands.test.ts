@@ -89,3 +89,9 @@ test('a command line names a folder only as a whole path segment', async () => {
   assert.equal(namesFolder('node /w/work.wt-ab/server.js', 'work.wt-a'), false);
   assert.equal(namesFolder('vite --open preview-page', 'preview'), false);
 });
+
+test('path arguments of a command line resolve against the program folder', async () => {
+  const { pathArguments } = await import('../../../server/worktrees/process-cwds.js');
+  assert.deepEqual(pathArguments({ args: 'python3 -m http.server --directory=../preview /abs/x https://example.com/a', cwd: '/w/repo' }), ['/w/repo/../preview', '/abs/x']);
+  assert.deepEqual(pathArguments({ args: 'node server.js ./public' }), []);
+});
