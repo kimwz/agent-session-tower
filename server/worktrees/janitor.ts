@@ -42,6 +42,8 @@ export interface WorktreeJanitorOptions {
   /** Sessions automation created whose work is done (`finishedAutomationSessionIds`). */
   finishedAutomation: () => ReadonlySet<string>;
   runs: () => Run[];
+  /** Folders Tower itself is set to work in (trigger folders, pinned projects): a worktree there is in use. */
+  reserved?: () => string[];
   git?: GitRunner;
   home?: string;
   now?: () => number;
@@ -54,14 +56,14 @@ export const worktreeCleanupFile = (stateDir: string) => join(stateDir, 'worktre
 
 /**
  * Removes the git worktrees a conversation made once its work is over: the owner closed it, or automation finished it.
- * Only worktrees its own transcript proves it created, only when every session that ran the same `git worktree add` is done,
- * nobody else refers to or works in the folder, and nothing committed or uncommitted would be lost. Branches are kept.
+ * Only worktrees its own transcript proves it created, only when no open session refers to or works in the folder (a session
+ * that ran the same `git worktree add` names it), no program works in it, and nothing committed or uncommitted would be lost.
+ * Files git ignores go with it. Branches are kept.
  */
 export class WorktreeJanitor {
   private saved: Saved = { version: VERSION, scanned: {}, worktrees: {} };
   private timer?: ReturnType<typeof setTimeout>;
   private running?: Promise<void>;
-  private removing = false;
   private paused = false;
   private closed = false;
   /** Per session and transcript revision: the folder names looked for, and those it refers to. */
@@ -84,8 +86,12 @@ export class WorktreeJanitor {
   pause(): void { this.paused = true; }
   resume(): void { this.paused = false; }
   close(): void { this.closed = true; if (this.timer) clearTimeout(this.timer); this.timer = undefined; }
-  /** A removal under way: a handoff waits for it rather than leave a half-deleted folder to the next worker. */
-  inFlight(): boolean { return this.removing; }
+  /**
+   * A pass under way: a handoff or idle exit waits for a moment between passes instead of holding submissions while one
+   * finishes (a removal can take minutes), and never leaves a half-deleted folder to the next worker.
+   */
+  inFlight(): boolean { return this.running !== undefined; }
+  private get stopping(): boolean { return this.paused || this.closed; }
   async flush(): Promise<void> { await this.running; }
 
   private schedule(ms: number): void {
@@ -129,9 +135,10 @@ export class WorktreeJanitor {
     for (const root of world.finishedRoots) {
       const members = world.families.get(root)!;
       if (members.every(member => this.saved.scanned[member.id] === member.updatedAt)) continue;
-      if (budget-- <= 0 || this.closed || this.paused) break;
+      if (budget-- <= 0 || this.stopping) break;
       try {
-        await this.scan(root, members);
+        // A scan cut short by a pause is not recorded, so the next pass reads the family again.
+        if (!await this.scan(root, members)) break;
         for (const member of members) this.saved.scanned[member.id] = member.updatedAt;
         changed = true;
       } catch (error) {
@@ -145,16 +152,17 @@ export class WorktreeJanitor {
     // Reads each open transcript once for every folder name; the checks before each removal then find them cached.
     if (due.length) await this.referrers(world.open, [...new Set(due.map(([path]) => basename(path)))]);
     for (const [path, entry] of due) {
-      if (this.closed || this.paused) break;
+      if (this.stopping) break;
       await this.settle(path, entry, world);
       changed = true;
     }
     if (changed) await this.save(this.options.sessions());
   }
 
-  /** Records every worktree a family's transcripts prove they created and that still exists. */
-  private async scan(root: string, members: Session[]): Promise<void> {
+  /** Records every worktree a family's transcripts prove they created and that still exists; false when cut short. */
+  private async scan(root: string, members: Session[]): Promise<boolean> {
     for (const member of members) {
+      if (this.stopping) return false;
       if (!member.filePath) continue;
       for (const creation of await unlessGone(transcriptCreations(member.filePath, member.provider, this.home, member.cwd || undefined), [])) {
         const worktree = await linkedWorktree(this.git, creation.path);
@@ -164,46 +172,37 @@ export class WorktreeJanitor {
         this.saved.worktrees[worktree.path] = { root, sessions: [member.id], createdAt: worktree.createdAt, state: 'pending', checkedAt: 0 };
       }
     }
+    return true;
   }
 
   private async settle(path: string, entry: Entry, world: World): Promise<void> {
     const keep = (reason: WorktreeKeptReason, detail?: string) => Object.assign(entry, { state: 'kept', reason, detail, checkedAt: this.now() });
+    const named = (session: Session) => session.customTitle || session.title;
     try {
       const worktree = await linkedWorktree(this.git, path);
       // Gone, or another worktree made later at the same place: nothing of this conversation's is left there.
       if (!worktree || worktree.createdAt !== entry.createdAt) { delete this.saved.worktrees[path]; return; }
-      const name = basename(worktree.path);
-      // Every session that ran a `git worktree add` for this folder around its creation must be done: a failed attempt
-      // at a path someone else had just created, and a fork's copy of its original's command, look the same.
-      for (const session of world.open) {
-        if (!session.filePath) continue;
-        const from = Date.parse(session.createdAt) - 60_000, to = Date.parse(session.updatedAt) + 60_000;
-        if (!(from <= worktree.createdAt && worktree.createdAt <= to)) continue;
-        const creations = await unlessGone(transcriptCreations(session.filePath, session.provider, this.home, session.cwd || undefined, name), []);
-        for (const creation of creations) {
-          if (!(creation.start - SLACK_MS <= worktree.createdAt && worktree.createdAt <= creation.start + LONGEST_CALL_MS + SLACK_MS)) continue;
-          if (await realpath(creation.path).catch(() => creation.path) === worktree.path) { keep('otherCreator', session.title); return; }
-        }
-      }
       const blocker = await removalBlocker(this.git, worktree);
       if (blocker) { keep(blocker.reason, blocker.detail); return; }
-      // Use is judged as things are now, right before removing: another removal in this pass may have taken minutes, and the
-      // owner may have reopened the conversation, or started a shell in the folder, meanwhile.
-      const now = await this.world();
-      if (!now.finishedRoots.has(entry.root)) return;
+      const name = basename(worktree.path);
       const inside = (folder: string) => folder === worktree.path || folder.startsWith(worktree.path + sep);
-      const referrer = (await this.referrers(now.open, [name])).get(name);
-      if (referrer) { keep('openSession', referrer.title); return; }
-      for (const session of now.open) {
+      // Use is judged as things are now: another removal in this pass may have taken minutes. An open session that ran the
+      // same `git worktree add` (a fork's copy, or a failed attempt at a path someone had just made) names the folder too.
+      const referrer = (await this.referrers((await this.world()).open, [name])).get(name);
+      if (this.stopping) return;
+      if (referrer) { keep('openSession', named(referrer)); return; }
+      for (const session of (await this.world()).open) {
         const cwd = session.cwd && await realpath(session.cwd).catch(() => session.cwd);
-        if (cwd && inside(cwd)) { keep('openSession', session.title); return; }
+        if (cwd && inside(cwd)) { keep('openSession', named(session)); return; }
       }
+      const reserved = await Promise.all((this.options.reserved?.() ?? []).map(folder => realpath(folder).catch(() => folder)));
+      if (reserved.some(inside)) { keep('reserved'); return; }
       const cwds = await (this.options.cwds ?? processCwds)();
       if (!cwds) { keep('processesUnknown'); return; }
       if (cwds.some(inside)) { keep('process'); return; }
-      this.removing = true;
-      try { await removeWorktree(this.git, worktree); }
-      finally { this.removing = false; }
+      // The last look, right before removing: the conversation may have been reopened, or given work, meanwhile.
+      if (this.stopping || !(await this.world()).finishedRoots.has(entry.root)) return;
+      await removeWorktree(this.git, worktree);
       Object.assign(entry, { state: 'removed', reason: undefined, detail: undefined, checkedAt: this.now() });
     } catch (error) {
       keep('failed', error instanceof Error ? error.message : String(error));
@@ -215,6 +214,7 @@ export class WorktreeJanitor {
     const referrers = new Map<string, Session>();
     const live = new Set<string>();
     for (const session of open) {
+      if (this.stopping) break;
       if (!session.filePath) continue;
       const key = `${session.id}\0${session.updatedAt}`;
       live.add(key);

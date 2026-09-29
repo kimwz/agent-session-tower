@@ -4,7 +4,7 @@ import { mkdir, open, rename, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Session } from '../../shared/types.js';
 
-/** Monitor display state only. Native processes and conversation files are untouched. */
+/** Which conversations the owner closed. Native processes and conversation files are untouched; the worktrees a closed conversation made are removed by the worker. */
 export class ClosedSessionStore {
   private readonly path: string;
   private ids = new Set<string>();

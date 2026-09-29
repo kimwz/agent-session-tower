@@ -44,7 +44,7 @@ Use a separate worktree when another agent is working in the same folder, or for
 - \`git worktree add ../<repo>-<task> -b <branch> origin/<base>\`
 - Once the work is merged or pushed, remove it with \`git worktree remove\` and delete the merged branch.
 - A worktree made only to review or inspect something is removed as soon as that review is done.
-- Tower also removes the worktrees a session made once the owner archives it or its automated work finishes, if nothing in them would be lost. Do not rely on that: clean up your own.
+- Tower also removes the worktrees a session made once the owner archives it or its automated work finishes, unless they hold uncommitted changes or unpushed commits; files git ignores (such as \`.env\`) go with them. Do not rely on that: clean up your own.
 - A small change in a folder nobody else is using can be made in place.
 
 When you finish:

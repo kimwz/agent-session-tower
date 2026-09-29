@@ -10,13 +10,18 @@ const MAX_LINE = 16 * 1024 * 1024;
 type Json = Record<string, any>;
 
 async function* rows(file: string, keep: (line: string) => boolean): AsyncGenerator<Json> {
-  const lines = createInterface({ input: createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
+  const input = createReadStream(file, { encoding: 'utf8' });
+  const lines = createInterface({ input, crlfDelay: Infinity });
   try {
     for await (const line of lines) {
       if (line.length > MAX_LINE || !keep(line)) continue;
       try { const row = JSON.parse(line); if (row && typeof row === 'object') yield row; } catch { /* A partial last line is skipped. */ }
     }
-  } finally { lines.close(); }
+  } finally {
+    // Closing readline leaves its file open; a search that stops early must close it too.
+    lines.close();
+    input.destroy();
+  }
 }
 
 const at = (value: unknown): number | undefined => { const ms = typeof value === 'string' ? Date.parse(value) : NaN; return Number.isFinite(ms) ? ms : undefined; };
@@ -26,12 +31,11 @@ const at = (value: unknown): number | undefined => { const ms = typeof value ===
  * those naming a worktree, Codex's context rows (the default folder), and results of calls already found.
  * A missing file throws, so a caller never records a transcript it could not read as scanned.
  */
-export async function transcriptCreations(file: string, provider: Provider, home: string, startCwd?: string, only?: string): Promise<Creation[]> {
+export async function transcriptCreations(file: string, provider: Provider, home: string, startCwd?: string): Promise<Creation[]> {
   const creations: Creation[] = [];
   const pending = new Map<string, Creation[]>();
   let cwd = startCwd;
-  // `only`: a folder name the command must mention, to look through many transcripts for one worktree cheaply.
-  const keep = (line: string) => (line.includes('worktree') && (!only || line.includes(only))) || line.includes('"turn_context"') || line.includes('"session_meta"')
+  const keep = (line: string) => line.includes('worktree') || line.includes('"turn_context"') || line.includes('"session_meta"')
     || (pending.size > 0 && (line.includes('tool_use_id') || line.includes('call_id')) && [...pending.keys()].some(id => line.includes(id)));
   for await (const row of rows(file, keep)) {
     const time = at(row.timestamp);

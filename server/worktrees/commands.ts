@@ -101,42 +101,52 @@ function pathOf(word: Word, cwd: string | undefined, home: string): string | und
 const GIT_VALUE_OPTIONS = new Set(['-c', '--config-env', '--exec-path', '--namespace', '--super-prefix', '--attr-source']);
 const ADD_VALUE_OPTIONS = new Set(['-b', '-B', '--reason']);
 
+/** First words that make the folder depend on how the shell runs what follows (conditions, loops, functions, negation). */
+const CONTROL = new Set(['if', 'elif', 'while', 'until', 'for', 'case', 'select', 'function', 'time', 'builtin', '!', 'coproc']);
+
 /**
  * The absolute paths of `git worktree add` commands in `command`, which starts in `cwd` (undefined when unknown).
- * `cd` is followed; `git -C` is resolved; `echo …`, quoted text and heredoc bodies are never commands.
+ * `git -C` is resolved. A `cd` is followed only into a command it is joined to by `&&`, so the next command runs only if it
+ * succeeded; a subshell or command substitution (`( … )`, `$( … )`) keeps its `cd` to itself. After a condition, loop or
+ * function the folder is unknown. `echo …`, quoted text and heredoc bodies are never commands.
  */
 export function worktreeAddPaths(command: string, cwd: string | undefined, home: string): string[] {
   if (command.length > 200_000) return [];
   const tokens = tokenize(command);
   const paths: string[] = [];
   let directory = cwd && isAbsolute(cwd) ? normalize(cwd) : undefined;
+  const outer: (string | undefined)[] = [];
   let words: Word[] = [];
-  const run = () => {
-    const simple = words; words = [];
+  let before: string | undefined;
+  const simple = (end: string | undefined) => {
+    const all = words; words = [];
     let index = 0;
     // Environment assignments and wrappers that run the rest as a command of its own.
-    while (index < simple.length) {
-      const text = simple[index]!.text;
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(text) && !simple[index]!.quoted) { index++; continue; }
-      if (['env', 'command', 'nohup', 'exec', '{', '}', '!', 'then', 'do', 'else'].includes(text)) { index++; continue; }
-      if (text === 'timeout' || text === 'nice') { index++; while (simple[index] && /^-/.test(simple[index]!.text)) index++; if (text === 'timeout') index++; continue; }
+    while (index < all.length) {
+      const text = all[index]!.text;
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(text) && !all[index]!.quoted) { index++; continue; }
+      if (['env', 'command', 'nohup', 'exec', '{', '}', 'then', 'do', 'else'].includes(text)) { index++; continue; }
+      if (text === 'timeout' || text === 'nice') { index++; while (all[index] && /^-/.test(all[index]!.text)) index++; if (text === 'timeout') index++; continue; }
       break;
     }
-    const name = simple[index];
-    if (!name || name.dynamic) { if (name?.text === 'cd') directory = undefined; return; }
+    const name = all[index];
+    if (!name) return;
+    if (name.dynamic || CONTROL.has(name.text)) { directory = undefined; return; }
     if (name.text === 'cd' || name.text === 'pushd') {
-      const target = simple[index + 1];
-      directory = target && target.text !== '-' && !target.text.startsWith('-') ? pathOf(target, directory, home) : undefined;
+      const target = all[index + 1];
+      // In a pipeline or in the background it runs in a subshell; joined by anything but `&&`, it may have failed.
+      const effective = end === '&&' && before !== '|' && before !== '|&';
+      directory = effective && target && target.text !== '-' && !target.text.startsWith('-') ? pathOf(target, directory, home) : undefined;
       return;
     }
     if (name.text === 'popd') { directory = undefined; return; }
     if (basename(name.text) !== 'git') return;
     let gitDirectory = directory;
     let i = index + 1;
-    for (; i < simple.length; i++) {
-      const word = simple[i]!;
+    for (; i < all.length; i++) {
+      const word = all[i]!;
       if (word.text === '-C') {
-        const target = simple[++i];
+        const target = all[++i];
         gitDirectory = target ? pathOf(target, gitDirectory, home) : undefined;
         if (!gitDirectory) return;
       } else if (/^--(?:git-dir|work-tree)(?:=|$)/.test(word.text)) return;
@@ -144,27 +154,32 @@ export function worktreeAddPaths(command: string, cwd: string | undefined, home:
       else if (word.text.startsWith('-')) continue;
       else break;
     }
-    if (simple[i]?.text !== 'worktree' || simple[i + 1]?.text !== 'add') return;
-    for (i += 2; i < simple.length; i++) {
-      const word = simple[i]!;
+    if (all[i]?.text !== 'worktree' || all[i + 1]?.text !== 'add') return;
+    for (i += 2; i < all.length; i++) {
+      const word = all[i]!;
       if (word.dynamic) return;
       if (word.text === '--') { i++; break; }
       if (ADD_VALUE_OPTIONS.has(word.text)) { i++; continue; }
       if (word.text.startsWith('-')) continue;
       break;
     }
-    const target = simple[i];
+    const target = all[i];
     const path = target && pathOf(target, gitDirectory, home);
     if (path) paths.push(path);
   };
+  const run = (end: string | undefined) => { simple(end); before = end; };
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index]!;
     if (isWord(token)) { words.push(token); continue; }
     // A redirection's target is a file, not an argument; a heredoc's delimiter was consumed with its body.
     if (REDIRECTS.has(token.op)) { if (isWord(tokens[index + 1])) index++; continue; }
-    if (SEPARATORS.has(token.op)) run();
+    if (!SEPARATORS.has(token.op)) continue;
+    run(token.op);
+    // A subshell or command substitution starts where its parent is and gives its folder back when it ends.
+    if (token.op === '(') outer.push(directory);
+    else if (token.op === ')') directory = outer.length ? outer.pop() : undefined;
   }
-  run();
+  run(undefined);
   return paths;
 }
 
@@ -197,32 +212,52 @@ function shellText(value: unknown): string | undefined {
   return value.map(part => /^[A-Za-z0-9_./:=@%+-]+$/.test(part) ? part : `'${part.replace(/'/g, `'\\''`)}'`).join(' ');
 }
 
-/** `tools.exec_command({cmd:"…", workdir:"…"})` calls in Codex's JS tool wrapper; string literals are read as JSON strings. */
+/**
+ * `tools.exec_command({cmd:"…", workdir:"…"})` calls in Codex's JS tool wrapper; string literals are read as JSON strings.
+ * Only the object's own keys count, and a call whose `cmd` or `workdir` is not a literal is left out.
+ */
 function jsExecCalls(source: string, cwd: string | undefined): ShellCall[] {
   const calls: ShellCall[] = [];
   const pattern = /exec_command\(\s*\{/g;
   for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
-    const fields: Record<string, string> = {};
-    let i = pattern.lastIndex;
-    for (let depth = 1; i < source.length && depth > 0;) {
-      const key = /^\s*,?\s*(?:"(\w+)"|(\w+))\s*:\s*/.exec(source.slice(i, i + 200));
-      if (key) {
-        i += key[0].length;
-        if (source[i] === '"') {
-          const literal = stringLiteral(source, i);
-          if (!literal) break;
-          fields[key[1] ?? key[2]!] = literal.value; i = literal.end; continue;
-        }
-      }
-      const c = source[i];
-      if (c === '{' || c === '[') depth++;
-      else if (c === '}' || c === ']') depth--;
-      else if (c === '"') { const literal = stringLiteral(source, i); if (!literal) break; i = literal.end; continue; }
-      i++;
-    }
-    if (fields.cmd) calls.push({ command: fields.cmd, cwd: fields.workdir ? (isAbsolute(fields.workdir) ? fields.workdir : cwd && resolve(cwd, fields.workdir)) : cwd });
+    const fields = objectFields(source, pattern.lastIndex);
+    if (!fields || typeof fields.cmd !== 'string' || ('workdir' in fields && typeof fields.workdir !== 'string')) continue;
+    const workdir = fields.workdir as string | undefined;
+    calls.push({ command: fields.cmd, cwd: workdir ? (isAbsolute(workdir) ? workdir : cwd && resolve(cwd, workdir)) : cwd });
   }
   return calls;
+}
+
+/** The top-level keys of the object literal starting after `{` at `start`: string literals as strings, anything else `null`. */
+function objectFields(source: string, start: number): Record<string, string | null> | undefined {
+  const fields: Record<string, string | null> = {};
+  let i = start;
+  while (i < source.length) {
+    const key = /^\s*(?:"(\w+)"|(\w+))\s*:\s*/.exec(source.slice(i, i + 200));
+    if (!key) return /^\s*\}/.test(source.slice(i, i + 200)) ? fields : undefined;
+    const name = key[1] ?? key[2]!;
+    i += key[0].length;
+    if (source[i] === '"') {
+      const literal = stringLiteral(source, i);
+      if (!literal) return undefined;
+      fields[name] = literal.value; i = literal.end;
+    } else {
+      // Skip any other value up to the `,` or `}` that ends it at this level.
+      fields[name] = null;
+      for (let depth = 0; i < source.length; i++) {
+        const c = source[i];
+        if (c === '"') { const literal = stringLiteral(source, i); if (!literal) return undefined; i = literal.end - 1; continue; }
+        if (c === '{' || c === '[' || c === '(') depth++;
+        else if (c === '}' || c === ']' || c === ')') { if (depth === 0) break; depth--; }
+        else if (c === ',' && depth === 0) break;
+      }
+    }
+    const rest = /^\s*([,}])/.exec(source.slice(i, i + 200));
+    if (!rest) return undefined;
+    i += rest[0].length;
+    if (rest[1] === '}') return fields;
+  }
+  return undefined;
 }
 
 function stringLiteral(source: string, start: number): { value: string; end: number } | undefined {

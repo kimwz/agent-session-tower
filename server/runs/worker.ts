@@ -500,7 +500,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // Worktrees a conversation made are removed once the owner closes it or automation finishes it.
     const worktrees = new WorktreeJanitor({ stateDir, sessions: () => visible.allSessions(), runs: () => runs.list(),
       closedIds: async () => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds(); },
-      finishedAutomation: () => finishedAutomationSessionIds(slack.automation.list(), visible.allSessions(), runs.list()) });
+      finishedAutomation: () => finishedAutomationSessionIds(slack.automation.list(), visible.allSessions(), runs.list()),
+      // Folders a trigger works in, and projects the owner pinned, are in use even with no conversation open there.
+      reserved: () => [...folderSettings(triggerEngine?.list() ?? []), ...(visible.snapshot().groups ?? []).filter(group => group.pinned).map(group => group.cwd)] });
     await worktrees.start().catch(error => console.error(`Worktree cleanup did not start: ${error instanceof Error ? error.message : String(error)}`));
     const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), publicAgents: () => publicAgents.projection(), ownPorts,
       // A trigger set up from a controlling computer checks the sharing list as it is when it runs.
@@ -558,4 +560,14 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});
   } catch (error) { void tools?.stop(); sessions.stop(); await release(); throw error; }
+}
+
+/** Every `cwd` a setting names, at any depth: the folders triggers and their rules work in. */
+function folderSettings(value: unknown, found: string[] = []): string[] {
+  if (Array.isArray(value)) for (const item of value) folderSettings(item, found);
+  else if (value && typeof value === 'object') for (const [key, item] of Object.entries(value)) {
+    if (key === 'cwd' && typeof item === 'string' && item.startsWith('/')) found.push(item);
+    else folderSettings(item, found);
+  }
+  return found;
 }

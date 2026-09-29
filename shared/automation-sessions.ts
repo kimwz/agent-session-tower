@@ -3,7 +3,7 @@ import type { Run, Session } from './types.js';
 
 /**
  * Sessions automation created that have finished: Slack's delegated work and sessions a trigger started,
- * with their finished subagents. Display and routing cleanup only; nothing is cancelled or deleted.
+ * with their finished subagents. They leave the canvas and routing, and the worktrees they made are removed; nothing is cancelled.
  */
 export function finishedAutomationSessionIds(workflows: SlackWorkflow[], sessions: Session[], runs: Run[]): Set<string> {
   const coordinators = new Set(workflows.filter(item => item.mode === 'conversation').map(item => item.sessionId));

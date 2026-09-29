@@ -84,12 +84,12 @@ export interface SessionDetail {
   worktrees?: WorktreeCleanup[];
 }
 /** Why Tower kept a worktree a finished conversation made. */
-export type WorktreeKeptReason = 'openSession' | 'otherCreator' | 'process' | 'processesUnknown' | 'locked' | 'changes' | 'unpushed' | 'unpublished' | 'failed';
+export type WorktreeKeptReason = 'openSession' | 'reserved' | 'process' | 'processesUnknown' | 'locked' | 'changes' | 'unpushed' | 'unpublished' | 'failed';
 export interface WorktreeCleanup {
   path: string;
   state: 'removed' | 'kept';
   reason?: WorktreeKeptReason;
-  /** The session holding it, the branch with unpushed commits, the number of changes, or git's message. */
+  /** The open session using it, the branch with unpushed commits, the number of changes, or git's message. */
   detail?: string;
   at: string;
 }

@@ -25,8 +25,9 @@ export async function processCwds(): Promise<string[] | undefined> {
     const { stdout } = await execute(process.platform === 'darwin' ? '/usr/sbin/lsof' : 'lsof', ['-nP', '-a', '-d', 'cwd', '-F', 'n'], { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 });
     return parseCwdList(stdout);
   } catch (error) {
-    // lsof exits 1 when some processes could not be inspected yet still lists the rest.
-    const stdout = (error as { stdout?: unknown }).stdout;
-    return typeof stdout === 'string' && stdout.includes('\nn/') ? parseCwdList(stdout) : undefined;
+    // lsof exits 1 when some processes could not be inspected yet lists the rest. Stopped by the timeout or the output
+    // limit, what it printed is only part of the list: then nothing is known.
+    const failed = error as { stdout?: unknown; code?: unknown; killed?: boolean; signal?: unknown };
+    return failed.code === 1 && !failed.killed && !failed.signal && typeof failed.stdout === 'string' && failed.stdout.includes('\nn/') ? parseCwdList(failed.stdout) : undefined;
   }
 }

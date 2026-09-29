@@ -1,13 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
+import { existsSync, readdirSync } from 'node:fs';
+import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gitRunner } from '../../../server/repositories/git.js';
 import { WorktreeJanitor, groupFamilies, worktreeCleanupFor } from '../../../server/worktrees/janitor.js';
 import { transcriptCreations, transcriptMentions } from '../../../server/worktrees/transcripts.js';
+import { parseCwdList } from '../../../server/worktrees/process-cwds.js';
 import type { Run, Session } from '../../../shared/types.js';
 
 const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
@@ -47,9 +48,10 @@ async function setup(t: test.TestContext) {
   return { dir, work, state, add, transcript, session };
 }
 
-function janitor(state: string, world: { sessions: Session[]; closed: Set<string>; automation?: Set<string>; runs?: Run[]; cwds?: string[] | undefined; now?: number }) {
-  return new WorktreeJanitor({ stateDir: state, sessions: () => world.sessions, closedIds: async () => world.closed, finishedAutomation: () => world.automation ?? new Set(),
-    runs: () => world.runs ?? [], git: gitRunner(env), home: '/nonexistent-home', now: () => world.now ?? Date.now(), cwds: async () => 'cwds' in world ? world.cwds : [], firstPassMs: 3_600_000 });
+function janitor(state: string, world: { sessions: Session[]; closed: Set<string>; automation?: Set<string>; runs?: Run[]; cwds?: string[] | undefined; now?: number },
+  extra: Partial<ConstructorParameters<typeof WorktreeJanitor>[0]> = {}) {
+  return new WorktreeJanitor({ ...extra, stateDir: state, sessions: () => world.sessions, closedIds: async () => world.closed, finishedAutomation: () => world.automation ?? new Set(),
+    runs: () => world.runs ?? [], git: gitRunner(env), home: '/nonexistent-home', now: () => world.now ?? Date.now(), cwds: extra.cwds ?? (async () => 'cwds' in world ? world.cwds : []), firstPassMs: 3_600_000 });
 }
 
 test('closing a session removes the clean, published worktrees it made and keeps any that would lose work', async t => {
@@ -111,7 +113,7 @@ test('a worktree stays while an open session refers to it, made it too, or a pro
   await cleaner.pass();
   const results = new Map((await worktreeCleanupFor(state, ['claude:done'])).map(item => [item.path, item]));
   assert.deepEqual([results.get(shared)?.reason, results.get(shared)?.detail], ['openSession', 'reader']);
-  assert.deepEqual([results.get(raced)?.reason, results.get(raced)?.detail], ['otherCreator', 'fork']);
+  assert.deepEqual([results.get(raced)?.reason, results.get(raced)?.detail], ['openSession', 'fork'], 'a session holding the same command names the folder');
   assert.equal(results.get(busy)?.reason, 'process');
 
   // Once the others are closed and the process is gone, the next check an hour later removes them all.
@@ -180,7 +182,6 @@ test('transcripts give Codex creations with their folders and results, and refer
     { type: 'response_item', timestamp: iso(5000), payload: { type: 'custom_tool_call', name: 'exec', call_id: 'c2', input: 'text(await tools.exec_command({cmd:"git worktree add /tmp/other HEAD"}));' } },
   ));
   assert.deepEqual(await transcriptCreations(codex, 'codex', '/h'), [{ path: '/w/repo.wt', start: 3000, end: 4000 }, { path: '/tmp/other', start: 5000 }]);
-  assert.deepEqual(await transcriptCreations(codex, 'codex', '/h', undefined, 'other'), [{ path: '/tmp/other', start: 5000 }]);
   assert.deepEqual([...await transcriptMentions(codex, ['repo.wt', 'ok', 'missing'])], ['repo.wt']);
   await assert.rejects(transcriptCreations(join(dir, 'gone.jsonl'), 'claude', '/h'), { code: 'ENOENT' });
 });
@@ -209,4 +210,90 @@ test('use is judged again right before each removal: a conversation reopened dur
   await cleaner.pass();
   assert.deepEqual([first, second, third].map(existsSync), [false, true, true]);
   assert.equal((await worktreeCleanupFor(state, ['claude:c']))[0]?.reason, 'process');
+});
+
+test('the last look before removing sees a run queued meanwhile, and a conversation that works inside the folder', async t => {
+  const { dir, state, add, transcript, session } = await setup(t);
+  const queued = join(dir, 'work.wt-queued'), inside = join(dir, 'work.wt-inside');
+  // The transcripts of these sessions are not what protects them: the proof lives in a subagent's file.
+  const world = {
+    sessions: [
+      session('q', undefined), session('q-sub', await transcript('q-sub', add(`git worktree add --detach ${queued} HEAD`, ['--detach', queued, 'HEAD'])), { isSubagent: true, parentId: 'claude:q' }),
+      session('i', await transcript('i', add(`git worktree add --detach ${inside} HEAD`, ['--detach', inside, 'HEAD']))),
+      session('shell', undefined, { cwd: join(inside, 'src') }),
+    ],
+    closed: new Set(['claude:q', 'claude:i']), runs: [] as Run[],
+  };
+  // A run is queued on q while the processes are being listed, after every earlier check passed.
+  const racing = janitor(state, world, { cwds: async () => { world.runs = [{ id: 'r', sessionId: 'claude:q', prompt: 'more', status: 'queued', createdAt: iso(Date.now()) } as Run]; return []; } });
+  await racing.start(); t.after(() => racing.close());
+  await racing.pass();
+  assert.equal(existsSync(queued), true, 'queued work keeps its worktree');
+  assert.equal(existsSync(inside), true);
+  const kept = await worktreeCleanupFor(state, ['claude:i']);
+  assert.deepEqual([kept[0]?.reason, kept[0]?.detail], ['openSession', 'shell'], 'an open conversation working inside the folder keeps it');
+});
+
+test('ownership needs the creation inside the call, and a worktree made again at the same path is not the old one', async t => {
+  const { dir, state, add, transcript, session } = await setup(t);
+  const late = join(dir, 'work.wt-late'), again = join(dir, 'work.wt-again');
+  const lateRows = add(`git worktree add --detach ${late} HEAD`, ['--detach', late, 'HEAD']);
+  // The call ran ten minutes before this worktree existed: some other command made it.
+  for (const row of lateRows) (row as { timestamp: string }).timestamp = iso(Date.parse(row.timestamp) - 10 * 60_000);
+  const againRows = add(`git worktree add --detach ${again} HEAD`, ['--detach', again, 'HEAD']);
+  const world = { sessions: [session('s', await transcript('s', [...lateRows, ...againRows]))], closed: new Set<string>() };
+  const cleaner = janitor(state, world);
+  await cleaner.start(); t.after(() => cleaner.close());
+  // Recorded while the session is closed and something keeps it: then removed and made again by someone else.
+  world.closed.add('claude:s');
+  (world as { cwds?: string[] }).cwds = [again];
+  await cleaner.pass();
+  assert.equal(existsSync(late), true, 'a creation outside the call is not proof');
+  assert.deepEqual((await worktreeCleanupFor(state, ['claude:s'])).map(item => [item.path, item.reason]), [[again, 'process']]);
+  git(join(dir, 'work'), 'worktree', 'remove', again);
+  git(join(dir, 'work'), 'worktree', 'add', '-q', '--detach', again, 'HEAD');
+  await utimes(join(dir, 'work', '.git', 'worktrees', 'work.wt-again', 'commondir'), new Date(), new Date(Date.now() + 3_600_000));
+  (world as { cwds?: string[]; now?: number }).cwds = [];
+  (world as { now?: number }).now = Date.now() + 2 * 3_600_000;
+  await cleaner.pass();
+  assert.equal(existsSync(again), true, 'the new worktree at that path is someone else\'s');
+  assert.deepEqual(await worktreeCleanupFor(state, ['claude:s']), []);
+});
+
+test('branches: a gone upstream lets the worktree go, unpublished commits without an upstream keep it', async t => {
+  const { dir, work, state, add, transcript, session } = await setup(t);
+  const merged = join(dir, 'work-merged'), unpublished = join(dir, 'work-unpublished'), reserved = join(dir, 'work-reserved');
+  const rows = [
+    ...add(`git worktree add -b merged ${merged} origin/main`, ['-b', 'merged', merged, 'origin/main']),
+    ...add(`git worktree add -b unpublished ${unpublished} origin/main`, ['-b', 'unpublished', unpublished, 'origin/main']),
+    ...add(`git worktree add --detach ${reserved} HEAD`, ['--detach', reserved, 'HEAD']),
+  ];
+  // Pushed, merged by squash on the remote and the branch deleted there: its commits are on no remote ref any more.
+  git(merged, 'push', '-q', '-u', 'origin', 'merged');
+  await writeFile(join(merged, 'm.txt'), 'm'); git(merged, 'add', 'm.txt'); git(merged, 'commit', '-qm', 'merged work'); git(merged, 'push', '-q');
+  git(work, 'push', '-q', 'origin', '--delete', 'merged'); git(work, 'fetch', '-q', '--prune');
+  git(unpublished, 'branch', '--unset-upstream');
+  await writeFile(join(unpublished, 'u.txt'), 'u'); git(unpublished, 'add', 'u.txt'); git(unpublished, 'commit', '-qm', 'never pushed');
+  const world = { sessions: [session('s', await transcript('s', rows))], closed: new Set(['claude:s']) };
+  const cleaner = janitor(state, world, { reserved: () => [reserved] });
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.equal(existsSync(merged), false);
+  assert.match(git(work, 'log', '--oneline', '-1', 'merged'), /merged work/, 'the branch and its commits stay');
+  const results = new Map((await worktreeCleanupFor(state, ['claude:s'])).map(item => [item.path, item]));
+  assert.deepEqual([results.get(unpublished)?.reason, results.get(unpublished)?.detail], ['unpushed', 'unpublished (1)']);
+  assert.equal(results.get(reserved)?.reason, 'reserved', 'a folder a trigger or pinned project uses stays');
+});
+
+test('lsof output counts only when lsof finished, and an early stop in a transcript search closes its file', async t => {
+  assert.deepEqual(parseCwdList('p1\nfcwd\nn/\np22\nfcwd\nn/Users/owner/work\n'), ['/', '/Users/owner/work']);
+  const dir = await mkdtemp(join(tmpdir(), 'tower-worktree-files-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, 'big.jsonl');
+  await writeFile(file, lines(...Array.from({ length: 20_000 }, (_, index) => ({ type: 'user', message: { content: index ? `line ${index}` : 'names work.wt-x' } }))));
+  const open = () => readdirSync('/dev/fd').length;
+  const before = open();
+  for (let i = 0; i < 20; i++) assert.deepEqual([...await transcriptMentions(file, ['work.wt-x'])], ['work.wt-x']);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(open() - before < 5, `open files grew from ${before} to ${open()}`);
 });

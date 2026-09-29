@@ -4,7 +4,7 @@ import { translate as t } from '../i18n/i18n';
 
 const REASONS: Record<WorktreeKeptReason, string> = {
   openSession: '열린 세션이 이 폴더를 쓰거나 언급합니다: {detail}',
-  otherCreator: '열린 세션도 이 폴더를 만든 기록이 있습니다: {detail}',
+  reserved: 'Tower의 트리거나 고정한 프로젝트가 이 폴더를 씁니다',
   process: '실행 중인 프로그램이 이 폴더에서 작업 중입니다',
   processesUnknown: '실행 중인 프로그램을 확인하지 못했습니다',
   locked: '잠긴 워크트리입니다',

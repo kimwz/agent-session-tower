@@ -310,8 +310,10 @@ async function main() {
     const session = runs.getSession(id);
     if (!session) return undefined;
     const page = await history.read(runs.nativeSessionId(id), before, limit);
-    // What became of the worktrees it made, once its work was over; the worker records it.
-    const worktrees = before === undefined ? await worktreeCleanupFor(stateDir, [session.id]).catch(() => []) : [];
+    // What became of the worktrees it made, once its work was over; the worker records it. Why one was kept only holds while
+    // the conversation stays closed (or its automated work finished).
+    const over = closedSessions.closedIds().has(session.id) || Boolean(session.launchedBy);
+    const worktrees = before === undefined ? (await worktreeCleanupFor(stateDir, [session.id]).catch(() => [])).filter(item => over || item.state === 'removed') : [];
     return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)), ...(worktrees.length ? { worktrees } : {}) };
   };
   // A retried request returns the message it already queued; that message is judged once only.

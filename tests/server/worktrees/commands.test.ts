@@ -31,6 +31,18 @@ test('text that is not a git worktree add command, or depends on the shell at ru
   assert.deepEqual(worktreeAddPaths("cat <<EOF | sh\ngit worktree add /tmp/g\nEOF\ngit worktree add /tmp/h", '/w', home), ['/tmp/h']);
 });
 
+test('a cd counts only when it surely ran in this shell: joined by &&, outside subshells, conditions and functions', () => {
+  // Wrong folders are worse than none: each of these once resolved ../y against the wrong directory.
+  for (const command of ['cd /a & git worktree add ../y', 'cd /nonexistent 2>/dev/null; git worktree add ../y', 'if cd /a; then git worktree add ../y; fi',
+    'builtin cd /a && git worktree add ../y', 'f() { cd /a; }; f; git worktree add ../y', 'ls | cd /a && git worktree add ../y', '! cd /a && git worktree add ../y']) {
+    assert.deepEqual(worktreeAddPaths(command, '/w/repo', home), [], command);
+  }
+  // A subshell or command substitution gives its folder back.
+  assert.deepEqual(worktreeAddPaths('(cd /a && git worktree add ../x); git worktree add ../y', '/w/repo', home), ['/x', '/w/y']);
+  assert.deepEqual(worktreeAddPaths('X=$(cd /a && pwd); git worktree add ../y', '/w/repo', home), ['/w/y']);
+  assert.deepEqual(worktreeAddPaths('if [ -d x ]; then git worktree add /abs/z HEAD; git worktree add ../z HEAD; fi', '/w/repo', home), ['/abs/z'], 'after a condition only absolute paths count');
+});
+
 test('Codex tool calls give their commands and folders in every form Codex writes', () => {
   assert.deepEqual(codexShellCalls({ type: 'function_call', name: 'exec_command', arguments: JSON.stringify({ cmd: 'git worktree add ../r.wt HEAD', workdir: '/w/r' }) }, '/start'), [{ command: 'git worktree add ../r.wt HEAD', cwd: '/w/r' }]);
   assert.deepEqual(codexShellCalls({ type: 'function_call', name: 'shell', arguments: JSON.stringify({ command: ['bash', '-lc', 'git worktree add x'] }) }, '/start'), [{ command: 'git worktree add x', cwd: '/start' }]);
@@ -39,4 +51,7 @@ test('Codex tool calls give their commands and folders in every form Codex write
   assert.deepEqual(codexShellCalls({ type: 'custom_tool_call', name: 'exec', input }, '/start'), [
     { command: 'git worktree add --detach /private/tmp/review 0dea1c6', cwd: '/private/tmp/integrate' }, { command: 'cat a.md', cwd: '/start' }]);
   assert.deepEqual(codexShellCalls({ type: 'function_call', name: 'exec_command', arguments: '{not json' }, '/start'), []);
+  // Only the call's own literal keys: a variable folder, or one nested in another object, is not the call's folder.
+  assert.deepEqual(codexShellCalls({ type: 'custom_tool_call', name: 'exec', input: 'const d="/a"; tools.exec_command({cmd:"git worktree add ../y", workdir: d})' }, '/w/repo'), []);
+  assert.deepEqual(codexShellCalls({ type: 'custom_tool_call', name: 'exec', input: 'tools.exec_command({cmd:"git worktree add ../y", env:{workdir:"/evil"}, yield_time_ms: 1000})' }, '/w/repo'), [{ command: 'git worktree add ../y', cwd: '/w/repo' }]);
 });
