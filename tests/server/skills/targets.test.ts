@@ -28,6 +28,7 @@ async function fixture(t: test.TestContext) {
     const service = new SkillService({ stateDir: state, homes, sessions: () => [shop, blog, docs].map((cwd, index) => session(String(index), cwd)), runs: () => [],
       history: async () => [], model: async () => ({}), advise: false });
     await service.start();
+    await service.settled();
     services.push(service);
     return service;
   };
@@ -206,4 +207,47 @@ test('narrowing a skill keeps the links it still needs: one reaching it through 
   (again as unknown as { options: { projects: () => string[] } }).options.projects = () => [alias];
   await again.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [alias] } });
   assert.equal(await f.linked(f.shop, 'deploy'), true, 'the links the alias needs stay');
+});
+
+test('a lost record is rebuilt from the links in place, never widened to every project', async t => {
+  const f = await fixture(t);
+  const skill = (await save(f.service, 'deploy', { all: false, projects: [f.shop] })).stored![0]!;
+  const file = join(f.state, 'skills.json');
+  const saved = JSON.parse(await readFile(file, 'utf8'));
+  saved.targets = [];
+  await writeFile(file, JSON.stringify(saved));
+  const again = await f.start();
+  assert.deepEqual((await again.overview()).stored![0]!.targets, { all: false, projects: [f.shop] });
+  assert.equal(await f.global('deploy'), false);
+  assert.doesNotMatch((await again.turnNotes(session('a', f.blog))) ?? '', /deploy/);
+  assert.equal(skill.name, 'deploy');
+});
+
+test('a project that is gone never blocks editing the skill, and a same-named skill elsewhere never blocks making one for chosen projects', async t => {
+  const f = await fixture(t);
+  const skill = (await save(f.service, 'deploy', { all: false, projects: [f.shop, f.blog] })).stored![0]!;
+  await rm(f.blog, { recursive: true });
+  const known = f.service as unknown as { options: { sessions: () => Session[] } };
+  const sessions = known.options.sessions;
+  known.options.sessions = () => sessions().filter(item => item.cwd !== f.blog);
+  await f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.shop, f.blog, f.docs] } });
+  assert.equal(await f.linked(f.docs, 'deploy'), true);
+  // A global skill of the same name outside Tower does not stop a Tower skill for chosen projects.
+  const theirs = join(f.homes.agentsHome, 'skills', 'review');
+  await mkdir(theirs, { recursive: true });
+  await writeFile(join(theirs, 'SKILL.md'), '---\nname: review\ndescription: theirs\n---\n');
+  await save(f.service, 'review', { all: false, projects: [f.shop] });
+  assert.equal(await f.linked(f.shop, 'review'), true);
+  await assert.rejects(f.service.mutate('assign', { dir: join(f.state, 'skills', 'global', 'review'), targets: { all: true } }), { statusCode: 409 }, 'but it cannot take the global name');
+});
+
+test('a project skill restored into a project chosen here applies there', async t => {
+  const f = await fixture(t);
+  await f.service.mutate('save', { scope: 'project', projectCwd: f.shop, cwd: f.shop, name: 'shop-deploy', description: 'Deploy.', body: 'Steps', pinned: true });
+  const dir = (await f.service.overview()).stored!.find(item => item.name === 'shop-deploy')!.dir;
+  const bundle = await f.service.exportBundle({ dirs: [dir] });
+  assert.equal(bundle.skills[0]!.scope, 'project');
+  const elsewhere: SkillBundle = { ...bundle, skills: [{ ...bundle.skills[0]!, project: { cwd: '/other/shop', title: 'shop' }, targets: { all: false, projects: [{ cwd: '/other/shop', title: 'shop' }] } }] };
+  await f.service.mutate('import', { bundle: elsewhere, choices: [{ index: 0, action: 'add', cwd: f.blog }] });
+  assert.equal(await f.linked(f.blog, 'shop-deploy'), true);
 });

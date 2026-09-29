@@ -83,6 +83,23 @@ export class SkillFiles {
     return join(await this.storeReal(), 'global', name);
   }
 
+  /**
+   * Where a Tower skill is linked now: everywhere when a global agent folder has it, else the known projects that do.
+   * A project's own skill with no link anywhere keeps its project.
+   */
+  async linkedTargets(dir: string, projects: string[]): Promise<SkillTargets> {
+    const name = basename(dir);
+    const leads = async (root: Root) => await rootIsSafe(root) && await realpath(join(root.dir, name)).catch(() => '') === dir;
+    for (const root of this.globalRoots().sweep) if (await leads(root)) return { all: true, projects: [] };
+    const found: string[] = [];
+    for (const cwd of projects) {
+      for (const root of this.projectRoots(cwd)) if (!found.includes(cwd) && await leads(root)) found.push(cwd);
+    }
+    if (found.length) return { all: false, projects: found };
+    const stored = await this.storedTargets(dir);
+    return stored.all ? { all: false, projects: [] } : stored;
+  }
+
   /** Where a Tower skill applied before it had targets of its own: everywhere when global, else its project. */
   async storedTargets(dir: string): Promise<SkillTargets> {
     if (dirname(dir) === join(await this.storeReal(), 'global')) return { all: true, projects: [] };
@@ -365,9 +382,13 @@ export class SkillFiles {
     const stored = await this.managed();
     const chosen = dirs.map(dir => stored.find(skill => skill.dir === dir));
     if (chosen.some(skill => !skill)) throw new SkillError('타워가 관리하는 스킬만 백업할 수 있습니다.', 404);
-    return Promise.all(chosen.map(async skill => ({ name: basename(skill!.dir), description: skill!.description, scope: skill!.scope,
-      ...(skill!.scope === 'project' && skill!.cwd ? { project: { cwd: skill!.cwd, title: basename(skill!.cwd) } } : {}),
-      files: await bundleFiles(skill!.dir) })));
+    // Where it is kept in Tower, whatever projects it applies to now.
+    const global = join(await this.storeReal(), 'global');
+    return Promise.all(chosen.map(async skill => {
+      const home = dirname(skill!.dir) === global ? undefined : (await this.storedTargets(skill!.dir)).projects[0];
+      return { name: basename(skill!.dir), description: skill!.description, scope: home ? 'project' as const : 'global' as const,
+        ...(home ? { project: { cwd: home, title: basename(home) } } : {}), files: await bundleFiles(skill!.dir) };
+    }));
   }
 
   /** What is in the way of a backed-up skill here: nothing, a Tower skill that may be replaced, or a skill Tower does not keep. */
@@ -421,7 +442,8 @@ export class SkillFiles {
     if (input.dir) return this.update(input.dir, input.cwd, name, description, input.body, input.revision);
     if (input.scope === 'project' && !input.cwd) throw new SkillError('프로젝트 스킬은 프로젝트 폴더가 필요합니다.');
     const cwd = input.scope === 'project' ? resolve(input.cwd!) : undefined;
-    const roots = this.roots(cwd).filter(root => root.scope === input.scope && (root.scope === 'global' || root.cwd === cwd || !root.provider));
+    // A Tower skill made without links is checked where it will be linked, when its projects are applied.
+    const roots = this.roots(cwd).filter(root => root.scope === input.scope && (root.scope === 'global' || root.cwd === cwd || !root.provider) && (input.link !== false || !root.provider));
     for (const root of roots) {
       if (await lstat(join(root.dir, name)).catch(() => undefined)) throw new SkillError('같은 이름의 스킬이 이미 있습니다.', 409);
     }
@@ -562,6 +584,7 @@ export class SkillFiles {
       // One place that cannot be linked never keeps the others from being linked and cleaned up.
       const failures: string[] = [];
       for (const root of wanted) {
+        if (!await rootIsSafe(root)) { failures.push(`${root.cwd ? basename(root.cwd) : root.dir}의 스킬 폴더가 다른 곳을 가리키는 링크라 쓸 수 없습니다.`); continue; }
         const path = join(root.dir, name);
         const info = await lstat(path).catch(() => undefined);
         if (info) {

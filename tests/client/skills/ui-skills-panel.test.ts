@@ -4,7 +4,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Skill, SkillOverview, SkillTargets } from '../../../shared/skills.js';
 import { getLanguage, setLanguage } from '../../../client/src/i18n/i18n.js';
-import { ProjectPicker, TowerSkills } from '../../../client/src/skills/SkillsPanel.js';
+import { ProjectPicker, toggleTargets, TowerSkills } from '../../../client/src/skills/SkillsPanel.js';
 
 const original = getLanguage();
 test.beforeEach(() => setLanguage('ko'));
@@ -64,4 +64,15 @@ test('the project picker shows chosen projects as chips and lists every project 
   const everywhere = picker({ all: true, projects: ['/work/b'] });
   assert.match(everywhere, /role="radio" aria-checked="true" class="active"><svg[^]*?모든 프로젝트/);
   assert.doesNotMatch(everywhere, /skill-target-options/);
+});
+
+test('a project’s switch adds or removes exactly that project, and a folder covered from above cannot be switched there', () => {
+  assert.deepEqual(toggleTargets({ all: false, projects: ['/work/a'] }, '/work/b', true), { all: false, projects: ['/work/a', '/work/b'] });
+  assert.deepEqual(toggleTargets({ all: false, projects: ['/work/a', '/work/b'] }, '/work/b', false), { all: false, projects: ['/work/a'] });
+  assert.deepEqual(toggleTargets({ all: false, projects: ['/work/a'] }, '/work/a', true), { all: false, projects: ['/work/a'] });
+  const markup = list([skill('deploy', { all: false, projects: ['/work/monitor'] })], { cwd: '/work/monitor/client' });
+  const toggle = markup.match(/<input[^>]*role="switch"[^>]*>/)![0];
+  assert.match(toggle, /checked=""/);
+  assert.match(toggle, /disabled=""/);
+  assert.match(markup, /상위 폴더에 적용돼 있습니다/);
 });

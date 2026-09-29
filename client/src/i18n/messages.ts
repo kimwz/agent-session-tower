@@ -1,5 +1,6 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  "상위 폴더에 적용돼 있습니다. 바꾸려면 스킬을 여세요.": "Applies through a parent folder. Open the skill to change that.",
   "Tower가 아는 프로젝트가 아직 없습니다.": "Tower knows no projects yet.",
   "{0} 빼기": "Remove {0}",
   "{0} 스킬을 이 프로젝트에 적용했습니다.": "The {0} skill now applies to this project.",

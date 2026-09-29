@@ -37,6 +37,10 @@ type View = 'mine' | 'proposals' | 'all' | 'guidance' | 'backup' | 'settings';
 /** Where a new skill or a proposal starts applying: the project it came from, or everywhere for a global one. */
 const startTargets = (cwd?: string): SkillTargets => ({ all: false, projects: cwd ? [cwd] : [] });
 const proposalTargets = (proposal: SkillProposal): SkillTargets => proposal.scope === 'project' && proposal.cwd ? { all: false, projects: [proposal.cwd] } : { all: true, projects: [] };
+/** A skill's projects with one project switched on or off. */
+export function toggleTargets(targets: SkillTargets, cwd: string, on: boolean): SkillTargets {
+  return { all: false, projects: on ? [...new Set([...targets.projects, cwd])] : targets.projects.filter(item => item !== cwd) };
+}
 /** What a request says about targets: everywhere, or exactly the chosen projects. */
 const targetsBody = (targets: SkillTargets) => targets.all ? { all: true } : { all: false, projects: targets.projects };
 
@@ -116,8 +120,8 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
           <button role="tab" aria-selected={view === 'proposals'} className={view === 'proposals' ? 'active' : ''} onClick={() => setView('proposals')}>{t('추천')}{ready.length > 0 && <span className="skills-count inline">{ready.length}</span>}</button>
         </nav>}
       {view === 'mine' && <TowerSkills overview={overview} cwd={cwd} busy={busy} proposals={ready.length} onNew={create} onEdit={skill => void edit(skill)} onProposals={() => setView('proposals')} onAll={() => setView('all')}
-        onToggle={(skill, on) => { const targets = skill.targets!; const projects = on ? [...targets.projects, cwd!] : targets.projects.filter(item => item !== cwd);
-          void mutate('assign', { dir: skill.dir, targets: { all: false, projects }, targetsRevision: targetsRevision(targets) },
+        onToggle={(skill, on) => { const targets = skill.targets!;
+          void mutate('assign', { dir: skill.dir, targets: targetsBody(toggleTargets(targets, cwd!, on)), targetsRevision: targetsRevision(targets) },
             on ? t('{0} 스킬을 이 프로젝트에 적용했습니다.', { 0: skill.name }) : t('{0} 스킬을 이 프로젝트에서 뺐습니다.', { 0: skill.name })); }} />}
       {view === 'all' && <SkillList overview={overview} cwd={cwd} busy={busy} onNew={create}
         onEdit={skill => void edit(skill)} onPin={skill => void mutate('pin', { dir: skill.dir, pinned: !skill.pinned })}
@@ -155,12 +159,16 @@ function MoreMenu({ view, onChoose }: { view: View; onChoose: (view: View) => vo
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
+    box.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
     const close = (event: MouseEvent) => { if (!box.current?.contains(event.target as Node)) setOpen(false); };
+    // Escape closes the menu only, never the panel under it, wherever the focus is.
+    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setOpen(false); } };
     document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
+    document.addEventListener('keydown', escape, true);
+    return () => { document.removeEventListener('mousedown', close); document.removeEventListener('keydown', escape, true); };
   }, [open]);
   const items: [View, string, typeof Eye][] = [['all', t('전체 스킬 보기'), Layers], ['guidance', t('내 지침'), ScrollText], ['backup', t('백업'), Archive], ['settings', t('자동 추천 설정'), Settings2]];
-  return <div className="skills-more" ref={box} onKeyDown={event => { if (event.key === 'Escape' && open) { event.stopPropagation(); event.preventDefault(); setOpen(false); } }}>
+  return <div className="skills-more" ref={box}>
     <button className={`icon-button ${open ? 'active' : ''}`} aria-label={t('더 보기')} title={t('더 보기')} aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(value => !value)}><MoreHorizontal size={18} /></button>
     {open && <div className="skills-more-menu" role="menu">{items.map(([item, label, Icon]) => <button key={item} role="menuitem" className={view === item ? 'active' : ''} onClick={() => { setOpen(false); onChoose(item); }}><Icon size={15} />{label}</button>)}</div>}
   </div>;
@@ -190,14 +198,16 @@ export function TowerSkills({ overview, cwd, busy, proposals, onNew, onEdit, onT
       : <ul>{shown.map(skill => {
         const targets = skill.targets;
         const here = Boolean(cwd && targets && targetsCover(targets, cwd));
+        // Applied to a folder above this one: switched there, not here.
+        const inherited = Boolean(here && targets && !targets.all && !targets.projects.includes(cwd!));
         return <li key={skill.dir} className={`tower-skill ${cwd && !here ? 'elsewhere' : ''}`}>
           <button type="button" className="tower-skill-open" onClick={() => onEdit(skill)} aria-label={t('{0} 열기', { 0: skill.name })}>
             <span className="tower-skill-name"><strong>{skill.name}</strong>{!skill.pinned && <span className="skill-badge quiet" title={t('턴 시작 때 알리지 않습니다. 에이전트가 설명을 보고 스스로 고를 때만 씁니다.')}>{t('알림 끔')}</span>}</span>
             <span className="tower-skill-description">{skill.description || t('설명 없음')}</span>
           </button>
           {targets && <span className={`skill-target-chip ${targets.all ? 'all' : !targets.projects.length ? 'none' : ''}`} title={targets.all ? t('모든 프로젝트') : targets.projects.join('\n') || t('어느 프로젝트에도 적용하지 않습니다')}>{targets.all ? <Globe size={12} /> : <FolderOpen size={12} />}{targetsLabel(targets)}</span>}
-          {cwd && targets && <label className="skill-switch" title={targets.all ? t('모든 프로젝트에 적용 중입니다. 바꾸려면 스킬을 여세요.') : t('이 프로젝트에 적용')}>
-            <input type="checkbox" role="switch" checked={here} disabled={busy || targets.all} aria-label={t('{0}를 이 프로젝트에 적용', { 0: skill.name })} onChange={event => onToggle(skill, event.target.checked)} /><span aria-hidden="true" /></label>}
+          {cwd && targets && <label className="skill-switch" title={targets.all ? t('모든 프로젝트에 적용 중입니다. 바꾸려면 스킬을 여세요.') : inherited ? t('상위 폴더에 적용돼 있습니다. 바꾸려면 스킬을 여세요.') : t('이 프로젝트에 적용')}>
+            <input type="checkbox" role="switch" checked={here} disabled={busy || targets.all || inherited} aria-label={t('{0}를 이 프로젝트에 적용', { 0: skill.name })} onChange={event => onToggle(skill, event.target.checked)} /><span aria-hidden="true" /></label>}
           <ChevronRight size={16} className="tower-skill-chevron" aria-hidden="true" />
         </li>;
       })}</ul>}
@@ -267,7 +277,6 @@ function SkillEditor({ draft: initial, cwd, projects, busy, onCancel, onSave, on
   const [draft, setDraft] = useState(initial);
   const editing = Boolean(draft.dir);
   const nameError = draft.name && !SKILL_NAME.test(draft.name) ? t('영어 소문자, 숫자, 하이픈만 쓸 수 있습니다.') : '';
-  const choices = [...new Set([...(cwd ? [cwd] : []), ...(draft.projectCwd ? [draft.projectCwd] : []), ...projects])];
   const set = (patch: Partial<Draft>) => setDraft(value => ({ ...value, ...patch }));
   return <form className="skill-editor" onSubmit={event => { event.preventDefault(); if (!nameError) onSave(draft); }}>
     <h3>{editing ? t('{0} 편집', { 0: draft.name }) : draft.proposalId ? t('추천 검토 후 등록') : t('새 스킬')}</h3>
@@ -275,11 +284,6 @@ function SkillEditor({ draft: initial, cwd, projects, busy, onCancel, onSave, on
     {draft.external && <p className="auth-hint">{t('skills 명령으로 설치한 스킬입니다. 다시 설치하면 여기서 고친 내용이 바뀝니다.')}</p>}
     <label>{t('이름')}<input value={draft.name} disabled={editing || busy} required maxLength={64} placeholder="cross-verified-delivery" spellCheck={false} onChange={event => set({ name: event.target.value.toLowerCase().replace(/\s+/g, '-') })} />
       {nameError ? <small className="auth-error">{nameError}</small> : <small>{t('폴더 이름이 됩니다. 영어 소문자, 숫자, 하이픈.')}</small>}</label>
-    {!editing && !draft.targets && <fieldset className="skill-scope"><legend>{t('적용 범위')}</legend>
-      <label><input type="radio" name="scope" checked={draft.scope === 'global'} disabled={busy} onChange={() => set({ scope: 'global' })} />{t('전역 · 모든 프로젝트')}</label>
-      <label><input type="radio" name="scope" checked={draft.scope === 'project'} disabled={busy || !choices.length} onChange={() => set({ scope: 'project', projectCwd: draft.projectCwd ?? choices[0] })} />{t('한 프로젝트')}</label>
-      {draft.scope === 'project' && <select value={draft.projectCwd ?? ''} disabled={busy} aria-label={t('프로젝트')} onChange={event => set({ projectCwd: event.target.value })}>{choices.map(item => <option key={item} value={item}>{folderName(item)} · {item}</option>)}</select>}
-    </fieldset>}
     <label>{t('언제 쓰는 스킬인가요?')}<textarea rows={3} value={draft.description} required maxLength={MAX_SKILL_DESCRIPTION} disabled={busy} placeholder={t('예: 새 기능을 구현하거나 설계를 바꾸는 요청을 받았을 때. 설계 → 교차 검증 → 구현 → 교차 검증 순서로 진행한다.')} onChange={event => set({ description: event.target.value })} />
       <small>{t('에이전트는 이 설명을 보고 스킬을 쓸지 정합니다. 무엇을 하는지와 언제 쓰는지를 함께 쓰세요.')}</small></label>
     {draft.targets && <ProjectPicker value={draft.targets} projects={projects} cwd={cwd} disabled={busy} onChange={targets => set({ targets })} />}
@@ -287,7 +291,7 @@ function SkillEditor({ draft: initial, cwd, projects, busy, onCancel, onSave, on
     <label className="skill-pinned"><input type="checkbox" checked={draft.pinned} disabled={busy} onChange={event => set({ pinned: event.target.checked })} />{t('항상 확인')}<small>{t('Tower가 모든 턴 시작 때(트리거, Slack, 마스터, 직접 대화) 이 스킬을 확인하라고 에이전트에게 알려 줍니다.')}</small></label>
     <footer>{onDelete && <button type="button" className="secondary-button skill-delete" disabled={busy} onClick={onDelete}><Trash2 size={14} />{t('삭제')}</button>}
       <span /><button type="button" className="secondary-button" disabled={busy} onClick={onCancel}>{t('취소')}</button>
-      <button type="submit" className="primary-button" disabled={busy || !draft.name || !!nameError || !draft.description.trim() || (draft.scope === 'project' && !draft.projectCwd)}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}{draft.proposalId ? t('등록') : t('저장')}</button></footer>
+      <button type="submit" className="primary-button" disabled={busy || !draft.name || !!nameError || !draft.description.trim()}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}{draft.proposalId ? t('등록') : t('저장')}</button></footer>
   </form>;
 }
 

@@ -1,4 +1,4 @@
-import { mkdir, readFile, realpath, stat } from 'node:fs/promises';
+import { mkdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { ChatMessage, Run, Session } from '../../shared/types.js';
@@ -70,7 +70,9 @@ export class SkillService {
       await this.state.start();
       const finished = await this.files.recover().catch(error => { console.error(`Skill moves were not recovered: ${error instanceof Error ? error.message : String(error)}`); return []; });
       await this.moved(finished.map(move => ({ from: move.places, to: move.to })));
-      await this.syncTargets().catch(error => console.error(`Skill targets were not checked: ${error instanceof Error ? error.message : String(error)}`));
+      // Links are brought in line in the background, among the other changes: a project on a volume that stopped
+      // answering never holds up the worker, the listing or a turn, which all read the records.
+      void this.exclusive(() => this.syncTargets()).catch(error => console.error(`Skill targets were not checked: ${error instanceof Error ? error.message : String(error)}`));
     })().catch(error => { this.initialized = undefined; throw error; });
     return this.initialized;
   }
@@ -85,6 +87,8 @@ export class SkillService {
   pause(): void { this.advisor.pause(); }
   resume(): void { this.advisor.resume(); }
   flush(): Promise<void> { return this.state.update(() => {}); }
+  /** Resolves once the changes queued so far, the start-up link check included, are done. */
+  settled(): Promise<void> { return this.queue.then(() => {}, () => {}); }
 
   /**
    * Work someone other than the owner here asked for: a trigger, Slack, another agent, or the owner at a controlling
@@ -187,11 +191,14 @@ export class SkillService {
   private async syncTargets(): Promise<void> {
     const stored = await this.files.managed();
     const gone = new Set<string>();
-    for (const item of this.state.get().targets) if (!(await stat(item.dir).catch(() => undefined))?.isDirectory()) gone.add(item.dir);
+    // Only a folder that is certainly gone loses its record; one that cannot be read right now keeps it.
+    for (const item of this.state.get().targets) if (await stat(item.dir).then(() => false, error => (error as NodeJS.ErrnoException).code === 'ENOENT')) gone.add(item.dir);
     const derived: SkillTargetRecord[] = [];
+    const known = [...new Set([...this.options.projects?.() ?? [], ...this.options.sessions().filter(session => !session.node).map(session => session.cwd)])];
     for (const skill of stored) {
       if (this.record(skill.dir)) continue;
-      const targets = await this.files.storedTargets(skill.dir);
+      // Rebuilt from where it is linked now, so a lost record never makes a skill apply to more projects than before.
+      const targets = await this.files.linkedTargets(skill.dir, known);
       derived.push({ dir: skill.dir, ...targets, linked: targets.projects, globalLinked: targets.all });
     }
     if (gone.size || derived.length) await this.state.update(state => { state.targets = [...state.targets.filter(item => !gone.has(item.dir)), ...derived]; });
@@ -228,7 +235,7 @@ export class SkillService {
   }
 
   /** Targets a request names: everywhere, or projects this Tower knows. Undefined when it names none. */
-  private async targetsFrom(value: unknown): Promise<SkillTargets | undefined> {
+  private async targetsFrom(value: unknown, dir?: string): Promise<SkillTargets | undefined> {
     if (value === undefined || value === null) return undefined;
     if (typeof value !== 'object') throw new SkillError('적용 프로젝트가 올바르지 않습니다.');
     const input = value as { all?: unknown; projects?: unknown };
@@ -236,7 +243,12 @@ export class SkillService {
     const list = Array.isArray(input.projects) ? input.projects : [];
     if (list.length > MAX_SKILL_TARGETS) throw new SkillError(`적용 프로젝트는 ${MAX_SKILL_TARGETS}개까지 고를 수 있습니다.`);
     const projects: string[] = [];
-    for (const cwd of list) { const folder = await this.project(cwd); if (folder && !projects.includes(folder)) projects.push(folder); }
+    // A project the skill already applies to stays, even when Tower no longer lists it, so it never blocks other edits.
+    const recorded = dir ? this.record(dir)?.projects ?? [] : [];
+    for (const cwd of list) {
+      const folder = typeof cwd === 'string' && recorded.includes(cwd) ? cwd : await this.project(cwd);
+      if (folder && !projects.includes(folder)) projects.push(folder);
+    }
     return { all: false, projects };
   }
 
@@ -258,6 +270,8 @@ export class SkillService {
     let skill: Skill;
     try { skill = await this.files.save({ scope: 'global', name, description: text(body.description), body: text(body.body), link: false }); }
     catch (error) {
+      // A folder left without its SKILL.md is no skill: it goes, with its record.
+      if (await stat(dir).catch(() => undefined) && !await stat(join(dir, 'SKILL.md')).catch(() => undefined)) await rm(dir, { recursive: true, force: true }).catch(() => {});
       if (!await stat(dir).catch(() => undefined)) await this.state.update(state => { state.targets = state.targets.filter(item => item.dir !== dir); });
       throw error;
     }
@@ -314,8 +328,8 @@ export class SkillService {
   private async change(action: string, body: Record<string, unknown>, cwd: string | undefined): Promise<void> {
     switch (action) {
       case 'save': {
-        const targets = await this.targetsFrom(body.targets);
         const editing = typeof body.dir === 'string' && body.dir ? body.dir : undefined;
+        const targets = await this.targetsFrom(body.targets, editing && await realpath(editing).catch(() => undefined));
         let skill: Skill;
         if (!editing && targets) skill = await this.create(body, targets);
         else {
@@ -352,7 +366,7 @@ export class SkillService {
       case 'assign': {
         const skill = await this.files.lookup(text(body.dir), cwd);
         if (!skill.managed) throw new SkillError('타워에 있는 스킬만 적용 프로젝트를 정할 수 있습니다.', 409);
-        const targets = await this.targetsFrom(body.targets);
+        const targets = await this.targetsFrom(body.targets, skill.dir);
         if (!targets) throw new SkillError('적용 프로젝트를 고르세요.');
         this.checkRevision(skill.dir, body);
         await this.apply(skill.dir, targets);
@@ -398,8 +412,11 @@ export class SkillService {
       case 'delete': {
         const skill = await this.files.lookup(text(body.dir), cwd);
         // A Tower skill loses its links in every project it applied to first.
-        if (skill.managed && this.record(skill.dir)) await this.apply(skill.dir, { all: false, projects: [] }, false);
-        await this.files.remove(skill.dir, skill.managed ? skill.cwd : cwd);
+        const before = skill.managed ? this.record(skill.dir) : undefined;
+        if (before) await this.apply(skill.dir, { all: false, projects: [] }, false);
+        // A skill that could not be removed applies where it did again.
+        try { await this.files.remove(skill.dir, skill.managed ? skill.cwd : cwd); }
+        catch (error) { if (before) await this.apply(skill.dir, { all: before.all, projects: before.projects }, false).catch(() => {}); throw error; }
         await this.pin(skill, false);
         if (skill.managed) await this.state.update(state => { state.targets = state.targets.filter(item => item.dir !== skill.dir); });
         break;
@@ -536,7 +553,10 @@ export class SkillService {
           skill = await this.files.install(item, cwd, choice.action === 'replace', false);
           await this.apply(dir, { all: existing.all, projects: existing.projects }, false);
         } else {
-          const targets = await this.importTargets(item) ?? (item.scope === 'global' ? { all: true, projects: [] } : { all: false, projects: [cwd!] });
+          const carried = await this.importTargets(item);
+          // A project skill applies to the project chosen for it here, in place of the one it came from.
+          const targets = carried && item.scope === 'project' && !carried.all ? { all: false, projects: [...new Set([...carried.projects.filter(path => path !== item.project?.cwd), cwd!])] }
+            : carried ?? (item.scope === 'global' ? { all: true, projects: [] } : { all: false, projects: [cwd!] });
           await this.files.checkTargets(dir, targets);
           await this.writeRecord({ dir, all: targets.all, projects: targets.projects, linked: targets.projects, globalLinked: targets.all });
           try { skill = await this.files.install(item, cwd, choice.action === 'replace', false); }
