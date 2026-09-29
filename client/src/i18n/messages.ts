@@ -1,5 +1,6 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  "{0}가 모든 프로젝트용 Codex 규칙 파일과 같은 파일이라서 바꾸지 않았습니다.": "{0} is the Codex rules file for every project, so it was not changed.",
   "권한 · 요청 {0}개": "Permissions · {0} requests",
   "권한": "Permissions",
   "결정은 저장했지만 대화에 알리지 못했습니다: {0}": "The decision was saved, but the conversation could not be told: {0}",

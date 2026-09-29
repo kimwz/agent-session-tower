@@ -15,6 +15,22 @@ export function codexRulesPath(scope: PermissionScope, cwd: string | undefined, 
   return scope === 'global' ? join(env.CODEX_HOME || join(homedir(), '.codex'), 'rules', 'tower.rules') : join(cwd!, '.codex', 'rules', 'tower.rules');
 }
 
+/** Where a path really is: its nearest existing folder with links resolved, and the rest as written. */
+export async function realLocation(path: string): Promise<string> {
+  const rest: string[] = [];
+  let current = resolve(path);
+  for (;;) {
+    try { return join(await realpath(current), ...rest.reverse()); }
+    catch (error) {
+      if (!missing(error)) throw error;
+      const parent = dirname(current);
+      if (parent === current) return resolve(path);
+      rest.push(basename(current));
+      current = parent;
+    }
+  }
+}
+
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
 
 /**
@@ -60,10 +76,12 @@ async function replaceIfUnchanged(path: string, before: string | undefined, cont
  * Writes Tower's own Codex rules file whole, or removes it when no rule is left. Only Tower writes this file, and a file
  * without Tower's header is left alone. A project file goes through the same link and git checks to be written or removed.
  */
-export async function syncCodex(file: string, lines: readonly string[], project?: string): Promise<void> {
+export async function syncCodex(file: string, lines: readonly string[], project?: string, globalFile?: string): Promise<void> {
   // A home rules folder kept elsewhere (dotfiles) is used where it really is.
   const path = project ? file : join(await realpath(dirname(file)).catch(() => dirname(file)), basename(file));
   if (project) {
+    // A project folder that is (or links to) the Codex home's parent would make its rules everyone's.
+    if (globalFile && await realLocation(file) === await realLocation(globalFile)) throw failure(`${file}가 모든 프로젝트용 Codex 규칙 파일과 같은 파일이라서 바꾸지 않았습니다.`);
     if (!(await projectFolders(project, path, lines.length > 0))) return;
     await keepUntracked(project, path, lines.length > 0);
   }

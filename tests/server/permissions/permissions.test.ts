@@ -180,3 +180,21 @@ test('agents reach permissions only through their own keyed requests; owner-only
   assert.equal(overview.pending, 1);
   await assert.rejects(api.call('permissions.overview', {}, { kind: 'owner', via: 'remote', controllerId: 'other' }), /on that computer itself/);
 });
+
+test('a project folder that is, or links to, the Codex home\'s parent never gets project rules in the file for every project', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'tower-permissions-home-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const home = join(root, 'home');
+  await mkdir(join(home, '.codex', 'rules'), { recursive: true });
+  const global = join(home, '.codex', 'rules', 'tower.rules');
+  await writeFile(global, `${CODEX_HEADER}\nprefix_rule(pattern=["keep"], decision="allow")\n`);
+  await symlink(home, join(root, 'alias'));
+  const service = new PermissionService({ stateDir: join(root, 'state'), env: { CODEX_HOME: join(home, '.codex') }, session: () => undefined });
+  await service.start();
+  t.after(() => service.close());
+  for (const cwd of [home, join(root, 'alias')]) {
+    await assert.rejects(service.save({ kind: 'command', value: 'terraform apply', providers: ['codex'], scope: 'project', cwd }), /모든 프로젝트용 파일과 같습니다/);
+    await assert.rejects(syncCodex(join(cwd, '.codex', 'rules', 'tower.rules'), [], cwd, global), /같은 파일이라서/);
+  }
+  assert.match(await readFile(global, 'utf8'), /keep/);
+});

@@ -7,7 +7,7 @@ import {
 } from '../../shared/permissions.js';
 import type { Provider } from '../../shared/types.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { codexRulesPath, syncCodex } from './native.js';
+import { codexRulesPath, realLocation, syncCodex } from './native.js';
 
 /** What Tower keeps about permission rules, in `<state>/permissions.json`. */
 export interface PermissionState {
@@ -115,7 +115,7 @@ export class PermissionService {
       const session = caller.sessionId ? this.options.session(caller.sessionId) : undefined;
       if (!caller.sessionId || !session?.cwd) throw failure('권한 요청은 Tower에서 시작한 대화에서만 보낼 수 있습니다.', 403);
       const provider: PermissionProvider = session.provider === 'codex' ? 'codex' : 'claude';
-      const rule = this.checked(clean({ kind: input.kind, value: input.value, providers: input.kind === 'claude' ? ['claude'] : input.providers ?? [provider], scope: input.scope,
+      const rule = await this.checked(clean({ kind: input.kind, value: input.value, providers: input.kind === 'claude' ? ['claude'] : input.providers ?? [provider], scope: input.scope,
         ...(input.scope === 'project' ? { cwd: session.cwd } : {}) }));
       // A rule for every project, or for this project, already covers what a project request asks for.
       const covering = this.state.rules.filter(existing => sameRule({ ...existing, scope: rule.scope, cwd: rule.cwd }, rule) && (existing.scope === 'global' || (rule.scope === 'project' && existing.cwd === rule.cwd)));
@@ -138,7 +138,7 @@ export class PermissionService {
   /** The owner adds a rule, or changes one. */
   save(input: PermissionRuleInput & { id?: string }): Promise<PermissionOverview> {
     return this.serial(async () => {
-      const rule = this.checked(clean(input));
+      const rule = await this.checked(clean(input));
       await this.commit(state => { upsert(state, rule, input.id, 'owner', undefined, this.now()); });
       await this.apply();
       return this.overview();
@@ -168,7 +168,7 @@ export class PermissionService {
         await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.status = 'denied'; item.decidedAt = at; });
         return { request, rule: undefined };
       }
-      const rule = this.checked(clean(edited ?? request.rule));
+      const rule = await this.checked(clean(edited ?? request.rule));
       await this.commit(state => {
         const made = upsert(state, rule, undefined, 'request', id, at);
         const item = state.requests.find(entry => entry.id === id)!;
@@ -184,8 +184,9 @@ export class PermissionService {
   }
 
   /** A rule this computer can keep: a Codex rule for a project whose rules file would be the one for every project cannot. */
-  private checked(rule: PermissionRuleInput): PermissionRuleInput {
-    if (rule.kind === 'command' && rule.scope === 'project' && rule.providers.includes('codex') && codexRulesPath('project', rule.cwd, this.options.env) === codexRulesPath('global', undefined, this.options.env)) {
+  private async checked(rule: PermissionRuleInput): Promise<PermissionRuleInput> {
+    if (rule.kind === 'command' && rule.scope === 'project' && rule.providers.includes('codex')
+      && await realLocation(codexRulesPath('project', rule.cwd, this.options.env)) === await realLocation(codexRulesPath('global', undefined, this.options.env))) {
       throw failure('이 폴더의 Codex 규칙 파일은 모든 프로젝트용 파일과 같습니다. 모든 프로젝트 규칙으로 저장하세요.');
     }
     return rule;
@@ -230,7 +231,7 @@ export class PermissionService {
     for (const file of this.state.codex) if (!files.has(file.path)) files.set(file.path, { scope: file.scope, ...(file.cwd ? { cwd: file.cwd } : {}), lines: [] });
     for (const [path, file] of files) {
       try {
-        await syncCodex(path, file.lines, file.scope === 'project' ? file.cwd : undefined);
+        await syncCodex(path, file.lines, file.scope === 'project' ? file.cwd : undefined, codexRulesPath('global', undefined, this.options.env));
         const had = this.state.codex.some(item => item.path === path);
         if (had !== file.lines.length > 0) await this.commit(state => {
           state.codex = file.lines.length ? [...state.codex, { path, scope: file.scope, ...(file.cwd ? { cwd: file.cwd } : {}) }] : state.codex.filter(item => item.path !== path);
