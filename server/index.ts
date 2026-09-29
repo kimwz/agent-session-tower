@@ -10,6 +10,7 @@ import { nativeHistory } from './sessions/native-history.js';
 import { SessionTitleStore } from './stores/session-titles.js';
 import { DismissedRunStore } from './stores/dismissed-runs.js';
 import { ClosedSessionStore } from './stores/closed-sessions.js';
+import { worktreeCleanupFor } from './worktrees/janitor.js';
 import { ProjectGroupStore } from './stores/project-groups.js';
 import { DurableRunManager } from './runs/durable-runner.js';
 import { runRunnerWorker } from './runs/worker.js';
@@ -309,7 +310,9 @@ async function main() {
     const session = runs.getSession(id);
     if (!session) return undefined;
     const page = await history.read(runs.nativeSessionId(id), before, limit);
-    return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)) };
+    // What became of the worktrees it made, once its work was over; the worker records it.
+    const worktrees = before === undefined ? await worktreeCleanupFor(stateDir, [session.id]).catch(() => []) : [];
+    return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)), ...(worktrees.length ? { worktrees } : {}) };
   };
   // A retried request returns the message it already queued; that message is judged once only.
   const judgedMessages = { ids: new Set<string>(), claim(id: string) {

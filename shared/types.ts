@@ -80,6 +80,18 @@ export interface SessionDetail {
   nextBefore?: number;
   /** Your last message before this page, which the page's first messages answer; only when there is earlier history. */
   previousUser?: ChatMessage;
+  /** Worktrees this conversation made that Tower removed, or kept and why, after its work was over. */
+  worktrees?: WorktreeCleanup[];
+}
+/** Why Tower kept a worktree a finished conversation made. */
+export type WorktreeKeptReason = 'openSession' | 'otherCreator' | 'process' | 'processesUnknown' | 'locked' | 'changes' | 'unpushed' | 'unpublished' | 'failed';
+export interface WorktreeCleanup {
+  path: string;
+  state: 'removed' | 'kept';
+  reason?: WorktreeKeptReason;
+  /** The session holding it, the branch with unpushed commits, the number of changes, or git's message. */
+  detail?: string;
+  at: string;
 }
 export interface ProviderHealth {
   provider: Provider;
