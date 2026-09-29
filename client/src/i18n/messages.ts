@@ -825,6 +825,7 @@ export const english: Record<string, string> = {
   '실행 중인 프로그램이 이 폴더에서 작업 중입니다': 'A running program is working in this folder',
   '실행 중인 프로그램을 확인하지 못했습니다': 'Running programs could not be checked',
   '잠긴 워크트리입니다': 'The worktree is locked',
+  '안에 다른 워크트리가 있습니다': 'Another worktree is inside it',
   '커밋하지 않은 변경이 있습니다 ({detail}개)': 'It has uncommitted changes ({detail})',
   '원격에 올리지 않은 커밋이 있습니다: {detail}': 'It has commits not pushed: {detail}',
   '어느 브랜치나 원격에도 없는 커밋이 있습니다 ({detail}개)': 'It has commits on no branch or remote ({detail})',

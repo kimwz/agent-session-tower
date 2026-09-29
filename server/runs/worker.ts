@@ -502,7 +502,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       closedIds: async () => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds(); },
       finishedAutomation: () => finishedAutomationSessionIds(slack.automation.list(), visible.allSessions(), runs.list()),
       // Folders a trigger works in, and projects the owner pinned, are in use even with no conversation open there.
-      reserved: () => [...folderSettings(triggerEngine?.list() ?? []), ...(visible.snapshot().groups ?? []).filter(group => group.pinned).map(group => group.cwd)] });
+      // Pins are read from the web's saved file each time: this worker's copy is only read when it starts.
+      reserved: async () => { const groups = new ProjectGroupStore(stateDir); await groups.start();
+        return [...folderSettings(triggerEngine?.list() ?? []), ...groups.list().filter(group => group.pinned).map(group => group.cwd)]; } });
     await worktrees.start().catch(error => console.error(`Worktree cleanup did not start: ${error instanceof Error ? error.message : String(error)}`));
     const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), publicAgents: () => publicAgents.projection(), ownPorts,
       // A trigger set up from a controlling computer checks the sharing list as it is when it runs.

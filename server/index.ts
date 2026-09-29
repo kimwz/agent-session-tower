@@ -316,7 +316,9 @@ async function main() {
     const page = await history.read(runs.nativeSessionId(id), before, limit);
     // What became of the worktrees it made, once its work was over; the worker records it. Why one was kept only holds while
     // the conversation stays closed (or its automated work finished).
-    const over = closedSessions.closedIds().has(session.id) || Boolean(session.launchedBy);
+    let root = session;
+    for (let depth = 0; depth < 20 && root.isSubagent && root.parentId; depth++) { const parent = runs.getSession(root.parentId); if (!parent) break; root = parent; }
+    const over = closedSessions.closedIds().has(root.id) || Boolean(root.launchedBy);
     const worktrees = before === undefined ? (await worktreeCleanupFor(stateDir, [session.id]).catch(() => [])).filter(item => over || item.state === 'removed') : [];
     return { ...(page || { messages: [], hasMore: false }), session: closedSessions.apply(titles.apply(session)), ...(worktrees.length ? { worktrees } : {}) };
   };

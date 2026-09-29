@@ -8,6 +8,7 @@ const REASONS: Record<WorktreeKeptReason, string> = {
   process: '실행 중인 프로그램이 이 폴더에서 작업 중입니다',
   processesUnknown: '실행 중인 프로그램을 확인하지 못했습니다',
   locked: '잠긴 워크트리입니다',
+  nested: '안에 다른 워크트리가 있습니다',
   changes: '커밋하지 않은 변경이 있습니다 ({detail}개)',
   unpushed: '원격에 올리지 않은 커밋이 있습니다: {detail}',
   unpublished: '어느 브랜치나 원격에도 없는 커밋이 있습니다 ({detail}개)',

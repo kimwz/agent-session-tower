@@ -1,5 +1,5 @@
 import { realpath, stat } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import type { GitRunner } from '../repositories/git.js';
 
 const TIMEOUT_MS = 20_000;
@@ -14,6 +14,8 @@ export interface LinkedWorktree {
   /** When `git worktree add` created it: its administrative `commondir` file is written then and never again. */
   createdAt: number;
   locked: boolean;
+  /** Other worktrees of the repository inside this one (in an ignored folder): removing this one would delete them. */
+  nested: boolean;
 }
 
 /**
@@ -43,14 +45,17 @@ export async function linkedWorktree(git: GitRunner, path: string): Promise<Link
     return undefined;
   })();
   if (!own) return undefined;
-  return { path: real, main, createdAt: created.mtimeMs, locked: own.some(line => line === 'locked' || line.startsWith('locked ')) };
+  const listed = await Promise.all(entries.flatMap(entry => entry.filter(line => line.startsWith('worktree ')).map(line => realpath(line.slice(9)).catch(() => line.slice(9)))));
+  return { path: real, main, createdAt: created.mtimeMs, locked: own.some(line => line === 'locked' || line.startsWith('locked ')),
+    nested: listed.some(other => other !== real && other.startsWith(real + sep)) };
 }
 
-export interface Blocker { reason: 'locked' | 'changes' | 'unpushed' | 'unpublished'; detail?: string }
+export interface Blocker { reason: 'locked' | 'nested' | 'changes' | 'unpushed' | 'unpublished'; detail?: string }
 
 /** Why removing this worktree would lose something, or undefined when everything in it is committed and published. */
 export async function removalBlocker(git: GitRunner, worktree: LinkedWorktree): Promise<Blocker | undefined> {
   if (worktree.locked) return { reason: 'locked' };
+  if (worktree.nested) return { reason: 'nested' };
   const status = await git(worktree.path, ['status', '--porcelain=v2', '--branch', '--untracked-files=normal'], TIMEOUT_MS);
   let branch: string | undefined, upstream: string | undefined, ahead: number | undefined;
   let changes = 0;

@@ -84,7 +84,7 @@ export interface SessionDetail {
   worktrees?: WorktreeCleanup[];
 }
 /** Why Tower kept a worktree a finished conversation made. */
-export type WorktreeKeptReason = 'openSession' | 'reserved' | 'process' | 'processesUnknown' | 'locked' | 'changes' | 'unpushed' | 'unpublished' | 'failed';
+export type WorktreeKeptReason = 'openSession' | 'reserved' | 'process' | 'processesUnknown' | 'locked' | 'nested' | 'changes' | 'unpushed' | 'unpublished' | 'failed';
 export interface WorktreeCleanup {
   path: string;
   state: 'removed' | 'kept';

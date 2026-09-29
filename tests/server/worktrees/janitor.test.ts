@@ -9,6 +9,7 @@ import { gitRunner } from '../../../server/repositories/git.js';
 import { WorktreeJanitor, groupFamilies, worktreeCleanupFor } from '../../../server/worktrees/janitor.js';
 import { transcriptCreations, transcriptMentions } from '../../../server/worktrees/transcripts.js';
 import { parseCwdList } from '../../../server/worktrees/process-cwds.js';
+import { readPrivateJson } from '../../../server/stores/private-json.js';
 import type { Run, Session } from '../../../shared/types.js';
 
 const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
@@ -50,8 +51,8 @@ async function setup(t: test.TestContext) {
 
 function janitor(state: string, world: { sessions: Session[]; closed: Set<string>; automation?: Set<string>; runs?: Run[]; cwds?: string[] | undefined; now?: number },
   extra: Partial<ConstructorParameters<typeof WorktreeJanitor>[0]> = {}) {
-  return new WorktreeJanitor({ ...extra, stateDir: state, sessions: () => world.sessions, closedIds: async () => world.closed, finishedAutomation: () => world.automation ?? new Set(),
-    runs: () => world.runs ?? [], git: gitRunner(env), home: '/nonexistent-home', now: () => world.now ?? Date.now(), cwds: extra.cwds ?? (async () => 'cwds' in world ? world.cwds : []), firstPassMs: 3_600_000 });
+  return new WorktreeJanitor({ stateDir: state, sessions: () => world.sessions, closedIds: async () => world.closed, finishedAutomation: () => world.automation ?? new Set(),
+    runs: () => world.runs ?? [], git: gitRunner(env), home: '/nonexistent-home', now: () => world.now ?? Date.now(), cwds: async () => 'cwds' in world ? world.cwds : [], firstPassMs: 3_600_000, ...extra });
 }
 
 test('closing a session removes the clean, published worktrees it made and keeps any that would lose work', async t => {
@@ -275,7 +276,7 @@ test('branches: a gone upstream lets the worktree go, unpublished commits withou
   git(unpublished, 'branch', '--unset-upstream');
   await writeFile(join(unpublished, 'u.txt'), 'u'); git(unpublished, 'add', 'u.txt'); git(unpublished, 'commit', '-qm', 'never pushed');
   const world = { sessions: [session('s', await transcript('s', rows))], closed: new Set(['claude:s']) };
-  const cleaner = janitor(state, world, { reserved: () => [reserved] });
+  const cleaner = janitor(state, world, { reserved: async () => [reserved] });
   await cleaner.start(); t.after(() => cleaner.close());
   await cleaner.pass();
   assert.equal(existsSync(merged), false);
@@ -296,4 +297,50 @@ test('lsof output counts only when lsof finished, and an early stop in a transcr
   for (let i = 0; i < 20; i++) assert.deepEqual([...await transcriptMentions(file, ['work.wt-x'])], ['work.wt-x']);
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.ok(open() - before < 5, `open files grew from ${before} to ${open()}`);
+});
+
+test('a worktree with another inside it stays; a conversation reopened while programs are listed keeps what it uses', async t => {
+  const { dir, work, state, add, transcript, session } = await setup(t);
+  const outer = join(dir, 'work.wt-outer'), shared = join(dir, 'work.wt-shared');
+  const rows = [...add(`git worktree add --detach ${outer} HEAD`, ['--detach', outer, 'HEAD']), ...add(`git worktree add --detach ${shared} HEAD`, ['--detach', shared, 'HEAD'])];
+  await writeFile(join(outer, '.git-info-exclude-marker'), '');
+  git(outer, 'rm', '-q', '--cached', '--ignore-unmatch', 'x');
+  await writeFile(join(work, '.git', 'info', 'exclude'), '.worktrees/\n.git-info-exclude-marker\n');
+  // A child worktree with work in progress, in a folder the outer one ignores.
+  const inner = join(outer, '.worktrees', 'inner');
+  git(work, 'worktree', 'add', '-q', '--detach', inner, 'HEAD');
+  await writeFile(join(inner, 'a.txt'), 'unsaved work');
+  const world = {
+    sessions: [session('a', await transcript('a', rows)), session('b', await transcript('b', [{ type: 'user', timestamp: iso(Date.now()), message: { content: `keep using ${shared}` } }]))],
+    closed: new Set(['claude:a', 'claude:b']),
+  };
+  // b is reopened while the processes are being listed.
+  const cleaner = janitor(state, world, { cwds: async () => { world.closed.delete('claude:b'); return []; } });
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.deepEqual([outer, inner, shared].map(existsSync), [true, true, true]);
+  const results = new Map((await worktreeCleanupFor(state, ['claude:a'])).map(item => [item.path, item.reason]));
+  assert.deepEqual([results.get(outer), results.get(shared)], ['nested', 'openSession']);
+});
+
+test('a pause stops a pass before it removes anything, and an interrupted scan is read again', async t => {
+  const { dir, state, add, transcript, session } = await setup(t);
+  const target = join(dir, 'work.wt-paused');
+  const world = { sessions: [session('p', await transcript('p', add(`git worktree add --detach ${target} HEAD`, ['--detach', target, 'HEAD']))),
+    session('p-sub', await transcript('p-sub', []), { isSubagent: true, parentId: 'claude:p' })], closed: new Set(['claude:p']) };
+  const scanned = async () => Object.keys(((await readPrivateJson(join(state, 'worktree-cleanup.json')).catch(() => ({}))) as { scanned?: object }).scanned ?? {});
+  const real = gitRunner(env);
+  let pauseOn: string | undefined = 'rev-parse';
+  const cleaner = janitor(state, world, { git: async (cwd, args, timeout) => { if (args[0] === pauseOn) { pauseOn = undefined; cleaner.pause(); } return real(cwd, args, timeout); } });
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.equal(existsSync(target), true, 'paused during the scan');
+  assert.deepEqual(await scanned(), [], 'a scan cut short is not recorded');
+  cleaner.resume(); pauseOn = 'status';
+  await cleaner.pass();
+  assert.equal(existsSync(target), true, 'paused before removing');
+  assert.equal(cleaner.inFlight(), false);
+  cleaner.resume();
+  await cleaner.pass();
+  assert.equal(existsSync(target), false, 'the scan was read again and the worktree removed once resumed');
 });

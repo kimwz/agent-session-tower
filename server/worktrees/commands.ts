@@ -101,47 +101,51 @@ function pathOf(word: Word, cwd: string | undefined, home: string): string | und
 const GIT_VALUE_OPTIONS = new Set(['-c', '--config-env', '--exec-path', '--namespace', '--super-prefix', '--attr-source']);
 const ADD_VALUE_OPTIONS = new Set(['-b', '-B', '--reason']);
 
-/** First words that make the folder depend on how the shell runs what follows (conditions, loops, functions, negation). */
-const CONTROL = new Set(['if', 'elif', 'while', 'until', 'for', 'case', 'select', 'function', 'time', 'builtin', '!', 'coproc']);
+/** Words after which the folder depends on how the shell runs things (conditions, loops, functions, negation). */
+const CONTROL = new Set(['if', 'then', 'elif', 'else', 'fi', 'while', 'until', 'for', 'do', 'done', 'case', 'esac', 'select', 'function', 'time', 'builtin', '!', 'coproc']);
 
 /**
  * The absolute paths of `git worktree add` commands in `command`, which starts in `cwd` (undefined when unknown).
- * `git -C` is resolved. A `cd` is followed only into a command it is joined to by `&&`, so the next command runs only if it
- * succeeded; a subshell or command substitution (`( … )`, `$( … )`) keeps its `cd` to itself. After a condition, loop or
- * function the folder is unknown. `echo …`, quoted text and heredoc bodies are never commands.
+ * `git -C` is resolved. A `cd` counts only as the first command of an `&&` chain, for the rest of that chain (each next
+ * command runs only if it succeeded), and only to an absolute, `./` or `../` folder; after the chain the folder is unknown.
+ * After a condition, loop, function or negation it stays unknown. `echo …`, quoted text and heredoc bodies are never
+ * commands. Unknown folders leave relative paths out; absolute paths still count.
  */
 export function worktreeAddPaths(command: string, cwd: string | undefined, home: string): string[] {
   if (command.length > 200_000) return [];
   const tokens = tokenize(command);
   const paths: string[] = [];
   let directory = cwd && isAbsolute(cwd) ? normalize(cwd) : undefined;
-  const outer: (string | undefined)[] = [];
+  let lost = false;
   let words: Word[] = [];
-  let before: string | undefined;
-  const simple = (end: string | undefined) => {
+  let position = 0;
+  let moved = false;
+  const simple = () => {
     const all = words; words = [];
-    let index = 0;
+    let index = 0, wrapped = false;
     // Environment assignments and wrappers that run the rest as a command of its own.
     while (index < all.length) {
       const text = all[index]!.text;
       if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(text) && !all[index]!.quoted) { index++; continue; }
-      if (['env', 'command', 'nohup', 'exec', '{', '}', 'then', 'do', 'else'].includes(text)) { index++; continue; }
-      if (text === 'timeout' || text === 'nice') { index++; while (all[index] && /^-/.test(all[index]!.text)) index++; if (text === 'timeout') index++; continue; }
+      // `then git …` still runs git, but from here on the folder depends on the condition.
+      if (CONTROL.has(text) || text === '{' || text === '}') { lost = true; index++; continue; }
+      if (['env', 'command', 'nohup', 'exec'].includes(text)) { index++; wrapped = true; continue; }
+      if (text === 'timeout' || text === 'nice') { index++; wrapped = true; while (all[index] && /^-/.test(all[index]!.text)) index++; if (text === 'timeout') index++; continue; }
       break;
     }
     const name = all[index];
     if (!name) return;
-    if (name.dynamic || CONTROL.has(name.text)) { directory = undefined; return; }
-    if (name.text === 'cd' || name.text === 'pushd') {
+    const first = position++ === 0;
+    if (name.dynamic) { lost = true; return; }
+    if (name.text === 'cd' || name.text === 'pushd' || name.text === 'popd') {
       const target = all[index + 1];
-      // In a pipeline or in the background it runs in a subshell; joined by anything but `&&`, it may have failed.
-      const effective = end === '&&' && before !== '|' && before !== '|&';
-      directory = effective && target && target.text !== '-' && !target.text.startsWith('-') ? pathOf(target, directory, home) : undefined;
+      const plain = target && !target.dynamic && (isAbsolute(target.text) || /^\.\.?(?:\/|$)/.test(target.text) || (!target.quoted && /^~(?:\/|$)/.test(target.text)));
+      directory = !lost && first && !wrapped && name.text !== 'popd' && plain ? pathOf(target, directory, home) : undefined;
+      moved = true;
       return;
     }
-    if (name.text === 'popd') { directory = undefined; return; }
     if (basename(name.text) !== 'git') return;
-    let gitDirectory = directory;
+    let gitDirectory = lost ? undefined : directory;
     let i = index + 1;
     for (; i < all.length; i++) {
       const word = all[i]!;
@@ -167,19 +171,26 @@ export function worktreeAddPaths(command: string, cwd: string | undefined, home:
     const path = target && pathOf(target, gitDirectory, home);
     if (path) paths.push(path);
   };
-  const run = (end: string | undefined) => { simple(end); before = end; };
   for (let index = 0; index < tokens.length; index++) {
     const token = tokens[index]!;
     if (isWord(token)) { words.push(token); continue; }
     // A redirection's target is a file, not an argument; a heredoc's delimiter was consumed with its body.
     if (REDIRECTS.has(token.op)) { if (isWord(tokens[index + 1])) index++; continue; }
     if (!SEPARATORS.has(token.op)) continue;
-    run(token.op);
-    // A subshell or command substitution starts where its parent is and gives its folder back when it ends.
-    if (token.op === '(') outer.push(directory);
-    else if (token.op === ')') directory = outer.length ? outer.pop() : undefined;
+    simple();
+    // `a || b && c` and pipelines are one list, whose later commands may run whether or not an earlier cd did (or run in
+    // subshells): a cd there is never the list's first command, and the list's end forgets where it went.
+    if (token.op === '&&' || token.op === '||' || token.op === '|' || token.op === '|&') {
+      if (token.op !== '&&' && moved) directory = undefined;
+      continue;
+    }
+    // The chain ended: where a cd in it left the shell is unknown from here (it may have failed, run in a subshell or in
+    // the background). Anything in parentheses may be a subshell, a substitution or a case pattern: the folder is lost.
+    if (moved) directory = undefined;
+    if (token.op === '(' || token.op === ')') lost = true;
+    position = 0; moved = false;
   }
-  run(undefined);
+  simple();
   return paths;
 }
 

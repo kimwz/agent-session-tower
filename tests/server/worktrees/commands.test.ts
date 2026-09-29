@@ -37,9 +37,15 @@ test('a cd counts only when it surely ran in this shell: joined by &&, outside s
     'builtin cd /a && git worktree add ../y', 'f() { cd /a; }; f; git worktree add ../y', 'ls | cd /a && git worktree add ../y', '! cd /a && git worktree add ../y']) {
     assert.deepEqual(worktreeAddPaths(command, '/w/repo', home), [], command);
   }
-  // A subshell or command substitution gives its folder back.
-  assert.deepEqual(worktreeAddPaths('(cd /a && git worktree add ../x); git worktree add ../y', '/w/repo', home), ['/x', '/w/y']);
-  assert.deepEqual(worktreeAddPaths('X=$(cd /a && pwd); git worktree add ../y', '/w/repo', home), ['/w/y']);
+  // Conditional, skipped or backgrounded chains, and anything after parentheses (subshells, substitutions, case patterns).
+  for (const command of ['true || cd /a && git worktree add ../y', 'false && cd /a && true; git worktree add ../y', '[ -d .git ] && cd /a && git fetch\ngit worktree add ../y',
+    'git fetch && cd /a && npm ci &\ngit worktree add ../y', 'if [ -d /a ]; then cd /a && :; fi; git worktree add ../y', 'while false; do cd /a && :; done; git worktree add ../y',
+    '(cd /a && case $x in a) git worktree add ../y;; esac)', 'env cd /a && git worktree add ../y', 'cd a && git worktree add ../y', 'X=$(cd /a && pwd); git worktree add ../y',
+    '(cd /a && git worktree add ../x); git worktree add ../y']) {
+    assert.deepEqual(worktreeAddPaths(command, '/w/repo', home), [], command);
+  }
+  assert.deepEqual(worktreeAddPaths('cd /a && git worktree add ../x & git worktree add /abs/y', '/w/repo', home), ['/x', '/abs/y'], 'a chain\'s own cd counts inside it; absolute paths always');
+  assert.deepEqual(worktreeAddPaths('cd ../other && git fetch -q && git worktree add ../o.wt HEAD', '/w/repo', home), ['/w/o.wt']);
   assert.deepEqual(worktreeAddPaths('if [ -d x ]; then git worktree add /abs/z HEAD; git worktree add ../z HEAD; fi', '/w/repo', home), ['/abs/z'], 'after a condition only absolute paths count');
 });
 
