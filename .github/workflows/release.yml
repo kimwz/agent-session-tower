@@ -1,5 +1,5 @@
 name: Release
-# Pushing the tag created by `npm version` publishes a GitHub release whose notes are that
+# Pushing a vx.y.z tag on a merged release commit publishes a GitHub release whose notes are that
 # version's CHANGELOG.md section.
 on:
   push:

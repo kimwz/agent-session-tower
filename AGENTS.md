@@ -13,13 +13,12 @@
 - Send cancellation or termination only for an explicit user stop/close action. Never infer cancellation from lost UI connections.
 - Verify lifecycle changes with isolated fake-provider processes, including web-process termination and reconnect. Do not create native test conversations in personal homes.
 
-# Deployment and release completion
+# Release and deployment
 
-- Deploy automatically after every completed code change: once the change is verified, run the full release and deployment below without asking for a separate request.
-
-- A requested deployment includes the version bump, changelog, commit, release tag, and push to the configured remote branch. Local server changes alone do not complete a deployment. Do not require a second request to publish the already authorized release.
-- Follow `docs/development.md`: choose the appropriate semantic version, write release notes dated today, run the required checks, use the release scripts to synchronize package and application versions, and push the commit and annotated version tag without force-pushing.
+- Changes reach `main` only through a reviewed and merged pull request. Tower's release and deployment then follow without a separate request.
+- A pull request that changes what Tower does carries its own release: the dated `CHANGELOG.md` section and the version bump. After merging, tag the commit the merge put on `main`. Follow "Releasing" in `docs/development.md`, including its checks before merging and before tagging. Never force-push a branch or move a tag.
+- A pull request that changes only documentation, agent instructions, tests, or CI has no version, changelog entry, or release; its changes ship with the next release.
 - Review the release contents before committing. Preserve unrelated work and exclude credentials, personal state, test-session data, and generated build output.
-- Build and deploy the new version, preserving active agent turns and terminal shells. Verify the running version and the remote branch/tag commit IDs before reporting completion.
+- Build and deploy the new version, preserving active agent turns and terminal shells. Verify the running version and that the release tag points at the merged commit on `main` before reporting completion.
 - A Tower running as the background service (`agent-session-tower service install`) is deployed by asking it to update, never by restarting its web by hand or starting a checkout in its place: after the Release workflow publishes the package, `POST /api/tower/update` with `{ "version": "x.y.z" }` on its local port (page token from `/api/bootstrap`), then confirm `/api/health` reports that version with `service: true`. It otherwise moves to the latest release by itself within about 30 minutes, and joined computers follow it.
-- Report the deployed version and pushed commit or release link. If any step fails or remains local-only, state exactly what is incomplete; do not describe it as a completed deployment.
+- Report the deployed version, the merged pull request, and the release link. If any step fails or remains local-only, state exactly what is incomplete; do not describe it as a completed deployment.
