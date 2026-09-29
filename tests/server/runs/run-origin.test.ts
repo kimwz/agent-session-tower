@@ -160,12 +160,13 @@ test('a damaged origin record never reads back as owner work', async t => {
   assert.deepEqual(manager.list().find(run => run.id === runId)?.origin, { kind: 'unknown' }, 'the run itself is kept');
 });
 
-test('trigger sessions never create folders, pre-trust only chosen folders, and run Claude in auto mode when unattended', async t => {
+test('trigger sessions never create folders, pre-trust only chosen folders, and run Claude in auto mode with the owner\'s allow rules when unattended', async t => {
   const f = await fixture(t);
   const launches: string[][] = [];
   const trusted: string[] = [];
+  const allowed = JSON.stringify({ permissions: { allow: ['Bash(gh pr merge *)'] } });
   const manager = new RunManager({ stateDir: f.stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000,
-    findExecutable: async provider => `/fixture/${provider}`, trustWorkspace: async (_provider, cwd) => { trusted.push(cwd); },
+    findExecutable: async provider => `/fixture/${provider}`, trustWorkspace: async (_provider, cwd) => { trusted.push(cwd); }, claudeSettings: cwd => cwd === f.directory ? allowed : undefined,
     spawnProcess: (_file, args) => { launches.push(args); throw new Error('stop after recording arguments'); } });
   await manager.start();
   t.after(async () => { await manager.close().catch(() => {}); });
@@ -182,6 +183,8 @@ test('trigger sessions never create folders, pre-trust only chosen folders, and 
   const unattendedArgs = launches.find(args => args.includes('--permission-mode'))!;
   assert.equal(unattendedArgs[unattendedArgs.indexOf('--permission-mode') + 1], 'auto');
   assert.equal(launches.filter(args => args.includes('--permission-mode')).length, 1);
+  assert.equal(unattendedArgs[unattendedArgs.indexOf('--settings') + 1], allowed);
+  assert.equal(launches.filter(args => args.includes('--settings')).length, 1, 'a turn whose approvals go to the owner keeps asking');
   await manager.close();
 });
 

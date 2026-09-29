@@ -54,7 +54,7 @@ test('the settings menu offers one to four sessions per row and marks the folder
 test('a group that is not a real folder cannot be renamed, pinned, hidden or worked in, but its row width still changes', () => {
   const unknown = { path: '알 수 없음', name: '알 수 없음' };
   assert.equal(disabledCount(header(unknown)), 1);
-  assert.equal(disabledCount(menu(unknown)), 6);
+  assert.equal(disabledCount(menu(unknown)), 7);
   assert.doesNotMatch(menu(unknown), /disabled=""[^>]*aria-label="한 줄에/);
 });
 
@@ -106,4 +106,9 @@ test('another computer’s folder shows its own path and offers that computer’
   assert.match(markup, /class="project-group-path folder-tail" title="\/Users\/me\/monitor"><bdi dir="ltr">\/Users\/me\/monitor<\/bdi>/);
   assert.doesNotMatch(markup, new RegExp(node));
   assert.doesNotMatch(menu({ path: `@${node}//Users/me/monitor` }), /disabled=""/);
+});
+
+test('a folder on this computer opens its skills and permissions from its menu; a joined computer\'s folder does not', () => {
+  assert.match(menu(), /이 폴더의 스킬.*이 폴더의 권한/s);
+  assert.doesNotMatch(menu({ machine: 'node-1' } as Partial<ProjectGroupHeaderData>), /이 폴더의 권한/);
 });

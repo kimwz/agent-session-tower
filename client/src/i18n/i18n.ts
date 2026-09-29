@@ -87,6 +87,10 @@ const errorTemplates = [
   'Auto Prompt: Claude Code가 지원하지 않는 라우팅 이벤트를 반환했습니다 ({0}).',
   'Auto Prompt: {0} 라우팅이 정상적으로 종료되지 않았습니다. 해당 CLI의 로그인, 모델 접근 권한과 호환성을 확인하세요.',
   '판단하지 못했습니다: {0}',
+  '{0}가 심볼릭 링크라서 규칙 파일을 바꾸지 않았습니다.',
+  '{0}는 Tower가 만든 파일이 아니라서 바꾸지 않았습니다.',
+  '{0}가 쓰는 동안 바뀌어 규칙을 쓰지 않았습니다. 잠시 뒤 다시 저장하세요.',
+  '{0}가 git에 커밋되어 있어 Tower가 바꾸지 않았습니다. 이 파일을 저장소에서 빼거나 규칙을 직접 관리하세요.',
 ].flatMap(key => [key, english[key]].map(template => {
   const names: string[] = [];
   const pattern = template.split(/(\{\w+\})/).map(part => {

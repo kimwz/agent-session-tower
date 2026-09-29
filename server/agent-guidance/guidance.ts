@@ -23,6 +23,13 @@ The owner keeps their recurring ways of working as skills (\`SKILL.md\` folders 
 - Explicit instructions in the request and the project's own instructions come first.
 - When the owner asks to keep a way of working as a skill, write \`~/.agents/skills/<name>/SKILL.md\` (or \`<project>/.agents/skills/<name>/SKILL.md\` for one project) with \`name\` and \`description\` frontmatter, and link \`~/.claude/skills/<name>\` (or \`<project>/.claude/skills/<name>\`) to that folder so both Claude Code and Codex find it.
 
+## Ask for permissions you need
+
+When Claude Code or Codex refuses an action the task needs (a permission rule, the auto-mode classifier, a sandbox), or keeps asking approval for it, and Tower's \`permissions_request\` tool is available to you:
+
+- Ask the owner for the narrowest rule: a command prefix such as \`gh pr merge\`, for this project unless it is needed everywhere, and say why.
+- Do not try another way around the refusal. An allowed rule applies from your next turn: say what waits on the permission and end your turn, or go on with other work first. The owner's decision can arrive as a message in this conversation; \`permissions_list\` also shows it.
+
 ## Keep git branches in sync
 
 Several agents can work in the same repository folder at once, and branches are often merged on the remote. Local branches then fall behind, or keep commits nobody pushed.

@@ -5,6 +5,7 @@ import type { TriggerActor, TriggerEvent, TriggerInput } from '../../shared/trig
 import type { AutoPromptJob, AutoPromptRequest, ChatMessage, Run, RunOrigin, Session, SessionDetail } from '../../shared/types.js';
 import type { SlackWorkflow } from '../../shared/slack.js';
 import type { RunAdmission } from '../runs/manager.js';
+import type { PermissionService } from '../permissions/service.js';
 import type { SessionSearch, SessionSearchResult } from '../sessions/service.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { TriggerScope, TriggerService } from '../triggers/service.js';
@@ -34,6 +35,7 @@ export interface TowerServices {
   projects?: () => Array<{ cwd: string; title: string; sessions: number; pinned: boolean }>;
   autoPrompts?: { submit(request: AutoPromptRequest, internal: Pick<RunAdmission, 'origin'>): Promise<AutoPromptJob>; get(id: string): AutoPromptJob | undefined };
   github?: { workflow(sessionId: string): SlackWorkflow | undefined; approveReply(workflowId: string, requestKey: string, text: string): Promise<unknown> };
+  permissions?: PermissionService;
   /** What this computer keeps from controlling computers, with these folders' real locations resolved again now. */
   remote?: (paths: string[]) => Promise<RemoteScope>;
 }
@@ -115,6 +117,11 @@ export class TowerApi {
     requests.set(key, { at: Date.now(), fingerprint, status: 'done', result: kept });
     await this.save().catch(() => {});
     return result;
+  }
+
+  private permissions(): PermissionService {
+    if (!this.services.permissions) throw failure('Permission rules are unavailable.', 503);
+    return this.services.permissions;
   }
 
   /** What this computer holds right now, read at once. */
@@ -305,6 +312,13 @@ export class TowerApi {
         return { job: await autoPrompts.submit({ requestId: value.requestId, provider: value.provider, prompt: value.prompt, ...(value.cwd ? { cwd: value.cwd } : {}),
           ...(value.model ? { model: value.model } : {}), ...(value.effort ? { effort: value.effort } : {}) }, { origin }) };
       }
+      case 'permissions.request': return this.permissions().request(value as Parameters<PermissionService['request']>[0], actor);
+      case 'permissions.list': return this.permissions().forAgent(actor, value.cwd);
+      case 'permissions.overview': return this.permissions().overview(value.cwd);
+      case 'permissions.save': return this.permissions().save({ ...value.rule, ...(value.id ? { id: value.id } : {}) });
+      case 'permissions.delete': return this.permissions().remove(value.id);
+      case 'permissions.decide': return this.permissions().decide(value.id, value.approve, value.rule, value.resume === true);
+      case 'permissions.acknowledge': return this.permissions().acknowledge();
       case 'autoPrompt.get': {
         const job = autoPrompts?.get(value.requestId);
         if (!job) throw failure('Auto Prompt request not found.', 404);
