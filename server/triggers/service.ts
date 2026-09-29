@@ -87,6 +87,12 @@ const UNFINISHED = new Set<TriggerEvent['status']>(['queued', 'claimed', 'runnin
 const ACTIVE = new Set<TriggerEvent['status']>(['claimed', 'running']);
 /** The line an open-issues run ends its report with to keep its issue open. */
 export const KEEP_OPEN = 'TOWER_KEEP_ISSUE_OPEN';
+const CLOSE_TRIES = 5;
+const CLOSE_RETRY_MS = 5 * 60_000;
+/** Whether a report ends with the line asking Tower to keep its issue open; a mention elsewhere does not count. */
+function asksToKeepOpen(output: string): boolean {
+  return output.trimEnd().split('\n').at(-1)?.trim() === KEEP_OPEN;
+}
 /** The issue an open-issues event is about, as the check recorded it. */
 function issueRef(event: TriggerEvent): { repository: string; number: number } | undefined {
   const { repository, number } = event.input.issue ?? {};
@@ -155,8 +161,10 @@ export class TriggerService extends EventEmitter {
   /** Tokens from the gh CLI, read again every few minutes; logins per token, so a changed account is noticed. */
   private ghToken?: { value: string; at: number };
   private readonly logins = new Map<string, { login: string; at: number }>();
-  /** Open-issues events whose issue is being closed right now. */
-  private readonly closing = new Set<string>();
+  /** Closes that failed in a way that may pass, by event: how often, and not again before `at`. */
+  private readonly closeRetries = new Map<string, { tries: number; at: number }>();
+  /** Open-issues runs' issues being closed now, one pass at a time. */
+  private closingIssues?: Promise<void>;
   /** Per credential: GitHub's rate limit allows no request before this time. */
   private readonly githubBlocked = new Map<string, number>();
   private readonly secrets: SecretStore;
@@ -221,7 +229,7 @@ export class TriggerService extends EventEmitter {
 
   hasActive(): boolean { return this.state.triggers.some(trigger => trigger.enabled) || this.state.events.some(event => UNFINISHED.has(event.status)); }
   /** Work a handoff must wait for: a tick, a save, or a claim whose submission is not yet recorded. */
-  inFlight(): boolean { return Boolean(this.ticking) || this.pendingCommits > 0 || this.polling.size > 0 || this.state.events.some(event => event.status === 'claimed'); }
+  inFlight(): boolean { return Boolean(this.ticking) || Boolean(this.closingIssues) || this.pendingCommits > 0 || this.polling.size > 0 || this.state.events.some(event => event.status === 'claimed'); }
   async flush(): Promise<void> { await this.commit(() => undefined, 'settle'); }
 
   // ---- Reading ----------------------------------------------------------------------------------
@@ -476,7 +484,9 @@ export class TriggerService extends EventEmitter {
         fired = await this.pollGitHub(trigger, this.now(), actor);
       } finally { unlock(); }
       const problem = this.state.cursors[id]?.lastError;
-      if (!fired.length) throw failure(problem ? `GitHub could not be checked: ${problem}` : 'Checked GitHub: nothing new since the last check.', problem ? 502 : 409);
+      const full = trigger.source.watch.type === 'open-issues' && this.unfinished(id) >= trigger.source.watch.concurrency;
+      if (!fired.length) throw failure(full ? 'Every place of this trigger is taken; the next issue is taken when a run ends.'
+        : problem ? `GitHub could not be checked: ${problem}` : 'Checked GitHub: nothing new since the last check.', problem && !full ? 502 : 409);
       void this.tick().catch(() => {});
       return structuredClone(fired[0]);
     }
@@ -561,7 +571,7 @@ export class TriggerService extends EventEmitter {
 
   /** Waits for requests in flight and their saves, so the state lock is released only after the last write. */
   async settle(): Promise<void> {
-    await Promise.allSettled([...this.polling.values()]);
+    await Promise.allSettled([...this.polling.values(), this.closingIssues]);
     await this.writes.catch(() => {});
   }
 
@@ -630,7 +640,8 @@ export class TriggerService extends EventEmitter {
       }
     }
     await this.track();
-    await this.closeIssues();
+    // Closing issues talks to GitHub; it goes on beside the tick so a slow answer never holds up other triggers.
+    if (!this.closingIssues && !this.held && !this.storageError) this.closingIssues = this.closeIssues().catch(() => {}).finally(() => { this.closingIssues = undefined; });
     await this.dispatch();
   }
 
@@ -970,7 +981,7 @@ export class TriggerService extends EventEmitter {
         catch (error) { outcome = { status: 'error', error: (error instanceof Error ? error.message : String(error)).slice(0, 1500) }; }
         await this.commit(state => {
           const event = state.events.find(item => item.id === claimed.id);
-          if (event) { Object.assign(event, outcome, { updatedAt: new Date(this.now()).toISOString() }); this.nextIssue(state, event); }
+          if (event) { Object.assign(event, outcome, { updatedAt: new Date(this.now()).toISOString() }); this.handFailed(state, event); }
         }, 'settle').catch(() => {});
       } finally { this.submitting.delete(claimed.id); }
     }
@@ -984,9 +995,22 @@ export class TriggerService extends EventEmitter {
   }
 
   private async submit(event: TriggerEvent): Promise<Partial<TriggerEvent>> {
-    const assigned = event.input.issue?.assign ? await this.assignIssue(event) : undefined;
     const outcome = await this.hand(event);
+    // Assigned only once the run really started, so an issue nobody works on is not left assigned.
+    const assigned = event.input.issue?.assign && outcome.status === 'running' ? await this.assignIssue(event) : undefined;
     return assigned ? { ...outcome, issueActions: assigned } : outcome;
+  }
+
+  /**
+   * An open issue whose run could not even start pauses its trigger: taking the next one would fail the same way
+   * and use up the queue. Turning the trigger on again takes the open issues again.
+   */
+  private handFailed(state: EngineState, event: TriggerEvent): void {
+    if (!event.input.issue || event.status !== 'error') return;
+    const position = state.cursors[event.triggerId];
+    if (!position || position.paused) return;
+    const reason = `Paused: the run for an issue could not start (${(event.error ?? 'unknown error').slice(0, 300)}). Turn the trigger on again to go on.`;
+    position.paused = { reason, at: new Date(this.now()).toISOString() };
   }
 
   /** An open issue is assigned to the trigger's account as its run starts; a failure is noted and the run goes on. */
@@ -1005,8 +1029,11 @@ export class TriggerService extends EventEmitter {
   /** Once an open issue's run ends, the next check comes now instead of at the next scheduled time. */
   private nextIssue(state: EngineState, event: TriggerEvent): void {
     if (!event.input.issue || UNFINISHED.has(event.status)) return;
+    const trigger = state.triggers.find(item => item.id === event.triggerId);
     const position = state.cursors[event.triggerId];
-    if (position?.nextAt !== undefined && !position.paused) position.nextAt = Math.min(position.nextAt, this.now());
+    // Only while the trigger still works through open issues, and never ahead of a failed check's back-off.
+    if (trigger?.source.kind !== 'github' || trigger.source.watch.type !== 'open-issues' || !position || position.failures) return;
+    if (position.nextAt !== undefined && !position.paused) position.nextAt = Math.min(position.nextAt, this.now());
   }
 
   /**
@@ -1014,28 +1041,43 @@ export class TriggerService extends EventEmitter {
    * no harm, so one cut off by a restart is simply sent again; one that failed is not.
    */
   private async closeIssues(): Promise<void> {
-    const due = this.state.events.filter(event => event.status === 'completed' && event.input.issue?.close && !this.closing.has(event.id)
-      && !event.issueActions?.closedAt && !event.issueActions?.closeError && !event.issueActions?.keptOpen);
+    const due = this.state.events.filter(event => event.status === 'completed' && event.input.issue?.close
+      && !event.issueActions?.closedAt && !event.issueActions?.closeError && !event.issueActions?.keptOpen && (this.closeRetries.get(event.id)?.at ?? 0) <= this.now());
     for (const event of due) {
-      const run = this.options.executor.runs().find(item => item.id === event.dispatch?.runId);
+      if (this.held || this.storageError) return;
+      const runs = this.options.executor.runs();
+      // A turn that scheduled its own continuation goes on in that run: its last run's report decides.
+      let run = runs.find(item => item.id === event.dispatch?.runId);
+      for (let next = run; next; next = runs.find(item => item.scheduled?.afterRunId === run!.id)) run = next;
+      if (run && (run.status === 'queued' || run.status === 'running')) continue;
       const issue = issueRef(event);
       let result: NonNullable<TriggerEvent['issueActions']>;
       if (!run) result = { keptOpen: true, keptReason: 'The run record is no longer available, so the issue was left open.' };
-      else if (run.output.includes(KEEP_OPEN)) result = { keptOpen: true, keptReason: 'The run asked to keep the issue open.' };
+      else if (run.status !== 'completed') result = { keptOpen: true, keptReason: 'The run did not complete, so the issue was left open.' };
+      else if (asksToKeepOpen(run.output)) result = { keptOpen: true, keptReason: 'The run asked to keep the issue open.' };
       else if (!issue) result = { closeError: 'The event does not name an issue.' };
       else {
-        this.closing.add(event.id);
         try {
           const fetch = await this.githubClient(event.triggerId, true);
           const response = await fetch(`/repos/${issue.repository}/issues/${issue.number}`, undefined, { method: 'PATCH', body: { state: 'closed', state_reason: 'completed' } });
           refused(response);
-          result = response.status >= 200 && response.status <= 299 ? { closedAt: new Date(this.now()).toISOString() } : { closeError: `Closing the issue failed: GitHub answered HTTP ${response.status}.` };
-        } catch (error) { result = { closeError: `Closing the issue failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500) }; }
+          if (response.status >= 200 && response.status <= 299) result = { closedAt: new Date(this.now()).toISOString() };
+          else if (response.status >= 500 || response.status === 429 || response.status === 403) throw new GitHubError(`GitHub answered HTTP ${response.status}.`);
+          else result = { closeError: `Closing the issue failed: GitHub answered HTTP ${response.status}.` };
+        } catch (error) {
+          // A failure that may pass (rate limits, the request budget, the network, GitHub's own errors) is tried again
+          // a few times, a few minutes apart, before it is recorded.
+          const message = `Closing the issue failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 500);
+          const tries = (this.closeRetries.get(event.id)?.tries ?? 0) + 1;
+          if (tries < CLOSE_TRIES) { this.closeRetries.set(event.id, { tries, at: this.now() + CLOSE_RETRY_MS }); continue; }
+          result = { closeError: message };
+        }
+        this.closeRetries.delete(event.id);
       }
       await this.commit(state => {
         const saved = state.events.find(item => item.id === event.id);
         if (saved) { saved.issueActions = { ...saved.issueActions, ...result }; saved.updatedAt = new Date(this.now()).toISOString(); }
-      }, 'settle').catch(() => {}).finally(() => this.closing.delete(event.id));
+      }, 'settle').catch(() => {});
     }
   }
 

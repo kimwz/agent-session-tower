@@ -3,6 +3,7 @@ import type { Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOve
 import { isOperationName, OPERATIONS } from '../../../shared/api/operations';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { authPost } from '../auth/AuthGate';
+import { translateMessage } from '../i18n/i18n';
 import { api } from '../common/lib';
 import { forgetRequest, nodeHeaders, nodePath, settleRequest } from '../remote/scope';
 
@@ -108,8 +109,8 @@ export function switchedWatch(kept: Partial<Record<Watch['type'], Watch>>, type:
 export function issueActionsLabel(event: Pick<TriggerEvent, 'issueActions'>, t: Translate): string {
   const actions = event.issueActions;
   if (!actions) return '';
-  return [actions.assignedAt && t('담당자 할당됨'), actions.assignError, actions.closedAt && t('이슈 닫음'), actions.keptOpen && t('이슈를 열어 둠'), actions.keptReason, actions.closeError]
-    .filter(Boolean).join(' · ');
+  const said = [actions.assignError, actions.keptReason, actions.closeError].filter((value): value is string => Boolean(value)).map(translateMessage);
+  return [actions.assignedAt && t('담당자 할당됨'), actions.closedAt && t('이슈 닫음'), actions.keptOpen && t('이슈를 열어 둠'), ...said].filter(Boolean).join(' · ');
 }
 
 /** A new trigger of one kind, with the defaults its editor starts from. */

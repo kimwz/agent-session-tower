@@ -171,18 +171,20 @@ export async function checkGitHub(watch: GitHubWatch, previous: GitHubCursor, fe
  * taken again.
  */
 async function checkOpen(watch: Extract<GitHubWatch, { type: 'open-issues' }>, previous: GitHubCursor, fetch: GitHubFetch): Promise<{ issues: GitHubIssue[]; cursor: GitHubCursor }> {
-  const found: GitHubIssue[] = [];
+  const all: GitHubIssue[] = [];
   for (const repo of watch.repos) {
     for (let page = 1; ; page++) {
-      if (page > OPEN_PAGES) throw new GitHubError(`More than ${OPEN_PAGE * OPEN_PAGES} issues and pull requests are open in ${repo}, more than one check reads; narrow the trigger with labels.`);
+      if (page > OPEN_PAGES) throw new GitHubError(`More than ${OPEN_PAGE * OPEN_PAGES} issues and pull requests are open in ${repo}, more than one check reads.`);
       const list = items(await fetch(`/repos/${repo}/issues?state=open&sort=created&direction=asc&per_page=${OPEN_PAGE}${page > 1 ? `&page=${page}` : ''}`), repo);
-      found.push(...list.filter(item => !record(item.pull_request) && item.state === 'open').map(item => issueOf(item, repo)).filter(issue => wanted(watch, issue)));
+      all.push(...list.filter(item => !record(item.pull_request) && item.state === 'open').map(item => issueOf(item, repo)));
       if (list.length < OPEN_PAGE) break;
     }
   }
-  // What was taken is remembered while it stays open, so the open issues themselves are what is limited.
-  if (found.length > MAX_OPEN) throw new GitHubError(`More than ${MAX_OPEN} open issues match this trigger, more than it keeps track of; narrow it with labels.`);
-  const open = new Set(found.map(keyOf));
+  // What was taken is remembered while it stays open, even if it no longer passes the filters, so a label taken
+  // off and put back does not start it again; the open issues themselves are what is limited.
+  if (all.length > MAX_OPEN) throw new GitHubError(`More than ${MAX_OPEN} issues are open in the watched repositories, more than this trigger keeps track of.`);
+  const found = all.filter(issue => wanted(watch, issue));
+  const open = new Set(all.map(keyOf));
   const handled = (previous.handled ?? []).filter(key => open.has(key));
   return { issues: found, cursor: { handled } };
 }

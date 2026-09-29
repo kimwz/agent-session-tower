@@ -85,7 +85,12 @@ async function fixture(t: TestContext, github: ReturnType<typeof fakeGitHub>) {
   t.after(async () => { service.close(); await service.settle(); await rm(directory, { recursive: true, force: true }); });
   const step = async () => { await service.tick(); for (let wait = 0; service.inFlight() && wait < 300; wait++) await new Promise(resolve => setTimeout(resolve, 5)); await service.tick(); };
   const finish = (index: number, output = 'Done.', status: Run['status'] = 'completed') => Object.assign(runs[index], { status, output });
-  return { project, clock, runs, service, step, finish };
+  const continueAfter = (index: number): Run => {
+    const run: Run = { ...structuredClone(runs[index]), id: randomUUID(), status: 'queued', output: '', scheduled: { at: '', afterRunId: runs[index].id } };
+    runs.push(run);
+    return run;
+  };
+  return { project, clock, runs, service, step, finish, continueAfter };
 }
 
 const queue = (project: string, watch: Record<string, unknown> = {}, policy: TriggerInput['policy'] = { overlap: 'skip', maxEventsPerHour: 20 }): TriggerInput => ({
@@ -182,4 +187,79 @@ test('an issue still being worked on is not taken again after the trigger is tur
   f.clock.now += 300_000;
   await f.step();
   assert.deepEqual(numbers(f.service), [1, 2], 'issue 1 is still running, and issue 2 is closed');
+});
+
+test('the report decides: only its last line keeps an issue open, and a scheduled continuation is waited for', async t => {
+  const repos = { 'octo/app': [{ number: 1 }, { number: 2 }] as Issue[] };
+  const f = await fixture(t, fakeGitHub(repos));
+  await f.service.create(queue(f.project, { concurrency: 2, assign: false }), OWNER);
+  f.clock.now += 300_000;
+  await f.step();
+  f.finish(0, `Checked with rg ${KEEP_OPEN} and fixed it.\nDone.`);
+  const later = f.continueAfter(1);
+  f.finish(1, 'Waiting for CI; continuing later.');
+  f.clock.now += 1000;
+  await f.step();
+  assert.equal(repos['octo/app'][0].state, 'closed', 'a mention of the marker inside the report does not keep it open');
+  assert.equal(repos['octo/app'][1].state ?? 'open', 'open', 'not closed while the continuation is still to run');
+  Object.assign(f.runs.find(run => run.id === later.id)!, { status: 'completed', output: `Needs the owner.\n${KEEP_OPEN}\n` });
+  f.clock.now += 1000;
+  await f.step();
+  assert.equal(repos['octo/app'][1].state ?? 'open', 'open');
+  assert.equal(f.service.events().find(event => numberOf(event) === 2)?.issueActions?.keptOpen, true, "the continuation's report decided");
+});
+
+test('an issue taken stays taken while open, even when a label filter stops matching for a while', async t => {
+  const repos = { 'octo/app': [{ number: 1, labels: ['agent'] }] as Issue[] };
+  const f = await fixture(t, fakeGitHub(repos));
+  await f.service.create(queue(f.project, { labels: ['agent'], close: false }), OWNER);
+  f.clock.now += 300_000;
+  await f.step();
+  f.finish(0);
+  f.clock.now += 1000;
+  await f.step();
+  repos['octo/app'][0].labels = [];
+  f.clock.now += 300_000;
+  await f.step();
+  repos['octo/app'][0].labels = ['agent'];
+  f.clock.now += 300_000;
+  await f.step();
+  assert.deepEqual(numbers(f.service), [1]);
+  assert.equal(repos['octo/app'][0].state ?? 'open', 'open', 'closing is off');
+});
+
+test('a run that cannot start pauses the trigger instead of using up the queue, and assigns nothing', async t => {
+  const repos = { 'octo/app': [{ number: 1 }, { number: 2 }] as Issue[] };
+  const github = fakeGitHub(repos);
+  const f = await fixture(t, github);
+  const trigger = await f.service.create(queue(f.project), OWNER);
+  await rm(f.project, { recursive: true });
+  f.clock.now += 300_000;
+  await f.step();
+  f.clock.now += 300_000;
+  await f.step();
+  assert.deepEqual(numbers(f.service), [1]);
+  assert.equal(f.service.events()[0].status, 'error');
+  assert.match(f.service.overview().triggers.find(item => item.id === trigger.id)?.paused?.reason ?? '', /could not start/);
+  assert.equal(github.writes.length, 0);
+});
+
+test('a close that fails for a while is tried again', async t => {
+  const repos = { 'octo/app': [{ number: 1 }] as Issue[] };
+  const github = fakeGitHub(repos);
+  let down = true;
+  const flaky: GitHubFetch = async (path, etag, send) => send?.method === 'PATCH' && down ? { status: 502, body: {} } : github.fetch(path, etag, send);
+  const f = await fixture(t, { ...github, fetch: flaky });
+  await f.service.create(queue(f.project, { assign: false }), OWNER);
+  f.clock.now += 300_000;
+  await f.step();
+  f.finish(0);
+  f.clock.now += 1000;
+  await f.step();
+  assert.equal(repos['octo/app'][0].state ?? 'open', 'open');
+  assert.equal(f.service.events()[0].issueActions, undefined, 'nothing is recorded yet');
+  down = false;
+  f.clock.now += 5 * 60_000;
+  await f.step();
+  assert.equal(repos['octo/app'][0].state, 'closed');
 });

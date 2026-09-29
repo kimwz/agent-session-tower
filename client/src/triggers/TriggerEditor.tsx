@@ -295,7 +295,7 @@ function AdvancedSettings({ input, onChange }: { input: TriggerInput; onChange: 
         <label>{t('동시에 처리할 이슈 수')}<input type="number" min={1} max={5} value={watch.concurrency} onChange={event => setWatch({ ...watch, concurrency: Math.min(5, Math.max(1, Number(event.target.value) || 1)) })} />
           <small>{t('1이면 한 번에 하나씩 처리합니다.')}</small></label>
         <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.assign} onChange={event => setWatch({ ...watch, assign: event.target.checked })} />{t('처리를 시작할 때 연결한 계정을 담당자로 할당')}</label>
-        <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.close} disabled={input.handler.kind !== 'task'} onChange={event => setWatch({ ...watch, close: event.target.checked })} />{t('실행이 끝나면 이슈 닫기')}</label>
+        <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.close && input.handler.kind === 'task'} disabled={input.handler.kind !== 'task'} onChange={event => setWatch({ ...watch, close: event.target.checked })} />{t('실행이 끝나면 이슈 닫기')}</label>
         <p className="trigger-note">{input.handler.kind === 'task' ? t('작업이 끝나지 않았거나 결정이 필요하다고 보고한 실행의 이슈는 열어 둡니다. 시간당 최대 실행에 닿으면 멈추지 않고 기다렸다가 이어서 처리합니다.') : t('코디네이터 처리 지침에서는 이슈를 자동으로 닫지 않습니다.')}</p>
       </>}
       {watch?.type === 'assigned-to-me' && <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.includePullRequests} onChange={event => setWatch({ ...watch, includePullRequests: event.target.checked })} />{t('풀 리퀘스트도 포함')}</label>}
