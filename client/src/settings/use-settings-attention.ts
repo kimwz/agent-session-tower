@@ -6,6 +6,7 @@ import { api } from '../common/lib';
 import { permissionOperation } from '../permissions/PermissionsPanel';
 import { triggerAttention } from '../triggers/trigger-helpers';
 import { useControllerJoin } from '../remote/controller-join';
+import { publishSkillSummary } from '../skills/skills-open';
 import type { SettingsAttention } from './settings-sections';
 
 const PERMISSION_POLL = 20_000;
@@ -25,7 +26,7 @@ export function useSettingsAttention(token: string, triggers: TriggerOverview | 
   }, [token]);
   const refreshSkills = useCallback(() => {
     if (!token) return;
-    void api<SkillSummary>('/api/skills/summary').then(summary => setSkills(summary.proposals)).catch(() => {});
+    void api<SkillSummary>('/api/skills/summary').then(summary => { setSkills(summary.proposals); publishSkillSummary(summary); }).catch(() => {});
   }, [token]);
   useEffect(() => {
     refreshPermissions();

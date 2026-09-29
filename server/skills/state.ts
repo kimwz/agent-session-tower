@@ -8,6 +8,8 @@ export interface SkillState {
   version: 1;
   /** Skills named in the guidance; a project skill with the project it belongs to. */
   pinned: { dir: string; cwd?: string }[];
+  /** Where each skill kept in Tower applies, by its folder. */
+  targets: SkillTargetRecord[];
   settings: SkillAdvisorSettings;
   proposals: SkillProposal[];
   notes: SkillNote[];
@@ -20,6 +22,12 @@ export interface SkillState {
   calls: { day: string; count: number };
 }
 
+/**
+ * Where a Tower skill applies (`all`, `projects`), and every place Tower may have linked it (`linked`, `globalLinked`):
+ * a superset written before any link is made and narrowed only after the links match, so a link is never forgotten.
+ */
+export interface SkillTargetRecord { dir: string; all: boolean; projects: string[]; linked: string[]; globalLinked: boolean }
+
 export const MAX_PROPOSALS = 60;
 export const MAX_NOTES = 200;
 /** Far above what the limits below can add up to (60 drafts of 16,000 characters, 200 notes). */
@@ -27,7 +35,7 @@ const MAX_BYTES = 12_000_000;
 const MAX_REFLECTED = 2_000;
 
 export function emptySkillState(now = new Date()): SkillState {
-  return { version: 1, pinned: [], settings: { enabled: true, provider: 'claude' }, proposals: [], notes: [], excluded: [], reflected: {}, startedAt: now.toISOString(), calls: { day: '', count: 0 } };
+  return { version: 1, pinned: [], targets: [], settings: { enabled: true, provider: 'claude' }, proposals: [], notes: [], excluded: [], reflected: {}, startedAt: now.toISOString(), calls: { day: '', count: 0 } };
 }
 
 export class SkillStateStore {
@@ -89,6 +97,11 @@ function normalize(value: unknown): SkillState {
   if (typeof input.startedAt === 'string') state.startedAt = input.startedAt;
   if (Array.isArray(input.pinned)) state.pinned = input.pinned.filter(item => item && typeof item.dir === 'string')
     .map(item => ({ dir: item.dir, ...(typeof item.cwd === 'string' ? { cwd: item.cwd } : {}) }));
+  if (Array.isArray(input.targets)) {
+    const paths = (value: unknown) => Array.isArray(value) ? [...new Set(value.filter((item): item is string => typeof item === 'string'))] : [];
+    state.targets = input.targets.filter(item => item && typeof item.dir === 'string')
+      .map(item => ({ dir: item.dir, all: item.all === true, projects: paths(item.projects), linked: paths(item.linked), globalLinked: item.globalLinked === true }));
+  }
   const settings = input.settings;
   if (settings && typeof settings === 'object') state.settings = { enabled: settings.enabled !== false, provider: settings.provider === 'codex' ? 'codex' : 'claude' };
   if (Array.isArray(input.proposals)) state.proposals = input.proposals.filter(item => item && typeof item.id === 'string' && typeof item.name === 'string')

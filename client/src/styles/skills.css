@@ -4,9 +4,6 @@
 .skills-scope .primary-button:disabled { opacity:.5; cursor:not-allowed; }
 .skills-count { position:absolute; top:2px; right:1px; min-width:15px; height:15px; padding:0 4px; border-radius:8px; background:#e7a13c; color:#1b1204; font-size:10px; font-weight:700; line-height:15px; text-align:center; }
 .skills-count.inline { position:static; display:inline-block; margin-left:6px; }
-.skills-tabs { display:flex; gap:4px; margin-top:18px; border-bottom:1px solid var(--line); }
-.skills-tabs button { display:inline-flex; align-items:center; padding:8px 12px; border:0; border-bottom:2px solid transparent; background:none; color:#a8b8ce; font-size:13px; cursor:pointer; }
-.skills-tabs button.active { color:#e4edf9; border-bottom-color:#91baff; }
 .skills-scope section { margin-top:14px; border-top:0; padding-top:0; }
 .skills-toolbar { display:flex; align-items:center; gap:8px; margin:12px 0; }
 .skills-toolbar input { flex:1; min-width:0; min-height:32px; padding:6px 10px; border:1px solid #344255; border-radius:6px; color:#e4edf9; background:#0d131d; }
@@ -69,3 +66,81 @@
 .skills-file input { position:absolute; inset:0; opacity:0; cursor:pointer; }
 .skills-import { margin-top:12px; }
 .skills-backup h3 { margin-top:18px; }
+
+/* Header: the everyday views as two segments, the rest behind ⋯. */
+.skills-header-actions { align-items:center; }
+.skills-more { position:relative; }
+.skills-more-menu { position:absolute; top:calc(100% + 6px); right:0; z-index:5; display:flex; flex-direction:column; min-width:190px; padding:6px; border:1px solid #3a506e; border-radius:9px; background:#142030; box-shadow:0 10px 30px #0006; }
+.skills-more-menu button { display:flex; align-items:center; gap:9px; padding:8px 10px; border:0; border-radius:6px; background:none; color:#d5e1f0; font-size:13px; text-align:left; cursor:pointer; }
+.skills-more-menu button:hover, .skills-more-menu button.active { background:#1f3048; }
+.skills-segments { display:inline-flex; gap:2px; margin-top:16px; padding:3px; border:1px solid var(--line); border-radius:9px; background:#0d141f; }
+.skills-segments button { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; padding:6px 14px; border:0; border-radius:7px; background:none; color:#a8b8ce; font-size:13px; cursor:pointer; }
+.skills-segments button.active { background:#223650; color:#eef4fc; }
+.skills-segment-count { color:#7f93ad; font-size:11.5px; font-variant-numeric:tabular-nums; }
+.skills-subhead { display:flex; align-items:center; gap:12px; margin-top:16px; }
+.skills-subhead h3 { margin:0; font-size:14px; }
+.skills-back { display:inline-flex; align-items:center; gap:5px; padding:4px 8px 4px 4px; border:0; border-radius:6px; background:none; color:#9fc3ff; font-size:12.5px; cursor:pointer; }
+.skills-back:hover { background:#1a283a; }
+
+/* My skills: one quiet row per skill. */
+.tower-skills ul { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }
+.tower-skill { display:flex; align-items:center; gap:10px; padding:4px 10px 4px 4px; border:1px solid var(--line); border-radius:9px; background:#0f1723; transition:border-color .12s, background .12s; }
+.tower-skill:hover { border-color:#3d5577; background:#121d2c; }
+.tower-skill.elsewhere { opacity:.62; }
+.tower-skill-open { flex:1; min-width:0; display:flex; flex-direction:column; gap:3px; padding:8px 10px; border:0; background:none; color:inherit; text-align:left; cursor:pointer; }
+.tower-skill-name { display:flex; align-items:center; gap:8px; }
+.tower-skill-name strong { font-size:13.5px; }
+.tower-skill-description { color:#93a5bd; font-size:12px; line-height:1.5; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.tower-skill-chevron { color:#5f7390; flex-shrink:0; }
+.skill-target-chip { display:inline-flex; align-items:center; gap:5px; max-width:180px; padding:3px 8px; border-radius:999px; background:#1a2a3e; color:#b9cbe2; font-size:11.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; flex-shrink:0; }
+.skill-target-chip.all { background:#1b3a2d; color:#9ee0ba; }
+.skill-target-chip.none { background:#262b33; color:#8793a3; }
+.skill-badge.quiet { background:#262b33; color:#8793a3; }
+.skills-suggest { display:flex; align-items:center; gap:8px; width:100%; margin:14px 0 2px; padding:9px 12px; border:1px solid #6b5326; border-radius:9px; background:#2a2112; color:#f1cf8f; font-size:12.5px; text-align:left; cursor:pointer; }
+.skills-suggest svg:last-child { margin-left:auto; }
+.skills-suggest:hover { background:#33291a; }
+.skills-empty { display:flex; flex-direction:column; align-items:center; gap:10px; margin-top:26px; padding:28px 20px; border:1px dashed #33465f; border-radius:12px; text-align:center; color:#8fa2bb; }
+.skills-empty p { margin:0; color:#dde7f4; font-size:14px; font-weight:600; }
+.skills-empty small { max-width:420px; font-size:12px; line-height:1.6; }
+.skills-empty .link-button { font-size:12px; }
+
+/* A switch for "applies to this project". */
+.skill-switch { position:relative; display:inline-flex; flex-shrink:0; cursor:pointer; }
+.skill-switch input { position:absolute; inset:0; margin:0; opacity:0; cursor:pointer; }
+.skill-switch span { width:30px; height:17px; border-radius:999px; background:#2c3a4d; transition:background .15s; }
+.skill-switch span::after { content:''; position:absolute; top:2px; left:2px; width:13px; height:13px; border-radius:50%; background:#c9d5e4; transition:transform .15s; }
+.skill-switch input:checked + span { background:#3f7d5c; }
+.skill-switch input:checked + span::after { transform:translateX(13px); }
+.skill-switch input:disabled { cursor:not-allowed; }
+.skill-switch input:disabled + span { opacity:.55; }
+.skill-switch input:focus-visible + span { outline:2px solid #91baff; outline-offset:2px; }
+
+/* Project picker. */
+.skill-targets { display:flex; flex-direction:column; gap:10px; margin:0; padding:0; border:0; font-size:12px; color:#b7c5d8; }
+.skill-targets legend { margin-bottom:6px; padding:0; }
+.skill-target-modes { display:inline-flex; align-self:flex-start; gap:2px; padding:3px; border:1px solid #344255; border-radius:8px; background:#0d131d; }
+.skill-target-modes button { display:inline-flex; align-items:center; gap:6px; padding:5px 12px; border:0; border-radius:6px; background:none; color:#a8b8ce; font-size:12.5px; cursor:pointer; }
+.skill-target-modes button.active { background:#223650; color:#eef4fc; }
+.skill-target-chips { list-style:none; display:flex; flex-wrap:wrap; gap:6px; margin:0; padding:0; }
+.skill-target-chips li { display:inline-flex; align-items:center; gap:4px; padding:3px 4px 3px 10px; border-radius:999px; background:#1f3350; color:#dbe8f8; font-size:12px; }
+.skill-target-chips button { display:inline-flex; padding:2px; border:0; border-radius:50%; background:none; color:#9fb4cf; cursor:pointer; }
+.skill-target-chips button:hover { background:#2d4668; color:#fff; }
+.skill-target-options { list-style:none; max-height:196px; overflow:auto; margin:0; padding:4px; border:1px solid #2a384b; border-radius:8px; background:#0c121b; }
+.skill-target-options label { display:grid !important; grid-template-columns:auto auto 1fr; align-items:center; gap:8px !important; padding:6px 8px; border-radius:6px; cursor:pointer; }
+.skill-target-options label:hover { background:#152131; }
+.skill-target-options strong { color:#e4edf9; font-size:12.5px; font-weight:500; }
+.skill-target-options small { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:rtl; text-align:left; }
+.skill-editor footer > span { flex:1; }
+.skill-delete { color:#ffb1b4 !important; }
+
+/* A dot on a project folder's menu item when a proposal is waiting there. */
+.skills-dot { display:inline-block; width:7px; height:7px; margin-left:auto; border-radius:50%; background:#e7a13c; }
+
+@media(max-width:680px) {
+  .tower-skill { flex-wrap:wrap; }
+  .tower-skill-open { flex-basis:100%; }
+  .tower-skill .skill-target-chip { margin-left:10px; margin-bottom:6px; }
+  .tower-skill-chevron { display:none; }
+  .skills-segments { display:flex; }
+  .skills-segments button { flex:1; justify-content:center; }
+}
