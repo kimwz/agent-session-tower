@@ -23,13 +23,13 @@ test('a Mac counts memory in use as Activity Monitor does, not only the never-us
 test('Linux CPU counts iowait as waiting and softirq and steal as time, which os.cpus() leaves out', () => {
   // user nice system idle iowait irq softirq steal guest guest_nice
   const stat = 'cpu  100 0 0 0 900 0 0 0 0 0\ncpu0 100 0 0 0 900 0 0 0 0 0\nintr 1\n';
-  assert.deepEqual(linuxCpuTimes(stat, 1), { cores: 1, idle: 900, total: 1000 }, '1 s running and 9 s on the disk is 10% busy, not 100%');
-  assert.deepEqual(linuxCpuTimes('cpu  100 0 0 100 0 0 800 0\n', 4), { cores: 4, idle: 100, total: 1000 }, 'softirq is busy time');
+  assert.deepEqual(linuxCpuTimes(stat, 1), { source: 'proc', cores: 1, idle: 900, total: 1000 }, '1 s running and 9 s on the disk is 10% busy, not 100%');
+  assert.deepEqual(linuxCpuTimes('cpu  100 0 0 100 0 0 800 0\n', 4), { source: 'proc', cores: 4, idle: 100, total: 1000 }, 'softirq is busy time');
   assert.equal(linuxCpuTimes('intr 1\n', 1), undefined);
 });
 
 /** Cumulative CPU time of `cores` cores at the given busy and idle totals. */
-const cpu = (busy: number, idle: number, cores = 2): CpuTimes => ({ cores, idle, total: busy + idle });
+const cpu = (busy: number, idle: number, cores = 2, source: CpuTimes['source'] = 'os'): CpuTimes => ({ source, cores, idle, total: busy + idle });
 function fake() {
   const state = { cpu: cpu(0, 0), now: 0, used: 8 * 1024 ** 3, free: 60 * 1024 ** 3, load: [1.5, 1, 0.5], memoryFails: false };
   const sources: SystemSources = {
@@ -95,6 +95,18 @@ test('a sample that fails keeps the last one', async () => {
   await monitor.sample();
   assert.equal(monitor.status(), before);
   assert.equal(announced, 1);
+});
+
+test('CPU starts over when the counter changes, rather than subtracting ticks from milliseconds', async () => {
+  const { state, sources } = fake();
+  const monitor = new SystemMonitor(sources, () => {});
+  await monitor.sample();
+  state.cpu = cpu(10, 10, 2, 'proc');
+  await monitor.sample();
+  assert.equal(monitor.status()?.cpu, undefined);
+  state.cpu = cpu(20, 20, 2, 'proc');
+  await monitor.sample();
+  assert.equal(monitor.status()?.cpu, 50);
 });
 
 test('CPU starts over when the number of cores changes, rather than subtracting different cores', async () => {

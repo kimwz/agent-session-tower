@@ -16,7 +16,8 @@ export interface SystemSources {
   now(): number;
 }
 
-export interface CpuTimes { cores: number; idle: number; total: number }
+/** `source` names the counter: /proc/stat counts in clock ticks, os.cpus() in milliseconds. */
+export interface CpuTimes { source: 'proc' | 'os'; cores: number; idle: number; total: number }
 
 const SAMPLE_MS = 10_000;
 /** A sample whose percentages did not move is still sent this often, so its details and time stay current. */
@@ -43,7 +44,7 @@ export function linuxCpuTimes(procStat: string, cores: number): CpuTimes | undef
   const fields = /^cpu\s+(.*)$/m.exec(procStat)?.[1]?.trim().split(/\s+/).slice(0, 8).map(Number);
   if (!fields || fields.length < 4 || fields.some(value => !Number.isFinite(value))) return undefined;
   const [, , , idle = 0, iowait = 0] = fields;
-  return { cores, idle: idle + iowait, total: fields.reduce((sum, value) => sum + value, 0) };
+  return { source: 'proc', cores, idle: idle + iowait, total: fields.reduce((sum, value) => sum + value, 0) };
 }
 
 function osCpuTimes(): CpuTimes {
@@ -51,7 +52,7 @@ function osCpuTimes(): CpuTimes {
   return list.reduce((sum, cpu) => {
     const { user, nice, sys, idle, irq } = cpu.times;
     return { ...sum, idle: sum.idle + idle, total: sum.total + user + nice + sys + idle + irq };
-  }, { cores: list.length, idle: 0, total: 0 });
+  }, { source: 'os' as const, cores: list.length, idle: 0, total: 0 });
 }
 
 function vmStat(): Promise<string> {
@@ -113,8 +114,8 @@ export class SystemMonitor {
       const [counted, memory, disk] = await Promise.all([this.sources.cpuTimes(), this.sources.memory(), this.sources.disk().catch(() => undefined)]);
       const previous = this.last;
       this.last = counted;
-      // Times of a different set of cores do not subtract; the next sample starts from this one.
-      const elapsed = previous && previous.cores === counted.cores ? counted.total - previous.total : 0;
+      // Times of a different set of cores, or from the other counter, do not subtract; the next sample starts from this one.
+      const elapsed = previous && previous.cores === counted.cores && previous.source === counted.source ? counted.total - previous.total : 0;
       const cpu = elapsed > 0 ? Math.min(100, Math.max(0, (1 - (counted.idle - previous!.idle) / elapsed) * 100)) : undefined;
       const load = this.sources.loadavg();
       const now = this.sources.now();
