@@ -2,7 +2,7 @@ import { translate as t, useI18n } from '../i18n/i18n';
 import { memo, useId } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
 import { ArrowUpRight, Check, Clock, GitBranch, Monitor, Radio, Sparkles } from 'lucide-react';
-import type { ProviderHealth, Session } from '../../../shared/types';
+import type { ProviderHealth, Session, SystemStatus } from '../../../shared/types';
 import type { NodeStatus } from '../../../shared/link';
 import { localPart } from '../remote/scope';
 import { SessionContextIcon } from '../sessions/SessionContextIcon';
@@ -10,6 +10,7 @@ import { outcomeLabels } from '../sessions/SessionOutcomeBadge';
 import { cleanPreview, providerLabels, relativeTime, sessionActivityAt, sessionState, sessionTitle } from '../common/lib';
 import { ProjectGroupHeader, type ProjectGroupHeaderData } from '../project-groups/ProjectGroupHeader';
 import { ProviderUsage } from '../providers/ProviderUsage';
+import { SystemRings } from './SystemRings';
 
 export type AgentData = { session: Session; selected: boolean; unread: boolean; onSelect: (id: string) => void;
   /** Its computer is out of reach: the card shows the last state seen. */
@@ -23,7 +24,9 @@ export type HostData = { name: string; active: number; providers: ProviderHealth
   /** This computer's Tower version; a joined computer's is in `link`. */
   version?: string;
   /** This computer's execution worker version, shown on hover. */
-  runnerVersion?: string };
+  runnerVersion?: string;
+  /** CPU, memory and disk, while the computer's state is arriving. */
+  system?: SystemStatus };
 
 function linkLabel(link: HostLink): string {
   if (link.updating) return link.status === 'connected' ? t("업데이트 중") : t("새 버전으로 다시 시작하는 중");
@@ -64,6 +67,7 @@ export const HostNode = memo(function HostNode({ data }: NodeProps<Node<HostData
   return <div className={`host-with-usage${link ? ' is-remote' : ''}${offline ? ' is-stale' : ''}`}><div className="host-node has-auto-prompt"><span className="host-icon"><Monitor size={20} /></span><div className="host-copy"><strong title={data.name}>{data.name || t("이 Mac")}</strong>
     {link && <span className={`host-link ${link.status}${link.live ? ' live' : ''}${link.updating ? ' updating' : ''}`} role="status"><i />{linkLabel(link)}{link.version && link.live ? ` · v${link.version}` : ''}</span>}
     {!link && data.version && <span className="host-link local" title={data.runnerVersion ? t("화면 v{0} · 실행 워커 v{1}", { 0: data.version, 1: data.runnerVersion }) : undefined}><i />{t("이 컴퓨터")} · v{data.version}</span>}
+    {data.system && !offline && <SystemRings status={data.system} />}
     <span><i className={data.active && !offline ? 'live-pip' : ''} /><span>{offline ? link?.known === false ? t("아직 상태를 받지 못했습니다") : t("마지막으로 본 상태입니다") : data.active ? t("{0}개 에이전트 작업 중", { 0: data.active }) : t("다음 작업을 기다리는 중")}</span></span></div><button type="button" className="auto-prompt-trigger nodrag nopan" aria-label={link ? t("{0}에서 Auto Prompt 열기", { 0: data.name }) : t("이 기기에서 Auto Prompt 열기")} title="Auto Prompt" disabled={data.disabled} onClick={() => data.onAutoPrompt()}><Sparkles size={32} aria-hidden="true" /></button></div><ProviderUsage providers={data.providers} /><Handle type="source" position={Position.Bottom} /></div>;
 });
 export const nodeTypes = { agent: AgentNode, projectGroup: ProjectGroupNode, host: HostNode };

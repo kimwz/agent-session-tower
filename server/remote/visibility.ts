@@ -121,6 +121,8 @@ export function remoteSnapshot(snapshot: Snapshot, scope: RemoteScope, controlle
     scanning: snapshot.scanning, hostname: snapshot.hostname, version: snapshot.version,
     ...(snapshot.runnerVersion ? { runnerVersion: snapshot.runnerVersion } : {}),
     ...(snapshot.runnerUpdate ? { runnerUpdate: snapshot.runnerUpdate } : {}),
+    // Numbers only: how busy the computer is, for its rings on the controlling Tower's canvas.
+    ...(snapshot.system ? { system: snapshot.system } : {}),
     updatedAt: snapshot.updatedAt,
   };
 }
