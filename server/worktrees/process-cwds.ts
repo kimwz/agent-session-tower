@@ -67,14 +67,15 @@ export function namesFolder(command: string, name: string): boolean {
   return new RegExp(`(?:^|[\\s/="'])${escaped}(?:$|[\\s/"'])`).test(command);
 }
 
-/** Path-like arguments of a command line (`/abs`, `./x`, `../x`, `--opt=/abs`), resolved against the program's folder. */
+/** Arguments of a command line that may be paths (`/abs`, `../x`, `current`, `--opt=/abs`), resolved against the program's folder. */
 export function pathArguments(line: ProgramLine): string[] {
   const paths: string[] = [];
   for (const token of line.args.split(/\s+/)) {
     const value = token.includes('=') ? token.slice(token.indexOf('=') + 1) : token;
     const bare = value.replace(/^['"]|['"]$/g, '');
     if (bare.startsWith('/')) paths.push(bare);
-    else if (line.cwd && (bare === '.' || bare === '..' || bare.startsWith('./') || bare.startsWith('../') || (bare.includes('/') && !bare.includes('://')))) paths.push(`${line.cwd}/${bare}`);
+    // Any other word may name a folder (or a symlink to one) in the program's folder: `--directory current`.
+    else if (line.cwd && bare && !bare.startsWith('-') && !bare.includes('://')) paths.push(`${line.cwd}/${bare}`);
   }
   return paths;
 }

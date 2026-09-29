@@ -92,6 +92,7 @@ test('a command line names a folder only as a whole path segment', async () => {
 
 test('path arguments of a command line resolve against the program folder', async () => {
   const { pathArguments } = await import('../../../server/worktrees/process-cwds.js');
-  assert.deepEqual(pathArguments({ args: 'python3 -m http.server --directory=../preview /abs/x https://example.com/a', cwd: '/w/repo' }), ['/w/repo/../preview', '/abs/x']);
+  assert.deepEqual(pathArguments({ args: 'python3 -m http.server --directory=../preview /abs/x https://example.com/a current', cwd: '/w/repo' }),
+    ['/w/repo/python3', '/w/repo/http.server', '/w/repo/../preview', '/abs/x', '/w/repo/current']);
   assert.deepEqual(pathArguments({ args: 'node server.js ./public' }), []);
 });

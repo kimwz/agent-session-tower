@@ -513,8 +513,9 @@ test('a program started elsewhere that names the folder on its command line keep
   const { symlink } = await import('node:fs/promises');
   await symlink(served, current);
   const world = { sessions: [session('p', await transcript('p', [...rows, ...servedRows]))], closed: new Set(['claude:p']),
-    commands: ['python3 -m http.server 8765 --directory ../preview', `python3 -m http.server 8766 --directory=${current}`] };
-  const cleaner = janitor(state, world);
+    commands: ['python3 -m http.server 8765 --directory ../preview'] };
+  // The second server runs in dir and serves a symlink by its bare name.
+  const cleaner = janitor(state, world, { commands: async () => [{ args: world.commands[0]! }, { args: 'python3 -m http.server 8766 --directory current', cwd: dir }] });
   await cleaner.start(); t.after(() => cleaner.close());
   await cleaner.pass();
   assert.equal(existsSync(preview), true, 'the server keeps its folder');
