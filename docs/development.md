@@ -83,13 +83,20 @@ Project editor/terminal controls open a resizable workspace overlay on the same 
 
 Every change reaches `main` through a reviewed pull request. A pull request that changes what Tower does carries its release; one that changes only documentation, agent instructions, tests, or CI has none and ships with the next release.
 
-1. On the pull request branch, pick `x.y.z` above the version on `origin/main` and write the `## [x.y.z] - YYYY-MM-DD` section in `CHANGELOG.md`, dated the day you merge.
-2. Run `npm version x.y.z --no-git-tag-version`. It runs `npm run check`, refuses to continue without that changelog section dated today, syncs the version the app reports, and rebuilds. It does not commit or tag: commit `CHANGELOG.md`, `package.json`, `package-lock.json`, and `shared/app-identity.ts` as `Release x.y.z`, and push the branch.
-3. Right before merging, `git fetch` and confirm that `x.y.z` is above the version on `origin/main` and that `git ls-remote --tags origin vx.y.z` prints nothing. If `main` moved, merge `origin/main` into the branch (do not rebase a pushed branch); if its version is no longer below `x.y.z`, move the version and changelog section above it in a new commit dated today and repeat step 2. Push and wait for CI. If only the day changed, re-date the section and repeat step 2 with `--allow-same-version`. A version-only or date-only change needs no new review.
-4. Merge with `gh pr merge <number> --squash --match-head-commit <head-sha>`.
-5. `git fetch origin`, then take the merged commit from `gh pr view <number> --json mergeCommit -q .mergeCommit.oid`. Confirm it is on `origin/main`, its `package.json` has `x.y.z`, and its parent's version is lower. Then `git tag -a vx.y.z -m "Release x.y.z" <commit>` and `git push origin vx.y.z`. The Release workflow publishes the changelog section as the GitHub release notes.
+1. On the pull request branch, pick `x.y.z` above the version on `origin/main` (`git show origin/main:package.json`) and write the `## [x.y.z] - YYYY-MM-DD` section at the top of `CHANGELOG.md`, dated today.
+2. Run `npm version x.y.z --no-git-tag-version` (`.npmrc` also turns off npm's own commit and tag). It runs `npm run check`, refuses to continue without that changelog section dated today, syncs the version the app reports, and rebuilds. Commit `CHANGELOG.md`, `package.json`, `package-lock.json`, and `shared/app-identity.ts` as `Release x.y.z`, push the branch, and wait for CI to pass.
+3. Right before merging, `git fetch` and check:
+   - `x.y.z` is above the version on `origin/main`, and `git ls-remote --tags origin vx.y.z` prints nothing. Otherwise merge `origin/main` into the branch (never rebase a pushed branch). In a conflict keep `main`'s changelog sections and versions as they are, move your own section and version above them, and repeat step 2.
+   - The changelog section is dated today. Otherwise re-date it and repeat step 2 with `--allow-same-version`.
 
-If step 5 finds that another pull request took the version first (the parent is not lower, or the tag already exists), do not tag and never move or force a tag: open a follow-up pull request that moves the version and changelog section above `main`, and release that one. Push release tags one to three at a time; GitHub starts no workflow for a push of more than three tags.
+   A change of version or date alone needs no new review. After any new push, start step 3 again.
+4. Merge with `gh pr merge <number> --squash --match-head-commit <head-sha>`. If GitHub refuses it (the branch changed or conflicts with `main`), go back to step 3.
+5. `git fetch origin` and take the merged commit from `gh pr view <number> --json mergeCommit -q .mergeCommit.oid`. Check that `git merge-base --is-ancestor <commit> origin/main` succeeds, that `git show <commit>:package.json` has `x.y.z` and `git show <commit>^:package.json` a lower version, and that CI passed on that commit (`gh run list --commit <commit> --workflow CI`; wait with `gh run watch` while it runs). The Release workflow publishes before its own checks and service Towers install the latest release, so never tag a commit whose CI has not passed.
+6. `git tag -a vx.y.z -m "Release x.y.z" <commit>` and `git push origin vx.y.z`. The Release workflow publishes the changelog section as the GitHub release notes.
+
+If step 5 fails, do not tag, and never move or force a tag. If another pull request took the version first (the parent is not lower, or the tag exists), open a follow-up pull request that moves the version and changelog section above `main` and release that one; it needs no new review. If CI failed on the merged commit, fix it in a new pull request. Push release tags one to three at a time; GitHub starts no workflow for a push of more than three tags.
+
+To deploy a Tower that runs from this checkout, update the folder it runs from once nobody else is working in it: `git pull --ff-only`, `npm ci` when dependencies changed, `npm run build`, then restart the web process only (see below).
 
 A specific release can be run with `npx --yes github:kimwz/agent-session-tower#vx.y.z`.
 
