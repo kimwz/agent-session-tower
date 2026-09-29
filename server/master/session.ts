@@ -178,7 +178,8 @@ export class MasterSession {
         if ((item.kind !== 'spoken' && item.kind !== 'report') || seen.has(turn.id)) continue;
         seen.add(turn.id);
         if (turn.replies?.some(reply => reply.text.trim())) this.voice?.timings?.mark(timingKey(item), 'text');
-        if (!turn.replies || this.voiced(turn.id)) continue;
+        // A turn with a record is followed on only while it is being read here (not one stopped, or read before a restart).
+        if (!turn.replies || (this.voiced(turn.id) && !this.voice?.streaming?.(turn.id))) continue;
         this.voice?.stream?.({ turn: turn.id, kind: item.kind === 'spoken' ? 'answer' : 'report', key: timingKey(item),
           ...(item.kind === 'spoken' && item.key ? { request: item.key } : {}), ...(item.kind === 'spoken' && item.voice ? { voiceSession: item.voice } : {}), replies: turn.replies });
       }

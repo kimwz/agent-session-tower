@@ -106,6 +106,10 @@ interface Playing {
   receivedAt?: number; playingAt?: number;
   /** Where in the audio the current source starts (seconds), and how often it was fetched again. */
   base: number; resumes: number; firstErrorAt?: number;
+  /** The fetch whose failure was already handled (an error and a refused play() may both tell of one). */
+  failedAttempt?: number;
+  /** Whether the current source has played at all (its place counts only then). */
+  sourcePlayed?: boolean;
 }
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -676,12 +680,12 @@ export class VoiceSession {
     // A player that never ends or fails is given up on after a while, so the queue goes on.
     current.timers.push(setTimeout(() => { if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); } else this.finishPlay(current, 'failed'); },
       say.streaming ? STREAMING_PLAY_MS : Math.max(30_000, say.text.length * 200)));
-    this.audio.onplaying = () => { if (this.current === current && current.playingAt === undefined) current.playingAt = Date.now(); };
+    this.audio.onplaying = () => { if (this.current !== current) return; current.playingAt ??= Date.now(); current.sourcePlayed = true; };
     this.audio.onended = () => { if (this.current === current) say.kind === 'notice' ? this.noticeEnded(current) : this.finishPlay(current, 'played'); };
     this.audio.onerror = () => {
       if (this.current !== current) return;
       if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); return; }
-      if (!this.resume(current)) this.finishPlay(current, 'failed');
+      this.lost(current);
     };
     this.audio.src = say.audio;
     this.audio.play().catch((error: unknown) => {
@@ -697,6 +701,13 @@ export class VoiceSession {
    * An answer whose audio was cut off partway (the web restarting in the middle) is fetched again from where it was,
    * a few times within a while: `base` keeps the place in the whole audio across several cuts.
    */
+  /** The current fetch of an answer failed: fetched again if it can be, otherwise the answer failed. Once per fetch. */
+  private lost(current: Playing): void {
+    if (this.current !== current || current.failedAttempt === current.resumes) return;
+    current.failedAttempt = current.resumes;
+    if (!this.resume(current)) this.finishPlay(current, 'failed');
+  }
+
   private resume(current: Playing): boolean {
     const kind = current.say.kind;
     if ((kind !== 'answer' && kind !== 'report') || current.playingAt === undefined || current.resumes >= RESUMES) return false;
@@ -704,12 +715,14 @@ export class VoiceSession {
     current.firstErrorAt ??= now;
     if (now - current.firstErrorAt > RESUME_WITHIN_MS) return false;
     current.resumes++;
-    const at = current.base + (Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : 0);
+    const at = current.base + (current.sourcePlayed && Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : 0);
     current.base = at;
+    current.sourcePlayed = false;
     current.timers.push(setTimeout(() => {
       if (this.current !== current) return;
       this.audio.src = `${current.say.audio}?at=${at.toFixed(2)}`;
-      this.audio.play().catch(() => this.finishPlay(current, 'failed'));
+      // Refused again (the web still away): another try, while tries and time are left.
+      this.audio.play().catch(() => this.lost(current));
     }, 1_000 * current.resumes));
     return true;
   }

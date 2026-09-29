@@ -214,15 +214,18 @@ async function harness(t: test.TestContext, options: { settings?: Record<string,
     if (!reply) run.replies!.push(reply = { id, text: '' });
     reply.text += text;
     if (done) reply.done = true;
+    fresh(run);
     emit();
   };
-  const finish = (run: Run, status: Run['status'] = 'completed') => { for (const reply of run.replies ?? []) reply.done = true; run.status = status; run.finishedAt = tick(); emit(); };
+  /** Tower's live state brings new objects each time, never the ones it gave before. */
+  const fresh = (run: Run) => { run.replies = run.replies?.map(item => ({ ...item })); };
+  const finish = (run: Run, status: Run['status'] = 'completed') => { for (const reply of run.replies ?? []) reply.done = true; fresh(run); run.status = status; run.finishedAt = tick(); emit(); };
   const spoken = () => labs.speeches.filter(text => !(VOICE_ACKS as readonly string[]).includes(untag(text))).map(untag);
   const entry = (pattern: RegExp) => until(() => room.recent(200).find((item): item is MasterEntry => (item.data.kind === 'master' || item.data.kind === 'event' || item.data.kind === 'error') && pattern.test(item.data.text)));
   const speakOf = (item: MasterEntry) => { const data = room.get(item.id)?.data; return data && (data.kind === 'master' || data.kind === 'event' || data.kind === 'error') ? data.speak : undefined; };
   const follow = async () => JSON.parse(await readFile(join(dir, 'follow.json'), 'utf8')) as { voiced?: Array<{ turn: string; state: string }> };
   const ask = async (text: string) => { const answer = await voice.voiceRequest({ session: current, clientMessageId: randomUUID(), text, local: true }); return { answer, run: await until(() => runs.at(-1)) }; };
-  return { dir, labs, room, session, voice, runs, emit, on, says, write, finish, spoken, entry, speakOf, follow, ask, settings };
+  return { dir, labs, room, session, voice, runs, emit, on, says, write, finish, spoken, entry, speakOf, follow, ask, settings, fresh };
 }
 
 test('an answer is read sentence by sentence while the master writes it; when the turn ends only the rest is read, nothing twice', async t => {
@@ -315,6 +318,7 @@ test('many replies at once are all read in order, none of their audio pushed out
   h.on();
   const { run } = await h.ask('많이 말해 줘');
   for (let index = 0; index < 45; index++) run.replies!.push({ id: `m${index}:0`, text: `${index}번째 짧은 말이에요.`, done: true });
+  h.fresh(run);
   h.emit();
   await until(() => h.says().find(say => say.kind === 'answer'));
   h.finish(run);
@@ -414,4 +418,19 @@ test('audio asked for again partway starts at a whole frame near that place', as
   const later = await get(`/${id}?at=0.06`);
   assert.equal(later.length, whole.length - 1251);
   assert.deepEqual(later.subarray(0, 4), header);
+});
+
+test('words that keep coming after the first ones went to speech are read too, from new state each time', async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const { run } = await h.ask('천천히 말해 줘');
+  h.write(run, 'm1:0', '첫 문장을 먼저 말씀드릴게요. ');
+  await until(() => h.says().find(say => say.kind === 'answer'));
+  await sleep(50);
+  // Well after the turn's record was kept, more words come, in new objects each time.
+  for (let index = 0; index < 3; index++) { await sleep(20); h.write(run, 'm1:0', `${index + 2}번째 문장을 이어서 말씀드려요, 조금 더 길게 써 볼게요. `); }
+  await until(() => h.spoken().length >= 2 || undefined);
+  h.write(run, 'm1:0', '끝.', true);
+  await until(() => h.spoken().join(' ').endsWith('끝.') || undefined);
+  assert.equal(h.spoken().join(' '), '첫 문장을 먼저 말씀드릴게요. 2번째 문장을 이어서 말씀드려요, 조금 더 길게 써 볼게요. 3번째 문장을 이어서 말씀드려요, 조금 더 길게 써 볼게요. 4번째 문장을 이어서 말씀드려요, 조금 더 길게 써 볼게요. 끝.');
 });

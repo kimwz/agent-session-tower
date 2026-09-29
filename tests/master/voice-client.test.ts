@@ -879,6 +879,7 @@ test('an answer read while it is written is waited for as long as the longest an
     mock.timers.tick(1_000);
     await flush();
     assert.equal(audio.played.at(-1), '/api/master/voice/audio/long?at=20.00');
+    audio.onplaying?.();
     audio.currentTime = 5;
     audio.onerror?.();
     mock.timers.tick(2_000);
@@ -890,5 +891,27 @@ test('an answer read while it is written is waited for as long as the longest an
     assert.deepEqual(page.results(), ['long:played']);
     const report = posts.find(post => post.path.endsWith('/played'))!;
     assert.equal(report.body.startedMs, 10, 'how long the sound took to start, on the page\'s clock');
+  } finally { page.end(); }
+});
+
+test('a fetch again that is refused while the web is still away is tried again, not given up on at once', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as unknown as { currentTime: number; onplaying: (() => void) | null; onerror: (() => void) | null; onended: (() => void) | null; played: string[] };
+    page.voice.say(page.say('cut', 'answer'));
+    audio.onplaying?.();
+    audio.currentTime = 4;
+    FakeAudio.refuse = true;
+    audio.onerror?.();
+    mock.timers.tick(1_000);
+    await flush();
+    assert.deepEqual(page.results(), [], 'the refused try is not the end');
+    FakeAudio.refuse = false;
+    mock.timers.tick(2_000);
+    await flush();
+    assert.equal(audio.played.at(-1), '/api/master/voice/audio/cut?at=4.00');
+    audio.onended?.();
+    await flush();
+    assert.deepEqual(page.results(), ['cut:played']);
   } finally { page.end(); }
 });
