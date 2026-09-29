@@ -87,13 +87,38 @@
 .master-voice-now { display:flex; align-items:flex-start; gap:8px; min-width:0; }
 .master-voice-now > .master-voice-dot { margin-top:4px; }
 .master-voice-now > svg { flex:none; margin-top:2px; }
-/* At most three lines; longer speech keeps its latest words in view (the column is anchored at its end). */
-.master-voice-now > .master-voice-label { flex:1; min-width:0; max-height:calc(1.45em * 3); overflow-y:auto; overflow-wrap:anywhere; line-height:1.45; display:flex; flex-direction:column-reverse; }
+/*
+ * At most three lines, five while the owner speaks (four on phones); the page scrolls it to keep the latest words in
+ * view, and fades its top while earlier words are above.
+ */
+.master-voice-now > .master-voice-label { flex:1; min-width:0; max-height:calc(1.45em * 3); overflow-y:auto; overflow-wrap:anywhere; line-height:1.45; overscroll-behavior:contain; }
+.master-voice.long .master-voice-now > .master-voice-label { max-height:calc(1.45em * 5); }
+.master-voice-now > .master-voice-label.scrolled { -webkit-mask-image:linear-gradient(to bottom, transparent, #000 1.2em); mask-image:linear-gradient(to bottom, transparent, #000 1.2em); }
+/* Writing goes on: a caret after the latest words. */
+.master-voice-caret { display:inline-block; width:2px; height:1.05em; margin-left:3px; vertical-align:text-bottom; background:var(--teal); animation:master-caret 1s steps(2, start) infinite; }
+@keyframes master-caret { to { visibility:hidden; } }
 .master-voice-controls { display:flex; flex-wrap:wrap; align-items:center; gap:6px 8px; min-width:0; }
 .master-voice-usage { flex:1 1 150px; min-width:0; overflow-wrap:anywhere; }
 
-/* While the master's conversation is open: voice and settings beside the button. */
+/* While the master's conversation is open: the microphone and settings slide out from under the button. */
+.master-tray { position:fixed; z-index:38; height:52px; display:flex; align-items:center; gap:6px; pointer-events:none; }
+.master-tray .master-mic { box-shadow:0 4px 12px rgba(0,0,0,.35); opacity:0; transform:translateX(-56px) scale(.6); transition:transform .2s cubic-bezier(.2,.8,.3,1), opacity .15s ease; }
+.master-tray .master-mic + .master-mic { transform:translateX(-100px) scale(.6); }
+.master-tray.shown { pointer-events:auto; }
+.master-tray.shown .master-mic { opacity:1; transform:none; }
+.master-tray.shown .master-mic:disabled { opacity:.45; }
+.master-tray.shown .master-mic + .master-mic { transition-delay:.04s; }
+
+/* While voice is on: the live voice bar and settings beside the button. */
 .master-bar { position:fixed; z-index:39; display:flex; align-items:flex-end; gap:8px; max-width:min(460px, calc(100vw - 90px)); }
 .master-bar .master-voice { border:1px solid var(--line); border-radius:10px; background:var(--surface); box-shadow:0 6px 18px rgba(0,0,0,.35); min-width:0; flex:1; }
 .master-bar-buttons { display:flex; gap:6px; }
 .master-bar .master-mic { box-shadow:0 4px 12px rgba(0,0,0,.35); }
+
+@media (max-width:680px) {
+  .master-voice.long .master-voice-now > .master-voice-label { max-height:calc(1.45em * 4); }
+}
+@media (prefers-reduced-motion:reduce) {
+  .master-tray .master-mic { transition:none; }
+  .master-voice-caret, .master-voice.speaking .master-voice-dot, .master-voice.playing .master-voice-dot { animation:none; }
+}

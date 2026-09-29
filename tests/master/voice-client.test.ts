@@ -981,3 +981,33 @@ test('what is read aloud plays at the speed set, pitch kept, for every source, a
     assert.deepEqual([audio.played.at(-1), audio.rates.at(-1)], ['/api/master/voice/audio/long?at=20.00', 1.8]);
   } finally { page.end(); }
 });
+
+test('a microphone the owner muted stays muted after a report is read, until they unmute it; one that stopped by itself listens again', async () => {
+  const page = await harness();
+  try {
+    page.voice.mute();
+    assert.equal(page.view().listening, false);
+    assert.equal(page.view().muted, true);
+    page.voice.say(page.say('r1', 'report'));
+    await flush();
+    page.audio.onended!();
+    await flush();
+    assert.deepEqual(page.results(), ['r1:played'], 'what the master reads aloud still plays while muted');
+    assert.equal(page.view().listening, false, 'the report did not open the microphone again');
+    await page.voice.listen();
+    assert.equal(page.view().listening, true);
+    assert.equal(page.view().muted, undefined);
+
+    // Listening that ran out by itself (no one spoke for the set minutes) comes back after a report, as before.
+    mock.timers.tick(6 * 60_000);
+    await flush();
+    assert.equal(page.view().listening, false);
+    assert.equal(page.view().muted, undefined);
+    mock.timers.tick(1_000);
+    page.voice.say(page.say('r2', 'report'));
+    await flush();
+    page.audio.onended!();
+    await flush();
+    assert.equal(page.view().listening, true);
+  } finally { page.end(); }
+});
