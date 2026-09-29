@@ -47,7 +47,7 @@ const ASSIGNED_PAGES = 10;
 const MAX_ASSIGNED = 2000;
 const OPEN_PAGE = 100;
 const OPEN_PAGES = 10;
-const MAX_HANDLED = 5000;
+const MAX_OPEN = 5000;
 const SEARCH_PAGE = 100;
 /** GitHub's search never returns more than this many results. */
 const SEARCH_MAX = 1000;
@@ -180,8 +180,10 @@ async function checkOpen(watch: Extract<GitHubWatch, { type: 'open-issues' }>, p
       if (list.length < OPEN_PAGE) break;
     }
   }
+  // What was taken is remembered while it stays open, so the open issues themselves are what is limited.
+  if (found.length > MAX_OPEN) throw new GitHubError(`More than ${MAX_OPEN} open issues match this trigger, more than it keeps track of; narrow it with labels.`);
   const open = new Set(found.map(keyOf));
-  const handled = (previous.handled ?? []).filter(key => open.has(key)).slice(-MAX_HANDLED);
+  const handled = (previous.handled ?? []).filter(key => open.has(key));
   return { issues: found, cursor: { handled } };
 }
 
