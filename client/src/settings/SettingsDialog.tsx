@@ -86,10 +86,8 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
   }, []);
 
   // Closing asks every section that has something unsaved, not only the one on screen.
-  const requestClose = useCallback(() => {
-    for (const guard of guards.current.values()) if (guard.leave && !guard.leave()) return;
-    onClose();
-  }, [onClose]);
+  const mayLeave = useCallback(() => [...guards.current.values()].every(guard => !guard.leave || guard.leave()), []);
+  const requestClose = useCallback(() => { if (mayLeave()) onClose(); }, [mayLeave, onClose]);
   const back = useCallback(() => onPlace({ ...place, list: true }), [onPlace, place]);
   const frames = useMemo(() => new Map(sections.map(section => [section, {
     active: section === current && !listing,
@@ -100,7 +98,7 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
 
   const choose = (section: SettingsSection) => onPlace({ section });
   // A conversation opened from a section is looked at without the settings over it.
-  const openSession = (id: string) => { onClose(); context.onOpenSession(id); };
+  const openSession = (id: string) => { if (!mayLeave()) return; onClose(); context.onOpenSession(id); };
   const body = (section: SettingsSection): ReactNode => {
     const cwd = folders[section];
     const clearFolder = () => onPlace({ section, cwd: undefined });
@@ -119,6 +117,8 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
 
   return createPortal(<dialog ref={dialog} className="settings-dialog" aria-label={t('설정')}
     onCancel={event => {
+      // Slack's and the public agents' own dialogs sit above this one and answer their own Esc; React hands it on.
+      if (event.target !== event.currentTarget) return;
       event.preventDefault();
       if (guards.current.get(current)?.escape?.()) return;
       requestClose();

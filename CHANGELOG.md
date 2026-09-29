@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.81.0] - 2026-09-29
+
+### Changed
+- **One settings button replaces the header icons and the canvas cog.** Triggers, skills, permissions, fast judgments, remote computers, notifications, account and the canvas settings now live in one Settings dialog. Its menu on the left names every section; the right shows one section in the same frame each time: a title, one line saying what it is for, tabs, and the body. On a phone the dialog shows the menu first and then one section, with a way back.
+- **The settings button stays in the top right when the header is hidden.** Its mark shows waiting permission requests first (in red), then skill proposals, and otherwise a dot when a trigger needs a look or another Tower started controlling this computer. So a permission request is seen while you work on the canvas. Waiting requests are checked every 20 seconds and again when the page comes back into view.
+- The canvas settings (layout, animated connections, show all, language, chat text size) are in **General**. Shift+A still switches show all.
+- Moving between sections keeps what you were writing. Esc first closes an open editor. Closing the dialog while a trigger, skill or rule is being edited asks before the changes are dropped.
+- A folder's "Skills for this folder" and "Permissions for this folder" open that section narrowed to the folder, marked by a chip beside the title; clear the chip to see everything.
+- The master agent opens these panels as sections of the settings.
+
 ## [1.80.1] - 2026-09-29
 
 ### Changed
