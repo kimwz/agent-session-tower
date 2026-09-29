@@ -46,21 +46,35 @@ fi` : `
 new_id=''`;
   return `#!/bin/sh
 # Agent Session Tower: notes which agent session started this ${name} run, then runs the real ${name}.
-# Every Tower's shim folder is skipped, and so is any program this chain already handed off to (a wrapper script that
-# runs \`${name}\` again finds the next one), so two shims or a wrapper never hand off to each other forever.
+# Every Tower's shim folder is skipped. A wrapper script named ${name} that runs \`${name}\` again would come back here:
+# while such a script runs, its path is remembered, so the next look finds the program after it. The real program never
+# carries this, so helpers it starts find it as usual.
 real=''
-used=\${TOWER_SHIM_USED:-}
+wrapper=''
+# Only a call straight from that script counts: the script itself (it \`exec\`s ${name}) or its own child while the
+# script still runs. A program the script started keeps its pid but is no script any more.
+if [ -n "\${TOWER_SHIM_WRAPPER:-}" ]; then
+  if [ "$$" = "\${TOWER_SHIM_WRAPPER_PID:-}" ]; then wrapper=$TOWER_SHIM_WRAPPER
+  elif [ "$PPID" = "\${TOWER_SHIM_WRAPPER_PID:-}" ]; then
+    case "$(ps -o comm= -p "$PPID" 2>/dev/null)" in *sh) wrapper=$TOWER_SHIM_WRAPPER ;; esac
+  fi
+fi
 old_ifs=$IFS; IFS=:
 for dir in $PATH; do
   [ -n "$dir" ] || continue
   resolved=$(CDPATH= cd -- "$dir" 2>/dev/null && pwd -P) || continue
   case "$resolved" in */runtime/launch-shims) continue ;; esac
-  case "|$used|" in *"|$resolved/${name}|"*) continue ;; esac
-  if [ -x "$dir/${name}" ] && [ ! -d "$dir/${name}" ]; then real="$dir/${name}"; used="$used|$resolved/${name}"; break; fi
+  [ -n "$wrapper" ] && [ "$resolved/${name}" = "$wrapper" ] && continue
+  if [ -x "$dir/${name}" ] && [ ! -d "$dir/${name}" ]; then real="$dir/${name}"; break; fi
 done
 IFS=$old_ifs
 if [ -z "$real" ]; then echo "${name}: command not found" >&2; exit 127; fi
-TOWER_SHIM_USED=$used; export TOWER_SHIM_USED
+unset TOWER_SHIM_WRAPPER TOWER_SHIM_WRAPPER_PID
+case "$(head -c 64 "$real" 2>/dev/null | head -n 1)" in
+  '#!'*sh|'#!'*sh' '*|'#!'*bash*|'#!'*zsh*)
+    TOWER_SHIM_WRAPPER="$(CDPATH= cd -- "$(dirname -- "$real")" && pwd -P)/${name}"; TOWER_SHIM_WRAPPER_PID=$$
+    export TOWER_SHIM_WRAPPER TOWER_SHIM_WRAPPER_PID ;;
+esac
 ${inject}
 launcher=''
 clean() { printf %s "$1" | tr -cd 'A-Za-z0-9-' | cut -c1-200; }
@@ -145,7 +159,7 @@ async function readMark(file: string): Promise<LaunchMark | undefined> {
  * process alive with the same start time, so a pid used again by an unrelated program is never taken for the helper.
  * Returns the proofs and the marks that were used (to be removed).
  */
-export function matchLaunchMarks(marks: LaunchMark[], owners: ReadonlyMap<number, readonly string[]>, started: ReadonlyMap<number, number>, known: ReadonlySet<string>, parents: ReadonlyMap<number, number> = new Map()): { proofs: Map<string, string>; used: LaunchMark[] } {
+export function matchLaunchMarks(marks: LaunchMark[], owners: ReadonlyMap<number, readonly string[]>, started: ReadonlyMap<number, number>, known: ReadonlySet<string>, parents: ReadonlyMap<number, number> = new Map(), inspectedAt = Infinity): { proofs: Map<string, string>; used: LaunchMark[] } {
   const proofs = new Map<string, string>();
   const used: LaunchMark[] = [];
   for (const mark of marks) {
@@ -158,7 +172,8 @@ export function matchLaunchMarks(marks: LaunchMark[], owners: ReadonlyMap<number
     }
     const start = started.get(mark.pid);
     // Its process is gone (or another program has its pid) and it named no child: it can never prove anything now.
-    if (started.size && (start === undefined || (mark.startedAt !== undefined && Math.abs(start - mark.startedAt) > 1000))) { used.push(mark); continue; }
+    // Judged only on a process list taken after the mark was written: an older one never saw the process.
+    if (started.size && inspectedAt > mark.at + 2000 && (start === undefined || (mark.startedAt !== undefined && Math.abs(start - mark.startedAt) > 1000))) { used.push(mark); continue; }
     if (mark.startedAt === undefined || start === undefined || Math.abs(start - mark.startedAt) > 1000) continue;
     // A launcher script (npm's `codex`) may start the native program as its own child: its sessions count too.
     const pids = [mark.pid, ...[...parents].filter(([, parent]) => parent === mark.pid).map(([pid]) => pid)];

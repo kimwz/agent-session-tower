@@ -164,7 +164,9 @@ export class SessionService extends EventEmitter {
         // The folder is read again only when it changed, or a minute later for expiry; matching runs on every scan.
         const changedAt = (await stat(this.launchMarks).catch(() => undefined))?.mtimeMs ?? 0;
         if (changedAt !== this.markRead.changedAt || Date.now() - this.markRead.at > 60_000) this.markRead = { changedAt, at: Date.now(), marks: await readLaunchMarks(this.launchMarks) };
-        const { proofs, used } = matchLaunchMarks(this.markRead.marks, this.processes.owners ?? new Map(), this.processes.started ?? new Map(), live, this.processes.parents ?? new Map());
+        // A run that left a mark since the processes were last looked at is looked at now, while it may still be running.
+        if (this.markRead.marks.some(mark => mark.at >= this.lastProcesses - 2000) && Date.now() - this.lastProcesses > 1000) await this.inspect();
+        const { proofs, used } = matchLaunchMarks(this.markRead.marks, this.processes.owners ?? new Map(), this.processes.started ?? new Map(), live, this.processes.parents ?? new Map(), this.lastProcesses);
         let fresh = false;
         for (const [id, launcher] of proofs) if (!this.launchers.has(id)) { this.launchers.set(id, [launcher]); this.proofsChanged = true; fresh = true; }
         // A mark goes only once its proof is on disk: until then it is the only record of who started the run.

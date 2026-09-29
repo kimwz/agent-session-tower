@@ -149,8 +149,9 @@ test('a launcher script’s child holds the session; a mark whose process is gon
   const parents = new Map([[501, 500]]);
   assert.equal(matchLaunchMarks([mark], owners, new Map([[500, 10_000], [501, 10_100]]), new Set([`codex:${CHILD}`]), parents).proofs.get(`codex:${CHILD}`), `claude:${LAUNCHER}`);
   assert.equal(matchLaunchMarks([mark], owners, new Map([[500, 10_000], [501, 10_100]]), new Set(), parents).used.length, 0, 'kept until the session is listed');
-  const gone = matchLaunchMarks([mark], new Map(), new Map([[9, 1]]), new Set(), parents);
+  const gone = matchLaunchMarks([mark], new Map(), new Map([[9, 1]]), new Set(), parents, mark.at + 5000);
   assert.deepEqual([gone.proofs.size, gone.used.length], [0, 1]);
+  assert.equal(matchLaunchMarks([mark], new Map(), new Map([[9, 1]]), new Set(), parents, mark.at - 3000).used.length, 0, 'a process list older than the mark never saw it');
   assert.equal(matchLaunchMarks([mark], new Map(), new Map(), new Set(), parents).used.length, 0, 'no process list at all proves nothing gone');
 });
 
@@ -158,4 +159,26 @@ test('Tower’s own processes start without the identity of the turn that restar
   const { withoutLauncher } = await import('../../../server/sessions/launch-env.js');
   const env = withoutLauncher({ PATH: '/state/runtime/launch-shims:/usr/bin:/other/runtime/launch-shims/:/bin', TOWER_LAUNCH_MARKS: '/m', CLAUDE_CODE_SESSION_ID: 'a', CODEX_THREAD_ID: 'b', HOME: '/h' });
   assert.deepEqual(env, { PATH: '/usr/bin:/bin', HOME: '/h' });
+});
+
+test('a helper’s own helper finds the real program too', async t => {
+  const f = await shims(t);
+  // The real claude runs claude again, as a helper that starts a helper does.
+  await writeFile(join(f.real, 'claude'), `#!${process.execPath}\nconst { spawnSync } = require('node:child_process');\nif (process.argv.includes('inner')) { console.log('inner ran'); process.exit(0); }\nconst r = spawnSync('claude', ['-p', 'inner'], { encoding: 'utf8' });\nprocess.stdout.write(r.stdout); process.exit(r.status ?? 9);\n`);
+  const result = f.run('claude', ['-p', 'outer'], { CLAUDE_CODE_SESSION_ID: LAUNCHER });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /inner ran/);
+  assert.equal((await f.marks()).length, 2, 'both runs are marked');
+});
+
+test('a program started through a small shell script (a version manager) still finds itself for its helpers', async t => {
+  const f = await shims(t);
+  const binary = join(f.root, 'versions', 'claude-bin');
+  await mkdir(join(f.root, 'versions'));
+  await writeFile(binary, `#!${process.execPath}\nconst { spawnSync } = require('node:child_process');\nif (process.argv.includes('inner')) { console.log('inner ran'); process.exit(0); }\nconst r = spawnSync('/bin/sh', ['-c', 'claude -p inner'], { encoding: 'utf8' });\nprocess.stdout.write(r.stdout); process.stderr.write(r.stderr); process.exit(r.status ?? 9);\n`);
+  await chmod(binary, 0o755);
+  await writeFile(join(f.real, 'claude'), `#!/bin/sh\nexec ${binary} "$@"\n`);
+  const result = f.run('claude', ['-p', 'outer'], { CLAUDE_CODE_SESSION_ID: LAUNCHER });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /inner ran/);
 });
