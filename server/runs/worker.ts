@@ -1,3 +1,4 @@
+import { installLaunchShims, launchMarksDir } from '../sessions/launch-marks.js';
 import { finishedAutomationSessionIds } from '../../shared/automation-sessions.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, unlink, writeFile } from 'node:fs/promises';
@@ -426,9 +427,11 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   let release: () => Promise<void>;
   try { release = await acquireStateLock(paths.runtime, 0); }
   catch (error) { if (error instanceof MonitorAlreadyRunning) return; throw error; }
-  const sessions = new SessionService({ launchProofs: join(stateDir, 'agent-launches.json') });
+  const sessions = new SessionService({ launchProofs: join(stateDir, 'agent-launches.json'), launchMarks: launchMarksDir(stateDir) });
+  // Without the shims a helper's launcher is proven only while the process tree shows it; the worker still starts.
+  const shims = await installLaunchShims(stateDir).catch(error => { console.error(`Launch shims were not installed: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
   const terminals = new WorkspaceTerminals({ keepAliveOnDisconnect: true });
-  const runs = new RunManager({ stateDir, getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true),
+  const runs = new RunManager({ stateDir, ...(shims ? { launchMarks: { shims, marks: launchMarksDir(stateDir) } } : {}), getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true),
     openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }), trustWorkspace });
   // Only the Tower on the account's own state folder keeps its Claude Code and Codex current, so two never update one install.
   // It is there even with automatic updates off: an install a previous worker left running is still waited for.

@@ -1,3 +1,5 @@
+// First: Tower's processes never carry the identity of an agent turn that started them.
+import './sessions/launch-env.js';
 import { hostname, homedir } from 'node:os';
 import { stat, truncate } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
