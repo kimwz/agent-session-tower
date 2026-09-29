@@ -20,7 +20,19 @@ class FakeSocket {
   onclose?: () => void;
   private readonly closeListeners: Array<() => void> = [];
   constructor(readonly url: string) { FakeSocket.all.push(this); }
-  send(message: string): void { assert.equal(this.readyState, 1, 'sent only while open'); this.sent.push(message); }
+  /** Answers each commit as ElevenLabs does (see `write`), instead of the test answering the last one itself. */
+  autoCommit = false;
+  private said = '';
+  private committedLength = 0;
+  send(message: string): void {
+    assert.equal(this.readyState, 1, 'sent only while open');
+    this.sent.push(message);
+    if (this.autoCommit && JSON.parse(message).commit === true) queueMicrotask(() => this.commitSaid());
+  }
+  /** ElevenLabs writes down `said` (all said so far): its partial writing covers only what came after the last commit. */
+  write(said: string): void { this.said = said; this.message({ message_type: 'partial_transcript', text: said.slice(this.committedLength).trim() }); }
+  /** ElevenLabs commits what it wrote since the last commit, as it also does by itself after about 36 seconds. */
+  commitSaid(): void { const text = this.said.slice(this.committedLength).trim(); this.committedLength = this.said.length; this.message({ message_type: 'committed_transcript', text }); }
   /** Only asks: the connection closes when the test says so, as a slow upload would. */
   close(): void { if (this.readyState < 2) this.readyState = 2; }
   addEventListener(type: string, listener: () => void): void { if (type === 'close') this.closeListeners.push(listener); }
@@ -85,7 +97,6 @@ let tokens = 0;
 let tokenFailures = 0;
 /** How the web judges a pause (Jev in real life): by default, finished. */
 let turnEnd: (body: { text: string; pauseMs: number }) => unknown = () => ({ finished: 0.9 });
-let nudgeAnswer: unknown = {};
 
 Object.assign(globalThis, {
   window: { isSecureContext: true, navigator: globalThis.navigator, dispatchEvent() {} },
@@ -100,8 +111,7 @@ Object.assign(globalThis, {
     const reply = path.endsWith('/on') ? { session: 'session-1' }
       : path.endsWith('/token') ? { tokenId: `token-${++tokens}`, url: 'wss://stt.test', expiresAt: Date.now() + 900_000 }
       : path.endsWith('/request') ? requestAnswer
-      : path.endsWith('/finished') ? await turnEnd(body as { text: string; pauseMs: number })
-      : path.endsWith('/nudge') ? nudgeAnswer : true;
+      : path.endsWith('/finished') ? await turnEnd(body as { text: string; pauseMs: number }) : true;
     return { ok: true, status: 200, json: async () => reply };
   },
 });
@@ -123,7 +133,6 @@ async function harness({ rate = 16_000, frame = 160, failTokens = 0 } = {}) {
   posts.length = 0;
   requestAnswer = {};
   turnEnd = () => ({ finished: 0.9 });
-  nudgeAnswer = {};
   tokenFailures = failTokens;
   mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 1_000_000 });
   let view: View | undefined;
@@ -365,7 +374,6 @@ test('what the browser will not play by itself can be played with a click, told 
 const commits = (socket: FakeSocket) => socket.sent.filter(message => JSON.parse(message).commit === true).length;
 const requests = () => posts.filter(post => post.path.endsWith('/request')).map(post => post.body.text);
 const judged = () => posts.filter(post => post.path.endsWith('/finished')).map(post => post.body as { text: string; pauseMs: number });
-const nudges = () => posts.filter(post => post.path.endsWith('/nudge')).length;
 
 /** The owner starts speaking and ElevenLabs has written down `text` so far. */
 async function startSpeaking(page: Awaited<ReturnType<typeof harness>>, text: string): Promise<FakeSocket> {
@@ -402,49 +410,35 @@ test('a pause mid-thought is not the end: each pause is judged, speaking on cont
   } finally { page.end(); }
 });
 
-test('a long unfinished pause gets one short sign that the owner is heard: it ends nothing, and speaking over it stops it', async () => {
+test('a long unfinished pause plays nothing and ends nothing: nothing of the speaker comes back into the microphone, and speaking on continues', async () => {
   const page = await harness();
   try {
+    // 2026-09-29: a recorded "계속 말씀하세요" played in such a pause came back through the microphone and was written into the request.
     turnEnd = ({ text }) => ({ finished: text.endsWith('줘') ? 0.9 : 0.1 });
-    nudgeAnswer = { say: { ...page.say('nudge', 'ack'), text: '계속 말씀하세요, 듣고 있어요.' } };
     const socket = await startSpeaking(page, '그러니까 음');
-    await page.hearSlowly(0.002, 4_000);
-    assert.equal(nudges(), 0, 'not yet');
-    await page.hearSlowly(0.002, 1_500);
-    assert.equal(nudges(), 1);
-    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/nudge');
+    await page.hearSlowly(0.002, 8_000);
+    assert.deepEqual(page.audio.played.slice(1), [], 'nothing is played');
+    assert.ok(!posts.some(post => post.path.includes('nudge')));
+    assert.deepEqual([commits(socket), requests().length, page.view().capturing, page.view().waiting], [0, 0, true, true]);
     const sent = socket.sent.length;
-    await page.hearSlowly(0.002, 300);
-    assert.equal(socket.sent.length, sent, 'what the microphone hears while the sign plays is not sent');
-
-    const paused = page.audio.paused.length;
     await page.hearSlowly(0.1, 400);
-    assert.ok(page.audio.paused.length > paused, 'speaking over the sign stops it');
-    assert.ok(socket.sent.length > sent, 'what they say is sent, the moment before included');
-    assert.deepEqual([commits(socket), requests().length, page.view().capturing], [0, 0, true], 'the sign ended nothing');
-
+    assert.ok(socket.sent.length > sent, 'what they say next is sent');
     socket.message({ message_type: 'partial_transcript', text: '그러니까 음 내일 배포 일정 잡아 줘' });
     await page.hearSlowly(0.002, 1_500);
     assert.equal(commits(socket), 1);
     socket.message({ message_type: 'committed_transcript', text: '그러니까 음 내일 배포 일정 잡아 줘' });
     await flush();
     assert.deepEqual(requests(), ['그러니까 음 내일 배포 일정 잡아 줘']);
-    assert.equal(nudges(), 1, 'once per utterance');
   } finally { page.end(); }
 });
 
-test('the sign played through leaves the utterance open, and a very long unfinished pause keeps what was said unsent to go on from', async () => {
+test('a very long unfinished pause keeps what was said unsent to go on from', async () => {
   const page = await harness();
   try {
     turnEnd = ({ text }) => ({ finished: text === '내일 회의는 오후 세 시로 잡아 줘' ? 0.9 : 0.1 });
-    nudgeAnswer = { say: { ...page.say('nudge', 'ack'), text: '계속 말씀하세요, 듣고 있어요.' } };
     const socket = await startSpeaking(page, '내일 회의는');
-    await page.hearSlowly(0.002, 5_500);
-    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/nudge');
-    page.audio.onended!();
-    const sent = socket.sent.length;
-    await page.hearSlowly(0.002, 500);
-    assert.ok(socket.sent.length > sent, 'listening goes on after the sign');
+    await page.hearSlowly(0.002, 6_000);
+    assert.equal(commits(socket), 0);
     await page.hearSlowly(0.002, 15_000);
     assert.equal(commits(socket), 1, 'written down after twenty seconds, not sent');
     socket.message({ message_type: 'committed_transcript', text: '내일 회의는' });
@@ -550,21 +544,24 @@ test('a finished request after many pauses still goes: once judgments run out, t
     // and with none left to ask at the longer pause, it waited twenty seconds and was kept unsent.
     turnEnd = () => ({ finished: 0.48 });
     const socket = await startSpeaking(page, '그,');
+    socket.autoCommit = true;
     let said = '그,';
     for (let pause = 0; pause < 19; pause++) {
       await page.hearSlowly(0.002, 1_200);
       said += ` 말 ${pause}`;
       await page.hearSlowly(0.1, 400);
-      socket.message({ message_type: 'partial_transcript', text: said });
+      socket.write(said);
     }
     said += ' 신난 목소리로 대화할 수 있도록.';
-    socket.message({ message_type: 'partial_transcript', text: said });
-    assert.equal(commits(socket), 0);
+    socket.write(said);
+    assert.ok(commits(socket) >= 1, 'long enough to be committed in parts at its pauses');
+    const parts = commits(socket);
     await page.hearSlowly(0.002, 1_200);
     assert.equal(judged().length, 20, 'the finished request had the last judgment');
+    assert.equal(judged().at(-1)!.text, said, 'judged as a whole, its parts included');
+    assert.equal(page.view().capturing, true);
     await page.hearSlowly(0.002, 2_300);
-    assert.equal(commits(socket), 1, 'sent within seconds, not kept unsent after twenty');
-    socket.message({ message_type: 'committed_transcript', text: said });
+    assert.equal(commits(socket), parts + 1, 'sent within seconds, not kept unsent after twenty');
     await flush();
     assert.deepEqual(requests(), [said]);
     assert.ok(judged().length <= 20);
@@ -574,26 +571,26 @@ test('a finished request after many pauses still goes: once judgments run out, t
     // Its last judgment sure that it is not finished, it waits for the owner however many judgments were used.
     turnEnd = ({ text }) => ({ finished: text.endsWith('그리고') ? 0.05 : 0.48 });
     const next = await startSpeaking(page, '그,');
+    next.autoCommit = true;
     let more = '그,';
     for (let pause = 0; pause < 19; pause++) {
       await page.hearSlowly(0.002, 1_200);
       more += ` 말 ${pause}`;
       await page.hearSlowly(0.1, 400);
-      next.message({ message_type: 'partial_transcript', text: more });
+      next.write(more);
     }
     more += ' 이것도 고쳐 주고 그리고';
-    next.message({ message_type: 'partial_transcript', text: more });
+    next.write(more);
     await page.hearSlowly(0.002, 4_500);
     assert.equal(judged().length, 40);
-    assert.equal(commits(next), 0, 'not sent at the longer pause');
+    assert.deepEqual([page.view().capturing, requests().length], [true, 1], 'not sent at the longer pause');
   } finally { page.end(); }
 });
 
-test('words still being written down in what seemed a pause are speech too quiet to hear: the pause starts over, unjudged as long and without the sign', async () => {
+test('words still being written down in what seemed a pause are speech too quiet to hear: the pause starts over, unjudged as long', async () => {
   const page = await harness();
   try {
     turnEnd = ({ text }) => ({ finished: text.endsWith('줄래?') ? 0.9 : 0.05 });
-    nudgeAnswer = { say: { ...page.say('nudge', 'ack'), text: '계속 말씀하세요, 듣고 있어요.' } };
     const socket = await startSpeaking(page, '그, 마스터 채팅 음성으로 할 때,');
     // The owner goes on softly: the microphone stays below speech, but ElevenLabs keeps writing.
     let said = '그, 마스터 채팅 음성으로 할 때,';
@@ -603,7 +600,6 @@ test('words still being written down in what seemed a pause are speech too quiet
       socket.message({ message_type: 'partial_transcript', text: said });
     }
     await page.hearSlowly(0.002, 1_000);
-    assert.equal(nudges(), 0, 'not told to go on while speaking');
     assert.ok(judged().length <= 3, `words a second apart are not each judged (${judged().length})`);
     assert.ok(judged().every(body => body.pauseMs < 3_000), `judged as short pauses: ${judged().map(body => body.pauseMs).join(', ')}`);
     assert.equal(commits(socket), 0);
@@ -652,84 +648,167 @@ test('out of judgments, a finished request goes even after a long pause judged u
   const page = await harness();
   try {
     turnEnd = () => ({ finished: 0.3 });
-    nudgeAnswer = { say: { ...page.say('nudge', 'ack'), text: '계속 말씀하세요, 듣고 있어요.' } };
     // Each pause gets its first judgment and the one at three seconds: ten pauses use all twenty.
     const socket = await startSpeaking(page, '그,');
+    socket.autoCommit = true;
     let said = '그,';
     for (let pause = 0; pause < 10; pause++) {
       await page.hearSlowly(0.002, 3_300);
       said += ` 말 ${pause}`;
       await page.hearSlowly(0.1, 400);
-      socket.message({ message_type: 'partial_transcript', text: said });
+      socket.write(said);
     }
     assert.equal(judged().length, 20);
     assert.ok(judged().at(-1)!.pauseMs >= 3_000, 'the last one was at the longer pause');
-    // It trails off: no more judgments, and it is not sent however long the owner thinks (the sign plays, then it waits unsent).
+    // It trails off: no more judgments, and it is not sent however long the owner thinks (it waits unsent).
     said += ' 그러니까 음';
-    socket.message({ message_type: 'partial_transcript', text: said });
-    await page.hearSlowly(0.002, 4_500);
-    assert.deepEqual([commits(socket), judged().length], [0, 20]);
-    await page.hearSlowly(0.002, 1_000);
-    assert.equal(nudges(), 1);
-    page.audio.onended!();
+    socket.write(said);
+    const parts = commits(socket);
+    await page.hearSlowly(0.002, 5_500);
+    assert.deepEqual([commits(socket), judged().length, page.view().capturing], [parts, 20, true]);
     await page.hearSlowly(0.002, 15_000);
-    assert.equal(commits(socket), 1, 'kept unsent after twenty seconds');
-    socket.message({ message_type: 'committed_transcript', text: said });
+    assert.equal(page.view().capturing, false, 'kept unsent after twenty seconds');
     await flush();
     socket.closed();
     await flush();
-    assert.deepEqual(requests(), []);
+    assert.deepEqual([requests(), page.view().draft], [[], said]);
 
     // The same, with a finished request: it goes at three seconds and the wait for its ending, not after twenty.
     page.voice.discard();
     const next = await startSpeaking(page, '그,');
+    next.autoCommit = true;
     let more = '그,';
     for (let pause = 0; pause < 10; pause++) {
       await page.hearSlowly(0.002, 3_300);
       more += ` 말 ${pause}`;
       await page.hearSlowly(0.1, 400);
-      next.message({ message_type: 'partial_transcript', text: more });
+      next.write(more);
     }
     assert.equal(judged().length, 40);
     more += ' 로그 보여 줘';
-    next.message({ message_type: 'partial_transcript', text: more });
+    next.write(more);
     await page.hearSlowly(0.002, 3_000);
-    assert.equal(commits(next), 0, 'not before three seconds');
+    assert.equal(page.view().capturing, true, 'not before three seconds');
     await page.hearSlowly(0.002, 500);
-    assert.equal(commits(next), 1);
-    next.message({ message_type: 'committed_transcript', text: more });
     await flush();
     assert.deepEqual(requests(), [more]);
   } finally { page.end(); }
 });
 
-test('the owner going on quietly calls off the sign: one on its way is not played, one playing stops and what was heard meanwhile is sent', async () => {
+// ─── long utterances ───────────────────────────────────────────────────────────────────────────────────────────
+
+test('a part ElevenLabs commits by itself mid-speech is kept: the request is the whole utterance, not its first part', async () => {
+  const page = await harness();
+  try {
+    // 2026-09-29: ElevenLabs committed the first ~36 seconds by itself; the page sent only those and lost the rest.
+    turnEnd = ({ text }) => ({ finished: text.endsWith('따로 맡겨 줘.') ? 0.9 : 0.1 });
+    const socket = await startSpeaking(page, '첫 응답을 뭐라고 할지');
+    socket.message({ message_type: 'committed_transcript', text: '첫 응답을 뭐라고 할지' });
+    await page.hearSlowly(0.1, 400);
+    socket.message({ message_type: 'partial_transcript', text: '정하는 작업도 따로 맡겨 줘.' });
+    assert.equal(page.view().heard, '첫 응답을 뭐라고 할지 정하는 작업도 따로 맡겨 줘.', 'shown whole');
+    await page.hearSlowly(0.002, 1_500);
+    assert.equal(judged().at(-1)!.text, '첫 응답을 뭐라고 할지 정하는 작업도 따로 맡겨 줘.', 'judged whole');
+    assert.equal(commits(socket), 1);
+    assert.deepEqual(requests(), [], 'waits for the part it committed');
+    socket.message({ message_type: 'committed_transcript', text: '정하는 작업도 따로 맡겨 줘.' });
+    await flush();
+    assert.deepEqual(requests(), ['첫 응답을 뭐라고 할지 정하는 작업도 따로 맡겨 줘.']);
+  } finally { page.end(); }
+});
+
+test('a long utterance is committed in parts at its pauses, a part coming back does not restart the pause, and every part is waited for', async () => {
+  const page = await harness();
+  try {
+    turnEnd = ({ text }) => ({ finished: text.endsWith('보여 줘') ? 0.9 : 0.1 });
+    const socket = await startSpeaking(page, '');
+    let said = '';
+    for (let part = 0; part < 4; part++) {
+      said += ` 설명 ${part}`;
+      await page.hearSlowly(0.1, 3_900);
+      socket.message({ message_type: 'partial_transcript', text: said.trim() });
+      await page.hearSlowly(0.002, 1_800);
+    }
+    assert.equal(commits(socket), 1, 'past fifteen seconds, the pause commits what was said so far');
+    socket.message({ message_type: 'committed_transcript', text: '설명 0, 설명 1 설명 2 설명 3' });
+    await page.hearSlowly(0.1, 2_000);
+    socket.message({ message_type: 'partial_transcript', text: '로그 보여 줘' });
+    await page.hearSlowly(0.002, 1_500);
+    assert.equal(commits(socket), 2, 'finished: the final commit');
+    assert.equal(judged().at(-1)!.text, '설명 0, 설명 1 설명 2 설명 3 로그 보여 줘');
+    socket.message({ message_type: 'committed_transcript', text: '로그 보여 줘' });
+    await flush();
+    assert.deepEqual(requests(), ['설명 0, 설명 1 설명 2 설명 3 로그 보여 줘']);
+
+    // A part committed in a pause, back while the pause goes on, is its final wording and not new quiet speech.
+    socket.closed();
+    await flush();
+    const next = await startSpeaking(page, '');
+    for (let part = 0; part < 4; part++) { await page.hearSlowly(0.1, 3_900); await page.hearSlowly(0.002, 1_800); }
+    next.message({ message_type: 'partial_transcript', text: '배포 상태 알려 주고' });
+    await page.hearSlowly(0.1, 400);
+    await page.hearSlowly(0.002, 1_100);
+    assert.equal(commits(next), 1);
+    const at = judged().length;
+    await page.hearSlowly(0.002, 1_000);
+    next.message({ message_type: 'committed_transcript', text: '배포 상태 알려 주고,' });
+    await page.hearSlowly(0.002, 1_600);
+    assert.ok(judged().slice(at).some(body => body.pauseMs >= 3_000), 'judged as the longer pause it is');
+  } finally { page.end(); }
+});
+
+test('speech with no pause is committed before ElevenLabs would do it by itself, and an utterance may run past a minute', async () => {
   const page = await harness();
   try {
     turnEnd = () => ({ finished: 0.1 });
-    let answerSign!: (value: unknown) => void;
-    nudgeAnswer = new Promise(resolve => { answerSign = resolve; });
-    const socket = await startSpeaking(page, '내일 회의는');
-    await page.hearSlowly(0.002, 5_300);
-    assert.equal(nudges(), 1, 'asked for');
-    socket.message({ message_type: 'partial_transcript', text: '내일 회의는 오후' });
-    answerSign({ say: { ...page.say('late', 'ack'), text: '계속 말씀하세요, 듣고 있어요.' } });
-    await page.hearSlowly(0.002, 300);
-    assert.ok(!page.audio.played.includes('/api/master/voice/audio/late'), 'a sign that came back late is not played');
+    const socket = await startSpeaking(page, '');
+    socket.autoCommit = true;
+    // Loud throughout, with syllable gaps too short for the gate's pause.
+    const at: number[] = [];
+    let said = '';
+    for (let second = 0; second < 95; second++) {
+      said = `${said} 말 ${second}`.trim();
+      socket.write(said);
+      await page.hear(0.1, 900);
+      await page.hear(0.002, 100);
+      if (commits(socket) > at.length) at.push(socket.seconds());
+    }
+    assert.equal(at.length, 2, `committed in parts (${at.join(', ')})`);
+    assert.ok(at[0] >= 30 && at[0] < 34, `the first before 36 seconds (${at[0]})`);
+    assert.ok(at[1] - at[0] < 34, 'the next one too');
+    assert.deepEqual([page.view().capturing, requests().length], [true, 0], 'not cut at a minute');
 
-    // A later long pause may have its sign; words written while it plays stop it, and nothing heard meanwhile is lost.
-    nudgeAnswer = { say: { ...page.say('second', 'ack'), text: '계속 말씀하세요, 듣고 있어요.' } };
-    await page.hearSlowly(0.002, 5_300);
-    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/second');
-    const sent = socket.sent.length;
-    const paused = page.audio.paused.length;
-    await page.hearSlowly(0.002, 200);
-    assert.equal(socket.sent.length, sent);
-    socket.message({ message_type: 'partial_transcript', text: '내일 회의는 오후 세 시로' });
+    // A moment quiet enough (though no pause) past thirty seconds is where the next part is cut.
+    for (let second = 0; second < 32 && commits(socket) === 2; second++) { await page.hear(0.1, 400); await page.hear(0.002, 600); }
+    const third = socket.seconds() - at[1];
+    assert.ok(commits(socket) === 3 && third >= 30 && third < 32, `cut at a quiet moment (${third})`);
+    socket.write(`${said} 마지막 부분`);
+    await page.hearSlowly(0.002, 1_500);
+    turnEnd = () => ({ finished: 0.9 });
+    await page.hearSlowly(0.002, 2_000);
     await flush();
-    assert.ok(page.audio.paused.length > paused, 'the sign stops');
-    assert.ok(socket.sent.length > sent, 'what the microphone heard while it played is sent');
-    await page.hearSlowly(0.002, 200);
-    assert.deepEqual([commits(socket), requests().length], [0, 0]);
+    assert.equal(requests().length, 1);
+    assert.equal(requests()[0], `${said} 마지막 부분`, 'the whole of it, its parts in order');
+  } finally { page.end(); }
+});
+
+test('a short request is committed once, and a final writing that is late or cut off still sends what was written down', async () => {
+  const page = await harness();
+  try {
+    const socket = await startSpeaking(page, '빌드 상태 알려 줘');
+    await page.hearSlowly(0.002, 1_500);
+    assert.equal(commits(socket), 1, 'one commit, at the pause');
+    socket.message({ message_type: 'committed_transcript', text: '빌드 상태 알려 줘' });
+    await flush();
+    assert.deepEqual(requests(), ['빌드 상태 알려 줘']);
+    socket.closed();
+    await flush();
+
+    const late = await startSpeaking(page, '테스트 결과 보여 줘');
+    await page.hearSlowly(0.002, 1_500);
+    assert.equal(commits(late), 1);
+    mock.timers.tick(4_000);
+    await flush();
+    assert.deepEqual(requests().at(-1), '테스트 결과 보여 줘', 'sent with what was written down so far');
   } finally { page.end(); }
 });

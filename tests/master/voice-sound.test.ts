@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { base64, endHoldMs, END_HOLD_MS, fitUtterance, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from '../../client/src/master/voice-sound.js';
+import { base64, endHoldMs, END_HOLD_MS, fitUtterance, joinSegments, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from '../../client/src/master/voice-sound.js';
 
 /** Feeds the gate a loudness for a while, 10 ms a frame (or `step`: a worklet's 128 samples at 48 kHz are 2.67 ms), and returns its events. */
 function feed(gate: SpeechGate, rms: number, ms: number, from: number, step = 10): { events: Array<{ at: number; event: string }>; end: number } {
@@ -47,13 +47,13 @@ test('listening ends after its minutes, a notice is judged with its moment to ob
   assert.deepEqual([...pcm], [0, 16383, -16384, 32767, -32768, 32767]);
   assert.equal(toPcm16(new Float32Array(48_000), 48_000).length, 16_000, 'resampled to 16 kHz');
   assert.equal(base64(new Uint8Array([104, 105])), 'aGk=');
-  // An utterance never sends more than its 60 seconds, the silent tail that commits it included.
-  assert.equal(UTTERANCE_BYTES, 1_920_000);
+  // An utterance never sends more than its three minutes, the silent tail that commits it included.
+  assert.equal(UTTERANCE_BYTES, 5_760_000);
   assert.equal(fitUtterance(0, 3_200, 640), 3_200);
   assert.equal(fitUtterance(UTTERANCE_BYTES - 640 - 1_001, 3_200, 640), 1_000, 'whole samples only');
   assert.equal(fitUtterance(UTTERANCE_BYTES - 640, 3_200, 640), 0);
   let sent = 0;
-  for (let chunk = 0; chunk < 700; chunk++) sent += fitUtterance(sent, 3_200, 640);
+  for (let chunk = 0; chunk < 1_900; chunk++) sent += fitUtterance(sent, 3_200, 640);
   assert.equal(sent + 640, UTTERANCE_BYTES);
 });
 
@@ -106,4 +106,13 @@ test('speech made of syllables with short gaps between them starts at its first 
     assert.deepEqual(heard, [], `keys typed ${loud + quiet} ms apart are not speech`);
     time = feed(clicks, 0.002, 1_000, time, 128 / 48).end;
   }
+});
+
+test('the parts of one utterance join into one text, a word cut between two parts once', () => {
+  assert.equal(joinSegments(['그리고 미리 녹음해 둔', '', '중간말은 빼 줘.']), '그리고 미리 녹음해 둔 중간말은 빼 줘.', 'an empty (silent) part adds nothing');
+  // As ElevenLabs writes a commit that falls mid-word (measured 2026-09-29).
+  assert.equal(joinSegments(['그리고 마지막으로-', '-모든 구간이']), '그리고 마지막으로 모든 구간이');
+  assert.equal(joinSegments(['열아홉, 스-', '스물, 스물하나']), '열아홉, 스물, 스물하나');
+  assert.equal(joinSegments([' 하나 ', '둘']), '하나 둘');
+  assert.equal(joinSegments([]), '');
 });

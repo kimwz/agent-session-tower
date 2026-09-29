@@ -12,7 +12,7 @@ import { MasterSession } from '../../server/master/session.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/master/tower-client.js';
 import { MasterVoice, migrate, type VoiceTiming } from '../../server/master/voice.js';
-import { isNoise, READ_CHARS, speakable, VOICE_ACKS, VOICE_NUDGE, VOICE_REST, VOICE_SAMPLE, voiced, voicedParts } from '../../server/master/voice-text.js';
+import { isNoise, READ_CHARS, speakable, VOICE_ACKS, VOICE_REST, VOICE_SAMPLE, voiced, voicedParts } from '../../server/master/voice-text.js';
 import type { MasterEntry, MasterSpeak, MasterStreamEvent } from '../../shared/master.js';
 import type { ChatMessage, Run, Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
@@ -222,16 +222,16 @@ test('voice needs an ElevenLabs key; tokens come from it, each reserving an utte
   const file = (h.voice as unknown as { file: { tokens: Array<{ issuedAt: number }> } }).file;
   for (const token of file.tokens) token.issuedAt -= 17 * 60_000;
   (h.voice as unknown as { settleExpired(now: number): void }).settleExpired(Date.now());
-  assert.equal(h.voice.status().today.sttSeconds, 6 + 60 * 2);
+  assert.equal(h.voice.status().today.sttSeconds, 6 + 180 * 2);
   assert.equal(file.tokens.length, 0);
 });
 
 test('a daily limit holds every unsettled token and every reading before it starts, so it is never passed', async t => {
-  const long = '오늘 끝난 일은 세 가지입니다. 첫째는 배포 준비, 둘째는 테스트 정리, 셋째는 문서 수정입니다. 남은 일은 없습니다. 더 알고 싶으시면 말씀해 주세요.';
-  const h = await harness(t, { settings: { voice: { dailyDollars: 0.01 } }, steps: [long] });
+  const long = `오늘 끝난 일은 세 가지입니다. ${'첫째는 배포 준비, 둘째는 테스트 정리, 셋째는 문서 수정입니다. '.repeat(4)}남은 일은 없습니다. 더 알고 싶으시면 말씀해 주세요.`;
+  const h = await harness(t, { settings: { voice: { dailyDollars: 0.03 } }, steps: [long] });
   const session = on(h);
   const token = await h.voice.voiceToken({ session });
-  // 60 seconds held (about $0.0065): a second would pass one cent.
+  // Three minutes held (about $0.0195): a second would pass the limit.
   await assert.rejects(h.voice.voiceToken({ session }), { statusCode: 409 });
   await h.voice.voiceUsage({ tokenId: token.tokenId, seconds: 2 });
   await h.voice.voiceToken({ session });
@@ -242,7 +242,7 @@ test('a daily limit holds every unsettled token and every reading before it star
   const entry = await masterEntry(h, /세 가지입니다/);
   await until(() => h.speakOf(entry.id)?.state === 'unspoken');
   assert.equal(h.labs.speeches.filter(item => String(item.body.text).includes('세 가지입니다')).length, 0);
-  assert.ok(h.voice.status().today.dollars <= 0.01);
+  assert.ok(h.voice.status().today.dollars <= 0.03);
 });
 
 test('what the owner said is a request like a typed one, answered first with a recorded reply that is made once', async t => {
@@ -315,21 +315,11 @@ test('voices are listed and heard with only a key, before the master session sta
   assert.match((await h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' })).audio, /preview-/);
 });
 
-test('a long pause gets a recorded sign that the owner is still heard: made once, never a request, and only for the voice session now', async t => {
+test('the web asks whether a session is the voice session now before judging a pause for it', async t => {
   const h = await harness(t, { steps: [] });
   const session = on(h);
   assert.equal(h.voice.voiceKnown({ session }), true);
   assert.equal(h.voice.voiceKnown({ session: 'not-this-one' }), false);
-  const first = await h.voice.voiceNudge({ session });
-  assert.equal(first.say?.text, VOICE_NUDGE);
-  assert.equal(first.say?.kind, 'ack', 'reported to nobody, as a short reply');
-  assert.match(first.say!.audio, /^\/api\/master\/voice\/audio\/clip-[a-f0-9]{64}$/);
-  const made = h.labs.speeches.length;
-  const again = await h.voice.voiceNudge({ session });
-  assert.equal(again.say?.audio, first.say?.audio);
-  assert.equal(h.labs.speeches.length, made, 'played from its recording');
-  assert.equal(h.prompts.length, 0, 'nothing is asked of the master');
-  assert.deepEqual(await h.voice.voiceNudge({ session: 'not-this-one' }), { stale: true });
 });
 
 test('an answer to a spoken request is read aloud where voice is on and marked played; with nobody to hear it, it is marked so', async t => {

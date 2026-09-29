@@ -239,11 +239,10 @@ test('voice goes to the host through the master routes, turning it on with wheth
   await post('/api/master/voice/request', { session: 's', clientMessageId: 'message-0001', text: '안녕', viewContext: { sessionId: 'x' }, local: true });
   await post('/api/master/voice/activity', { session: 's', speaking: true, sinceSpeechMs: 0, extra: 'ignored' });
   await post('/api/master/voice/played', { session: 's', id: 'n', result: 'played' });
-  await post('/api/master/voice/nudge', { session: 's' });
   assert.deepEqual(await (await post('/api/master/voice/finished', { session: 's', text: '배포해 줘', pauseMs: 1_000 })).json(), { unavailable: true }, 'without fast judgments the page decides');
   await post('/api/master/voice/off', { session: 's' });
   assert.equal((await post('/api/master/voice/other', {})).status, 404);
-  assert.deepEqual(calls.map(([method]) => method), ['voiceOn', 'voicePresence', 'voiceToken', 'voiceUsage', 'voiceRequest', 'voiceActivity', 'voicePlayed', 'voiceNudge', 'voiceOff']);
+  assert.deepEqual(calls.map(([method]) => method), ['voiceOn', 'voicePresence', 'voiceToken', 'voiceUsage', 'voiceRequest', 'voiceActivity', 'voicePlayed', 'voiceOff']);
   assert.equal(calls[0][1].local, false, 'the server says where the page is, not the page');
   assert.equal(calls[4][1].local, false);
   assert.deepEqual(calls[5][1], { session: 's', speaking: true, sinceSpeechMs: 0 });

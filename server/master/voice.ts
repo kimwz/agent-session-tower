@@ -7,7 +7,7 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { ElevenLabs, VoiceInfo } from './elevenlabs.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
-import { isNoise, speakable, VOICE_ACKS, VOICE_NUDGE, VOICE_SAMPLE, VOICE_WORKING, voiced, voicedParts } from './voice-text.js';
+import { isNoise, speakable, VOICE_ACKS, VOICE_SAMPLE, VOICE_WORKING, voiced, voicedParts } from './voice-text.js';
 
 /** Estimated prices: ElevenLabs realtime speech-to-text per second, text-to-speech per character by model. */
 const STT_DOLLARS_PER_SECOND = 0.39 / 3600;
@@ -15,7 +15,7 @@ const ttsDollarsPerChar = (model: string) => (model === 'eleven_v3' ? 0.1 : 0.05
 /** GPT-Live's price, for voice time kept from 1.52–1.55. */
 const LIVE_DOLLARS_PER_SECOND = 0.05 / 60;
 /** One thing said is at most this long (the page stops sending there); each token reserves it until settled. */
-const UTTERANCE_SECONDS = 60;
+const UTTERANCE_SECONDS = 180;
 const TOKEN_LIFE_MS = 16 * 60_000;
 const TOKENS_PER_SESSION = 2;
 const TOKENS_PER_MINUTE = 20;
@@ -311,18 +311,6 @@ export class MasterVoice {
 
   /** Whether `session` is the voice session now (for a judgment the web makes about it). */
   voiceKnown(input: { session: unknown }): boolean { return Boolean(this.current(input.session)); }
-
-  /**
-   * A short sign that the owner is still being listened to, for a long pause in the middle of what they say: played
-   * by the page only, from a recording, and never a request, an answer or the end of what is being said.
-   */
-  async voiceNudge(input: { session: unknown }): Promise<{ stale?: true; say?: MasterSay }> {
-    const session = this.current(input.session);
-    if (!session) return { stale: true };
-    session.seenAt = Date.now();
-    const say = await this.clipSay(session, VOICE_NUDGE, 'ack').catch(() => undefined);
-    return say ? { say } : {};
-  }
 
   /** A spoken request takes a while: said once, from a recording. */
   async working(origin: VoiceOrigin): Promise<void> {

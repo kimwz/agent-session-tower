@@ -124,8 +124,26 @@ export function endHoldMs(heard: string): number {
   return END_HOLD_MS.unclear;
 }
 
-/** One utterance is at most 60 seconds of 16 kHz 16-bit audio: what each token reserves. */
-export const UTTERANCE_BYTES = 60 * 32_000;
+/** One utterance is at most three minutes of 16 kHz 16-bit audio (pauses included): what each token reserves. */
+export const UTTERANCE_BYTES = 180 * 32_000;
+
+/**
+ * What ElevenLabs wrote down for each committed part of one utterance, as one text. A part cut mid-word ends in "-"
+ * and the next starts with "-" or writes the whole word again ("…스-", "스물…"): the word is joined back once.
+ */
+export function joinSegments(parts: readonly string[]): string {
+  let text = '';
+  for (const raw of parts) {
+    const part = raw.trim();
+    if (!part) continue;
+    const cut = /(\S*)-$/.exec(text);
+    if (!cut) { text = text ? `${text} ${part}` : part; continue; }
+    const next = part.replace(/^-/, '');
+    const kept = cut[1] && next.startsWith(cut[1]) ? text.slice(0, cut.index) : text.slice(0, -1);
+    text = `${kept.trimEnd()} ${next}`.trim();
+  }
+  return text;
+}
 
 /** How much of a chunk (in bytes, whole samples) still fits an utterance, leaving room for the tail that commits it. */
 export function fitUtterance(sent: number, size: number, tail: number): number {
