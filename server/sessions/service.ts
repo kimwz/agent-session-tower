@@ -75,13 +75,17 @@ export class SessionService extends EventEmitter {
   stop(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; this.proofFile?.close(); }
   /**
    * Before another worker takes over: no new scan starts, and once this resolves everything proved so far is on disk and nothing
-   * more is written, so a successor that has read the file is never overwritten. `resume()` undoes it when the handover does not happen.
+   * more is written, so a successor that has read the file is never overwritten. It fails when the proofs could not be saved, so the
+   * handover does not happen; `resume()` undoes it then.
    */
   async quiesce(): Promise<void> {
     this.quiesced = true;
     await this.pendingRefresh?.catch(() => {});
+    // A write already queued may still fail; only once it settled is it known whether one more is needed.
+    await this.proofFile?.flush();
     if ((this.proofsChanged || this.proofFile?.failed) && this.proofFile?.save(this.launchers, true)) this.proofsChanged = false;
     await this.proofFile?.flush();
+    if (this.proofFile?.failed) throw new Error('Proofs of agent-launched runs could not be saved.');
   }
   resume(): void { this.quiesced = false; }
   list(): Session[] { return [...this.index.values()].map((record) => ({ ...record.session })).sort(sortSessions); }

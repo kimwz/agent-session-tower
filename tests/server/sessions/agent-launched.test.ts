@@ -202,6 +202,31 @@ test('a worker handing over has saved every proof, and looks and writes no more 
   assert.deepEqual(Object.keys(await f.saved(f.service)).sort(), [`claude:${FIRST}`, `claude:${SECOND}`]);
 });
 
+test('a worker does not hand over while its proofs cannot be saved, and saves them once it can', async t => {
+  if (process.getuid?.() === 0) return t.skip('permissions do not stop root');
+  const f = await fixture(t, { launchProofs: true });
+  const FIRST = '70000000-0000-4000-8000-000000000007', SECOND = '80000000-0000-4000-8000-000000000008';
+  const state = join(f.launchProofs!, '..');
+  await writeFile(join(f.claudeDir, `${CLAUDE}.jsonl`), claude(CLAUDE, 'sdk-cli'));
+  await writeFile(join(f.claudeDir, `${FIRST}.jsonl`), claude(FIRST, 'sdk-cli'));
+  f.setLaunchers({ [`claude:${FIRST}`]: [`claude:${CLAUDE}`] });
+  await f.service.refresh();
+  assert.deepEqual(Object.keys(await f.saved(f.service)), [`claude:${FIRST}`]);
+  await chmod(state, 0o500);
+  try {
+    // The scan queues a write that fails after it; the handover must not take that for success.
+    await writeFile(join(f.claudeDir, `${SECOND}.jsonl`), claude(SECOND, 'sdk-cli'));
+    f.setLaunchers({ [`claude:${SECOND}`]: [`claude:${CLAUDE}`] });
+    await f.service.refresh(true);
+    await assert.rejects(f.service.quiesce(), /could not be saved/);
+    f.service.resume();
+  } finally { await chmod(state, 0o700); }
+  // Writable again: the next handover saves at once, without waiting out the retry pause.
+  await f.service.quiesce();
+  assert.deepEqual(Object.keys(JSON.parse(await readFile(f.launchProofs!, 'utf8')).launches).sort(), [`claude:${FIRST}`, `claude:${SECOND}`]);
+  f.service.resume();
+});
+
 test('a Codex proof stays while one of its history folders is missing, even when the other lists files', async t => {
   const f = await fixture(t, { launchProofs: true });
   const archived = join(f.codexDir, '..', 'archived_sessions');
