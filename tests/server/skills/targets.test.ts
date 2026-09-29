@@ -263,3 +263,13 @@ test('deleting a Tower skill never takes an agents’ skill of the same name wit
   assert.equal(await f.linked(f.shop, 'review'), false);
   assert.equal((await f.service.overview()).stored!.some(item => item.name === 'review'), false);
 });
+
+test('a project’s own skill outside Tower is still edited from that project', async t => {
+  const f = await fixture(t);
+  const own = join(f.shop, '.claude', 'skills', 'notes');
+  await mkdir(own, { recursive: true });
+  await writeFile(join(own, 'SKILL.md'), '---\nname: notes\ndescription: old\n---\nBody\n');
+  const skill = (await f.service.overview({ cwd: f.shop })).skills.find(item => item.name === 'notes')!;
+  await f.service.mutate('save', { cwd: f.shop, dir: skill.dir, revision: skill.revision, scope: 'project', name: 'notes', description: 'new', body: 'Body' });
+  assert.match(await readFile(join(own, 'SKILL.md'), 'utf8'), /description: "?new/);
+});
