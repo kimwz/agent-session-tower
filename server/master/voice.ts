@@ -574,6 +574,8 @@ export class MasterVoice {
     };
     // Stopped earlier (skipped, voice ended) or read before a restart: marked, never read again.
     if (!stream) { add('unspoken'); return; }
+    // Already ending (told once by the request that waited on it): nothing changes.
+    if (stream.finishing) return;
     if (!input.completed) {
       const heard = stream.played > 0;
       this.stopStream(stream);

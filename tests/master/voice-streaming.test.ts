@@ -485,3 +485,17 @@ test('a turn being read goes on to its end even when the only request that follo
   await until(() => !h.voice.streaming(typed.id) || undefined);
   await until(() => !h.voice.busy() || undefined);
 });
+
+test('a turn that ended while its words still play keeps its entry, however often Tower\'s state changes meanwhile', async t => {
+  const h = await harness(t, { page: { delayMs: 400 } });
+  h.on();
+  const { run } = await h.ask('끝난 뒤에도');
+  h.write(run, 'm1:0', '이 답은 끝난 뒤에도 기록돼요.', true);
+  await until(() => h.says().find(say => say.kind === 'answer'));
+  h.finish(run);
+  await until(() => h.session.activeTasks() >= 0 && !h.runs.some(item => item.status === 'running') || undefined);
+  for (let index = 0; index < 5; index++) { await sleep(30); h.emit(); }
+  const done = await h.entry(/끝난 뒤에도 기록돼요/);
+  await until(() => h.speakOf(done)?.state === 'played');
+  assert.equal((done.data as { kind: string }).kind, 'master');
+});
