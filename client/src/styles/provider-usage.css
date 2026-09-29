@@ -48,7 +48,7 @@
 .system-rings-trigger:hover { background: #23364c; }
 .system-rings-trigger:focus-visible { background: #23364c; outline: 2px solid #97bff9; outline-offset: 1px; }
 .system-ring { position: relative; display: grid; place-items: center; width: 20px; height: 20px; }
-.system-ring svg { position: absolute; inset: 0; width: 20px; height: 20px; transform: rotate(-90deg); fill: none; stroke-width: 4; }
+.system-ring svg { position: absolute; inset: 0; width: 20px; height: 20px; transform: rotate(-90deg); fill: none; stroke-width: 3; }
 .system-ring-track { stroke: #344356; }
 .system-ring-fill { stroke: #76c5b5; stroke-linecap: round; }
 .system-ring.high .system-ring-fill { stroke: #e9ba78; }
