@@ -90,7 +90,7 @@ export function SlackPanel({ token, onClose, providers = [], projects = [] }: { 
           <form className="slack-working-reaction" onSubmit={event => { event.preventDefault(); if (workingReaction !== null) void mutate('/api/slack/settings', { workingReaction: workingReaction.trim() }).then(ok => { if (ok) setWorkingReaction(null); }); }}>
             <label>{t('작업 중 표시 이모지')}<small>{t('멘션이나 이어진 요청을 받자마자 이 이모지를 달고, 작업이 끝나면 뗍니다. 비우면 쓰지 않습니다.')}</small>
               <input value={workingReaction ?? overview.workingReaction ?? ''} placeholder="loading" autoComplete="off" spellCheck={false} disabled={busy} onChange={event => setWorkingReaction(event.target.value)} /></label>
-            {workingReaction !== null && workingReaction.trim() !== (overview.workingReaction ?? '') && <button className="secondary-button" disabled={busy}>{t('저장')}</button>}
+            {workingReaction !== null && workingReaction.trim().replace(/^:|:$/g, '') !== (overview.workingReaction ?? '') && <button className="secondary-button" disabled={busy}>{t('저장')}</button>}
           </form>
         </div>
         <p>{t('상태')}: {overview.status}</p>{overview.error && <p role="alert" className="slack-error">{overview.error}</p>}

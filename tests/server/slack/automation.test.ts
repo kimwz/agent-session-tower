@@ -1030,11 +1030,14 @@ test('slack_react can mark a follow-up the conversation received, and nothing el
   await f.manager.tool(id, 'slack_react', { name: 'loading', action: 'add', ts: '3.0' });
   await f.manager.tool(id, 'slack_react', { name: 'white_check_mark', action: 'add' });
   await assert.rejects(f.manager.tool(id, 'slack_react', { name: 'x', action: 'add', ts: '3.5' }), /ts must be/);
+  // A message the conversation already had in its first thread.
+  await f.manager.tool(id, 'slack_react', { name: 'eyes', action: 'add', ts: '1.0' });
+  targets.pop();
   await assert.rejects(f.manager.tool(id, 'slack_react', { name: 'x', action: 'add', ts: '9.9' }), /ts must be/);
   assert.deepEqual(targets, ['add:loading:3.0', `add:white_check_mark:${request.ts}`]);
-  assert.deepEqual(f.manager.list()[1].reactions?.map(reaction => reaction.ts), ['3.0', undefined]);
+  assert.deepEqual(f.manager.list()[1].reactions?.map(reaction => reaction.ts), ['3.0', undefined, '1.0']);
   const restarted = new SlackAutomationManager(f.options); await restarted.start();
-  assert.equal(restarted.list()[1].reactions?.length, 2);
+  assert.equal(restarted.list()[1].reactions?.length, 3);
 });
 
 test('a reaction call underway keeps the worker from handing off, and the handoff save waits for it', async t => {
@@ -1056,4 +1059,22 @@ test('a reaction call underway keeps the worker from handing off, and the handof
   const saved = JSON.parse(await readFile(join(f.directory, 'slack-automation.json'), 'utf8'));
   assert.equal(saved.workflows[0].workingMarks[0].state, 'on');
   await f.manager.tick(); assert.deepEqual(calls, ['add:loading:1.1'], 'held, nothing new starts');
+});
+
+test('a request whose admission is not saved gets no reaction, and clearing takes every mark off at once', async t => {
+  const f = await fixture(t);
+  const calls: string[] = [];
+  f.options.react = async (_mention, name, action, ts) => { calls.push(`${action}:${name}:${ts}`); };
+  f.options.workingReaction = () => 'loading';
+  f.options.startConversation = () => new Promise(() => {});
+  const path = join(f.directory, 'slack-automation.json');
+  await rm(path); await mkdir(path);
+  await assert.rejects(f.manager.ingest(mention));
+  assert.deepEqual(calls, [], 'no reaction for a request that was not admitted');
+  await rm(path, { recursive: true });
+  await f.manager.ingest(mention);
+  assert.deepEqual(calls, ['add:loading:1.1']);
+  await f.manager.clearMarks();
+  assert.deepEqual(calls, ['add:loading:1.1', 'remove:loading:1.1']);
+  assert.deepEqual(f.manager.list()[0].workingMarks, [{ ts: '1.1', name: 'loading', state: 'off' }]);
 });

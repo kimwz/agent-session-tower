@@ -14,7 +14,7 @@ import type { RunOrigin } from '../../shared/types.js';
 import type { SlackProjection } from '../triggers/service.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { SlackAutomationManager, validateSlackRules } from './automation.js';
-import { SlackClient } from './client.js';
+import { SlackApiError, SlackClient } from './client.js';
 import { SlackSocket, type SlackSocketOptions } from './socket.js';
 import { judgeSlackFollowUp } from './follow-up.js';
 import type { DecisionEngine } from '../decisions/engine.js';
@@ -106,7 +106,9 @@ export class SlackService extends EventEmitter {
       react: async (mention, name, action, ts) => {
         const client = this.client(mention.teamId);
         if (!client.react) throw new Error('Slack reactions are unavailable.');
-        await client.react(mention.channel, ts ?? mention.ts, name, action);
+        // A deleted message has nothing left to take off.
+        try { await client.react(mention.channel, ts ?? mention.ts, name, action); }
+        catch (error) { if (!(action === 'remove' && error instanceof SlackApiError && error.code === 'message_not_found')) throw error; }
       },
       workingReaction: () => this.settings.workingReaction,
     });
@@ -234,6 +236,7 @@ export class SlackService extends EventEmitter {
       if (typeof body.appToken !== 'string' || !/^xapp-[\w-]{10,500}$/.test(body.appToken) || typeof body.userToken !== 'string' || !/^xoxp-[\w-]{10,500}$/.test(body.userToken)) throw invalid('Slack App 토큰(xapp)과 사용자 토큰(xoxp)을 입력하세요.');
       if (this.automation.hasPending()) throw invalid('진행 중인 Slack 작업이 끝난 뒤 계정을 변경하세요.');
       const account = await this.makeClient(body.userToken).auth();
+      if (this.settings.userToken) await this.automation.clearMarks();
       const next = { language: this.settings.language, enabled: false, appToken: body.appToken, userToken: body.userToken, account };
       await writePrivateJson(this.path, JSON.stringify(next));
       this.settings = next;
@@ -254,6 +257,7 @@ export class SlackService extends EventEmitter {
       await this.automation.setRules(body.rules);
     } else if (action === 'disconnect') {
       if (this.automation.hasPending()) throw invalid('진행 중인 Slack 작업이 끝난 뒤 연결을 해제하세요. 새 멘션 감시는 지금 끌 수 있습니다.');
+      await this.automation.clearMarks();
       await writePrivateJson(this.path, JSON.stringify({ enabled: false, language: this.settings.language }));
       this.settings = { enabled: false, language: this.settings.language };
       await this.tone.load('');

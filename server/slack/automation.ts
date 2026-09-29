@@ -241,7 +241,7 @@ export class SlackAutomationManager extends EventEmitter {
    * Saves the current state again and reports failure, so a handoff never leaves an older file behind. A reaction
    * call already underway is waited for first; held, no new one starts.
    */
-  async flush(): Promise<void> { await this.marking; return this.persist(); }
+  async flush(): Promise<void> { await this.marking?.catch(() => {}); return this.persist(); }
   private waiting(item: SlackWorkflow): boolean { return this.held && item.status === 'received' && !item.conversationClaimed; }
   async setRules(rules: SlackRule[]): Promise<void> {
     validateSlackRules(rules);
@@ -261,12 +261,13 @@ export class SlackAutomationManager extends EventEmitter {
     const now = new Date().toISOString();
     if (rules) validateSlackRules(rules);
     const item: SlackWorkflow = { id, ...(this.options.startConversation ? { mode: 'conversation' as const } : {}), mention: structuredClone(mention), rules: (rules ? structuredClone(rules) : this.rules()).filter(rule => rule.enabled), ...(approvals ? { approvals } : {}), status: 'received', createdAt: now, updatedAt: now };
-    if (item.mode === 'conversation') this.markWorking(item, mention.ts);
     this.items.push(item);
     const admission = this.persist(); this.admissions.set(id, admission);
     try { await admission; } catch (error) { this.items = this.items.filter(value => value !== item); throw error; }
     finally { this.admissions.delete(id); }
-    this.emit('change'); void this.sweepMarks(); return structuredClone(item);
+    // Only an admitted request is marked, so a failed save never leaves a reaction without a record.
+    if (item.mode === 'conversation') await this.queueMark(item, mention.ts);
+    this.emit('change'); return structuredClone(item);
   }
   /**
    * Takes a later message in the thread of a conversation that already began, for that conversation, and reports
@@ -283,22 +284,22 @@ export class SlackAutomationManager extends EventEmitter {
     if ((item.followUps?.length ?? 0) >= MAX_FOLLOW_UPS) return false;
     const followUp: SlackFollowUp = { ts: message.ts, user: message.user, text: message.text.slice(0, MAX_FOLLOW_UP_TEXT), ...(message.mentioned ? { mentioned: true } : {}),
       status: message.mentioned ? 'pending' : 'received', receivedAt: new Date(now).toISOString() };
-    const previous = item.followUps; const previousMarks = item.workingMarks;
+    const previous = item.followUps;
     item.followUps = [...(previous ?? []), followUp];
-    if (followUp.status === 'pending') this.markWorking(item, followUp.ts);
-    try { await this.persist(); } catch (error) { item.followUps = previous; item.workingMarks = previousMarks; throw error; }
-    this.emit('change'); void this.sweepMarks();
+    try { await this.persist(); } catch (error) { item.followUps = previous; throw error; }
+    if (followUp.status === 'pending') await this.queueMark(item, followUp.ts);
+    this.emit('change');
     return true;
   }
   async tick(): Promise<void> {
     if (!this.started) return;
     // Marks never wait for the conversations: a slow thread fetch or judgment must not delay them.
-    const marks = this.sweepMarks();
+    const marks = this.sweepMarks().catch(() => {});
     if (this.processing) { await Promise.all([this.processing, marks]); return; }
     this.processing = this.drain();
     try { await this.processing; } finally { this.processing = undefined; }
     // What this pass settled loses its marks now rather than a tick later.
-    await marks; await this.sweepMarks();
+    await marks; await this.sweepMarks().catch(() => {});
   }
   private async drain(): Promise<void> {
     for (const item of this.items) {
@@ -430,9 +431,8 @@ export class SlackAutomationManager extends EventEmitter {
       catch (error) { followUp.status = 'error'; followUp.reason = `The judgment failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 1500); await this.save(item, {}); continue; }
       if (addressed === undefined) { followUp.status = 'skipped'; followUp.reason = 'Fast judgments for Slack follow-ups are off.'; }
       else { followUp.addressed = Math.round(addressed * 100) / 100; followUp.status = addressed >= FOLLOW_UP_ADDRESSED ? 'pending' : 'skipped'; if (followUp.status === 'skipped') followUp.reason = 'Judged not to ask anything of the owner.'; }
-      if (followUp.status === 'pending') this.markWorking(item, followUp.ts);
       await this.save(item, {});
-      if (followUp.status === 'pending') void this.sweepMarks();
+      if (followUp.status === 'pending') await this.queueMark(item, followUp.ts);
     }
     const pending = followUps.filter(followUp => followUp.status === 'pending');
     if (!pending.length) return;
@@ -459,12 +459,36 @@ export class SlackAutomationManager extends EventEmitter {
       await this.save(item, {});
     }
   }
-  /** Queues the working reaction for a message Tower starts on; the caller persists it with that change. */
-  private markWorking(item: SlackWorkflow, ts: string): void {
+  /**
+   * Records the working reaction for a message Tower took up, once that message is saved, and starts putting it on.
+   * The record is saved before Slack is called, so a reaction is never left without one.
+   */
+  private async queueMark(item: SlackWorkflow, ts: string): Promise<void> {
     const name = this.options.workingReaction?.();
     if (!name || !validEmoji(name) || !this.options.react || item.workingMarks?.some(mark => mark.ts === ts && mark.state !== 'off')) return;
     if ((item.workingMarks?.length ?? 0) >= MAX_WORKING_MARKS) return;
-    item.workingMarks = [...(item.workingMarks ?? []), { ts, name, state: 'add' }];
+    const mark = { ts, name, state: 'add' as const };
+    item.workingMarks = [...(item.workingMarks ?? []), mark];
+    try { await this.persist(); } catch { item.workingMarks = item.workingMarks.filter(value => value !== mark); return; }
+    void this.sweepMarks().catch(() => {});
+  }
+  /** Takes every working reaction off now, before the account that put them on is disconnected or replaced. */
+  async clearMarks(): Promise<void> {
+    await this.marking?.catch(() => {});
+    for (const item of this.items) {
+      for (const mark of item.workingMarks ?? []) if (mark.state !== 'off') await this.settleMark(item, mark, 'remove');
+    }
+  }
+  /** One Slack call for a mark, never repeated: its outcome, failure included, is recorded. */
+  private async settleMark(item: SlackWorkflow, mark: NonNullable<SlackWorkflow['workingMarks']>[number], action: 'add' | 'remove'): Promise<void> {
+    let error: string | undefined;
+    try { await this.options.react!(structuredClone(item.mention), mark.name, action, mark.ts); }
+    catch (failure) { error = (failure instanceof Error ? failure.message : String(failure)).slice(0, 1500) || 'Slack reaction failed.'; }
+    // A later removal's outcome replaces an earlier failure to put it on.
+    delete mark.error;
+    Object.assign(mark, { state: action === 'remove' ? 'off' : 'on' }, error ? { error } : {});
+    try { await this.persist(); } catch { /* Kept in memory; the next save writes it. */ }
+    this.emit('change');
   }
   /** Nothing of this conversation is still working: not starting, no turn, no delegated task, no message on its way. */
   private settled(item: SlackWorkflow): boolean {
@@ -485,18 +509,11 @@ export class SlackAutomationManager extends EventEmitter {
       do {
         this.markAgain = false;
         for (const item of this.items) {
-          for (const mark of item.workingMarks ?? []) {
-            if (mark.state === 'off' || this.held) continue;
-            const settled = this.settled(item);
-            if (mark.state === 'on' && !settled) continue;
-            const action = settled ? 'remove' : 'add';
-            let error: string | undefined;
-            try { await this.options.react!(structuredClone(item.mention), mark.name, action, mark.ts); }
-            catch (failure) { error = (failure instanceof Error ? failure.message : String(failure)).slice(0, 1500) || 'Slack reaction failed.'; }
-            Object.assign(mark, { state: settled ? 'off' : 'on' }, error ? { error } : {});
-            try { await this.persist(); } catch { /* Kept in memory; the next save writes it. */ }
-            this.emit('change');
-          }
+          if (this.held) return;
+          const marks = item.workingMarks?.filter(mark => mark.state !== 'off');
+          if (!marks?.length) continue;
+          const settled = this.settled(item);
+          for (const mark of marks) if (!this.held && (settled || mark.state === 'add')) await this.settleMark(item, mark, settled ? 'remove' : 'add');
         }
       } while (this.markAgain);
     })().finally(() => { this.marking = undefined; });
@@ -589,8 +606,9 @@ export class SlackAutomationManager extends EventEmitter {
       if (!consent || consent.status === 'cancelled' || !this.options.react) throw new Error('No reply authorization covers reactions. An autoReply rule delegation or owner send permission is required.');
       const emoji = typeof args.name === 'string' ? args.name.replace(/^:|:$/g, '') : '';
       if (!(this.channel.validReaction ?? validEmoji)(emoji) || !['add', 'remove'].includes(String(args.action))) throw new Error('Provide an emoji name and action add or remove.');
-      // Only the request itself, or a later thread message Tower brought to this conversation.
-      if (args.ts !== undefined && args.ts !== item.mention.ts && !item.followUps?.some(followUp => followUp.ts === args.ts && followUp.status === 'delivered')) throw new Error('ts must be the request message or a thread message delivered to this conversation.');
+      // Only the request itself, or a thread message this conversation was given: in its first thread or brought later.
+      if (args.ts !== undefined && args.ts !== item.mention.ts && !item.thread?.some(message => message.ts === args.ts)
+        && !item.followUps?.some(followUp => followUp.ts === args.ts && followUp.status === 'delivered')) throw new Error('ts must be the request message or a thread message delivered to this conversation.');
       if ((item.reactions?.length ?? 0) >= MAX_REACTIONS) throw new Error('Reaction limit reached for this conversation.');
       const action = args.action as 'add' | 'remove';
       const ts = typeof args.ts === 'string' ? args.ts : item.mention.ts;
