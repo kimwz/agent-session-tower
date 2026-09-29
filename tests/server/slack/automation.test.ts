@@ -1036,3 +1036,24 @@ test('slack_react can mark a follow-up the conversation received, and nothing el
   const restarted = new SlackAutomationManager(f.options); await restarted.start();
   assert.equal(restarted.list()[1].reactions?.length, 2);
 });
+
+test('a reaction call underway keeps the worker from handing off, and the handoff save waits for it', async t => {
+  const f = await fixture(t);
+  let answer!: () => void;
+  const calls: string[] = [];
+  f.options.react = (_mention, name, action, ts) => { calls.push(`${action}:${name}:${ts}`); return new Promise<void>(resolve => { answer = resolve; }); };
+  f.options.workingReaction = () => 'loading';
+  f.options.startConversation = () => new Promise(() => {});
+  await f.manager.ingest(mention);
+  for (let wait = 0; !calls.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(f.manager.inFlight(), true);
+  f.manager.hold();
+  let flushed = false;
+  const flush = f.manager.flush().then(() => { flushed = true; });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(flushed, false, 'the handoff save waits for the reaction call');
+  answer(); await flush;
+  const saved = JSON.parse(await readFile(join(f.directory, 'slack-automation.json'), 'utf8'));
+  assert.equal(saved.workflows[0].workingMarks[0].state, 'on');
+  await f.manager.tick(); assert.deepEqual(calls, ['add:loading:1.1'], 'held, nothing new starts');
+});

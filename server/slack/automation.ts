@@ -232,13 +232,16 @@ export class SlackAutomationManager extends EventEmitter {
   hasPending(): boolean { return this.list().some(item => !terminal.has(item.status)); }
   /** Anything already underway: a tick advancing an item, an admission, a tool call, or an unfinished workflow. */
   inFlight(): boolean {
-    return Boolean(this.processing) || this.admissions.size > 0 || this.toolOperations.size > 0
+    return Boolean(this.processing) || Boolean(this.marking) || this.admissions.size > 0 || this.toolOperations.size > 0
       || this.list().some(item => !terminal.has(item.status) && !this.waiting(item));
   }
   /** During a worker handoff, newly received mentions wait for the successor instead of starting here. */
   hold(): void { this.held = true; }
-  /** Saves the current state again and reports failure, so a handoff never leaves an older file behind. */
-  flush(): Promise<void> { return this.persist(); }
+  /**
+   * Saves the current state again and reports failure, so a handoff never leaves an older file behind. A reaction
+   * call already underway is waited for first; held, no new one starts.
+   */
+  async flush(): Promise<void> { await this.marking; return this.persist(); }
   private waiting(item: SlackWorkflow): boolean { return this.held && item.status === 'received' && !item.conversationClaimed; }
   async setRules(rules: SlackRule[]): Promise<void> {
     validateSlackRules(rules);
