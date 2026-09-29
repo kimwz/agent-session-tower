@@ -356,14 +356,20 @@ export class WorktreeJanitor {
       // busy moment leaves the worktree for the next pass). Nothing waits between the last look and the removal.
       const revision = (session: Session) => `${session.id}\0${session.updatedAt}\0${session.cwd}`;
       let checked = new Set<string>();
+      let settled = '';
       for (let attempt = 0; ; attempt++) {
         const now = await this.world();
         if (this.stopping) { await discard(); return; }
         if (hidden && !now.finishedRoots.has(entry.root)) {
+          // Judged again until nothing changed while it was judged: a conversation that started there meanwhile keeps it.
+          const state = hiddenState(now.sessions, this.options.runs());
+          if (state === settled) break;
+          if (attempt === 3) { await discard(); return; }
           const blocker = await this.hiddenBlocker(worktree.path, now);
           if (blocker === 'wait') { await discard(); entry.state = 'pending'; return; }
           if (blocker) { await discard(); keep(blocker.reason, blocker.detail); return; }
-          break;
+          settled = state;
+          continue;
         }
         if (!now.finishedRoots.has(entry.root)) { await discard(); return; }
         const changed = now.open.filter(session => !checked.has(revision(session)));
@@ -435,6 +441,12 @@ const KEPT_SUFFIX = '-kept';
 
 /** A run another agent started: hidden from the canvas, shown at most under its launcher. */
 function hiddenRun(session: Session): boolean { return Boolean(session.launchedByAgent || session.parentLink === 'exec'); }
+
+/** Everything a helpers' folder is judged on, as one value: sessions, where they work, how far along, and the runs. */
+function hiddenState(sessions: Session[], runs: Run[]): string {
+  return JSON.stringify([sessions.map(session => [session.id, session.updatedAt, session.cwd, session.status, Boolean(session.activeProcess)]),
+    runs.map(run => [run.id, run.status, run.sessionId])]);
+}
 
 async function archivesSize(root: string): Promise<number> {
   const size = async (path: string): Promise<number> => {

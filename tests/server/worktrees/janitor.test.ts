@@ -600,3 +600,25 @@ test('a helpers’ folder stays while a helper works in it or its maker used it 
   await cleaner.pass();
   assert.equal(existsSync(review), false, 'checked again later, once all was quiet');
 });
+
+test('a conversation started in a helpers’ folder while it is judged keeps it', async t => {
+  const { dir, state, add, transcript, session } = await setup(t);
+  const review = join(dir, 'work.wt-review');
+  const rows = add(`git worktree add --detach ${review} HEAD`, ['--detach', review, 'HEAD']);
+  const start = Date.now();
+  const world = { sessions: [session('maker', await transcript('maker', rows), { updatedAt: iso(start) }),
+    session('r1', undefined, { provider: 'codex', id: 'codex:r1', cwd: review, launchedByAgent: true, updatedAt: iso(start) })], closed: new Set<string>(), now: start + 60 * 60_000 };
+  let armed = false, added = false;
+  const cleaner = janitor(state, world, {
+    // Right before the last look: the owner opens a conversation there just after the sessions were read.
+    sessions: () => [...world.sessions],
+    reserved: async () => { armed = true; return []; },
+    runs: () => { if (armed && !added) { added = true; world.sessions.push(session('owner-here', undefined, { cwd: review, updatedAt: iso(start + 60 * 60_000) })); } return []; },
+  });
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.ok(added);
+  assert.ok(existsSync(review));
+  const [result] = await worktreeCleanupFor(state, ['claude:maker']);
+  assert.deepEqual([result?.reason, result?.detail], ['openSession', 'owner-here']);
+});
