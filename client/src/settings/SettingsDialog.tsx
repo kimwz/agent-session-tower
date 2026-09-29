@@ -124,7 +124,8 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
       requestClose();
     }}
     // The browser may close a modal on its own (a second Esc without a click in between); the page follows it.
-    onClose={event => { if (event.target === event.currentTarget) onClose(); }}
+    // A close queued before the dialog opened again (React's development double mount) is not one.
+    onClose={event => { if (event.target === event.currentTarget && !event.currentTarget.open) onClose(); }}
     onClick={event => { if (event.target === event.currentTarget) requestClose(); }}>
     <div className={`settings-shell ${listing ? 'listing' : 'reading'}`}>
       <nav className="settings-nav" aria-label={t('설정 메뉴')}>

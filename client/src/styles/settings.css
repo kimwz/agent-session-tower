@@ -99,6 +99,11 @@ label.settings-row { cursor:pointer; }
 @media (min-width:681px) {
   .has-chat .app-header .header-actions { margin-right:var(--chat-panel-width, 0px); }
 }
+/* With little room left beside a wide conversation, the header keeps only its controls. */
+@media (min-width:681px) and (max-width:1100px) {
+  .has-chat .app-header .brand h1, .has-chat .app-header .brand-local, .has-chat .app-header .header-center, .has-chat .app-header .connection-state { display:none; }
+  .has-chat .app-header .header-actions { flex:none; }
+}
 
 @media (max-width:900px) {
   .settings-button { width:34px; padding:0; justify-content:center; }
