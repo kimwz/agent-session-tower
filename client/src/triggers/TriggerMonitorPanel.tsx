@@ -8,7 +8,7 @@ import { SessionTail } from '../chat/SessionTail';
 import { absoluteTime } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
 import { SlackMentionDetail, SlackOverview } from '../slack/SlackMonitorPanel';
-import { eventStatusLabel, towerOperation } from './trigger-helpers';
+import { eventStatusLabel, issueActionsLabel, towerOperation } from './trigger-helpers';
 import { triggerEventWorking } from './trigger-monitor';
 
 /**
@@ -103,6 +103,7 @@ export function TriggerEventDetail({ eventId, initial, token, onRead, onUpdate, 
       {link && <a className="slack-monitor-back" href={link} target="_blank" rel="noreferrer noopener"><ExternalLink size={14} />{t('GitHub에서 보기')}</a>}
       {current.reason && <p className="slack-monitor-text">{translateMessage(current.reason)}</p>}
       {current.error && <p role="alert">{translateMessage(current.error)}</p>}
+      {current.issueActions && <p className="slack-monitor-text">{issueActionsLabel(current, t)}</p>}
       {instructions && <details><summary>{t('전달한 지시')}</summary><p className="slack-monitor-text">{instructions}</p></details>}
       {payload !== undefined && <details><summary>{link ? t('받은 이슈') : t('받은 응답')}</summary><pre className="slack-monitor-text">{JSON.stringify(payload, null, 2)}</pre></details>}
     </section>

@@ -8,7 +8,7 @@ import { translateMessage, useI18n } from '../i18n/i18n';
 import { TriggerConnections, TriggerLimits } from './TriggerConnections';
 import { TriggerEditor } from './TriggerEditor';
 import { KIND_ICONS, TriggerTypePicker } from './TriggerKinds';
-import { auditActionLabel, eventStatusLabel, kindLabel, scheduleLabel, towerOperation, TriggerMachine, type SourceKind } from './trigger-helpers';
+import { auditActionLabel, eventStatusLabel, issueActionsLabel, kindLabel, scheduleLabel, towerOperation, TriggerMachine, type SourceKind } from './trigger-helpers';
 
 export { blankGitHubSource, blankHttpSource, blankTrigger, eventStatusLabel, scheduleLabel, towerOperation } from './trigger-helpers';
 
@@ -230,7 +230,8 @@ function TriggerHistory({ token, overview, coordinators = new Set(), onChanged }
     {events.length ? <ol className="trigger-log">{events.map(event => { const Icon = event.kind === 'manual' ? Play : KIND_ICONS[event.kind]; return <li key={event.id}>
       <Icon size={14} /><div><p><strong>{event.triggerName}</strong><span className={`trigger-status ${event.status}`}>{eventStatusLabel(event.status, t)}</span></p>
         <small>{absoluteTime(event.occurredAt)} · {event.summary}</small>
-        {(event.error || event.reason) && <small className={event.error ? 'slack-error' : ''}>{translateMessage(event.error ?? event.reason!)}</small>}</div>
+        {(event.error || event.reason) && <small className={event.error ? 'slack-error' : ''}>{translateMessage(event.error ?? event.reason!)}</small>}
+        {event.issueActions && <small>{issueActionsLabel(event, t)}</small>}</div>
     </li>; })}</ol> : <p className="trigger-note">{t('아직 실행 기록이 없습니다.')}</p>}
     <h3>{t('변경 기록')}</h3>
     {audit.length ? <ol className="trigger-log">{audit.map(entry => <li key={entry.id}>

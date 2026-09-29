@@ -526,3 +526,14 @@ test('scheduled requests resume in the next minute after the request budget ran 
   await f.step(service);
   assert.deepEqual(server.received.map(request => request.url), ['/test', '/poll']);
 });
+
+test('a PATCH sends its body and, left unanswered, is reported as possibly delivered like a POST', async t => {
+  const bodies: string[] = [];
+  const server = await endpoint(t, (request, body, response) => { bodies.push(`${request.method} ${body}`); response.end('{}'); });
+  const sent = await performHttp({ method: 'PATCH', url: `${server.origin}/issue`, headers: {}, secretHeaders: {}, body: '{"state":"closed"}', timeoutMs: 2000, noRedirects: true }, OPEN);
+  assert.equal(sent.ok, true);
+  assert.deepEqual(bodies, ['PATCH {"state":"closed"}']);
+  const silent = await endpoint(t, () => {});
+  const lost = await performHttp({ method: 'PATCH', url: `${silent.origin}/issue`, headers: {}, secretHeaders: {}, body: '{}', timeoutMs: 200 }, OPEN);
+  assert.equal(!lost.ok && lost.uncertain, true);
+});

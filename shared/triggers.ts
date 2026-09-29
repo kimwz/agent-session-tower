@@ -80,6 +80,23 @@ export const GitHubWatchSchema = z.discriminatedUnion('type', [
     /** Only authors with this relationship to the repository; by default its owners, members and collaborators. */
     authorAssociation: z.union([z.literal('any'), z.array(z.enum(GITHUB_ASSOCIATIONS)).min(1)]).default(['OWNER', 'MEMBER', 'COLLABORATOR']),
   }).strict(),
+  /**
+   * Every open issue in these repositories, those opened before setup included, taken one after another: each is
+   * handed to a run, and the next one when a run finishes. Each issue is taken once while it stays open.
+   */
+  z.object({
+    type: z.literal('open-issues'),
+    repos: z.array(repository).min(1).max(20),
+    labels: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
+    authors: z.array(z.string().trim().min(1).max(39)).max(50).optional(),
+    authorAssociation: z.union([z.literal('any'), z.array(z.enum(GITHUB_ASSOCIATIONS)).min(1)]).default(['OWNER', 'MEMBER', 'COLLABORATOR']),
+    /** How many issues are worked on at once. */
+    concurrency: z.number().int().min(1).max(5).default(1),
+    /** Assign the issue to the connected account when its run starts. */
+    assign: z.boolean().default(true),
+    /** Close the issue when its run completes, unless the run says to keep it open. Task handlers only. */
+    close: z.boolean().default(true),
+  }).strict(),
   /** Open issues newly assigned to the connected account. */
   z.object({ type: z.literal('assigned-to-me'), repos: z.array(repository).max(20).optional(), includePullRequests: z.boolean().default(false) }).strict(),
   /**
@@ -218,7 +235,9 @@ export interface TriggerEvent {
     /** A coordinator event for a review request: its replies are reviews, with the verdicts allowed when it fired. */
     review?: { verdicts: 'comment' | 'any' };
     /** Started from, or set up from, a controlling computer: it never uses a folder kept out of sharing. */
-    remote?: { controllerId: string } };
+    remote?: { controllerId: string };
+    /** An open-issues event: its issue, and what Tower does to it, as set when it fired. The payload is trimmed later; this is not. */
+    issue?: { account: string; assign: boolean; close: boolean; repository?: string; number?: number } };
   summary: string;
   reason?: string;
   error?: string;
@@ -228,6 +247,8 @@ export interface TriggerEvent {
   requestId: string;
   claimedAt?: string;
   dispatch?: { runId?: string; sessionId?: string; createdSessionId?: string; /** The coordinator conversation that took the event. */ workflowId?: string };
+  /** What Tower did to an open-issues event's issue. */
+  issueActions?: { assignedAt?: string; assignError?: string; closedAt?: string; closeError?: string; keptOpen?: boolean; keptReason?: string };
 }
 
 export interface TriggerAuditEntry {
