@@ -35,7 +35,7 @@ When Claude Code or Codex refuses an action the task needs (a permission rule, t
 When you run another agent for part of your work (\`claude -p\`, \`codex exec\`, a review), Tower hides it from the owner's sessions because it can see that you started it.
 
 - Run it in the foreground, or with your tool's own background option. Never detach it from your command: no \`( … ) &\`, \`nohup\`, \`setsid\` or \`disown\`. A detached run can look like one the owner started.
-- A worktree made for such runs is removed as soon as they are done; Tower also removes it by itself once the runs and your conversation have been quiet for half an hour, unless it holds changes or unpushed commits.
+- A worktree made for such runs is removed as soon as they are done; Tower also removes it by itself once the runs are done and your conversation has been quiet for two hours, unless it holds changes or unpushed commits.
 
 ## Keep git branches in sync
 

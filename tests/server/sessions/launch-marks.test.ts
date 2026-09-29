@@ -55,6 +55,7 @@ test('resumed, interactive and Codex runs keep their arguments; without a launch
   const marks = await f.marks();
   assert.equal(marks.length, 4);
   assert.ok(marks.every(mark => mark.child === ''), 'only a new run the shim named has a child');
+  assert.ok(marks.length >= 3);
   assert.ok(marks.some(mark => mark.launcher === `codex:${LAUNCHER}` && mark.provider === 'codex'));
   await rm(launchMarksDir(f.state), { recursive: true }); await mkdir(launchMarksDir(f.state));
   f.run('claude', ['-p', 'x'], {});
@@ -69,7 +70,7 @@ test('a mark naming its child links it once the child is listed; any other mark 
   assert.equal(matchLaunchMarks([named], new Map(), new Map(), new Set()).used.length, 0, 'kept until the child appears');
   assert.deepEqual([...matchLaunchMarks([named], new Map(), new Map(), new Set([`claude:${CHILD}`])).proofs], [[`claude:${CHILD}`, `claude:${LAUNCHER}`]]);
   const owners = new Map([[500, [`claude:${CHILD}`]]]);
-  assert.equal(matchLaunchMarks([mark({ startedAt: 10_000 })], owners, new Map([[500, 10_400]]), new Set()).proofs.get(`claude:${CHILD}`), `claude:${LAUNCHER}`);
+  assert.equal(matchLaunchMarks([mark({ startedAt: 10_000 })], owners, new Map([[500, 10_400]]), new Set([`claude:${CHILD}`])).proofs.get(`claude:${CHILD}`), `claude:${LAUNCHER}`);
   assert.equal(matchLaunchMarks([mark({ startedAt: 10_000 })], owners, new Map([[500, 90_000]]), new Set()).proofs.size, 0, 'a pid used again by another program');
   assert.equal(matchLaunchMarks([mark({})], owners, new Map([[500, 10_000]]), new Set()).proofs.size, 0, 'no start time, no proof');
   assert.equal(matchLaunchMarks([mark({ launcher: `claude:${CHILD}`, startedAt: 1 })], owners, new Map([[500, 1]]), new Set()).proofs.size, 0, 'never its own launcher');
@@ -113,4 +114,48 @@ test('a detached claude -p helper is joined to the session that started it, and 
   await service.quiesce(); service.resume();
   assert.deepEqual(JSON.parse(await readFile(join(state, 'agent-launches.json'), 'utf8')).launches[`claude:${CHILD}`], [`claude:${LAUNCHER}`], 'kept for the next worker');
   execFileSync('true');
+});
+
+test('two Towers’ shims or a wrapper script never hand off to each other forever; subcommands and prompts are left alone', async t => {
+  const f = await shims(t);
+  const other = await installLaunchShims(join(f.root, 'other state'));
+  const both = f.run('claude', ['--version'], { CLAUDE_CODE_SESSION_ID: LAUNCHER }, `${f.dir}:${other}:${f.real}:/usr/bin:/bin`);
+  assert.equal(both.status, 3, 'the real program ran');
+  // A wrapper named claude that runs `claude` again through PATH.
+  const wrappers = join(f.root, 'wrappers');
+  await mkdir(wrappers);
+  await writeFile(join(wrappers, 'claude'), `#!/bin/sh\nexec claude "$@"\n`); await chmod(join(wrappers, 'claude'), 0o755);
+  const wrapped = spawnSync(join(f.dir, 'claude'), ['-p', 'x'], { env: { PATH: `${f.dir}:${wrappers}:${f.real}:/usr/bin:/bin`, TOWER_LAUNCH_MARKS: launchMarksDir(f.state), CLAUDE_CODE_SESSION_ID: LAUNCHER }, encoding: 'utf8', timeout: 10_000 });
+  assert.equal(wrapped.status, 3);
+  assert.equal((wrapped.stdout.match(/--session-id/g) ?? []).length, 1, 'one id, given once');
+  assert.match(f.run('claude', ['mcp', 'add', 'srv', 'npx', 'x', '-p', '3000'], { CLAUDE_CODE_SESSION_ID: LAUNCHER }).stdout, /^\d+ mcp add srv npx x -p 3000$/m);
+  assert.match(f.run('claude', ['-p', 'Review --resume handling'], { CLAUDE_CODE_SESSION_ID: LAUNCHER }).stdout, /^\d+ --session-id [a-f0-9-]{36} -p Review --resume handling$/m, 'an option name inside a prompt is no option');
+});
+
+test('a marks folder that cannot be written stays silent; one others can write is not believed', async t => {
+  const f = await shims(t);
+  await chmod(launchMarksDir(f.state), 0o500);
+  t.after(() => chmod(launchMarksDir(f.state), 0o700).catch(() => {}));
+  const result = f.run('claude', ['--version'], { CLAUDE_CODE_SESSION_ID: LAUNCHER });
+  assert.equal(result.stderr.replace(/^PATH=.*\n/m, ''), '', 'no error on the helper’s own output');
+  await chmod(launchMarksDir(f.state), 0o777);
+  await writeFile(join(launchMarksDir(f.state), '42.json'), JSON.stringify({ pid: 42, provider: 'claude', launcher: `claude:${LAUNCHER}`, child: `claude:${CHILD}`, at: Math.floor(Date.now() / 1000) }));
+  assert.deepEqual(await readLaunchMarks(launchMarksDir(f.state)), []);
+});
+
+test('a launcher script’s child holds the session; a mark whose process is gone and names no child is dropped', () => {
+  const mark: LaunchMark = { pid: 500, provider: 'codex', launcher: `claude:${LAUNCHER}`, at: Date.now(), file: '/x', startedAt: 10_000 };
+  const owners = new Map([[501, [`codex:${CHILD}`]]]);
+  const parents = new Map([[501, 500]]);
+  assert.equal(matchLaunchMarks([mark], owners, new Map([[500, 10_000], [501, 10_100]]), new Set([`codex:${CHILD}`]), parents).proofs.get(`codex:${CHILD}`), `claude:${LAUNCHER}`);
+  assert.equal(matchLaunchMarks([mark], owners, new Map([[500, 10_000], [501, 10_100]]), new Set(), parents).used.length, 0, 'kept until the session is listed');
+  const gone = matchLaunchMarks([mark], new Map(), new Map([[9, 1]]), new Set(), parents);
+  assert.deepEqual([gone.proofs.size, gone.used.length], [0, 1]);
+  assert.equal(matchLaunchMarks([mark], new Map(), new Map(), new Set(), parents).used.length, 0, 'no process list at all proves nothing gone');
+});
+
+test('Tower’s own processes start without the identity of the turn that restarted them', async () => {
+  const { withoutLauncher } = await import('../../../server/sessions/launch-env.js');
+  const env = withoutLauncher({ PATH: '/state/runtime/launch-shims:/usr/bin:/other/runtime/launch-shims/:/bin', TOWER_LAUNCH_MARKS: '/m', CLAUDE_CODE_SESSION_ID: 'a', CODEX_THREAD_ID: 'b', HOME: '/h' });
+  assert.deepEqual(env, { PATH: '/usr/bin:/bin', HOME: '/h' });
 });

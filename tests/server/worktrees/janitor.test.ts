@@ -568,6 +568,9 @@ test('a worktree only helper runs worked in goes once they and its maker were qu
   assert.ok(existsSync(review), 'helpers finished only minutes ago');
   world.now = start + 31 * 60_000;
   await cleaner.pass();
+  assert.ok(existsSync(review), 'its maker named it half an hour ago: it may come back after CI');
+  world.now = start + 2 * 60 * 60_000 + 60_000;
+  await cleaner.pass();
   assert.equal(existsSync(review), false, 'the helpers’ folder goes while its maker is still open');
   assert.ok(existsSync(manual), 'one made by hand never goes this way');
   assert.ok(existsSync(shared), 'a conversation the owner sees works there');
@@ -596,7 +599,7 @@ test('a helpers’ folder stays while a helper works in it or its maker used it 
   assert.ok(existsSync(review), 'its maker used it moments ago');
   const [result] = await worktreeCleanupFor(state, ['claude:maker']);
   assert.deepEqual([result?.reason, result?.detail], ['openSession', 'maker']);
-  world.now = start + 2 * 60 * 60_000 + 60_000;
+  world.now = start + 59 * 60_000 + 2 * 60 * 60_000 + 60_000;
   await cleaner.pass();
   assert.equal(existsSync(review), false, 'checked again later, once all was quiet');
 });
@@ -607,13 +610,13 @@ test('a conversation started in a helpers’ folder while it is judged keeps it'
   const rows = add(`git worktree add --detach ${review} HEAD`, ['--detach', review, 'HEAD']);
   const start = Date.now();
   const world = { sessions: [session('maker', await transcript('maker', rows), { updatedAt: iso(start) }),
-    session('r1', undefined, { provider: 'codex', id: 'codex:r1', cwd: review, launchedByAgent: true, updatedAt: iso(start) })], closed: new Set<string>(), now: start + 60 * 60_000 };
+    session('r1', undefined, { provider: 'codex', id: 'codex:r1', cwd: review, launchedByAgent: true, updatedAt: iso(start) })], closed: new Set<string>(), now: start + 3 * 60 * 60_000 };
   let armed = false, added = false;
   const cleaner = janitor(state, world, {
     // Right before the last look: the owner opens a conversation there just after the sessions were read.
     sessions: () => [...world.sessions],
     reserved: async () => { armed = true; return []; },
-    runs: () => { if (armed && !added) { added = true; world.sessions.push(session('owner-here', undefined, { cwd: review, updatedAt: iso(start + 60 * 60_000) })); } return []; },
+    runs: () => { if (armed && !added) { added = true; world.sessions.push(session('owner-here', undefined, { cwd: review, updatedAt: iso(start + 3 * 60 * 60_000) })); } return []; },
   });
   await cleaner.start(); t.after(() => cleaner.close());
   await cleaner.pass();
@@ -630,7 +633,7 @@ test('a closed conversation reopened in a helpers’ folder while it is judged k
   const start = Date.now();
   const world = { sessions: [session('maker', await transcript('maker', rows), { updatedAt: iso(start) }),
     session('r1', undefined, { provider: 'codex', id: 'codex:r1', cwd: review, launchedByAgent: true, updatedAt: iso(start) }),
-    session('owner-here', undefined, { cwd: review, updatedAt: iso(start) })], closed: new Set<string>(['claude:owner-here']), now: start + 60 * 60_000 };
+    session('owner-here', undefined, { cwd: review, updatedAt: iso(start) })], closed: new Set<string>(['claude:owner-here']), now: start + 3 * 60 * 60_000 };
   let armed = false, reopened = false;
   const cleaner = janitor(state, world, {
     sessions: () => [...world.sessions],
@@ -642,4 +645,28 @@ test('a closed conversation reopened in a helpers’ folder while it is judged k
   await cleaner.pass();
   assert.ok(reopened);
   assert.ok(existsSync(review));
+});
+
+test('a helper nobody is known to have started does not keep a closed conversation’s worktree; nor do many helpers hide its maker', async t => {
+  const { dir, state, add, transcript, session } = await setup(t);
+  const review = join(dir, 'work.wt-review'), busy = join(dir, 'work.wt-busy');
+  const rows = [...add(`git worktree add --detach ${review} HEAD`, ['--detach', review, 'HEAD']), ...add(`git worktree add --detach ${busy} HEAD`, ['--detach', busy, 'HEAD'])];
+  const start = Date.now();
+  const helpers = Array.from({ length: 10 }, (_, i) => session(`h${i}`, undefined, { provider: 'codex', id: `codex:h${i}`, cwd: review, launchedByAgent: true, updatedAt: iso(start) }));
+  const world = { sessions: [session('maker', await transcript('maker', rows), { updatedAt: iso(start) }), ...helpers,
+    session('w1', undefined, { provider: 'codex', id: 'codex:w1', cwd: busy, launchedByAgent: true, updatedAt: iso(start), status: 'working' })],
+    closed: new Set<string>(['claude:maker']), now: start + 60 * 60_000 };
+  const cleaner = janitor(state, world);
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.equal(existsSync(review), false, 'the quiet helpers are no open conversation of the owner');
+  assert.ok(existsSync(busy), 'a helper still working keeps its folder');
+  // Open maker: its transcript is found before the ten helpers are read.
+  const again = join(dir, 'work.wt-again');
+  const more = add(`git worktree add --detach ${again} HEAD`, ['--detach', again, 'HEAD']);
+  const maker2 = session('maker2', await transcript('maker2', [...more, { type: 'user', timestamp: iso(start), message: { content: `Reviews in ${again}` } }]), { updatedAt: iso(start) });
+  world.sessions = [maker2, ...Array.from({ length: 10 }, (_, i) => session(`g${i}`, undefined, { provider: 'codex', id: `codex:g${i}`, cwd: again, launchedByAgent: true, updatedAt: iso(start) }))];
+  world.now = start + 3 * 60 * 60_000;
+  await cleaner.pass();
+  assert.equal(existsSync(again), false);
 });

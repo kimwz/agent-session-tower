@@ -875,6 +875,7 @@ export class RunManager extends EventEmitter {
     this.markLaunches(env);
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_SESSION_ID;
+    delete env.CODEX_THREAD_ID;
     let started = false;
     let registered = false;
     await this.addTurnNotes(run, session, creating);
@@ -1004,6 +1005,7 @@ export class RunManager extends EventEmitter {
     // The web server may itself have been started from inside Claude Code.
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_SESSION_ID;
+    delete env.CODEX_THREAD_ID;
     if (master) {
       env.MCP_TOOL_TIMEOUT = String(MASTER_TOOL_TIMEOUT_SECONDS * 1000);
       // Asked the way the turn will start: same program, folder and environment.

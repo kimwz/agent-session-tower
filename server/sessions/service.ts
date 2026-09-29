@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import type { ChatMessage, Provider, Session, SessionDetail } from '../../shared/types.js';
 import { sortSessions } from '../../shared/session-activity.js';
 import { LaunchProofFile } from './launch-proofs.js';
-import { matchLaunchMarks, readLaunchMarks } from './launch-marks.js';
+import { matchLaunchMarks, readLaunchMarks, type LaunchMark } from './launch-marks.js';
 import { inspectProcesses, type ProcessSnapshot } from './processes.js';
 import { appendFile, applyStatus, initial, ownHistory, parseMessages, walk, CHUNK, MAX_LINE, type RecordState } from './parser.js';
 
@@ -51,6 +51,7 @@ export class SessionService extends EventEmitter {
   private readonly launchers = new Map<string, string[]>();
   private readonly proofFile?: LaunchProofFile;
   private readonly launchMarks?: string;
+  private markRead: { changedAt: number; at: number; marks: LaunchMark[] } = { changedAt: -1, at: 0, marks: [] };
   private proofsLoaded = false;
   private proofsChanged = false;
   /** Another worker is taking over: this one neither looks at sessions nor saves proofs until it resumes. */
@@ -160,9 +161,18 @@ export class SessionService extends EventEmitter {
       const live = new Set([...this.records.values()].map(state => state.session.id));
       // A helper that was detached from its launcher, so the process tree no longer shows who started it, left a mark.
       if (this.launchMarks) {
-        const { proofs, used } = matchLaunchMarks(await readLaunchMarks(this.launchMarks), this.processes.owners ?? new Map(), this.processes.started ?? new Map(), live);
-        for (const [id, launcher] of proofs) if (!this.launchers.has(id)) { this.launchers.set(id, [launcher]); this.proofsChanged = true; }
-        for (const mark of used) await rm(mark.file, { force: true }).catch(() => {});
+        // The folder is read again only when it changed, or a minute later for expiry; matching runs on every scan.
+        const changedAt = (await stat(this.launchMarks).catch(() => undefined))?.mtimeMs ?? 0;
+        if (changedAt !== this.markRead.changedAt || Date.now() - this.markRead.at > 60_000) this.markRead = { changedAt, at: Date.now(), marks: await readLaunchMarks(this.launchMarks) };
+        const { proofs, used } = matchLaunchMarks(this.markRead.marks, this.processes.owners ?? new Map(), this.processes.started ?? new Map(), live, this.processes.parents ?? new Map());
+        let fresh = false;
+        for (const [id, launcher] of proofs) if (!this.launchers.has(id)) { this.launchers.set(id, [launcher]); this.proofsChanged = true; fresh = true; }
+        // A mark goes only once its proof is on disk: until then it is the only record of who started the run.
+        if (fresh && this.proofFile && this.proofFile.save(this.launchers, true)) { this.proofsChanged = false; await this.proofFile.flush(); }
+        if (!this.proofFile?.failed && used.length) {
+          for (const mark of used) await rm(mark.file, { force: true }).catch(() => {});
+          this.markRead.marks = this.markRead.marks.filter(mark => !used.includes(mark));
+        }
       }
       // A history folder that lists nothing at all (renamed, not mounted) proves nothing is gone either.
       if (!codex.length && !archived.length) incomplete.add('codex');

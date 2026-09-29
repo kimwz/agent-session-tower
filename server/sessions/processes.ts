@@ -23,6 +23,7 @@ export interface ProcessSnapshot {
   /** The sessions each live process holds, and when each process started (ms): what launch marks are matched against. */
   owners?: Map<number, string[]>;
   started?: Map<number, number>;
+  parents?: Map<number, number>;
 }
 
 /** Only exact native files under this Codex home count as a live session. */
@@ -131,6 +132,7 @@ export async function inspectProcesses(claudeHome: string, codexHome: string): P
   } catch { /* lsof is optional, including on non-macOS systems. */ }
   snapshot.launchers = processLaunchers(parents, owners, process.pid);
   snapshot.owners = owners;
+  snapshot.parents = parents;
   snapshot.started = new Map([...commands].map(([pid, info]) => [pid, info.startedAt]));
   return snapshot;
 }

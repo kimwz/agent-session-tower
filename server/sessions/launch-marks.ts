@@ -25,28 +25,42 @@ export const launchShimsDir = (stateDir: string) => join(stateDir, 'runtime', 'l
  * `exec`s it with the same environment (itself still first in the PATH, so a helper's own helpers are marked too).
  */
 export function launchShim(name: 'claude' | 'codex'): string {
+  // Each argument on its own, so an option's name inside a prompt never counts; nothing after `--` is an option.
   const inject = name === 'claude' ? `
 new_id=''
-case " $* " in *' -p '*|*' --print '*)
-  case " $* " in *' --session-id '*|*' --session-id='*|*' -r '*|*' --resume'*|*' -c '*|*' --continue '*|*' --fork-session '*) ;;
-  *) new_id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
-     new_id=$(printf %s "$new_id" | tr 'A-Z' 'a-z' | tr -cd 'a-f0-9-') ;;
-  esac ;;
-esac` : `
+print=''; own=''
+# A subcommand (\`claude mcp …\`, \`claude update\`) never gets a session id.
+case "\${1:-}" in -*) ;; *) own=1 ;; esac
+for arg in "$@"; do
+  case "$arg" in
+    --) break ;;
+    -p|--print) print=1 ;;
+    --session-id|--session-id=*|-r|--resume|--resume=*|-c|--continue|--fork-session) own=1 ;;
+  esac
+done
+if [ -n "$print" ] && [ -z "$own" ]; then
+  new_id=$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null)
+  new_id=$(printf %s "$new_id" | tr 'A-Z' 'a-z' | tr -cd 'a-f0-9-')
+  [ \${#new_id} -eq 36 ] || new_id=''
+fi` : `
 new_id=''`;
   return `#!/bin/sh
 # Agent Session Tower: notes which agent session started this ${name} run, then runs the real ${name}.
-shim_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+# Every Tower's shim folder is skipped, and so is any program this chain already handed off to (a wrapper script that
+# runs \`${name}\` again finds the next one), so two shims or a wrapper never hand off to each other forever.
 real=''
+used=\${TOWER_SHIM_USED:-}
 old_ifs=$IFS; IFS=:
 for dir in $PATH; do
   [ -n "$dir" ] || continue
   resolved=$(CDPATH= cd -- "$dir" 2>/dev/null && pwd -P) || continue
-  [ "$resolved" = "$shim_dir" ] && continue
-  if [ -x "$dir/${name}" ] && [ ! -d "$dir/${name}" ]; then real="$dir/${name}"; break; fi
+  case "$resolved" in */runtime/launch-shims) continue ;; esac
+  case "|$used|" in *"|$resolved/${name}|"*) continue ;; esac
+  if [ -x "$dir/${name}" ] && [ ! -d "$dir/${name}" ]; then real="$dir/${name}"; used="$used|$resolved/${name}"; break; fi
 done
 IFS=$old_ifs
 if [ -z "$real" ]; then echo "${name}: command not found" >&2; exit 127; fi
+TOWER_SHIM_USED=$used; export TOWER_SHIM_USED
 ${inject}
 launcher=''
 clean() { printf %s "$1" | tr -cd 'A-Za-z0-9-' | cut -c1-200; }
@@ -59,7 +73,7 @@ if [ -n "$launcher" ] && [ -n "$marks" ] && [ -d "$marks" ] && [ ! -L "$marks" ]
   child=''
   [ -n "$new_id" ] && child="claude:$new_id"
   tmp="$marks/.$$.tmp"
-  if printf '{"pid":%s,"provider":"%s","launcher":"%s","child":"%s","started":"%s","at":%s}\\n' "$$" "${name}" "$launcher" "$child" "$started" "$(date +%s)" > "$tmp" 2>/dev/null; then
+  if { printf '{"pid":%s,"provider":"%s","launcher":"%s","child":"%s","started":"%s","at":%s}\\n' "$$" "${name}" "$launcher" "$child" "$started" "$(date +%s)" > "$tmp"; } 2>/dev/null; then
     mv -f "$tmp" "$marks/$$.json" 2>/dev/null || rm -f "$tmp"
   fi
 fi
@@ -73,6 +87,7 @@ export async function installLaunchShims(stateDir: string): Promise<string> {
   const dir = launchShimsDir(stateDir);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await mkdir(launchMarksDir(stateDir), { recursive: true, mode: 0o700 });
+  await chmod(launchMarksDir(stateDir), 0o700);
   for (const name of ['claude', 'codex'] as const) {
     const path = join(dir, name), text = launchShim(name);
     if (await readFile(path, 'utf8').catch(() => '') === text) continue;
@@ -87,7 +102,8 @@ export async function installLaunchShims(stateDir: string): Promise<string> {
 /** The marks runs left, oldest first; broken, oversized and expired ones are removed. */
 export async function readLaunchMarks(dir: string, now = Date.now()): Promise<LaunchMark[]> {
   const info = await lstat(dir).catch(() => undefined);
-  if (!info?.isDirectory()) return [];
+  // Only a folder of this account that nobody else can write to holds marks worth believing.
+  if (!info?.isDirectory() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o022)) return [];
   const names = (await readdir(dir).catch(() => [] as string[])).filter(name => /^\d{1,10}\.json$/.test(name));
   const marks: LaunchMark[] = [];
   for (const name of names) {
@@ -129,7 +145,7 @@ async function readMark(file: string): Promise<LaunchMark | undefined> {
  * process alive with the same start time, so a pid used again by an unrelated program is never taken for the helper.
  * Returns the proofs and the marks that were used (to be removed).
  */
-export function matchLaunchMarks(marks: LaunchMark[], owners: ReadonlyMap<number, readonly string[]>, started: ReadonlyMap<number, number>, known: ReadonlySet<string>): { proofs: Map<string, string>; used: LaunchMark[] } {
+export function matchLaunchMarks(marks: LaunchMark[], owners: ReadonlyMap<number, readonly string[]>, started: ReadonlyMap<number, number>, known: ReadonlySet<string>, parents: ReadonlyMap<number, number> = new Map()): { proofs: Map<string, string>; used: LaunchMark[] } {
   const proofs = new Map<string, string>();
   const used: LaunchMark[] = [];
   for (const mark of marks) {
@@ -140,10 +156,16 @@ export function matchLaunchMarks(marks: LaunchMark[], owners: ReadonlyMap<number
       used.push(mark);
       continue;
     }
-    const sessions = owners.get(mark.pid);
     const start = started.get(mark.pid);
-    if (!sessions?.length || mark.startedAt === undefined || start === undefined || Math.abs(start - mark.startedAt) > 1000) continue;
-    for (const session of sessions) if (session !== mark.launcher && session.startsWith(`${mark.provider}:`)) proofs.set(session, mark.launcher);
+    // Its process is gone (or another program has its pid) and it named no child: it can never prove anything now.
+    if (started.size && (start === undefined || (mark.startedAt !== undefined && Math.abs(start - mark.startedAt) > 1000))) { used.push(mark); continue; }
+    if (mark.startedAt === undefined || start === undefined || Math.abs(start - mark.startedAt) > 1000) continue;
+    // A launcher script (npm's `codex`) may start the native program as its own child: its sessions count too.
+    const pids = [mark.pid, ...[...parents].filter(([, parent]) => parent === mark.pid).map(([pid]) => pid)];
+    const sessions = pids.flatMap(pid => owners.get(pid) ?? []).filter(session => session !== mark.launcher && session.startsWith(`${mark.provider}:`));
+    // Kept until every session it proves is listed, like a mark naming its child.
+    if (!sessions.length || sessions.some(session => !known.has(session))) continue;
+    for (const session of sessions) proofs.set(session, mark.launcher);
     used.push(mark);
   }
   return { proofs, used };

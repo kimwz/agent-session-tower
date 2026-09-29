@@ -26,6 +26,11 @@ const MOST_KEPT = { bytes: 200 * 1024 * 1024, files: 20_000 };
 const STUCK_MS = 10 * 60_000;
 /** A folder only helper runs worked in is removed once they and the conversation that made it were quiet this long. */
 const HIDDEN_QUIET_MS = 30 * 60_000;
+/**
+ * An open conversation naming a helpers' folder (the one that made it included) keeps it until it was quiet this long:
+ * it may be waiting on CI before it works there again.
+ */
+const MAKER_QUIET_MS = 2 * 60 * 60_000;
 /** Folders of helper runs whose creator is looked for in one pass; each look reads transcripts. */
 const HIDDEN_PER_PASS = 5;
 /** Transcripts read to find who made one such folder. */
@@ -86,6 +91,8 @@ export class WorktreeJanitor {
   private sealed = false;
   /** Per open session: the folder names looked for, those its transcript refers to, and how far it was read. */
   private readonly mentions = new Map<string, { file: string; end: number; searched: Set<string>; found: Set<string> }>();
+  /** Helpers' folders whose maker no transcript proved, by when that was last looked for. */
+  private readonly unproven = new Map<string, number>();
   private readonly git: GitRunner;
   private readonly home: string;
   private readonly now: () => number;
@@ -228,8 +235,13 @@ export class WorktreeJanitor {
       if (this.hiddenWait(worktree.path, world)) continue;
       budget--;
       const known = entry && entry.createdAt === worktree.createdAt ? entry : undefined;
+      // A folder no transcript proves was made by a conversation is looked at again only an hour later, so the others
+      // behind it get their turn.
+      const unproven = this.unproven.get(worktree.path);
+      if (!known && unproven !== undefined && now - unproven < RECHECK_MS) { budget++; continue; }
       const creator = known ? known.root : await this.creatorOf(worktree, world, folders.get(cwd)!);
-      if (!creator) continue;
+      if (!creator) { this.unproven.set(worktree.path, now); continue; }
+      this.unproven.delete(worktree.path);
       const record: Entry = known ?? { kind: 'hidden', root: creator, sessions: [creator], createdAt: worktree.createdAt, state: 'pending', checkedAt: 0 };
       this.saved.worktrees[worktree.path] = record;
       await this.settle(worktree.path, record, world);
@@ -253,11 +265,12 @@ export class WorktreeJanitor {
     const name = basename(worktree.path);
     const rootOf = new Map<string, string>();
     for (const [root, members] of world.families) for (const member of members) rootOf.set(member.id, root);
-    const families = [...new Set(helpers.map(helper => rootOf.get(helper.id) ?? helper.id))].flatMap(root => world.families.get(root) ?? []);
+    // The helpers' launchers' families, without helpers that are their own family (nobody known started them).
+    const families = [...new Set(helpers.map(helper => rootOf.get(helper.id) ?? helper.id))].flatMap(root => world.families.get(root) ?? []).filter(session => !hiddenRun(session));
     await this.referrers(world.open, [name]);
-    const naming = world.open.filter(session => this.mentions.get(session.id)?.found.has(name));
+    const naming = world.open.filter(session => !hiddenRun(session) && this.mentions.get(session.id)?.found.has(name));
     const seen = new Set<string>();
-    for (const session of [...families, ...naming]) {
+    for (const session of [...naming, ...families]) {
       if (seen.has(session.id) || seen.size >= CREATORS_READ || this.stopping) continue;
       seen.add(session.id);
       if (!session.filePath) continue;
@@ -285,7 +298,8 @@ export class WorktreeJanitor {
     const busy = busySessionIds(world.sessions, this.options.runs());
     for (const session of world.open) {
       if (!this.mentions.get(session.id)?.found.has(name)) continue;
-      if (busy.has(session.id) || this.now() - (Date.parse(session.updatedAt) || 0) < HIDDEN_QUIET_MS) return { reason: 'openSession', detail: session.customTitle || session.title };
+      if (hiddenRun(session) && !busy.has(session.id)) continue;
+      if (busy.has(session.id) || this.now() - (Date.parse(session.updatedAt) || 0) < MAKER_QUIET_MS) return { reason: 'openSession', detail: session.customTitle || session.title };
     }
     return undefined;
   }
@@ -338,10 +352,11 @@ export class WorktreeJanitor {
       // first; an unusually large amount of them keeps the worktree instead.
       const work = await ignoredWork(this.git, worktree.path, MOST_KEPT);
       if (work.bytes > MOST_KEPT.bytes || work.files > MOST_KEPT.files) { keep('ignoredWork', `${work.files} files`); return; }
-      const hidden = entry.kind === 'hidden';
+      // Once the conversation that made it is over, a helpers' folder is handled like any other.
+      const hidden = entry.kind === 'hidden' && !world.finishedRoots.has(entry.root);
       // A helpers' folder may go while the conversation that made it is still open: its moved-aside files are never pruned,
       // and when there is no room left for them the folder stays instead.
-      if (hidden && work.entries.length && await archivesSize(join(this.options.stateDir, 'worktree-files')) + work.bytes > ARCHIVES_MOST_BYTES) { keep('ignoredWork', 'archive full'); return; }
+      if (hidden && work.entries.length && await archivesSize(join(this.options.stateDir, 'worktree-files'), KEPT_SUFFIX) + work.bytes > KEPT_MOST_BYTES) { keep('ignoredWork', 'archive full'); return; }
       const archive = work.entries.length ? join(this.options.stateDir, 'worktree-files', `${name}-${new Date(this.now()).toISOString().replace(/[:.]/g, '-')}${hidden ? KEPT_SUFFIX : ''}`) : undefined;
       const discard = async () => { if (archive) await rm(archive, { recursive: true, force: true }); };
       // A copy that fails partway is removed, so retries never pile up copies.
@@ -362,7 +377,7 @@ export class WorktreeJanitor {
         if (this.stopping) { await discard(); return; }
         if (hidden && !now.finishedRoots.has(entry.root)) {
           // Judged again until nothing changed while it was judged: a conversation that started there meanwhile keeps it.
-          const state = hiddenState(now.sessions, now.open, this.options.runs());
+          const state = hiddenState(worktree.path, now, this.options.runs(), this.folders);
           if (state === settled) break;
           if (attempt === 3) { await discard(); return; }
           const blocker = await this.hiddenBlocker(worktree.path, now);
@@ -375,11 +390,14 @@ export class WorktreeJanitor {
         const changed = now.open.filter(session => !checked.has(revision(session)));
         if (!changed.length) break;
         if (attempt === 3) { await discard(); return; }
+        // A helper run another agent started is no conversation of the owner's: it keeps the folder only while it works.
+        const quietHelper = (session: Session) => hiddenRun(session) && !busySessionIds(now.sessions, this.options.runs()).has(session.id)
+          && this.now() - (Date.parse(session.updatedAt) || 0) >= HIDDEN_QUIET_MS;
         for (const session of changed) {
           const cwd = session.cwd && await this.resolved(session.cwd);
-          if (cwd && inside(cwd)) { await discard(); keep('openSession', named(session)); return; }
+          if (cwd && inside(cwd) && !quietHelper(session)) { await discard(); keep('openSession', named(session)); return; }
         }
-        const referrer = (await this.referrers(changed, [name])).get(name);
+        const referrer = (await this.referrers(changed.filter(session => !quietHelper(session)), [name])).get(name);
         if (referrer) { await discard(); keep('openSession', named(referrer)); return; }
         checked = new Set(now.open.map(revision));
       }
@@ -443,12 +461,18 @@ const KEPT_SUFFIX = '-kept';
 function hiddenRun(session: Session): boolean { return Boolean(session.launchedByAgent || session.parentLink === 'exec'); }
 
 /** Everything a helpers' folder is judged on, as one value: sessions, where they work, how far along, and the runs. */
-function hiddenState(sessions: Session[], open: Session[], runs: Run[]): string {
-  return JSON.stringify([sessions.map(session => [session.id, session.updatedAt, session.cwd, session.status, Boolean(session.activeProcess)]),
-    open.map(session => session.id), runs.map(run => [run.id, run.status, run.sessionId])]);
+function hiddenState(path: string, world: World, runs: Run[], folders: ReadonlyMap<string, string>): string {
+  const inside = (session: Session) => { const cwd = session.cwd && (folders.get(session.cwd) ?? session.cwd); return Boolean(cwd && (cwd === path || cwd.startsWith(path + sep))); };
+  const here = world.sessions.filter(inside);
+  const ids = new Set(here.flatMap(session => [session.id, `${session.provider}:${session.nativeId}`]));
+  return JSON.stringify([here.map(session => [session.id, session.updatedAt, session.status, Boolean(session.activeProcess)]),
+    world.open.map(session => session.id), runs.filter(run => ids.has(run.sessionId)).map(run => [run.id, run.status])]);
 }
 
-async function archivesSize(root: string): Promise<number> {
+/** Moved-aside files of helpers' folders kept at most; they are never pruned, so beyond this the folders stay. */
+const KEPT_MOST_BYTES = 1024 * 1024 * 1024;
+
+async function archivesSize(root: string, suffix: string): Promise<number> {
   const size = async (path: string): Promise<number> => {
     const info = await lstat(path).catch(() => undefined);
     if (!info?.isDirectory()) return info?.size ?? 0;
@@ -456,7 +480,9 @@ async function archivesSize(root: string): Promise<number> {
     for (const name of await readdir(path).catch(() => [] as string[])) total += await size(join(path, name));
     return total;
   };
-  return size(root);
+  let total = 0;
+  for (const name of await readdir(root).catch(() => [] as string[])) if (name.endsWith(suffix)) total += await size(join(root, name));
+  return total;
 }
 
 async function pruneArchives(root: string, keep: string): Promise<void> {
@@ -468,9 +494,8 @@ async function pruneArchives(root: string, keep: string): Promise<void> {
     return total;
   };
   const folders = await Promise.all((await readdir(root)).map(async name => ({ path: join(root, name), at: (await stat(join(root, name))).mtimeMs, bytes: await size(join(root, name)) })));
-  // Files of a helpers' folder removed while its conversation was still open are never pruned.
-  for (const folder of folders) if (folder.path.endsWith(KEPT_SUFFIX)) folder.at = Infinity;
-  let total = folders.reduce((sum, folder) => sum + folder.bytes, 0);
+  // Files of a helpers' folder removed while its conversation was still open are never pruned, and have their own limit.
+  let total = folders.filter(folder => !folder.path.endsWith(KEPT_SUFFIX)).reduce((sum, folder) => sum + folder.bytes, 0);
   for (const folder of folders.sort((a, b) => a.at - b.at)) {
     if (total <= ARCHIVES_MOST_BYTES) break;
     if (folder.path === keep || folder.path.endsWith(KEPT_SUFFIX)) continue;
