@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.78.0] - 2026-09-29
+
+### Added
+- **Slack: a working emoji the moment a request arrives.** Set **작업 중 표시 이모지** (working emoji) in the Slack panel's connection tab, for example `loading`. Tower puts it on a mention right when it arrives, and on a later thread message as soon as it is found to ask something of you (at once when it mentions you, after the quick judgment otherwise), without waiting for the agent. It comes off by itself when that work is done: no agent turn, delegated task or message on its way is left. Empty turns it off (the default).
+  - Rules no longer need a "put :loading: on first" step; they can keep only the result emoji (✅ / ❌). If a rule still adds and removes the same emoji, nothing conflicts.
+  - Each reaction call is made once: if Slack refuses one, it is noted in the conversation's record rather than retried every second.
+
+### Changed
+- **Slack: reactions go on the message that asked.** When a later message in the thread asks for more work (for example "dev 배포 부탁드립니다" after a review), the agent now reacts on that message instead of the first request of the thread.
+
 ## [1.77.0] - 2026-09-29
 
 ### Changed
