@@ -112,7 +112,9 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
           {overview.notes.map(note => <li key={`${note.at}-${note.sessionId}`}><button type="button" className="link-button" onClick={() => onOpenSession(note.sessionId)}>{note.title}</button><small>{date(note.at)} · {folderName(note.cwd)}</small><p>{note.note}</p></li>)}
         </ul></details>}
       </section>}
-      {tab === 'guidance' && <GuidanceEditor overview={overview} busy={busy} onSave={(owner, revision) => void mutate('guidance', { owner, revision }, t('지침을 저장했습니다. 새로 시작하는 대화부터 적용됩니다.'))} />}
+      {tab === 'guidance' && <GuidanceEditor overview={overview} busy={busy} onSave={(owner, revision) => void mutate('guidance', { owner, revision }, t('지침을 저장했습니다. 새로 시작하는 대화부터 적용됩니다.'))
+        // After a save refused because the guidance changed elsewhere, the latest version is fetched; the draft stays in the editor.
+        .then(saved => { if (!saved) void load().catch(() => {}); })} />}
       {tab === 'backup' && <Backup overview={overview} token={token} projects={projects} busy={busy} onImport={body => mutate('import', body, t('백업을 가져왔습니다.'))} onError={setError} />}
       {tab === 'settings' && <AdvisorSettings overview={overview} busy={busy} onChange={body => void mutate('settings', body)}
         onBackfill={() => void mutate('backfill', { days: 7 }, t('최근 7일 요청을 분석하기 시작했습니다. 몇 분 걸립니다.'))} onRefresh={() => void act(async () => api<SkillOverview>(`/api/skills${query(cwd)}`))} />}

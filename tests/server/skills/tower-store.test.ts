@@ -335,3 +335,19 @@ test('an older execution worker is never asked for what came with Tower’s own 
     assert.equal(skillsCapability(operation, [action]), 'skills', `${operation} ${action ?? ''}`);
   }
 });
+
+test('a project skill moved into Tower goes to that project’s folder in Tower and stays out of git status', async t => {
+  const f = await homes(t);
+  const repo = join(f.home, 'work', 'shop');
+  await mkdir(repo, { recursive: true });
+  execFileSync('git', ['init', '-q', repo]);
+  const original = join(repo, '.agents', 'skills', 'deploy');
+  await mkdir(original, { recursive: true });
+  await writeFile(join(original, 'SKILL.md'), '---\nname: deploy\ndescription: d\n---\nSteps\n');
+  const { skill } = await f.files.adopt(original, repo);
+  assert.match(skill.dir, new RegExp(`^${f.store}/projects/shop-[0-9a-f]{8}/deploy$`));
+  assert.deepEqual(JSON.parse(await readFile(join(skill.dir, '..', 'project.json'), 'utf8')), { cwd: repo });
+  assert.equal(await readlink(original), skill.dir);
+  assert.equal(await readlink(join(repo, '.claude', 'skills', 'deploy')), skill.dir);
+  assert.equal(execFileSync('git', ['-C', repo, 'status', '--porcelain']).toString().trim(), '');
+});

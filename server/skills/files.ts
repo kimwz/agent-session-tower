@@ -165,7 +165,7 @@ export class SkillFiles {
     for (const copy of skill.copies) {
       if (copy.dir === skill.dir || !roots.has(dirname(copy.dir))) continue;
       // The link is made first beside the copy, then swapped in; if that fails, the copy comes back from the trash.
-      const link = `${copy.dir}.tower-link-${randomUUID().slice(0, 8)}`;
+      const link = join(dirname(copy.dir), `.${basename(copy.dir)}.tower-link-${randomUUID().slice(0, 8)}`);
       await symlink(relative(dirname(copy.dir), skill.dir), link, 'dir');
       let kept: string;
       try { kept = await this.trash(copy.dir); }
