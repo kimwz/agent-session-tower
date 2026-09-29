@@ -546,3 +546,57 @@ test('a copy that fails partway leaves nothing behind in the state folder', { sk
   assert.equal(existsSync(target), true);
   assert.deepEqual(existsSync(join(state, 'worktree-files')) ? readdirSync(join(state, 'worktree-files')) : [], []);
 });
+
+test('a worktree only helper runs worked in goes once they and its maker were quiet, while its maker is still open', async t => {
+  const { dir, state, add, transcript, session } = await setup(t);
+  const review = join(dir, 'work.wt-review'), manual = join(dir, 'work.wt-manual'), shared = join(dir, 'work.wt-shared');
+  const rows = [...add(`git worktree add --detach ${review} HEAD`, ['--detach', review, 'HEAD']), ...add(`git worktree add --detach ${shared} HEAD`, ['--detach', shared, 'HEAD'])];
+  // Made by hand in a terminal: no transcript proves who made it.
+  git(join(dir, 'work'), 'worktree', 'add', '-q', '--detach', manual, 'HEAD');
+  // Review records git ignores, as in `tmp/`.
+  await appendFile(join(dir, 'work', '.git', 'info', 'exclude'), 'tmp/\n');
+  await mkdir(join(review, 'tmp')); await writeFile(join(review, 'tmp', 'review.log'), 'P1 none');
+  const start = Date.now();
+  const helper = (id: string, cwd: string, extra: Partial<Session> = {}) => session(id, undefined, { provider: 'codex', id: `codex:${id}`, cwd, launchedByAgent: true, updatedAt: iso(start), ...extra });
+  const maker = session('maker', await transcript('maker', [...rows, { type: 'user', timestamp: iso(start), message: { content: `Reviews run in ${review} and ${manual}` } }]), { updatedAt: iso(start) });
+  const world = { sessions: [maker, helper('r1', review), helper('m1', manual), helper('s1', shared),
+    // The owner opened a conversation in the shared one.
+    session('owner-here', undefined, { cwd: shared, updatedAt: iso(start) })], closed: new Set<string>(), now: start + 5 * 60_000 };
+  const cleaner = janitor(state, world);
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.ok(existsSync(review), 'helpers finished only minutes ago');
+  world.now = start + 31 * 60_000;
+  await cleaner.pass();
+  assert.equal(existsSync(review), false, 'the helpers’ folder goes while its maker is still open');
+  assert.ok(existsSync(manual), 'one made by hand never goes this way');
+  assert.ok(existsSync(shared), 'a conversation the owner sees works there');
+  const archived = readdirSync(join(state, 'worktree-files'));
+  assert.equal(archived.length, 1);
+  assert.match(archived[0]!, /-kept$/, 'its ignored files are kept and never pruned');
+});
+
+test('a helpers’ folder stays while a helper works in it or its maker used it recently', async t => {
+  const { dir, state, add, transcript, session } = await setup(t);
+  const review = join(dir, 'work.wt-review');
+  const rows = add(`git worktree add --detach ${review} HEAD`, ['--detach', review, 'HEAD']);
+  const start = Date.now();
+  const maker = session('maker', await transcript('maker', rows), { updatedAt: iso(start) });
+  const helper = session('r1', undefined, { provider: 'codex', id: 'codex:r1', cwd: review, launchedByAgent: true, updatedAt: iso(start), status: 'working' });
+  const world = { sessions: [maker, helper], closed: new Set<string>(), now: start + 60 * 60_000 };
+  const cleaner = janitor(state, world);
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.ok(existsSync(review), 'a helper still works there');
+  helper.status = 'completed';
+  // The maker named the folder again a minute ago.
+  maker.updatedAt = iso(start + 59 * 60_000);
+  await appendFile(maker.filePath!, lines({ type: 'user', timestamp: iso(start + 59 * 60_000), message: { content: `Look again at ${review}` } }));
+  await cleaner.pass();
+  assert.ok(existsSync(review), 'its maker used it moments ago');
+  const [result] = await worktreeCleanupFor(state, ['claude:maker']);
+  assert.deepEqual([result?.reason, result?.detail], ['openSession', 'maker']);
+  world.now = start + 2 * 60 * 60_000 + 60_000;
+  await cleaner.pass();
+  assert.equal(existsSync(review), false, 'checked again later, once all was quiet');
+});

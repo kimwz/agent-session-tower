@@ -1,11 +1,12 @@
 import { resolveExecLineage } from './exec-lineage.js';
 import { EventEmitter } from 'node:events';
-import { open, stat } from 'node:fs/promises';
+import { open, rm, stat } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import type { ChatMessage, Provider, Session, SessionDetail } from '../../shared/types.js';
 import { sortSessions } from '../../shared/session-activity.js';
 import { LaunchProofFile } from './launch-proofs.js';
+import { matchLaunchMarks, readLaunchMarks } from './launch-marks.js';
 import { inspectProcesses, type ProcessSnapshot } from './processes.js';
 import { appendFile, applyStatus, initial, ownHistory, parseMessages, walk, CHUNK, MAX_LINE, type RecordState } from './parser.js';
 
@@ -29,6 +30,8 @@ interface SessionOptions {
   codexHome?: string; claudeHome?: string; pollIntervalMs?: number; inspectProcesses?: () => Promise<ProcessSnapshot>;
   /** Where proofs of agent-launched runs are kept, so they outlive this process. Without it they live only in memory. */
   launchProofs?: string;
+  /** Where helper runs started inside Tower's turns leave marks naming who started them (see launch-marks.ts). */
+  launchMarks?: string;
 }
 
 export class SessionService extends EventEmitter {
@@ -47,6 +50,7 @@ export class SessionService extends EventEmitter {
   /** Launching sessions seen while a child's process was alive. The proof outlives the process, and this process too when saved. */
   private readonly launchers = new Map<string, string[]>();
   private readonly proofFile?: LaunchProofFile;
+  private readonly launchMarks?: string;
   private proofsLoaded = false;
   private proofsChanged = false;
   /** Another worker is taking over: this one neither looks at sessions nor saves proofs until it resumes. */
@@ -63,6 +67,7 @@ export class SessionService extends EventEmitter {
     this.interval = Math.max(250, options.pollIntervalMs ?? 1500);
     this.readProcesses = options.inspectProcesses ?? (() => inspectProcesses(this.claudeHome, this.codexHome));
     if (options.launchProofs) this.proofFile = new LaunchProofFile(options.launchProofs);
+    this.launchMarks = options.launchMarks;
   }
 
   async start(): Promise<void> {
@@ -153,6 +158,12 @@ export class SessionService extends EventEmitter {
       if (unchecked.some(state => Date.now() - Date.parse(state.session.createdAt) < 120_000) && Date.now() - this.lastProcesses > 1000) await this.inspect();
       for (const state of unchecked) this.checked.add(state.session.id);
       const live = new Set([...this.records.values()].map(state => state.session.id));
+      // A helper that was detached from its launcher, so the process tree no longer shows who started it, left a mark.
+      if (this.launchMarks) {
+        const { proofs, used } = matchLaunchMarks(await readLaunchMarks(this.launchMarks), this.processes.owners ?? new Map(), this.processes.started ?? new Map(), live);
+        for (const [id, launcher] of proofs) if (!this.launchers.has(id)) { this.launchers.set(id, [launcher]); this.proofsChanged = true; }
+        for (const mark of used) await rm(mark.file, { force: true }).catch(() => {});
+      }
       // A history folder that lists nothing at all (renamed, not mounted) proves nothing is gone either.
       if (!codex.length && !archived.length) incomplete.add('codex');
       if (!claude.length) incomplete.add('claude');

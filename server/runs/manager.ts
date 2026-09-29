@@ -1,3 +1,4 @@
+import { LAUNCH_MARKS_ENV } from '../sessions/launch-marks.js';
 import { spawn, type ChildProcessWithoutNullStreams, type SpawnOptionsWithoutStdio } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -44,6 +45,11 @@ interface RunnerOptions {
   /** How the master's Claude sign-in is checked before its turn (tests replace it). */
   checkClaudeSubscription?: typeof checkClaudeSubscription;
   env?: NodeJS.ProcessEnv;
+  /**
+   * Folder of the `claude`/`codex` shims put first in every turn's PATH, and where their marks go: a helper the turn starts
+   * notes who started it, so it is never shown as the owner's own session even when detached (see launch-marks.ts).
+   */
+  launchMarks?: { shims: string; marks: string };
   spawnProcess?: SpawnProcess;
   findExecutable?: (provider: Provider) => Promise<string | undefined>;
   maxConcurrent?: number;
@@ -177,6 +183,14 @@ export class RunManager extends EventEmitter {
    * at what the gate needs, after the last asynchronous step before a provider starts; the gate then answers at once.
    */
   setLaunchGate(gate: (run: Run) => string | undefined, prepare?: (run: Run) => Promise<void>): void { this.launchGate = gate; this.launchPrepare = prepare; }
+  /** Puts the launch shims first in a turn's PATH and tells them where to leave their marks. */
+  private markLaunches(env: NodeJS.ProcessEnv): void {
+    const launch = this.options.launchMarks;
+    if (!launch) return;
+    env.PATH = [launch.shims, ...(env.PATH ?? '').split(delimiter).filter(dir => dir && dir !== launch.shims)].join(delimiter);
+    env[LAUNCH_MARKS_ENV] = launch.marks;
+  }
+
   private async prepareLaunch(run: Run): Promise<void> {
     // A look that fails leaves the gate with what it knows; a folder it cannot tell about counts as private.
     if (run.status === 'queued') await this.launchPrepare?.(run).catch(() => {});
@@ -858,6 +872,7 @@ export class RunManager extends EventEmitter {
     const master = this.masterSession(session);
     const env = master ? withoutKeys({ ...process.env, ...this.options.env }) : { ...process.env, ...this.options.env };
     env.PATH = providerDirectories(env).join(delimiter);
+    this.markLaunches(env);
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_SESSION_ID;
     let started = false;
@@ -985,6 +1000,7 @@ export class RunManager extends EventEmitter {
     const master = this.masterSession(session);
     const env = master ? withoutKeys({ ...process.env, ...this.options.env }) : { ...process.env, ...this.options.env };
     env.PATH = providerDirectories(env).join(delimiter);
+    this.markLaunches(env);
     // The web server may itself have been started from inside Claude Code.
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_SESSION_ID;
