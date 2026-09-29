@@ -563,25 +563,36 @@ export class SkillFiles {
       const failures: string[] = [];
       for (const root of wanted) {
         const path = join(root.dir, name);
-        if (await lstat(path).catch(() => undefined)) {
+        const info = await lstat(path).catch(() => undefined);
+        if (info) {
           if (await realpath(path).catch(() => '') !== dir) failures.push(`${root.cwd ? basename(root.cwd) : root.dir}에 같은 이름의 다른 스킬이 이미 있습니다.`);
+          // A link reaching the skill through another link (~/.claude/skills/x → ~/.agents/skills/x) would break when
+          // that one is removed below: it is swapped for a direct one.
+          else if (info.isSymbolicLink() && await readlink(path) !== dir) {
+            const swap = join(root.dir, `.${name}.tower-link-${randomUUID().slice(0, 8)}`);
+            try { await symlink(dir, swap, 'dir'); await rename(swap, path); }
+            catch (error) { await unlink(swap).catch(() => {}); failures.push(error instanceof Error ? error.message : String(error)); }
+          }
           continue;
         }
         try { await ensureRoot(root); await symlink(dir, path, 'dir'); }
         catch (error) { failures.push(error instanceof Error ? error.message : String(error)); }
       }
       for (const cwd of present) await excludeLinks(cwd, name, true).catch(() => {});
-      const keep = new Set(wanted.map(root => root.dir));
-      const sweep = [...(targets.all ? [] : this.globalRoots().sweep), ...[...new Set(tracked.projects)].filter(cwd => !targets.projects.includes(cwd)).flatMap(cwd => this.projectRoots(cwd))]
-        .filter(root => !keep.has(root.dir));
+      // Folders are compared by their real place: a project named through a link is the same folder as the project.
+      const real = (folder: string) => realpath(folder).catch(() => resolve(folder));
+      const keep = new Set(await Promise.all(wanted.map(root => real(root.dir))));
+      const sweep = [...(targets.all ? [] : this.globalRoots().sweep), ...[...new Set(tracked.projects)].filter(cwd => !targets.projects.includes(cwd)).flatMap(cwd => this.projectRoots(cwd))];
       // Every link is judged before any is removed: a link to a link reads as broken once the first one is gone.
-      const doomed: string[] = [];
+      const doomed = new Map<string, string>();
       for (const root of sweep) {
         if (!await rootIsSafe(root)) continue;
+        const folder = await real(root.dir);
+        if (keep.has(folder)) continue;
         const path = join(root.dir, name);
-        if ((await lstat(path).catch(() => undefined))?.isSymbolicLink() && await realpath(path).catch(() => '') === dir) doomed.push(path);
+        if ((await lstat(path).catch(() => undefined))?.isSymbolicLink() && await realpath(path).catch(() => '') === dir) doomed.set(join(folder, name), path);
       }
-      for (const path of doomed) await unlink(path).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failures.push(error instanceof Error ? error.message : String(error)); });
+      for (const path of doomed.values()) await unlink(path).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failures.push(error instanceof Error ? error.message : String(error)); });
       if (failures.length) throw new SkillError(failures.join(' / '), 409);
     });
   }

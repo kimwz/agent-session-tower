@@ -188,3 +188,22 @@ test('an older execution worker is never asked for projects per skill', () => {
   assert.equal(skillsCapability('skillsMutate', ['import', { bundle }]), 'skillTargets');
   assert.equal(skillsCapability('skillsImportPlan', [{ skills: [{ name: 'x' }] }]), 'towerSkills');
 });
+
+test('narrowing a skill keeps the links it still needs: one reaching it through a global link, or a project named through a link', async t => {
+  const f = await fixture(t);
+  const skill = (await save(f.service, 'deploy', { all: true, projects: [] })).stored![0]!;
+  // An older install linked the project to the global link, not to Tower's folder.
+  await mkdir(join(f.shop, '.claude', 'skills'), { recursive: true });
+  await symlink(join(f.homes.agentsHome, 'skills', 'deploy'), join(f.shop, '.claude', 'skills', 'deploy'));
+  await f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.shop] } });
+  assert.equal(await f.global('deploy'), false);
+  assert.equal(await realpath(join(f.shop, '.claude', 'skills', 'deploy')), skill.dir, 'still reaches the skill');
+  assert.equal(await readlink(join(f.shop, '.claude', 'skills', 'deploy')), skill.dir);
+  // The same folder by another name.
+  const alias = join(f.home, 'work', 'shop-alias');
+  await symlink(f.shop, alias);
+  const again = await f.start();
+  (again as unknown as { options: { projects: () => string[] } }).options.projects = () => [alias];
+  await again.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [alias] } });
+  assert.equal(await f.linked(f.shop, 'deploy'), true, 'the links the alias needs stay');
+});
