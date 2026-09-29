@@ -128,6 +128,8 @@ export class SlackAutomationManager extends EventEmitter {
   private processing?: Promise<void>;
   private marking?: Promise<void>;
   private markAgain = false;
+  private clearing = false;
+  private readonly unsaved = new WeakSet<object>();
   private toolOperations = new Map<string, Promise<unknown>>();
   private started = false;
   private held = false;
@@ -469,15 +471,25 @@ export class SlackAutomationManager extends EventEmitter {
     if ((item.workingMarks?.length ?? 0) >= MAX_WORKING_MARKS) return;
     const mark = { ts, name, state: 'add' as const };
     item.workingMarks = [...(item.workingMarks ?? []), mark];
+    // A pass already running must not take it up before it is saved.
+    this.unsaved.add(mark);
     try { await this.persist(); } catch { item.workingMarks = item.workingMarks.filter(value => value !== mark); return; }
+    finally { this.unsaved.delete(mark); }
     void this.sweepMarks().catch(() => {});
   }
   /** Takes every working reaction off now, before the account that put them on is disconnected or replaced. */
   async clearMarks(): Promise<void> {
-    await this.marking?.catch(() => {});
-    for (const item of this.items) {
-      for (const mark of item.workingMarks ?? []) if (mark.state !== 'off') await this.settleMark(item, mark, 'remove');
-    }
+    // Sweeps stand aside meanwhile, and this counts as the one reaction pass in flight.
+    this.clearing = true;
+    try {
+      await this.marking?.catch(() => {});
+      this.marking = (async () => {
+        for (const item of this.items) {
+          for (const mark of item.workingMarks ?? []) if (mark.state !== 'off') await this.settleMark(item, mark, 'remove');
+        }
+      })().finally(() => { this.marking = undefined; });
+      await this.marking;
+    } finally { this.clearing = false; }
   }
   /** One Slack call for a mark, never repeated: its outcome, failure included, is recorded. */
   private async settleMark(item: SlackWorkflow, mark: NonNullable<SlackWorkflow['workingMarks']>[number], action: 'add' | 'remove'): Promise<void> {
@@ -503,14 +515,14 @@ export class SlackAutomationManager extends EventEmitter {
    * uncertain is still taken off with a real call.
    */
   private sweepMarks(): Promise<void> {
-    if (!this.started || this.held || !this.options.react) return Promise.resolve();
+    if (!this.started || this.held || this.clearing || !this.options.react) return Promise.resolve();
     if (this.marking) { this.markAgain = true; return this.marking; }
     this.marking = (async () => {
       do {
         this.markAgain = false;
         for (const item of this.items) {
-          if (this.held) return;
-          const marks = item.workingMarks?.filter(mark => mark.state !== 'off');
+          if (this.held || this.clearing) return;
+          const marks = item.workingMarks?.filter(mark => mark.state !== 'off' && !this.unsaved.has(mark));
           if (!marks?.length) continue;
           const settled = this.settled(item);
           for (const mark of marks) if (!this.held && (settled || mark.state === 'add')) await this.settleMark(item, mark, settled ? 'remove' : 'add');

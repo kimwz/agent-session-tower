@@ -1078,3 +1078,23 @@ test('a request whose admission is not saved gets no reaction, and clearing take
   assert.deepEqual(calls, ['add:loading:1.1', 'remove:loading:1.1']);
   assert.deepEqual(f.manager.list()[0].workingMarks, [{ ts: '1.1', name: 'loading', state: 'off' }]);
 });
+
+test('clearing waits for a reaction pass and no sweep puts a mark back meanwhile', async t => {
+  const f = await fixture(t);
+  const calls: string[] = [];
+  const answers: Array<() => void> = [];
+  f.options.react = (_mention, name, action, ts) => { calls.push(`${action}:${name}:${ts}`); return new Promise<void>(resolve => answers.push(resolve)); };
+  f.options.workingReaction = () => 'loading';
+  f.options.startConversation = () => new Promise(() => {});
+  const admitted = f.manager.ingest(mention);
+  for (let wait = 0; !calls.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  const clearing = f.manager.clearMarks();
+  void f.manager.tick();
+  answers.shift()!(); await admitted;
+  for (let wait = 0; calls.length < 2 && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(f.manager.inFlight(), true);
+  void f.manager.tick();
+  answers.shift()!(); await clearing;
+  assert.deepEqual(calls, ['add:loading:1.1', 'remove:loading:1.1'], 'no add comes between or after the clearing');
+  assert.equal(f.manager.list()[0].workingMarks?.[0].state, 'off');
+});
