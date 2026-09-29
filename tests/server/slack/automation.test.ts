@@ -691,7 +691,7 @@ test('owner completion permission can report a durable submission failure withou
   await f.manager.tool(id, 'tower_task_complete', { ...args, outcome: 'failed' }); assert.equal(f.counts().sends, 1);
 });
 
-test('autoReply rule delegation grants one truthful report, reactions and participant mentions without owner approval', async t => {
+test('autoReply rule delegation grants one truthful report and participant mentions without owner approval; reactions need no grant', async t => {
   const f = await fixture(t);
   await f.manager.setRules([{ ...rule, autoReply: true }]);
   const reactions: string[] = []; const mentionables: string[][] = []; const automatic: boolean[] = [];
@@ -699,11 +699,13 @@ test('autoReply rule delegation grants one truthful report, reactions and partic
   f.options.sendReply = async (_mention, _text, mentionable, auto) => { mentionables.push(mentionable); automatic.push(auto); return { ts: '2.0' }; };
   f.options.startConversation = async (_workflow, _prompt, instructions) => { assert.match(instructions!, /autoReply true/); return { sessionId: 'owner-chat', runId: 'coordinator' }; };
   await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
-  await assert.rejects(f.manager.tool(id, 'slack_react', { name: 'hourglass_flowing_sand', action: 'add' }), /No reply authorization/);
+  // The first thing a rule asks for, before any delegation.
+  await f.manager.tool(id, 'slack_react', { name: ':hourglass_flowing_sand:', action: 'add' });
+  assert.equal(f.manager.list()[0].ownerConditionalReply, undefined, 'a reaction grants nothing');
+  await assert.rejects(f.manager.tool(id, 'slack_send', { text: 'Done' }), /No immediate owner send authorization/);
   await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', ruleId: 'review', prompt: 'Deploy the fix' });
   const consent = f.manager.list()[0].ownerConditionalReply!;
   assert.equal(consent.ruleId, 'review'); assert.equal(consent.mode, 'composed'); assert.match(consent.instruction!, /Confirm only a finished review/);
-  await f.manager.tool(id, 'slack_react', { name: ':hourglass_flowing_sand:', action: 'add' });
   await assert.rejects(f.manager.tool(id, 'slack_react', { name: 'bad name', action: 'add' }), /emoji name/);
   const task = f.manager.list()[0].delegatedTasks![0]; const job = f.options.getAutoPrompt(task.requestId)!;
   const run: Run = { id: job.runId!, sessionId: job.sessionId!, autoPromptId: task.requestId, status: 'running', prompt: '', output: 'Review finished.', createdAt: '' };
@@ -734,7 +736,8 @@ test('rules without autoReply never grant sending, and owner cancellation revoke
   await g.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', prompt: 'Deploy the fix' });
   chatText(await g.manager.ownerChat('owner-chat', '아직 보내지 마세요'));
   assert.equal(g.manager.list()[0].ownerConditionalReply?.status, 'cancelled');
-  await assert.rejects(g.manager.tool(id, 'slack_react', { name: 'eyes', action: 'add' }), /No reply authorization/);
+  await g.manager.tool(id, 'slack_react', { name: 'eyes', action: 'add' });
+  assert.equal(g.manager.list()[0].ownerConditionalReply?.status, 'cancelled', 'a reaction does not bring a cancelled grant back');
   await assert.rejects(g.manager.setRules([{ ...rule, autoReply: 'yes' as unknown as boolean }]), /올바르지/);
 });
 test('while the worker hands off, new mentions are saved but only the successor starts them', async t => {

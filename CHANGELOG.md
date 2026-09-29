@@ -4,10 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.78.1] - 2026-09-29
+## [1.78.2] - 2026-09-29
 
 ### Changed
 - **Allow rules now reach every Claude Code turn Tower starts, as they already did for Codex.** Triggers, Slack and GitHub watches and public agents are work you set up, and you chose what it may do. Until now their Claude turns did not get your allow rules, so an action you allowed (for example a deploy command for a deploy public agent) was still refused there by the auto-mode classifier. Work set to wait for your approval no longer asks about actions you allowed either. The Permissions panel says where rules apply. Claude sessions you open yourself in a terminal are still not affected.
+
+## [1.78.1] - 2026-09-29
+
+### Fixed
+- **Slack and GitHub coordinators can add reactions at any time.** Emoji reactions no longer wait for reply permission, which only came from an autoReply rule's delegation or the owner. So a rule's "put :loading: on first" works as its first step, and a coordinator that asks for nothing to be sent can still react. Replies still need the same permission as before.
 
 ## [1.78.0] - 2026-09-29
 
