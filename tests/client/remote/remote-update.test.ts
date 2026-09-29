@@ -48,3 +48,15 @@ test('this computer carries its execution worker version for the canvas', () => 
   const view = combinedView({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'here', version: '1.56.0', runnerVersion: '1.53.2', updatedAt: at }, new Map());
   assert.equal(view.hosts[0].runnerVersion, '1.53.2');
 });
+
+test('computer status reaches the canvas for this computer and for joined ones only while they stream', () => {
+  const system = { cpu: 10, cores: 4, load: [0, 0, 0] as [number, number, number], memory: { total: 8, used: 4 }, sampledAt: at };
+  const joined = { id: 'b'.repeat(32), name: 'studio', status: 'connected' as const, features: ['read'], streaming: true };
+  const local = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'here', version: '1.79.0', updatedAt: at, system };
+  const theirs = { ...local, hostname: 'studio', system: { ...system, cpu: 80 } };
+  const live = combinedView({ ...local, nodes: [joined] }, new Map([[joined.id, theirs]]));
+  assert.equal(live.hosts[0].system?.cpu, 10);
+  assert.equal(live.hosts[1].system?.cpu, 80);
+  const away = combinedView({ ...local, nodes: [{ ...joined, status: 'offline', streaming: false }] }, new Map([[joined.id, theirs]]));
+  assert.equal(away.hosts[1].system, undefined, 'last numbers of a computer out of reach are not shown as current');
+});

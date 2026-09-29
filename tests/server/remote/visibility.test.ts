@@ -96,3 +96,9 @@ test('remote work inside this machine routes with the same view: no excluded fol
   assert.deepEqual(working.groups?.map(item => item.cwd), ['/work/open']);
   assert.deepEqual(working.runs.map(item => item.id), ['r-open']);
 });
+
+test('a controlling Tower sees the computer status numbers', () => {
+  const system = { cpu: 12, cores: 8, load: [1, 2, 3] as [number, number, number], memory: { total: 16, used: 8 }, disk: { total: 100, free: 40 }, sampledAt: now };
+  assert.deepEqual(remoteSnapshot({ ...base(), system }, scope(), 'controller-a1b2c3d4e5f6').system, system);
+  assert.equal(remoteSnapshot(base(), scope(), 'controller-a1b2c3d4e5f6').system, undefined);
+});

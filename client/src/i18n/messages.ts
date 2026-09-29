@@ -1929,4 +1929,13 @@ export const english: Record<string, string> = {
   "나에게 묻는 메시지가 아니라고 판단했습니다.": "Judged not to ask anything of the owner.",
   "이 메시지가 대화에 전달됐는지 확실하지 않아 다시 보내지 않았습니다.": "Whether this message reached the conversation is uncertain, so it was not sent again.",
   "판단하지 못했습니다: {0}": "The judgment failed: {0}",
+  "메모리": "Memory",
+  "디스크": "Disk",
+  "측정 중": "Measuring",
+  "컴퓨터 상태: {0}": "Computer status: {0}",
+  "컴퓨터 상태": "Computer status",
+  "코어 {0}개 · 부하 {1}": "{0} cores · load {1}",
+  "{0} / {1} GB 사용": "{0} / {1} GB used",
+  "{0} / {1} GB 사용 · {2} GB 남음": "{0} / {1} GB used · {2} GB free",
+  "측정: {0}": "Measured: {0}",
 };

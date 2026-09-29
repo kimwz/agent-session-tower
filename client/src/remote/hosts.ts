@@ -1,4 +1,4 @@
-import type { ProviderHealth, Snapshot } from '../../../shared/types';
+import type { ProviderHealth, Snapshot, SystemStatus } from '../../../shared/types';
 import { translate as t } from '../i18n/i18n';
 import type { NodeStatus } from '../../../shared/link';
 import { scopeSnapshot } from './scope';
@@ -27,6 +27,8 @@ export interface Host {
   /** This computer's execution worker, which keeps its own code until it is idle. */
   runnerVersion?: string;
   providers: ProviderHealth[];
+  /** CPU, memory and disk, only while its state is arriving now. */
+  system?: SystemStatus;
 }
 
 // Renaming a snapshot is done once per computer and snapshot, not on every render.
@@ -80,13 +82,15 @@ const named = (node: string, snapshot: Snapshot) => {
 export function combinedView(local: Snapshot | null, nodes: ReadonlyMap<string, Snapshot>): { view: Snapshot | null; hosts: Host[]; complete: boolean } {
   if (!local) return { view: null, hosts: [], complete: false };
   const complete = local.nodes !== undefined;
-  const here: Host = { name: local.hostname, status: 'local', live: true, canWork: true, workspace: true, known: true, version: local.version, ...(local.runnerVersion ? { runnerVersion: local.runnerVersion } : {}), providers: local.providers };
+  const here: Host = { name: local.hostname, status: 'local', live: true, canWork: true, workspace: true, known: true, version: local.version, ...(local.runnerVersion ? { runnerVersion: local.runnerVersion } : {}), providers: local.providers, ...(local.system ? { system: local.system } : {}) };
   const listed = local.nodes ?? [];
   for (const node of scoped.keys()) if (!listed.some(item => item.id === node)) scoped.delete(node);
   if (!listed.length) return { view: local, hosts: [here], complete };
   const parts = listed.flatMap(node => { const snapshot = nodes.get(node.id); return snapshot ? [named(node.id, snapshot)] : []; });
   const hosts = [here, ...listed.map((node): Host => ({ node: node.id, name: node.label || node.name, status: node.status, live: node.status === 'connected' && node.streaming,
-    canWork: node.status === 'connected' && node.streaming && node.features.includes('work'), workspace: node.status === 'connected' && node.features.includes('workspace'), ...(node.features.includes('read') ? { reporting: true } : {}), ...(node.status === 'connected' && node.features.includes('triggers') ? { triggers: true } : {}), known: Boolean(nodes.get(node.id)) && !nodes.get(node.id)!.scanning, ...(node.updating ? { updating: true } : {}), ...(node.version ? { version: node.version } : {}), providers: nodes.get(node.id)?.providers ?? [] }))];
+    canWork: node.status === 'connected' && node.streaming && node.features.includes('work'), workspace: node.status === 'connected' && node.features.includes('workspace'), ...(node.features.includes('read') ? { reporting: true } : {}), ...(node.status === 'connected' && node.features.includes('triggers') ? { triggers: true } : {}), known: Boolean(nodes.get(node.id)) && !nodes.get(node.id)!.scanning, ...(node.updating ? { updating: true } : {}), ...(node.version ? { version: node.version } : {}), providers: nodes.get(node.id)?.providers ?? [],
+    // A computer out of reach shows no rings rather than old numbers that look current.
+    ...(node.status === 'connected' && node.streaming && nodes.get(node.id)?.system ? { system: nodes.get(node.id)!.system } : {}) }))];
   return { hosts, complete, view: { ...local,
     sessions: [...local.sessions, ...parts.flatMap(part => part.sessions)],
     runs: [...local.runs, ...parts.flatMap(part => part.runs)],
