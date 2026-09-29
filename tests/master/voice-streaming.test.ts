@@ -434,3 +434,24 @@ test('words that keep coming after the first ones went to speech are read too, f
   await until(() => h.spoken().join(' ').endsWith('끝.') || undefined);
   assert.equal(h.spoken().join(' '), '첫 문장을 먼저 말씀드릴게요. 2번째 문장을 이어서 말씀드려요, 조금 더 길게 써 볼게요. 3번째 문장을 이어서 말씀드려요, 조금 더 길게 써 볼게요. 4번째 문장을 이어서 말씀드려요, 조금 더 길게 써 볼게요. 끝.');
 });
+
+test('a message steered into a turn being read that fails to arrive does not stop the turn\'s reading', async t => {
+  const h = await harness(t, { page: { delayMs: 5 } });
+  h.on();
+  const { run } = await h.ask('첫 요청');
+  h.write(run, 'm1:0', '첫 요청에 답하고 있어요. ');
+  await until(() => h.says().find(say => say.kind === 'answer'));
+  // A second request steered into the same turn; its delivery failed while the turn goes on.
+  const second = await h.ask('덧붙인 요청');
+  second.run.steering = { targetRunId: run.id, state: 'uncertain', requestedAt: new Date().toISOString() };
+  second.run.status = 'error';
+  second.run.finishedAt = new Date().toISOString();
+  h.emit();
+  await h.entry(/답하지 못했습니다/);
+  assert.equal(h.voice.streaming(run.id), true, 'the turn is still being read');
+  h.write(run, 'm1:0', '이어서 끝까지 말씀드려요.', true);
+  h.finish(run);
+  const done = await h.entry(/끝까지 말씀드려요/);
+  await until(() => h.speakOf(done)?.state === 'played');
+  assert.ok(h.spoken().includes('이어서 끝까지 말씀드려요.'));
+});

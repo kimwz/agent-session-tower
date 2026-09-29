@@ -419,7 +419,10 @@ export class MasterSession {
       ? report ? { kind: 'event', text: item.answer, speak } : { kind: 'master', text: item.answer, turnId: item.id, final: true, speak, ...request }
       : { kind: 'error', text: ended === 'cancelled' ? '요청이 멈췄습니다.' : '요청에 답하지 못했습니다. 마스터 창에서 확인해 주세요.', speak };
     // Read (or begun to be read) while it was written: the rest is read, and nothing of it is read twice.
-    if (turn && (this.voiced(turn) || voice.streaming?.(turn)) && voice.finishStream) {
+    // Only the turn's own end settles it: a message steered into a turn still running that failed to arrive is told
+    // on its own, as before, and the turn goes on being read.
+    const turnGoesOn = turnRun !== undefined && !FINISHED_RUN.has(turnRun.status);
+    if (turn && !turnGoesOn && (this.voiced(turn) || voice.streaming?.(turn)) && voice.finishStream) {
       if (ended === 'completed' && item.answer) item.spoke = true;
       voice.finishStream({ turn, ...(turnRun?.replies ? { replies: turnRun.replies } : {}), completed: ended === 'completed', ...(data ? { data } : {}) });
       return;
