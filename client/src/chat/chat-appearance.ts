@@ -50,6 +50,12 @@ export function useChatAppearance() {
   const [maxWidth, setMaxWidth] = useState(maximumWidth);
   const drag = useRef<{ pointerId: number; x: number; width: number } | null>(null);
   const width = clamp(preferredWidth, 320, maxWidth);
+  // While a conversation covers the right of the page, the header's settings button moves to its left edge.
+  useEffect(() => {
+    const root = document.documentElement.style;
+    root.setProperty('--chat-panel-width', `${width}px`);
+    return () => { root.removeProperty('--chat-panel-width'); };
+  }, [width]);
   useEffect(() => {
     const update = () => setMaxWidth(maximumWidth());
     window.addEventListener('resize', update);

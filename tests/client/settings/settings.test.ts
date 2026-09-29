@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage } from '../../../client/src/i18n/i18n.js';
-import { entryMark, initialSection, noAttention, sectionMark, settingsSections } from '../../../client/src/settings/settings-sections.js';
+import { entryMark, initialSection, noAttention, requestAllowed, sectionMark, settingsSections } from '../../../client/src/settings/settings-sections.js';
 import { onOpenSettings, openSettings, type SettingsRequest } from '../../../client/src/settings/settings-open.js';
 import { openSkills } from '../../../client/src/skills/skills-open.js';
 import { openPermissions } from '../../../client/src/permissions/permissions-open.js';
@@ -38,6 +38,15 @@ test('the settings open where asked, else on a waiting permission request, else 
   assert.equal(initialSection(undefined, noAttention, 'skills', sections), 'skills');
   assert.equal(initialSection(undefined, noAttention, undefined, sections), 'general');
   assert.equal(initialSection('account', noAttention, undefined, sections), 'general', 'a section this page lacks is not opened');
+});
+
+test('a request the page cannot show is refused: no token yet, a missing section, or account management away from this computer', () => {
+  const page = { token: 't', sections: settingsSections(true), local: true };
+  assert.equal(requestAllowed(page, 'triggers'), true);
+  assert.equal(requestAllowed(page, undefined), true);
+  assert.equal(requestAllowed({ ...page, token: '' }, 'triggers'), false);
+  assert.equal(requestAllowed({ ...page, local: false }, 'account'), false);
+  assert.equal(requestAllowed({ ...page, sections: settingsSections(false) }, 'account'), false);
 });
 
 test('a folder menu opens skills and permissions in the settings, narrowed to that folder', t => {

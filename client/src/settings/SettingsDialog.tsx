@@ -120,9 +120,11 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
       // Slack's and the public agents' own dialogs sit above this one and answer their own Esc; React hands it on.
       if (event.target !== event.currentTarget) return;
       event.preventDefault();
-      if (guards.current.get(current)?.escape?.()) return;
+      if (!listing && guards.current.get(current)?.escape?.()) return;
       requestClose();
     }}
+    // The browser may close a modal on its own (a second Esc without a click in between); the page follows it.
+    onClose={event => { if (event.target === event.currentTarget) onClose(); }}
     onClick={event => { if (event.target === event.currentTarget) requestClose(); }}>
     <div className={`settings-shell ${listing ? 'listing' : 'reading'}`}>
       <nav className="settings-nav" aria-label={t('설정 메뉴')}>

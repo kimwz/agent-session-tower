@@ -95,6 +95,11 @@ label.settings-row { cursor:pointer; }
 .settings-switch:disabled { opacity:.45; cursor:default; }
 .settings-switch:focus-visible, .settings-segmented button:focus-visible, .settings-row select:focus-visible { outline:2px solid #97c4ff; outline-offset:2px; }
 
+/* A conversation covers the right of the page, header included; the settings button stays beside it. */
+@media (min-width:681px) {
+  .has-chat .app-header .header-actions { margin-right:var(--chat-panel-width, 0px); }
+}
+
 @media (max-width:900px) {
   .settings-button { width:34px; padding:0; justify-content:center; }
   .settings-button-label { display:none; }

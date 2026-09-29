@@ -26,7 +26,7 @@ export function useSettingsAttention(token: string, triggers: TriggerOverview | 
   }, [token]);
   const refreshSkills = useCallback(() => {
     if (!token) return;
-    void api<SkillSummary>('/api/skills/summary').then(summary => { setSkills(summary.proposals); publishSkillSummary(summary); }).catch(() => {});
+    void api<SkillSummary>('/api/skills/summary').then(summary => { setSkills(summary.proposals); publishSkillSummary(summary); }).catch(() => { setSkills(0); publishSkillSummary({ proposals: 0 }); });
   }, [token]);
   useEffect(() => {
     refreshPermissions();

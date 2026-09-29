@@ -2,7 +2,7 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'r
 import { FolderChip } from '../settings/FolderChip';
 import { SettingsFrameContext, SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
 import { Archive, ArrowLeft, Check, ChevronRight, Download, Eye, FolderInput, FolderOpen, Globe, Layers, Link2, LoaderCircle, Merge, MoreHorizontal, Pencil, Pin, PinOff, Plus, RefreshCw, ScrollText, Settings2, Sparkles, Trash2, Upload, X } from 'lucide-react';
-import type { Skill, SkillBundle, SkillDetail, SkillImportChoice, SkillImportPlan, SkillOverview, SkillProposal, SkillScope, SkillSummary, SkillTargets } from '../../../shared/skills';
+import type { Skill, SkillBundle, SkillDetail, SkillImportChoice, SkillImportPlan, SkillOverview, SkillProposal, SkillScope, SkillTargets } from '../../../shared/skills';
 import { MAX_SKILL_DESCRIPTION, proposalReady, SKILL_NAME, targetsCover, targetsRevision } from '../../../shared/skills';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { api } from '../common/lib';
@@ -47,10 +47,10 @@ export function SkillsPanel({ token, cwd, projects, onClearFolder, onChanged, on
   // The 7-day analysis takes minutes; the panel follows it until it ends.
   const analysing = overview?.advisor.backfill?.running;
   useEffect(() => {
-    if (!analysing) return;
+    if (!analysing || !active) return;
     const timer = setInterval(() => void load().catch(() => {}), 4_000);
     return () => clearInterval(timer);
-  }, [analysing, load]);
+  }, [analysing, active, load]);
   async function act(action: () => Promise<SkillOverview>, done = '') {
     if (busy) return false;
     setBusy(true); setError(''); setNotice('');

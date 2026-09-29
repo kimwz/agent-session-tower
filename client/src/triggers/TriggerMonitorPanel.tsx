@@ -41,7 +41,7 @@ export function TriggerMonitorPanel({ token, slack, slackError, mentionId, jobs,
           <section><h3>{t('트리거 실행')}</h3>
             {events.length ? events.slice(0, shown).map(item => <button key={item.id} className={`slack-monitor-entry ${triggerEventWorking(item) ? 'working' : triggerUnreadIds?.has(item.id) ? 'unread' : ''}`} onClick={() => onSelectEvent(item.id)}>
               <strong>{item.triggerName}</strong><span>{eventStatusLabel(item.status, t)} · {item.summary}</span><time>{new Date(item.receivedAt).toLocaleString()}</time></button>)
-              : <p>{t('아직 트리거가 실행되지 않았습니다. 트리거는 상단의 번개 버튼에서 만듭니다.')}</p>}
+              : <p>{t('아직 트리거가 실행되지 않았습니다. 트리거는 설정의 트리거에서 만듭니다.')}</p>}
             {(events.length > shown || hasMore) && <button className="slack-monitor-back" onClick={() => { setShown(value => value + PANEL_PAGE); if (shown + PANEL_PAGE > events.length) onMore(); }}>{t('실행 더 보기')}</button>}
           </section>
           <section><h3>Slack</h3><SlackOverview slack={slack} token={token} unreadIds={slackUnreadIds} onSelectMention={onSelectMention} /></section>

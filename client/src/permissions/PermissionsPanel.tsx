@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useState } from 'react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { FolderChip } from '../settings/FolderChip';
 import { SettingsFrameContext, SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
 import { Check, LoaderCircle, Pencil, Plus, Trash2, TriangleAlert } from 'lucide-react';
@@ -30,10 +30,12 @@ export function PermissionsPanel({ token, cwd, projects, pending: waiting, onCle
   const [resume, setResume] = useState(true);
   const shown = useCallback((all: PermissionOverview): PermissionOverview => cwd ? { ...all, rules: all.rules.filter(rule => rule.scope === 'global' || rule.cwd === cwd), requests: all.requests.filter(request => request.cwd === cwd),
     targets: all.targets.filter(target => target.scope === 'global' || target.cwd === cwd), pending: all.requests.filter(request => request.cwd === cwd && request.status === 'pending').length } : all, [cwd]);
+  // The requests tab is chosen once, on opening; later reloads leave the owner where they are.
+  const opened = useRef(false);
   // Asked again when shown again and when the page sees the number of waiting requests change.
   useEffect(() => {
     if (!active) return;
-    void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(value => { setOverview(value); if (value.pending) setTab('requests'); }).catch(error => setError(error instanceof Error ? error.message : String(error)));
+    void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(value => { if (!opened.current && value.pending) setTab('requests'); opened.current = true; setOverview(value); }).catch(error => setError(error instanceof Error ? error.message : String(error)));
   }, [token, cwd, active, waiting]);
   useSettingsGuard({
     escape: () => { if (!draft) return false; setDraft(null); return true; },

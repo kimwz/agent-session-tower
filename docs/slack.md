@@ -11,7 +11,7 @@ This initial integration uses a private Slack app with Socket Mode and a **user 
 3. Under **OAuth & Permissions → User Token Scopes**, add `channels:history`, `groups:history`, `im:history`, `mpim:history`, `chat:write`, and `reactions:write` (progress emoji for auto-reply rules). Omit conversation types you do not want to monitor, together with their event subscriptions below.
 4. Under **Event Subscriptions → Subscribe to events on behalf of users**, add `message.channels`, `message.groups`, `message.im`, and `message.mpim` for the enabled scopes. Use user events, not `app_mention`: the target is your personal account.
 5. Install/reinstall the app to your workspace and obtain its **User OAuth Token** (`xoxp-`). Use the same app/workspace for both tokens. Token rotation is not implemented; use an internal app without token rotation for this version.
-6. Open **Slack automation** in the Tower header and enter the two tokens. Save instructions, then explicitly enable monitoring. Connecting alone does not enable it.
+6. Open **Settings → Triggers**, choose **Slack mentions**, and enter the two tokens. Save instructions, then explicitly enable monitoring. Connecting alone does not enable it.
 
 Socket Mode needs outbound HTTPS and WebSocket access to Slack; it does not require a public callback URL. Slack delivers only messages accessible to the app's authorized user and scopes. This version processes newly delivered direct user mentions (`<@USER_ID>`), not historic mentions, edits that introduce a mention, group mentions, or bot-generated messages. Events missed during a prolonged outage are not backfilled.
 

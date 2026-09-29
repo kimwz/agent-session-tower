@@ -121,7 +121,7 @@ See [Auto Prompt architecture and API](auto-prompt.md) for integration details.
 
 Skills keep the ways you often work (how a new feature is designed and reviewed, how a code review is done, how a project is deployed) so Claude Code and Codex handle the same kind of request the same way without being told again. They are standard `SKILL.md` folders both agents load by themselves, inside and outside Tower.
 
-- The **Skills** button in the header lists every skill on this computer; **이 폴더의 스킬** in a project folder's menu lists the skills usable there: that project's own (from its folder up to its repository root) and the global ones.
+- **Settings → Skills** lists the skills kept in Tower, with every other skill on this computer behind its ⋯ menu; **이 폴더의 스킬** in a project folder's menu lists the skills usable there: that project's own (from its folder up to its repository root) and the global ones.
 - **새 스킬** keeps the skill in Tower's own folder, `<state>/skills`, and links it into `~/.agents/skills` (Codex) and `~/.claude/skills` (Claude Code); a project skill is linked into the project's `.agents/skills` and `.claude/skills`, and those links are listed in the repository's `.git/info/exclude`. Editing keeps any frontmatter Tower does not manage. Deleting moves the folder to `<state>/skills-trash`.
 - **타워로 옮기기** moves a skill kept elsewhere into Tower's folder and leaves a link in its place, so the agents keep using it. A move that stops half way is finished or undone at the next start.
 - **지침**: your own guidance, kept in `<state>/guidance/owner.md`, is given to every Claude Code and Codex conversation after Tower's text.
@@ -149,7 +149,7 @@ Stop the existing server before changing its bind address:
 agent-session-tower --host 0.0.0.0 --port 8000
 ```
 
-Open `http://localhost:8000` on the server computer. Expand the navigation and select the **Account management** icon at the upper right to set an ID and a password (12–256 characters). Direct localhost access requires no login. Other devices see a login page; remote access stays unavailable until an account is configured. With `--state-dir`, the account and security records belong to that state directory.
+Open `http://localhost:8000` on the server computer. Open **Settings → Account** (the button at the upper right) to set an ID and a password (12–256 characters). Direct localhost access requires no login. Other devices see a login page; remote access stays unavailable until an account is configured. With `--state-dir`, the account and security records belong to that state directory.
 
 Use the network address printed in the terminal from your other device and sign in with the configured ID/password. Passwords are stored only as salted scrypt hashes. Login sessions last up to 7 days and end on logout, password change, or IP block; they survive Tower restarts and updates. Only a digest of each session token is saved, in `<state-dir>/auth-sessions.json`. Ending a session also disconnects its live event and terminal-output streams.
 

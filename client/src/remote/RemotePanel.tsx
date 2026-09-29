@@ -1,6 +1,6 @@
 import { useCallback, useContext, useEffect, useRef, useState, type FormEvent } from 'react';
 import { SettingsFrameContext, SettingsPane } from '../settings/SettingsPane';
-import { Check, Copy, FolderX, LoaderCircle, Monitor, Plus, Radio, RefreshCw, Trash2, X } from 'lucide-react';
+import { Check, Copy, FolderX, LoaderCircle, Monitor, Plus, Radio, RefreshCw, Trash2 } from 'lucide-react';
 import type { ControllerSummary, LinkInvite, LinkOverview, NodeSummary, RemoteAction, RemoteChange, UpdateFailure, UpdateStage } from '../../../shared/link';
 import type { TriggerAuditEntry } from '../../../shared/triggers';
 import { absoluteTime, api, copyText, relativeTime } from '../common/lib';

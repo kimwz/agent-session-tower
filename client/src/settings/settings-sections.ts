@@ -46,4 +46,11 @@ export function initialSection(requested: SettingsSection | undefined, attention
   return 'general';
 }
 
+/** Whether this page can show what was asked: signed in to the page, a section it has, account management only on the computer itself. */
+export function requestAllowed(page: { token: string; sections: readonly SettingsSection[]; local: boolean }, section: SettingsSection | undefined): boolean {
+  if (!page.token) return false;
+  if (section && !page.sections.includes(section)) return false;
+  return section !== 'account' || page.local;
+}
+
 export const markText = (count: number) => count > 9 ? '9+' : String(count);

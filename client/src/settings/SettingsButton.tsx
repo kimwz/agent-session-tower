@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Settings } from 'lucide-react';
 import { useAuth } from '../auth/AuthGate';
+import { useMediaQuery } from '../common/use-media-query';
 import { useI18n } from '../i18n/i18n';
 import { refreshPush } from '../notifications/push';
 import { ControllerJoinNotice } from '../remote/controller-join';
 import { onOpenSettings } from './settings-open';
-import { entryMark, initialSection, markText, settingsSections, type SettingsSection } from './settings-sections';
+import { entryMark, initialSection, markText, requestAllowed, settingsSections, type SettingsSection } from './settings-sections';
 import { SettingsDialog, type SettingsContext, type SettingsPlace } from './SettingsDialog';
 import { useSettingsAttention } from './use-settings-attention';
 
@@ -16,6 +17,7 @@ import { useSettingsAttention } from './use-settings-attention';
 export function SettingsButton({ context, joined }: { context: SettingsContext; joined?: { name: string; at: string } }) {
   const { t } = useI18n();
   const auth = useAuth();
+  const phone = useMediaQuery('(max-width: 680px)');
   const { token } = context;
   const { attention, refresh, join } = useSettingsAttention(token, context.triggers, joined);
   const [place, setPlace] = useState<SettingsPlace | null>(null);
@@ -25,7 +27,7 @@ export function SettingsButton({ context, joined }: { context: SettingsContext; 
   useEffect(() => { void refreshPush(token).catch(() => {}); }, [token]);
   useEffect(() => { if (place) last.current = place.section; }, [place]);
   // Looking at the remote computers is seeing who joined.
-  const remoteShown = place?.section === 'remote' && !place.list;
+  const remoteShown = place?.section === 'remote' && !(place.list && phone);
   useEffect(() => { if (remoteShown) join.acknowledge(); }, [remoteShown, join.notice?.at]);
 
   const open = useCallback((section?: SettingsSection, extra: Omit<SettingsPlace, 'section'> = {}) => {
@@ -36,10 +38,7 @@ export function SettingsButton({ context, joined }: { context: SettingsContext; 
   const openRef = useRef(open);
   openRef.current = open;
   useEffect(() => onOpenSettings(request => {
-    if (!token) return false;
-    if (request.section && !sections.includes(request.section)) return false;
-    // Account management opens only on a page of this computer itself.
-    if (request.section === 'account' && !auth?.status.local) return false;
+    if (!requestAllowed({ token, sections, local: Boolean(auth?.status.local) }, request.section)) return false;
     openRef.current(request.section, 'cwd' in request ? { cwd: request.cwd } : {});
     return true;
   }), [token, sections, auth]);

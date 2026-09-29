@@ -1,5 +1,5 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
+import { SettingsFrameContext, SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
 import { Gauge, History, Pencil, Play, Plug, Plus, RotateCcw, Trash2, Zap } from 'lucide-react';
 import type { ProviderHealth, Session } from '../../../shared/types';
 import type { Trigger, TriggerAuditEntry, TriggerEvent, TriggerOverview, TriggerSummary } from '../../../shared/triggers';
@@ -57,11 +57,13 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
   const revisions = ownOverview?.triggers.map(item => `${item.id}:${item.revision}`).join(',');
   useEffect(() => { void refresh(); }, [refresh, target ? '' : revisions]);
   // Another computer's triggers are not on this page's live stream; they are asked for again while shown.
+  const { active } = useContext(SettingsFrameContext);
   useEffect(() => {
-    if (!target || away) return;
+    if (!target || away || !active) return;
+    void refresh();
     const timer = window.setInterval(() => { void refresh(); }, 5000);
     return () => window.clearInterval(timer);
-  }, [target, away, refresh]);
+  }, [target, away, active, refresh]);
   const run = async (work: () => Promise<unknown>) => {
     const from = target;
     setBusy(true); setError('');

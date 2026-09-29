@@ -1347,7 +1347,7 @@ export const english: Record<string, string> = {
   "전체 보기": "All activity",
   "이 실행 기록을 찾을 수 없습니다.": "This run is no longer in the history.",
   "트리거 실행": "Trigger runs",
-  "아직 트리거가 실행되지 않았습니다. 트리거는 상단의 번개 버튼에서 만듭니다.": "No trigger has run yet. Create triggers with the lightning button at the top.",
+  "아직 트리거가 실행되지 않았습니다. 트리거는 설정의 트리거에서 만듭니다.": "No trigger has run yet. Create triggers in Settings → Triggers.",
   "예약 실행": "Scheduled run",
   "HTTP 응답": "HTTP response",
   "전달한 지시": "Instructions sent",

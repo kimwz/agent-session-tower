@@ -2,8 +2,6 @@
 .skills-scope .primary-button { padding:6px 12px; border:1px solid #5278a9; border-radius:7px; background:#254c7a; color:#edf5ff; font-size:13px; font-weight:600; cursor:pointer; }
 .skills-scope .primary-button:hover:not(:disabled) { background:#305e92; }
 .skills-scope .primary-button:disabled { opacity:.5; cursor:not-allowed; }
-.skills-count { position:absolute; top:2px; right:1px; min-width:15px; height:15px; padding:0 4px; border-radius:8px; background:#e7a13c; color:#1b1204; font-size:10px; font-weight:700; line-height:15px; text-align:center; }
-.skills-count.inline { position:static; display:inline-block; margin-left:6px; }
 .skills-scope section { margin-top:14px; border-top:0; padding-top:0; }
 .skills-toolbar { display:flex; align-items:center; gap:8px; margin:12px 0; }
 .skills-toolbar input { flex:1; min-width:0; min-height:32px; padding:6px 10px; border:1px solid #344255; border-radius:6px; color:#e4edf9; background:#0d131d; }
@@ -68,14 +66,10 @@
 .skills-backup h3 { margin-top:18px; }
 
 /* Header: the everyday views as two segments, the rest behind ⋯. */
-.skills-header-actions { align-items:center; }
 .skills-more { position:relative; }
 .skills-more-menu { position:absolute; top:calc(100% + 6px); right:0; z-index:5; display:flex; flex-direction:column; min-width:190px; padding:6px; border:1px solid #3a506e; border-radius:9px; background:#142030; box-shadow:0 10px 30px #0006; }
 .skills-more-menu button { display:flex; align-items:center; gap:9px; padding:8px 10px; border:0; border-radius:6px; background:none; color:#d5e1f0; font-size:13px; text-align:left; cursor:pointer; }
 .skills-more-menu button:hover, .skills-more-menu button.active { background:#1f3048; }
-.skills-segments { display:inline-flex; gap:2px; margin-top:16px; padding:3px; border:1px solid var(--line); border-radius:9px; background:#0d141f; }
-.skills-segments button { display:inline-flex; align-items:center; gap:6px; white-space:nowrap; padding:6px 14px; border:0; border-radius:7px; background:none; color:#a8b8ce; font-size:13px; cursor:pointer; }
-.skills-segments button.active { background:#223650; color:#eef4fc; }
 .skills-segment-count { color:#7f93ad; font-size:11.5px; font-variant-numeric:tabular-nums; }
 .skills-subhead { display:flex; align-items:center; gap:12px; margin-top:16px; }
 .skills-subhead h3 { margin:0; font-size:14px; }
@@ -141,6 +135,4 @@
   .tower-skill-open { flex-basis:100%; }
   .tower-skill .skill-target-chip { margin-left:10px; margin-bottom:6px; }
   .tower-skill-chevron { display:none; }
-  .skills-segments { display:flex; }
-  .skills-segments button { flex:1; justify-content:center; }
 }
