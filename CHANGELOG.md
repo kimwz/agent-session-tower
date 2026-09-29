@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.78.1] - 2026-09-29
+
+### Fixed
+- **Slack and GitHub coordinators can add reactions at any time.** Emoji reactions no longer wait for reply permission, which only came from an autoReply rule's delegation or the owner. So a rule's "put :loading: on first" works as its first step, and a coordinator that asks for nothing to be sent can still react. Replies still need the same permission as before.
+
 ## [1.78.0] - 2026-09-29
 
 ### Added
