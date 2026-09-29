@@ -4,6 +4,7 @@ import { APP_VERSION } from '../../../shared/app-identity';
 import { DEFAULT_MASTER_VOICE, type MasterDirective } from '../../../shared/master';
 import { splitScopedId } from '../remote/scope';
 import { post } from './api';
+import { dockLayout } from './dock-layout';
 import { followRoom, type RoomState } from './room-stream';
 import { runScreenCommand, type MasterControls } from './screen';
 import { useWords } from './strings';
@@ -31,8 +32,10 @@ function tabId(): string {
 
 /**
  * The master agent's floating button (bottom left). The master is a session: the button opens its conversation like
- * any other, or, before it has one, a panel to start it. While its conversation is open, a small bar beside the button
- * holds voice and the master's settings. Hidden when this Tower has no master. `sessionId` is the open conversation.
+ * any other, or, before it has one, a panel to start it. While its conversation is open, the microphone and the
+ * master's settings slide out beside the button; the microphone turns voice on, and then the button (a microphone
+ * itself) turns it off, with the live voice bar beside it. Hidden when this Tower has no master. `sessionId` is the
+ * open conversation.
  */
 export function MasterDock({ token, controls, sessionId }: { token: string; controls: MasterControls; sessionId: string | null }) {
   const words = useWords();
@@ -106,7 +109,8 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
         if (voiceRef.current !== current) return;
         voiceRef.current = null;
         setVoiceView(null);
-        setVoiceEnded({ reason, ...(error ? { error } : {}) });
+        // Turned off by the owner: nothing more to say about it beside the button.
+        setVoiceEnded(reason === 'owner' ? null : { reason, ...(error ? { error } : {}) });
       },
     });
     voiceRef.current = current;
@@ -151,18 +155,25 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   if (absent) return null;
   const thinking = overview?.session?.status === 'working';
   const tasks = overview?.activeTasks ?? 0;
+  const layout = dockLayout({ conversationOpen: masterOpen, voiceOn: Boolean(voiceView), ended: Boolean(voiceEnded), panelOpen: open });
+  const ending = layout.button === 'end-voice';
+  const fabLabel = ending ? words('음성 대화 끝내기', 'End voice') : words('마스터 에이전트', 'Master agent');
+  const settingsButton = <button className="master-mic" onClick={() => setOpen(true)} title={words('마스터 설정', 'Master settings')} aria-label={words('마스터 설정', 'Master settings')}><Settings size={16} /></button>;
+  const tray = layout.side === 'tray';
   return <>
-    <button ref={button} className={`master-fab ${thinking ? 'thinking' : ''} ${masterOpen || open ? 'open' : ''} ${voiceView ? 'voice' : ''}`} style={fabStyle(position)} onClick={press}
-      aria-label={words('마스터 에이전트', 'Master agent')} title={`${words('마스터 에이전트', 'Master agent')} (Shift+M)`} aria-pressed={masterOpen || open} aria-keyshortcuts="Shift+M">
+    <button ref={button} className={`master-fab ${thinking ? 'thinking' : ''} ${masterOpen || open ? 'open' : ''} ${voiceView ? 'voice' : ''}`} style={fabStyle(position)} onClick={ending ? voice.stop : press}
+      aria-label={fabLabel} title={ending ? fabLabel : `${fabLabel} (Shift+M)`} {...(ending ? {} : { 'aria-pressed': masterOpen || open, 'aria-keyshortcuts': 'Shift+M' })}>
       {voiceView ? <Mic size={22} /> : thinking ? <LoaderCircle size={22} className="spin" /> : <Bot size={22} />}
       {tasks > 0 && <span className="master-fab-tasks" title={words('맡긴 일 중 아직 보고되지 않은 것', 'Handed-out work not reported yet')}>{tasks}</span>}
     </button>
-    {(masterOpen || voiceView || voiceEnded) && !open && <div className="master-bar" style={barStyle(position)}>
+    {/* Kept in place while hidden, so it slides back under the button instead of vanishing. */}
+    <div className={`master-tray ${tray ? 'shown' : ''}`} style={barStyle(position)} inert={!tray} aria-hidden={!tray}>
+      <button className="master-mic" onClick={() => { voice.start(); requestAnimationFrame(() => button.current?.focus()); }} disabled={Boolean(voice.unavailable)} title={voice.unavailable ?? words('음성 대화 (ElevenLabs 받아쓰기·읽어 주기)', 'Talk to the master (ElevenLabs speech to text and reading aloud)')} aria-label={words('음성 대화 시작', 'Start voice')}><Mic size={16} /></button>
+      {settingsButton}
+    </div>
+    {(layout.side === 'voice' || layout.side === 'ended') && <div className="master-bar" style={barStyle(position)}>
       <VoiceBar voice={voice} />
-      <div className="master-bar-buttons">
-        {!voiceView && <button className="master-mic" onClick={voice.start} disabled={Boolean(voice.unavailable)} title={voice.unavailable ?? words('말로 시키기 (ElevenLabs 받아쓰기·읽어 주기)', 'Talk to the master (ElevenLabs speech to text and reading aloud)')} aria-label={words('음성 대화 시작', 'Start voice')}><Mic size={16} /></button>}
-        <button className="master-mic" onClick={() => setOpen(true)} title={words('마스터 설정', 'Master settings')} aria-label={words('마스터 설정', 'Master settings')}><Settings size={16} /></button>
-      </div>
+      <div className="master-bar-buttons">{settingsButton}</div>
     </div>}
     {open && <Suspense fallback={<div className="master-panel"><LoaderCircle className="spin" size={18} /></div>}>
       <MasterPanel token={token} overview={overview} voice={voice} top={position.panelTop} onClose={close} onStarted={id => { setOpen(false); controlsRef.current.selectSession(id); }} />

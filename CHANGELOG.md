@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.77.0] - 2026-09-29
+
+### Changed
+- **The master's floating button stands alone until you need more.** Nothing sits beside it by default: today's voice cost and the voice line no longer stay next to it after voice is turned off.
+  - Opening the master's conversation slides the microphone and settings icons out from under the button; closing the conversation (a click on the background too) folds them back. Cost and transcription totals show only while voice is on and in the master's settings.
+  - The microphone icon starts a voice conversation. The button then turns into a microphone, and pressing it ends the conversation: what was playing stops, and speech still being written down is dropped rather than sent. The conversation window stays as it was. There is no separate "음성 끄기" button any more. Shift+M still opens and closes the conversation.
+  - "듣기 끄기" is now **마이크 뮤트** / **뮤트 해제**. A muted microphone stays muted until you unmute it, even after news of finished work is read aloud (which used to turn listening back on); answers and news are still read.
+- **Long speech stays readable while you talk.** What is being written down shows up to five lines (four on phones) and keeps its latest words in view as it grows, with a blinking caret while writing goes on and a fade at the top when earlier words scroll out. Scroll up to read what came before; scrolling back down, or starting a new sentence, follows again.
+
 ## [1.76.0] - 2026-09-29
 
 ### Added

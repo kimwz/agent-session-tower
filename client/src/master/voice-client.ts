@@ -70,6 +70,8 @@ export interface VoiceView {
   /** What the browser would not play by itself, to be played with a click. */
   blocked?: { text: string };
   error?: string;
+  /** The owner muted the microphone: it stays off, even after a report is read, until they unmute it. */
+  muted?: boolean;
 }
 
 export interface VoiceSessionOptions {
@@ -141,6 +143,8 @@ export class VoiceSession {
   /** What was said before a long pause and not sent yet; what is said next goes on from it. */
   private draft = '';
   private listening = false;
+  /** The owner muted the microphone (see `VoiceView.muted`). */
+  private held = false;
   /** A voice is heard, not speech yet (see `VoiceView.hearing`). */
   private hearing = false;
   private armed = false;
@@ -180,10 +184,13 @@ export class VoiceSession {
     this.unlock();
     try {
       const { session } = await post<{ session: string }>('/api/master/voice/on', this.options.token(), { tabId: this.options.tabId });
+      // Ended before the master answered: its new voice session is turned off too, and nothing more starts here.
+      if (this.over) { void post('/api/master/voice/off', this.options.token(), { session }).catch(() => {}); return; }
       this.session = session;
       this.sessionDigest = await digest(session);
       await this.context.audioWorklet.addModule('/master-pcm-tap.js');
       await this.listen();
+      if (this.over) return;
       this.timer = setInterval(() => this.tick(), 1_000);
       void this.presence();
     } catch (error) {
@@ -199,9 +206,15 @@ export class VoiceSession {
     this.end('owner');
   }
 
-  /** Listening back on (by the owner, or after a report was read). */
+  /** Listening back on by the owner (unmuting too). */
   async listen(): Promise<void> {
-    if (this.over) return;
+    this.held = false;
+    await this.listenAgain();
+  }
+
+  /** Listening back on, unless the owner muted the microphone. */
+  private async listenAgain(): Promise<void> {
+    if (this.over || this.held) return;
     this.lastActivityAt = Date.now();
     if (!this.listening) {
       this.listening = true;
@@ -213,8 +226,16 @@ export class VoiceSession {
     this.show({});
   }
 
-  /** Listening off: the microphone is let go, but what the master reads aloud still plays here. */
+  /** The owner mutes the microphone: what the master reads aloud still plays here, and it stays muted until unmuted. */
   mute(): void {
+    if (this.over) return;
+    this.held = true;
+    if (!this.listening) { this.show({}); return; }
+    this.stopListening();
+  }
+
+  /** Listening off: the microphone is let go, but what the master reads aloud still plays here. */
+  private stopListening(): void {
     if (!this.listening) return;
     this.listening = false;
     // A notice can no longer be objected to by voice: its change is not sent.
@@ -277,7 +298,7 @@ export class VoiceSession {
   status(voice: MasterVoiceStatus): void {
     if (this.over || !this.sessionDigest) return;
     if (voice.session !== this.sessionDigest) this.end(voice.session ? 'replaced' : 'host');
-    else if (voice.limited && this.listening) { this.mute(); this.show({ error: '오늘 음성 한도에 닿아 듣기를 껐습니다.' }); }
+    else if (voice.limited && this.listening) { this.stopListening(); this.show({ error: '오늘 음성 한도에 닿아 듣기를 껐습니다.' }); }
   }
 
   /** Something to play: only this session's, once each, not once it is stale, and never more than a few waiting. */
@@ -663,7 +684,7 @@ export class VoiceSession {
   /** Reports how long an utterance ran, once, tried three times in 30 seconds. */
   private settleUsage(tokenId: string, seconds: number): void {
     const attempt = (left: number) => void post('/api/master/voice/usage', this.options.token(), { tokenId, seconds: Math.min(seconds, UTTERANCE_BYTES / 32_000) })
-      .catch(() => { if (left > 0) setTimeout(() => attempt(left - 1), 10_000); else if (!this.over) { this.mute(); this.show({ error: '마스터에 닿지 않아 듣기를 껐습니다.' }); } });
+      .catch(() => { if (left > 0) setTimeout(() => attempt(left - 1), 10_000); else if (!this.over) { this.stopListening(); this.show({ error: '마스터에 닿지 않아 듣기를 껐습니다.' }); } });
     attempt(2);
   }
 
@@ -751,7 +772,7 @@ export class VoiceSession {
     if (!current.replay) this.report(current.say, result, current.playingAt !== undefined && current.receivedAt !== undefined ? current.playingAt - current.receivedAt : undefined);
     else if (result === 'failed') this.show({ error: '다시 들을 수 없습니다. 답은 화면에 있습니다.' });
     // A report read aloud turns listening back on, so the owner can answer it.
-    if (current.say.kind === 'report' && result === 'played') { this.lastActivityAt = Date.now(); void this.listen(); }
+    if (current.say.kind === 'report' && result === 'played') { this.lastActivityAt = Date.now(); void this.listenAgain(); }
     this.show({});
     setTimeout(() => this.next(), COOLDOWN_MS);
   }
@@ -806,7 +827,7 @@ export class VoiceSession {
     if (this.over) return;
     const now = Date.now();
     if (this.current) this.pace();
-    if (this.listening && !this.utterance && !this.current && listenExpired(this.lastActivityAt, this.options.settings().listenMinutes, now)) this.mute();
+    if (this.listening && !this.utterance && !this.current && listenExpired(this.lastActivityAt, this.options.settings().listenMinutes, now)) this.stopListening();
     if (this.listening && !this.utterance) this.prefetch();
     if (this.listening && (this.speechToTell || now - this.lastReportAt >= REPORT_MS)) this.activity(now);
     if (now - this.lastPresenceAt >= PRESENCE_MS) void this.presence();
@@ -839,7 +860,7 @@ export class VoiceSession {
     const waiting = Boolean(utterance && utterance.quietSince !== undefined && !utterance.ownRule && utterance.verdict && utterance.verdict.finished < VOICE_TURN_FINISHED);
     if (utterance || this.current || !this.armed) this.hearing = false;
     const hearing = this.hearing;
-    this.view = { ...this.view, ...change, listening: this.listening, capturing: Boolean(utterance), hearing, waiting, draft: this.draft || undefined, playing: this.current ? { kind: this.current.say.kind, text: this.current.say.text } : undefined, blocked: this.blocked ? { text: this.blocked.text } : undefined };
+    this.view = { ...this.view, ...change, listening: this.listening, muted: this.held || undefined, capturing: Boolean(utterance), hearing, waiting, draft: this.draft || undefined, playing: this.current ? { kind: this.current.say.kind, text: this.current.say.text } : undefined, blocked: this.blocked ? { text: this.blocked.text } : undefined };
     this.options.onView(this.view);
   }
 }
