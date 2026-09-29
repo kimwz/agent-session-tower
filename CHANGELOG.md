@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.70.0] - 2026-09-29
+
+### Changed
+- **A skill copied into each agent's folder is listed once.** Skills installed earlier as separate folders in `~/.agents/skills` (Codex) and `~/.claude/skills` (Claude Code) showed twice in the skills panel, one row per agent, while skills made in Tower showed once with both labels. Now each skill is one row with the agents that use it.
+  - Identical copies show **복사본 N개** and a **합치기** button: the other copies move to `<state>/skills-trash` and a link to the kept folder takes their place, so an edit reaches both agents. A pin on any copy is kept.
+  - Copies that differ slightly (usually each names its own agent) show **에이전트별 복사본** and are not merged; editing one says which agent's copy changes.
+  - Deleting such a skill removes every copy.
+
 ## [1.69.0] - 2026-09-29
 
 ### Added
