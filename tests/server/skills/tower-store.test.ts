@@ -61,37 +61,80 @@ test('a skill with a link inside, or with per-agent copies that differ, is not m
   assert.equal(await realpath(join(f.agentsHome, 'skills', 'same')), skill.dir);
 });
 
-test('a move a crash interrupted is undone when the original never left, and finished when it did', async t => {
+test('a move a crash interrupted is undone before its copy is complete, and finished after, at every step', async t => {
   const f = await homes(t);
-  const step = async (name: string) => {
+  await mkdir(join(f.store, 'global'), { recursive: true });
+  const id = (n: number) => `0000000${n}`;
+  const move = async (name: string, n: number, copied: boolean) => {
     const from = await external(f.agentsHome, name);
     const to = join(f.store, 'global', name);
-    const move = { from, to, incoming: join(f.store, 'global', `.incoming-${name}`), aside: `${from}.tower-old-00000000`, link: `${from}.tower-link-00000000` };
-    await mkdir(join(f.store, 'global'), { recursive: true });
-    execFileSync('cp', ['-R', from, to]);
-    return move;
+    if (copied) execFileSync('cp', ['-R', from, to]);
+    return { id: id(n), to, incoming: join(f.store, 'global', `.incoming-${id(n)}`), places: [from] };
   };
-  // Stopped after the copy: the original is still in place, so the copy goes and the skill stays where it was.
-  const copied = await step('copied');
+  // Stopped while copying: the copy goes, the skill stays where it was.
+  const copying = await move('copying', 1, false);
+  execFileSync('cp', ['-R', copying.places[0], copying.incoming]);
+  // Stopped after the copy, before the swap: the swap is done now.
+  const copied = await move('copied', 2, true);
   // Stopped between putting the original aside and the link in its place: the link is put there.
-  const aside = await step('aside');
-  await rename(aside.from, aside.aside);
-  // Stopped after the swap, before the rest: it is finished.
-  const swapped = await step('swapped');
-  await rename(swapped.from, swapped.aside);
-  await symlink(swapped.to, swapped.from, 'dir');
-  await writeMoves(f.journal, [copied, aside, swapped]);
+  const aside = await move('aside', 3, true);
+  await rename(aside.places[0], `${aside.places[0]}.tower-old-${aside.id}`);
+  // Stopped after the swap: the rest is done.
+  const swapped = await move('swapped', 4, true);
+  await rename(swapped.places[0], `${swapped.places[0]}.tower-old-${swapped.id}`);
+  await symlink(swapped.to, swapped.places[0], 'dir');
+  await writeMoves(f.journal, [copying, copied, aside, swapped]);
   const finished = await f.files.recover();
-  assert.deepEqual(finished.map(move => move.from).sort(), [aside.from, swapped.from].sort());
-  assert.ok((await lstat(copied.from)).isDirectory());
-  await assert.rejects(lstat(copied.to));
-  for (const move of [aside, swapped]) {
-    assert.equal(await readlink(move.from), move.to);
-    await assert.rejects(lstat(move.aside));
-    assert.equal(await realpath(join(f.claudeHome, 'skills', move.from.split('/').at(-1)!)), move.to, 'the other agent is linked too');
+  assert.deepEqual(finished.map(item => item.id).sort(), [copied.id, aside.id, swapped.id]);
+  assert.ok((await lstat(copying.places[0])).isDirectory());
+  await assert.rejects(lstat(copying.incoming));
+  for (const item of [copied, aside, swapped]) {
+    assert.equal(await readlink(item.places[0]), item.to);
+    await assert.rejects(lstat(`${item.places[0]}.tower-old-${item.id}`));
+    assert.equal(await realpath(join(f.claudeHome, 'skills', item.places[0].split('/').at(-1)!)), item.to, 'the other agent is linked too');
   }
   assert.deepEqual(JSON.parse(await readFile(f.journal, 'utf8')), []);
+  assert.equal((await readdir(f.trash)).length, 3);
+});
+
+test('identical copies moved into Tower are all recorded, so a crash between them is finished too', async t => {
+  const f = await homes(t);
+  const codex = await external(f.agentsHome, 'same'), claude = await external(f.claudeHome, 'same');
+  const to = join(f.store, 'global', 'same');
+  await mkdir(join(f.store, 'global'), { recursive: true });
+  execFileSync('cp', ['-R', codex, to]);
+  // The first place was swapped; the crash came before the Claude copy was.
+  await rename(codex, `${codex}.tower-old-00000009`);
+  await symlink(to, codex, 'dir');
+  await writeMoves(f.journal, [{ id: '00000009', to, incoming: join(f.store, 'global', '.incoming-00000009'), places: [codex, claude] }]);
+  await f.files.recover();
+  assert.equal(await readlink(codex), to);
+  assert.equal(await readlink(claude), to);
   assert.equal((await readdir(f.trash)).length, 2);
+});
+
+test('recovery never touches anything outside Tower’s own folder', async t => {
+  const f = await homes(t);
+  const elsewhere = join(f.root, 'elsewhere');
+  await mkdir(join(elsewhere, '.incoming-abcdef12'), { recursive: true });
+  await mkdir(join(elsewhere, 'x.tower-old-abcdef12'), { recursive: true });
+  await mkdir(f.store, { recursive: true });
+  await symlink(elsewhere, join(f.store, 'global'));
+  await writeMoves(f.journal, [{ id: 'abcdef12', to: join(elsewhere, 'x'), incoming: join(elsewhere, '.incoming-abcdef12'), places: [join(f.agentsHome, 'skills', 'x')] }]);
+  await f.files.recover();
+  assert.deepEqual((await readdir(elsewhere)).sort(), ['.incoming-abcdef12', 'x.tower-old-abcdef12']);
+  assert.deepEqual(JSON.parse(await readFile(f.journal, 'utf8')), []);
+});
+
+test('an import that stopped while replacing a Tower skill gets the old one back', async t => {
+  const f = await homes(t);
+  const global = join(f.store, 'global');
+  await mkdir(join(global, 'review.tower-old-abcdef12'), { recursive: true });
+  await writeFile(join(global, 'review.tower-old-abcdef12', 'SKILL.md'), '---\nname: review\ndescription: d\n---\nold\n');
+  await mkdir(join(global, '.incoming-abcdef12'), { recursive: true });
+  await f.files.recover();
+  assert.deepEqual(await readdir(global), ['review']);
+  assert.match(await readFile(join(global, 'review', 'SKILL.md'), 'utf8'), /old/);
 });
 
 test('a skill kept in Tower whose links were lost is still listed, and linking puts them back', async t => {
@@ -115,6 +158,19 @@ test('links to a Tower skill in a git project are kept out of git status, and pu
   assert.equal(execFileSync('git', ['-C', repo, 'status', '--porcelain']).toString().trim(), '');
   await f.files.remove(skill.dir, repo);
   assert.doesNotMatch(await readFile(exclude, 'utf8'), /deploy/);
+});
+
+test('a git exclude file that is a link is left alone', async t => {
+  const f = await homes(t);
+  const repo = join(f.home, 'work', 'linked');
+  await mkdir(repo, { recursive: true });
+  execFileSync('git', ['init', '-q', repo]);
+  const outside = join(f.root, 'settings.json');
+  await writeFile(outside, '{"keep":true}');
+  await rm(join(repo, '.git', 'info', 'exclude'), { force: true });
+  await symlink(outside, join(repo, '.git', 'info', 'exclude'));
+  await f.files.save({ scope: 'project', cwd: repo, name: 'deploy', description: 'd', body: 'b' });
+  assert.equal(await readFile(outside, 'utf8'), '{"keep":true}');
 });
 
 test('a backup file is checked before use: names, paths inside a skill and SKILL.md', () => {

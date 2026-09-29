@@ -181,83 +181,109 @@ export class SkillFiles {
   adopt(dir: string, cwd?: string): Promise<{ skill: Skill; from: string[] }> { return this.serial(() => this.adoptNow(dir, cwd)); }
   /** Finishes or undoes the moves a crash interrupted; run before skills serve anything. Returns the finished ones. */
   recover(): Promise<SkillMove[]> { return this.serial(() => this.recoverNow()); }
-  /** Moves in progress right now, so a pin on the old place still counts. */
+  /** Moves in progress right now, so a pin on an old place still counts. */
   pending(): readonly SkillMove[] { return this.moving; }
   private moving: SkillMove[] = [];
 
   /**
-   * Moves a skill kept elsewhere into Tower's store: its folder is copied in, a link to the copy takes its place, and the
-   * other agent gets a link too. Every step is recorded first, so a crash is finished or undone at the next start.
+   * Moves a skill kept elsewhere into Tower's store: its folder is copied in, and every place it was (identical copies
+   * included) becomes a link to the stored one; the other agent gets a link too. The move is recorded before anything
+   * changes: until the copy is complete a crash undoes it, after that the next start finishes it.
    */
   private async adoptNow(dir: string, cwd?: string): Promise<{ skill: Skill; from: string[] }> {
-    let skill = await this.find(dir, cwd);
+    const skill = await this.find(dir, cwd);
     if (skill.managed) return { skill, from: [] };
-    const from = skill.copies?.map(copy => copy.dir) ?? [skill.dir];
-    if (skill.copies) {
-      if (skill.copiesDiffer) throw new SkillError('에이전트별 복사본의 내용이 달라 옮길 수 없습니다. 먼저 하나로 정리하세요.', 409);
-      skill = await this.mergeNow(skill.dir, cwd);
-    }
-    if (!(await this.realRoots(skill.cwd)).has(dirname(skill.dir))) throw new SkillError('스킬 폴더 밖에 있는 스킬은 옮길 수 없습니다.', 409);
+    if (skill.copiesDiffer) throw new SkillError('에이전트별 복사본의 내용이 달라 옮길 수 없습니다. 먼저 하나로 정리하세요.', 409);
+    const roots = await this.realRoots(skill.cwd);
+    const places = [skill.dir, ...(skill.copies ?? []).map(copy => copy.dir).filter(place => place !== skill.dir)];
+    if (places.some(place => !roots.has(dirname(place)))) throw new SkillError('스킬 폴더 밖에 있는 스킬은 옮길 수 없습니다.', 409);
     if (await containsLink(skill.dir)) throw new SkillError('스킬 폴더 안에 링크가 있어 옮길 수 없습니다. 링크가 가리키는 파일이 따라오지 않습니다.', 409);
     const root = await this.storeRoot(skill.scope, skill.cwd);
     const to = join(root, basename(skill.dir));
     if (await lstat(to).catch(() => undefined)) throw new SkillError('타워에 같은 이름의 스킬이 이미 있습니다.', 409);
-    const id = randomUUID().slice(0, 8);
-    const move: SkillMove = { from: skill.dir, to, incoming: join(root, `.incoming-${id}`), aside: `${skill.dir}.tower-old-${id}`, link: `${skill.dir}.tower-link-${id}` };
+    const id = randomUUID().replace(/-/g, '').slice(0, 8);
+    const move: SkillMove = { id, to, incoming: join(root, `.incoming-${id}`), places };
     await this.journal(moves => [...moves, move]);
     this.moving = [...this.moving, move];
     try {
-      await cp(skill.dir, move.incoming, { recursive: true, errorOnExist: true, force: false });
-      await rename(move.incoming, to);
-      await symlink(to, move.link, 'dir');
-      await rename(skill.dir, move.aside);
-      await rename(move.link, skill.dir);
-    } catch (error) {
-      await this.settle(move).catch(() => {});
-      throw error;
+      try {
+        await cp(skill.dir, move.incoming, { recursive: true, errorOnExist: true, force: false });
+        await rename(move.incoming, to);
+      } catch (error) { await this.settle(move).catch(() => {}); throw error; }
+      await this.settle(move);
     } finally { this.moving = this.moving.filter(item => item !== move); }
-    await this.finish(move);
-    return { skill: await this.find(to, cwd), from };
+    return { skill: await this.find(to, cwd), from: places };
   }
 
-  /** Brings one recorded move to an end from what is on disk: finished when the swap happened, undone otherwise. */
+  /**
+   * Brings one recorded move to an end from what is on disk. Before the stored copy is complete the move is undone;
+   * once it is, every place becomes a link to it, whatever step a crash stopped at. Each step can be repeated.
+   */
   private async settle(move: SkillMove): Promise<boolean> {
-    await unlink(move.link).catch(() => {});
-    const at = await lstat(move.from).catch(() => undefined);
-    if (at?.isSymbolicLink() && resolve(dirname(move.from), await readlink(move.from)) === move.to) { await this.finish(move); return true; }
-    if (!at && await lstat(move.to).catch(() => undefined)) {
-      await symlink(move.to, move.from, 'dir');
-      await this.finish(move);
-      return true;
+    const aside = (place: string) => `${place}.tower-old-${move.id}`, link = (place: string) => `${place}.tower-link-${move.id}`;
+    for (const place of move.places) if ((await lstat(link(place)).catch(() => undefined))?.isSymbolicLink()) await unlink(link(place));
+    const stored = await lstat(move.to).catch(() => undefined);
+    if (!stored?.isDirectory()) {
+      for (const place of move.places) if (!await lstat(place).catch(() => undefined) && await lstat(aside(place)).catch(() => undefined)) await rename(aside(place), place);
+      await rm(move.incoming, { recursive: true, force: true });
+      await this.journal(moves => moves.filter(item => item.id !== move.id));
+      return false;
     }
-    // The original is still in place (or comes back from aside): the move never happened.
-    if (!at && await lstat(move.aside).catch(() => undefined)) await rename(move.aside, move.from);
+    for (const place of move.places) {
+      const at = await lstat(place).catch(() => undefined);
+      if (at?.isSymbolicLink()) continue;
+      if (!at) { await symlink(move.to, place, 'dir'); continue; }
+      if (!at.isDirectory()) continue;
+      await symlink(move.to, link(place), 'dir');
+      await rename(place, aside(place));
+      await rename(link(place), place);
+    }
     await rm(move.incoming, { recursive: true, force: true });
-    if (await lstat(move.from).catch(() => undefined)) await rm(move.to, { recursive: true, force: true });
-    await this.journal(moves => moves.filter(item => item.from !== move.from || item.to !== move.to));
-    return false;
+    await this.finish(move);
+    return true;
   }
 
   private async finish(move: SkillMove): Promise<void> {
     const skill = await this.find(move.to).catch(() => undefined) ?? await this.findStored(move.to);
     if (skill) await this.linkNow(skill.dir, skill.cwd);
-    if (await lstat(move.aside).catch(() => undefined)) await this.trash(move.aside);
-    await this.journal(moves => moves.filter(item => item.from !== move.from || item.to !== move.to));
+    for (const place of move.places) {
+      const aside = `${place}.tower-old-${move.id}`;
+      if (await lstat(aside).catch(() => undefined)) await this.trash(aside);
+    }
+    await this.journal(moves => moves.filter(item => item.id !== move.id));
     this.finished.push(move);
   }
   private finished: SkillMove[] = [];
 
+  /** Store folders Tower may clean up: real folders inside its own, never a link leading elsewhere. */
+  private async storeFolders(): Promise<string[]> {
+    const real = async (path: string) => { const info = await lstat(path).catch(() => undefined); return Boolean(info?.isDirectory() && !info.isSymbolicLink()); };
+    if (!await real(this.homes.store)) return [];
+    const folders: string[] = [];
+    if (await real(join(this.homes.store, 'global'))) folders.push(join(this.homes.store, 'global'));
+    if (await real(join(this.homes.store, 'projects'))) {
+      for (const key of await readdir(join(this.homes.store, 'projects')).catch(() => [] as string[])) {
+        if (await real(join(this.homes.store, 'projects', key))) folders.push(join(this.homes.store, 'projects', key));
+      }
+    }
+    return folders;
+  }
+
   private async recoverNow(): Promise<SkillMove[]> {
     this.finished = [];
-    for (const move of await readMoves(this.homes.journal)) await this.settle(move);
+    const folders = await this.storeFolders();
+    for (const move of await readMoves(this.homes.journal)) {
+      // Only a move into one of Tower's own folders is touched; anything else in the record is dropped as it is.
+      if (!folders.includes(dirname(move.to)) || dirname(move.incoming) !== dirname(move.to)) { await this.journal(moves => moves.filter(item => item.id !== move.id)); continue; }
+      await this.settle(move);
+    }
     // An import or replacement stopped half way: a replaced skill whose new copy never arrived comes back.
-    const folders = [join(this.homes.store, 'global'), ...(await readdir(join(this.homes.store, 'projects')).catch(() => [] as string[])).map(key => join(this.homes.store, 'projects', key))];
     for (const folder of folders) {
       for (const name of await readdir(folder).catch(() => [] as string[])) {
         const path = join(folder, name);
-        if (name.startsWith('.incoming-')) { await rm(path, { recursive: true, force: true }); continue; }
-        const aside = name.match(/^(.+)\.tower-old-[0-9a-f]{8}$/)?.[1];
-        if (!aside) continue;
+        if (/^\.incoming-[0-9a-f]{8}$/.test(name)) { await rm(path, { recursive: true, force: true }); continue; }
+        const aside = name.match(/^([a-z0-9][a-z0-9-]{0,63})\.tower-old-[0-9a-f]{8}$/)?.[1];
+        if (!aside || !(await lstat(path).catch(() => undefined))?.isDirectory()) continue;
         if (await lstat(join(folder, aside)).catch(() => undefined)) await this.trash(path);
         else await rename(path, join(folder, aside));
       }
@@ -326,7 +352,7 @@ export class SkillFiles {
       const conflict = await this.conflict(item.name, item.scope, cwd);
       if (conflict === 'external' || conflict === 'managed' && !replace) throw new SkillError('같은 이름의 스킬이 이미 있습니다.', 409);
       const root = await this.storeRoot(item.scope, cwd);
-      const target = join(root, item.name), id = randomUUID().slice(0, 8);
+      const target = join(root, item.name), id = randomUUID().replace(/-/g, '').slice(0, 8);
       const incoming = join(root, `.incoming-${id}`), aside = join(root, `${item.name}.tower-old-${id}`);
       await writeBundleFiles(incoming, item.files).catch(async error => { await rm(incoming, { recursive: true, force: true }); throw error; });
       if (conflict === 'managed') await rename(target, aside);

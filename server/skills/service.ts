@@ -66,7 +66,7 @@ export class SkillService {
     this.ready = (async () => {
       await this.state.start();
       const finished = await this.files.recover().catch(error => { console.error(`Skill moves were not recovered: ${error instanceof Error ? error.message : String(error)}`); return []; });
-      await this.moved(finished.map(move => ({ from: [move.from], to: move.to })));
+      await this.moved(finished.map(move => ({ from: move.places, to: move.to })));
     })();
     await this.ready;
     this.recordRuns();
@@ -122,7 +122,7 @@ export class SkillService {
       dirs.add(item.dir);
       const real = await realpath(item.dir).catch(() => undefined);
       if (real) dirs.add(real);
-      for (const move of moving) if (move.from === item.dir) dirs.add(move.to);
+      for (const move of moving) if (move.places.includes(item.dir)) dirs.add(move.to);
     }
     return dirs;
   }

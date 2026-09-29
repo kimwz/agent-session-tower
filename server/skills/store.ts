@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import type { SkillBundle, SkillBundleFile } from '../../shared/skills.js';
@@ -16,13 +16,18 @@ export function projectKey(cwd: string): string {
   return `${name}-${createHash('sha256').update(resolve(cwd)).digest('hex').slice(0, 8)}`;
 }
 
-/** A move of a skill folder into Tower, recorded before anything is changed so a crash can be finished or undone. */
-export interface SkillMove { from: string; to: string; incoming: string; aside: string; link: string }
+/**
+ * A move of a skill into Tower, recorded before anything is changed so a crash can be finished or undone. `places` are
+ * the folders the skill was in (the first is copied); each becomes a link to `to`.
+ */
+export interface SkillMove { id: string; to: string; incoming: string; places: string[] }
 
 export async function readMoves(path: string): Promise<SkillMove[]> {
   try {
     const saved = await readPrivateJson(path, 1_000_000);
-    return Array.isArray(saved) ? saved.filter((item): item is SkillMove => !!item && ['from', 'to', 'incoming', 'aside', 'link'].every(key => typeof (item as Record<string, unknown>)[key] === 'string')) : [];
+    return Array.isArray(saved) ? saved.filter((item): item is SkillMove => !!item && typeof item === 'object'
+      && /^[0-9a-f]{8}$/.test(String((item as SkillMove).id)) && typeof (item as SkillMove).to === 'string' && typeof (item as SkillMove).incoming === 'string'
+      && Array.isArray((item as SkillMove).places) && (item as SkillMove).places.length > 0 && (item as SkillMove).places.every(place => typeof place === 'string' && isAbsolute(place))) : [];
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw error;
@@ -39,22 +44,29 @@ const git = promisify(execFile);
  * must never be committed. Only the repository's local exclude file changes, never `.gitignore`.
  */
 export async function excludeLinks(cwd: string, name: string, excluded: boolean): Promise<void> {
-  let file: string, prefix: string;
+  let common: string, prefix: string;
   try {
-    file = (await git('git', ['-C', cwd, 'rev-parse', '--git-path', 'info/exclude'], { timeout: 5_000 })).stdout.trim();
+    common = (await git('git', ['-C', cwd, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { timeout: 5_000 })).stdout.trim();
     prefix = (await git('git', ['-C', cwd, 'rev-parse', '--show-prefix'], { timeout: 5_000 })).stdout.trim();
   } catch { return; }
-  if (!file) return;
-  const path = isAbsolute(file) ? file : join(cwd, file);
+  // Only the repository's own exclude file, reached without any link: never a file a link leads to.
+  if (!common || !isAbsolute(common) || await realpath(common).catch(() => '') !== resolve(common)) return;
+  const info = join(common, 'info'), path = join(info, 'exclude');
+  const folder = await lstat(info).catch(() => undefined);
+  if (folder && (folder.isSymbolicLink() || !folder.isDirectory())) return;
+  const file = await lstat(path).catch(() => undefined);
+  if (file && (file.isSymbolicLink() || !file.isFile())) return;
   const lines = [`/${prefix}.agents/skills/${name}`, `/${prefix}.claude/skills/${name}`];
-  const current = await readFile(path, 'utf8').catch(() => '');
+  const current = file ? await readFile(path, 'utf8') : '';
   const kept = current.split('\n').filter(line => !lines.includes(line));
   while (kept.length && !kept.at(-1)) kept.pop();
   const next = [...kept, ...(excluded ? lines : [])].join('\n');
   const text = next ? `${next}\n` : '';
   if (text === current) return;
-  await mkdir(join(path, '..'), { recursive: true });
-  await writeFile(path, text);
+  if (!folder) await mkdir(info);
+  const temporary = `${path}.tower-${process.pid}-${Date.now()}`;
+  await writeFile(temporary, text, { flag: 'wx', mode: file ? file.mode & 0o777 : 0o644 });
+  await rename(temporary, path).catch(async error => { await unlink(temporary).catch(() => {}); throw error; });
 }
 
 const MAX_SKILL_FILES = 500;
