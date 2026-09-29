@@ -1,4 +1,4 @@
-// Release rules, enforced by `npm version <x>`:
+// Release rules, enforced by `npm version <x> --no-git-tag-version`:
 //   - every version has a CHANGELOG.md section, which becomes the GitHub release notes
 //   - shared/app-identity.ts reports the same version as package.json
 // usage: node scripts/release.mjs prepare        (npm "version" hook: sync the version, require notes)
