@@ -4,7 +4,7 @@ import { lstat, mkdir, readdir, readFile, realpath, rename, unlink, writeFile } 
 import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import type { SkillBundle, SkillBundleFile } from '../../shared/skills.js';
-import { MAX_SKILL_BUNDLE_BYTES, SKILL_BUNDLE_FORMAT, SKILL_NAME } from '../../shared/skills.js';
+import { MAX_SKILL_BUNDLE_BYTES, MAX_SKILL_TARGETS, SKILL_BUNDLE_FORMAT, SKILL_NAME } from '../../shared/skills.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 /**
@@ -146,8 +146,13 @@ export function parseBundle(value: unknown): SkillBundle {
       return { path, mode: Number.isInteger(entry.mode) ? (entry.mode as number) & 0o755 | 0o600 : 0o644, base64: entry.base64 };
     });
     if (!files.some(file => file.path === 'SKILL.md')) throw bad('백업 안의 스킬에 SKILL.md가 없습니다.');
+    const targets = skill.targets && typeof skill.targets === 'object' ? skill.targets as Record<string, unknown> : undefined;
+    const places = Array.isArray(targets?.projects) ? targets!.projects.slice(0, MAX_SKILL_TARGETS).flatMap(item => {
+      const place = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+      return typeof place.cwd === 'string' && isAbsolute(place.cwd) ? [{ cwd: resolve(place.cwd), title: text(place.title, 200) }] : [];
+    }) : [];
     return { name, description: text(skill.description, 1024), scope, ...(scope === 'project' ? { project: { cwd: resolve(project!.cwd as string), title: text(project!.title, 200) } } : {}),
-      pinned: skill.pinned === true, files };
+      pinned: skill.pinned === true, files, ...(targets ? { targets: { all: targets.all === true, projects: targets.all === true ? [] : places } } : {}) };
   });
   const keys = skills.map(skill => `${skill.scope}\0${skill.project?.cwd ?? ''}\0${skill.name}`);
   if (new Set(keys).size !== keys.length) throw bad('백업 안에 같은 스킬이 두 번 들어 있습니다.');
