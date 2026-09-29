@@ -504,7 +504,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // Folders a trigger works in, and projects the owner pinned, are in use even with no conversation open there.
       // Pins are read from the web's saved file each time: this worker's copy is only read when it starts.
       reserved: async () => { const groups = new ProjectGroupStore(stateDir); await groups.start();
-        return [...folderSettings(triggerEngine?.list() ?? []), ...groups.list().filter(group => group.pinned).map(group => group.cwd)]; } });
+        const triggers = triggerEngine?.list() ?? [];
+        // A trigger that continues a conversation works where that conversation does.
+        const continued = sessionTargets(triggers).flatMap(id => { const cwd = runs.getSession(id)?.cwd; return cwd ? [cwd] : []; });
+        return [...folderSettings(triggers), ...continued, ...groups.list().filter(group => group.pinned).map(group => group.cwd)]; } });
     await worktrees.start().catch(error => console.error(`Worktree cleanup did not start: ${error instanceof Error ? error.message : String(error)}`));
     const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), publicAgents: () => publicAgents.projection(), ownPorts,
       // A trigger set up from a controlling computer checks the sharing list as it is when it runs.
@@ -570,6 +573,17 @@ function folderSettings(value: unknown, found: string[] = []): string[] {
   else if (value && typeof value === 'object') for (const [key, item] of Object.entries(value)) {
     if (key === 'cwd' && typeof item === 'string' && item.startsWith('/')) found.push(item);
     else folderSettings(item, found);
+  }
+  return found;
+}
+
+/** The conversations triggers continue (`target: { mode: 'session', sessionId }`). */
+function sessionTargets(value: unknown, found: string[] = []): string[] {
+  if (Array.isArray(value)) for (const item of value) sessionTargets(item, found);
+  else if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (record.mode === 'session' && typeof record.sessionId === 'string') found.push(record.sessionId);
+    for (const item of Object.values(record)) sessionTargets(item, found);
   }
   return found;
 }

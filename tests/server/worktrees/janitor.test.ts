@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { appendFile, mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gitRunner } from '../../../server/repositories/git.js';
@@ -49,10 +49,10 @@ async function setup(t: test.TestContext) {
   return { dir, work, state, add, transcript, session };
 }
 
-function janitor(state: string, world: { sessions: Session[]; closed: Set<string>; automation?: Set<string>; runs?: Run[]; cwds?: string[] | undefined; now?: number },
+function janitor(state: string, world: { sessions: Session[]; closed: Set<string>; automation?: Set<string>; runs?: Run[]; cwds?: string[] | undefined; commands?: string[]; now?: number },
   extra: Partial<ConstructorParameters<typeof WorktreeJanitor>[0]> = {}) {
   return new WorktreeJanitor({ stateDir: state, sessions: () => world.sessions, closedIds: async () => world.closed, finishedAutomation: () => world.automation ?? new Set(),
-    runs: () => world.runs ?? [], git: gitRunner(env), home: '/nonexistent-home', now: () => world.now ?? Date.now(), cwds: async () => 'cwds' in world ? world.cwds : [], firstPassMs: 3_600_000, ...extra });
+    runs: () => world.runs ?? [], git: gitRunner(env), home: '/nonexistent-home', now: () => world.now ?? Date.now(), cwds: async () => 'cwds' in world ? world.cwds : [], commands: async () => world.commands ?? [], firstPassMs: 3_600_000, ...extra });
 }
 
 test('closing a session removes the clean, published worktrees it made and keeps any that would lose work', async t => {
@@ -494,4 +494,26 @@ test('a branch with an upstream is also checked for repositories inside, and a c
   await cleaner.start(); t.after(() => cleaner.close());
   await cleaner.pass();
   assert.deepEqual((await worktreeCleanupFor(state, ['claude:b'])).map(item => [item.reason, item.detail]), [['nested', join(branch, 'other', 'wt')]]);
+});
+
+test('a program started elsewhere that names the folder on its command line keeps it; moved-aside notes survive a removal', async t => {
+  const { dir, work, state, add, transcript, session } = await setup(t);
+  const preview = join(dir, 'preview'), notes = join(dir, 'work.wt-notes');
+  const rows = [...add('git worktree add --detach ../preview HEAD', ['--detach', preview, 'HEAD']), ...add(`git worktree add --detach ${notes} HEAD`, ['--detach', notes, 'HEAD'])];
+  await writeFile(join(work, '.git', 'info', 'exclude'), 'tmp/\nnode_modules/\n.env\n');
+  await mkdir(join(notes, 'tmp', 'task'), { recursive: true }); await writeFile(join(notes, 'tmp', 'task', 'review.log'), 'review record');
+  await mkdir(join(notes, 'tmp', 'task', 'node_modules', 'x'), { recursive: true }); await writeFile(join(notes, 'tmp', 'task', 'node_modules', 'x', 'i.js'), 'dep');
+  await writeFile(join(notes, '.env'), 'LOCAL=1');
+  await mkdir(join(notes, 'node_modules', 'big'), { recursive: true }); await writeFile(join(notes, 'node_modules', 'big', 'i.js'), 'dep');
+  const world = { sessions: [session('p', await transcript('p', rows))], closed: new Set(['claude:p']), commands: ['python3 -m http.server 8765 --directory ../preview'] };
+  const cleaner = janitor(state, world);
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.equal(existsSync(preview), true, 'the server keeps its folder');
+  assert.equal(existsSync(notes), false);
+  const archive = (await worktreeCleanupFor(state, ['claude:p'])).find(item => item.path === notes)?.archive;
+  assert.ok(archive && archive.startsWith(join(state, 'worktree-files')));
+  assert.equal(await readFile(join(archive, 'tmp', 'task', 'review.log'), 'utf8'), 'review record');
+  assert.equal(await readFile(join(archive, '.env'), 'utf8'), 'LOCAL=1');
+  assert.deepEqual([existsSync(join(archive, 'node_modules')), existsSync(join(archive, 'tmp', 'task', 'node_modules'))], [false, false], 'dependencies are not kept');
 });

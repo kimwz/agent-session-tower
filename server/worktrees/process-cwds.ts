@@ -31,3 +31,17 @@ export async function processCwds(): Promise<string[] | undefined> {
     return failed.code === 1 && !failed.killed && !failed.signal && typeof failed.stdout === 'string' && failed.stdout.includes('\nn/') ? parseCwdList(failed.stdout) : undefined;
   }
 }
+
+/** The command line of every process this account can see; undefined when they cannot be listed. */
+export async function processCommands(): Promise<string[] | undefined> {
+  try {
+    const { stdout } = await execute(process.platform === 'darwin' ? '/bin/ps' : 'ps', ['-axww', '-o', 'args='], { timeout: 10_000, maxBuffer: 32 * 1024 * 1024, env: { ...process.env, LC_ALL: 'C' } });
+    return stdout.split('\n').filter(Boolean);
+  } catch { return undefined; }
+}
+
+/** Whether a command line names this folder as a path segment (`--directory ../preview`, `/w/preview/server.js`). */
+export function namesFolder(command: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[\\s/="'])${escaped}(?:$|[\\s/"'])`).test(command);
+}

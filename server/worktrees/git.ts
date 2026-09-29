@@ -1,5 +1,5 @@
 import { execFile, spawn } from 'node:child_process';
-import { realpath, stat } from 'node:fs/promises';
+import { lstat, readdir, realpath, stat } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { basename, dirname, join } from 'node:path';
 import type { GitRunner } from '../repositories/git.js';
@@ -132,6 +132,31 @@ async function nestedBlocker(git: GitRunner, path: string): Promise<Blocker | un
     if (worktrees > 1) return { reason: 'nested', detail: folder };
   }
   return undefined;
+}
+
+/** Folders of files a tool makes again (dependencies, builds, caches): they go with a worktree and are never kept. */
+const REGENERABLE = new Set(['node_modules', 'bower_components', '.pnpm-store', 'vendor', 'dist', 'build', 'out', '.next', '.nuxt', '.svelte-kit', '.turbo',
+  '.cache', '.parcel-cache', '.vite', 'coverage', 'target', '__pycache__', '.pytest_cache', '.mypy_cache', '.venv', 'venv', '.gradle', '.DS_Store']);
+export const regenerable = (relative: string) => relative.split('/').some(part => REGENERABLE.has(part));
+
+export interface IgnoredWork { entries: string[]; bytes: number; files: number }
+
+/**
+ * Files git ignores in the worktree that no tool makes again: notes, review records, local settings. Listed as git collapses
+ * them (`tmp/`, `.env`), with their size; regenerable folders at any depth are left out. Symlinks count as themselves.
+ */
+export async function ignoredWork(git: GitRunner, path: string, most: { bytes: number; files: number }): Promise<IgnoredWork> {
+  const listed = (await git(path, ['ls-files', '--others', '--ignored', '--exclude-standard', '--directory', '-z'], TIMEOUT_MS)).split('\0').filter(Boolean)
+    .map(entry => entry.replace(/\/$/, '')).filter(entry => !regenerable(entry));
+  const work: IgnoredWork = { entries: listed, bytes: 0, files: 0 };
+  const walk = async (relative: string): Promise<void> => {
+    if (work.bytes > most.bytes || work.files > most.files) return;
+    const info = await lstat(join(path, relative));
+    if (!info.isDirectory()) { work.files++; work.bytes += info.size; return; }
+    for (const name of await readdir(join(path, relative))) if (!regenerable(`${relative}/${name}`)) await walk(`${relative}/${name}`);
+  };
+  for (const entry of listed) await walk(entry);
+  return work;
 }
 
 /** `git worktree remove` without force: git itself refuses when anything is modified or untracked. */

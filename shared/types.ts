@@ -84,13 +84,15 @@ export interface SessionDetail {
   worktrees?: WorktreeCleanup[];
 }
 /** Why Tower kept a worktree a finished conversation made. */
-export type WorktreeKeptReason = 'openSession' | 'reserved' | 'process' | 'processesUnknown' | 'locked' | 'nested' | 'changes' | 'unpushed' | 'unpublished' | 'failed';
+export type WorktreeKeptReason = 'openSession' | 'reserved' | 'process' | 'processesUnknown' | 'locked' | 'nested' | 'ignoredWork' | 'changes' | 'unpushed' | 'unpublished' | 'failed';
 export interface WorktreeCleanup {
   path: string;
   state: 'removed' | 'kept';
   reason?: WorktreeKeptReason;
   /** The open session using it, the branch with unpushed commits, the number of changes, or git's message. */
   detail?: string;
+  /** Where the files git ignored in it (notes, review records, local settings) were moved before it was removed. */
+  archive?: string;
   at: string;
 }
 export interface ProviderHealth {

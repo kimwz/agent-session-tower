@@ -81,3 +81,11 @@ test('paths git is given keep their .. for the file system, which follows symlin
   assert.deepEqual(raw('cd /w/link/.. && git worktree add ./y HEAD', '/start', home), ['/w/./y']);
   assert.deepEqual(raw('git -C ../other worktree add ../o.wt', '/w/repo', home), ['/w/repo/../other/../o.wt']);
 });
+
+test('a command line names a folder only as a whole path segment', async () => {
+  const { namesFolder } = await import('../../../server/worktrees/process-cwds.js');
+  assert.equal(namesFolder('python3 -m http.server --directory ../preview', 'preview'), true);
+  assert.equal(namesFolder('node /w/work.wt-a/server.js', 'work.wt-a'), true);
+  assert.equal(namesFolder('node /w/work.wt-ab/server.js', 'work.wt-a'), false);
+  assert.equal(namesFolder('vite --open preview-page', 'preview'), false);
+});

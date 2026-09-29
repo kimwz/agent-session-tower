@@ -1,11 +1,11 @@
 import { homedir } from 'node:os';
-import { basename, join, normalize, sep } from 'node:path';
-import { realpath } from 'node:fs/promises';
+import { basename, join, normalize, relative, sep } from 'node:path';
+import { cp, realpath, rm } from 'node:fs/promises';
 import type { Run, Session, WorktreeCleanup, WorktreeKeptReason } from '../../shared/types.js';
 import { gitRunner, type GitRunner } from '../repositories/git.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import { linkedWorktree, removalBlocker, removeWorktree, type LinkedWorktree } from './git.js';
-import { processCwds } from './process-cwds.js';
+import { ignoredWork, linkedWorktree, regenerable, removalBlocker, removeWorktree, type LinkedWorktree } from './git.js';
+import { namesFolder, processCommands, processCwds } from './process-cwds.js';
 import { transcriptCreations, transcriptMentions } from './transcripts.js';
 
 const VERSION = 1;
@@ -20,6 +20,8 @@ const SLACK_MS = 5_000;
 /** How long after its call a creation may still be proven: background calls and calls without a result. */
 const LONGEST_CALL_MS = 30 * 60_000;
 const KEEP_REMOVED = 500;
+/** Ignored work files moved aside before a removal at most; more keeps the worktree. */
+const MOST_KEPT = { bytes: 200 * 1024 * 1024, files: 20_000 };
 /** A pass running longer than this no longer counts as work in flight. */
 const STUCK_MS = 10 * 60_000;
 
@@ -30,6 +32,8 @@ interface Entry {
   state: 'pending' | 'kept' | 'removed';
   reason?: WorktreeKeptReason;
   detail?: string;
+  /** Where the ignored work files went before removal. */
+  archive?: string;
   checkedAt: number;
 }
 interface World { sessions: Session[]; families: Map<string, Session[]>; finishedRoots: Set<string>; finished: Set<string>; open: Session[] }
@@ -50,6 +54,7 @@ export interface WorktreeJanitorOptions {
   home?: string;
   now?: () => number;
   cwds?: () => Promise<string[] | undefined>;
+  commands?: () => Promise<string[] | undefined>;
   firstPassMs?: number;
   passMs?: number;
 }
@@ -217,29 +222,43 @@ export class WorktreeJanitor {
       const cwds = await (this.options.cwds ?? processCwds)();
       if (!cwds) { keep('processesUnknown'); return; }
       if (cwds.some(inside)) { keep('process'); return; }
+      // A program started elsewhere may still work in it (`--directory ../preview`): its command line names the folder.
+      const commands = await (this.options.commands ?? processCommands)();
+      if (!commands) { keep('processesUnknown'); return; }
+      if (commands.some(command => namesFolder(command, name))) { keep('process'); return; }
       const reserved = await Promise.all((await this.options.reserved?.() ?? []).map(folder => this.resolved(folder)));
       if (reserved.some(inside)) { keep('reserved'); return; }
+      // Files git ignores that no tool makes again (notes, review records, local settings) are moved to Tower's state folder
+      // first; an unusually large amount of them keeps the worktree instead.
+      const work = await ignoredWork(this.git, worktree.path, MOST_KEPT);
+      if (work.bytes > MOST_KEPT.bytes || work.files > MOST_KEPT.files) { keep('ignoredWork', `${work.files} files`); return; }
+      const archive = work.entries.length ? join(this.options.stateDir, 'worktree-files', `${name}-${new Date(this.now()).toISOString().replace(/[:.]/g, '-')}`) : undefined;
+      if (archive) for (const entry of work.entries) {
+        await cp(join(worktree.path, entry), join(archive, entry), { recursive: true, verbatimSymlinks: true, errorOnExist: true, force: false, preserveTimestamps: true,
+          filter: source => !regenerable(relative(worktree.path, source)) });
+      }
+      const discard = async () => { if (archive) await rm(archive, { recursive: true, force: true }); };
       // Conversations are judged last, and again until nothing changed while their transcripts were read (a few tries; a
       // busy moment leaves the worktree for the next pass). Nothing waits between the last look and the removal.
       const revision = (session: Session) => `${session.id}\0${session.updatedAt}\0${session.cwd}`;
       let checked = new Set<string>();
       for (let attempt = 0; ; attempt++) {
         const now = await this.world();
-        if (this.stopping || !now.finishedRoots.has(entry.root)) return;
+        if (this.stopping || !now.finishedRoots.has(entry.root)) { await discard(); return; }
         const changed = now.open.filter(session => !checked.has(revision(session)));
         if (!changed.length) break;
-        if (attempt === 3) return;
+        if (attempt === 3) { await discard(); return; }
         for (const session of changed) {
           const cwd = session.cwd && await this.resolved(session.cwd);
-          if (cwd && inside(cwd)) { keep('openSession', named(session)); return; }
+          if (cwd && inside(cwd)) { await discard(); keep('openSession', named(session)); return; }
         }
         const referrer = (await this.referrers(changed, [name])).get(name);
-        if (referrer) { keep('openSession', named(referrer)); return; }
+        if (referrer) { await discard(); keep('openSession', named(referrer)); return; }
         checked = new Set(now.open.map(revision));
       }
       this.removal = removeWorktree(this.git, worktree);
-      try { await this.removal; } finally { this.removal = undefined; }
-      Object.assign(entry, { state: 'removed', reason: undefined, detail: undefined, checkedAt: this.now() });
+      try { await this.removal; } catch (error) { await discard(); throw error; } finally { this.removal = undefined; }
+      Object.assign(entry, { state: 'removed', reason: undefined, detail: undefined, archive, checkedAt: this.now() });
     } catch (error) {
       keep('failed', error instanceof Error ? error.message : String(error));
     }
@@ -350,6 +369,6 @@ export async function worktreeCleanupFor(stateDir: string, ids: readonly string[
   const saved = await loadCleanup(stateDir);
   const wanted = new Set(ids);
   return Object.entries(saved.worktrees).filter(([, entry]) => entry.state !== 'pending' && (wanted.has(entry.root) || entry.sessions.some(id => wanted.has(id))))
-    .map(([path, entry]) => ({ path, state: entry.state as 'removed' | 'kept', ...(entry.reason ? { reason: entry.reason } : {}), ...(entry.detail ? { detail: entry.detail } : {}), at: new Date(entry.checkedAt).toISOString() }))
+    .map(([path, entry]) => ({ path, state: entry.state as 'removed' | 'kept', ...(entry.reason ? { reason: entry.reason } : {}), ...(entry.detail ? { detail: entry.detail } : {}), ...(entry.archive ? { archive: entry.archive } : {}), at: new Date(entry.checkedAt).toISOString() }))
     .sort((a, b) => a.path.localeCompare(b.path));
 }
