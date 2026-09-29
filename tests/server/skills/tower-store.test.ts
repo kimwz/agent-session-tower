@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { lstat, mkdir, mkdtemp, readdir, readFile, readlink, realpath, rename, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { SkillFiles } from '../../../server/skills/files.js';
 import { parseBundle, writeMoves } from '../../../server/skills/store.js';
 import { SkillService } from '../../../server/skills/service.js';
+import { skillsCapability } from '../../../server/runs/durable-runner.js';
 import { installAgentGuidance, OWNER_GUIDANCE_FILE } from '../../../server/agent-guidance/install.js';
 import type { Session } from '../../../shared/types.js';
 
@@ -27,6 +28,8 @@ async function external(root: string, name: string, text = 'Steps') {
   await writeFile(join(dir, 'references', 'a.md'), 'ref');
   return dir;
 }
+
+const aside = (place: string, id: string) => join(dirname(place), `.${basename(place)}.tower-old-${id}`);
 
 test('moving a skill into Tower keeps it where the agents look, through a link to Tower’s folder', async t => {
   const f = await homes(t);
@@ -77,20 +80,20 @@ test('a move a crash interrupted is undone before its copy is complete, and fini
   // Stopped after the copy, before the swap: the swap is done now.
   const copied = await move('copied', 2, true);
   // Stopped between putting the original aside and the link in its place: the link is put there.
-  const aside = await move('aside', 3, true);
-  await rename(aside.places[0], `${aside.places[0]}.tower-old-${aside.id}`);
+  const halfway = await move('aside', 3, true);
+  await rename(halfway.places[0], aside(halfway.places[0], halfway.id));
   // Stopped after the swap: the rest is done.
   const swapped = await move('swapped', 4, true);
-  await rename(swapped.places[0], `${swapped.places[0]}.tower-old-${swapped.id}`);
+  await rename(swapped.places[0], aside(swapped.places[0], swapped.id));
   await symlink(swapped.to, swapped.places[0], 'dir');
-  await writeMoves(f.journal, [copying, copied, aside, swapped]);
+  await writeMoves(f.journal, [copying, copied, halfway, swapped]);
   const finished = await f.files.recover();
-  assert.deepEqual(finished.map(item => item.id).sort(), [copied.id, aside.id, swapped.id]);
+  assert.deepEqual(finished.map(item => item.id).sort(), [copied.id, halfway.id, swapped.id]);
   assert.ok((await lstat(copying.places[0])).isDirectory());
   await assert.rejects(lstat(copying.incoming));
-  for (const item of [copied, aside, swapped]) {
+  for (const item of [copied, halfway, swapped]) {
     assert.equal(await readlink(item.places[0]), item.to);
-    await assert.rejects(lstat(`${item.places[0]}.tower-old-${item.id}`));
+    await assert.rejects(lstat(aside(item.places[0], item.id)));
     assert.equal(await realpath(join(f.claudeHome, 'skills', item.places[0].split('/').at(-1)!)), item.to, 'the other agent is linked too');
   }
   assert.deepEqual(JSON.parse(await readFile(f.journal, 'utf8')), []);
@@ -104,7 +107,7 @@ test('identical copies moved into Tower are all recorded, so a crash between the
   await mkdir(join(f.store, 'global'), { recursive: true });
   execFileSync('cp', ['-R', codex, to]);
   // The first place was swapped; the crash came before the Claude copy was.
-  await rename(codex, `${codex}.tower-old-00000009`);
+  await rename(codex, aside(codex, '00000009'));
   await symlink(to, codex, 'dir');
   await writeMoves(f.journal, [{ id: '00000009', to, incoming: join(f.store, 'global', '.incoming-00000009'), places: [codex, claude] }]);
   await f.files.recover();
@@ -117,20 +120,20 @@ test('recovery never touches anything outside Tower’s own folder', async t => 
   const f = await homes(t);
   const elsewhere = join(f.root, 'elsewhere');
   await mkdir(join(elsewhere, '.incoming-abcdef12'), { recursive: true });
-  await mkdir(join(elsewhere, 'x.tower-old-abcdef12'), { recursive: true });
+  await mkdir(join(elsewhere, '.x.tower-old-abcdef12'), { recursive: true });
   await mkdir(f.store, { recursive: true });
   await symlink(elsewhere, join(f.store, 'global'));
   await writeMoves(f.journal, [{ id: 'abcdef12', to: join(elsewhere, 'x'), incoming: join(elsewhere, '.incoming-abcdef12'), places: [join(f.agentsHome, 'skills', 'x')] }]);
   await f.files.recover();
-  assert.deepEqual((await readdir(elsewhere)).sort(), ['.incoming-abcdef12', 'x.tower-old-abcdef12']);
+  assert.deepEqual((await readdir(elsewhere)).sort(), ['.incoming-abcdef12', '.x.tower-old-abcdef12']);
   assert.deepEqual(JSON.parse(await readFile(f.journal, 'utf8')), []);
 });
 
 test('an import that stopped while replacing a Tower skill gets the old one back', async t => {
   const f = await homes(t);
   const global = join(f.store, 'global');
-  await mkdir(join(global, 'review.tower-old-abcdef12'), { recursive: true });
-  await writeFile(join(global, 'review.tower-old-abcdef12', 'SKILL.md'), '---\nname: review\ndescription: d\n---\nold\n');
+  await mkdir(join(global, '.review.tower-old-abcdef12'), { recursive: true });
+  await writeFile(join(global, '.review.tower-old-abcdef12', 'SKILL.md'), '---\nname: review\ndescription: d\n---\nold\n');
   await mkdir(join(global, '.incoming-abcdef12'), { recursive: true });
   await f.files.recover();
   assert.deepEqual(await readdir(global), ['review']);
@@ -147,7 +150,7 @@ test('a skill kept in Tower whose links were lost is still listed, and linking p
   assert.deepEqual((await f.files.link(skill.dir)).providers, ['claude', 'codex']);
 });
 
-test('links to a Tower skill in a git project are kept out of git status, and put back in when it is deleted', async t => {
+test('links to a Tower skill in a git project are kept out of git status, and the lines stay for other worktrees', async t => {
   const f = await homes(t);
   const repo = join(f.home, 'work', 'shop');
   await mkdir(join(repo, 'src'), { recursive: true });
@@ -157,7 +160,13 @@ test('links to a Tower skill in a git project are kept out of git status, and pu
   assert.match(await readFile(exclude, 'utf8'), /^\/\.agents\/skills\/deploy\n\/\.claude\/skills\/deploy$/m);
   assert.equal(execFileSync('git', ['-C', repo, 'status', '--porcelain']).toString().trim(), '');
   await f.files.remove(skill.dir, repo);
-  assert.doesNotMatch(await readFile(exclude, 'utf8'), /deploy/);
+  assert.match(await readFile(exclude, 'utf8'), /deploy/, 'other worktrees of the repository share these lines');
+  // A folder git tracks (a skill the repository shares) is never moved into Tower.
+  await mkdir(join(repo, '.agents', 'skills', 'shared'), { recursive: true });
+  await writeFile(join(repo, '.agents', 'skills', 'shared', 'SKILL.md'), '---\nname: shared\ndescription: d\n---\n');
+  execFileSync('git', ['-C', repo, 'add', '.agents/skills/shared']);
+  await assert.rejects(f.files.adopt(join(repo, '.agents', 'skills', 'shared'), repo), { statusCode: 409 });
+  assert.ok((await lstat(join(repo, '.agents', 'skills', 'shared'))).isDirectory());
 });
 
 test('a git exclude file that is a link is left alone', async t => {
@@ -204,9 +213,9 @@ test('chosen Tower skills, their pins and the owner’s guidance go to another c
   await from.mutate('save', { scope: 'global', name: 'review', description: 'Review code.', body: 'Steps', pinned: true });
   await from.mutate('save', { scope: 'project', projectCwd: projectA, cwd: projectA, name: 'deploy', description: 'Deploy.', body: 'Steps' });
   await from.mutate('save', { scope: 'global', name: 'left-out', description: 'Not chosen.', body: 'Steps' });
-  const guidance = (await from.overview()).guidance;
+  const guidance = (await from.overview()).guidance!;
   await from.mutate('guidance', { owner: 'Always answer in Korean.', revision: guidance.revision });
-  const stored = (await from.overview()).stored;
+  const stored = (await from.overview()).stored!;
   assert.deepEqual(stored.map(skill => skill.name).sort(), ['deploy', 'left-out', 'review'], 'every Tower skill, projects included');
   const chosen = stored.filter(skill => skill.name !== 'left-out').map(skill => skill.dir);
   const bundle = JSON.parse(JSON.stringify(await from.exportBundle({ dirs: chosen, guidance: true })));
@@ -220,11 +229,11 @@ test('chosen Tower skills, their pins and the owner’s guidance go to another c
     'a project path this computer does not know is left for the owner to choose');
   await to.mutate('import', { bundle, choices: [{ index: 0, action: 'add' }, { index: 1, action: 'add', cwd: projectB }], guidance: 'replace', pins: true });
   const after = await to.overview();
-  const review = after.stored.find(skill => skill.name === 'review')!;
+  const review = after.stored!.find(skill => skill.name === 'review')!;
   assert.equal(review.pinned, true);
   assert.deepEqual(review.providers, ['claude', 'codex']);
-  assert.equal(after.stored.find(skill => skill.name === 'deploy')?.cwd, projectB);
-  assert.equal(after.guidance.owner, 'Always answer in Korean.\n');
+  assert.equal(after.stored!.find(skill => skill.name === 'deploy')?.cwd, projectB);
+  assert.equal(after.guidance!.owner, 'Always answer in Korean.\n');
   assert.equal(installed, 1, 'the agents are given the imported guidance');
   assert.match((await to.turnNotes(session(projectB)))!, /- review: Review code\./);
 
@@ -249,6 +258,11 @@ test('a pin on a skill moved into Tower moves with it, and the owner’s guidanc
   const [moved] = (await skills.overview()).skills;
   assert.equal(moved.managed, true);
   assert.equal(moved.pinned, true);
+  const state = JSON.parse(await readFile(join(f.state, 'skills.json'), 'utf8')) as { pinned: { dir: string }[] };
+  assert.deepEqual(state.pinned.map(pin => pin.dir), [moved.dir], 'the pin itself names the stored folder');
+  // A stale page asking to move it again changes nothing, the pin included.
+  await skills.mutate('adopt', { dir: moved.dir });
+  assert.equal((await skills.overview()).skills[0].pinned, true);
   assert.match((await skills.turnNotes(session(f.home)))!, new RegExp(`${moved.dir}/SKILL\\.md`));
 
   await mkdir(join(f.state, 'guidance'), { recursive: true });
@@ -256,4 +270,68 @@ test('a pin on a skill moved into Tower moves with it, and the owner’s guidanc
   await installAgentGuidance({ stateDir: f.state, claudeHome: f.claudeHome, codexHome: f.codexHome });
   assert.match(await readFile(join(f.claudeHome, 'CLAUDE.md'), 'utf8'), new RegExp(`^@${join(f.state, OWNER_GUIDANCE_FILE)}$`, 'm'));
   assert.match(await readFile(join(f.codexHome, 'AGENTS.md'), 'utf8'), /## The owner's own instructions\n\nAnswer in Korean\.\n<!-- agent-session-tower:end -->/);
+});
+
+test('the owner’s guidance: two saves of one revision never both win, Tower’s markers are dropped, and a partial import leaves it alone', async t => {
+  const f = await homes(t);
+  const skills = await service(f, []);
+  const { revision } = (await skills.overview()).guidance!;
+  const results = await Promise.allSettled(['First', 'Second'].map(owner => skills.mutate('guidance', { owner, revision })));
+  assert.deepEqual(results.map(result => result.status).sort(), ['fulfilled', 'rejected']);
+  const current = (await skills.overview()).guidance!;
+  await skills.mutate('guidance', { owner: 'Keep\n<!-- agent-session-tower:end -->\n<!-- agent-session-tower:off -->\nThis', revision: current.revision });
+  assert.equal((await skills.overview()).guidance!.owner, 'Keep\nThis\n');
+  const bundle = { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: '', guidance: 'Imported rule',
+    skills: [{ name: 'broken', scope: 'global', pinned: false, description: 'd', files: [{ path: 'SKILL.md', mode: 0o644, base64: Buffer.from('x').toString('base64') }] }] };
+  await external(f.agentsHome, 'broken');
+  await assert.rejects(skills.mutate('import', { bundle, choices: [{ index: 0, action: 'add' }], guidance: 'append' }), { statusCode: 409 });
+  assert.equal((await skills.overview()).guidance!.owner, 'Keep\nThis\n', 'nothing to add twice on a retry');
+});
+
+test('the copy Tower keeps is the one listed and kept when an identical outside copy appears', async t => {
+  const f = await homes(t);
+  const stored = await f.files.save({ scope: 'global', name: 'same', description: 'd', body: 'b' });
+  await mkdir(join(f.codexHome, 'skills'), { recursive: true });
+  execFileSync('cp', ['-R', stored.dir, join(f.codexHome, 'skills', 'same')]);
+  const [listed] = await f.files.list();
+  assert.equal(listed.dir, stored.dir);
+  assert.equal(listed.managed, true);
+  await f.files.merge(listed.dir);
+  assert.ok((await lstat(stored.dir)).isDirectory(), 'the stored copy stays');
+  assert.equal(await realpath(join(f.codexHome, 'skills', 'same')), stored.dir);
+});
+
+test('one move that cannot be settled never stops the others, and an unreadable move record is set aside', async t => {
+  const f = await homes(t);
+  await mkdir(join(f.store, 'global'), { recursive: true });
+  const stuckFolder = join(f.root, 'locked');
+  await mkdir(stuckFolder, { recursive: true });
+  const stuck = join(stuckFolder, 'stuck');
+  await mkdir(stuck); await writeFile(join(stuck, 'SKILL.md'), '---\nname: stuck\ndescription: d\n---\n');
+  execFileSync('cp', ['-R', stuck, join(f.store, 'global', 'stuck')]);
+  const { chmod } = await import('node:fs/promises');
+  await chmod(stuckFolder, 0o555);
+  const ok = await external(f.agentsHome, 'ok');
+  execFileSync('cp', ['-R', ok, join(f.store, 'global', 'ok')]);
+  await writeMoves(f.journal, [
+    { id: '00000001', to: join(f.store, 'global', 'stuck'), incoming: join(f.store, 'global', '.incoming-00000001'), places: [stuck] },
+    { id: '00000002', to: join(f.store, 'global', 'ok'), incoming: join(f.store, 'global', '.incoming-00000002'), places: [ok] },
+  ]);
+  const finished = await f.files.recover().finally(() => chmod(stuckFolder, 0o755));
+  assert.deepEqual(finished.map(move => move.id), ['00000002']);
+  assert.equal(await readlink(ok), join(f.store, 'global', 'ok'));
+  assert.deepEqual((JSON.parse(await readFile(f.journal, 'utf8')) as { id: string }[]).map(move => move.id), ['00000001'], 'kept for the next start');
+
+  await writeFile(f.journal, '{not json');
+  assert.deepEqual(await f.files.recover(), []);
+  assert.ok((await readdir(f.state)).some(name => name.startsWith('skills-moves.json.unreadable-')));
+});
+
+test('an older execution worker is never asked for what came with Tower’s own skill folder', () => {
+  for (const [operation, action] of [['skillsExport'], ['skillsImportPlan'], ['skillsMutate', 'adopt'], ['skillsMutate', 'guidance'], ['skillsMutate', 'import']]) {
+    assert.equal(skillsCapability(operation, [action]), 'towerSkills', `${operation} ${action ?? ''}`);
+  }
+  for (const [operation, action] of [['skillsOverview'], ['skillsDetail'], ['skillsSummary'], ['skillsMutate', 'save'], ['skillsMutate', 'merge'], ['skillsMutate', 'pin']]) {
+    assert.equal(skillsCapability(operation, [action]), 'skills', `${operation} ${action ?? ''}`);
+  }
 });

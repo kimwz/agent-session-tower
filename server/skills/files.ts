@@ -1,12 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { access, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { constants, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import type { Skill, SkillBundleSkill, SkillDetail, SkillProvider, SkillScope } from '../../shared/skills.js';
 import { MAX_SKILL_BODY, MAX_SKILL_DESCRIPTION, SKILL_NAME } from '../../shared/skills.js';
 import { formatSkillFile, parseSkillFile } from './skill-file.js';
-import { bundleFiles, containsLink, excludeLinks, projectKey, readMoves, writeBundleFiles, writeMoves, type SkillMove } from './store.js';
+import { asideOf, bundleFiles, containsLink, excludeLinks, projectKey, readMoves, trackedByGit, writeBundleFiles, writeMoves, type SkillMove } from './store.js';
 
 export interface SkillHomes {
   /** The account's home folder: project skills are never looked for at or above it. */
@@ -119,7 +119,9 @@ export class SkillFiles {
       groups.set(key, [...groups.get(key) ?? [], skill]);
     }
     const skills: Skill[] = [];
-    for (const [first, ...others] of groups.values()) {
+    for (const group of groups.values()) {
+      // The copy Tower keeps is the one listed, edited and kept when copies are merged.
+      const [first, ...others] = [...group.filter(skill => skill.managed), ...group.filter(skill => !skill.managed)];
       if (!others.length) { skills.push(first); continue; }
       const all = [first, ...others];
       const digests = await Promise.all(all.map(skill => folderDigest(skill.dir)));
@@ -198,6 +200,13 @@ export class SkillFiles {
     const places = [skill.dir, ...(skill.copies ?? []).map(copy => copy.dir).filter(place => place !== skill.dir)];
     if (places.some(place => !roots.has(dirname(place)))) throw new SkillError('스킬 폴더 밖에 있는 스킬은 옮길 수 없습니다.', 409);
     if (await containsLink(skill.dir)) throw new SkillError('스킬 폴더 안에 링크가 있어 옮길 수 없습니다. 링크가 가리키는 파일이 따라오지 않습니다.', 409);
+    // A folder git tracks (a project's shared skill, or a dotfiles repository) would show as deleted, and a commit would
+    // remove it for everyone; git would also turn the link back into a folder on the next checkout.
+    for (const place of places) if (await trackedByGit(place)) throw new SkillError('git이 관리하는 스킬 폴더라 옮기지 않습니다. 저장소에서 함께 쓰는 스킬은 그대로 두세요.', 409);
+    for (const place of places) {
+      try { await access(dirname(place), constants.W_OK); }
+      catch { throw new SkillError('스킬이 있는 폴더에 쓸 수 없어 옮길 수 없습니다.', 409); }
+    }
     const root = await this.storeRoot(skill.scope, skill.cwd);
     const to = join(root, basename(skill.dir));
     if (await lstat(to).catch(() => undefined)) throw new SkillError('타워에 같은 이름의 스킬이 이미 있습니다.', 409);
@@ -220,7 +229,7 @@ export class SkillFiles {
    * once it is, every place becomes a link to it, whatever step a crash stopped at. Each step can be repeated.
    */
   private async settle(move: SkillMove): Promise<boolean> {
-    const aside = (place: string) => `${place}.tower-old-${move.id}`, link = (place: string) => `${place}.tower-link-${move.id}`;
+    const aside = (place: string) => asideOf(place, move.id), link = (place: string) => join(dirname(place), `.${basename(place)}.tower-link-${move.id}`);
     for (const place of move.places) if ((await lstat(link(place)).catch(() => undefined))?.isSymbolicLink()) await unlink(link(place));
     const stored = await lstat(move.to).catch(() => undefined);
     if (!stored?.isDirectory()) {
@@ -247,7 +256,7 @@ export class SkillFiles {
     const skill = await this.find(move.to).catch(() => undefined) ?? await this.findStored(move.to);
     if (skill) await this.linkNow(skill.dir, skill.cwd);
     for (const place of move.places) {
-      const aside = `${place}.tower-old-${move.id}`;
+      const aside = asideOf(place, move.id);
       if (await lstat(aside).catch(() => undefined)) await this.trash(aside);
     }
     await this.journal(moves => moves.filter(item => item.id !== move.id));
@@ -275,17 +284,21 @@ export class SkillFiles {
     for (const move of await readMoves(this.homes.journal)) {
       // Only a move into one of Tower's own folders is touched; anything else in the record is dropped as it is.
       if (!folders.includes(dirname(move.to)) || dirname(move.incoming) !== dirname(move.to)) { await this.journal(moves => moves.filter(item => item.id !== move.id)); continue; }
-      await this.settle(move);
+      // One move that cannot be settled now (a folder not writable, say) stays recorded and never blocks the others.
+      try { await this.settle(move); }
+      catch (error) { console.error(`A skill move could not be settled yet: ${error instanceof Error ? error.message : String(error)}`); }
     }
     // An import or replacement stopped half way: a replaced skill whose new copy never arrived comes back.
     for (const folder of folders) {
       for (const name of await readdir(folder).catch(() => [] as string[])) {
         const path = join(folder, name);
         if (/^\.incoming-[0-9a-f]{8}$/.test(name)) { await rm(path, { recursive: true, force: true }); continue; }
-        const aside = name.match(/^([a-z0-9][a-z0-9-]{0,63})\.tower-old-[0-9a-f]{8}$/)?.[1];
+        const aside = name.match(/^\.([a-z0-9][a-z0-9-]{0,63})\.tower-old-[0-9a-f]{8}$/)?.[1];
         if (!aside || !(await lstat(path).catch(() => undefined))?.isDirectory()) continue;
-        if (await lstat(join(folder, aside)).catch(() => undefined)) await this.trash(path);
-        else await rename(path, join(folder, aside));
+        try {
+          if (await lstat(join(folder, aside)).catch(() => undefined)) await this.trash(path);
+          else await rename(path, join(folder, aside));
+        } catch (error) { console.error(`A replaced skill could not be restored yet: ${error instanceof Error ? error.message : String(error)}`); }
       }
     }
     return this.finished.splice(0);
@@ -353,7 +366,7 @@ export class SkillFiles {
       if (conflict === 'external' || conflict === 'managed' && !replace) throw new SkillError('같은 이름의 스킬이 이미 있습니다.', 409);
       const root = await this.storeRoot(item.scope, cwd);
       const target = join(root, item.name), id = randomUUID().replace(/-/g, '').slice(0, 8);
-      const incoming = join(root, `.incoming-${id}`), aside = join(root, `${item.name}.tower-old-${id}`);
+      const incoming = join(root, `.incoming-${id}`), aside = asideOf(target, id);
       await writeBundleFiles(incoming, item.files).catch(async error => { await rm(incoming, { recursive: true, force: true }); throw error; });
       if (conflict === 'managed') await rename(target, aside);
       try { await rename(incoming, target); }
@@ -436,7 +449,7 @@ export class SkillFiles {
         if (leads.some(lead => folders.includes(lead))) await unlink(path);
       }
     }
-    if (skill.managed && skill.scope === 'project' && skill.cwd) await excludeLinks(skill.cwd, basename(skill.dir), false);
+    // The exclude lines stay: other worktrees of the repository share them, and the owner may have written the same line.
   }
 
   private async update(dir: string, cwd: string | undefined, name: string, description: string, body: string, revision?: string): Promise<Skill> {

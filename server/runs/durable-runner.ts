@@ -27,6 +27,11 @@ interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: n
   spawn?: (command: { execPath: string; args: string[] }) => void }
 
 /** A disposable UI connection. Only the independent worker owns provider lifetimes. */
+/** Tower's own skill folder, guidance and backups came later than skills themselves: an older worker lacks them. */
+export function skillsCapability(operation: string, args: unknown[]): 'skills' | 'towerSkills' {
+  return operation === 'skillsExport' || operation === 'skillsImportPlan' || operation === 'skillsMutate' && ['adopt', 'guidance', 'import'].includes(String(args[0])) ? 'towerSkills' : 'skills';
+}
+
 export class DurableRunManager extends EventEmitter {
   private paths?: Awaited<ReturnType<typeof runnerPaths>>;
   private snapshot?: RunnerSnapshot;
@@ -217,9 +222,7 @@ export class DurableRunManager extends EventEmitter {
   async publicAgentsMutate(action: string, body: Record<string, unknown>): Promise<Omit<PublicAgentOverview, 'listener'>> { this.requirePublicAgents(); return this.call('publicAgentsMutate', [action, body]) as Promise<Omit<PublicAgentOverview, 'listener'>>; }
   /** Skills live in the worker; an older worker has none yet. */
   async skills(operation: 'skillsOverview' | 'skillsDetail' | 'skillsSummary' | 'skillsMutate' | 'skillsExport' | 'skillsImportPlan', args: unknown[]): Promise<unknown> {
-    // Tower's own skill folder, guidance and backups came later than skills themselves.
-    const later = operation === 'skillsExport' || operation === 'skillsImportPlan' || operation === 'skillsMutate' && ['adopt', 'guidance', 'import'].includes(String(args[0]));
-    if (!this.supports(later ? 'towerSkills' : 'skills')) throw Object.assign(new Error('실행 워커가 아직 새 버전으로 바뀌지 않았습니다. 진행 중인 작업이 끝나 워커가 바뀌면 스킬을 쓸 수 있습니다.'), { statusCode: 503 });
+    if (!this.supports(skillsCapability(operation, args))) throw Object.assign(new Error('실행 워커가 아직 새 버전으로 바뀌지 않았습니다. 진행 중인 작업이 끝나 워커가 바뀌면 스킬을 쓸 수 있습니다.'), { statusCode: 503 });
     return this.call(operation, args);
   }
   async publicVisit(action: string, slug: string, input: { token?: string; ip: string; password?: unknown; text?: unknown }): Promise<{ state: PublicVisitorState; token?: string }> {

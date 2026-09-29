@@ -5,8 +5,8 @@ import type { ChatMessage, Run, Session } from '../../shared/types.js';
 import type { GuidanceOverview, Skill, SkillBundle, SkillDetail, SkillImportChoice, SkillImportPlan, SkillOverview, SkillSummary } from '../../shared/skills.js';
 import { MAX_SKILL_BUNDLE_BYTES, SKILL_BUNDLE_FORMAT } from '../../shared/skills.js';
 import { AGENT_GUIDANCE } from '../agent-guidance/guidance.js';
-import { OWNER_GUIDANCE_FILE } from '../agent-guidance/install.js';
-import { writePrivateJson } from '../stores/private-json.js';
+import { OWNER_GUIDANCE_FILE, withoutTowerMarkers } from '../agent-guidance/install.js';
+import { writePrivateFile } from '../stores/private-json.js';
 import { revisionOf } from './files.js';
 import { parseBundle } from './store.js';
 import { proposalReady, proposalsFor } from '../../shared/skills.js';
@@ -60,15 +60,22 @@ export class SkillService {
     });
   }
 
-  private ready: Promise<void> = Promise.resolve();
-  /** Moves a crash interrupted are finished or undone before any skill is listed or named to a turn. */
-  async start(): Promise<void> {
-    this.ready = (async () => {
+  private initialized?: Promise<void>;
+  /**
+   * Moves a crash interrupted are finished or undone before any skill is listed or named to a turn. A start that failed
+   * is tried again on the next use rather than leaving skills unusable until the worker restarts.
+   */
+  private ready(): Promise<void> {
+    this.initialized ??= (async () => {
       await this.state.start();
       const finished = await this.files.recover().catch(error => { console.error(`Skill moves were not recovered: ${error instanceof Error ? error.message : String(error)}`); return []; });
       await this.moved(finished.map(move => ({ from: move.places, to: move.to })));
-    })();
-    await this.ready;
+    })().catch(error => { this.initialized = undefined; throw error; });
+    return this.initialized;
+  }
+
+  async start(): Promise<void> {
+    await this.ready().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
     this.recordRuns();
     if (this.options.advise !== false) this.advisor.start();
   }
@@ -135,12 +142,13 @@ export class SkillService {
 
   /** Pins and accepted proposals that named a folder now kept in Tower name the stored one. */
   private async moved(moves: { from: string[]; to: string }[]): Promise<void> {
-    if (!moves.length) return;
+    const real = moves.filter(move => move.from.length);
+    if (!real.length) return;
     await this.state.update(state => {
-      for (const move of moves) {
+      for (const move of real) {
         const pin = state.pinned.find(item => move.from.includes(item.dir));
-        state.pinned = state.pinned.filter(item => !move.from.includes(item.dir) && item.dir !== move.to);
-        if (pin) state.pinned.push({ ...pin, dir: move.to });
+        state.pinned = state.pinned.filter(item => !move.from.includes(item.dir));
+        if (pin && !state.pinned.some(item => item.dir === move.to)) state.pinned.push({ ...pin, dir: move.to });
         for (const proposal of state.proposals) if (proposal.skillDir && move.from.includes(proposal.skillDir)) proposal.skillDir = move.to;
       }
     });
@@ -149,14 +157,16 @@ export class SkillService {
   /** Replaces the pins of a skill (on any of its copies) with one on the folder that is edited, or none. */
   private async pin(skill: Skill, pinned: boolean): Promise<void> {
     const dirs = folders(skill);
+    // A pin left on an old place (a link to the skill now) belongs to the skill too.
+    const reals = new Map(await Promise.all(this.state.get().pinned.map(async item => [item.dir, await realpath(item.dir).catch(() => item.dir)] as const)));
     await this.state.update(state => {
-      state.pinned = state.pinned.filter(item => !dirs.includes(item.dir));
+      state.pinned = state.pinned.filter(item => !dirs.includes(item.dir) && !dirs.includes(reals.get(item.dir) ?? item.dir));
       if (pinned) state.pinned.push({ dir: skill.dir, ...(skill.cwd ? { cwd: skill.cwd } : {}) });
     });
   }
 
   async overview(input: { cwd?: unknown } = {}): Promise<SkillOverview> {
-    await this.ready;
+    await this.ready();
     const cwd = await this.project(input.cwd);
     const state = this.state.get();
     const proposals = proposalsFor(state.proposals.filter(item => item.status === 'open'), cwd)
@@ -179,7 +189,7 @@ export class SkillService {
   }
 
   async mutate(action: string, body: Record<string, unknown>): Promise<SkillOverview> {
-    await this.ready;
+    await this.ready();
     const cwd = await this.project(body.cwd);
     switch (action) {
       case 'save': {
@@ -217,8 +227,10 @@ export class SkillService {
       case 'guidance': {
         const owner = text(body.owner).replace(/\r\n/g, '\n');
         if (Buffer.byteLength(owner) > 256 * 1024) throw new SkillError('지침이 너무 깁니다.', 413);
-        if (text(body.revision) !== (await this.guidance()).revision) throw new SkillError('다른 곳에서 지침이 바뀌었습니다. 다시 열어 최신 내용으로 고치세요.', 409);
-        await this.writeGuidance(owner);
+        await this.guidanceChange(async current => {
+          if (text(body.revision) !== current.revision) throw new SkillError('다른 곳에서 지침이 바뀌었습니다. 다시 열어 최신 내용으로 고치세요.', 409);
+          return owner;
+        });
         break;
       }
       case 'import': {
@@ -264,7 +276,7 @@ export class SkillService {
    * a project's own only inside that project.
    */
   async turnNotes(session: Session): Promise<string | undefined> {
-    await this.ready;
+    await this.ready();
     const pinned = this.state.get().pinned;
     if (!pinned.length) return undefined;
     const cwd = resolve(session.cwd);
@@ -284,15 +296,22 @@ export class SkillService {
     return { owner, revision: revisionOf(owner), tower: AGENT_GUIDANCE, installed: Boolean(this.options.installGuidance) };
   }
 
-  private async writeGuidance(owner: string): Promise<void> {
-    await mkdir(dirname(this.guidanceFile()), { recursive: true, mode: 0o700 });
-    await writePrivateJson(this.guidanceFile(), owner.trim() ? `${owner.trimEnd()}\n` : '');
-    await this.options.installGuidance?.();
+  private guidanceQueue: Promise<unknown> = Promise.resolve();
+  /** Reads, checks and writes the owner's guidance one change at a time, then gives it to the agents. */
+  private guidanceChange(change: (current: GuidanceOverview) => Promise<string>): Promise<void> {
+    const next = this.guidanceQueue.catch(() => {}).then(async () => {
+      const owner = withoutTowerMarkers(await change(await this.guidance()));
+      await mkdir(dirname(this.guidanceFile()), { recursive: true, mode: 0o700 });
+      await writePrivateFile(this.guidanceFile(), owner.trim() ? `${owner.trimEnd()}\n` : '');
+      await this.options.installGuidance?.();
+    });
+    this.guidanceQueue = next;
+    return next;
   }
 
   /** A backup of the chosen Tower skills (and the owner's guidance, when asked), as one file to download. */
   async exportBundle(input: Record<string, unknown>): Promise<SkillBundle> {
-    await this.ready;
+    await this.ready();
     const dirs = Array.isArray(input.dirs) ? input.dirs.filter((dir): dir is string => typeof dir === 'string') : [];
     const pinned = await this.pinned();
     const skills = (await this.files.bundle(dirs)).map((skill, index) => ({ ...skill, pinned: pinned.has(dirs[index]) }));
@@ -304,7 +323,7 @@ export class SkillService {
 
   /** What importing a backup would do here, item by item, before anything is written. */
   async importPlan(input: unknown): Promise<SkillImportPlan> {
-    await this.ready;
+    await this.ready();
     const bundle = parseBundle(input);
     const known = (cwd: string) => this.options.sessions().some(session => !session.node && session.cwd === cwd) || Boolean(this.options.projects?.().includes(cwd));
     const items = await Promise.all(bundle.skills.map(async (skill, index) => {
@@ -330,11 +349,11 @@ export class SkillService {
         if (body.pins === true && item.pinned) await this.pin(skill, true);
       } catch (error) { failures.push(`${item.name}: ${error instanceof Error ? error.message : String(error)}`); }
     }
+    // The guidance is taken only when every chosen skill came in, so trying again never adds it twice.
+    if (failures.length) throw new SkillError(`가져오지 못한 스킬이 있습니다. 지침은 가져오지 않았습니다. ${failures.join(' / ')}`, 409);
     const guidance = bundle.guidance?.trim();
     if (guidance && (body.guidance === 'replace' || body.guidance === 'append')) {
-      const current = (await this.guidance()).owner.trim();
-      await this.writeGuidance(body.guidance === 'append' && current ? `${current}\n\n${guidance}` : guidance);
+      await this.guidanceChange(async current => body.guidance === 'append' && current.owner.trim() ? `${current.owner.trim()}\n\n${guidance}` : guidance);
     }
-    if (failures.length) throw new SkillError(`가져오지 못한 스킬이 있습니다. ${failures.join(' / ')}`, 409);
   }
 }

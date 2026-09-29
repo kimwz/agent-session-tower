@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, readdir, readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
-import { basename, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import type { SkillBundle, SkillBundleFile } from '../../shared/skills.js';
 import { MAX_SKILL_BUNDLE_BYTES, SKILL_BUNDLE_FORMAT, SKILL_NAME } from '../../shared/skills.js';
@@ -25,19 +25,35 @@ export interface SkillMove { id: string; to: string; incoming: string; places: s
 export async function readMoves(path: string): Promise<SkillMove[]> {
   try {
     const saved = await readPrivateJson(path, 1_000_000);
-    return Array.isArray(saved) ? saved.filter((item): item is SkillMove => !!item && typeof item === 'object'
+    if (!Array.isArray(saved)) throw Object.assign(new Error('Skill move record is invalid.'), { name: 'SyntaxError' });
+    return saved.filter((item): item is SkillMove => !!item && typeof item === 'object'
       && /^[0-9a-f]{8}$/.test(String((item as SkillMove).id)) && typeof (item as SkillMove).to === 'string' && typeof (item as SkillMove).incoming === 'string'
-      && Array.isArray((item as SkillMove).places) && (item as SkillMove).places.length > 0 && (item as SkillMove).places.every(place => typeof place === 'string' && isAbsolute(place))) : [];
+      && Array.isArray((item as SkillMove).places) && (item as SkillMove).places.length > 0 && (item as SkillMove).places.every(place => typeof place === 'string' && isAbsolute(place)));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    // A record that cannot be parsed is kept aside for the owner, not guessed at; moves start over from an empty one.
+    if (error instanceof SyntaxError || (error as Error).name === 'SyntaxError') {
+      await rename(path, `${path}.unreadable-${Date.now()}`).catch(() => {});
+      console.error('The skill move record could not be read and was set aside.');
+      return [];
+    }
     throw error;
   }
 }
+/** Where a folder is put aside while it is replaced: hidden (dot-named) beside it, so no agent reads it as a second skill. */
+export function asideOf(dir: string, id: string): string { return join(dirname(dir), `.${basename(dir)}.tower-old-${id}`); }
+
 export async function writeMoves(path: string, moves: SkillMove[]): Promise<void> {
   await writePrivateJson(path, JSON.stringify(moves, null, 2));
 }
 
 const git = promisify(execFile);
+
+/** Whether git tracks any file in a folder (a repository's shared skill, or a dotfiles repository). */
+export async function trackedByGit(dir: string): Promise<boolean> {
+  try { return Boolean((await git('git', ['-C', dirname(dir), 'ls-files', '--', basename(dir)], { timeout: 5_000 })).stdout.trim()); }
+  catch { return false; }
+}
 
 /**
  * Keeps the links to a Tower skill out of the project's git status: they point into Tower's folder by absolute path and

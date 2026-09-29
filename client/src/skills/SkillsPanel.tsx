@@ -8,7 +8,7 @@ import { api } from '../common/lib';
 import { locale, translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { onOpenSkills } from './skills-open';
 
-const post = (path: string, token: string, body: unknown) => api<SkillOverview>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(body) });
+const post = <T = SkillOverview>(path: string, token: string, body: unknown) => api<T>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(body) });
 const query = (cwd?: string, extra: Record<string, string> = {}) => { const params = new URLSearchParams({ ...(cwd ? { cwd } : {}), ...extra }).toString(); return params ? `?${params}` : ''; };
 const date = (value: string) => { const time = new Date(value); return Number.isNaN(time.getTime()) ? '' : time.toLocaleDateString(locale(), { month: 'short', day: 'numeric' }); };
 const folderName = (path: string) => path.split('/').filter(Boolean).at(-1) || path;
@@ -97,7 +97,7 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
         onEdit={skill => void edit(skill)} onPin={skill => void mutate('pin', { dir: skill.dir, pinned: !skill.pinned })}
         onLink={skill => void mutate('link', { dir: skill.dir }, t('{0} 스킬을 Claude Code와 Codex 모두에 연결했습니다.', { 0: skill.name }))}
         onMerge={skill => void mutate('merge', { dir: skill.dir }, t('{0} 스킬의 복사본을 하나로 합쳤습니다.', { 0: skill.name }))}
-        onAdopt={skill => { if (window.confirm(t('{0} 스킬 폴더를 타워 폴더로 옮기고, 원래 자리에는 링크를 남깁니다. 에이전트는 계속 같은 스킬을 씁니다. 옮길까요?', { 0: skill.name }))) void mutate('adopt', { dir: skill.dir }, t('{0} 스킬을 타워로 옮겼습니다.', { 0: skill.name })); }}
+        onAdopt={skill => { if (window.confirm(`${t('{0} 스킬 폴더를 타워 폴더로 옮기고, 원래 자리에는 링크를 남깁니다. 에이전트는 계속 같은 스킬을 씁니다. 옮길까요?', { 0: skill.name })}${skill.external ? `\n\n${t('skills 명령으로 설치한 스킬입니다. 옮긴 뒤 skills 명령으로 다시 설치하거나 업데이트하면 타워에 둔 폴더가 바뀝니다.')}` : ''}`)) void mutate('adopt', { dir: skill.dir }, t('{0} 스킬을 타워로 옮겼습니다.', { 0: skill.name })); }}
         onDelete={skill => { if (window.confirm(t('{0} 스킬을 삭제할까요? 폴더는 Tower 상태 폴더의 skills-trash로 옮겨집니다.', { 0: skill.name }))) void mutate('delete', { dir: skill.dir }, t('{0} 스킬을 삭제했습니다.', { 0: skill.name })); }} />}
       {tab === 'proposals' && <section className="skills-proposals">
         {ready.length ? ready.map(proposal => <ProposalCard key={proposal.id} proposal={proposal} busy={busy} onReview={review} onAccept={accept} onOpenSession={onOpenSession}
@@ -221,7 +221,9 @@ function GuidanceEditor({ overview, busy, onSave }: { overview: SkillOverview; b
   const { t } = useI18n();
   const guidance = overview.guidance;
   const [owner, setOwner] = useState(guidance?.owner ?? '');
-  useEffect(() => setOwner(guidance?.owner ?? ''), [guidance?.owner, guidance?.revision]);
+  const [saved, setSaved] = useState(guidance?.owner ?? '');
+  // A newer saved text replaces the editor only while it holds no edits of its own; a draft survives a failed save.
+  useEffect(() => { const next = guidance?.owner ?? ''; setOwner(current => current === saved ? next : current); setSaved(next); }, [guidance?.owner, guidance?.revision]);
   if (!guidance) return <p className="auth-empty">{t('실행 워커가 새 버전으로 바뀌면 지침을 관리할 수 있습니다.')}</p>;
   return <section className="skills-guidance">
     <p className="auth-hint">{t('모든 Claude Code와 Codex 대화가 받는 내 지침입니다. 타워 폴더(guidance/owner.md)에 있어 백업하고 옮길 수 있습니다. 요청과 프로젝트 지침이 먼저입니다.')}</p>
@@ -244,12 +246,11 @@ function Backup({ overview, token, projects, busy, onImport, onError }: { overvi
   const [choices, setChoices] = useState<Record<number, SkillImportChoice>>({});
   const [guidanceMode, setGuidanceMode] = useState<'skip' | 'replace' | 'append'>('skip');
   const [pins, setPins] = useState(true);
-  const external = overview.skills.filter(skill => !skill.managed).length;
-  const request = (path: string, body: unknown) => api<unknown>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(body) });
+  const external = overview.skills.filter(skill => skill.managed === false).length;
   async function download() {
     setWorking(true); onError('');
     try {
-      const data = await request('/api/skills/export', { dirs: [...chosen], guidance: withGuidance });
+      const data = await post<SkillBundle>('/api/skills/export', token, { dirs: [...chosen], guidance: withGuidance });
       const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
       const link = document.createElement('a');
       link.href = url; link.download = `tower-skills-${new Date().toISOString().slice(0, 10)}.json`; link.click();
@@ -257,18 +258,24 @@ function Backup({ overview, token, projects, busy, onImport, onError }: { overvi
     } catch (error) { onError(error instanceof Error ? error.message : String(error)); }
     finally { setWorking(false); }
   }
+  /** Asks what importing the backup would do here now; after an import that partly failed, the answer shows what came in. */
+  async function planFor(data: SkillBundle) {
+    const next = await post<SkillImportPlan>('/api/skills/import-plan', token, data);
+    setBundle(data); setPlan(next);
+    setChoices(Object.fromEntries(next.items.map(item => [item.index, { index: item.index, action: item.conflict === 'new' && (item.scope === 'global' || item.cwd) ? 'add' : 'skip', ...(item.cwd ? { cwd: item.cwd } : {}) }])));
+    // Someone else's guidance would reach every conversation: it is shown, and taken only when chosen.
+    setGuidanceMode('skip');
+  }
   async function read(file: File) {
     setWorking(true); onError(''); setPlan(null);
-    try {
-      const data = JSON.parse(await file.text()) as SkillBundle;
-      const next = await request('/api/skills/import-plan', data) as SkillImportPlan;
-      setBundle(data); setPlan(next);
-      setChoices(Object.fromEntries(next.items.map(item => [item.index, { index: item.index, action: item.conflict === 'new' && (item.scope === 'global' || item.cwd) ? 'add' : 'skip', ...(item.cwd ? { cwd: item.cwd } : {}) }])));
-      setGuidanceMode(next.guidance ? (overview.guidance?.owner.trim() ? 'append' : 'replace') : 'skip');
-    } catch (error) { onError(error instanceof SyntaxError ? t('백업 파일을 읽을 수 없습니다.') : error instanceof Error ? error.message : String(error)); }
+    try { await planFor(JSON.parse(await file.text()) as SkillBundle); }
+    catch (error) { onError(error instanceof SyntaxError ? t('백업 파일을 읽을 수 없습니다.') : error instanceof Error ? error.message : String(error)); }
     finally { setWorking(false); }
   }
-  const setChoice = (index: number, patch: Partial<SkillImportChoice>) => setChoices(value => ({ ...value, [index]: { ...value[index], ...patch } }));
+  // Choosing a project for an item that was skipped means taking it.
+  const setChoice = (index: number, patch: Partial<SkillImportChoice>) => setChoices(value => ({ ...value, [index]: { ...value[index], ...patch,
+    ...(patch.cwd && value[index]?.action === 'skip' ? { action: 'add' as const } : {}) } }));
+  const taking = Object.values(choices).some(choice => choice.action !== 'skip') || guidanceMode !== 'skip';
   const place = (skill: Skill) => skill.scope === 'global' ? t('전역') : folderName(skill.cwd ?? '');
   return <section className="skills-backup">
     <h3>{t('내보내기')}</h3>
@@ -287,16 +294,19 @@ function Backup({ overview, token, projects, busy, onImport, onError }: { overvi
         <strong>{item.name}</strong><span className="skill-badge">{item.scope === 'global' ? t('전역') : folderName(item.fromCwd ?? '')}</span>
         {item.conflict === 'external' ? <small>{t('타워 밖에 같은 이름의 스킬이 있어 건너뜁니다.')}</small>
           : <select value={choice?.action ?? 'skip'} disabled={busy || working} aria-label={t('{0} 가져오기 방법', { 0: item.name })} onChange={event => setChoice(item.index, { action: event.target.value as SkillImportChoice['action'] })}>
-            <option value="skip">{t('건너뛰기')}</option>{item.conflict === 'new' ? <option value="add">{t('가져오기')}</option> : <option value="replace">{t('타워에 있는 것을 바꾸기')}</option>}</select>}
+            <option value="skip">{t('건너뛰기')}</option>{(item.conflict === 'new' || item.scope === 'project') && <option value="add">{t('가져오기')}</option>}
+            {(item.conflict === 'managed' || item.scope === 'project') && <option value="replace">{t('타워에 있는 것을 바꾸기')}</option>}</select>}
         {item.scope === 'project' && item.conflict !== 'external' && <select value={choice?.cwd ?? ''} disabled={busy || working} aria-label={t('{0}를 둘 프로젝트', { 0: item.name })} onChange={event => setChoice(item.index, { cwd: event.target.value || undefined })}>
           <option value="">{t('프로젝트 고르기')}</option>{[...new Set([...(item.cwd ? [item.cwd] : []), ...projects])].map(path => <option key={path} value={path}>{folderName(path)} · {path}</option>)}</select>}
       </li>; })}</ul>
+      {plan.guidance && <details className="skills-guidance-preview"><summary>{t('백업에 든 지침 보기')}</summary><pre className="skill-preview">{bundle.guidance}</pre></details>}
       {plan.guidance && <fieldset className="skill-scope"><legend>{t('백업에 든 지침')}</legend>
         {(['skip', 'append', 'replace'] as const).map(mode => <label key={mode}><input type="radio" name="guidance-mode" checked={guidanceMode === mode} onChange={() => setGuidanceMode(mode)} />{mode === 'skip' ? t('가져오지 않기') : mode === 'append' ? t('내 지침 뒤에 붙이기') : t('내 지침을 바꾸기')}</label>)}</fieldset>}
       <label className="skill-pinned"><input type="checkbox" checked={pins} onChange={event => setPins(event.target.checked)} />{t('“항상 확인”도 그대로')}</label>
-      <div className="skills-toolbar"><span /><button className="primary-button" disabled={busy || working} onClick={async () => {
+      <div className="skills-toolbar"><span /><button className="primary-button" disabled={busy || working || !taking} onClick={async () => {
         const selected = Object.values(choices).filter(choice => choice.action !== 'skip');
         if (await onImport({ bundle, choices: selected, guidance: guidanceMode, pins })) { setPlan(null); setBundle(null); }
+        else await planFor(bundle).catch(() => {});
       }}><Check size={14} />{t('가져오기')}</button></div>
     </div>}
   </section>;

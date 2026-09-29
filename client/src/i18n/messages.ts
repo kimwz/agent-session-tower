@@ -1,5 +1,10 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  "skills 명령으로 설치한 스킬입니다. 옮긴 뒤 skills 명령으로 다시 설치하거나 업데이트하면 타워에 둔 폴더가 바뀝니다.": "This skill was installed with the skills command. Reinstalling or updating it with that command after the move changes the folder kept in Tower.",
+  "백업에 든 지침 보기": "Show the guidance in the backup",
+  "git이 관리하는 스킬 폴더라 옮기지 않습니다. 저장소에서 함께 쓰는 스킬은 그대로 두세요.": "Git tracks this skill folder, so it is not moved. Leave skills a repository shares where they are.",
+  "스킬이 있는 폴더에 쓸 수 없어 옮길 수 없습니다.": "The folder holding the skill cannot be written, so it cannot be moved.",
+  "가져오지 못한 스킬이 있습니다. 지침은 가져오지 않았습니다. {0}": "Some skills could not be imported, so the guidance was not imported either. {0}",
   "지침": "Guidance",
   "백업": "Backup",
   "{0} 스킬 폴더를 타워 폴더로 옮기고, 원래 자리에는 링크를 남깁니다. 에이전트는 계속 같은 스킬을 씁니다. 옮길까요?": "Move the {0} skill folder into Tower's folder and leave a link in its place? The agents keep using the same skill.",

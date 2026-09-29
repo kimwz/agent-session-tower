@@ -20,8 +20,8 @@ export interface Skill {
   pinned: boolean;
   /** Installed by the `skills` command; a reinstall replaces edits made here. */
   external: boolean;
-  /** Kept in Tower's own folder (`<state>/skills`), so it is backed up and moved with Tower. */
-  managed: boolean;
+  /** Kept in Tower's own folder (`<state>/skills`), so it is backed up and moved with Tower. Absent from older workers. */
+  managed?: boolean;
   /** Hash of the SKILL.md this listing read; a save sends it back so a newer edit is never overwritten. */
   revision: string;
   /**
@@ -96,8 +96,9 @@ export interface SkillImportChoice { index: number; action: 'add' | 'replace' | 
 export interface SkillOverview {
   skills: Skill[];
   /** Every skill kept in Tower's own folder, whatever project it belongs to: what a backup can hold. */
-  stored: Skill[];
-  guidance: GuidanceOverview;
+  stored?: Skill[];
+  /** Absent from workers older than Tower's own skill folder. */
+  guidance?: GuidanceOverview;
   proposals: SkillProposal[];
   notes: SkillNote[];
   settings: SkillAdvisorSettings;

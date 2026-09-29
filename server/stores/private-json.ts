@@ -22,3 +22,6 @@ export async function writePrivateJson(path: string, data: string): Promise<void
     await rename(temporary, path);
   } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
 }
+
+/** Any owner-only text file in the state directory, written the same safe way. */
+export const writePrivateFile = writePrivateJson;

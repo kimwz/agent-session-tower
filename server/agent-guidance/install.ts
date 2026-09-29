@@ -32,7 +32,7 @@ export async function installAgentGuidance(homes: GuidanceHomes): Promise<Guidan
   await mkdir(homes.stateDir, { recursive: true, mode: 0o700 });
   if (await readText(guidanceFile) !== AGENT_GUIDANCE) await replaceFile(guidanceFile, AGENT_GUIDANCE);
   const ownerFile = join(homes.stateDir, OWNER_GUIDANCE_FILE);
-  const owner = (await readText(ownerFile))?.trim();
+  const owner = withoutTowerMarkers(await readText(ownerFile) ?? '').trim();
   const claude = await isDirectory(homes.claudeHome)
     ? await updateSection(join(homes.claudeHome, 'CLAUDE.md'), owner ? `@${guidanceFile}\n@${ownerFile}` : `@${guidanceFile}`) : 'not-installed';
   const codex = await isDirectory(homes.codexHome)
@@ -44,6 +44,11 @@ export async function installAgentGuidance(homes: GuidanceHomes): Promise<Guidan
 async function codexInstructions(home: string): Promise<string> {
   const override = join(home, 'AGENTS.override.md');
   return (await readText(override))?.trim() ? override : join(home, 'AGENTS.md');
+}
+
+/** The owner's text never carries Tower's own section markers, which would end or switch off the managed section. */
+export function withoutTowerMarkers(text: string): string {
+  return text.split('\n').filter(line => !/<!--\s*agent-session-tower:/.test(line)).join('\n');
 }
 
 export function withSection(text: string, body: string): string {
