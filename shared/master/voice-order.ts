@@ -3,13 +3,14 @@ import type { MasterSay } from '../master.js';
 /**
  * The order of what is said for one spoken request, in one place.
  *
- * 1. The first response (`FIRST_RESPONSE_KINDS`, today a recorded short reply the host picks in
- *    `MasterVoice.firstResponse`) is said first, as soon as the request went to the master.
+ * 1. The first response (`FIRST_RESPONSE_KINDS`: a short sentence a fast model writes from the request, made in
+ *    `MasterVoice.firstResponse` while the request goes to the master) is said first, when it is ready in time.
  * 2. The answer (the master's own words, read while it writes them) follows it. The first response playing is never
  *    cut; the answer waits for it (and the page's short pause between things said).
- * 3. Once any of the answer has come, a first response or a "still working" line of that request not yet playing is
- *    dropped, and one arriving later is not said: the answer has begun, so they would come too late.
- * The host keeps its part of the same rule: it does not say "still working" once the answer's words were read.
+ * 3. Once any of the answer has come, a first response of that request not yet playing is dropped, and one arriving
+ *    later is not said: the answer has begun, so it would come too late.
+ * The host keeps its part of the same rule: it does not hand out a first response once the answer's words were read.
+ * (`working`, the "still working" line of builds before 1.73, is still treated as a first response.)
  */
 export const FIRST_RESPONSE_KINDS: ReadonlySet<MasterSay['kind']> = new Set(['ack', 'working']);
 const ANSWER_KINDS: ReadonlySet<MasterSay['kind']> = new Set(['answer', 'report']);

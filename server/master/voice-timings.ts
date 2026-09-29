@@ -8,7 +8,7 @@ export interface VoiceTimingRecord {
   mode?: 'stream' | 'turn-end';
   /** The host took the spoken request (or sent the report). */
   request?: number;
-  /** The first response (today a recorded short reply) was handed to the page. */
+  /** The first response (a fast model's short sentence) was handed to the page. */
   ack?: number;
   /** The host first saw the master's words for it. */
   text?: number;

@@ -13,7 +13,10 @@ import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/master/tower-client.js';
 import { frameAt, id3Size, MasterVoice } from '../../server/master/voice.js';
 import { FIRST_CHUNK, TextFollower } from '../../server/master/voice-stream.js';
-import { streamTone, VOICE_ACKS, VOICE_REST, VOICE_TONES, voicedChunk } from '../../server/master/voice-text.js';
+import { streamTone, VOICE_REST, VOICE_TONES, voicedChunk } from '../../server/master/voice-text.js';
+
+/** What the fake fast model says first. */
+const FIRST = '요청을 확인해 볼게요.';
 import { describe } from '../../server/master/voice-timings.js';
 import { masterRoutes } from '../../server/master/routes.js';
 import type { MasterClient } from '../../server/master/client.js';
@@ -190,7 +193,16 @@ async function harness(t: test.TestContext, options: { settings?: Record<string,
   const emit = () => { for (const listener of listeners) listener(); };
   const session = new MasterSession({ stateDir: dir, dataDir: dir, settings, tower: client, live, room, followMs: options.followMs ?? 60_000 });
   const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), apiBase: labs.base, historyDelaysMs: [10] });
-  const voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs, timing: { firstChunkMs: 1_000, synthMs: 2_000, playMs: 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 },
+  /** The fast model writing first replies, faked; `delayMs` holds its answer back. */
+  const firsts = { delayMs: 0 };
+  const firstReply = {
+    prepare: () => {}, close: () => {},
+    make: async (_text: string, signal: AbortSignal) => {
+      if (firsts.delayMs) await new Promise<void>(resolve => { const timer = setTimeout(resolve, firsts.delayMs); signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
+      return signal.aborted ? { skipped: 'failed' as const, warm: true } : { text: FIRST, warm: true };
+    },
+  };
+  const voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs, firstReply, timing: { firstChunkMs: 1_000, synthMs: 2_000, playMs: 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 },
     hooks: { hide: text => text, connectedSince: () => client.connectedSince(), send: input => session.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }),
       streamState: (turn, state) => session.voicedState(turn, state) } });
   session.setVoice(voice);
@@ -220,12 +232,12 @@ async function harness(t: test.TestContext, options: { settings?: Record<string,
   /** Tower's live state brings new objects each time, never the ones it gave before. */
   const fresh = (run: Run) => { run.replies = run.replies?.map(item => ({ ...item })); };
   const finish = (run: Run, status: Run['status'] = 'completed') => { for (const reply of run.replies ?? []) reply.done = true; fresh(run); run.status = status; run.finishedAt = tick(); emit(); };
-  const spoken = () => labs.speeches.filter(text => !(VOICE_ACKS as readonly string[]).includes(untag(text))).map(untag);
+  const spoken = () => labs.speeches.filter(text => untag(text) !== FIRST).map(untag);
   const entry = (pattern: RegExp) => until(() => room.recent(200).find((item): item is MasterEntry => (item.data.kind === 'master' || item.data.kind === 'event' || item.data.kind === 'error') && pattern.test(item.data.text)));
   const speakOf = (item: MasterEntry) => { const data = room.get(item.id)?.data; return data && (data.kind === 'master' || data.kind === 'event' || data.kind === 'error') ? data.speak : undefined; };
   const follow = async () => JSON.parse(await readFile(join(dir, 'follow.json'), 'utf8')) as { voiced?: Array<{ turn: string; state: string }> };
   const ask = async (text: string) => { const answer = await voice.voiceRequest({ session: current, clientMessageId: randomUUID(), text, local: true }); return { answer, run: await until(() => runs.at(-1)) }; };
-  return { dir, labs, room, session, voice, runs, emit, on, says, write, finish, spoken, entry, speakOf, follow, ask, settings, fresh };
+  return { dir, labs, room, session, voice, runs, emit, on, says, write, finish, spoken, entry, speakOf, follow, ask, settings, fresh, firsts, current: () => current };
 }
 
 test('an answer is read sentence by sentence while the master writes it; when the turn ends only the rest is read, nothing twice', async t => {
@@ -362,16 +374,26 @@ test('voice turned off while an answer is read stops it; nothing of that turn is
   assert.equal(h.voice.busy(), false);
 });
 
-test('"still working" is not said once the answer has begun, and the timing of the first sound is kept', async t => {
+test('a first response ready only after the answer has begun is not said', async t => {
   const h = await harness(t);
-  const session = h.on();
-  const { answer, run } = await h.ask('상태 알려줘');
-  const key = answer.ack!.request!;
+  h.on();
+  h.firsts.delayMs = 400;
+  const asked = h.voice.voiceRequest({ session: h.current(), clientMessageId: randomUUID(), text: '상태 알려줘', local: true });
+  const run = await until(() => h.runs.at(-1));
   h.write(run, 'm1:0', '지금 상태를 확인했어요. ');
   await until(() => h.says().find(say => say.kind === 'answer'));
-  await h.voice.working({ key, session: h.voice.status().session });
-  assert.equal(h.says().filter(say => say.kind === 'working').length, 0);
-  void session;
+  assert.deepEqual(await asked, {});
+  h.finish(run);
+});
+
+test('the timing of the first response and the first sound is kept', async t => {
+  const h = await harness(t);
+  h.on();
+  const { answer, run } = await h.ask('상태 알려줘');
+  const key = answer.ack!.request!;
+  assert.equal(answer.ack!.text, FIRST);
+  h.write(run, 'm1:0', '지금 상태를 확인했어요. ');
+  await until(() => h.says().find(say => say.kind === 'answer'));
   h.write(run, 'm1:0', '모두 정상이에요.', true);
   h.finish(run);
   const done = await h.entry(/정상이에요/);

@@ -1,9 +1,5 @@
-/** Short things the master says at once, recorded the first time they are needed and played from then on. */
-export const VOICE_ACKS = ['네, 확인해 볼게요.', '네, 알아볼게요.', '잠시만요, 볼게요.'] as const;
 /** Read in a voice the owner is choosing, so they hear how it answers. */
 export const VOICE_SAMPLE = '안녕하세요! 이 목소리로 답과 끝난 일 소식을 읽어 드릴게요.';
-/** Said once when a spoken request takes a while. */
-export const VOICE_WORKING = '아직 하고 있어요. 끝나면 말씀드릴게요.';
 
 /**
  * What speech-to-text is known to write for noise or silence rather than for anything said, compared without spaces

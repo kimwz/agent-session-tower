@@ -1,14 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import type { ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import type { MasterEntry, MasterEntryData, MasterSay, MasterSpeak, MasterStreamEvent, MasterViewContext, MasterVoiceStatus } from '../../shared/master.js';
 import type { RunReply } from '../../shared/types.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { ElevenLabs, VoiceInfo } from './elevenlabs.js';
+import type { FirstReplyMaker } from './first-reply.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
-import { isNoise, READ_CHARS, speakable, streamTone, VOICE_ACKS, VOICE_REST, VOICE_SAMPLE, VOICE_WORKING, voiced, voicedChunk, voicedParts } from './voice-text.js';
+import { isNoise, READ_CHARS, speakable, streamTone, VOICE_REST, VOICE_SAMPLE, voiced, voicedChunk, voicedParts } from './voice-text.js';
 import { CHUNK_PAUSE_MS, TextFollower } from './voice-stream.js';
 import { VoiceTimings } from './voice-timings.js';
 
@@ -17,6 +18,13 @@ const STT_DOLLARS_PER_SECOND = 0.39 / 3600;
 const ttsDollarsPerChar = (model: string) => (model === 'eleven_v3' ? 0.1 : 0.05) / 1000;
 /** GPT-Live's price, for voice time kept from 1.52–1.55. */
 const LIVE_DOLLARS_PER_SECOND = 0.05 / 60;
+/**
+ * A first reply's model call, as counted against the daily limit: paid by the Claude subscription, estimated at Haiku's
+ * list price for about 1,000 tokens read and 40 written, rounded up.
+ */
+const FIRST_REPLY_DOLLARS = 0.002;
+/** A first reply not ready this long after the request came is not said: the answer is near by then. */
+const FIRST_REPLY_MS = 2_500;
 /** One thing said is at most this long (the page stops sending there); each token reserves it until settled. */
 const UTTERANCE_SECONDS = 180;
 const TOKEN_LIFE_MS = 16 * 60_000;
@@ -25,7 +33,6 @@ const TOKENS_PER_MINUTE = 20;
 const SAY_QUEUE = 20;
 const KEEP_DAYS = 40;
 const KEEP_SPEAKING = 500;
-const CLIPS = 30;
 const CLIP_BYTES = 5 * 1024 * 1024;
 /** Voice samples kept for the settings: about one per voice an account lists. */
 const PREVIEWS = 60;
@@ -71,10 +78,12 @@ export interface MasterVoiceOptions {
   room: MasterRoom;
   hooks: VoiceHooks;
   elevenLabs: ElevenLabs;
+  /** Writes the first thing said after a spoken request; without it nothing is said before the answer. */
+  firstReply?: Pick<FirstReplyMaker, 'prepare' | 'make' | 'close'>;
   timing?: Partial<VoiceTiming>;
 }
 
-interface Day { sttSeconds: number; ttsChars: number; dollars: number }
+interface Day { sttSeconds: number; ttsChars: number; dollars: number; firstReplies?: number }
 export interface VoiceFile {
   version: 6;
   days: Record<string, Day>;
@@ -252,7 +261,6 @@ export class MasterVoice {
   private closed = false;
   private readonly timing: VoiceTiming;
   private readonly path: string;
-  private readonly clips: string;
   private readonly previews: string;
   /** Recordings being made, by digest. */
   private readonly recording = new Map<string, Promise<string>>();
@@ -266,7 +274,6 @@ export class MasterVoice {
   constructor(private readonly options: MasterVoiceOptions) {
     this.timing = { ...TIMING, ...options.timing };
     this.path = join(options.dataDir, 'voice.json');
-    this.clips = join(options.dataDir, 'voice-clips');
     this.previews = join(options.dataDir, 'voice-previews');
     this.timings = new VoiceTimings(join(options.dataDir, 'voice-timings.json'));
   }
@@ -275,6 +282,8 @@ export class MasterVoice {
     const saved = await readPrivateJson(this.path).catch(() => undefined) as Record<string, unknown> | undefined;
     this.file = migrate(saved, Date.now());
     await this.timings.start();
+    // Short replies recorded before 1.73 are not said any more.
+    await rm(join(this.options.dataDir, 'voice-clips'), { recursive: true, force: true }).catch(() => {});
     // News waiting to be read may sit in an older part of the conversation; nothing being read survives a restart.
     for (const item of this.file.speaking) await this.options.room.load(item.order).catch(() => {});
     this.file.speaking = this.file.speaking.filter(item => speakOf(this.options.room.get(item.id)?.data));
@@ -293,6 +302,7 @@ export class MasterVoice {
     if (this.timer) clearInterval(this.timer);
     if (this.pauseTimer) clearInterval(this.pauseTimer);
     this.endSession(this.session);
+    this.options.firstReply?.close();
     for (const live of [...this.lives.values()]) this.drop(live);
     await this.writes;
     await this.timings.flush();
@@ -319,6 +329,7 @@ export class MasterVoice {
     this.endSession(this.session);
     const id = randomUUID();
     this.session = { id, digest: hash(id), tabId: input.tabId, local: input.local, listening: true, seenAt: Date.now() };
+    this.options.firstReply?.prepare();
     this.broadcast();
     this.deliver();
     return { session: id };
@@ -342,7 +353,7 @@ export class MasterVoice {
     const listening = input.listening === true;
     const changed = session.listening !== listening || !this.alive(session);
     Object.assign(session, { listening, seenAt: Date.now() });
-    if (changed) { this.broadcast(); if (this.alive(session)) this.deliver(); }
+    if (changed) { this.broadcast(); if (this.alive(session)) { this.options.firstReply?.prepare(); this.deliver(); } }
     return true;
   }
 
@@ -402,7 +413,10 @@ export class MasterVoice {
     return true;
   }
 
-  /** What the owner said, written down on their page: a request like a typed one, answered first with a short reply. */
+  /**
+   * What the owner said, written down on their page: a request like a typed one. A short first reply, written from the
+   * request alone while the master starts on it, comes back to be played first (when one is ready in time).
+   */
   async voiceRequest(input: { session: unknown; clientMessageId: unknown; text: unknown; viewContext?: MasterViewContext; local: boolean }): Promise<{ ignored?: true; stale?: true; ack?: MasterSay }> {
     const session = this.current(input.session);
     if (!session) return { stale: true };
@@ -411,38 +425,54 @@ export class MasterVoice {
     session.seenAt = Date.now();
     if (isNoise(input.text)) return { ignored: true };
     const key = hash(input.clientMessageId);
-    await this.options.hooks.send({
-      clientMessageId: input.clientMessageId, text: input.text.trim(), local: input.local,
-      viewContext: { ...input.viewContext, tabId: session.tabId },
-      voice: { session: session.digest, key }, spoken: true,
-    });
-    const ack = await this.firstResponse(session, key);
+    const text = input.text.trim();
+    // Made alongside sending the request, never holding it up.
+    const cancel = new AbortController();
+    const first = this.firstResponse(session, text, key, cancel.signal).catch(() => undefined);
+    try {
+      await this.options.hooks.send({
+        clientMessageId: input.clientMessageId, text, local: input.local,
+        viewContext: { ...input.viewContext, tabId: session.tabId },
+        voice: { session: session.digest, key }, spoken: true,
+      });
+    } catch (error) { cancel.abort(); throw error; }
+    const ack = await first;
     if (ack) this.timings.mark(key, 'ack');
     return ack ? { ack } : {};
   }
 
   /**
-   * The first response to a spoken request, said as soon as it went to the master: today one of the recorded short
-   * replies. The page plays it before the answer and drops it once the answer has begun (`SayOrder` in
+   * The first response to a spoken request: a short sentence a fast model writes from the request alone ("SORI 광고
+   * 성과를 확인해 볼게요") while the request goes to the master, or nothing — when the model finds nothing worth saying
+   * (a greeting), it is not ready in time, the answer has begun, the daily limit is near, or voice moved. It is never kept
+   * in the conversation. The page plays it before the answer and drops it once the answer has begun (`SayOrder` in
    * shared/master/voice-order.ts, where the whole order is described).
    */
-  private async firstResponse(session: Session, request: string): Promise<MasterSay | undefined> {
-    const say = await this.clipSay(session, VOICE_ACKS[Math.floor(Math.random() * VOICE_ACKS.length)], 'ack').catch(() => undefined);
-    return say && { ...say, request };
+  private async firstResponse(session: Session, text: string, request: string, cancel: AbortSignal): Promise<MasterSay | undefined> {
+    const maker = this.options.firstReply;
+    if (!maker) return undefined;
+    // The call is counted when it is made, like characters read.
+    if (this.limited(Date.now(), FIRST_REPLY_DOLLARS)) return undefined;
+    this.add(Date.now(), { firstReply: true });
+    void this.save();
+    const signal = AbortSignal.any([cancel, AbortSignal.timeout(FIRST_REPLY_MS)]);
+    const reply = await maker.make(text, signal);
+    if (!reply.text || signal.aborted || this.session !== session || !this.alive(session) || this.answering(request)) return undefined;
+    // A card's value in it would go out as it is: such a sentence is not said.
+    if (this.options.hooks.hide(reply.text) !== reply.text) return undefined;
+    const model = this.options.settings.current().voice.model;
+    const sent = voiced(reply.text, model, 'ack');
+    // Judged against the limit as it is now (an answer may have spent meanwhile), and charged in the same step.
+    if (this.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) return undefined;
+    const live = this.synthesize(sent);
+    if (!await this.firstChunk(live) || this.session !== session) { this.abandon(live); return undefined; }
+    return { id: randomUUID(), session: session.digest, kind: 'ack', text: reply.text, audio: `/api/master/voice/audio/${live.id}`, expiresAt: Date.now() + 60_000, request };
   }
 
   /** Whether `session` is the voice session now (for a judgment the web makes about it). */
   voiceKnown(input: { session: unknown }): boolean { return Boolean(this.current(input.session)); }
 
-  /** A spoken request takes a while: said once, from a recording. */
-  async working(origin: VoiceOrigin): Promise<void> {
-    const session = this.session;
-    if (!session || origin.session !== session.digest || !this.alive(session) || this.answering(origin.key)) return;
-    const say = await this.clipSay(session, VOICE_WORKING, 'working').catch(() => undefined);
-    if (say && this.session === session && !this.answering(origin.key)) this.options.room.broadcast({ type: 'say', seq: 0, say: { ...say, request: origin.key } });
-  }
-
-  /** Whether the answer to a spoken request has begun to be read: "still working" would come too late then. */
+  /** Whether the answer to a spoken request has begun to be read: a first response would come too late then. */
   private answering(request: string): boolean {
     return [...this.streams.values()].some(stream => stream.request === request && stream.segments.some(segment => segment.queued))
       || [...this.says.values()].some(say => say.key === request);
@@ -899,9 +929,9 @@ export class MasterVoice {
    * waited for, but never past its connection closing or a while; nothing waiting is left behind either way.
    */
   async serveAudio(id: string, res: ServerResponse, at = 0): Promise<void> {
-    const clip = /^(clip|preview)-([a-f0-9]{64})$/.exec(id);
-    if (clip) {
-      const data = await readFile(join(clip[1] === 'clip' ? this.clips : this.previews, `${clip[2]}.mp3`)).catch(() => undefined);
+    const preview = /^preview-([a-f0-9]{64})$/.exec(id);
+    if (preview) {
+      const data = await readFile(join(this.previews, `${preview[1]}.mp3`)).catch(() => undefined);
       if (!data) { res.writeHead(404).end(); return; }
       res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', 'Content-Length': data.length }).end(data);
       return;
@@ -976,15 +1006,6 @@ export class MasterVoice {
     return live ? live.waiters.size + live.readers.size : 0;
   }
 
-  /** A short fixed sentence, made once per voice and model and kept on disk; played from there each time. */
-  private async clipSay(session: Session, text: string, kind: 'ack' | 'working'): Promise<MasterSay> {
-    const settings = this.options.settings.current().voice;
-    // A card's value found in a fixed sentence would go out as it is: such a sentence is not said.
-    if (this.options.hooks.hide(text) !== text) throw new Error('hidden');
-    const key = await this.record(this.clips, voiced(text, settings.model, 'ack'), settings.voiceId, settings.model, CLIPS);
-    return { id: randomUUID(), session: session.digest, kind, text, audio: `/api/master/voice/audio/clip-${key}`, expiresAt: Date.now() + 60_000 };
-  }
-
   /**
    * Audio of a fixed sentence in a voice and model, kept in `dir` under its digest and made only when it is not there;
    * the same recording asked for twice at once is made once. Made with exactly the voice and model it is kept under.
@@ -1050,8 +1071,9 @@ export class MasterVoice {
 
   // ─── cost ────────────────────────────────────────────────────────────────────────────────────────────────────
 
-  private add(at: number, used: { sttSeconds?: number; ttsChars?: number; model?: string }): void {
+  private add(at: number, used: { sttSeconds?: number; ttsChars?: number; model?: string; firstReply?: true }): void {
     const day = (this.file.days[localDay(at)] ??= { sttSeconds: 0, ttsChars: 0, dollars: 0 });
+    if (used.firstReply) { day.firstReplies = (day.firstReplies ?? 0) + 1; day.dollars += FIRST_REPLY_DOLLARS; }
     if (used.sttSeconds) { day.sttSeconds += used.sttSeconds; day.dollars += used.sttSeconds * STT_DOLLARS_PER_SECOND; }
     if (used.ttsChars) { day.ttsChars += used.ttsChars; day.dollars += used.ttsChars * ttsDollarsPerChar(used.model ?? ''); }
   }
@@ -1152,6 +1174,7 @@ export class MasterVoice {
   private endSession(session: Session | undefined): void {
     if (!session || this.session !== session) return;
     this.session = undefined;
+    this.options.firstReply?.close();
     for (const stream of [...this.streams.values()]) if (stream.session === session) this.stopStream(stream);
     for (const done of [...this.results.values()]) done('stopped');
   }
@@ -1167,6 +1190,8 @@ export class MasterVoice {
     const now = Date.now();
     this.settleExpired(now);
     this.sweep();
+    // Nothing waits to write a first reply for a page that is gone.
+    if (!this.session || !this.alive(this.session)) this.options.firstReply?.close();
     for (const live of [...this.lives.values()]) if (now - live.createdAt > LIVE_MS && !live.held) this.drop(live);
     const oldest = localDay(now - KEEP_DAYS * 86_400_000);
     for (const day of Object.keys(this.file.days)) if (day < oldest) delete this.file.days[day];
@@ -1196,7 +1221,7 @@ export function migrate(saved: Record<string, unknown> | undefined, now: number)
   if (saved.version === 6) {
     if (saved.days && typeof saved.days === 'object') {
       for (const [day, value] of Object.entries(saved.days as Record<string, Partial<Day>>)) {
-        if (/^\d{4}-\d{2}-\d{2}$/.test(day) && value && typeof value === 'object') file.days[day] = { sttSeconds: Number(value.sttSeconds) || 0, ttsChars: Number(value.ttsChars) || 0, dollars: Number(value.dollars) || 0 };
+        if (/^\d{4}-\d{2}-\d{2}$/.test(day) && value && typeof value === 'object') file.days[day] = { sttSeconds: Number(value.sttSeconds) || 0, ttsChars: Number(value.ttsChars) || 0, dollars: Number(value.dollars) || 0, ...(Number(value.firstReplies) > 0 ? { firstReplies: Number(value.firstReplies) } : {}) };
       }
     }
     if (Array.isArray(saved.tokens)) file.tokens = saved.tokens.filter((token): token is VoiceFile['tokens'][number] => typeof token?.id === 'string' && typeof token?.session === 'string' && Number.isFinite(token?.issuedAt));

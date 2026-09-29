@@ -15,8 +15,6 @@ import type { TowerClient } from './tower-client.js';
 const FOLLOW_MS = 5_000;
 /** Work Tower cannot find for this long is reported as unknown. */
 const UNKNOWN_MS = 30 * 60_000;
-/** A spoken request that takes this long hears, once, that it is still being worked on. */
-const STILL_WORKING_MS = 20_000;
 const MASTER_RUNS = 500;
 const FOLLOWED = 300;
 /** Longest report message: well under what a session takes (32,000 characters), so a report is never refused for size. */
@@ -67,7 +65,6 @@ export interface Followed {
   answer?: string;
   /** The voice session a spoken request (or a report while voice is on) belongs to. */
   voice?: string;
-  workingSaid?: true;
 }
 
 /**
@@ -84,7 +81,6 @@ interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; fol
 export interface VoiceSide {
   speaks(report: boolean): 'pending' | 'unspoken' | undefined;
   deliver(): void;
-  working(origin: { key: string; session?: string }): Promise<void>;
   /** The master's words for a turn so far, to read while they are written. */
   stream?(input: { turn: string; kind: 'answer' | 'report'; key: string; request?: string; voiceSession?: string; replies: readonly RunReply[] }): void;
   /** Whether a turn is being read while it is written. */
@@ -390,14 +386,7 @@ export class MasterSession {
       if (run && (run.status === 'completed' || run.status === 'error' || run.status === 'cancelled')) ended = run.status;
     }
     if (!ended && Date.now() - Date.parse(item.createdAt) > UNKNOWN_MS && !run && !(item.jobId && !item.runId && (snapshot.autoPrompts ?? []).some(entry => entry.id === item.jobId))) ended = 'unknown';
-    if (!ended) {
-      if (item.kind === 'spoken' && !item.workingSaid && run?.status === 'running' && Date.now() - Date.parse(item.createdAt) > STILL_WORKING_MS) {
-        item.workingSaid = true;
-        void this.voice?.working({ key: item.id, ...(item.voice ? { session: item.voice } : {}) });
-        return true;
-      }
-      return false;
-    }
+    if (!ended) return false;
     // Messages steered into one turn share its answer, given after the last of them.
     const target = run ? run.steering?.targetRunId ?? run.id : undefined;
     // Only messages steered in after this one come after it in the history, before the turn's answer.

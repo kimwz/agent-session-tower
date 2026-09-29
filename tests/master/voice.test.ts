@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer, request as httpRequest, type IncomingMessage, type Server } from 'node:http';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ElevenLabs } from '../../server/master/elevenlabs.js';
@@ -12,7 +12,8 @@ import { MasterSession } from '../../server/master/session.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/master/tower-client.js';
 import { MasterVoice, migrate, type VoiceTiming } from '../../server/master/voice.js';
-import { isNoise, READ_CHARS, speakable, VOICE_ACKS, VOICE_REST, VOICE_SAMPLE, voiced, voicedParts } from '../../server/master/voice-text.js';
+import { isNoise, READ_CHARS, speakable, VOICE_REST, VOICE_SAMPLE, voiced, voicedParts } from '../../server/master/voice-text.js';
+import type { FirstReply } from '../../server/master/first-reply.js';
 import type { MasterEntry, MasterSpeak, MasterStreamEvent } from '../../shared/master.js';
 import type { ChatMessage, Run, Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
@@ -23,6 +24,8 @@ const VOICE_KEY = 'el-test-0123456789abcdef';
 const TAB = randomUUID();
 const digestOf = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32);
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+/** What the fake fast model says first, unless a test says otherwise. */
+const FIRST = '요청을 확인해 볼게요.';
 const FAST: Partial<VoiceTiming> = { firstChunkMs: 1_000, synthMs: 2_000, playMs: 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 };
 
 async function listen(server: Server): Promise<number> {
@@ -134,7 +137,21 @@ async function harness(t: test.TestContext, options: Options = {}) {
   const live = { fresh: async () => snapshot(), snapshot, node: () => undefined } as unknown as LiveState;
   const session = new MasterSession({ stateDir: dir, dataDir: dir, settings, tower: client, live, room, followMs: 30 });
   const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), apiBase: labs.base, sttBase: labs.base.replace('http', 'ws'), historyDelaysMs: [10] });
-  const voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs, timing: { ...FAST, ...options.timing },
+  /** The fast model writing first replies, faked: what it was asked, and whether a process would wait. */
+  const firsts = {
+    asked: [] as string[], waiting: false, delayMs: 0,
+    reply: (_text: string): FirstReply => ({ text: FIRST, warm: true }),
+  };
+  const firstReply = {
+    prepare: () => { firsts.waiting = true; },
+    close: () => { firsts.waiting = false; },
+    make: async (text: string, signal: AbortSignal): Promise<FirstReply> => {
+      firsts.asked.push(text);
+      if (firsts.delayMs) await new Promise<void>(resolve => { const timer = setTimeout(resolve, firsts.delayMs); signal.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true }); });
+      return signal.aborted ? { skipped: 'failed', warm: true } : firsts.reply(text);
+    },
+  };
+  const voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs, firstReply, timing: { ...FAST, ...options.timing },
     hooks: { hide: text => text, connectedSince: () => client.connectedSince(), send: input => session.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }) } });
   session.setVoice(voice);
   await voice.start();
@@ -152,7 +169,7 @@ async function harness(t: test.TestContext, options: Options = {}) {
     await session.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: title }, { session: { id: run.sessionId }, run: { id } });
     answer(run, `${title}: done`);
   };
-  return { dir, labs, room, session, voice, client, towerPort, seen, events, says, speakOf, queueEvent, settings, prompts, runs, history, tick };
+  return { dir, labs, room, session, voice, client, towerPort, seen, events, says, speakOf, queueEvent, settings, prompts, runs, history, tick, firsts };
 }
 type Harness = Awaited<ReturnType<typeof harness>>;
 const masterEntry = (h: Harness, pattern: RegExp) => until(() => h.room.recent(200).find((entry): entry is MasterEntry => (entry.data.kind === 'master' || entry.data.kind === 'event') && pattern.test(entry.data.text)));
@@ -245,30 +262,72 @@ test('a daily limit holds every unsettled token and every reading before it star
   assert.ok(h.voice.status().today.dollars <= 0.03);
 });
 
-test('what the owner said is a request like a typed one, answered first with a recorded reply that is made once', async t => {
+test('what the owner said is a request like a typed one, answered first with a reply a fast model wrote from it, never kept', async t => {
   const h = await harness(t, { steps: ['작업 두 개입니다.\n\n- a\n- b', '두 번째 답'] });
   const session = on(h);
+  assert.equal(h.firsts.waiting, true, 'a writer waits while voice is on');
   assert.deepEqual(await request(h, session, '감사합니다.'), { ignored: true }, 'known phantom transcripts are noise');
   assert.deepEqual(await request(h, session, '(음악)'), { ignored: true });
+  assert.deepEqual(h.firsts.asked, [], 'noise asks nothing');
   const first = await request(h, session, '지금 작업 중인 세션 알려줘');
-  assert.ok(first.ack && (VOICE_ACKS as readonly string[]).includes(first.ack.text));
-  assert.match(first.ack.audio, /^\/api\/master\/voice\/audio\/clip-[a-f0-9]{64}$/);
-  assert.equal(first.ack.session, digestOf(session));
+  assert.deepEqual(h.firsts.asked, ['지금 작업 중인 세션 알려줘']);
+  assert.equal(first.ack?.text, FIRST);
+  assert.equal(first.ack?.kind, 'ack');
+  assert.match(first.ack!.audio, /^\/api\/master\/voice\/audio\/[0-9a-f-]{36}$/, 'made for this request, not a recording');
+  assert.equal(first.ack!.session, digestOf(session));
+  assert.equal(h.labs.speeches[0].body.text, `[cheerfully] ${FIRST}`, 'read brightly');
+  assert.equal(h.labs.speeches[0].body.model_id, 'eleven_v3_conversational');
+  assert.equal(h.labs.speeches[0].body.language_code, 'ko');
   const owner = h.room.recent(20).find(entry => entry.data.kind === 'owner');
   assert.deepEqual(owner?.data, { kind: 'owner', text: '지금 작업 중인 세션 알려줘', voice: true });
   // It goes to the master session marked as said aloud, so the master answers it to be heard.
   assert.equal(h.prompts[0], '[voice] 지금 작업 중인 세션 알려줘');
   await masterEntry(h, /두 개입니다/);
-  const made = h.labs.speeches.length;
-  // The same short reply again is played from its recording.
-  for (let index = 0; index < 6; index++) await request(h, session, `요청 ${index}`);
-  const clips = await readdir(join(h.dir, 'voice-clips'));
-  assert.ok(clips.length <= VOICE_ACKS.length);
-  assert.ok(h.labs.speeches.length - made <= VOICE_ACKS.length, 'each reply is made once');
-  assert.equal(h.labs.speeches[0].body.model_id, 'eleven_v3_conversational');
-  assert.equal(h.labs.speeches[0].body.language_code, 'ko');
-  assert.equal(h.labs.speeches[0].body.text, `[cheerfully] ${first.ack.text}`, 'a short reply is recorded brightly');
+  assert.ok(!h.room.recent(50).some(entry => JSON.stringify(entry.data).includes(FIRST)), 'the first reply is not part of the conversation');
+  assert.deepEqual(await readdir(join(h.dir, 'voice-clips')).catch(() => []), [], 'nothing recorded');
+  await (h.voice as unknown as { writes: Promise<void> }).writes;
+  const days = (JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8')) as { days: Record<string, { firstReplies?: number }> }).days;
+  assert.ok(Object.values(days).some(day => day.firstReplies === 1), 'the model call is counted');
   assert.equal(isNoise('네 알겠어요'), false);
+  h.voice.voiceOff({ session });
+  assert.equal(h.firsts.waiting, false, 'nothing waits once voice is off');
+});
+
+test('short replies recorded by an earlier version are removed when the voice starts', async t => {
+  const h = await harness(t, { steps: [], prepare: async dir => { await mkdir(join(dir, 'voice-clips'), { recursive: true }); await writeFile(join(dir, 'voice-clips', `${'a'.repeat(64)}.mp3`), 'old'); } });
+  assert.deepEqual(await readdir(join(h.dir, 'voice-clips')).catch(() => 'gone'), 'gone');
+});
+
+test('no first reply is said when the model says nothing, it comes too late, it names a card, or voice moved; the request goes all the same', async t => {
+  const h = await harness(t, { steps: ['하나', '둘', '셋', '넷'] });
+  const session = on(h);
+  h.firsts.reply = () => ({ skipped: 'model', warm: true });
+  assert.deepEqual(await request(h, session, '안녕'), {});
+  h.firsts.reply = () => ({ text: FIRST, warm: true });
+  h.firsts.delayMs = 3_000;
+  const started = Date.now();
+  assert.deepEqual(await request(h, session, '배포 상태 봐줘'), {});
+  assert.ok(Date.now() - started < 2_900, 'given up on at its deadline');
+  h.firsts.delayMs = 0;
+  (h.voice as unknown as { options: { hooks: { hide(text: string): string } } }).options.hooks.hide = text => text.replace('확인', '■');
+  assert.deepEqual(await request(h, session, '세션 확인해줘'), {});
+  (h.voice as unknown as { options: { hooks: { hide(text: string): string } } }).options.hooks.hide = text => text;
+  h.firsts.delayMs = 200;
+  const moved = request(h, session, '다른 거 봐줘');
+  await sleep(50);
+  on(h, randomUUID());
+  assert.deepEqual(await moved, {});
+  assert.equal(h.prompts.length, 4, 'every request reached the master');
+  assert.equal(h.labs.speeches.filter(item => String(item.body.text).includes(FIRST)).length, 0, 'none was read');
+});
+
+test('a spoken request that runs long says nothing more on its own: no recorded "still working"', async t => {
+  const h = await harness(t, { steps: [() => undefined] });
+  const session = on(h);
+  await request(h, session, '오래 걸리는 일 해줘');
+  (h.session as unknown as { file: { followed: Array<{ createdAt: string }> } }).file.followed.forEach(item => { item.createdAt = new Date(Date.now() - 60_000).toISOString(); });
+  await sleep(200);
+  assert.deepEqual(h.says().filter(say => say.kind === 'working'), []);
 });
 
 test('a voice is heard before it is chosen: a Korean sample read brightly in that voice, made once, paid for, and served from disk', async t => {
@@ -410,7 +469,7 @@ test('audio streams to the page as it is made; cut-off audio cuts the page off, 
 
 /** An mp3 as ElevenLabs sends it: an ID3 tag of `size` bytes after its header, then frames. */
 /** What was sent to speech for answers, the short replies left out. */
-const readings = (h: Harness) => h.labs.speeches.map(item => String(item.body.text)).filter(text => !VOICE_ACKS.some(ack => text.endsWith(ack)));
+const readings = (h: Harness) => h.labs.speeches.map(item => String(item.body.text)).filter(text => !text.endsWith(FIRST));
 const mp3 = (frames: string, size = 35) => Buffer.concat([Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, size]), Buffer.alloc(size, 0x54), Buffer.from(frames)]);
 
 test('a long answer to a spoken request is read whole: parts of whole sentences, in order, made into one stream with one tag at its start', async t => {

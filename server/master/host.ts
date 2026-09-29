@@ -15,7 +15,8 @@ import { MasterSettingsStore } from './settings.js';
 import { MASTER_TOOLS, MasterTools } from './tools.js';
 import { TowerClient, type WebCredentials } from './tower-client.js';
 import { ElevenLabs, type ElevenLabsOptions } from './elevenlabs.js';
-import { MasterVoice, type VoiceTiming } from './voice.js';
+import { FirstReplyMaker } from './first-reply.js';
+import { MasterVoice, type MasterVoiceOptions, type VoiceTiming } from './voice.js';
 
 export const MASTER_PROTOCOL = 1;
 const MAX_REQUEST = 256 * 1024;
@@ -30,7 +31,7 @@ export interface MasterHostOptions {
   followMs?: number;
   onClosed?: () => void;
   /** Tests talk to fake ElevenLabs servers, faster. */
-  voice?: { elevenLabs?: Omit<ElevenLabsOptions, 'key'>; timing?: Partial<VoiceTiming> };
+  voice?: { elevenLabs?: Omit<ElevenLabsOptions, 'key'>; timing?: Partial<VoiceTiming>; firstReply?: MasterVoiceOptions['firstReply'] };
 }
 
 const failure = (message: string, statusCode: number) => Object.assign(new Error(message), { statusCode });
@@ -218,7 +219,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     session = new MasterSession({ stateDir: paths.stateDir, dataDir: paths.data, settings, tower, live, room, onChange: broadcastOverview, ...(options.followMs ? { followMs: options.followMs } : {}) });
     tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), broadcast: event => room.broadcast(event), started: (target, body, answer) => session!.started(target, body, answer), delegated: () => session!.delegatedTable() });
     const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), ...options.voice?.elevenLabs });
-    voice = new MasterVoice({ dataDir: paths.data, settings, room, elevenLabs, ...(options.voice?.timing ? { timing: options.voice.timing } : {}),
+    voice = new MasterVoice({ dataDir: paths.data, settings, room, elevenLabs, firstReply: options.voice?.firstReply ?? new FirstReplyMaker({ stateDir: paths.stateDir }), ...(options.voice?.timing ? { timing: options.voice.timing } : {}),
       hooks: { hide: text => text, connectedSince: () => tower.connectedSince(), send: input => session!.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }),
         streamState: (turn, state) => session!.voicedState(turn, state) } });
     session.setVoice(voice);
