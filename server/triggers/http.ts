@@ -27,7 +27,8 @@ export interface Destination {
   ownPorts: readonly number[];
 }
 export interface HttpCall {
-  method: 'GET' | 'POST';
+  /** PATCH is used only for GitHub writes; it is handled like POST, as a write that may have arrived. */
+  method: 'GET' | 'POST' | 'PATCH';
   url: string;
   headers: Record<string, string>;
   /** Headers from the secret store, sent only while the request stays on `secretOrigin`. */
@@ -159,7 +160,7 @@ async function perform(call: HttpCall, destination: Destination, resolve: typeof
   let delivered = false;
   let url: URL;
   try { url = new URL(call.url); } catch { return { ok: false, error: 'Invalid URL.', uncertain: false }; }
-  let method = call.method;
+  let method: string = call.method;
   let body = call.body;
   let sendSecrets = Object.keys(call.secretHeaders).length > 0;
   if (sendSecrets && url.origin !== call.secretOrigin) return { ok: false, error: `The secret headers belong to ${call.secretOrigin}, not ${url.origin}; nothing was sent.`, uncertain: false };
@@ -168,17 +169,17 @@ async function perform(call: HttpCall, destination: Destination, resolve: typeof
     let target: { address: string; family: 4 | 6 };
     try { target = await allowedAddress(url, destination, resolve, deadline); }
     catch (error) { return { ok: false, error: (error as Error).message, uncertain: delivered }; }
-    const headers = { ...call.headers, ...(sendSecrets ? call.secretHeaders : {}), ...(body !== undefined && method === 'POST' ? { 'content-length': String(Buffer.byteLength(body)) } : {}) };
+    const headers = { ...call.headers, ...(sendSecrets ? call.secretHeaders : {}), ...(body !== undefined && method !== 'GET' ? { 'content-length': String(Buffer.byteLength(body)) } : {}) };
     const remaining = deadline - Date.now();
     // A POST answered with a redirect was delivered: whatever happens next, it must not be sent again.
     const stop = (error: string): HttpOutcome => ({ ok: false, error, uncertain: delivered });
     if (remaining <= 0) return stop(`No response within ${Math.round(call.timeoutMs / 1000)} seconds.`);
     const refused = call.beforeSend?.();
     if (refused) return stop(refused);
-    const outcome = await once(url, method, headers, method === 'POST' ? body : undefined, target, remaining, call.maxBytes ?? MAX_RESPONSE_BYTES);
+    const outcome = await once(url, method, headers, method !== 'GET' ? body : undefined, target, remaining, call.maxBytes ?? MAX_RESPONSE_BYTES);
     if (!outcome.ok) return { ...outcome, uncertain: outcome.uncertain || delivered };
     if (!('redirect' in outcome)) return outcome;
-    delivered ||= method === 'POST';
+    delivered ||= method !== 'GET';
     if (call.noRedirects) return stop(`The server redirected (HTTP ${outcome.status}) and the redirect was not followed.`);
     if (hop >= MAX_REDIRECTS) return stop('Too many redirects.');
     let next: URL;
@@ -199,7 +200,7 @@ function once(url: URL, method: string, headers: Record<string, string>, body: s
     let sent = false;
     let settled = false;
     const finish = (value: HttpOutcome | { ok: true; redirect: string; status: number }) => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
-    const fail = (message: string) => finish({ ok: false, error: message, uncertain: method === 'POST' && sent });
+    const fail = (message: string) => finish({ ok: false, error: message, uncertain: method !== 'GET' && sent });
     const req = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {
       method, headers: { 'user-agent': 'Agent-Session-Tower-Trigger', ...headers }, agent: url.protocol === 'https:' ? agents.https : agents.http,
       // Connect to the address that was checked, not whatever the name resolves to a moment later.

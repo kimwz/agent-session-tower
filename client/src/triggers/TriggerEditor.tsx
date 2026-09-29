@@ -244,10 +244,11 @@ function GitHubFields({ token, source, onChange, onAccount }: { token: string; s
   };
   return <>
     <Choice label={t('무엇을 볼까요')} value={watch.type} onChange={switchWatch}
-      options={[['issue-opened', t('저장소에 새로 열린 이슈')], ['assigned-to-me', t('나에게 새로 할당된 이슈')], ['review-requested', t('나에게 리뷰를 요청한 풀 리퀘스트')]]} />
-    <label>{t('저장소')}<textarea rows={2} required={watch.type === 'issue-opened'} placeholder="owner/name" value={repos} onChange={event => { setRepos(event.target.value); const names = list(event.target.value);
-      setWatch(watch.type === 'issue-opened' ? { ...watch, repos: names } : { ...watch, ...(names.length ? { repos: names } : { repos: undefined }) }); }} />
-      <small>{watch.type === 'issue-opened' ? t('한 줄에 하나씩 owner/name. 처음 확인할 때 이미 있던 이슈로는 실행하지 않습니다.') : t('비우면 모든 저장소. 한 줄에 하나씩 owner/name.')}</small></label>
+      options={[['issue-opened', t('저장소에 새로 열린 이슈')], ['open-issues', t('열린 이슈를 하나씩 차례로 처리')], ['assigned-to-me', t('나에게 새로 할당된 이슈')], ['review-requested', t('나에게 리뷰를 요청한 풀 리퀘스트')]]} />
+    <label>{t('저장소')}<textarea rows={2} required={watch.type === 'issue-opened' || watch.type === 'open-issues'} placeholder="owner/name" value={repos} onChange={event => { setRepos(event.target.value); const names = list(event.target.value);
+      setWatch(watch.type === 'issue-opened' || watch.type === 'open-issues' ? { ...watch, repos: names } : { ...watch, ...(names.length ? { repos: names } : { repos: undefined }) }); }} />
+      <small>{watch.type === 'issue-opened' ? t('한 줄에 하나씩 owner/name. 처음 확인할 때 이미 있던 이슈로는 실행하지 않습니다.')
+        : watch.type === 'open-issues' ? t('한 줄에 하나씩 owner/name. 이미 열려 있던 이슈까지 오래된 것부터 하나씩 처리하고, 실행이 끝나면 다음 이슈를 가져옵니다.') : t('비우면 모든 저장소. 한 줄에 하나씩 owner/name.')}</small></label>
     {watch.type === 'review-requested' && <p className="trigger-note">{t('리뷰어로 지정되거나 Draft가 Ready for review로 바뀌면 실행하고, 리뷰를 남긴 뒤 다시 요청받으면 또 실행합니다. 처음 확인할 때 이미 요청된 PR로는 실행하지 않습니다.')}</p>}
     <div className="trigger-account">
       {/* The sign-in is checked on the computer that uses it, so on another computer it stays as it is. */}
@@ -289,6 +290,14 @@ function AdvancedSettings({ input, onChange }: { input: TriggerInput; onChange: 
       {source.kind === 'http' && <label>{t('제한 시간 (초)')}<input type="number" min={1} max={45} value={source.request.timeoutSeconds} onChange={event => onChange({ ...input, source: { ...source, request: { ...source.request, timeoutSeconds: Math.min(45, Math.max(1, Number(event.target.value) || 1)) } } })} /></label>}
       {/* Keyed by the kind of watch, so what the fields show always matches what is saved. */}
       {watch?.type === 'issue-opened' && <IssueFilters key={watch.type} watch={watch} onChange={setWatch} />}
+      {watch?.type === 'open-issues' && <>
+        <IssueFilters key={watch.type} watch={watch} onChange={setWatch} />
+        <label>{t('동시에 처리할 이슈 수')}<input type="number" min={1} max={5} value={watch.concurrency} onChange={event => setWatch({ ...watch, concurrency: Math.min(5, Math.max(1, Number(event.target.value) || 1)) })} />
+          <small>{t('1이면 한 번에 하나씩 처리합니다.')}</small></label>
+        <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.assign} onChange={event => setWatch({ ...watch, assign: event.target.checked })} />{t('처리를 시작할 때 연결한 계정을 담당자로 할당')}</label>
+        <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.close} disabled={input.handler.kind !== 'task'} onChange={event => setWatch({ ...watch, close: event.target.checked })} />{t('실행이 끝나면 이슈 닫기')}</label>
+        <p className="trigger-note">{input.handler.kind === 'task' ? t('작업이 끝나지 않았거나 결정이 필요하다고 보고한 실행의 이슈는 열어 둡니다. 시간당 최대 실행에 닿으면 멈추지 않고 기다렸다가 이어서 처리합니다.') : t('코디네이터 처리 지침에서는 이슈를 자동으로 닫지 않습니다.')}</p>
+      </>}
       {watch?.type === 'assigned-to-me' && <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.includePullRequests} onChange={event => setWatch({ ...watch, includePullRequests: event.target.checked })} />{t('풀 리퀘스트도 포함')}</label>}
       {watch?.type === 'review-requested' && <>
         <label className="wide">{t('리뷰 판정')}<select value={watch.verdicts} onChange={event => setWatch({ ...watch, verdicts: event.target.value as 'comment' | 'any' })}>
@@ -301,9 +310,9 @@ function AdvancedSettings({ input, onChange }: { input: TriggerInput; onChange: 
   </details>;
 }
 
-type IssueWatch = Extract<GitHubSource['watch'], { type: 'issue-opened' }>;
+type IssueWatch = Extract<GitHubSource['watch'], { type: 'issue-opened' | 'open-issues' }>;
 /** Which new issues count: labels, authors, and how the author relates to the repository. */
-function IssueFilters({ watch, onChange }: { watch: IssueWatch; onChange: (watch: IssueWatch) => void }) {
+function IssueFilters<W extends IssueWatch>({ watch, onChange }: { watch: W; onChange: (watch: W) => void }) {
   const { t } = useI18n();
   // Typed text is kept as written, so a trailing comma does not vanish while typing.
   const [labels, setLabels] = useState(watch.labels?.join(', ') ?? '');

@@ -2,8 +2,8 @@ import type { GitHubWatch } from '../../shared/triggers.js';
 
 /** One GitHub API answer, reduced to what checking needs. */
 export interface GitHubResponse { status: number; body: unknown; etag?: string; truncated?: boolean; remaining?: number; reset?: number }
-/** Reads by default; `send` makes it a POST, whose failure may mean it arrived (`uncertain` on the error). */
-export type GitHubFetch = (path: string, etag?: string, send?: { method: 'POST'; body: unknown }) => Promise<GitHubResponse>;
+/** Reads by default; `send` makes it a write, whose failure may mean it arrived (`uncertain` on the error). */
+export type GitHubFetch = (path: string, etag?: string, send?: { method: 'POST' | 'PATCH'; body: unknown }) => Promise<GitHubResponse>;
 
 /** An issue as a run receives it: outside content, shortened. */
 export interface GitHubIssue {
@@ -31,6 +31,8 @@ export interface GitHubCursor {
   assignedEtag?: string;
   /** Pull requests asking for a review at the last complete check, as `owner/name#number`. */
   reviews?: string[];
+  /** Open issues already taken by an open-issues watch, as `owner/name#number`; forgotten once they close. */
+  handled?: string[];
 }
 
 /** A failed check. `retryAt` is when GitHub's rate limit allows the next one. */
@@ -43,6 +45,9 @@ const ISSUE_PAGES = 10;
 const ASSIGNED_PAGE = 100;
 const ASSIGNED_PAGES = 10;
 const MAX_ASSIGNED = 2000;
+const OPEN_PAGE = 100;
+const OPEN_PAGES = 10;
+const MAX_HANDLED = 5000;
 const SEARCH_PAGE = 100;
 /** GitHub's search never returns more than this many results. */
 const SEARCH_MAX = 1000;
@@ -90,11 +95,11 @@ export function issueOf(item: Item, repository?: string): GitHubIssue {
   };
 }
 
-const keyOf = (issue: Pick<GitHubIssue, 'repository' | 'number'>) => `${issue.repository.toLowerCase()}#${issue.number}`;
+export const keyOf = (issue: Pick<GitHubIssue, 'repository' | 'number'>) => `${issue.repository.toLowerCase()}#${issue.number}`;
 const lower = (values: readonly string[] | undefined) => values?.map(value => value.toLowerCase());
 
 /** Whether an opened issue passes the watch's filters. */
-export function wanted(watch: Extract<GitHubWatch, { type: 'issue-opened' }>, issue: GitHubIssue): boolean {
+export function wanted(watch: Extract<GitHubWatch, { type: 'issue-opened' | 'open-issues' }>, issue: GitHubIssue): boolean {
   const labels = lower(watch.labels);
   const authors = lower(watch.authors);
   if (labels?.length && !issue.labels.some(label => labels.includes(label.toLowerCase()))) return false;
@@ -109,6 +114,7 @@ export function wanted(watch: Extract<GitHubWatch, { type: 'issue-opened' }>, is
  */
 export async function checkGitHub(watch: GitHubWatch, previous: GitHubCursor, fetch: GitHubFetch): Promise<{ issues: GitHubIssue[]; cursor: GitHubCursor }> {
   if (watch.type === 'review-requested') return checkReviews(watch, previous, fetch);
+  if (watch.type === 'open-issues') return checkOpen(watch, previous, fetch);
   if (watch.type === 'issue-opened') {
     const repos: NonNullable<GitHubCursor['repos']> = {};
     const found: GitHubIssue[] = [];
@@ -157,6 +163,26 @@ export async function checkGitHub(watch: GitHubWatch, previous: GitHubCursor, fe
   if (!previous.assigned) return { issues: [], cursor: { assigned: remembered, ...etag } };
   const before = new Set(previous.assigned);
   return { issues: current.filter(issue => !before.has(keyOf(issue))), cursor: { assigned: remembered, ...etag } };
+}
+
+/**
+ * Every open issue that passes the filters, oldest first, read whole each time. Which of them to take is the
+ * service's choice; `handled` is only trimmed here to the issues still open, so one closed and opened again is
+ * taken again.
+ */
+async function checkOpen(watch: Extract<GitHubWatch, { type: 'open-issues' }>, previous: GitHubCursor, fetch: GitHubFetch): Promise<{ issues: GitHubIssue[]; cursor: GitHubCursor }> {
+  const found: GitHubIssue[] = [];
+  for (const repo of watch.repos) {
+    for (let page = 1; ; page++) {
+      if (page > OPEN_PAGES) throw new GitHubError(`More than ${OPEN_PAGE * OPEN_PAGES} issues and pull requests are open in ${repo}, more than one check reads; narrow the trigger with labels.`);
+      const list = items(await fetch(`/repos/${repo}/issues?state=open&sort=created&direction=asc&per_page=${OPEN_PAGE}${page > 1 ? `&page=${page}` : ''}`), repo);
+      found.push(...list.filter(item => !record(item.pull_request) && item.state === 'open').map(item => issueOf(item, repo)).filter(issue => wanted(watch, issue)));
+      if (list.length < OPEN_PAGE) break;
+    }
+  }
+  const open = new Set(found.map(keyOf));
+  const handled = (previous.handled ?? []).filter(key => open.has(key)).slice(-MAX_HANDLED);
+  return { issues: found, cursor: { handled } };
 }
 
 /**

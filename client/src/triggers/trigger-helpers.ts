@@ -74,7 +74,7 @@ export function scheduleLabel(trigger: Pick<Trigger, 'source'>, t: Translate): s
   if (trigger.source.kind === 'github') {
     const watch = trigger.source.watch;
     const repos = watch.repos?.length ? ` · ${watch.repos[0]}${watch.repos.length > 1 ? ` +${watch.repos.length - 1}` : ''}` : '';
-    return `GitHub · ${watch.type === 'issue-opened' ? t('새 이슈') : watch.type === 'review-requested' ? t('리뷰 요청') : t('나에게 할당')}${repos} · ${when}`;
+    return `GitHub · ${watch.type === 'issue-opened' ? t('새 이슈') : watch.type === 'open-issues' ? t('열린 이슈 차례로') : watch.type === 'review-requested' ? t('리뷰 요청') : t('나에게 할당')}${repos} · ${when}`;
   }
   if (trigger.source.kind !== 'http') return when;
   let host = trigger.source.request.url;
@@ -99,7 +99,17 @@ export function switchedWatch(kept: Partial<Record<Watch['type'], Watch>>, type:
     ? { type, ...(repos.length ? { repos } : {}), includePullRequests: earlier?.type === type && earlier.includePullRequests }
     : type === 'review-requested'
       ? { type, ...(repos.length ? { repos } : {}), includeTeams: earlier?.type === type && earlier.includeTeams, verdicts: earlier?.type === type ? earlier.verdicts : 'comment' }
-      : { ...(earlier?.type === type ? earlier : { authorAssociation: [...MEMBERS] }), type, repos };
+      : type === 'open-issues'
+        ? { ...(earlier?.type === type ? earlier : { authorAssociation: [...MEMBERS], concurrency: 1, assign: true, close: true }), type, repos }
+        : { ...(earlier?.type === type ? earlier : { authorAssociation: [...MEMBERS] }), type, repos };
+}
+
+/** What Tower did to an open-issues run's issue, for the run's line in the history. */
+export function issueActionsLabel(event: Pick<TriggerEvent, 'issueActions'>, t: Translate): string {
+  const actions = event.issueActions;
+  if (!actions) return '';
+  return [actions.assignedAt && t('담당자 할당됨'), actions.assignError, actions.closedAt && t('이슈 닫음'), actions.keptOpen && t('이슈를 열어 둠'), actions.keptReason, actions.closeError]
+    .filter(Boolean).join(' · ');
 }
 
 /** A new trigger of one kind, with the defaults its editor starts from. */
