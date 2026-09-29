@@ -557,6 +557,7 @@ export class MasterVoice {
 
   /** Whether a turn is being read while it is written. */
   streaming(turn: string): boolean { return this.streams.has(turn); }
+  streamingTurns(): string[] { return [...this.streams.keys()]; }
 
   /**
    * A turn that was read while it was written ended: what was not read yet is read, then its entry is added, marked

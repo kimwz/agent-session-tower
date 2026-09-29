@@ -89,6 +89,8 @@ export interface VoiceSide {
   stream?(input: { turn: string; kind: 'answer' | 'report'; key: string; request?: string; voiceSession?: string; replies: readonly RunReply[] }): void;
   /** Whether a turn is being read while it is written. */
   streaming?(turn: string): boolean;
+  /** The turns being read while they are written. */
+  streamingTurns?(): string[];
   /** A turn with a voiced record ended: the rest is read, and its entry added (never waiting to be read again). */
   finishStream?(input: { turn: string; replies?: readonly RunReply[]; completed: boolean; data?: MasterEntryData }): void;
   timings?: { mark(key: string | undefined, field: 'request' | 'text' | 'end', at?: number, about?: { kind?: 'answer' | 'report' }): void };
@@ -169,11 +171,14 @@ export class MasterSession {
       if (!snapshot) return;
       let ended = false;
       const seen = new Set<string>();
+      /** Turns a followed request still waits on: their end is settled when that request is looked at. */
+      const covered = new Set<string>();
       for (const item of this.file.followed) {
         if (item.state !== 'running' || !item.runId || item.node) continue;
         const run = (snapshot.runs ?? []).find(entry => entry.id === item.runId);
         if (!run) continue;
         const turn = turnOf(run, snapshot);
+        covered.add(turn.id);
         if (FINISHED_RUN.has(turn.status) || FINISHED_RUN.has(run.status)) { ended = true; continue; }
         if ((item.kind !== 'spoken' && item.kind !== 'report') || seen.has(turn.id)) continue;
         seen.add(turn.id);
@@ -182,6 +187,15 @@ export class MasterSession {
         if (!turn.replies || (this.voiced(turn.id) && !this.voice?.streaming?.(turn.id))) continue;
         this.voice?.stream?.({ turn: turn.id, kind: item.kind === 'spoken' ? 'answer' : 'report', key: timingKey(item),
           ...(item.kind === 'spoken' && item.key ? { request: item.key } : {}), ...(item.kind === 'spoken' && item.voice ? { voiceSession: item.voice } : {}), replies: turn.replies });
+      }
+      // A turn being read that no followed request waits on any more (the one steered into it failed to arrive): its
+      // words are still followed here, and it is settled when it ends.
+      for (const turnId of this.voice?.streamingTurns?.() ?? []) {
+        if (covered.has(turnId)) continue;
+        const turn = (snapshot.runs ?? []).find(entry => entry.id === turnId);
+        if (!turn?.replies) continue;
+        if (FINISHED_RUN.has(turn.status)) this.voice?.finishStream?.({ turn: turnId, replies: turn.replies, completed: turn.status === 'completed' });
+        else this.voice?.stream?.({ turn: turnId, kind: 'answer', key: turnId, replies: turn.replies });
       }
       if (ended) void this.follow();
     });

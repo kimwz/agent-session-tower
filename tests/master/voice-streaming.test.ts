@@ -461,3 +461,27 @@ test('a message steered into a turn being read that fails to arrive does not sto
   await until(() => h.speakOf(done)?.state === 'played');
   await until(() => h.spoken().includes('이어서 끝까지 말씀드려요.') || undefined);
 });
+
+test('a turn being read goes on to its end even when the only request that followed it failed to arrive', async t => {
+  const h = await harness(t, { page: { delayMs: 5 } });
+  h.on();
+  // The owner typed to the master (a turn nobody follows); then spoke, and that request was steered into it.
+  const typed: Run = { id: 'typed', sessionId: MASTER, prompt: '글로 쓴 요청', status: 'running', createdAt: new Date().toISOString(), output: '', replies: [] };
+  h.runs.push(typed);
+  const spoken = await h.ask('말로 덧붙인 요청');
+  spoken.run.steering = { targetRunId: typed.id, state: 'delivered', requestedAt: new Date().toISOString() };
+  h.write(typed, 'm1:0', '두 요청에 함께 답하고 있어요. ');
+  await until(() => h.says().find(say => say.kind === 'answer'));
+  assert.equal(h.voice.streaming(typed.id), true);
+  // The steered request's delivery turns out to have failed; the typed turn goes on.
+  spoken.run.steering = { ...spoken.run.steering, state: 'uncertain' };
+  spoken.run.status = 'error';
+  spoken.run.finishedAt = new Date().toISOString();
+  h.emit();
+  await h.entry(/답하지 못했습니다/);
+  h.write(typed, 'm1:0', '마지막 문장까지 읽혀요.', true);
+  h.finish(typed);
+  await until(() => h.spoken().includes('마지막 문장까지 읽혀요.') || undefined);
+  await until(() => !h.voice.streaming(typed.id) || undefined);
+  await until(() => !h.voice.busy() || undefined);
+});
