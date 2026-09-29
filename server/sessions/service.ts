@@ -5,6 +5,7 @@ import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import type { ChatMessage, Provider, Session, SessionDetail } from '../../shared/types.js';
 import { sortSessions } from '../../shared/session-activity.js';
+import { LaunchProofFile } from './launch-proofs.js';
 import { inspectProcesses, type ProcessSnapshot } from './processes.js';
 import { appendFile, applyStatus, initial, ownHistory, parseMessages, walk, CHUNK, MAX_LINE, type RecordState } from './parser.js';
 
@@ -24,7 +25,11 @@ function rawNeedle(term: string): Buffer {
 
 const GENERATION_BASE = Math.floor(Math.random() * 2 ** 31) * 2 ** 20;
 
-interface SessionOptions { codexHome?: string; claudeHome?: string; pollIntervalMs?: number; inspectProcesses?: () => Promise<ProcessSnapshot> }
+interface SessionOptions {
+  codexHome?: string; claudeHome?: string; pollIntervalMs?: number; inspectProcesses?: () => Promise<ProcessSnapshot>;
+  /** Where proofs of agent-launched runs are kept, so they outlive this process. Without it they live only in memory. */
+  launchProofs?: string;
+}
 
 export class SessionService extends EventEmitter {
   readonly codexHome: string;
@@ -39,8 +44,13 @@ export class SessionService extends EventEmitter {
   private pendingRefresh?: Promise<void>;
   private lastProcesses = 0;
   private processes: ProcessSnapshot = { claude: new Map(), codex: new Set(), providerRunning: { claude: false, codex: false } };
-  /** Launching sessions seen while a child's process was alive. The proof outlives the process. */
+  /** Launching sessions seen while a child's process was alive. The proof outlives the process, and this process too when saved. */
   private readonly launchers = new Map<string, string[]>();
+  private readonly proofFile?: LaunchProofFile;
+  private proofsLoaded = false;
+  private proofsChanged = false;
+  /** Another worker is taking over: this one neither looks at sessions nor saves proofs until it resumes. */
+  private quiesced = false;
   /** Non-interactive sessions whose process was already looked at once after they appeared. */
   private readonly checked = new Set<string>();
   private readonly generations = new WeakMap<RecordState, number>();
@@ -52,6 +62,7 @@ export class SessionService extends EventEmitter {
     this.claudeHome = options.claudeHome || process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
     this.interval = Math.max(250, options.pollIntervalMs ?? 1500);
     this.readProcesses = options.inspectProcesses ?? (() => inspectProcesses(this.claudeHome, this.codexHome));
+    if (options.launchProofs) this.proofFile = new LaunchProofFile(options.launchProofs);
   }
 
   async start(): Promise<void> {
@@ -61,13 +72,25 @@ export class SessionService extends EventEmitter {
       this.timer.unref();
     }
   }
-  stop(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; }
+  stop(): void { if (this.timer) clearInterval(this.timer); this.timer = undefined; this.proofFile?.close(); }
+  /**
+   * Before another worker takes over: no new scan starts, and once this resolves everything proved so far is on disk and nothing
+   * more is written, so a successor that has read the file is never overwritten. `resume()` undoes it when the handover does not happen.
+   */
+  async quiesce(): Promise<void> {
+    this.quiesced = true;
+    await this.pendingRefresh?.catch(() => {});
+    if ((this.proofsChanged || this.proofFile?.failed) && this.proofFile?.save(this.launchers, true)) this.proofsChanged = false;
+    await this.proofFile?.flush();
+  }
+  resume(): void { this.quiesced = false; }
   list(): Session[] { return [...this.index.values()].map((record) => ({ ...record.session })).sort(sortSessions); }
   get(id: string): Session | undefined { const state = this.index.get(id); return state ? { ...state.session } : undefined; }
   /** A conversation's latest user requests, newest first, each shortened to 300 characters. */
   recentRequests(id: string): string[] { return [...(this.index.get(id)?.recentRequests ?? [])]; }
 
   refresh(forceProcesses = false): Promise<void> {
+    if (this.quiesced) return this.pendingRefresh ?? Promise.resolve();
     if (this.pendingRefresh) return forceProcesses ? this.pendingRefresh.then(() => this.refresh(true)) : this.pendingRefresh;
     if (forceProcesses) this.lastProcesses = 0;
     this.pendingRefresh = this.scan().finally(() => { this.pendingRefresh = undefined; });
@@ -77,8 +100,16 @@ export class SessionService extends EventEmitter {
   private async scan(): Promise<void> {
     this.scanning = true;
     try {
+      // Saved proofs come first: nothing is written before them, so a save can never drop what an earlier worker proved.
+      if (this.proofFile && !this.proofsLoaded) {
+        for (const [id, parents] of await this.proofFile.load()) if (!this.launchers.has(id)) this.launchers.set(id, parents);
+        this.proofsLoaded = true;
+      }
+      // A provider whose history could not be listed completely (a folder unreadable or missing) proves no conversation of it is gone.
+      const incomplete = new Set<Provider>();
       const [codex, archived, claude] = await Promise.all([
-        walk(join(this.codexHome, 'sessions')), walk(join(this.codexHome, 'archived_sessions')), walk(join(this.claudeHome, 'projects')),
+        walk(join(this.codexHome, 'sessions'), 6, () => incomplete.add('codex')), walk(join(this.codexHome, 'archived_sessions'), 6, () => incomplete.add('codex')),
+        walk(join(this.claudeHome, 'projects'), 6, () => incomplete.add('claude')),
       ]);
       if (Date.now() - this.lastProcesses > 8000) await this.inspect();
       const files = [...codex.map((path) => ({ path, provider: 'codex' as const, archived: false })),
@@ -105,6 +136,7 @@ export class SessionService extends EventEmitter {
             applyStatus(state, this.processes, Date.now());
             if (before !== JSON.stringify(state.session)) changed = true;
           } catch (error) {
+            incomplete.add(entry.provider);
             if (this.diagnostics.length < 20) this.diagnostics.push({ provider: entry.provider, message: `Could not read ${basename(entry.path)}: ${(error as NodeJS.ErrnoException).code || 'read error'}` });
           }
         }
@@ -117,7 +149,13 @@ export class SessionService extends EventEmitter {
       if (unchecked.some(state => Date.now() - Date.parse(state.session.createdAt) < 120_000) && Date.now() - this.lastProcesses > 1000) await this.inspect();
       for (const state of unchecked) this.checked.add(state.session.id);
       const live = new Set([...this.records.values()].map(state => state.session.id));
-      for (const id of this.launchers.keys()) if (!live.has(id)) this.launchers.delete(id);
+      // A history folder that lists nothing at all (renamed, not mounted) proves nothing is gone either.
+      if (!codex.length && !archived.length) incomplete.add('codex');
+      if (!claude.length) incomplete.add('claude');
+      for (const id of this.launchers.keys()) {
+        if (live.has(id) || incomplete.has(id.startsWith('codex:') ? 'codex' : 'claude')) continue;
+        this.launchers.delete(id); this.proofsChanged = true;
+      }
       for (const id of this.checked) if (!live.has(id)) this.checked.delete(id);
       this.index.clear();
       for (const state of this.records.values()) {
@@ -127,6 +165,7 @@ export class SessionService extends EventEmitter {
         if (!duplicate || (duplicate.archived && !state.archived) || (duplicate.archived === state.archived && state.session.updatedAt > duplicate.session.updatedAt)) this.index.set(state.session.id, state);
       }
       if (resolveExecLineage(this.index.values(), this.launchers)) changed = true;
+      if ((this.proofsChanged || this.proofFile?.failed) && this.proofFile?.save(this.launchers)) this.proofsChanged = false;
       this.scanning = false;
       if (changed) this.emit('change', this.list());
     } finally { this.scanning = false; }
@@ -136,7 +175,7 @@ export class SessionService extends EventEmitter {
     this.processes = await this.readProcesses();
     this.lastProcesses = Date.now();
     // The first observation is the proof: it is taken while the run is young and its launcher alive.
-    for (const [id, parents] of this.processes.launchers ?? []) if (!this.launchers.has(id)) this.launchers.set(id, parents);
+    for (const [id, parents] of this.processes.launchers ?? []) if (!this.launchers.has(id)) { this.launchers.set(id, parents); this.proofsChanged = true; }
   }
 
   /** `before` is an opaque byte cursor, stable when new messages are appended. */

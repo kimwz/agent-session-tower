@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.74.1] - 2026-09-29
+
+### Fixed
+- **Claude reviews another agent started no longer come back on the canvas after Tower updates.** A `claude -p` run started inside an agent's turn (for example the Claude Fable check in a PR review) showed as your own session once Tower had updated after the run finished.
+  - Such a run carries no mark of who started it: Tower can only see it under the launching agent's process while it runs. That proof was kept only in the execution worker's memory, and every update starts a new worker, so a run that had already finished could never be proven again. Codex runs were not affected; they carry their own mark.
+  - The proof is now saved in the state folder (`agent-launches.json`), so each new worker keeps it. A worker handing over saves what it proved first and then writes nothing more.
+  - A proof is forgotten when its conversation's file is deleted, never because a history folder could not be read.
+  - Runs that finished before this version have no saved proof and stay visible until you close them.
+
 ## [1.74.0] - 2026-09-29
 
 ### Added

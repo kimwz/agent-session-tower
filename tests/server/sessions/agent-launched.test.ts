@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SessionService } from '../../../server/sessions/service.js';
@@ -29,20 +29,32 @@ function claude(id: string, entrypoint: string, command = 'git status') {
   );
 }
 
-async function fixture(t: { after(fn: () => unknown): void }) {
+async function fixture(t: { after(fn: () => unknown): void }, options: { launchProofs?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'tower-agent-launched-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
   const codexHome = join(dir, 'codex'), claudeHome = join(dir, 'claude');
   const codexDir = join(codexHome, 'sessions'), claudeDir = join(claudeHome, 'projects', 'work');
-  await Promise.all([mkdir(codexDir, { recursive: true }), mkdir(claudeDir, { recursive: true })]);
+  const launchProofs = options.launchProofs ? join(dir, 'state', 'agent-launches.json') : undefined;
+  await Promise.all([mkdir(codexDir, { recursive: true }), mkdir(claudeDir, { recursive: true }), mkdir(join(dir, 'state'))]);
   let launchers = new Map<string, string[]>();
   let inspections = 0;
-  const service = new SessionService({ codexHome, claudeHome, inspectProcesses: async (): Promise<ProcessSnapshot> => {
-    inspections++;
-    return { claude: new Map(), codex: new Set(), providerRunning: { claude: false, codex: false }, launchers };
-  } });
+  const services: SessionService[] = [];
+  /** A new execution worker: same homes and state folder, its own memory. */
+  const worker = () => {
+    const service = new SessionService({ codexHome, claudeHome, launchProofs, inspectProcesses: async (): Promise<ProcessSnapshot> => {
+      inspections++;
+      return { claude: new Map(), codex: new Set(), providerRunning: { claude: false, codex: false }, launchers };
+    } });
+    services.push(service);
+    return service;
+  };
+  t.after(async () => { for (const service of services) { await service.quiesce(); service.stop(); } await rm(dir, { recursive: true, force: true }); });
+  /** What a worker has written so far, once its queued writes finished. */
+  const saved = async (service: SessionService) => {
+    await service.quiesce(); service.resume();
+    return JSON.parse(await readFile(launchProofs!, 'utf8')).launches as Record<string, string[]>;
+  };
   return {
-    service, codexDir, claudeDir,
+    service: worker(), worker, saved, codexDir, claudeDir, claudeHome, launchProofs,
     setLaunchers: (value: Record<string, string[]>) => { launchers = new Map(Object.entries(value)); },
     inspections: () => inspections,
   };
@@ -111,6 +123,124 @@ test('without proof an agent-launched run stays unlinked but marked, and interac
   const scheduled = f.service.get(`claude:${SCHEDULED}`);
   assert.equal(scheduled?.parentId, undefined, 'claude -p started by a scheduler or script stays a visible session');
   assert.equal(scheduled?.launchedByAgent, undefined);
+});
+
+test('a claude -p run proven by one execution worker stays with its launcher in the next one', async t => {
+  const f = await fixture(t, { launchProofs: true });
+  const REVIEW_P = '70000000-0000-4000-8000-000000000007';
+  await writeFile(join(f.claudeDir, `${CLAUDE}.jsonl`), claude(CLAUDE, 'sdk-cli'));
+  await writeFile(join(f.claudeDir, `${REVIEW_P}.jsonl`), claude(REVIEW_P, 'sdk-cli'));
+  f.setLaunchers({ [`claude:${REVIEW_P}`]: [`claude:${CLAUDE}`] });
+  await f.service.refresh();
+  assert.equal(f.service.get(`claude:${REVIEW_P}`)?.parentId, `claude:${CLAUDE}`);
+  // A release replaces the worker after the review finished: its process is gone and cannot be looked at again.
+  await f.service.quiesce();
+  f.service.stop();
+  assert.equal((await stat(f.launchProofs!)).mode & 0o777, 0o600, 'the proofs are the owner\'s alone');
+  f.setLaunchers({});
+  const next = f.worker();
+  await next.refresh(true);
+  const review = next.get(`claude:${REVIEW_P}`);
+  assert.equal(review?.parentId, `claude:${CLAUDE}`);
+  assert.equal(review?.parentLink, 'exec');
+  assert.equal(review?.isSubagent, true);
+  assert.equal(next.get(`claude:${CLAUDE}`)?.parentId, undefined, 'the launcher stays where it was');
+});
+
+test('a saved proof leaves with its conversation, but a history folder that lists nothing or cannot be read keeps it', async t => {
+  const f = await fixture(t, { launchProofs: true });
+  const REVIEW_P = '70000000-0000-4000-8000-000000000007';
+  await writeFile(join(f.claudeDir, `${CLAUDE}.jsonl`), claude(CLAUDE, 'sdk-cli'));
+  await writeFile(join(f.claudeDir, `${REVIEW_P}.jsonl`), claude(REVIEW_P, 'sdk-cli'));
+  f.setLaunchers({ [`claude:${REVIEW_P}`]: [`claude:${CLAUDE}`] });
+  await f.service.refresh();
+  f.setLaunchers({});
+  const proof = { [`claude:${REVIEW_P}`]: [`claude:${CLAUDE}`] };
+  assert.deepEqual(await f.saved(f.service), proof);
+  // A renamed or unmounted history folder lists no file at all; that proves nothing was deleted.
+  await rename(join(f.claudeHome, 'projects'), join(f.claudeHome, 'projects-away'));
+  await f.service.refresh(true);
+  assert.deepEqual(await f.saved(f.service), proof);
+  await rename(join(f.claudeHome, 'projects-away'), join(f.claudeHome, 'projects'));
+  // Nor does a folder that could not be read while others could.
+  const other = join(f.claudeHome, 'projects', 'other');
+  await mkdir(other);
+  await writeFile(join(other, `${HELPER}.jsonl`), claude(HELPER, 'cli'));
+  await rename(join(f.claudeDir, `${REVIEW_P}.jsonl`), join(other, `${REVIEW_P}.jsonl`));
+  if (process.getuid?.() !== 0) {
+    await chmod(other, 0o000);
+    try {
+      await f.service.refresh(true);
+      assert.deepEqual(await f.saved(f.service), proof);
+    } finally { await chmod(other, 0o700); }
+  }
+  await rm(join(other, `${REVIEW_P}.jsonl`));
+  await f.service.refresh(true);
+  assert.deepEqual(await f.saved(f.service), {});
+});
+
+test('a worker handing over has saved every proof, and looks and writes no more unless the handover is called off', async t => {
+  const f = await fixture(t, { launchProofs: true });
+  const FIRST = '70000000-0000-4000-8000-000000000007', SECOND = '80000000-0000-4000-8000-000000000008';
+  await writeFile(join(f.claudeDir, `${CLAUDE}.jsonl`), claude(CLAUDE, 'sdk-cli'));
+  await writeFile(join(f.claudeDir, `${FIRST}.jsonl`), claude(FIRST, 'sdk-cli'));
+  f.setLaunchers({ [`claude:${FIRST}`]: [`claude:${CLAUDE}`] });
+  await f.service.refresh();
+  await f.service.quiesce();
+  const onDisk = async () => JSON.parse(await readFile(f.launchProofs!, 'utf8')).launches as Record<string, string[]>;
+  assert.deepEqual(Object.keys(await onDisk()), [`claude:${FIRST}`]);
+  // A run that appears once the handover began is left to the successor, which may already have read the file.
+  await writeFile(join(f.claudeDir, `${SECOND}.jsonl`), claude(SECOND, 'sdk-cli'));
+  f.setLaunchers({ [`claude:${SECOND}`]: [`claude:${CLAUDE}`] });
+  await f.service.refresh(true);
+  assert.equal(f.service.get(`claude:${SECOND}`), undefined);
+  assert.deepEqual(Object.keys(await onDisk()), [`claude:${FIRST}`]);
+  // The handover failed: this worker stays in service, looks again and saves.
+  f.service.resume();
+  await f.service.refresh(true);
+  assert.equal(f.service.get(`claude:${SECOND}`)?.parentId, `claude:${CLAUDE}`);
+  assert.deepEqual(Object.keys(await f.saved(f.service)).sort(), [`claude:${FIRST}`, `claude:${SECOND}`]);
+});
+
+test('a Codex proof stays while one of its history folders is missing, even when the other lists files', async t => {
+  const f = await fixture(t, { launchProofs: true });
+  const archived = join(f.codexDir, '..', 'archived_sessions');
+  await mkdir(archived);
+  await writeFile(join(f.claudeDir, `${CLAUDE}.jsonl`), claude(CLAUDE, 'sdk-cli'));
+  await writeFile(join(f.codexDir, `rollout-${REVIEW}.jsonl`), codex(REVIEW, 'exec'));
+  await writeFile(join(archived, `rollout-${DESKTOP}.jsonl`), codex(DESKTOP, 'vscode'));
+  f.setLaunchers({ [`codex:${REVIEW}`]: [`claude:${CLAUDE}`] });
+  await f.service.refresh();
+  f.setLaunchers({});
+  const proof = { [`codex:${REVIEW}`]: [`claude:${CLAUDE}`] };
+  assert.deepEqual(await f.saved(f.service), proof);
+  await rename(f.codexDir, `${f.codexDir}-away`);
+  await f.service.refresh(true);
+  assert.deepEqual(await f.saved(f.service), proof);
+  await rename(`${f.codexDir}-away`, f.codexDir);
+  await rm(join(f.codexDir, `rollout-${REVIEW}.jsonl`));
+  await f.service.refresh(true);
+  assert.deepEqual(await f.saved(f.service), {});
+});
+
+test('damaged saved proofs never stop the sessions from loading, and only valid entries count', async t => {
+  const f = await fixture(t, { launchProofs: true });
+  const REVIEW_P = '70000000-0000-4000-8000-000000000007';
+  const OTHER = '80000000-0000-4000-8000-000000000008';
+  await writeFile(join(f.claudeDir, `${CLAUDE}.jsonl`), claude(CLAUDE, 'sdk-cli'));
+  await writeFile(join(f.claudeDir, `${REVIEW_P}.jsonl`), claude(REVIEW_P, 'sdk-cli'));
+  await writeFile(join(f.claudeDir, `${OTHER}.jsonl`), claude(OTHER, 'sdk-cli'));
+  await writeFile(f.launchProofs!, '{"version":1,"launches":', { mode: 0o600 });
+  await f.service.refresh();
+  assert.equal(f.service.get(`claude:${REVIEW_P}`)?.parentId, undefined);
+  assert.equal(f.service.get(`claude:${CLAUDE}`)?.title, 'Review with Codex');
+  await writeFile(f.launchProofs!, JSON.stringify({ version: 1, launches: {
+    [`claude:${REVIEW_P}`]: [`claude:${CLAUDE}`], [`claude:${OTHER}`]: ['not a session id'], 'bogus': [`claude:${CLAUDE}`],
+  } }), { mode: 0o600 });
+  const next = f.worker();
+  await next.refresh();
+  assert.equal(next.get(`claude:${REVIEW_P}`)?.parentId, `claude:${CLAUDE}`);
+  assert.equal(next.get(`claude:${OTHER}`)?.parentId, undefined);
 });
 
 test('process ancestry names the nearest agent session and stops at the monitor worker', () => {

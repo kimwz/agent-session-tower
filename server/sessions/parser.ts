@@ -165,11 +165,12 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
   return messages;
 }
 
-export async function walk(directory: string, maxDepth = 6): Promise<string[]> {
+/** `unreadable` hears of each folder that could not be listed, a missing one included, so a caller knows the list may be incomplete. */
+export async function walk(directory: string, maxDepth = 6, unreadable?: (path: string) => void): Promise<string[]> {
   const files: string[] = [];
   async function visit(path: string, depth: number): Promise<void> {
     let entries;
-    try { entries = await readdir(path, { withFileTypes: true }); } catch { return; }
+    try { entries = await readdir(path, { withFileTypes: true }); } catch { unreadable?.(path); return; }
     for (const entry of entries) {
       if (entry.isFile() && entry.name.endsWith('.jsonl')) files.push(join(path, entry.name));
       else if (entry.isDirectory() && depth < maxDepth) await visit(join(path, entry.name), depth + 1);
