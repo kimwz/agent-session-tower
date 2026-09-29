@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.83.0] - 2026-09-29
+
+### Fixed
+- **Helper runs stay hidden even when they are detached.** When an agent in a Tower turn started a `claude -p` review as `( claude -p … ) &`, the run lost its link to the agent before Tower looked, so it showed on the canvas as your own session. Every Claude and Codex turn Tower runs now finds a small `claude`/`codex` shim first on its PATH. It notes which session started the run (Claude Code and Codex pass their session id to every command, and a detached run keeps it), gives a new `claude -p` run its session id so the note names that exact run, and then starts the real program with the same arguments. Other runs are matched by process id and start time while they run. The proof is kept like the process-tree proof, so the run stays under its launcher after it ends.
+
+### Added
+- **Folders only helper runs worked in are removed when their work is done.** A git worktree where only hidden runs (an agent's `codex exec` or `claude -p`, reviews) worked is removed once they and the conversation that made it have been quiet for 30 minutes, even while that conversation stays open. It needs a transcript that proves a conversation made it with `git worktree add`, so a worktree you made by hand is never removed this way. A conversation you see working there, uncommitted changes, unpushed commits, a program in it and pinned or trigger folders keep it as before. Its ignored files (notes, review records) are moved to `worktree-files/` in Tower's state folder and are never pruned; when there is no room for them the folder stays. Leftovers from earlier are cleaned up over the next passes.
+- The agents' guidance asks them to start helper agents in the foreground or with their tool's background option, never detached, and to remove a worktree made for them as soon as they are done.
+
 ## [1.82.0] - 2026-09-29
 
 ### Changed
