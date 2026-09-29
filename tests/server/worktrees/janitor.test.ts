@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gitRunner } from '../../../server/repositories/git.js';
@@ -183,7 +183,7 @@ test('transcripts give Codex creations with their folders and results, and refer
     { type: 'response_item', timestamp: iso(5000), payload: { type: 'custom_tool_call', name: 'exec', call_id: 'c2', input: 'text(await tools.exec_command({cmd:"git worktree add /tmp/other HEAD"}));' } },
   ));
   assert.deepEqual(await transcriptCreations(codex, 'codex', '/h'), [{ path: '/w/repo/../repo.wt', start: 3000, end: 4000 }, { path: '/tmp/other', start: 5000 }]);
-  assert.deepEqual([...await transcriptMentions(codex, ['repo.wt', 'ok', 'missing'])], ['repo.wt']);
+  assert.deepEqual([...(await transcriptMentions(codex, ['repo.wt', 'ok', 'missing'])).found], ['repo.wt']);
   await assert.rejects(transcriptCreations(join(dir, 'gone.jsonl'), 'claude', '/h'), { code: 'ENOENT' });
 });
 
@@ -294,7 +294,7 @@ test('lsof output counts only when lsof finished, and an early stop in a transcr
   await writeFile(file, lines(...Array.from({ length: 20_000 }, (_, index) => ({ type: 'user', message: { content: index ? `line ${index}` : 'names work.wt-x' } }))));
   const open = () => readdirSync('/dev/fd').length;
   const before = open();
-  for (let i = 0; i < 20; i++) assert.deepEqual([...await transcriptMentions(file, ['work.wt-x'])], ['work.wt-x']);
+  for (let i = 0; i < 20; i++) assert.deepEqual([...(await transcriptMentions(file, ['work.wt-x'])).found], ['work.wt-x']);
   await new Promise(resolve => setTimeout(resolve, 50));
   assert.ok(open() - before < 5, `open files grew from ${before} to ${open()}`);
 });
@@ -363,4 +363,78 @@ test('a repository inside an ignored folder of the worktree keeps it; so does a 
   assert.equal((await worktreeCleanupFor(state, ['claude:a'])).find(item => item.path === outer)?.reason, 'nested');
   assert.equal(existsSync(join(outer, 'vendor', 'other', 'work.txt')), true);
   assert.equal(existsSync(later), true, 'an open conversation that changed meanwhile is read again first');
+});
+
+test('a clean repository without a remote inside an ignored folder (a test fixture) does not keep the worktree', async t => {
+  const { dir, work, state, add, transcript, session } = await setup(t);
+  const target = join(dir, 'work.wt-fixtures');
+  const rows = add(`git worktree add --detach ${target} HEAD`, ['--detach', target, 'HEAD']);
+  await writeFile(join(work, '.git', 'info', 'exclude'), 'tmp/\n');
+  const fixture = join(target, 'tmp', 'fixture', 'repo');
+  execFileSync('git', ['init', '-q', fixture], { env });
+  await writeFile(join(fixture, 'f.txt'), 'fixture'); git(fixture, 'add', 'f.txt'); git(fixture, 'commit', '-qm', 'fixture');
+  const world = { sessions: [session('f', await transcript('f', rows))], closed: new Set(['claude:f']) };
+  const cleaner = janitor(state, world);
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.equal(existsSync(target), false);
+});
+
+test('an unrelated session that keeps working does not hold off removal; a session that mentions the folder later does', async t => {
+  const { dir, state, add, transcript, session } = await setup(t);
+  const target = join(dir, 'work.wt-busy-neighbour');
+  const busyFile = await transcript('busy', [{ type: 'user', timestamp: iso(Date.now()), message: { content: 'other work' } }]);
+  const world = { sessions: [session('a', await transcript('a', add(`git worktree add --detach ${target} HEAD`, ['--detach', target, 'HEAD']))), session('busy', busyFile, { cwd: '/elsewhere' })],
+    closed: new Set(['claude:a']) };
+  let looks = 0;
+  const sessions = () => [world.sessions[0]!, { ...world.sessions[1]!, updatedAt: iso(Date.now() + ++looks) }];
+  // First the neighbour writes about the folder only after an earlier look: it is caught up and keeps it.
+  const cleaner = janitor(state, world, { sessions, cwds: async () => { await appendFile(busyFile, lines({ type: 'user', timestamp: iso(Date.now()), message: { content: `now use ${target}` } })); return []; } });
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.equal((await worktreeCleanupFor(state, ['claude:a']))[0]?.reason, 'openSession');
+  // A neighbour that only writes unrelated lines, on every look, does not.
+  const other = janitor(join(dir, 'state'), { ...world, sessions: [world.sessions[0]!, session('busy2', await transcript('busy2', [{ type: 'user', timestamp: iso(Date.now()), message: { content: 'x' } }]), { cwd: '/elsewhere' })] },
+    { sessions: () => [world.sessions[0]!, { ...session('busy2', join(dir, 'transcripts', 'busy2.jsonl'), { cwd: '/elsewhere' }), updatedAt: iso(1e12 + looks) }], now: () => Date.now() + 2 * 3_600_000,
+      // It writes while the programs are listed, right before the conversations are judged.
+      cwds: async () => { looks++; await appendFile(join(dir, 'transcripts', 'busy2.jsonl'), lines({ type: 'user', timestamp: iso(Date.now()), message: { content: 'more' } })); return []; } });
+  await other.start(); t.after(() => other.close());
+  await other.pass();
+  assert.equal(existsSync(target), false);
+});
+
+test('once closed and flushed, a pass that was stuck writes nothing', async t => {
+  const { dir, state, add, transcript, session } = await setup(t);
+  const target = join(dir, 'work.wt-sealed');
+  const world = { sessions: [session('s', await transcript('s', add(`git worktree add --detach ${target} HEAD`, ['--detach', target, 'HEAD'])))], closed: new Set(['claude:s']) };
+  let release!: () => void;
+  const stuck = new Promise<void>(resolve => { release = resolve; });
+  const cleaner = janitor(state, world, { cwds: async () => { await stuck; return []; } });
+  await cleaner.start();
+  const pass = cleaner.pass();
+  await new Promise(resolve => setTimeout(resolve, 300));
+  cleaner.close();
+  await cleaner.flush();
+  release();
+  await pass;
+  assert.equal(existsSync(join(state, 'worktree-cleanup.json')), false);
+  assert.equal(existsSync(target), true);
+});
+
+test('edits hidden from git status, and a bare repository inside, keep the worktree; a folder name JSON escapes is still found', async t => {
+  const { dir, work, state, add, transcript, session } = await setup(t);
+  const hidden = join(dir, 'work.wt-hidden'), bare = join(dir, 'work.wt-bare'), quoted = join(dir, 'work.wt-"q"');
+  const rows = [...add(`git worktree add --detach ${hidden} HEAD`, ['--detach', hidden, 'HEAD']), ...add(`git worktree add --detach ${bare} HEAD`, ['--detach', bare, 'HEAD']),
+    ...add(`git worktree add --detach '${quoted}' HEAD`, ['--detach', quoted, 'HEAD'])];
+  git(hidden, 'update-index', '--skip-worktree', 'a.txt'); await writeFile(join(hidden, 'a.txt'), 'edited but hidden');
+  await writeFile(join(work, '.git', 'info', 'exclude'), 'backup.git/\n');
+  execFileSync('git', ['init', '-q', '--bare', join(bare, 'backup.git')], { env });
+  const world = { sessions: [session('h', await transcript('h', rows)), session('reader', await transcript('reader', [{ type: 'user', timestamp: iso(Date.now()), message: { content: `look at ${quoted}` } }]))],
+    closed: new Set(['claude:h']) };
+  const cleaner = janitor(state, world);
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  const results = new Map((await worktreeCleanupFor(state, ['claude:h'])).map(item => [item.path, item.reason]));
+  assert.deepEqual([results.get(hidden), results.get(bare), results.get(quoted)], ['changes', 'nested', 'openSession']);
+  assert.deepEqual([hidden, bare, quoted].map(existsSync), [true, true, true]);
 });

@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
 import { promisify } from 'node:util';
-import { dirname, join, sep } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import type { GitRunner } from '../repositories/git.js';
 
 const TIMEOUT_MS = 20_000;
@@ -16,8 +16,6 @@ export interface LinkedWorktree {
   /** When `git worktree add` created it: its administrative `commondir` file is written then and never again. */
   createdAt: number;
   locked: boolean;
-  /** Other worktrees of the repository inside this one (in an ignored folder): removing this one would delete them. */
-  nested: boolean;
 }
 
 /**
@@ -47,9 +45,7 @@ export async function linkedWorktree(git: GitRunner, path: string): Promise<Link
     return undefined;
   })();
   if (!own) return undefined;
-  const listed = await Promise.all(entries.flatMap(entry => entry.filter(line => line.startsWith('worktree ')).map(line => realpath(line.slice(9)).catch(() => line.slice(9)))));
-  return { path: real, main, createdAt: created.mtimeMs, locked: own.some(line => line === 'locked' || line.startsWith('locked ')),
-    nested: listed.some(other => other !== real && other.startsWith(real + sep)) };
+  return { path: real, main, createdAt: created.mtimeMs, locked: own.some(line => line === 'locked' || line.startsWith('locked ')) };
 }
 
 export interface Blocker { reason: 'locked' | 'nested' | 'changes' | 'unpushed' | 'unpublished'; detail?: string }
@@ -57,7 +53,6 @@ export interface Blocker { reason: 'locked' | 'nested' | 'changes' | 'unpushed' 
 /** Why removing this worktree would lose something, or undefined when everything in it is committed and published. */
 export async function removalBlocker(git: GitRunner, worktree: LinkedWorktree): Promise<Blocker | undefined> {
   if (worktree.locked) return { reason: 'locked' };
-  if (worktree.nested) return { reason: 'nested' };
   const status = await git(worktree.path, ['status', '--porcelain=v2', '--branch', '--untracked-files=normal'], TIMEOUT_MS);
   let branch: string | undefined, upstream: string | undefined, ahead: number | undefined;
   let changes = 0;
@@ -68,24 +63,51 @@ export async function removalBlocker(git: GitRunner, worktree: LinkedWorktree): 
     else if (/^[12u?] /.test(line)) changes++;
   }
   if (changes) return { reason: 'changes', detail: String(changes) };
-  // Another repository or worktree inside it, in a folder git ignores here, would go with it, uncommitted work and all.
-  if (await containsRepository(worktree.path)) return { reason: 'nested' };
+  // Files git was told not to look at (`update-index --assume-unchanged` / `--skip-worktree`) may hold edits status hides.
+  const hidden = (await git(worktree.path, ['ls-files', '-v'], TIMEOUT_MS)).split('\n').filter(line => /^(?:[a-z]|S) /.test(line)).length;
+  if (hidden) return { reason: 'changes', detail: String(hidden) };
   // Branches are never deleted, so their commits stay; commits not yet published mean the work is not over.
   // An upstream that is gone was published and then deleted on the remote, as merged pull requests are.
-  if (branch && upstream) return ahead ? { reason: 'unpushed', detail: `${branch} (${ahead})` } : undefined;
+  if (branch && upstream) return ahead ? { reason: 'unpushed', detail: `${branch} (${ahead})` } : nestedBlocker(git, worktree.path);
   // Without an upstream, and on a detached HEAD, which only the worktree holds: commits no remote (or branch or tag) has.
   const unpublished = Number((await git(worktree.path, ['rev-list', '--count', 'HEAD', '--not', '--remotes', ...(branch ? [] : ['--branches', '--tags'])], TIMEOUT_MS)).trim());
   if (!Number.isFinite(unpublished)) throw new Error('git rev-list gave no count');
   if (unpublished) return branch ? { reason: 'unpushed', detail: `${branch} (${unpublished})` } : { reason: 'unpublished', detail: String(unpublished) };
-  return undefined;
+  return nestedBlocker(git, worktree.path);
 }
 
 const execute = promisify(execFile);
 
-/** Whether any folder below the worktree's own top holds a `.git` (a repository, or another repository's worktree). */
-async function containsRepository(path: string): Promise<boolean> {
-  const { stdout } = await execute('find', [path, '-mindepth', '2', '-name', '.git', '-print', '-quit'], { timeout: 120_000, maxBuffer: 1024 * 1024 });
-  return stdout.trim().length > 0;
+const MOST_NESTED = 100;
+
+/**
+ * A repository inside the worktree, in a folder git ignores there, goes with it. That only loses nothing when it is a plain
+ * repository with nothing uncommitted and nothing it was meant to publish unpublished: test fixtures and fetched copies go,
+ * another repository's worktree or submodule (a `.git` file), or work in progress, keeps the worktree.
+ */
+async function nestedBlocker(git: GitRunner, path: string): Promise<Blocker | undefined> {
+  // `.git` folders and files, and the HEAD of any bare repository (one without a working tree, such as a backup).
+  const { stdout } = await execute('find', [path, '-mindepth', '2', '(', '-name', '.git', '-prune', '-print', ')', '-o', '(', '-name', 'HEAD', '-type', 'f', '-print', ')'],
+    { timeout: 120_000, maxBuffer: 4 * 1024 * 1024 });
+  const lines = stdout.split('\n').filter(Boolean);
+  for (const head of lines.filter(line => basename(line) === 'HEAD')) {
+    const folder = dirname(head);
+    const [objects, refs] = await Promise.all(['objects', 'refs'].map(name => stat(join(folder, name)).then(info => info.isDirectory(), () => false)));
+    if (objects && refs) return { reason: 'nested', detail: folder };
+  }
+  const found = lines.filter(line => basename(line) === '.git');
+  if (found.length > MOST_NESTED) return { reason: 'nested', detail: `${found.length} repositories` };
+  for (const dotGit of found) {
+    const folder = dirname(dotGit);
+    if (!(await stat(dotGit)).isDirectory()) return { reason: 'nested', detail: folder };
+    const status = await git(folder, ['status', '--porcelain', '--untracked-files=normal'], TIMEOUT_MS);
+    if (status.trim()) return { reason: 'nested', detail: folder };
+    if ((await git(folder, ['remote'], TIMEOUT_MS)).trim()) {
+      const unpublished = Number((await git(folder, ['rev-list', '--count', '--all', '--not', '--remotes'], TIMEOUT_MS)).trim());
+      if (!Number.isFinite(unpublished) || unpublished) return { reason: 'nested', detail: folder };
+    }
+  }
+  return undefined;
 }
 
 /** `git worktree remove` without force: git itself refuses when anything is modified or untracked. */

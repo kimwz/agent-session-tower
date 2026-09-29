@@ -52,7 +52,8 @@ function tokenize(command: string): Token[] | undefined {
       if (i >= command.length) dynamic = true;
       continue;
     }
-    if (c === '\\') { if (i + 1 < command.length && command[i + 1] !== '\n') { word += command[i + 1]; active = true; } i++; continue; }
+    // An escaped character is quoted: `\~` is a folder named ~, not home.
+    if (c === '\\') { if (i + 1 < command.length && command[i + 1] !== '\n') { word += command[i + 1]; active = true; if (!word.slice(0, -1)) quoted = true; } i++; continue; }
     if (c === '#' && !active) { const end = command.indexOf('\n', i); i = (end === -1 ? command.length : end) - 1; continue; }
     if (/\s/.test(c)) { finish(); continue; }
     if (c === '$' || c === '`') { dynamic = true; word += c; active = true; continue; }
@@ -99,7 +100,7 @@ function pathOf(word: Word, cwd: string | undefined, home: string, logical = fal
   if (word.dynamic || !word.text) return undefined;
   let text = word.text;
   if (!word.quoted && (text === '~' || text.startsWith('~/'))) text = join(home, text.slice(1));
-  else if (text.startsWith('~')) return undefined;
+  else if (!word.quoted && text.startsWith('~')) return undefined;
   if (isAbsolute(text)) return logical ? normalize(text) : text;
   if (!cwd) return undefined;
   return logical ? resolve(cwd, text) : `${cwd.replace(/\/+$/, '')}/${text}`;
@@ -138,6 +139,8 @@ export function worktreeAddPaths(command: string, cwd: string | undefined, home:
       const text = all[index]!.text;
       if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(text) && !all[index]!.quoted) { index++; continue; }
       // `then git …` still runs git, but from here on the folder depends on the condition.
+      // Code run from a string or a file: its words are parsed again by the shell, so nothing here is evidence.
+      if (text === 'eval' || text === 'source' || text === '.') { lost = true; return; }
       if (CONTROL.has(text) || text === '{' || text === '}') { lost = true; index++; continue; }
       if (['env', 'command', 'nohup', 'exec'].includes(text)) { index++; wrapped = true; continue; }
       if (text === 'timeout' || text === 'nice') { index++; wrapped = true; while (all[index] && /^-/.test(all[index]!.text)) index++; if (text === 'timeout') index++; continue; }
@@ -147,7 +150,7 @@ export function worktreeAddPaths(command: string, cwd: string | undefined, home:
     if (!name) return;
     const first = position++ === 0;
     if (name.dynamic) { lost = true; return; }
-    if (name.text === 'cd' || name.text === 'pushd' || name.text === 'popd') {
+    if (name.text === 'cd' || name.text === 'chdir' || name.text === 'pushd' || name.text === 'popd') {
       const target = all.length === index + 2 ? all[index + 1] : undefined;
       // Exactly one folder: zsh's `cd old new` and options change what it means.
       const plain = target && !target.dynamic && (isAbsolute(target.text) || /^\.\.?(?:\/|$)/.test(target.text) || (!target.quoted && /^~(?:\/|$)/.test(target.text)));
@@ -240,8 +243,11 @@ function shellText(value: unknown): string | undefined {
  */
 function jsExecCalls(source: string, cwd: string | undefined): ShellCall[] {
   const calls: ShellCall[] = [];
+  const code = codePositions(source);
   const pattern = /exec_command\(\s*\{/g;
   for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
+    // A call written in a comment or inside a string never ran.
+    if (!code[match.index]) continue;
     const fields = objectFields(source, pattern.lastIndex);
     if (!fields || typeof fields.cmd !== 'string' || ('workdir' in fields && typeof fields.workdir !== 'string')) continue;
     const workdir = fields.workdir as string | undefined;
@@ -280,6 +286,24 @@ function objectFields(source: string, start: number): Record<string, string | nu
     if (rest[1] === '}') return fields;
   }
   return undefined;
+}
+
+/** Which characters of JavaScript source are code, not a comment or the inside of a string or template. */
+function codePositions(source: string): boolean[] {
+  const code = new Array<boolean>(source.length).fill(false);
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i]!, next = source[i + 1];
+    if (c === '/' && next === '/') { const end = source.indexOf('\n', i); i = end === -1 ? source.length : end; continue; }
+    if (c === '/' && next === '*') { const end = source.indexOf('*/', i + 2); i = end === -1 ? source.length : end + 1; continue; }
+    if (c === '"' || c === "'" || c === '`') {
+      code[i] = true;
+      for (i++; i < source.length && source[i] !== c; i++) if (source[i] === '\\') i++;
+      code[i] = true;
+      continue;
+    }
+    code[i] = true;
+  }
+  return code;
 }
 
 function stringLiteral(source: string, start: number): { value: string; end: number } | undefined {

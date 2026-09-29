@@ -1,5 +1,5 @@
 import { homedir } from 'node:os';
-import { basename, join, sep } from 'node:path';
+import { basename, join, normalize, sep } from 'node:path';
 import { realpath } from 'node:fs/promises';
 import type { Run, Session, WorktreeCleanup, WorktreeKeptReason } from '../../shared/types.js';
 import { gitRunner, type GitRunner } from '../repositories/git.js';
@@ -71,8 +71,8 @@ export class WorktreeJanitor {
   private paused = false;
   private closed = false;
   private sealed = false;
-  /** Per session and transcript revision: the folder names looked for, and those it refers to. */
-  private readonly mentions = new Map<string, { searched: Set<string>; found: Set<string> }>();
+  /** Per open session: the folder names looked for, those its transcript refers to, and how far it was read. */
+  private readonly mentions = new Map<string, { file: string; end: number; searched: Set<string>; found: Set<string> }>();
   private readonly git: GitRunner;
   private readonly home: string;
   private readonly now: () => number;
@@ -174,7 +174,7 @@ export class WorktreeJanitor {
     const due = Object.entries(this.saved.worktrees).filter(([, entry]) => entry.state !== 'removed' && world.finishedRoots.has(entry.root)
       && (entry.state === 'pending' || now - entry.checkedAt >= RECHECK_MS));
     // Reads each open transcript once for every folder name; the checks before each removal then find them cached.
-    if (due.length) await this.referrers(world.open, [...new Set(due.map(([path]) => basename(path)))]);
+    if (due.length) await this.referrers(world.open, [...new Set(due.map(([path]) => basename(path)))], true);
     for (const [path, entry] of due) {
       if (this.stopping) break;
       await this.settle(path, entry, world);
@@ -189,7 +189,8 @@ export class WorktreeJanitor {
       if (this.stopping) return false;
       if (!member.filePath) continue;
       for (const creation of await unlessGone(transcriptCreations(member.filePath, member.provider, this.home, member.cwd || undefined), [])) {
-        const worktree = await linkedWorktree(this.git, creation.path);
+        // Written relative to a folder that is gone since (often another worktree the agent removed), the path is read as text.
+        const worktree = await linkedWorktree(this.git, creation.path) ?? (creation.path.includes('/..') ? await linkedWorktree(this.git, normalize(creation.path)) : undefined);
         if (!worktree || !createdBy(worktree, creation)) continue;
         const entry = this.saved.worktrees[worktree.path];
         if (entry && entry.createdAt === worktree.createdAt) { if (!entry.sessions.includes(member.id)) entry.sessions.push(member.id); continue; }
@@ -218,18 +219,24 @@ export class WorktreeJanitor {
       if (cwds.some(inside)) { keep('process'); return; }
       const reserved = await Promise.all((await this.options.reserved?.() ?? []).map(folder => this.resolved(folder)));
       if (reserved.some(inside)) { keep('reserved'); return; }
-      const now = await this.world();
-      if (!now.finishedRoots.has(entry.root)) return;
-      for (const session of now.open) {
-        const cwd = session.cwd && await this.resolved(session.cwd);
-        if (cwd && inside(cwd)) { keep('openSession', named(session)); return; }
+      // Conversations are judged last, and again until nothing changed while their transcripts were read (a few tries; a
+      // busy moment leaves the worktree for the next pass). Nothing waits between the last look and the removal.
+      const revision = (session: Session) => `${session.id}\0${session.updatedAt}\0${session.cwd}`;
+      let checked = new Set<string>();
+      for (let attempt = 0; ; attempt++) {
+        const now = await this.world();
+        if (this.stopping || !now.finishedRoots.has(entry.root)) return;
+        const changed = now.open.filter(session => !checked.has(revision(session)));
+        if (!changed.length) break;
+        if (attempt === 3) return;
+        for (const session of changed) {
+          const cwd = session.cwd && await this.resolved(session.cwd);
+          if (cwd && inside(cwd)) { keep('openSession', named(session)); return; }
+        }
+        const referrer = (await this.referrers(changed, [name])).get(name);
+        if (referrer) { keep('openSession', named(referrer)); return; }
+        checked = new Set(now.open.map(revision));
       }
-      const referrer = (await this.referrers(now.open, [name])).get(name);
-      if (referrer) { keep('openSession', named(referrer)); return; }
-      // The last look: nothing may have changed while transcripts were read. Between it and the removal nothing waits.
-      const last = await this.world();
-      const read = new Set(now.open.map(session => `${session.id}\0${session.updatedAt}\0${session.cwd}`));
-      if (this.stopping || !last.finishedRoots.has(entry.root) || last.open.some(session => !read.has(`${session.id}\0${session.updatedAt}\0${session.cwd}`))) return;
       this.removal = removeWorktree(this.git, worktree);
       try { await this.removal; } finally { this.removal = undefined; }
       Object.assign(entry, { state: 'removed', reason: undefined, detail: undefined, checkedAt: this.now() });
@@ -238,26 +245,34 @@ export class WorktreeJanitor {
     }
   }
 
-  /** The first open session referring to each folder name; each transcript is read once for all names it was not yet searched for. */
-  private async referrers(open: Session[], names: string[]): Promise<Map<string, Session>> {
+  /**
+   * The first open session referring to each folder name. Each transcript is read once for the names it was not yet searched
+   * for, and afterwards only from where the last read ended: a working session that grew meanwhile is caught up in a moment.
+   */
+  private async referrers(open: Session[], names: string[], forget = false): Promise<Map<string, Session>> {
     const referrers = new Map<string, Session>();
     const live = new Set<string>();
     for (const session of open) {
       if (this.stopping) break;
       if (!session.filePath) continue;
-      const key = `${session.id}\0${session.updatedAt}`;
-      live.add(key);
-      const known = this.mentions.get(key) ?? { searched: new Set<string>(), found: new Set<string>() };
-      const missing = names.filter(name => !known.searched.has(name));
-      if (missing.length) {
-        for (const name of await unlessGone(transcriptMentions(session.filePath, missing), new Set<string>())) known.found.add(name);
+      live.add(session.id);
+      let known = this.mentions.get(session.id);
+      if (known?.file !== session.filePath) known = { file: session.filePath, end: 0, searched: new Set(), found: new Set() };
+      const missing = names.filter(name => !known!.searched.has(name));
+      const unfound = [...known.searched].filter(name => !known!.found.has(name));
+      // New names are looked for from the start, together with those still not found; otherwise only what was appended.
+      const search = missing.length ? [...missing, ...unfound] : unfound;
+      if (search.length) {
+        const result = await unlessGone(transcriptMentions(session.filePath, search, missing.length ? 0 : known.end), { found: new Set<string>(), end: 0 });
+        for (const name of result.found) known.found.add(name);
         for (const name of missing) known.searched.add(name);
-        this.mentions.set(key, known);
+        known.end = result.end;
       }
+      this.mentions.set(session.id, known);
       for (const name of names) if (known.found.has(name) && !referrers.has(name)) referrers.set(name, session);
     }
-    // Revisions no open session has any more are dropped.
-    for (const key of this.mentions.keys()) if (!live.has(key)) this.mentions.delete(key);
+    // Sessions no longer open are dropped, when all open sessions were given.
+    if (forget) for (const id of this.mentions.keys()) if (!live.has(id)) this.mentions.delete(id);
     return referrers;
   }
 

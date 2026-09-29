@@ -1,4 +1,5 @@
 import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import type { Provider } from '../../shared/types.js';
 import { codexShellCalls, worktreeAddPaths } from './commands.js';
@@ -9,11 +10,23 @@ export interface Creation { path: string; start: number; end?: number }
 const MAX_LINE = 16 * 1024 * 1024;
 type Json = Record<string, any>;
 
-async function* rows(file: string, keep: (line: string) => boolean): AsyncGenerator<Json> {
-  const input = createReadStream(file, { encoding: 'utf8' });
+/**
+ * The rows of a transcript from byte `from`, as it is now. `read.end` becomes the end of the last whole line, where a later
+ * read of what was appended starts.
+ */
+async function* rows(file: string, keep: (line: string) => boolean, from = 0, read: { end: number } = { end: 0 }): AsyncGenerator<Json> {
+  const size = (await stat(file)).size;
+  read.end = Math.min(from, size);
+  if (from >= size) return;
+  const input = createReadStream(file, { encoding: 'utf8', start: from, end: size - 1 });
   const lines = createInterface({ input, crlfDelay: Infinity });
+  let offset = from;
   try {
     for await (const line of lines) {
+      const next = offset + Buffer.byteLength(line) + 1;
+      // A last line without its newline is still being written: it is read again next time.
+      if (next <= size) read.end = next;
+      offset = next;
       if (line.length > MAX_LINE || !keep(line)) continue;
       try { const row = JSON.parse(line); if (row && typeof row === 'object') yield row; } catch { /* A partial last line is skipped. */ }
     }
@@ -75,15 +88,18 @@ export async function transcriptCreations(file: string, provider: Provider, home
  * Which of `names` this transcript refers to in what its session did or was told: requests, answers, commands and the
  * folders it worked in. Tool output is left out, so a session that only listed worktrees does not hold them all.
  */
-export async function transcriptMentions(file: string, names: readonly string[]): Promise<Set<string>> {
+export async function transcriptMentions(file: string, names: readonly string[], from = 0): Promise<{ found: Set<string>; end: number }> {
   const found = new Set<string>();
-  const wanted = (line: string) => names.some(name => !found.has(name) && line.includes(name));
-  for await (const row of rows(file, wanted)) {
+  // Transcripts are JSON: a name is found as JSON writes it (a quote or backslash in it is escaped there).
+  const written = new Map(names.map(name => [name, JSON.stringify(name).slice(1, -1)]));
+  const wanted = (line: string) => names.some(name => !found.has(name) && line.includes(written.get(name)!));
+  const read = { end: from };
+  for await (const row of rows(file, wanted, from, read)) {
     const text = JSON.stringify(withoutOutput(row)) ?? '';
-    for (const name of names) if (text.includes(name)) found.add(name);
+    for (const name of names) if (text.includes(written.get(name)!)) found.add(name);
     if (found.size === names.length) break;
   }
-  return found;
+  return { found, end: read.end };
 }
 
 /**
