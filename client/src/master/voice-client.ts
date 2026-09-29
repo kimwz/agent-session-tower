@@ -429,7 +429,8 @@ export class VoiceSession {
       socket.onmessage = event => {
         let message: { message_type?: string; text?: string; error?: string };
         try { message = JSON.parse(String(event.data)); } catch { return; }
-        if (message.message_type === 'partial_transcript' && this.utterance === utterance) this.written(utterance, String(message.text ?? ''));
+        // Writing that comes while the last part is awaited is kept too, in case that part never comes.
+        if (message.message_type === 'partial_transcript') { if (this.utterance === utterance) this.written(utterance, String(message.text ?? '')); else utterance.partial = String(message.text ?? ''); }
         else if (message.message_type === 'committed_transcript' || message.message_type === 'committed_transcript_with_timestamps') this.committed(utterance, String(message.text ?? ''));
         else if (message.message_type && STT_ERRORS.has(message.message_type)) utterance.settle(new Error(message.error ?? message.message_type));
       };
@@ -514,6 +515,8 @@ export class VoiceSession {
     try {
       text = (await Promise.race([utterance.done, new Promise<string>((_, reject) => setTimeout(() => reject(new Error('받아쓰기가 늦어 버렸습니다.')), COMMIT_MS))])).trim();
     } catch (error) {
+      // Called off (voice ended, listening muted): nothing goes.
+      if (utterance.closed) return;
       // Late or cut off: what was written down so far goes, rather than nothing.
       text = joinSegments([...utterance.segments, utterance.partial]);
       if (!text) this.show({ error: `받아쓰지 못했습니다: ${errorText(error)}` });

@@ -812,3 +812,26 @@ test('a short request is committed once, and a final writing that is late or cut
     assert.deepEqual(requests().at(-1), '테스트 결과 보여 줘', 'sent with what was written down so far');
   } finally { page.end(); }
 });
+
+test('writing that comes while the last part is awaited is what goes if that part never comes, and muting meanwhile sends nothing', async () => {
+  const page = await harness();
+  try {
+    const socket = await startSpeaking(page, '배포해 줘');
+    await page.hearSlowly(0.002, 1_500);
+    assert.equal(commits(socket), 1);
+    socket.message({ message_type: 'partial_transcript', text: '배포해 줘 대신 운영은 건드리지 마' });
+    mock.timers.tick(4_000);
+    await flush();
+    assert.deepEqual(requests(), ['배포해 줘 대신 운영은 건드리지 마']);
+    socket.closed();
+    await flush();
+
+    const muted = await startSpeaking(page, '서버 재시작해 줘');
+    await page.hearSlowly(0.002, 1_500);
+    assert.equal(commits(muted), 1);
+    page.voice.mute();
+    mock.timers.tick(4_000);
+    await flush();
+    assert.deepEqual(requests(), ['배포해 줘 대신 운영은 건드리지 마'], 'called off, not sent');
+  } finally { page.end(); }
+});
