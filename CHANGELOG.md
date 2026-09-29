@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.73.0] - 2026-09-29
+
+### Changed
+- **The master's first words after a spoken request fit the request, and no recorded sentence is said any more.** Instead of "네, 확인해 볼게요." picked at random, Claude's fastest model (Haiku, thinking off, no tools) writes one short sentence from what you said, such as "SORI 광고 성과를 확인해 볼게요.", while the request goes to the master.
+  - It states no facts or results and asks nothing; for a greeting or a thank-you nothing is said.
+  - While voice is on, one Claude Code process waits ready, so the sentence comes 0.7–1 s after the request (measured), and it is heard before the master's answer. One not ready within 2.5 s, or ready only after the answer began, is not said.
+  - It runs only through your Claude subscription sign-in (checked before every process starts), keeps no conversation anywhere and never appears as a session. Without a Claude subscription sign-in, nothing is said before the answer.
+  - Each one counts against the daily voice limit: its reading, and $0.002 for the model call.
+  - The master is told such a sentence may already have been said, so it starts with the substance.
+- **"아직 하고 있어요." is gone.** A long turn is heard through what the master writes as it works. Recordings kept for the old sentences are removed.
+
 ## [1.72.0] - 2026-09-29
 
 ### Changed
