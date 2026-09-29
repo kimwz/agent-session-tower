@@ -10,7 +10,7 @@ async function homes(t: test.TestContext) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-skills-')));
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, 'home');
-  const result = { home, agentsHome: join(home, '.agents'), claudeHome: join(home, '.claude'), codexHome: join(home, '.codex'), trash: join(root, 'state', 'skills-trash') };
+  const result = { home, agentsHome: join(home, '.agents'), claudeHome: join(home, '.claude'), codexHome: join(home, '.codex'), trash: join(root, 'state', 'skills-trash'), store: join(root, 'state', 'skills'), journal: join(root, 'state', 'skills-moves.json') };
   await mkdir(result.claudeHome, { recursive: true }); await mkdir(result.codexHome, { recursive: true });
   return { ...result, files: new SkillFiles(result) };
 }
@@ -27,12 +27,14 @@ test('a SKILL.md keeps every frontmatter key Tower does not own when its name an
   assert.equal(parseSkillFile("---\nname: a\ndescription: 'It''s folded'\n---\nx").description, "It's folded");
 });
 
-test('a new global skill is written once in ~/.agents/skills and linked into Claude Code, so both agents find it', async t => {
+test('a new skill is kept in Tower’s own folder and linked into both agents’ folders', async t => {
   const f = await homes(t);
   const skill = await f.files.save({ scope: 'global', name: 'cross-review', description: 'Use for new work.', body: '1. Design\n2. Review' });
-  assert.equal(skill.dir, join(f.agentsHome, 'skills', 'cross-review'));
+  assert.equal(skill.dir, join(f.store, 'global', 'cross-review'));
+  assert.equal(skill.managed, true);
   assert.deepEqual(skill.providers, ['claude', 'codex']);
-  assert.equal(await readlink(join(f.claudeHome, 'skills', 'cross-review')), '../../.agents/skills/cross-review');
+  assert.equal(await readlink(join(f.claudeHome, 'skills', 'cross-review')), skill.dir, 'linked by its absolute path');
+  assert.equal(await readlink(join(f.agentsHome, 'skills', 'cross-review')), skill.dir);
   // Reached through a linked folder (like /tmp on macOS), the link still leads to the skill.
   const linkedHome = join(f.home, '..', 'linked-home');
   await symlink(f.home, linkedHome);
@@ -90,8 +92,10 @@ test('a project shows its own skills, those of folders up to its repository root
   assert.deepEqual(projectFolders(join(f.home, 'loose'), f.home), [join(f.home, 'loose')], 'outside a repository only the folder itself');
   await f.files.save({ scope: 'global', name: 'global-one', description: 'g', body: '' });
   const rootSkill = await f.files.save({ scope: 'project', cwd: repo, name: 'deploy', description: 'repo deploy', body: '' });
-  assert.equal(rootSkill.dir, join(repo, '.agents', 'skills', 'deploy'));
-  assert.equal(await readlink(join(repo, '.claude', 'skills', 'deploy')), '../../.agents/skills/deploy');
+  assert.match(rootSkill.dir, new RegExp(`^${f.store}/projects/repo-[0-9a-f]{8}/deploy$`));
+  assert.deepEqual(JSON.parse(await readFile(join(rootSkill.dir, '..', 'project.json'), 'utf8')), { cwd: repo });
+  assert.equal(await readlink(join(repo, '.claude', 'skills', 'deploy')), rootSkill.dir);
+  assert.equal(await readlink(join(repo, '.agents', 'skills', 'deploy')), rootSkill.dir);
   await f.files.save({ scope: 'project', cwd: app, name: 'app-only', description: 'a', body: '' });
   const listed = await f.files.list(app);
   assert.deepEqual(listed.map(skill => [skill.name, skill.scope, skill.cwd ?? '']), [['app-only', 'project', app], ['deploy', 'project', repo], ['global-one', 'global', '']]);

@@ -1,11 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { access, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { constants, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, dirname, join, relative, resolve } from 'node:path';
-import type { Skill, SkillDetail, SkillProvider, SkillScope } from '../../shared/skills.js';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
+import type { Skill, SkillBundleSkill, SkillDetail, SkillProvider, SkillScope } from '../../shared/skills.js';
 import { MAX_SKILL_BODY, MAX_SKILL_DESCRIPTION, SKILL_NAME } from '../../shared/skills.js';
 import { formatSkillFile, parseSkillFile } from './skill-file.js';
+import { asideOf, bundleFiles, containsLink, excludeLinks, projectKey, readMoves, trackedByGit, writeBundleFiles, writeMoves, type SkillMove } from './store.js';
 
 export interface SkillHomes {
   /** The account's home folder: project skills are never looked for at or above it. */
@@ -18,9 +19,13 @@ export interface SkillHomes {
   codexHome: string;
   /** Where deleted skills are moved, so a deletion can be undone by hand. */
   trash: string;
+  /** Tower's own skill folder, `<state>/skills`: the skills Tower keeps, backed up and moved with it. */
+  store: string;
+  /** Moves into the store in progress, finished or undone at the next start. */
+  journal: string;
 }
 /** `base` is the folder the root must stay inside: no link between it and the root may lead elsewhere. */
-interface Root { dir: string; base: string; scope: SkillScope; provider: SkillProvider; cwd?: string; canonical: boolean }
+interface Root { dir: string; base: string; scope: SkillScope; provider?: SkillProvider; cwd?: string; canonical: boolean }
 export interface SkillWrite {
   /** An existing skill's folder; absent to create one. */
   dir?: string;
@@ -38,15 +43,16 @@ const MAX_FILE = 256 * 1024;
 export function skillHomes(stateDir: string, env: NodeJS.ProcessEnv = process.env): SkillHomes {
   const home = homedir();
   return { home, agentsHome: join(home, '.agents'), claudeHome: env.CLAUDE_CONFIG_DIR || join(home, '.claude'),
-    codexHome: env.CODEX_HOME || join(home, '.codex'), trash: join(stateDir, 'skills-trash') };
+    codexHome: env.CODEX_HOME || join(home, '.codex'), trash: join(stateDir, 'skills-trash'),
+    store: join(stateDir, 'skills'), journal: join(stateDir, 'skills-moves.json') };
 }
 export class SkillError extends Error {
   constructor(message: string, readonly statusCode = 400) { super(message); }
 }
 
 /**
- * The skill folders both agents read. A skill is written once in the shared `.agents/skills` folder (global or in the
- * project) and linked into Claude Code's `skills` folder, the layout the `skills` command also uses.
+ * The skill folders both agents read, and Tower's own store. A skill made in Tower is kept in the store and linked into
+ * each agent's folder (`.agents/skills` for Codex, `.claude/skills` for Claude Code), globally or in the project.
  */
 export class SkillFiles {
   constructor(private readonly homes: SkillHomes) {}
@@ -61,12 +67,31 @@ export class SkillFiles {
       { dir: join(dir, '.agents', 'skills'), base: dir, scope: 'project', provider: 'codex', cwd: dir, canonical: dir === cwd },
       { dir: join(dir, '.claude', 'skills'), base: dir, scope: 'project', provider: 'claude', cwd: dir, canonical: false },
     );
+    // Tower's store comes last: a stored skill is found through its links first, and alone when they are missing.
+    roots.push({ dir: join(this.homes.store, 'global'), base: this.homes.store, scope: 'global', canonical: false });
+    for (const dir of projectFolders(cwd, this.homes.home)) roots.push({ dir: this.projectStore(dir), base: this.homes.store, scope: 'project', cwd: dir, canonical: false });
     return roots;
+  }
+
+  private projectStore(cwd: string): string { return join(this.homes.store, 'projects', projectKey(cwd)); }
+
+  private async storeReal(): Promise<string> { return realpath(this.homes.store).catch(() => resolve(this.homes.store)); }
+
+  /** Makes the store folder a skill of `scope` goes to, with the project's path beside it. */
+  private async storeRoot(scope: SkillScope, cwd?: string): Promise<string> {
+    await mkdir(this.homes.store, { recursive: true, mode: 0o700 });
+    if (scope === 'global') { await ensureRoot({ dir: join(this.homes.store, 'global'), base: this.homes.store, scope, canonical: false }); return join(this.homes.store, 'global'); }
+    const dir = this.projectStore(cwd!);
+    await ensureRoot({ dir, base: this.homes.store, scope, cwd, canonical: false });
+    const file = join(dir, 'project.json');
+    if (!existsSync(file)) await writeFile(file, `${JSON.stringify({ cwd: resolve(cwd!) }, null, 2)}\n`);
+    return dir;
   }
 
   /** Every skill the agents find here: the global ones, and the project's own when a project is given. */
   async list(cwd?: string): Promise<Skill[]> {
     const external = await this.installedBySkillsCommand();
+    const store = await this.storeReal();
     const found = new Map<string, Skill>();
     for (const root of this.roots(cwd)) {
       let names: string[];
@@ -76,14 +101,14 @@ export class SkillFiles {
         const dir = await realpath(join(root.dir, name)).catch(() => undefined);
         if (!dir || !(await stat(dir).catch(() => undefined))?.isDirectory()) continue;
         const existing = found.get(dir);
-        if (existing) { if (!existing.providers.includes(root.provider)) existing.providers.push(root.provider); continue; }
+        if (existing) { if (root.provider && !existing.providers.includes(root.provider)) existing.providers.push(root.provider); continue; }
         const text = await readSkillText(join(dir, 'SKILL.md'));
         if (text === undefined) continue;
         const parsed = parseSkillFile(text);
         found.set(dir, {
           dir, name: parsed.name?.trim() || name, description: (parsed.description ?? '').trim(),
-          scope: root.scope, ...(root.cwd ? { cwd: root.cwd } : {}), providers: [root.provider], pinned: false,
-          external: root.scope === 'global' && external.has(basename(dir)), revision: revisionOf(text),
+          scope: root.scope, ...(root.cwd ? { cwd: root.cwd } : {}), providers: root.provider ? [root.provider] : [], pinned: false,
+          external: root.scope === 'global' && external.has(basename(dir)), managed: dir.startsWith(store + sep), revision: revisionOf(text),
         });
       }
     }
@@ -94,7 +119,9 @@ export class SkillFiles {
       groups.set(key, [...groups.get(key) ?? [], skill]);
     }
     const skills: Skill[] = [];
-    for (const [first, ...others] of groups.values()) {
+    for (const group of groups.values()) {
+      // The copy Tower keeps is the one listed, edited and kept when copies are merged.
+      const [first, ...others] = [...group.filter(skill => skill.managed), ...group.filter(skill => !skill.managed)];
       if (!others.length) { skills.push(first); continue; }
       const all = [first, ...others];
       const digests = await Promise.all(all.map(skill => folderDigest(skill.dir)));
@@ -138,7 +165,7 @@ export class SkillFiles {
     for (const copy of skill.copies) {
       if (copy.dir === skill.dir || !roots.has(dirname(copy.dir))) continue;
       // The link is made first beside the copy, then swapped in; if that fails, the copy comes back from the trash.
-      const link = `${copy.dir}.tower-link-${randomUUID().slice(0, 8)}`;
+      const link = join(dirname(copy.dir), `.${basename(copy.dir)}.tower-link-${randomUUID().slice(0, 8)}`);
       await symlink(relative(dirname(copy.dir), skill.dir), link, 'dir');
       let kept: string;
       try { kept = await this.trash(copy.dir); }
@@ -151,6 +178,202 @@ export class SkillFiles {
       }
     }
     return this.find(skill.dir, cwd);
+  }
+
+  adopt(dir: string, cwd?: string): Promise<{ skill: Skill; from: string[] }> { return this.serial(() => this.adoptNow(dir, cwd)); }
+  /** Finishes or undoes the moves a crash interrupted; run before skills serve anything. Returns the finished ones. */
+  recover(): Promise<SkillMove[]> { return this.serial(() => this.recoverNow()); }
+  /** Moves in progress right now, so a pin on an old place still counts. */
+  pending(): readonly SkillMove[] { return this.moving; }
+  private moving: SkillMove[] = [];
+
+  /**
+   * Moves a skill kept elsewhere into Tower's store: its folder is copied in, and every place it was (identical copies
+   * included) becomes a link to the stored one; the other agent gets a link too. The move is recorded before anything
+   * changes: until the copy is complete a crash undoes it, after that the next start finishes it.
+   */
+  private async adoptNow(dir: string, cwd?: string): Promise<{ skill: Skill; from: string[] }> {
+    const skill = await this.find(dir, cwd);
+    if (skill.managed) return { skill, from: [] };
+    if (skill.copiesDiffer) throw new SkillError('에이전트별 복사본의 내용이 달라 옮길 수 없습니다. 먼저 하나로 정리하세요.', 409);
+    const roots = await this.realRoots(skill.cwd);
+    const places = [skill.dir, ...(skill.copies ?? []).map(copy => copy.dir).filter(place => place !== skill.dir)];
+    if (places.some(place => !roots.has(dirname(place)))) throw new SkillError('스킬 폴더 밖에 있는 스킬은 옮길 수 없습니다.', 409);
+    if (await containsLink(skill.dir)) throw new SkillError('스킬 폴더 안에 링크가 있어 옮길 수 없습니다. 링크가 가리키는 파일이 따라오지 않습니다.', 409);
+    // A folder git tracks (a project's shared skill, or a dotfiles repository) would show as deleted, and a commit would
+    // remove it for everyone; git would also turn the link back into a folder on the next checkout.
+    for (const place of places) if (await trackedByGit(place)) throw new SkillError('git이 관리하는 스킬 폴더라 옮기지 않습니다. 저장소에서 함께 쓰는 스킬은 그대로 두세요.', 409);
+    for (const place of places) {
+      try { await access(dirname(place), constants.W_OK); }
+      catch { throw new SkillError('스킬이 있는 폴더에 쓸 수 없어 옮길 수 없습니다.', 409); }
+    }
+    const root = await this.storeRoot(skill.scope, skill.cwd);
+    const to = join(root, basename(skill.dir));
+    if (await lstat(to).catch(() => undefined)) throw new SkillError('타워에 같은 이름의 스킬이 이미 있습니다.', 409);
+    const id = randomUUID().replace(/-/g, '').slice(0, 8);
+    const move: SkillMove = { id, to, incoming: join(root, `.incoming-${id}`), places };
+    await this.journal(moves => [...moves, move]);
+    this.moving = [...this.moving, move];
+    try {
+      try {
+        await cp(skill.dir, move.incoming, { recursive: true, errorOnExist: true, force: false });
+        await rename(move.incoming, to);
+      } catch (error) { await this.settle(move).catch(() => {}); throw error; }
+      await this.settle(move);
+    } finally { this.moving = this.moving.filter(item => item !== move); }
+    return { skill: await this.find(to, cwd), from: places };
+  }
+
+  /**
+   * Brings one recorded move to an end from what is on disk. Before the stored copy is complete the move is undone;
+   * once it is, every place becomes a link to it, whatever step a crash stopped at. Each step can be repeated.
+   */
+  private async settle(move: SkillMove): Promise<boolean> {
+    const aside = (place: string) => asideOf(place, move.id), link = (place: string) => join(dirname(place), `.${basename(place)}.tower-link-${move.id}`);
+    for (const place of move.places) if ((await lstat(link(place)).catch(() => undefined))?.isSymbolicLink()) await unlink(link(place));
+    const stored = await lstat(move.to).catch(() => undefined);
+    if (!stored?.isDirectory()) {
+      for (const place of move.places) if (!await lstat(place).catch(() => undefined) && await lstat(aside(place)).catch(() => undefined)) await rename(aside(place), place);
+      await rm(move.incoming, { recursive: true, force: true });
+      await this.journal(moves => moves.filter(item => item.id !== move.id));
+      return false;
+    }
+    for (const place of move.places) {
+      const at = await lstat(place).catch(() => undefined);
+      if (at?.isSymbolicLink()) continue;
+      if (!at) { await symlink(move.to, place, 'dir'); continue; }
+      if (!at.isDirectory()) continue;
+      await symlink(move.to, link(place), 'dir');
+      await rename(place, aside(place));
+      await rename(link(place), place);
+    }
+    await rm(move.incoming, { recursive: true, force: true });
+    await this.finish(move);
+    return true;
+  }
+
+  private async finish(move: SkillMove): Promise<void> {
+    const skill = await this.find(move.to).catch(() => undefined) ?? await this.findStored(move.to);
+    if (skill) await this.linkNow(skill.dir, skill.cwd);
+    for (const place of move.places) {
+      const aside = asideOf(place, move.id);
+      if (await lstat(aside).catch(() => undefined)) await this.trash(aside);
+    }
+    await this.journal(moves => moves.filter(item => item.id !== move.id));
+    this.finished.push(move);
+  }
+  private finished: SkillMove[] = [];
+
+  /** Store folders Tower may clean up: real folders inside its own, never a link leading elsewhere. */
+  private async storeFolders(): Promise<string[]> {
+    const real = async (path: string) => { const info = await lstat(path).catch(() => undefined); return Boolean(info?.isDirectory() && !info.isSymbolicLink()); };
+    if (!await real(this.homes.store)) return [];
+    const folders: string[] = [];
+    if (await real(join(this.homes.store, 'global'))) folders.push(join(this.homes.store, 'global'));
+    if (await real(join(this.homes.store, 'projects'))) {
+      for (const key of await readdir(join(this.homes.store, 'projects')).catch(() => [] as string[])) {
+        if (await real(join(this.homes.store, 'projects', key))) folders.push(join(this.homes.store, 'projects', key));
+      }
+    }
+    return folders;
+  }
+
+  private async recoverNow(): Promise<SkillMove[]> {
+    this.finished = [];
+    const folders = await this.storeFolders();
+    for (const move of await readMoves(this.homes.journal)) {
+      // Only a move into one of Tower's own folders is touched; anything else in the record is dropped as it is.
+      if (!folders.includes(dirname(move.to)) || dirname(move.incoming) !== dirname(move.to)) { await this.journal(moves => moves.filter(item => item.id !== move.id)); continue; }
+      // One move that cannot be settled now (a folder not writable, say) stays recorded and never blocks the others.
+      try { await this.settle(move); }
+      catch (error) { console.error(`A skill move could not be settled yet: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    // An import or replacement stopped half way: a replaced skill whose new copy never arrived comes back.
+    for (const folder of folders) {
+      for (const name of await readdir(folder).catch(() => [] as string[])) {
+        const path = join(folder, name);
+        if (/^\.incoming-[0-9a-f]{8}$/.test(name)) { await rm(path, { recursive: true, force: true }); continue; }
+        const aside = name.match(/^\.([a-z0-9][a-z0-9-]{0,63})\.tower-old-[0-9a-f]{8}$/)?.[1];
+        if (!aside || !(await lstat(path).catch(() => undefined))?.isDirectory()) continue;
+        try {
+          if (await lstat(join(folder, aside)).catch(() => undefined)) await this.trash(path);
+          else await rename(path, join(folder, aside));
+        } catch (error) { console.error(`A replaced skill could not be restored yet: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+    }
+    return this.finished.splice(0);
+  }
+
+  private async journal(change: (moves: SkillMove[]) => SkillMove[]): Promise<void> {
+    await mkdir(dirname(this.homes.journal), { recursive: true, mode: 0o700 });
+    await writeMoves(this.homes.journal, change(await readMoves(this.homes.journal)));
+  }
+
+  /** A stored skill found by its own folder, whatever project it belongs to. */
+  private async findStored(dir: string): Promise<Skill | undefined> {
+    return (await this.managed()).find(skill => skill.dir === dir);
+  }
+
+  /** Every skill Tower keeps: the global ones and those of every project it has a folder for. */
+  async managed(): Promise<Skill[]> {
+    const cwds: string[] = [];
+    for (const key of await readdir(join(this.homes.store, 'projects')).catch(() => [] as string[])) {
+      try {
+        const saved = JSON.parse(await readFile(join(this.homes.store, 'projects', key, 'project.json'), 'utf8')) as { cwd?: unknown };
+        if (typeof saved.cwd === 'string' && this.projectStore(saved.cwd) === join(this.homes.store, 'projects', key)) cwds.push(saved.cwd);
+      } catch { /* A folder without its project record is not Tower's. */ }
+    }
+    const seen = new Set<string>();
+    const all: Skill[] = [];
+    for (const cwd of [undefined, ...cwds]) {
+      for (const skill of await this.list(cwd)) {
+        if (!skill.managed || seen.has(skill.dir) || (cwd && skill.scope === 'project' && skill.cwd !== cwd)) continue;
+        seen.add(skill.dir);
+        all.push(skill);
+      }
+    }
+    return all;
+  }
+
+  /** The chosen stored skills as backup entries: their files, where they belong and what they are. */
+  async bundle(dirs: string[]): Promise<Omit<SkillBundleSkill, 'pinned'>[]> {
+    const stored = await this.managed();
+    const chosen = dirs.map(dir => stored.find(skill => skill.dir === dir));
+    if (chosen.some(skill => !skill)) throw new SkillError('타워가 관리하는 스킬만 백업할 수 있습니다.', 404);
+    return Promise.all(chosen.map(async skill => ({ name: basename(skill!.dir), description: skill!.description, scope: skill!.scope,
+      ...(skill!.scope === 'project' && skill!.cwd ? { project: { cwd: skill!.cwd, title: basename(skill!.cwd) } } : {}),
+      files: await bundleFiles(skill!.dir) })));
+  }
+
+  /** What is in the way of a backed-up skill here: nothing, a Tower skill that may be replaced, or a skill Tower does not keep. */
+  async conflict(name: string, scope: SkillScope, cwd?: string): Promise<'new' | 'managed' | 'external'> {
+    const store = join(scope === 'global' ? join(this.homes.store, 'global') : this.projectStore(cwd!), name);
+    const agents = this.roots(cwd).filter(root => root.provider && root.scope === scope && (scope === 'global' || root.cwd === cwd));
+    const real = await this.storeReal();
+    for (const root of agents) {
+      const path = join(root.dir, name);
+      if (!await lstat(path).catch(() => undefined)) continue;
+      const target = await realpath(path).catch(() => '');
+      if (!target.startsWith(real + sep)) return 'external';
+    }
+    return await lstat(store).catch(() => undefined) ? 'managed' : 'new';
+  }
+
+  /** Writes a backed-up skill into the store, replacing a Tower skill of that name only when asked, and links it. */
+  install(item: SkillBundleSkill, cwd: string | undefined, replace: boolean): Promise<Skill> {
+    return this.serial(async () => {
+      const conflict = await this.conflict(item.name, item.scope, cwd);
+      if (conflict === 'external' || conflict === 'managed' && !replace) throw new SkillError('같은 이름의 스킬이 이미 있습니다.', 409);
+      const root = await this.storeRoot(item.scope, cwd);
+      const target = join(root, item.name), id = randomUUID().replace(/-/g, '').slice(0, 8);
+      const incoming = join(root, `.incoming-${id}`), aside = asideOf(target, id);
+      await writeBundleFiles(incoming, item.files).catch(async error => { await rm(incoming, { recursive: true, force: true }); throw error; });
+      if (conflict === 'managed') await rename(target, aside);
+      try { await rename(incoming, target); }
+      catch (error) { if (conflict === 'managed') await rename(aside, target).catch(() => {}); await rm(incoming, { recursive: true, force: true }); throw error; }
+      if (conflict === 'managed') await this.trash(aside);
+      return this.linkNow(target, cwd);
+    });
   }
 
   private async realRoots(cwd?: string): Promise<Set<string>> {
@@ -172,17 +395,17 @@ export class SkillFiles {
     if (Buffer.byteLength(input.body) > MAX_SKILL_BODY) throw new SkillError('스킬 내용이 너무 깁니다.');
     if (input.dir) return this.update(input.dir, input.cwd, name, description, input.body, input.revision);
     if (input.scope === 'project' && !input.cwd) throw new SkillError('프로젝트 스킬은 프로젝트 폴더가 필요합니다.');
-    const roots = this.roots(input.scope === 'project' ? input.cwd : undefined).filter(root => root.scope === input.scope);
-    const canonical = roots.find(root => root.canonical)!;
-    const dir = join(canonical.dir, name);
+    const cwd = input.scope === 'project' ? resolve(input.cwd!) : undefined;
+    const roots = this.roots(cwd).filter(root => root.scope === input.scope && (root.scope === 'global' || root.cwd === cwd || !root.provider));
     for (const root of roots) {
       if (await lstat(join(root.dir, name)).catch(() => undefined)) throw new SkillError('같은 이름의 스킬이 이미 있습니다.', 409);
     }
-    await ensureRoot(canonical);
+    // A skill made in Tower lives in Tower's store; the agents reach it through links.
+    const dir = join(await this.storeRoot(input.scope, cwd), name);
     await mkdir(dir);
     await writeFile(join(dir, 'SKILL.md'), formatSkillFile({ name, description, body: input.body }), { flag: 'wx' });
-    await this.linkNow(dir, input.scope === 'project' ? input.cwd : undefined);
-    return this.find(dir, input.cwd);
+    await this.linkNow(dir, cwd);
+    return this.find(dir, cwd);
   }
 
   /** Links a skill into every agent's folder of its scope that does not have it yet. */
@@ -196,9 +419,11 @@ export class SkillFiles {
       const path = join(root.dir, basename(skill.dir));
       if (await lstat(path).catch(() => undefined)) throw new SkillError('연결할 스킬 폴더에 같은 이름이 이미 있습니다.', 409);
       await ensureRoot(root);
-      // Relative to the folder's real place, so the link holds when part of the path is itself a link (/tmp on macOS).
-      await symlink(relative(await realpath(root.dir), skill.dir), path, 'dir');
+      // A stored skill is linked by its absolute path; others relative to the folder's real place, so the link holds
+      // when part of the path is itself a link (/tmp on macOS).
+      await symlink(skill.managed ? skill.dir : relative(await realpath(root.dir), skill.dir), path, 'dir');
     }
+    if (skill.managed && skill.scope === 'project' && skill.cwd) await excludeLinks(skill.cwd, basename(skill.dir), true);
     return this.find(skill.dir, cwd);
   }
 
@@ -224,6 +449,7 @@ export class SkillFiles {
         if (leads.some(lead => folders.includes(lead))) await unlink(path);
       }
     }
+    // The exclude lines stay: other worktrees of the repository share them, and the owner may have written the same line.
   }
 
   private async update(dir: string, cwd: string | undefined, name: string, description: string, body: string, revision?: string): Promise<Skill> {

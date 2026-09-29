@@ -2,7 +2,7 @@ import { finishedAutomationSessionIds } from '../../shared/automation-sessions.j
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { hostname } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import type { AutoPromptRequest, CreateSessionRequest, MessageAttachments, RunApprovalResponse, Snapshot } from '../../shared/types.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { AutoPromptManager } from '../auto-prompt/manager.js';
@@ -37,12 +37,13 @@ import { RemoteExclusionStore } from '../remote/exclusions.js';
 import { remoteTriggerLaunch } from '../remote/visibility.js';
 import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
 import { SkillService } from '../skills/service.js';
+import { installAgentGuidance } from '../agent-guidance/install.js';
 import { PermissionService } from '../permissions/service.js';
 import { skillHomes } from '../skills/files.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
 import { MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
-const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary']);
+const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan']);
 
 export interface RunnerHostOptions {
   stateDir: string;
@@ -208,6 +209,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'skillsDetail': if (options.skills) return options.skills.detail(record(args[0])); break;
       case 'skillsSummary': if (options.skills) return options.skills.summary(); break;
       case 'skillsMutate': if (options.skills) return options.skills.mutate(String(args[0]), record(args[1])); break;
+      case 'skillsExport': if (options.skills) return options.skills.exportBundle(record(args[0])); break;
+      case 'skillsImportPlan': if (options.skills) return options.skills.importPlan(args[0]); break;
       case 'publicAgentsOverview': if (options.publicAgents) return options.publicAgents.overview(); break;
       case 'publicAgentsConversation': if (options.publicAgents) return options.publicAgents.conversation(args[0] as string, args[1] as string); break;
       case 'publicAgentsMutate': if (options.publicAgents) return options.publicAgents.mutate(args[0] as string, args[1] as Record<string, unknown>); break;
@@ -482,7 +485,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       projects: () => (visible.snapshot().groups ?? []).map(group => group.cwd),
       history: async (session, limit) => (await sessions.detail(runs.nativeSessionId(session.id), undefined, limit))?.messages,
       model: (request, options) => runAutoPromptModel(request, { stateDir, ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) }),
-      advise: resolve(stateDir) === resolve(defaultStateDir()) });
+      advise: resolve(stateDir) === resolve(defaultStateDir()),
+      // Only the Tower on the account's own state folder points the agents' global instructions at itself.
+      ...(resolve(stateDir) === resolve(defaultStateDir()) ? { installGuidance: async () => { await installAgentGuidance({ stateDir, claudeHome: process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), codexHome: process.env.CODEX_HOME || join(homedir(), '.codex') }); } } : {}) });
     // Skills never keep the worker from starting.
     await skills.start().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
     const permissions = new PermissionService({ stateDir, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),

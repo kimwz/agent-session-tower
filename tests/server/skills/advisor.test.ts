@@ -28,7 +28,7 @@ async function fixture(t: test.TestContext, answer: (request: AutoPromptModelReq
   const histories = new Map<string, ChatMessage[]>();
   const calls: AutoPromptModelRequest[] = [];
   const service = new SkillService({
-    stateDir, homes: { home, agentsHome: join(home, '.agents'), claudeHome: join(home, '.claude'), codexHome: join(home, '.codex'), trash: join(stateDir, 'trash') },
+    stateDir, homes: { home, agentsHome: join(home, '.agents'), claudeHome: join(home, '.claude'), codexHome: join(home, '.codex'), trash: join(stateDir, 'trash'), store: join(stateDir, 'skills'), journal: join(stateDir, 'skills-moves.json') },
     sessions: () => sessions, runs: () => runs, history: async item => histories.get(item.id),
     model: async request => { calls.push(request); return answer(request); }, advise: false,
   });

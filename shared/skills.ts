@@ -20,6 +20,8 @@ export interface Skill {
   pinned: boolean;
   /** Installed by the `skills` command; a reinstall replaces edits made here. */
   external: boolean;
+  /** Kept in Tower's own folder (`<state>/skills`), so it is backed up and moved with Tower. Absent from older workers. */
+  managed?: boolean;
   /** Hash of the SKILL.md this listing read; a save sends it back so a newer edit is never overwritten. */
   revision: string;
   /**
@@ -65,8 +67,38 @@ export interface SkillAdvisorStatus {
   backfill?: { running: boolean; at?: string; error?: string; proposals?: number };
 }
 
+/** The owner's own guidance, kept in Tower and given to every agent beside Tower's own text. */
+export interface GuidanceOverview { owner: string; revision: string; tower: string; installed: boolean }
+
+/** A backup of chosen skills and guidance, made by one Tower and read by another. */
+export const SKILL_BUNDLE_FORMAT = 'agent-session-tower.skills';
+export const MAX_SKILL_BUNDLE_BYTES = 20 * 1024 * 1024;
+export interface SkillBundleFile { path: string; mode: number; base64: string }
+export interface SkillBundleSkill { name: string; description: string; scope: SkillScope; project?: { cwd: string; title: string }; pinned: boolean; files: SkillBundleFile[] }
+export interface SkillBundle { format: typeof SKILL_BUNDLE_FORMAT; version: 1; exportedAt: string; from: string; guidance?: string; skills: SkillBundleSkill[] }
+/** What importing each item of a bundle would do here. */
+export interface SkillImportItem {
+  index: number;
+  name: string;
+  scope: SkillScope;
+  /** The project folder it was in on the other computer. */
+  fromCwd?: string;
+  /** new: nothing by that name; managed: a Tower skill by that name (can be replaced); external: a skill Tower does not keep (skip only). */
+  conflict: 'new' | 'managed' | 'external';
+  /** For a project skill: this computer's folder with the same path, when Tower knows it. */
+  cwd?: string;
+  pinned: boolean;
+  description: string;
+}
+export interface SkillImportPlan { items: SkillImportItem[]; guidance: boolean; exportedAt: string; from: string }
+export interface SkillImportChoice { index: number; action: 'add' | 'replace' | 'skip'; cwd?: string }
+
 export interface SkillOverview {
   skills: Skill[];
+  /** Every skill kept in Tower's own folder, whatever project it belongs to: what a backup can hold. */
+  stored?: Skill[];
+  /** Absent from workers older than Tower's own skill folder. */
+  guidance?: GuidanceOverview;
   proposals: SkillProposal[];
   notes: SkillNote[];
   settings: SkillAdvisorSettings;
