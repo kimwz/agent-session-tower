@@ -29,7 +29,8 @@ export function MasterPanel({ token, overview, voice, top, onClose, onStarted }:
     {starting && !settings
       ? <MasterStart token={token} replace={replacing} current={overview?.session?.provider} onCancel={replacing ? () => setReplacing(false) : undefined} onStarted={binding => { setReplacing(false); onStarted(binding.sessionId); }} />
       : <MasterSettingsView token={token} overview={overview} onNewSession={() => { setSettings(false); setReplacing(true); }} />}
-    <VoiceBar voice={voice} />
+    {/* The panel covers the floating button that ends voice, so the bar here does it. */}
+    <VoiceBar voice={{ ...voice, end: voice.stop }} />
   </aside>;
 }
 

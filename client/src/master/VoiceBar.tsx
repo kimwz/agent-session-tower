@@ -24,6 +24,10 @@ export interface VoiceControls {
   /** Drops what waits unsent. */
   discard(): void;
   dismiss(): void;
+  /**
+   * Where the voice bar has no floating button beside it (the master's panel covers it), the bar ends voice itself.
+   */
+  end?: () => void;
 }
 
 /** Today's voice use on this computer (estimated), always in view with voice. */
@@ -50,24 +54,28 @@ export function atEnd(box: Pick<HTMLElement, 'scrollTop' | 'scrollHeight' | 'cli
 }
 
 /**
- * Keeps what is heard showing its latest words as it grows, unless the owner scrolled up to read what came before;
- * scrolling back down, or a new utterance, follows again. Marks the box while earlier words are out of sight above.
+ * Keeps what is heard showing its latest words as it grows or its box changes height, unless the owner scrolled up
+ * to read what came before; scrolling back down, or new speech, follows again. Marks the box while earlier words are
+ * out of sight above.
  */
-function useFollowEnd(text: string, fresh: boolean) {
+function useFollowEnd(text: string, writing: boolean, long: boolean) {
   const box = useRef<HTMLSpanElement>(null);
   const follow = useRef(true);
-  if (fresh) follow.current = true;
+  const wasWriting = useRef(false);
+  const mark = (element: HTMLElement) => element.classList.toggle('scrolled', element.scrollTop > 0);
   useLayoutEffect(() => {
+    if (writing && !wasWriting.current) follow.current = true;
+    wasWriting.current = writing;
     const element = box.current;
     if (!element) return;
     if (follow.current) element.scrollTop = element.scrollHeight;
-    element.classList.toggle('scrolled', element.scrollTop > 0);
-  }, [text]);
+    mark(element);
+  }, [text, writing, long]);
   const onScroll = () => {
     const element = box.current;
     if (!element) return;
     follow.current = atEnd(element);
-    element.classList.toggle('scrolled', element.scrollTop > 0);
+    mark(element);
   };
   return { ref: box, onScroll };
 }
@@ -78,10 +86,8 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
   const usage = voiceUsage(voice.status, words);
   const view = voice.view;
   const writing = Boolean(view && !view.playing && (view.capturing || view.hearing));
-  const wasWriting = useRef(false);
-  const fresh = writing && !wasWriting.current;
-  wasWriting.current = writing;
-  const follow = useFollowEnd(view ? `${view.heard ?? ''}|${view.draft ?? ''}|${view.playing?.text ?? ''}` : '', fresh);
+  const long = Boolean(view && (writing || (!view.playing && view.draft)));
+  const follow = useFollowEnd(view ? `${view.heard ?? ''}|${view.draft ?? ''}|${view.playing?.text ?? ''}` : '', writing, long);
   if (view) {
     const playing = view.playing;
     const label = playing ? (playing.kind === 'notice' ? `${words('되돌릴 수 없는 작업', 'Irreversible change')}: ${playing.text}` : playing.text)
@@ -92,7 +98,7 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
       : view.muted ? words('마이크 뮤트됨 · 답과 소식은 계속 읽어 드려요', 'Microphone muted · answers and news are still read aloud')
       : words('음성 켜짐 · 맡긴 일 소식은 읽어 드려요', 'Voice on · news of finished work is read aloud');
     // What is heard or read aloud has a line of its own; today's use sits beside the buttons below it, so neither covers the other.
-    return <div className={`master-voice live ${writing ? 'speaking' : playing ? 'playing' : ''} ${writing || (!playing && view.draft) ? 'long' : ''}`}>
+    return <div className={`master-voice live ${writing ? 'speaking' : playing ? 'playing' : ''} ${long ? 'long' : ''}`}>
       <div className="master-voice-now" role="status">
         <span className="master-voice-dot" aria-hidden />
         {playing ? <Volume2 size={13} /> : view.listening ? <Mic size={13} /> : <MicOff size={13} />}
@@ -109,6 +115,7 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
         {!playing && (view.listening
           ? <button className="secondary-button" onClick={voice.mute} title={words('마이크만 끕니다. 답과 소식은 계속 읽어 드려요.', 'Turns only the microphone off; answers and news are still read aloud.')}><MicOff size={12} />{words('마이크 뮤트', 'Mute microphone')}</button>
           : <button className="master-voice-restart" onClick={voice.listen}><Mic size={12} />{view.muted ? words('뮤트 해제', 'Unmute') : words('다시 듣기', 'Listen')}</button>)}
+        {voice.end && <button className="master-voice-end" onClick={voice.end}><Square size={12} />{words('음성 대화 끝내기', 'End voice')}</button>}
       </div>
       </div>
     </div>;

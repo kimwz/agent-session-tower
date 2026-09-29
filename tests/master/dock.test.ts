@@ -61,3 +61,14 @@ test('speech being written down shows with a caret, in a taller box', () => {
   assert.match(html, /master-voice live speaking long/);
   assert.doesNotMatch(render(controls({ listening: true, capturing: false, heard: '들은 말' })), /master-voice-caret/);
 });
+
+test('where the master\'s panel covers the button, its voice bar ends voice itself', () => {
+  setLanguage('ko');
+  assert.match(render(controls({ listening: true, capturing: false }, { end() {} })), /음성 대화 끝내기/);
+  assert.doesNotMatch(render(controls({ listening: true, capturing: false })), /음성 대화 끝내기/);
+});
+
+test('an unsent draft keeps the taller box', () => {
+  setLanguage('ko');
+  assert.match(render(controls({ listening: true, capturing: false, draft: '보내지 않은 말' })), /master-voice live  long/);
+});

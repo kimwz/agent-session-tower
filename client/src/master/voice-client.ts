@@ -184,10 +184,13 @@ export class VoiceSession {
     this.unlock();
     try {
       const { session } = await post<{ session: string }>('/api/master/voice/on', this.options.token(), { tabId: this.options.tabId });
+      // Ended before the master answered: its new voice session is turned off too, and nothing more starts here.
+      if (this.over) { void post('/api/master/voice/off', this.options.token(), { session }).catch(() => {}); return; }
       this.session = session;
       this.sessionDigest = await digest(session);
       await this.context.audioWorklet.addModule('/master-pcm-tap.js');
       await this.listen();
+      if (this.over) return;
       this.timer = setInterval(() => this.tick(), 1_000);
       void this.presence();
     } catch (error) {

@@ -1011,3 +1011,20 @@ test('a microphone the owner muted stays muted after a report is read, until the
     assert.equal(page.view().listening, true);
   } finally { page.end(); }
 });
+
+test('voice ended before the master answered turning it on is turned off there too, and nothing more starts here', async () => {
+  posts.length = 0;
+  let ended = '';
+  const voice = new VoiceSession({
+    token: () => 'page-token', tabId: 'tab-1', viewContext: () => undefined,
+    settings: () => ({ voiceId: 'v', model: 'eleven_v3_conversational', endSilenceMs: 1_000, listenMinutes: 5, readReports: true, dailyDollars: 0, playbackRate: 1 }),
+    onView: () => {}, onEnded: reason => { ended = reason; },
+  });
+  const started = voice.start();
+  voice.stop();
+  await started;
+  await flush();
+  assert.equal(ended, 'owner');
+  assert.deepEqual(posts.map(post => post.path), ['/api/master/voice/on', '/api/master/voice/off']);
+  assert.equal(posts[1]!.body.session, 'session-1');
+});

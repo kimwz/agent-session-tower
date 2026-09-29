@@ -173,7 +173,7 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
     </div>
     {(layout.side === 'voice' || layout.side === 'ended') && <div className="master-bar" style={barStyle(position)}>
       <VoiceBar voice={voice} />
-      {layout.side === 'voice' && <div className="master-bar-buttons">{settingsButton}</div>}
+      <div className="master-bar-buttons">{settingsButton}</div>
     </div>}
     {open && <Suspense fallback={<div className="master-panel"><LoaderCircle className="spin" size={18} /></div>}>
       <MasterPanel token={token} overview={overview} voice={voice} top={position.panelTop} onClose={close} onStarted={id => { setOpen(false); controlsRef.current.selectSession(id); }} />
