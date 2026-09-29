@@ -340,7 +340,8 @@ export class SkillService {
             await this.files.checkTargets(current.dir, targets);
           }
           const scope = body.scope === 'project' ? 'project' : 'global';
-          const target = scope === 'project' ? await this.project(body.projectCwd ?? body.cwd) : undefined;
+          // An edit keeps the skill where it is; only a new one needs its project checked.
+          const target = scope === 'project' && !editing ? await this.project(body.projectCwd ?? body.cwd) : undefined;
           skill = await this.files.save({ ...(editing ? { dir: editing, revision: text(body.revision) } : {}),
             scope, ...(target ? { cwd: target } : {}), name: text(body.name), description: text(body.description), body: text(body.body) });
           if (editing && targets) await this.apply(skill.dir, targets, false);

@@ -484,7 +484,9 @@ export class SkillFiles {
     const skill = await this.find(dir, cwd);
     const roots = this.roots(skill.cwd);
     const owned = await this.realRoots(skill.cwd);
-    const folders = skill.copies?.map(copy => copy.dir) ?? [skill.dir];
+    // Deleting a Tower skill never takes a folder outside Tower's own, such as a same-named skill of the agents'.
+    const store = await this.storeReal();
+    const folders = (skill.copies?.map(copy => copy.dir) ?? [skill.dir]).filter(folder => !skill.managed || folder.startsWith(store + sep));
     for (const folder of folders) if (owned.has(dirname(folder))) await this.trash(folder);
     for (const root of roots) {
       // A skills folder reached through a link leads outside the folders Tower may change.

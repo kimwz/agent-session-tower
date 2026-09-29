@@ -251,3 +251,15 @@ test('a project skill restored into a project chosen here applies there', async 
   await f.service.mutate('import', { bundle: elsewhere, choices: [{ index: 0, action: 'add', cwd: f.blog }] });
   assert.equal(await f.linked(f.blog, 'shop-deploy'), true);
 });
+
+test('deleting a Tower skill never takes an agents’ skill of the same name with it', async t => {
+  const f = await fixture(t);
+  const theirs = join(f.homes.agentsHome, 'skills', 'review');
+  await mkdir(theirs, { recursive: true });
+  await writeFile(join(theirs, 'SKILL.md'), '---\nname: review\ndescription: theirs\n---\n');
+  await save(f.service, 'review', { all: false, projects: [f.shop] });
+  await f.service.mutate('delete', { dir: join(f.state, 'skills', 'global', 'review') });
+  assert.equal(await readFile(join(theirs, 'SKILL.md'), 'utf8'), '---\nname: review\ndescription: theirs\n---\n');
+  assert.equal(await f.linked(f.shop, 'review'), false);
+  assert.equal((await f.service.overview()).stored!.some(item => item.name === 'review'), false);
+});

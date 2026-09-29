@@ -76,3 +76,10 @@ test('a project’s switch adds or removes exactly that project, and a folder co
   assert.match(toggle, /disabled=""/);
   assert.match(markup, /상위 폴더에 적용돼 있습니다/);
 });
+
+test('a folder chosen together with a folder above it cannot be switched off on its own', () => {
+  const markup = list([skill('deploy', { all: false, projects: ['/work/monitor', '/work/monitor/client'] })], { cwd: '/work/monitor/client' });
+  assert.match(markup.match(/<input[^>]*role="switch"[^>]*>/)![0], /disabled=""/);
+  const own = list([skill('deploy', { all: false, projects: ['/work/monitor/client'] })], { cwd: '/work/monitor/client' });
+  assert.doesNotMatch(own.match(/<input[^>]*role="switch"[^>]*>/)![0], /disabled=""/);
+});

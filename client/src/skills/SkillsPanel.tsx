@@ -199,7 +199,7 @@ export function TowerSkills({ overview, cwd, busy, proposals, onNew, onEdit, onT
         const targets = skill.targets;
         const here = Boolean(cwd && targets && targetsCover(targets, cwd));
         // Applied to a folder above this one: switched there, not here.
-        const inherited = Boolean(here && targets && !targets.all && !targets.projects.includes(cwd!));
+        const inherited = Boolean(here && targets && !targets.all && targets.projects.some(project => project !== cwd && targetsCover({ all: false, projects: [project] }, cwd!)));
         return <li key={skill.dir} className={`tower-skill ${cwd && !here ? 'elsewhere' : ''}`}>
           <button type="button" className="tower-skill-open" onClick={() => onEdit(skill)} aria-label={t('{0} 열기', { 0: skill.name })}>
             <span className="tower-skill-name"><strong>{skill.name}</strong>{!skill.pinned && <span className="skill-badge quiet" title={t('턴 시작 때 알리지 않습니다. 에이전트가 설명을 보고 스스로 고를 때만 씁니다.')}>{t('알림 끔')}</span>}</span>
