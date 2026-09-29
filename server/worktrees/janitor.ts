@@ -108,7 +108,12 @@ export class WorktreeJanitor {
   private get stopping(): boolean { return this.paused || this.closed; }
   async flush(): Promise<void> {
     if (this.removal) await this.removal.catch(() => {});
-    else if (this.running) await Promise.race([this.running, new Promise(resolve => setTimeout(resolve, 5_000).unref?.())]);
+    else if (this.running) {
+      // Awaited on purpose (handoff, idle exit): the timer keeps the wait alive even when nothing else runs.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([this.running, new Promise(resolve => { timer = setTimeout(resolve, 5_000); })]);
+      clearTimeout(timer);
+    }
     // Once closed and flushed, the state file belongs to the next worker: a pass that was stuck writes nothing when it ends.
     if (this.closed) this.sealed = true;
   }

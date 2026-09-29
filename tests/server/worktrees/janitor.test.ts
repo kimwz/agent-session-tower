@@ -529,7 +529,7 @@ test('a program started elsewhere that names the folder on its command line keep
   assert.deepEqual([existsSync(join(archive, 'node_modules')), existsSync(join(archive, 'tmp', 'task', 'node_modules'))], [false, false], 'dependencies are not kept');
 });
 
-test('a copy that fails partway leaves nothing behind in the state folder', async t => {
+test('a copy that fails partway leaves nothing behind in the state folder', { skip: process.getuid?.() === 0 ? 'root reads unreadable files' : false }, async t => {
   const { dir, work, state, add, transcript, session } = await setup(t);
   const target = join(dir, 'work.wt-unreadable');
   const rows = add(`git worktree add --detach ${target} HEAD`, ['--detach', target, 'HEAD']);
