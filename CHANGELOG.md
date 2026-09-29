@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.79.0] - 2026-09-29
+## [1.80.0] - 2026-09-29
 
 ### Added
 - **Worktrees a conversation made are removed once its work is over.** Agents create git worktrees for reviews and parallel work and often leave them behind, each with a full checkout and installed dependencies (node_modules included). When you close a conversation, or 30 minutes after a trigger or Slack task finished its work, Tower removes the worktrees that conversation and the subagents and runs it launched created with `git worktree add`. It keeps a worktree, and says why on the conversation's page, when:
@@ -14,6 +14,14 @@ format, and saved browser preferences are the compatibility surface.
 
   Branches are never deleted, and git never removes a worktree with changes. Files git ignores in the worktree (installed dependencies, build output, a local `.env`) go with it. A kept worktree is checked again every hour. Worktrees an agent's run started on its own, without a conversation known to have launched it, are left alone.
 - The agents' guidance now asks them to remove a review worktree as soon as the review is done.
+
+## [1.79.0] - 2026-09-29
+
+### Added
+- **Computer status rings on the canvas.** Under each computer's version, three small rings show how busy it is: **C** (CPU), **R** (memory) and **D** (the disk that holds Tower's state). A ring turns amber from 75% and red from 90%. Hover, focus or tap them for the details: CPU share, core count and load averages, memory and disk used out of the total, disk space left, and when it was measured. Each Tower measures its own computer every 10 seconds and joined computers send theirs to the Tower that controls them, so their rings appear once they run this version; a computer out of reach shows none. On a Mac, memory is counted as Activity Monitor's "Memory Used", not the much smaller free-page count.
+
+### Changed
+- The computer card on the canvas is slightly taller to fit the rings; folders placed automatically sit correspondingly lower.
 
 ## [1.78.2] - 2026-09-29
 

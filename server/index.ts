@@ -52,6 +52,7 @@ import { RemoteAudit } from './remote/audit.js';
 import { NodeViewStore } from './link/views.js';
 import { newerVersion, refreshService } from './link/service.js';
 import { releasePackage, releasePublished } from './link/join-code.js';
+import { SystemMonitor, systemSources } from './system/status.js';
 import { diskFree, handoffHeld, heldWorkerEntry, managedByService, runUpdateHelper, serviceSteps, updateActive, Updates } from './link/update.js';
 import { LatestReleases } from './updates/latest.js';
 import { TowerAutoUpdate } from './updates/tower.js';
@@ -241,6 +242,8 @@ async function main() {
   const history = nativeHistory(runs);
   const listeners = new Set<() => void>();
   const changed = () => { for (const listener of listeners) listener(); };
+  // CPU, memory and disk of this computer, for the rings on its host node.
+  const system = new SystemMonitor(systemSources(stateDir), changed);
   // The Codex probe starts the CLI, so it never runs while this account's Codex is being updated.
   const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed, unlessUpdating: (provider, read) => unlessUpdating(stateDir, provider, read) });
   // This Tower keeps itself current when it runs as the service; its worker keeps Claude Code and Codex current.
@@ -303,6 +306,7 @@ async function main() {
       ...(joined ? { controllerJoined: joined } : {}),
       ...(remoteNodes?.ready ? { nodes } : {}),
       autoUpdate: autoUpdate(true),
+      ...(system.status() ? { system: system.status() } : {}),
       updatedAt: new Date().toISOString(),
     };
   };
@@ -555,6 +559,7 @@ async function main() {
   void towerUpdates.start().catch(error => console.error(`Automatic updates are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   capabilities.start();
   repositories.start();
+  system.start();
   await outcomes.start();
   await notifications.start().catch(error => console.error(`Notifications are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   await publicListener.start().catch(error => console.error(`Public agent pages are unavailable: ${error instanceof Error ? error.message : String(error)}`));
@@ -565,6 +570,7 @@ async function main() {
     if (closing) return;
     closing = true;
     for (const timer of pruning) clearTimeout(timer);
+    system.close();
     towerUpdates.stop();
     remoteNodes?.close();
     const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => { remoteRouter.dispose(); return nodeViews.flush(); });

@@ -320,6 +320,19 @@ export interface ProjectGroupPatch {
   pinned?: boolean;
   hidden?: boolean;
 }
+/** How busy the computer running a Tower is, measured every few seconds. Numbers only. */
+export interface SystemStatus {
+  /** Busy share of all cores since the previous sample, 0–100; absent on the first sample. */
+  cpu?: number;
+  cores: number;
+  /** 1, 5 and 15-minute load averages (zero on Windows). */
+  load: [number, number, number];
+  /** Bytes. */
+  memory: { total: number; used: number };
+  /** Bytes on the volume that holds Tower's state directory. */
+  disk?: { total: number; free: number };
+  sampledAt: string;
+}
 export interface Snapshot {
   sessions: Session[];
   /** Branch sync state of recently used project folders that are git repositories. */
@@ -346,4 +359,6 @@ export interface Snapshot {
   nodes?: RemoteNode[];
   /** How this Tower keeps itself, Claude Code and Codex current. */
   autoUpdate?: AutoUpdateStatus;
+  /** CPU, memory and disk of the computer running this Tower. */
+  system?: SystemStatus;
 }

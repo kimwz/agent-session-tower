@@ -26,7 +26,7 @@ export function graphSessionGroups(sessions: Session[], limit: number, selectedI
   return [...groups.entries()].sort(([a, aSessions], [b, bSessions]) => sortSessions(aSessions[0], bSessions[0]) || a.localeCompare(b));
 }
 
-export const HOST_HEIGHT = 145;
+export const HOST_HEIGHT = 169;
 /** Reserve room for account usage without rewriting saved folder or card positions. */
 export function clearHostPosition(host: { x: number; y: number }, projects: Array<{ position: { x: number; y: number }; width: number; height: number }>) {
   let y = host.y;

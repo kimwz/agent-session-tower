@@ -1,5 +1,5 @@
-.host-with-usage { width: 256px; height: 145px; position: relative; overflow: visible; border: 1px solid #435772; border-radius: 13px; background: #1a273a; box-shadow: 0 6px 24px #00000018; }
-.host-with-usage .host-node { width: 100%; height: 72px; border: 0; background: none; box-shadow: none; }
+.host-with-usage { width: 256px; height: 169px; position: relative; overflow: visible; border: 1px solid #435772; border-radius: 13px; background: #1a273a; box-shadow: 0 6px 24px #00000018; }
+.host-with-usage .host-node { width: 100%; height: 96px; border: 0; background: none; box-shadow: none; }
 .host-node .host-icon { flex-shrink: 0; }
 .host-node > div { min-width: 0; }
 .provider-usage { height: 71px; margin: 0 10px; padding: 6px 0; border-top: 1px solid #35495f; }
@@ -41,3 +41,28 @@
 .usage-tooltip dl > .ahead .usage-bar b { background: #ec8a7d; }
 .usage-tooltip > small { color: #8ba0bb; }
 .usage-tooltip .usage-stale { color: #e1b776; }
+
+/* CPU, RAM and disk rings under a computer's version */
+.system-rings { position: relative; margin-top: 5px; }
+.system-rings-trigger { display: inline-flex; gap: 4px; padding: 2px; margin: -2px; border: 0; border-radius: 6px; background: none; cursor: default; }
+.system-rings-trigger:hover { background: #23364c; }
+.system-rings-trigger:focus-visible { background: #23364c; outline: 2px solid #97bff9; outline-offset: 1px; }
+.system-ring { position: relative; display: grid; place-items: center; width: 20px; height: 20px; }
+.system-ring svg { position: absolute; inset: 0; width: 20px; height: 20px; transform: rotate(-90deg); fill: none; stroke-width: 4; }
+.system-ring-track { stroke: #344356; }
+.system-ring-fill { stroke: #76c5b5; stroke-linecap: round; }
+.system-ring.high .system-ring-fill { stroke: #e9ba78; }
+.system-ring.critical .system-ring-fill { stroke: #ec8a7d; }
+.system-ring b { position: relative; font-size: 8.5px; font-weight: 600; line-height: 1; color: #b9cbe2; }
+.system-rings-tooltip { position: absolute; top: calc(100% + 8px); left: -60px; z-index: 100; width: 250px; border: 1px solid #4b6687; border-radius: 10px; padding: 12px 14px; background: #152335; color: #d8e5f5; box-shadow: 0 12px 40px #0009; font-size: 11px; white-space: normal; cursor: default; }
+.system-rings-tooltip::before { content: ''; position: absolute; top: -9px; left: 0; right: 0; height: 9px; }
+.system-rings-tooltip > strong { display: block; max-width: none; font-size: 12px; color: #d8e5f5; }
+.system-rings-tooltip dl { margin: 8px 0; }
+.system-rings-tooltip dl > div { display: grid; grid-template-columns: 52px 1fr; gap: 8px; border-top: 1px solid #30465f; padding: 7px 0; }
+.system-rings-tooltip dt { color: #b7cbe5; }
+.system-rings-tooltip dd { margin: 0; display: grid; gap: 2px; }
+.system-rings-tooltip dd em { font-style: normal; font-weight: 600; font-variant-numeric: tabular-nums; }
+.system-rings-tooltip dd span { color: #90a8c3; font-size: 10px; }
+.system-rings-tooltip .high dd em { color: #e9ba78; }
+.system-rings-tooltip .critical dd em { color: #ec8a7d; }
+.system-rings-tooltip small { color: #869ab5; font-size: 10px; }
