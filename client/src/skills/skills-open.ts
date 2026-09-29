@@ -1,9 +1,4 @@
-/** Opens the skills panel from anywhere on the page, such as a project folder's menu; the header button shows it. */
-const listeners = new Set<(cwd?: string) => void>();
+import { openSettings } from '../settings/settings-open';
 
-export function openSkills(cwd?: string): void { for (const listener of listeners) listener(cwd); }
-
-export function onOpenSkills(listener: (cwd?: string) => void): () => void {
-  listeners.add(listener);
-  return () => { listeners.delete(listener); };
-}
+/** Opens the skills from anywhere on the page, such as a project folder's menu, narrowed to that folder. */
+export function openSkills(cwd?: string): boolean { return openSettings({ section: 'skills', cwd }); }

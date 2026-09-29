@@ -1,12 +1,10 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { Gauge, History, Pencil, Play, Plug, Plus, RotateCcw, Trash2, X, Zap } from 'lucide-react';
+import { SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
+import { Gauge, History, Pencil, Play, Plug, Plus, RotateCcw, Trash2, Zap } from 'lucide-react';
 import type { ProviderHealth, Session } from '../../../shared/types';
 import type { Trigger, TriggerAuditEntry, TriggerEvent, TriggerOverview, TriggerSummary } from '../../../shared/triggers';
 import { absoluteTime, relativeTime } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
-import { SlackPanel } from '../slack/SlackPanel';
-import { PublicAgentsPanel } from './PublicAgentsPanel';
 import { TriggerConnections, TriggerLimits } from './TriggerConnections';
 import { TriggerEditor } from './TriggerEditor';
 import { KIND_ICONS, TriggerTypePicker } from './TriggerKinds';
@@ -23,23 +21,8 @@ export type TriggerTargets = (node: string) => { projects: [string, string][]; s
 /** What the triggers tab shows: the list, the kind picker for a new trigger, or the editor. */
 type View = { page: 'list' } | { page: 'pick' } | { page: 'edit'; kind: SourceKind; trigger?: Trigger };
 
-export function TriggerButton({ token, overview, computers = [], targets, ...context }: Omit<Context, 'token'> & { token: string; overview?: TriggerOverview; computers?: TriggerComputer[]; targets?: TriggerTargets }) {
+export function TriggerPanel({ token, overview: ownOverview, providers: ownProviders, projects: ownProjects, sessions: ownSessions, computers = [], targets, onOpenSlack, onOpenPublic }: Context & { overview?: TriggerOverview; computers?: TriggerComputer[]; targets?: TriggerTargets; onOpenSlack: () => void; onOpenPublic?: () => void }) {
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
-  const [slack, setSlack] = useState(false);
-  const [publicAgents, setPublicAgents] = useState(false);
-  const attention = overview?.storageError || overview?.triggers.some(item => item.paused || item.error || item.lastEvent?.status === 'error' || item.lastEvent?.status === 'uncertain');
-  return <>
-    <button className={`icon-button trigger-button ${attention ? 'attention' : ''}`} data-master-panel="triggers" aria-label={t('트리거')} title={t('트리거')} disabled={!token} onClick={() => setOpen(true)}><Zap size={18} /></button>
-    {open && <TriggerPanel {...context} token={token} overview={overview} computers={computers} targets={targets} onClose={() => setOpen(false)} onOpenSlack={() => { setOpen(false); setSlack(true); }} onOpenPublic={() => { setOpen(false); setPublicAgents(true); }} />}
-    {slack && <SlackPanel providers={context.providers} projects={context.projects} token={token} onClose={() => setSlack(false)} />}
-    {publicAgents && <PublicAgentsPanel token={token} providers={context.providers} projects={context.projects} onClose={() => setPublicAgents(false)} />}
-  </>;
-}
-
-export function TriggerPanel({ token, overview: ownOverview, providers: ownProviders, projects: ownProjects, sessions: ownSessions, computers = [], targets, onClose, onOpenSlack, onOpenPublic }: Context & { overview?: TriggerOverview; computers?: TriggerComputer[]; targets?: TriggerTargets; onClose: () => void; onOpenSlack: () => void; onOpenPublic?: () => void }) {
-  const { t } = useI18n();
-  const dialog = useRef<HTMLDialogElement>(null);
   const [tab, setTab] = useState<Tab>('triggers');
   const [triggers, setTriggers] = useState<Trigger[] | null>(null);
   const [view, setView] = useState<View>({ page: 'list' });
@@ -79,11 +62,6 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
     const timer = window.setInterval(() => { void refresh(); }, 5000);
     return () => window.clearInterval(timer);
   }, [target, away, refresh]);
-  useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    dialog.current?.showModal();
-    return () => { dialog.current?.close(); if (opener?.isConnected) opener.focus(); };
-  }, []);
   const run = async (work: () => Promise<unknown>) => {
     const from = target;
     setBusy(true); setError('');
@@ -96,20 +74,22 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
   const choose = (next: string) => leave(() => { asked.current++; shown.current = next || undefined; setNode(next); setTriggers(null); setRemoteOverview(undefined); setError(''); setView({ page: 'list' }); if (next && (tab === 'connections' || tab === 'limits')) setTab('triggers'); });
   const name = computer?.name ?? t('연결된 컴퓨터');
   const coordinators = new Set(target ? (triggers ?? []).filter(item => item.handler.kind === 'coordinator').map(item => item.id) : []);
-  const close = () => leave(onClose);
+  // An unsaved trigger is asked about before the owner moves to another section or closes the settings; Esc leaves the editor first.
+  useSettingsGuard({
+    escape: () => { if (!editing) return false; leave(() => setView({ page: 'list' })); return true; },
+    leave: () => !editing || window.confirm(t('저장하지 않은 트리거 변경 사항을 버릴까요?')),
+  });
   const summaries = new Map(overview?.triggers.map(item => [item.id, item]));
   const slack = target ? undefined : overview?.triggers.find(item => item.kind === 'slack');
   const published = target ? [] : overview?.triggers.filter(item => item.kind === 'public') ?? [];
   const tabs = [['triggers', t('트리거'), Zap], ['history', t('기록'), History], ['connections', t('연결'), Plug], ['limits', t('한도'), Gauge]] as const;
-  return createPortal(<TriggerMachine.Provider value={target ? { node: target, name } : {}}><dialog ref={dialog} className="slack-dialog trigger-dialog" aria-labelledby="trigger-title" onCancel={event => { event.preventDefault(); close(); }}><div className="slack-panel">
-    <header className="slack-head"><div><h2 id="trigger-title">{t('트리거')}</h2><p>{target ? t('{0}의 트리거입니다. 정한 때가 되면 그 컴퓨터에서 실행됩니다.', { 0: name }) : t('정한 시간이나 GitHub·HTTP·Slack에서 일이 생기면 프로젝트 에이전트에게 작업을 맡깁니다.')}</p></div>
-      {computers.length > 0 && <label className="trigger-computer">{t('컴퓨터')}<select value={node} onChange={event => choose(event.target.value)}>
-        <option value="">{t('이 컴퓨터')}</option>{computers.map(item => <option key={item.node} value={item.node} disabled={!item.ready && item.node !== node}>
-          {item.ready ? item.name : !item.connected ? t('{0} (오프라인)', { 0: item.name }) : t('{0} (Tower 업데이트 필요)', { 0: item.name })}</option>)}</select></label>}
-      <button className="icon-button" aria-label={t('닫기')} onClick={close}><X size={18} /></button></header>
-    <nav className="slack-tabs" role="tablist">{tabs.map(([id, label, Icon]) =>
-      <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? 'active' : ''} onClick={() => leave(() => { setView({ page: 'list' }); setTab(id); })}><Icon size={14} />{label}</button>)}</nav>
-    <div className="slack-body">
+  return <TriggerMachine.Provider value={target ? { node: target, name } : {}}><SettingsPane title={t('트리거')} scope="slack-panel trigger-scope"
+    description={target ? t('{0}의 트리거입니다. 정한 때가 되면 그 컴퓨터에서 실행됩니다.', { 0: name }) : t('정한 시간이나 GitHub·HTTP·Slack에서 일이 생기면 프로젝트 에이전트에게 작업을 맡깁니다.')}
+    actions={computers.length > 0 && <label className="trigger-computer">{t('컴퓨터')}<select value={node} onChange={event => choose(event.target.value)}>
+      <option value="">{t('이 컴퓨터')}</option>{computers.map(item => <option key={item.node} value={item.node} disabled={!item.ready && item.node !== node}>
+        {item.ready ? item.name : !item.connected ? t('{0} (오프라인)', { 0: item.name }) : t('{0} (Tower 업데이트 필요)', { 0: item.name })}</option>)}</select></label>}
+    tabs={tabs.map(([id, label, Icon]) => ({ id, label, icon: <Icon size={14} /> }))} tab={tab} onTab={id => leave(() => { setView({ page: 'list' }); setTab(id); })}>
+    <div className="trigger-body">
       {error && <p role="alert" className="slack-error">{translateMessage(error)}</p>}
       {overview?.storageError && <p role="alert" className="slack-error">{translateMessage(overview.storageError)}</p>}
       {away && editing && <p role="alert" className="slack-error">{t('{0}에 지금 연결되어 있지 않아 저장할 수 없습니다. 다시 연결되면 저장할 수 있습니다.', { 0: name })}</p>}
@@ -152,7 +132,7 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
         : tab === 'connections' ? <TriggerConnections token={token} slack={slack} onOpenSlack={onOpenSlack} />
         : <TriggerLimits token={token} />}
     </div>
-  </div></dialog></TriggerMachine.Provider>, document.body);
+  </SettingsPane></TriggerMachine.Provider>;
 }
 
 /** Slack's own settings are one click away, even while an older worker cannot report on triggers. */

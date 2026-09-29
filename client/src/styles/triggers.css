@@ -1,6 +1,4 @@
-/* Triggers reuse the Slack automation dialog; only what differs is defined here. */
-.trigger-button { position: relative; }
-.trigger-button.attention::after { content: ''; position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
+/* Triggers reuse the Slack automation styles; only what differs is defined here. */
 .trigger-dialog .slack-tabs button svg { flex: none; }
 .trigger-note { margin: 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
 .trigger-note.trigger-warn { color: var(--amber); }

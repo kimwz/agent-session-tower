@@ -1,22 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { Bell, BellOff, BellRing, LoaderCircle, Trash2, X } from 'lucide-react';
+import { useCallback, useContext, useEffect, useState } from 'react';
+import { SettingsFrameContext, SettingsPane } from '../settings/SettingsPane';
+import { Bell, BellOff, BellRing, LoaderCircle, Trash2 } from 'lucide-react';
 import type { NotificationEvents, NotificationOverview } from '../../../shared/notifications';
 import { api } from '../common/lib';
 import { locale, translateMessage, useI18n } from '../i18n/i18n';
-import { deviceIdOf, disablePush, enablePush, existingSubscription, notificationPost, pushSupport, refreshPush } from './push';
+import { deviceIdOf, disablePush, enablePush, existingSubscription, notificationPost, pushSupport } from './push';
 
-export function NotificationButton({ token }: { token: string }) {
+export function NotificationPanel({ token }: { token: string }) {
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
-  // An allowed browser keeps its registration in the page's current language without being asked.
-  useEffect(() => { void refreshPush(token).catch(() => {}); }, [token]);
-  return <><button className={`icon-button ${open ? 'active' : ''}`} data-master-panel="notifications" title={t('알림')} aria-label={t('알림')} aria-expanded={open} onClick={() => setOpen(true)}><Bell size={18} /></button>{open && <NotificationPanel token={token} onClose={() => setOpen(false)} />}</>;
-}
-
-export function NotificationPanel({ token, onClose }: { token: string; onClose: () => void }) {
-  const { t } = useI18n();
-  const dialog = useRef<HTMLDialogElement>(null);
   const [overview, setOverview] = useState<NotificationOverview | null>(null);
   const [ownId, setOwnId] = useState<string | null>(null);
   const [error, setError] = useState('');
@@ -30,13 +21,8 @@ export function NotificationPanel({ token, onClose }: { token: string; onClose: 
     setOwnId(subscription ? await deviceIdOf(subscription) : null);
     setOverview(value);
   }, []);
-  useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    const element = dialog.current;
-    element?.showModal();
-    void load().catch(error => setError(error instanceof Error ? error.message : String(error)));
-    return () => { element?.close(); if (opener?.isConnected) opener.focus(); };
-  }, [load]);
+  const { active } = useContext(SettingsFrameContext);
+  useEffect(() => { if (active) void load().catch(error => setError(error instanceof Error ? error.message : String(error))); }, [load, active]);
   async function act(action: () => Promise<NotificationOverview | undefined>, done = '') {
     if (busy) return;
     setBusy(true); setError(''); setNotice('');
@@ -51,8 +37,7 @@ export function NotificationPanel({ token, onClose }: { token: string; onClose: 
     : support === 'install' ? t('iPhone과 iPad에서는 공유 메뉴의 “홈 화면에 추가”로 설치한 뒤, 설치한 앱에서 알림을 켜세요.')
     : support === 'unsupported' ? t('이 브라우저는 푸시 알림을 지원하지 않습니다.')
     : permission === 'denied' ? t('이 사이트의 알림이 브라우저 설정에서 차단되어 있습니다. 브라우저 설정에서 허용한 뒤 다시 시도하세요.') : '';
-  return createPortal(<dialog ref={dialog} className="auth-dialog notification-dialog" aria-labelledby="notification-title" onCancel={onClose} onClick={event => { if (event.target === event.currentTarget) onClose(); }}><div className="auth-panel">
-    <header><h2 id="notification-title">{t('알림')}</h2><div><button className="icon-button" aria-label={t('닫기')} onClick={onClose}><X size={20} /></button></div></header>
+  return <SettingsPane title={t('알림')} scope="auth-panel notification-scope" description={t('작업이 끝나거나 답을 기다릴 때 이 기기로 푸시 알림')}>
     <p className="auth-hint">{t('프로젝트 채팅의 작업이 끝나거나, 대화가 승인·답변을 기다리거나, 트리거가 작업을 시작하면 알림을 보냅니다. 페이지를 닫아도 이 기기로 전달됩니다.')}</p>
     {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
     {notice && <p className="notification-notice" role="status">{notice}</p>}
@@ -76,5 +61,5 @@ export function NotificationPanel({ token, onClose }: { token: string; onClose: 
         </li>)}</ul> : <p className="auth-empty">{t('알림을 받는 기기가 없습니다.')}</p>}
       </section>
     </>}
-  </div></dialog>, document.body);
+  </SettingsPane>;
 }

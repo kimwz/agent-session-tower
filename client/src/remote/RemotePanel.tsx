@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
-import { createPortal } from 'react-dom';
-import { Check, Copy, FolderX, LoaderCircle, Monitor, Network, Plus, Radio, RefreshCw, Trash2, X } from 'lucide-react';
+import { useCallback, useContext, useEffect, useRef, useState, type FormEvent } from 'react';
+import { SettingsFrameContext, SettingsPane } from '../settings/SettingsPane';
+import { Check, Copy, FolderX, LoaderCircle, Monitor, Plus, Radio, RefreshCw, Trash2, X } from 'lucide-react';
 import type { ControllerSummary, LinkInvite, LinkOverview, NodeSummary, RemoteAction, RemoteChange, UpdateFailure, UpdateStage } from '../../../shared/link';
 import type { TriggerAuditEntry } from '../../../shared/triggers';
 import { absoluteTime, api, copyText, relativeTime } from '../common/lib';
@@ -8,47 +8,15 @@ import { translateMessage, useI18n } from '../i18n/i18n';
 import { auditActionLabel } from '../triggers/trigger-helpers';
 import { NodeTools } from '../app/AutoUpdate';
 
-type Tab = 'nodes' | 'controllers' | 'exclusions';
-const TABS: Tab[] = ['nodes', 'controllers', 'exclusions'];
+export type RemoteTab = 'nodes' | 'controllers' | 'exclusions';
+const TABS: RemoteTab[] = ['nodes', 'controllers', 'exclusions'];
 const post = <T,>(token: string, path: string, body: unknown) => api<T>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: JSON.stringify(body) });
 
-const SEEN_JOIN = 'agent-monitor.seen-controller-join';
-const seenJoin = () => { try { return localStorage.getItem(SEEN_JOIN) ?? ''; } catch { return ''; } };
-
-/**
- * Remote computers: the ones this computer controls, the ones that control it, and what it never shares.
- * `controlledBy` names the computers controlling this one right now; `joined` is the latest that started to, shown
- * here until it is seen in any tab: dismissed, or its computer looked at.
- */
-export function RemoteButton({ token, projects, controlledBy = [], joined }: { token: string; projects: [string, string][]; controlledBy?: string[]; joined?: { name: string; at: string } }) {
+/** Remote computers: the ones this computer controls, the ones that control it, and what it never shares. */
+export function RemotePanel({ token, projects, initialTab = 'nodes', controlledBy = [] }: { token: string; projects: [string, string][]; initialTab?: RemoteTab; controlledBy?: string[] }) {
   const { t } = useI18n();
-  const [open, setOpen] = useState<Tab | null>(null);
-  const [seen, setSeen] = useState(seenJoin);
-  useEffect(() => {
-    const follow = (event: StorageEvent) => { if (event.key === SEEN_JOIN) setSeen(event.newValue ?? ''); };
-    window.addEventListener('storage', follow);
-    return () => window.removeEventListener('storage', follow);
-  }, []);
-  const label = controlledBy.length ? t('원격 컴퓨터 · {0}이(가) 이 컴퓨터를 제어하는 중', { 0: controlledBy.join(', ') }) : t('원격 컴퓨터');
-  const notice = joined && joined.at > seen ? joined : undefined;
-  const acknowledge = () => { if (!notice) return; try { localStorage.setItem(SEEN_JOIN, notice.at); } catch { /* Shown again next time. */ } setSeen(notice.at); };
-  // With a notice showing, the panel opens on the computers controlling this one.
-  const show = (tab: Tab) => { acknowledge(); setOpen(tab); };
-  return <div className="remote-anchor">
-    <button className={`icon-button remote-button ${controlledBy.length ? 'controlled' : ''}`} data-master-panel="remote" aria-label={label} title={label} disabled={!token} onClick={() => show(notice ? 'controllers' : 'nodes')}><Network size={18} /></button>
-    {notice && <div className="remote-join-notice" role="status">
-      <p>{t('{0}이(가) 이 컴퓨터를 제어하기 시작했습니다.', { 0: notice.name })}<small><time dateTime={notice.at}>{absoluteTime(notice.at)}</time></small></p>
-      <div><button type="button" className="secondary-button" onClick={() => show('controllers')}>{t('보기')}</button>
-        <button type="button" className="secondary-button" onClick={acknowledge}>{t('확인')}</button></div>
-    </div>}
-    {open && <RemotePanel token={token} projects={projects} initialTab={open} onClose={() => setOpen(null)} />}
-  </div>;
-}
-
-export function RemotePanel({ token, projects, initialTab = 'nodes', onClose }: { token: string; projects: [string, string][]; initialTab?: Tab; onClose: () => void }) {
-  const { t } = useI18n();
-  const dialog = useRef<HTMLDialogElement>(null);
-  const [tab, setTab] = useState<Tab>(initialTab);
+  const { active } = useContext(SettingsFrameContext);
+  const [tab, setTab] = useState<RemoteTab>(initialTab);
   const [overview, setOverview] = useState<LinkOverview | null>(null);
   const [error, setError] = useState('');
   const [pollError, setPollError] = useState('');
@@ -61,13 +29,12 @@ export function RemotePanel({ token, projects, initialTab = 'nodes', onClose }: 
     catch (cause) { setPollError(cause instanceof Error ? cause.message : String(cause)); }
   }, []);
   useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    dialog.current?.showModal();
+    if (!active) return;
     void refresh();
-    // Connections change on their own; the panel follows while it is open.
+    // Connections change on their own; the section follows while it is shown.
     const timer = window.setInterval(() => { void refresh(); }, 2000);
-    return () => { window.clearInterval(timer); dialog.current?.close(); if (opener?.isConnected) opener.focus(); };
-  }, [refresh]);
+    return () => window.clearInterval(timer);
+  }, [refresh, active]);
   const run = async (work: () => Promise<unknown>) => {
     setBusy(true); setError('');
     try { await work(); await refresh(); return true; }
@@ -79,28 +46,18 @@ export function RemotePanel({ token, projects, initialTab = 'nodes', onClose }: 
     setInvite(await post<LinkInvite>(token, '/api/link/invite', {}));
   });
   const tabs = { nodes: [t('연결한 컴퓨터'), Monitor], controllers: [t('이 컴퓨터를 제어하는 Tower'), Radio], exclusions: [t('공유 제외'), FolderX] } as const;
-  const moveTab = (event: KeyboardEvent) => {
-    if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
-    event.preventDefault();
-    const next = TABS[(TABS.indexOf(tab) + (event.key === 'ArrowRight' ? 1 : TABS.length - 1)) % TABS.length];
-    setTab(next);
-    document.getElementById(`remote-tab-${next}`)?.focus();
-  };
   const shownError = error || pollError;
-  return createPortal(<dialog ref={dialog} className="slack-dialog remote-dialog" aria-labelledby="remote-title" onCancel={event => { event.preventDefault(); onClose(); }}><div className="slack-panel">
-    <header className="slack-head"><div><h2 id="remote-title">{t('원격 컴퓨터')}</h2><p>{t('다른 컴퓨터의 Tower를 이 화면에서 쓰거나, 이 컴퓨터를 다른 Tower에 맡깁니다.')}</p></div><button className="icon-button" aria-label={t('닫기')} onClick={onClose}><X size={18} /></button></header>
-    <nav className="slack-tabs" role="tablist" onKeyDown={moveTab}>{TABS.map(id => { const [label, Icon] = tabs[id]; return (
-      <button key={id} id={`remote-tab-${id}`} type="button" role="tab" aria-selected={tab === id} aria-controls={`remote-panel-${id}`} tabIndex={tab === id ? 0 : -1} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><Icon size={14} />{label}</button>); })}</nav>
-    <div className="slack-body" role="tabpanel" id={`remote-panel-${tab}`} aria-labelledby={`remote-tab-${tab}`}>
-      {shownError && <p role="alert" className="slack-error">{translateMessage(shownError)}</p>}
-      {overview?.errors?.map(message => <p key={message} role="alert" className="slack-error">{translateMessage(message)}</p>)}
-      {!overview ? <LoaderCircle className="spin" aria-label={t('불러오는 중')} />
-        : tab === 'nodes' ? <Nodes token={token} overview={overview} busy={busy} run={run} invite={invite} known={known.current} onInvite={createInvite} />
-        : tab === 'controllers' ? <Controllers token={token} overview={overview} busy={busy} run={run} />
-        : <Exclusions token={token} overview={overview} projects={projects} busy={busy} run={run} />}
-      {overview && <p className="remote-identity">{t('이 컴퓨터의 지문')}: <code>{overview.identity.fingerprint}</code></p>}
-    </div>
-  </div></dialog>, document.body);
+  return <SettingsPane title={t('원격 컴퓨터')} scope="slack-panel remote-scope" tab={tab} onTab={setTab}
+    description={controlledBy.length ? t('{0}이(가) 이 컴퓨터를 제어하는 중', { 0: controlledBy.join(', ') }) : t('다른 컴퓨터의 Tower를 이 화면에서 쓰거나, 이 컴퓨터를 다른 Tower에 맡깁니다.')}
+    tabs={TABS.map(id => { const [label, Icon] = tabs[id]; return { id, label, icon: <Icon size={14} /> }; })}>
+    {shownError && <p role="alert" className="slack-error">{translateMessage(shownError)}</p>}
+    {overview?.errors?.map(message => <p key={message} role="alert" className="slack-error">{translateMessage(message)}</p>)}
+    {!overview ? <LoaderCircle className="spin" aria-label={t('불러오는 중')} />
+      : tab === 'nodes' ? <Nodes token={token} overview={overview} busy={busy} run={run} invite={invite} known={known.current} onInvite={createInvite} />
+      : tab === 'controllers' ? <Controllers token={token} overview={overview} busy={busy} run={run} />
+      : <Exclusions token={token} overview={overview} projects={projects} busy={busy} run={run} />}
+    {overview && <p className="remote-identity">{t('이 컴퓨터의 지문')}: <code>{overview.identity.fingerprint}</code></p>}
+  </SettingsPane>;
 }
 
 type Run = (work: () => Promise<unknown>) => Promise<boolean>;

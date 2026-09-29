@@ -36,3 +36,4 @@ import './triggers.css';
 import './remote.css';
 import './skills.css';
 import './permissions.css';
+import './settings.css';

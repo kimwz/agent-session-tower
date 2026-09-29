@@ -4,7 +4,8 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { setLanguage } from '../../../client/src/i18n/i18n.js';
 import { absoluteTime } from '../../../client/src/common/lib.js';
-import { RemoteButton, RemoteChanges } from '../../../client/src/remote/RemotePanel.js';
+import { RemoteChanges } from '../../../client/src/remote/RemotePanel.js';
+import { ControllerJoinNotice } from '../../../client/src/remote/controller-join.js';
 
 test('this computer’s owner reads what controlling computers changed here, by computer and without content', () => {
   setLanguage('ko');
@@ -28,8 +29,8 @@ test('this computer’s owner reads what controlling computers changed here, by 
 
 test('a computer that started controlling this one is announced here until it is seen', () => {
   setLanguage('ko');
-  const markup = renderToStaticMarkup(createElement(RemoteButton, { token: 't', projects: [], controlledBy: ['Office Mac'], joined: { name: 'Office Mac', at: '2026-09-24T01:00:00.000Z' } }));
+  const markup = renderToStaticMarkup(createElement(ControllerJoinNotice, { notice: { name: 'Office Mac', at: '2026-09-24T01:00:00.000Z' }, onShow() {}, onDismiss() {} }));
   assert.match(markup, /Office Mac이\(가\) 이 컴퓨터를 제어하기 시작했습니다/);
   assert.match(markup, /<time dateTime="2026-09-24T01:00:00.000Z">/);
-  assert.doesNotMatch(renderToStaticMarkup(createElement(RemoteButton, { token: 't', projects: [] })), /제어하기 시작했습니다/);
+  assert.match(markup, />보기<\/button>.*>확인<\/button>/);
 });

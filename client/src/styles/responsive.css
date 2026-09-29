@@ -146,8 +146,7 @@
   font-size:9px;
   gap:5px
 }
-.header-actions>.icon-button,
-.header-actions>.remote-anchor>.icon-button {
+.header-actions>.icon-button {
   width:25px
 }
 .sidebar-toggle {

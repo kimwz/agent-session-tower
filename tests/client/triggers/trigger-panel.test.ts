@@ -2,10 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { blankGitHubSource, blankHttpSource, blankTrigger, eventStatusLabel, scheduleLabel, TriggerButton } from '../../../client/src/triggers/TriggerPanel.js';
+import { blankGitHubSource, blankHttpSource, blankTrigger, eventStatusLabel, scheduleLabel } from '../../../client/src/triggers/TriggerPanel.js';
 import { setLanguage, translate } from '../../../client/src/i18n/i18n.js';
 import { TriggerTypePicker } from '../../../client/src/triggers/TriggerKinds.js';
-import { switchedWatch } from '../../../client/src/triggers/trigger-helpers.js';
+import { switchedWatch, triggerAttention } from '../../../client/src/triggers/trigger-helpers.js';
 import { TriggerInputSchema } from '../../../shared/triggers.js';
 
 test('a new scheduled run from the panel is exactly what the server accepts once named and instructed', () => {
@@ -36,11 +36,11 @@ test('schedules and run states read naturally in both languages', () => {
   }
 });
 
-test('the header trigger button marks runs that need attention', () => {
-  const markup = (status: 'completed' | 'error') => renderToStaticMarkup(createElement(TriggerButton, { token: 't', providers: [], projects: [], sessions: [],
-    overview: { recent: [], triggers: [{ id: 'a', name: 'Nightly', enabled: true, kind: 'schedule', revision: 1, updatedAt: '', updatedBy: { kind: 'owner', via: 'ui' }, lastEvent: { id: 'e', status, occurredAt: '' } }] } }));
-  assert.doesNotMatch(markup('completed'), /attention/);
-  assert.match(markup('error'), /attention/);
+test('a trigger whose last run failed asks for attention in the settings', () => {
+  const overview = (status: 'completed' | 'error') => ({ recent: [], triggers: [{ id: 'a', name: 'Nightly', enabled: true, kind: 'schedule' as const, revision: 1, updatedAt: '', updatedBy: { kind: 'owner' as const, via: 'ui' as const }, lastEvent: { id: 'e', status, occurredAt: '' } }] });
+  assert.equal(triggerAttention(overview('completed')), false);
+  assert.equal(triggerAttention(overview('error')), true);
+  assert.equal(triggerAttention(undefined), false);
 });
 
 test('a new GitHub trigger from the panel needs repositories and a checked account before the server accepts it', () => {

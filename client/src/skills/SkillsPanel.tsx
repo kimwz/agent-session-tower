@@ -1,39 +1,25 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { Check, Download, Eye, FolderInput, Link2, LoaderCircle, Merge, Pencil, Pin, PinOff, Plus, RefreshCw, Sparkles, Trash2, Upload, X } from 'lucide-react';
-import type { Skill, SkillBundle, SkillDetail, SkillImportChoice, SkillImportPlan, SkillOverview, SkillProposal, SkillScope, SkillSummary } from '../../../shared/skills';
+import { useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import { FolderChip } from '../settings/FolderChip';
+import { SettingsFrameContext, SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
+import { Check, Download, Eye, FolderInput, Link2, LoaderCircle, Merge, Pencil, Pin, PinOff, Plus, RefreshCw, Sparkles, Trash2, Upload } from 'lucide-react';
+import type { Skill, SkillBundle, SkillDetail, SkillImportChoice, SkillImportPlan, SkillOverview, SkillProposal, SkillScope } from '../../../shared/skills';
 import { MAX_SKILL_DESCRIPTION, proposalReady, SKILL_NAME } from '../../../shared/skills';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { api } from '../common/lib';
 import { locale, translate as t, translateMessage, useI18n } from '../i18n/i18n';
-import { onOpenSkills } from './skills-open';
 
 const post = <T = SkillOverview>(path: string, token: string, body: unknown) => api<T>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(body) });
 const query = (cwd?: string, extra: Record<string, string> = {}) => { const params = new URLSearchParams({ ...(cwd ? { cwd } : {}), ...extra }).toString(); return params ? `?${params}` : ''; };
 const date = (value: string) => { const time = new Date(value); return Number.isNaN(time.getTime()) ? '' : time.toLocaleDateString(locale(), { month: 'short', day: 'numeric' }); };
 const folderName = (path: string) => path.split('/').filter(Boolean).at(-1) || path;
 
-/** The header button: opens every skill, and shows how many proposals wait for the owner. */
-export function SkillsButton({ token, projects, onOpenSession }: { token: string; projects: string[]; onOpenSession: (id: string) => void }) {
-  const { t } = useI18n();
-  const [open, setOpen] = useState<{ cwd?: string } | null>(null);
-  const [count, setCount] = useState(0);
-  const refresh = useCallback(() => { if (token) void api<SkillSummary>('/api/skills/summary').then(summary => setCount(summary.proposals)).catch(() => setCount(0)); }, [token]);
-  useEffect(() => { refresh(); const timer = setInterval(refresh, 60_000); return () => clearInterval(timer); }, [refresh]);
-  useEffect(() => onOpenSkills(cwd => setOpen({ cwd })), []);
-  const label = count ? t('스킬 · 추천 {0}개', { 0: count }) : t('스킬');
-  return <><button className={`icon-button skills-button ${open ? 'active' : ''}`} data-master-panel="skills" title={label} aria-label={label} disabled={!token} onClick={() => setOpen({})}>
-    <Sparkles size={18} />{count > 0 && <span className="skills-count" aria-hidden="true">{count > 9 ? '9+' : count}</span>}
-  </button>{open && <SkillsPanel token={token} cwd={open.cwd} projects={projects} onOpenSession={id => { setOpen(null); onOpenSession(id); }} onClose={() => { setOpen(null); refresh(); }} />}</>;
-}
-
 type Draft = { dir?: string; revision?: string; name: string; description: string; body: string; scope: SkillScope; projectCwd?: string; pinned: boolean; proposalId?: string; external?: boolean; separate?: string };
 type Tab = 'skills' | 'proposals' | 'guidance' | 'backup' | 'settings';
 
 /** The owner's skills where the panel was opened (every skill, or one project's with the global ones), proposals and settings. */
-export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { token: string; cwd?: string; projects: string[]; onClose: () => void; onOpenSession: (id: string) => void }) {
+export function SkillsPanel({ token, cwd, projects, onClearFolder, onChanged, onOpenSession }: { token: string; cwd?: string; projects: string[]; onClearFolder: () => void; onChanged: () => void; onOpenSession: (id: string) => void }) {
   const { t } = useI18n();
-  const dialog = useRef<HTMLDialogElement>(null);
+  const { active } = useContext(SettingsFrameContext);
   const [overview, setOverview] = useState<SkillOverview | null>(null);
   const [tab, setTab] = useState<Tab>('skills');
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -41,13 +27,12 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const load = useCallback(async () => setOverview(await api<SkillOverview>(`/api/skills${query(cwd)}`)), [cwd]);
-  useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    const element = dialog.current;
-    element?.showModal();
-    void load().catch(error => setError(error instanceof Error ? error.message : String(error)));
-    return () => { element?.close(); if (opener?.isConnected) opener.focus(); };
-  }, [load]);
+  // Asked again when shown again: proposals arrive while the owner looks elsewhere.
+  useEffect(() => { if (active) void load().catch(error => setError(error instanceof Error ? error.message : String(error))); }, [load, active]);
+  useSettingsGuard({
+    escape: () => { if (!draft) return false; setDraft(null); return true; },
+    leave: () => !draft || window.confirm(t('저장하지 않은 변경 사항을 버릴까요?')),
+  });
   // The 7-day analysis takes minutes; the panel follows it until it ends.
   const analysing = overview?.advisor.backfill?.running;
   useEffect(() => {
@@ -58,7 +43,7 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
   async function act(action: () => Promise<SkillOverview>, done = '') {
     if (busy) return false;
     setBusy(true); setError(''); setNotice('');
-    try { setOverview(await action()); if (done) setNotice(done); return true; }
+    try { setOverview(await action()); if (done) setNotice(done); onChanged(); return true; }
     catch (error) { setError(error instanceof Error ? error.message : String(error)); return false; }
     finally { setBusy(false); }
   }
@@ -77,9 +62,11 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
     t('{0} 스킬을 등록했습니다.', { 0: proposal.name }));
   const ready = overview?.proposals.filter(proposalReady) ?? [];
   const watching = overview?.proposals.filter(proposal => !proposalReady(proposal)) ?? [];
-  const title = cwd ? t('{0}의 스킬', { 0: folderName(cwd) }) : t('스킬');
-  return createPortal(<dialog ref={dialog} className="auth-dialog skills-dialog" aria-labelledby="skills-title" onCancel={event => { if (draft) { event.preventDefault(); setDraft(null); } else onClose(); }} onClick={event => { if (event.target === event.currentTarget && !draft) onClose(); }}><div className="auth-panel">
-    <header><h2 id="skills-title"><Sparkles size={17} />{title}</h2><div><button className="icon-button" aria-label={t('닫기')} onClick={onClose}><X size={20} /></button></div></header>
+  const tabs = draft || !overview ? undefined : (['skills', 'proposals', 'guidance', 'backup', 'settings'] as Tab[]).map(id => ({ id,
+    label: id === 'skills' ? t('스킬 {0}', { 0: overview.skills.length }) : id === 'proposals' ? t('추천') : id === 'guidance' ? t('지침') : id === 'backup' ? t('백업') : t('자동 추천 설정'),
+    ...(id === 'proposals' && ready.length ? { count: ready.length } : {}) }));
+  return <SettingsPane title={t('스킬')} scope="auth-panel skills-scope" chip={cwd ? <FolderChip cwd={cwd} onClear={onClearFolder} /> : undefined}
+    description={t('자주 하는 작업 방식을 에이전트가 같은 순서로 따르게 합니다')} tabs={tabs} tab={tab} onTab={setTab}>
     <p className="auth-hint">{cwd ? t('이 프로젝트에서 Claude Code와 Codex가 쓸 수 있는 스킬입니다. 이 프로젝트의 스킬과 모든 프로젝트에 쓰이는 전역 스킬이 함께 보입니다.')
       : t('자주 하는 작업 방식을 스킬로 두면 Claude Code와 Codex가 같은 요청을 같은 순서로 처리합니다. “항상 확인”으로 둔 스킬은 Tower가 모든 턴 시작 때 에이전트에게 알려 줍니다.')}</p>
     {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
@@ -87,12 +74,6 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
     {draft ? <SkillEditor draft={draft} cwd={cwd} projects={projects} busy={busy} onCancel={() => setDraft(null)}
       onSave={async next => { if (await mutate('save', { ...next }, t('{0} 스킬을 저장했습니다.', { 0: next.name }))) { setDraft(null); if (next.proposalId) setTab('skills'); } }} />
       : !overview ? !error && <LoaderCircle className="spin" aria-label={t('불러오는 중')} /> : <>
-      <nav className="skills-tabs" role="tablist" aria-label={t('스킬 메뉴')}>
-        {(['skills', 'proposals', 'guidance', 'backup', 'settings'] as Tab[]).map(item => <button key={item} role="tab" aria-selected={tab === item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>
-          {item === 'skills' ? t('스킬 {0}', { 0: overview.skills.length }) : item === 'proposals' ? <>{t('추천')}{ready.length > 0 && <span className="skills-count inline">{ready.length}</span>}</>
-            : item === 'guidance' ? t('지침') : item === 'backup' ? t('백업') : t('자동 추천 설정')}
-        </button>)}
-      </nav>
       {tab === 'skills' && <SkillList overview={overview} cwd={cwd} busy={busy} onNew={() => setDraft({ name: '', description: '', body: '', scope: cwd ? 'project' : 'global', ...(cwd ? { projectCwd: cwd } : {}), pinned: false })}
         onEdit={skill => void edit(skill)} onPin={skill => void mutate('pin', { dir: skill.dir, pinned: !skill.pinned })}
         onLink={skill => void mutate('link', { dir: skill.dir }, t('{0} 스킬을 Claude Code와 Codex 모두에 연결했습니다.', { 0: skill.name }))}
@@ -119,7 +100,7 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
       {tab === 'settings' && <AdvisorSettings overview={overview} busy={busy} onChange={body => void mutate('settings', body)}
         onBackfill={() => void mutate('backfill', { days: 7 }, t('최근 7일 요청을 분석하기 시작했습니다. 몇 분 걸립니다.'))} onRefresh={() => void act(async () => api<SkillOverview>(`/api/skills${query(cwd)}`))} />}
     </>}
-  </div></dialog>, document.body);
+  </SettingsPane>;
 }
 
 function SkillList({ overview, cwd, busy, onNew, onEdit, onPin, onLink, onMerge, onAdopt, onDelete }: { overview: SkillOverview; cwd?: string; busy: boolean; onNew: () => void; onEdit: (skill: Skill) => void; onPin: (skill: Skill) => void; onLink: (skill: Skill) => void; onMerge: (skill: Skill) => void; onAdopt: (skill: Skill) => void; onDelete: (skill: Skill) => void }) {

@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { BrainCircuit, KeyRound, LoaderCircle, RefreshCw, Trash2, X } from 'lucide-react';
+import { useCallback, useContext, useEffect, useState } from 'react';
+import { SettingsFrameContext, SettingsPane } from '../settings/SettingsPane';
+import { KeyRound, LoaderCircle, RefreshCw, Trash2 } from 'lucide-react';
 import type { DecisionFeatures, DecisionOverview, DecisionRecord } from '../../../shared/decisions';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { api } from '../common/lib';
@@ -8,29 +8,18 @@ import { locale, translate as t, translateMessage, useI18n } from '../i18n/i18n'
 
 const post = (path: string, token: string, body: unknown) => api<DecisionOverview>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(body) });
 
-export function DecisionButton({ token }: { token: string }) {
-  const { t } = useI18n();
-  const [open, setOpen] = useState(false);
-  return <><button className={`icon-button ${open ? 'active' : ''}`} data-master-panel="decisions" title={t('빠른 판단')} aria-label={t('빠른 판단')} aria-expanded={open} onClick={() => setOpen(true)}><BrainCircuit size={18} /></button>{open && <DecisionPanel token={token} onClose={() => setOpen(false)} />}</>;
-}
-
 /** The fast-judgment service (Jev today), its API key, and which Tower features use it. */
-export function DecisionPanel({ token, onClose }: { token: string; onClose: () => void }) {
+export function DecisionPanel({ token }: { token: string }) {
   const { t } = useI18n();
-  const dialog = useRef<HTMLDialogElement>(null);
   const [overview, setOverview] = useState<DecisionOverview | null>(null);
   const [key, setKey] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const load = useCallback(async () => setOverview(await api<DecisionOverview>('/api/decisions')), []);
-  useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    const element = dialog.current;
-    element?.showModal();
-    void load().catch(error => setError(error instanceof Error ? error.message : String(error)));
-    return () => { element?.close(); if (opener?.isConnected) opener.focus(); };
-  }, [load]);
+  const { active } = useContext(SettingsFrameContext);
+  // Shown again after another section, it asks again: things change while the owner looks elsewhere.
+  useEffect(() => { if (active) void load().catch(error => setError(error instanceof Error ? error.message : String(error))); }, [load, active]);
   async function act(action: () => Promise<DecisionOverview>, done = '') {
     if (busy) return;
     setBusy(true); setError(''); setNotice('');
@@ -40,8 +29,7 @@ export function DecisionPanel({ token, onClose }: { token: string; onClose: () =
   }
   const setFeature = (name: keyof DecisionFeatures, value: boolean) => overview && void act(() => post('/api/decisions/settings', token, { features: { ...overview.features, [name]: value } }));
   const label = overview?.label ?? 'Jev';
-  return createPortal(<dialog ref={dialog} className="auth-dialog decision-dialog" aria-labelledby="decision-title" onCancel={onClose} onClick={event => { if (event.target === event.currentTarget) onClose(); }}><div className="auth-panel">
-    <header><h2 id="decision-title">{t('빠른 판단')}</h2><div><button className="icon-button" aria-label={t('닫기')} onClick={onClose}><X size={20} /></button></div></header>
+  return <SettingsPane title={t('빠른 판단')} scope="auth-panel decision-scope" description={t('Auto Prompt 추천과 알림 선별 같은 빠른 판단 기능')}>
     <p className="auth-hint">{t('{0} 같은 빠른 객관식 판단 서비스로 Auto Prompt 추천과 알림 선별을 켭니다. API 키가 없으면 두 기능은 꺼져 있고 Tower는 평소대로 동작합니다.', { 0: label })}</p>
     {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
     {notice && <p className="notification-notice" role="status">{notice}</p>}
@@ -76,7 +64,7 @@ export function DecisionPanel({ token, onClose }: { token: string; onClose: () =
           : <p className="auth-empty">{t('아직 판단 기록이 없습니다. Tower를 다시 시작하면 기록이 비워집니다.')}</p>}
       </section>
     </>}
-  </div></dialog>, document.body);
+  </SettingsPane>;
 }
 
 const RESULT_LABELS: Record<DecisionRecord['result'], string> = { notify: '알릴 턴으로 판단', quiet: '중간 단계로 판단해 알리지 않음', suggested: '추천함', noSuggestion: '맞는 곳 없음',

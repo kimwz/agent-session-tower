@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { SidebarFilters } from '../../../client/src/sessions/SidebarFilters.js';
-import { CanvasSettings } from '../../../client/src/graph/CanvasSettings.js';
+import { GeneralSettings } from '../../../client/src/settings/GeneralSettings.js';
 import { getLanguage, setLanguage, translate } from '../../../client/src/i18n/i18n.js';
 
 const originalLanguage = getLanguage();
@@ -34,17 +34,18 @@ test('idle and error use the secondary status selector with no misleading major 
   }
 });
 
-test('closed settings expose only the cog and keep all popup controls out of keyboard navigation', () => {
+test('the general settings show the canvas controls as they are, and leave them unavailable without a canvas', () => {
   setLanguage('en');
-  const props = { manual: false, onLayoutChange() {}, motion: true, onMotionChange() {}, showHidden: false, onShowHiddenChange() {}, suspended: false };
-  const markup = renderToStaticMarkup(createElement(CanvasSettings, props));
-  assert.match(markup, /aria-label="Canvas settings"/);
-  assert.match(markup, /aria-expanded="false" aria-controls="[^"]+"/);
-  assert.equal((markup.match(/<button /g) || []).length, 1);
-  assert.doesNotMatch(markup, /<input|<section|canvas-settings-popover/);
-  const suspended = renderToStaticMarkup(createElement(CanvasSettings, { ...props, suspended: true }));
-  assert.match(suspended, /aria-expanded="false"[^>]*disabled=""/);
-  assert.doesNotMatch(suspended, /<input|<section/);
+  const canvas = { manual: true, motion: false, setLayout() {}, setMotion() {} };
+  const markup = renderToStaticMarkup(createElement(GeneralSettings, { canvas, showHidden: true, onShowHiddenChange() {} }));
+  assert.match(markup, /<h2[^>]*>General<\/h2>/);
+  assert.match(markup, /aria-pressed="false"[^>]*>.*Auto layout/);
+  assert.match(markup, /aria-pressed="true"[^>]*>.*Manual layout/);
+  assert.match(markup, /Animate connections<\/span><input type="checkbox" role="switch" class="settings-switch"\/>/);
+  assert.match(markup, /aria-keyshortcuts="Shift\+A"/);
+  assert.match(markup, /<option value="en" lang="en" selected="">English/);
+  const loading = renderToStaticMarkup(createElement(GeneralSettings, { canvas: null, showHidden: false, onShowHiddenChange() {} }));
+  assert.equal((loading.match(/disabled=""/g) || []).length >= 3, true, 'layout and motion wait for the canvas');
 });
 
 test('canvas summary and settings labels localize without changing counts', () => {

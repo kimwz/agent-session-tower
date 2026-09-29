@@ -1,5 +1,5 @@
 import { createContext } from 'react';
-import type { Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput } from '../../../shared/triggers';
+import type { Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOverview } from '../../../shared/triggers';
 import { isOperationName, OPERATIONS } from '../../../shared/api/operations';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { authPost } from '../auth/AuthGate';
@@ -42,6 +42,11 @@ export async function towerOperation<T>(token: string, operation: string, input:
     if (write) { if (disposition === 'uncertain' && status === 409) forgetRequest(node, key); else settleRequest(node, key, error); }
     throw error;
   }
+}
+
+/** A trigger needs a look: paused, failing, its last run failed or is unknown, or the store cannot be read. */
+export function triggerAttention(overview: TriggerOverview | undefined): boolean {
+  return Boolean(overview?.storageError || overview?.triggers.some(item => item.paused || item.error || item.lastEvent?.status === 'error' || item.lastEvent?.status === 'uncertain'));
 }
 
 export function eventStatusLabel(status: TriggerEvent['status'], t: (key: string) => string): string {
