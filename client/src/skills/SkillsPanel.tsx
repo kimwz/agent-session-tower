@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Check, Eye, Link2, LoaderCircle, Merge, Pencil, Pin, PinOff, Plus, RefreshCw, Sparkles, Trash2, X } from 'lucide-react';
-import type { Skill, SkillDetail, SkillOverview, SkillProposal, SkillScope, SkillSummary } from '../../../shared/skills';
+import { Check, Download, Eye, FolderInput, Link2, LoaderCircle, Merge, Pencil, Pin, PinOff, Plus, RefreshCw, Sparkles, Trash2, Upload, X } from 'lucide-react';
+import type { Skill, SkillBundle, SkillDetail, SkillImportChoice, SkillImportPlan, SkillOverview, SkillProposal, SkillScope, SkillSummary } from '../../../shared/skills';
 import { MAX_SKILL_DESCRIPTION, proposalReady, SKILL_NAME } from '../../../shared/skills';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { api } from '../common/lib';
@@ -28,7 +28,7 @@ export function SkillsButton({ token, projects, onOpenSession }: { token: string
 }
 
 type Draft = { dir?: string; revision?: string; name: string; description: string; body: string; scope: SkillScope; projectCwd?: string; pinned: boolean; proposalId?: string; external?: boolean; separate?: string };
-type Tab = 'skills' | 'proposals' | 'settings';
+type Tab = 'skills' | 'proposals' | 'guidance' | 'backup' | 'settings';
 
 /** The owner's skills where the panel was opened (every skill, or one project's with the global ones), proposals and settings. */
 export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { token: string; cwd?: string; projects: string[]; onClose: () => void; onOpenSession: (id: string) => void }) {
@@ -88,14 +88,16 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
       onSave={async next => { if (await mutate('save', { ...next }, t('{0} 스킬을 저장했습니다.', { 0: next.name }))) { setDraft(null); if (next.proposalId) setTab('skills'); } }} />
       : !overview ? !error && <LoaderCircle className="spin" aria-label={t('불러오는 중')} /> : <>
       <nav className="skills-tabs" role="tablist" aria-label={t('스킬 메뉴')}>
-        {(['skills', 'proposals', 'settings'] as Tab[]).map(item => <button key={item} role="tab" aria-selected={tab === item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>
-          {item === 'skills' ? t('스킬 {0}', { 0: overview.skills.length }) : item === 'proposals' ? <>{t('추천')}{ready.length > 0 && <span className="skills-count inline">{ready.length}</span>}</> : t('자동 추천 설정')}
+        {(['skills', 'proposals', 'guidance', 'backup', 'settings'] as Tab[]).map(item => <button key={item} role="tab" aria-selected={tab === item} className={tab === item ? 'active' : ''} onClick={() => setTab(item)}>
+          {item === 'skills' ? t('스킬 {0}', { 0: overview.skills.length }) : item === 'proposals' ? <>{t('추천')}{ready.length > 0 && <span className="skills-count inline">{ready.length}</span>}</>
+            : item === 'guidance' ? t('지침') : item === 'backup' ? t('백업') : t('자동 추천 설정')}
         </button>)}
       </nav>
       {tab === 'skills' && <SkillList overview={overview} cwd={cwd} busy={busy} onNew={() => setDraft({ name: '', description: '', body: '', scope: cwd ? 'project' : 'global', ...(cwd ? { projectCwd: cwd } : {}), pinned: false })}
         onEdit={skill => void edit(skill)} onPin={skill => void mutate('pin', { dir: skill.dir, pinned: !skill.pinned })}
         onLink={skill => void mutate('link', { dir: skill.dir }, t('{0} 스킬을 Claude Code와 Codex 모두에 연결했습니다.', { 0: skill.name }))}
         onMerge={skill => void mutate('merge', { dir: skill.dir }, t('{0} 스킬의 복사본을 하나로 합쳤습니다.', { 0: skill.name }))}
+        onAdopt={skill => { if (window.confirm(t('{0} 스킬 폴더를 타워 폴더로 옮기고, 원래 자리에는 링크를 남깁니다. 에이전트는 계속 같은 스킬을 씁니다. 옮길까요?', { 0: skill.name }))) void mutate('adopt', { dir: skill.dir }, t('{0} 스킬을 타워로 옮겼습니다.', { 0: skill.name })); }}
         onDelete={skill => { if (window.confirm(t('{0} 스킬을 삭제할까요? 폴더는 Tower 상태 폴더의 skills-trash로 옮겨집니다.', { 0: skill.name }))) void mutate('delete', { dir: skill.dir }, t('{0} 스킬을 삭제했습니다.', { 0: skill.name })); }} />}
       {tab === 'proposals' && <section className="skills-proposals">
         {ready.length ? ready.map(proposal => <ProposalCard key={proposal.id} proposal={proposal} busy={busy} onReview={review} onAccept={accept} onOpenSession={onOpenSession}
@@ -110,13 +112,15 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
           {overview.notes.map(note => <li key={`${note.at}-${note.sessionId}`}><button type="button" className="link-button" onClick={() => onOpenSession(note.sessionId)}>{note.title}</button><small>{date(note.at)} · {folderName(note.cwd)}</small><p>{note.note}</p></li>)}
         </ul></details>}
       </section>}
+      {tab === 'guidance' && <GuidanceEditor overview={overview} busy={busy} onSave={(owner, revision) => void mutate('guidance', { owner, revision }, t('지침을 저장했습니다. 새로 시작하는 대화부터 적용됩니다.'))} />}
+      {tab === 'backup' && <Backup overview={overview} token={token} projects={projects} busy={busy} onImport={body => mutate('import', body, t('백업을 가져왔습니다.'))} onError={setError} />}
       {tab === 'settings' && <AdvisorSettings overview={overview} busy={busy} onChange={body => void mutate('settings', body)}
         onBackfill={() => void mutate('backfill', { days: 7 }, t('최근 7일 요청을 분석하기 시작했습니다. 몇 분 걸립니다.'))} onRefresh={() => void act(async () => api<SkillOverview>(`/api/skills${query(cwd)}`))} />}
     </>}
   </div></dialog>, document.body);
 }
 
-function SkillList({ overview, cwd, busy, onNew, onEdit, onPin, onLink, onMerge, onDelete }: { overview: SkillOverview; cwd?: string; busy: boolean; onNew: () => void; onEdit: (skill: Skill) => void; onPin: (skill: Skill) => void; onLink: (skill: Skill) => void; onMerge: (skill: Skill) => void; onDelete: (skill: Skill) => void }) {
+function SkillList({ overview, cwd, busy, onNew, onEdit, onPin, onLink, onMerge, onAdopt, onDelete }: { overview: SkillOverview; cwd?: string; busy: boolean; onNew: () => void; onEdit: (skill: Skill) => void; onPin: (skill: Skill) => void; onLink: (skill: Skill) => void; onMerge: (skill: Skill) => void; onAdopt: (skill: Skill) => void; onDelete: (skill: Skill) => void }) {
   const { t } = useI18n();
   const [filter, setFilter] = useState('');
   const shown = useMemo(() => overview.skills.filter(skill => !filter.trim() || `${skill.name} ${skill.description}`.toLowerCase().includes(filter.trim().toLowerCase())), [overview.skills, filter]);
@@ -128,6 +132,8 @@ function SkillList({ overview, cwd, busy, onNew, onEdit, onPin, onLink, onMerge,
       {skills.length ? <ul>{skills.map(skill => <li key={skill.dir} className={`skill-row ${skill.pinned ? 'pinned' : ''}`}>
         <div className="skill-row-main"><strong>{skill.name}</strong>
           <span className="skill-badges">{skill.providers.map(provider => <span key={provider} className={`skill-badge ${provider}`}>{provider === 'claude' ? 'Claude' : 'Codex'}</span>)}
+            {skill.managed && <span className="skill-badge managed" title={t('타워 폴더에 있어 백업하고 옮길 수 있습니다.')}>{t('타워 관리')}</span>}
+            {!skill.providers.length && <span className="skill-badge unlinked" title={t('타워 폴더에만 있고 에이전트 폴더에 연결되지 않았습니다. 연결을 누르면 Claude Code와 Codex가 씁니다.')}>{t('연결 안 됨')}</span>}
             {skill.pinned && <span className="skill-badge pinned">{t('항상 확인')}</span>}{skill.external && <span className="skill-badge external" title={t('skills 명령으로 설치한 스킬입니다. 다시 설치하면 여기서 고친 내용이 바뀝니다.')}>{t('외부 설치')}</span>}
             {skill.copies && <span className="skill-badge copies" title={skill.copiesDiffer ? t('Claude Code와 Codex가 각자 다른 폴더의 복사본을 씁니다. 내용이 조금 달라(보통 각자 자기 이름을 적음) 합치지 않았습니다.') : t('같은 내용의 복사본이 Claude Code와 Codex 폴더에 따로 있습니다. 하나로 합치면 고칠 때 한 번에 바뀝니다.')}>{skill.copiesDiffer ? t('에이전트별 복사본') : t('복사본 {0}개', { 0: skill.copies.length })}</span>}
             {skill.scope === 'project' && skill.cwd && skill.cwd !== cwd && <span className="skill-badge" title={skill.cwd}>{folderName(skill.cwd)}</span>}</span>
@@ -135,6 +141,7 @@ function SkillList({ overview, cwd, busy, onNew, onEdit, onPin, onLink, onMerge,
         <div className="skill-row-actions">
           <button className="icon-button" title={skill.pinned ? t('항상 확인 끄기') : t('항상 확인: 모든 턴 시작 때 에이전트에게 알려 줍니다')} aria-label={skill.pinned ? t('항상 확인 끄기') : t('항상 확인 켜기')} aria-pressed={skill.pinned} disabled={busy} onClick={() => onPin(skill)}>{skill.pinned ? <PinOff size={15} /> : <Pin size={15} />}</button>
           {skill.copies && !skill.copiesDiffer && <button className="icon-button" title={t('복사본을 하나로 합치기')} aria-label={t('{0} 복사본을 하나로 합치기', { 0: skill.name })} disabled={busy} onClick={() => onMerge(skill)}><Merge size={15} /></button>}
+          {skill.managed === false && <button className="icon-button" title={t('타워로 옮기기: 백업하고 다른 컴퓨터로 옮길 수 있게 타워 폴더에 둡니다')} aria-label={t('{0} 타워로 옮기기', { 0: skill.name })} disabled={busy || skill.copiesDiffer} onClick={() => onAdopt(skill)}><FolderInput size={15} /></button>}
           {skill.providers.length < 2 && <button className="icon-button" title={t('Claude Code와 Codex 모두에 연결')} aria-label={t('Claude Code와 Codex 모두에 연결')} disabled={busy} onClick={() => onLink(skill)}><Link2 size={15} /></button>}
           <button className="icon-button" title={t('편집')} aria-label={t('{0} 편집', { 0: skill.name })} disabled={busy} onClick={() => onEdit(skill)}><Pencil size={15} /></button>
           <button className="icon-button" title={t('삭제')} aria-label={t('{0} 삭제', { 0: skill.name })} disabled={busy} onClick={() => onDelete(skill)}><Trash2 size={15} /></button>
@@ -206,5 +213,91 @@ function AdvisorSettings({ overview, busy, onChange, onBackfill, onRefresh }: { 
     <div className="skills-toolbar"><button className="secondary-button" disabled={busy || advisor.backfill?.running} onClick={onBackfill}>{advisor.backfill?.running ? <LoaderCircle className="spin" size={14} /> : <Sparkles size={14} />}{advisor.backfill?.running ? t('분석하는 중…') : t('최근 7일 분석')}</button>
       <button className="icon-button" title={t('새로고침')} aria-label={t('새로고침')} disabled={busy} onClick={onRefresh}><RefreshCw size={14} /></button></div>
     {advisor.backfill?.at && !advisor.backfill.running && <p className="auth-hint">{advisor.backfill.error ? <span className="auth-error">{t('분석 실패: {0}', { 0: advisor.backfill.error })}</span> : t('{0}에 분석해 추천 {1}개를 올렸습니다.', { 0: time(advisor.backfill.at), 1: advisor.backfill.proposals ?? 0 })}</p>}
+  </section>;
+}
+
+/** The owner's own guidance, kept in Tower and given to every agent with Tower's text. */
+function GuidanceEditor({ overview, busy, onSave }: { overview: SkillOverview; busy: boolean; onSave: (owner: string, revision: string) => void }) {
+  const { t } = useI18n();
+  const guidance = overview.guidance;
+  const [owner, setOwner] = useState(guidance?.owner ?? '');
+  useEffect(() => setOwner(guidance?.owner ?? ''), [guidance?.owner, guidance?.revision]);
+  if (!guidance) return <p className="auth-empty">{t('실행 워커가 새 버전으로 바뀌면 지침을 관리할 수 있습니다.')}</p>;
+  return <section className="skills-guidance">
+    <p className="auth-hint">{t('모든 Claude Code와 Codex 대화가 받는 내 지침입니다. 타워 폴더(guidance/owner.md)에 있어 백업하고 옮길 수 있습니다. 요청과 프로젝트 지침이 먼저입니다.')}</p>
+    {!guidance.installed && <p className="auth-hint">{t('이 타워는 기본 상태 폴더가 아니어서 에이전트 지침에 넣지 않고 저장만 합니다.')}</p>}
+    <textarea className="skill-body" rows={14} value={owner} disabled={busy} spellCheck={false} aria-label={t('내 지침')} placeholder={t('예: 답은 항상 한국어로 합니다. 배포 전에는 반드시 테스트를 돌립니다.')} onChange={event => setOwner(event.target.value)} />
+    <div className="skills-toolbar"><span /><button className="primary-button" disabled={busy || owner === guidance.owner} onClick={() => onSave(owner, guidance.revision)}><Check size={14} />{t('저장')}</button></div>
+    <details><summary>{t('타워가 넣는 기본 지침 보기')}</summary><pre className="skill-preview">{guidance.tower}</pre></details>
+  </section>;
+}
+
+/** Chosen skills and guidance out to a file, and back in on this or another computer. */
+function Backup({ overview, token, projects, busy, onImport, onError }: { overview: SkillOverview; token: string; projects: string[]; busy: boolean; onImport: (body: Record<string, unknown>) => Promise<boolean>; onError: (message: string) => void }) {
+  const { t } = useI18n();
+  const stored = overview.stored ?? [];
+  const [chosen, setChosen] = useState<Set<string>>(() => new Set(stored.map(skill => skill.dir)));
+  const [withGuidance, setWithGuidance] = useState(Boolean(overview.guidance?.owner.trim()));
+  const [working, setWorking] = useState(false);
+  const [bundle, setBundle] = useState<SkillBundle | null>(null);
+  const [plan, setPlan] = useState<SkillImportPlan | null>(null);
+  const [choices, setChoices] = useState<Record<number, SkillImportChoice>>({});
+  const [guidanceMode, setGuidanceMode] = useState<'skip' | 'replace' | 'append'>('skip');
+  const [pins, setPins] = useState(true);
+  const external = overview.skills.filter(skill => !skill.managed).length;
+  const request = (path: string, body: unknown) => api<unknown>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(body) });
+  async function download() {
+    setWorking(true); onError('');
+    try {
+      const data = await request('/api/skills/export', { dirs: [...chosen], guidance: withGuidance });
+      const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url; link.download = `tower-skills-${new Date().toISOString().slice(0, 10)}.json`; link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1_000);
+    } catch (error) { onError(error instanceof Error ? error.message : String(error)); }
+    finally { setWorking(false); }
+  }
+  async function read(file: File) {
+    setWorking(true); onError(''); setPlan(null);
+    try {
+      const data = JSON.parse(await file.text()) as SkillBundle;
+      const next = await request('/api/skills/import-plan', data) as SkillImportPlan;
+      setBundle(data); setPlan(next);
+      setChoices(Object.fromEntries(next.items.map(item => [item.index, { index: item.index, action: item.conflict === 'new' && (item.scope === 'global' || item.cwd) ? 'add' : 'skip', ...(item.cwd ? { cwd: item.cwd } : {}) }])));
+      setGuidanceMode(next.guidance ? (overview.guidance?.owner.trim() ? 'append' : 'replace') : 'skip');
+    } catch (error) { onError(error instanceof SyntaxError ? t('백업 파일을 읽을 수 없습니다.') : error instanceof Error ? error.message : String(error)); }
+    finally { setWorking(false); }
+  }
+  const setChoice = (index: number, patch: Partial<SkillImportChoice>) => setChoices(value => ({ ...value, [index]: { ...value[index], ...patch } }));
+  const place = (skill: Skill) => skill.scope === 'global' ? t('전역') : folderName(skill.cwd ?? '');
+  return <section className="skills-backup">
+    <h3>{t('내보내기')}</h3>
+    <p className="auth-hint">{t('고른 스킬과 내 지침을 파일 하나로 받습니다. 다른 컴퓨터의 타워에서 가져오면 됩니다.')}{external > 0 && ` ${t('타워 폴더 밖의 스킬 {0}개는 스킬 탭에서 “타워로 옮기기”를 해야 백업할 수 있습니다.', { 0: external })}`}</p>
+    {stored.length ? <ul className="skills-checklist">{stored.map(skill => <li key={skill.dir}><label><input type="checkbox" checked={chosen.has(skill.dir)} disabled={busy || working}
+      onChange={event => setChosen(value => { const next = new Set(value); if (event.target.checked) next.add(skill.dir); else next.delete(skill.dir); return next; })} />
+      <strong>{skill.name}</strong><span className="skill-badge">{place(skill)}</span>{skill.pinned && <span className="skill-badge pinned">{t('항상 확인')}</span>}</label></li>)}</ul>
+      : <p className="auth-empty">{t('타워 폴더에 있는 스킬이 아직 없습니다.')}</p>}
+    <label className="skill-pinned"><input type="checkbox" checked={withGuidance} disabled={busy || working || !overview.guidance?.owner.trim()} onChange={event => setWithGuidance(event.target.checked)} />{t('내 지침도 함께')}</label>
+    <div className="skills-toolbar"><span /><button className="primary-button" disabled={busy || working || (!chosen.size && !withGuidance)} onClick={() => void download()}>{working ? <LoaderCircle className="spin" size={14} /> : <Download size={14} />}{t('선택한 것 내보내기')}</button></div>
+    <h3>{t('가져오기')}</h3>
+    <label className="secondary-button skills-file"><Upload size={14} />{t('백업 파일 고르기')}<input type="file" accept="application/json,.json" disabled={busy || working} onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; if (file) void read(file); }} /></label>
+    {plan && bundle && <div className="skills-import">
+      <p className="auth-hint">{t('{0}에서 {1}에 내보낸 백업입니다.', { 0: plan.from || '?', 1: plan.exportedAt ? new Date(plan.exportedAt).toLocaleString(locale()) : '?' })}</p>
+      <ul className="skills-checklist">{plan.items.map(item => { const choice = choices[item.index]; return <li key={item.index}>
+        <strong>{item.name}</strong><span className="skill-badge">{item.scope === 'global' ? t('전역') : folderName(item.fromCwd ?? '')}</span>
+        {item.conflict === 'external' ? <small>{t('타워 밖에 같은 이름의 스킬이 있어 건너뜁니다.')}</small>
+          : <select value={choice?.action ?? 'skip'} disabled={busy || working} aria-label={t('{0} 가져오기 방법', { 0: item.name })} onChange={event => setChoice(item.index, { action: event.target.value as SkillImportChoice['action'] })}>
+            <option value="skip">{t('건너뛰기')}</option>{item.conflict === 'new' ? <option value="add">{t('가져오기')}</option> : <option value="replace">{t('타워에 있는 것을 바꾸기')}</option>}</select>}
+        {item.scope === 'project' && item.conflict !== 'external' && <select value={choice?.cwd ?? ''} disabled={busy || working} aria-label={t('{0}를 둘 프로젝트', { 0: item.name })} onChange={event => setChoice(item.index, { cwd: event.target.value || undefined })}>
+          <option value="">{t('프로젝트 고르기')}</option>{[...new Set([...(item.cwd ? [item.cwd] : []), ...projects])].map(path => <option key={path} value={path}>{folderName(path)} · {path}</option>)}</select>}
+      </li>; })}</ul>
+      {plan.guidance && <fieldset className="skill-scope"><legend>{t('백업에 든 지침')}</legend>
+        {(['skip', 'append', 'replace'] as const).map(mode => <label key={mode}><input type="radio" name="guidance-mode" checked={guidanceMode === mode} onChange={() => setGuidanceMode(mode)} />{mode === 'skip' ? t('가져오지 않기') : mode === 'append' ? t('내 지침 뒤에 붙이기') : t('내 지침을 바꾸기')}</label>)}</fieldset>}
+      <label className="skill-pinned"><input type="checkbox" checked={pins} onChange={event => setPins(event.target.checked)} />{t('“항상 확인”도 그대로')}</label>
+      <div className="skills-toolbar"><span /><button className="primary-button" disabled={busy || working} onClick={async () => {
+        const selected = Object.values(choices).filter(choice => choice.action !== 'skip');
+        if (await onImport({ bundle, choices: selected, guidance: guidanceMode, pins })) { setPlan(null); setBundle(null); }
+      }}><Check size={14} />{t('가져오기')}</button></div>
+    </div>}
   </section>;
 }

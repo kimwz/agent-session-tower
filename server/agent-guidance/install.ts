@@ -4,6 +4,9 @@ import { basename, dirname, join } from 'node:path';
 import { AGENT_GUIDANCE } from './guidance.js';
 
 export const GUIDANCE_FILE = 'agent-guidance.md';
+/** The owner's own guidance, written from Tower's skills panel and given to every agent beside Tower's text. */
+export const OWNER_GUIDANCE_FILE = join('guidance', 'owner.md');
+export const OWNER_GUIDANCE_HEADING = "## The owner's own instructions";
 const BEGIN = '<!-- agent-session-tower:begin (managed by Agent Session Tower; replaced when it starts) -->';
 const END = '<!-- agent-session-tower:end -->';
 /** Written anywhere in an instruction file, keeps Tower from adding or updating its section there. */
@@ -28,10 +31,12 @@ export async function installAgentGuidance(homes: GuidanceHomes): Promise<Guidan
   const guidanceFile = join(homes.stateDir, GUIDANCE_FILE);
   await mkdir(homes.stateDir, { recursive: true, mode: 0o700 });
   if (await readText(guidanceFile) !== AGENT_GUIDANCE) await replaceFile(guidanceFile, AGENT_GUIDANCE);
+  const ownerFile = join(homes.stateDir, OWNER_GUIDANCE_FILE);
+  const owner = (await readText(ownerFile))?.trim();
   const claude = await isDirectory(homes.claudeHome)
-    ? await updateSection(join(homes.claudeHome, 'CLAUDE.md'), `@${guidanceFile}`) : 'not-installed';
+    ? await updateSection(join(homes.claudeHome, 'CLAUDE.md'), owner ? `@${guidanceFile}\n@${ownerFile}` : `@${guidanceFile}`) : 'not-installed';
   const codex = await isDirectory(homes.codexHome)
-    ? await updateSection(await codexInstructions(homes.codexHome), AGENT_GUIDANCE.trimEnd()) : 'not-installed';
+    ? await updateSection(await codexInstructions(homes.codexHome), owner ? `${AGENT_GUIDANCE.trimEnd()}\n\n${OWNER_GUIDANCE_HEADING}\n\n${owner}` : AGENT_GUIDANCE.trimEnd()) : 'not-installed';
   return { claude, codex };
 }
 
