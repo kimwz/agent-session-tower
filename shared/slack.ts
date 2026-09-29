@@ -55,7 +55,14 @@ export interface SlackWorkflow {
   replies?: Array<{ requestKey: string; text: string; status: 'proposed' | 'sending' | 'sent' | 'uncertain'; approvedAt?: string; ts?: string }>;
   ownerConditionalReply?: { mode?: 'composed'; ruleId?: string; requestIds?: string[]; instruction?: string; requestId: string; requestKey: string; text: string; status: 'pending' | 'sent' | 'blocked' | 'cancelled' | 'uncertain'; authorizedAt: string; evidence?: string };
   ownerReplySelection?: { requestKey: string; text: string };
-  reactions?: Array<{ name: string; action: 'add' | 'remove'; at: string }>;
+  /** `ts` names a later thread message the reaction went on; the request message otherwise. */
+  reactions?: Array<{ name: string; action: 'add' | 'remove'; at: string; ts?: string }>;
+  /**
+   * Tower's own working reaction on the request and on later messages it took up (Slack conversations only).
+   * add: to put on, or whether it went on is uncertain; on: put on, or putting it on failed; off: taken off, or the
+   * attempt failed (error).
+   */
+  workingMarks?: Array<{ ts: string; name: string; state: 'add' | 'on' | 'off'; error?: string }>;
   /** Later thread messages, oldest first (Slack conversations only). */
   followUps?: SlackFollowUp[];
   mention: SlackMention;
@@ -78,6 +85,8 @@ export interface SlackPublicStatus {
   tone?: SlackToneGuide;
   language?: 'ko' | 'en';
   allowSelfMentions?: boolean;
+  /** The emoji Tower puts on a message while working on it; unset turns it off. */
+  workingReaction?: string;
   connected: boolean;
   enabled: boolean;
   status: string;

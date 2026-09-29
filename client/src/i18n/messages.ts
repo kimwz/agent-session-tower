@@ -1106,6 +1106,8 @@ export const english: Record<string, string> = {
   "지침을 저장했습니다.": "Rules saved.",
   "Slack 계정": "Slack account",
   "내 멘션도 처리 (테스트용)": "Process my own mentions (for testing)",
+  "작업 중 표시 이모지": "Working emoji",
+  "멘션이나 이어진 요청을 받자마자 이 이모지를 달고, 작업이 끝나면 뗍니다. 비우면 쓰지 않습니다.": "Added as soon as a mention or a follow-up request arrives, and taken off when the work is done. Leave empty to turn it off.",
   "멘션 감시": "Monitor mentions",
   "연결 해제": "Disconnect",
   "Slack 앱의 Socket Mode 토큰과 사용자 OAuth 토큰을 입력하세요.": "Enter your Slack app Socket Mode token and user OAuth token.",

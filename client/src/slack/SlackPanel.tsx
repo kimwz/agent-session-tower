@@ -30,6 +30,7 @@ export function SlackPanel({ token, onClose, providers = [], projects = [] }: { 
   const dirtyRef = useRef(false);
   const [appToken, setAppToken] = useState('');
   const [userToken, setUserToken] = useState('');
+  const [workingReaction, setWorkingReaction] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
   const revision = useRef(0);
@@ -86,6 +87,11 @@ export function SlackPanel({ token, onClose, providers = [], projects = [] }: { 
         <div className="slack-settings">
           <label className="slack-check"><input type="checkbox" checked={overview.enabled} disabled={busy} onChange={event => void mutate('/api/slack/settings', { enabled: event.target.checked })} /><span><strong>{t('멘션 감시')}</strong><small>{t('새 멘션마다 전용 대화를 열고 지침에 따라 처리합니다.')}</small></span></label>
           <label className="slack-check"><input type="checkbox" checked={overview.allowSelfMentions === true} disabled={busy} onChange={event => void mutate('/api/slack/settings', { allowSelfMentions: event.target.checked })} /><span><strong>{t('내 멘션도 처리 (테스트용)')}</strong><small>{t('직접 멘션해 지침을 시험할 수 있습니다. 실제 작업이 실행됩니다.')}</small></span></label>
+          <form className="slack-working-reaction" onSubmit={event => { event.preventDefault(); if (workingReaction !== null) void mutate('/api/slack/settings', { workingReaction: workingReaction.trim() }).then(ok => { if (ok) setWorkingReaction(null); }); }}>
+            <label>{t('작업 중 표시 이모지')}<small>{t('멘션이나 이어진 요청을 받자마자 이 이모지를 달고, 작업이 끝나면 뗍니다. 비우면 쓰지 않습니다.')}</small>
+              <input value={workingReaction ?? overview.workingReaction ?? ''} placeholder="loading" autoComplete="off" spellCheck={false} disabled={busy} onChange={event => setWorkingReaction(event.target.value)} /></label>
+            {workingReaction !== null && workingReaction.trim().replace(/^:|:$/g, '') !== (overview.workingReaction ?? '') && <button className="secondary-button" disabled={busy}>{t('저장')}</button>}
+          </form>
         </div>
         <p>{t('상태')}: {overview.status}</p>{overview.error && <p role="alert" className="slack-error">{overview.error}</p>}
         <button className="secondary-button" disabled={busy} onClick={() => void mutate('/api/slack/disconnect', {})}>{t('연결 해제')}</button>

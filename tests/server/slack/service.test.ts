@@ -290,3 +290,31 @@ test('a later message in a handled thread reaches its conversation when the judg
   assert.equal(service.overview().events.length, 1);
   assert.equal(service.overview().events[0].followUps?.at(-1)?.mentioned, true);
 });
+
+test('the working reaction is a saved setting that marks new mentions at once on their message', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-slack-working-'));
+  let socket: SlackSocketOptions | undefined;
+  const reactions: string[] = [];
+  // Conversations never start here: the reaction goes on before any of that.
+  const create = () => new SlackService({ stateDir, runs: { list: () => [], create: () => new Promise(() => {}) }, autoPrompts: { get: () => undefined, submit: async () => { throw new Error('Must not execute'); } }, refresh: async () => {} }, {
+    client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => new Promise(() => {}), reply: async () => { throw new Error('Must not send'); },
+      react: async (channel: string, ts: string, name: string, action: 'add' | 'remove') => { reactions.push(`${action}:${name}:${channel}:${ts}`); } }),
+    socket: options => { socket = options; return { start() {}, stop() {} }; },
+    model: async () => { throw new Error('Must not start a provider'); },
+  });
+  let service = create();
+  t.after(async () => { service.close(); await rm(stateDir, { recursive: true, force: true }); });
+  await service.start();
+  await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
+  assert.equal(service.overview().workingReaction, undefined, 'off by default');
+  for (const workingReaction of ['bad name', 7, ':'.repeat(3)]) await assert.rejects(service.mutate('settings', { workingReaction }), { statusCode: 400 });
+  await service.mutate('settings', { enabled: true, workingReaction: ':loading:' });
+  assert.equal(service.overview().workingReaction, 'loading');
+  await socket!.onEvent({ team_id: 'T1', event_id: 'E1', event: { type: 'message', channel: 'C1', user: 'U2', ts: '100.001', text: '<@U1> deploy dev please' } });
+  for (let wait = 0; !reactions.length && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(reactions, ['add:loading:C1:100.001']);
+  service.close(); service = create(); await service.start();
+  assert.equal(service.overview().workingReaction, 'loading', 'kept across restarts');
+  await service.mutate('settings', { workingReaction: '' });
+  assert.equal(service.overview().workingReaction, undefined, 'an empty value turns it off');
+});

@@ -24,7 +24,9 @@ export const GITHUB_CHANNEL: CoordinatorChannel = {
 export const GITHUB_SESSION_TOOLS = SLACK_SESSION_TOOLS.map(tool => {
   const name = tool.name.replace(/^slack_/, 'github_');
   if (name === 'github_react') {
-    return { ...tool, name, inputSchema: { ...tool.inputSchema, properties: { ...tool.inputSchema.properties, action: { type: 'string', enum: ['add'] } } },
+    // GitHub reactions go on the issue only.
+    const { ts: _ts, ...properties } = tool.inputSchema.properties as Record<string, unknown>;
+    return { ...tool, name, inputSchema: { ...tool.inputSchema, properties: { ...properties, action: { type: 'string', enum: ['add'] } } },
       description: `Add a reaction to the original GitHub issue, for example to mark progress. Allowed only while reply authorization exists (an autoReply rule delegation or owner send permission). One of: ${GITHUB_REACTIONS.join(', ')}.` };
   }
   const description = name === 'github_react'

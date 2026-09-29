@@ -26,6 +26,8 @@
 .slack-panel .slack-check { flex-direction: row; align-items: flex-start; gap: 10px; }
 .slack-check input { margin-top: 2px; }
 .slack-check > span { display: flex; flex-direction: column; gap: 2px; }
+.slack-working-reaction { display: flex; align-items: flex-end; gap: 8px; }
+.slack-working-reaction label { flex: 1; max-width: 320px; }
 .slack-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .slack-actions button, .slack-savebar button { display: inline-flex; align-items: center; gap: 6px; }
 .slack-notice { color: var(--teal) !important; }

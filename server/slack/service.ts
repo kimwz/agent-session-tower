@@ -14,13 +14,15 @@ import type { RunOrigin } from '../../shared/types.js';
 import type { SlackProjection } from '../triggers/service.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { SlackAutomationManager, validateSlackRules } from './automation.js';
-import { SlackClient } from './client.js';
+import { SlackApiError, SlackClient } from './client.js';
 import { SlackSocket, type SlackSocketOptions } from './socket.js';
 import { judgeSlackFollowUp } from './follow-up.js';
 import type { DecisionEngine } from '../decisions/engine.js';
 
 type Account = { teamId: string; userId: string; teamName?: string; userName?: string };
-type Settings = { enabled: boolean; allowSelfMentions?: boolean; language?: 'ko' | 'en'; appToken?: string; userToken?: string; account?: Account };
+type Settings = { enabled: boolean; allowSelfMentions?: boolean; language?: 'ko' | 'en'; workingReaction?: string; appToken?: string; userToken?: string; account?: Account };
+/** An emoji name as Slack's reactions use it, without colons. */
+const EMOJI_NAME = /^[a-z0-9_+'-]{1,100}$/;
 interface Dependencies {
   client?: (token: string) => Pick<SlackClient, 'auth' | 'thread' | 'reply'> & Partial<Pick<SlackClient, 'searchOwnMessages' | 'react'>>;
   socket?: (options: SlackSocketOptions) => Pick<SlackSocket, 'start' | 'stop'>;
@@ -101,11 +103,14 @@ export class SlackService extends EventEmitter {
       // A reply nobody instructed or approved says so; one the owner asked for or approved is theirs.
       sendReply: (mention, text, mentionable, automatic) => this.client(mention.teamId).reply(mention.channel, mention.threadTs, text, mentionable,
         automatic ? `Sent by ${this.settings.account?.userName ? `${this.settings.account.userName}'s` : 'an'} agent` : undefined),
-      react: async (mention, name, action) => {
+      react: async (mention, name, action, ts) => {
         const client = this.client(mention.teamId);
         if (!client.react) throw new Error('Slack reactions are unavailable.');
-        await client.react(mention.channel, mention.ts, name, action);
+        // A deleted message has nothing left to take off.
+        try { await client.react(mention.channel, ts ?? mention.ts, name, action); }
+        catch (error) { if (!(action === 'remove' && error instanceof SlackApiError && error.code === 'message_not_found')) throw error; }
       },
+      workingReaction: () => this.settings.workingReaction,
     });
     this.automation.on('change', () => this.emit('change'));
   }
@@ -114,7 +119,7 @@ export class SlackService extends EventEmitter {
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
     try {
       const saved = await readPrivateJson(this.path) as Settings;
-      if ((saved.language !== undefined && saved.language !== 'ko' && saved.language !== 'en') || (saved.allowSelfMentions !== undefined && typeof saved.allowSelfMentions !== 'boolean') || typeof saved.enabled !== 'boolean' || (saved.userToken && typeof saved.userToken !== 'string') || (saved.appToken && typeof saved.appToken !== 'string')) throw new Error('Invalid Slack connection settings.');
+      if ((saved.language !== undefined && saved.language !== 'ko' && saved.language !== 'en') || (saved.allowSelfMentions !== undefined && typeof saved.allowSelfMentions !== 'boolean') || (saved.workingReaction !== undefined && !(typeof saved.workingReaction === 'string' && EMOJI_NAME.test(saved.workingReaction))) || typeof saved.enabled !== 'boolean' || (saved.userToken && typeof saved.userToken !== 'string') || (saved.appToken && typeof saved.appToken !== 'string')) throw new Error('Invalid Slack connection settings.');
       this.settings = saved;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     await this.tone.load(this.settings.account ? `${this.settings.account.teamId}:${this.settings.account.userId}` : '');
@@ -133,7 +138,7 @@ export class SlackService extends EventEmitter {
   pause() { this.socket?.stop(); this.socket = undefined; if (this.timer) clearInterval(this.timer); this.timer = undefined; }
   resume() { this.restartSocket(); this.startTicking(); }
   overview() {
-    return { tone: this.tone.overview(), language: this.settings.language ?? 'ko', connected: Boolean(this.settings.userToken), enabled: this.settings.enabled, allowSelfMentions: this.settings.allowSelfMentions === true, status: this.status,
+    return { tone: this.tone.overview(), language: this.settings.language ?? 'ko', connected: Boolean(this.settings.userToken), enabled: this.settings.enabled, allowSelfMentions: this.settings.allowSelfMentions === true, ...(this.settings.workingReaction ? { workingReaction: this.settings.workingReaction } : {}), status: this.status,
       ...(this.error ? { error: this.error } : {}), ...(this.settings.account ? { account: { ...this.settings.account } } : {}),
       rules: this.automation.rules(), events: this.automation.list() };
   }
@@ -192,7 +197,7 @@ export class SlackService extends EventEmitter {
     return work;
   }
   private async update(action: string, body: Record<string, unknown>) {
-    const fields: Record<string, string[]> = { connect: ['appToken', 'userToken'], settings: ['enabled', 'allowSelfMentions', 'language'], rules: ['rules'], disconnect: [], 'tone/collect': [], 'tone/save': ['guide', 'enabled'], 'replies/approve': ['workflowId', 'requestKey', 'text'] };
+    const fields: Record<string, string[]> = { connect: ['appToken', 'userToken'], settings: ['enabled', 'allowSelfMentions', 'language', 'workingReaction'], rules: ['rules'], disconnect: [], 'tone/collect': [], 'tone/save': ['guide', 'enabled'], 'replies/approve': ['workflowId', 'requestKey', 'text'] };
     if (!body || typeof body !== 'object' || Array.isArray(body) || !fields[action] || Object.keys(body).some(key => !fields[action].includes(key))) throw invalid('Slack 설정 요청이 올바르지 않습니다.');
     if (action === 'tone/save') {
       if (typeof body.guide !== 'string' || body.guide.length > 4000 || typeof body.enabled !== 'boolean' || !this.settings.account) throw invalid('말투 가이드 설정이 올바르지 않습니다.');
@@ -232,14 +237,17 @@ export class SlackService extends EventEmitter {
       if (this.automation.hasPending()) throw invalid('진행 중인 Slack 작업이 끝난 뒤 계정을 변경하세요.');
       const account = await this.makeClient(body.userToken).auth();
       const next = { language: this.settings.language, enabled: false, appToken: body.appToken, userToken: body.userToken, account };
-      await writePrivateJson(this.path, JSON.stringify(next));
-      this.settings = next;
-      await this.tone.load(`${account.teamId}:${account.userId}`);
-      this.restartSocket();
+      await this.releaseAccount(async () => {
+        await writePrivateJson(this.path, JSON.stringify(next));
+        this.settings = next;
+        await this.tone.load(`${account.teamId}:${account.userId}`);
+      });
     } else if (action === 'settings') {
-      if (!Object.keys(body).length || Object.entries(body).some(([key, value]) => key === 'language' ? value !== 'ko' && value !== 'en' : typeof value !== 'boolean')) throw invalid('감시 설정이 올바르지 않습니다.');
+      if (!Object.keys(body).length || Object.entries(body).some(([key, value]) => key === 'language' ? value !== 'ko' && value !== 'en'
+        : key === 'workingReaction' ? !(typeof value === 'string' && (value === '' || EMOJI_NAME.test(value.replace(/^:|:$/g, '')))) : typeof value !== 'boolean')) throw invalid('감시 설정이 올바르지 않습니다.');
+      const workingReaction = typeof body.workingReaction === 'string' ? body.workingReaction.replace(/^:|:$/g, '') : undefined;
       if (body.enabled && !this.settings.userToken) throw invalid('Slack 계정을 먼저 연결하세요.');
-      const next = { ...this.settings, ...('language' in body ? { language: body.language as 'ko' | 'en' } : {}), ...('enabled' in body ? { enabled: body.enabled as boolean } : {}), ...('allowSelfMentions' in body ? { allowSelfMentions: body.allowSelfMentions as boolean } : {}) };
+      const next: Settings = { ...this.settings, ...('workingReaction' in body ? { workingReaction: workingReaction || undefined } : {}), ...('language' in body ? { language: body.language as 'ko' | 'en' } : {}), ...('enabled' in body ? { enabled: body.enabled as boolean } : {}), ...('allowSelfMentions' in body ? { allowSelfMentions: body.allowSelfMentions as boolean } : {}) };
       await writePrivateJson(this.path, JSON.stringify(next));
       const monitoringChanged = next.enabled !== this.settings.enabled;
       this.settings = next;
@@ -249,14 +257,24 @@ export class SlackService extends EventEmitter {
       await this.automation.setRules(body.rules);
     } else if (action === 'disconnect') {
       if (this.automation.hasPending()) throw invalid('진행 중인 Slack 작업이 끝난 뒤 연결을 해제하세요. 새 멘션 감시는 지금 끌 수 있습니다.');
-      await writePrivateJson(this.path, JSON.stringify({ enabled: false, language: this.settings.language }));
-      this.settings = { enabled: false, language: this.settings.language };
-      await this.tone.load('');
-      this.restartSocket();
+      await this.releaseAccount(async () => {
+        await writePrivateJson(this.path, JSON.stringify({ enabled: false, language: this.settings.language }));
+        this.settings = { enabled: false, language: this.settings.language };
+        await this.tone.load('');
+      });
     } else throw invalid('지원하지 않는 Slack 설정입니다.');
     this.changedAt = new Date().toISOString();
     this.emit('change');
     return this.overview();
+  }
+  /**
+   * Replaces or drops the connected account: with events and ticks stopped, Tower's working reactions come off with
+   * the account that put them on, and none goes back on before `change` is done.
+   */
+  private async releaseAccount(change: () => Promise<void>) {
+    this.pause();
+    try { await this.automation.clearMarks(change); }
+    finally { this.restartSocket(); this.startTicking(); }
   }
   private restartSocket() {
     this.socket?.stop(); this.socket = undefined; this.error = undefined;
