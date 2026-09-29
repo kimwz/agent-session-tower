@@ -1,8 +1,9 @@
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { CodeXml, Eye, EyeOff, Folder, LoaderCircle, Pencil, Pin, Plus, Settings, Sparkles, Terminal, X } from 'lucide-react';
+import { CodeXml, Eye, EyeOff, Folder, LoaderCircle, Pencil, Pin, Plus, Settings, ShieldCheck, Sparkles, Terminal, X } from 'lucide-react';
 import { openSkills } from '../skills/skills-open';
+import { openPermissions } from '../permissions/permissions-open';
 import type { ProjectGroupPatch } from '../../../shared/types';
 import type { RepositoryAction, RepositoryStatus } from '../../../shared/repositories';
 import { RepositorySync } from './RepositorySync';
@@ -105,6 +106,7 @@ export function ProjectGroupMenu({ data, onEditTitle, onDone }: { data: ProjectG
     <button type="button" disabled={workspaceUnavailable} onClick={act(() => openWorkspace?.(data.path, 'terminal', data.machine))}><Terminal size={15} />{t("브라우저 터미널 열기")}</button>
     {workspaceNote && <p className="project-group-menu-note">{workspaceNote}</p>}
     {!data.machine && <button type="button" disabled={!actionable || !data.token} onClick={act(() => openSkills(data.path))}><Sparkles size={15} />{t("이 폴더의 스킬")}</button>}
+    {!data.machine && <button type="button" disabled={!actionable || !data.token} onClick={act(() => openPermissions(data.path))}><ShieldCheck size={15} />{t("이 폴더의 권한")}</button>}
     <button type="button" disabled={disabled} onClick={act(onEditTitle)}><Pencil size={14} />{t("그룹 제목 편집")}</button>
     <button type="button" aria-pressed={data.hidden} disabled={viewDisabled} onClick={act(() => { void data.onUpdate({ cwd: data.path, hidden: !data.hidden }); })}>{data.hidden ? <EyeOff size={15} /> : <Eye size={15} />}{data.hidden ? t("폴더 숨김 해제") : t("폴더와 세션을 캔버스에서 숨기기")}</button>
     <div className="project-group-columns" role="group" aria-label={t("한 줄에 놓을 세션 수")}><span>{t("한 줄에 놓을 세션 수")}</span><div>

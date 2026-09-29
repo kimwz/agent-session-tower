@@ -37,6 +37,7 @@ import { RemoteExclusionStore } from '../remote/exclusions.js';
 import { remoteTriggerLaunch } from '../remote/visibility.js';
 import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
 import { SkillService } from '../skills/service.js';
+import { PermissionService } from '../permissions/service.js';
 import { skillHomes } from '../skills/files.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
 import { MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
@@ -484,6 +485,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       advise: resolve(stateDir) === resolve(defaultStateDir()) });
     // Skills never keep the worker from starting.
     await skills.start().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
+    const permissions = new PermissionService({ stateDir, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
+      resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' } }); } });
+    await permissions.start().catch(error => console.error(`Permission rules did not start: ${error instanceof Error ? error.message : String(error)}`));
+    runs.setClaudeSettings(cwd => permissions.claudeSettings(cwd));
     runs.setTurnNotes((_run, session) => skills.turnNotes(session));
     runs.on('change', () => skills.recordRuns());
     const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), publicAgents: () => publicAgents.projection(), ownPorts,
@@ -515,7 +520,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // Once more as the provider is about to start: a trigger set up remotely never works in a folder kept from sharing.
       return remoteLaunch.refused(run) ? REMOTE_FOLDER_REFUSED : undefined;
     }, run => remoteLaunch.prepareRun(run));
-    const api = new TowerApi({ stateDir, triggers, runs, github,
+    const api = new TowerApi({ stateDir, triggers, runs, github, permissions,
       remote: async paths => { await exclusions.reload(); await exclusions.prepare(paths, { fresh: true }); return { matcher: exclusions.matcher(), coordinators: coordinators() }; },
       projects: () => {
         const snapshot = visible.snapshot();
@@ -532,12 +537,12 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         search: async (id, query) => runs.getSession(id) ? (await sessions.search(runs.nativeSessionId(id), query)) ?? { count: 0, matches: [], bytes: 0 } : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
     await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
-      onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
       inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || Boolean(tools?.busy()), holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); },
-      quiesce: async () => { tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); await Promise.all([slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
-      resume: () => { tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); sessions.resume(); },
+      quiesce: async () => { tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); permissions.pause(); await Promise.all([permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
+      resume: () => { tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); permissions.resume(); sessions.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});

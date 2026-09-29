@@ -4,6 +4,18 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.75.0] - 2026-09-29
+
+### Added
+- **Permissions: one place for what Claude Code and Codex may do without asking, and agents can ask you for a permission.** Open it from the shield button in the header (the badge counts requests waiting for you), or for one project from its folder menu ("이 폴더의 권한").
+  - A rule is either a command prefix such as `gh pr merge` (allowed with any arguments, for Claude Code, Codex or both) or a Claude Code rule for other tools such as `WebFetch(domain:example.com)`. It applies to every project or to one project. Each rule shows exactly what each agent reads (`Bash(gh pr merge *)`, `prefix_rule(pattern=["gh", "pr", "merge"], decision="allow")`). Quotes, pipes, redirects and wildcards are refused, and broad rules such as a bare `git` or `python` get a warning.
+  - An agent in a turn you started from Tower asks with the new `permissions_request` tool when Claude Code or Codex refused or keeps asking about an action the task needs (for example the auto-mode classifier refusing `gh pr merge`). It gives the narrowest rule and why, and is told not to work around the refusal. The request shows under Requests with its reason, the conversation and the exact rules. You can allow it, edit it first (for example make it apply to every project or to both agents), or refuse it.
+  - With "결정을 요청한 대화에 보내 이어서 진행" (on by default), your decision goes to that conversation as your next message, after the turn under way if the agent is still working. The agent then goes on, since an allowed rule applies from its next turn. `permissions_list` also shows an agent its requests and the rules for its folder.
+  - Claude Code receives the rules as settings of the turns you start from Tower (and work your agents start): every project's rules, and a project's rules in that folder and the folders inside it. Turns that handle outside content (triggers, Slack, GitHub, public agents) keep the auto-mode classifier's review. Your own settings files are never rewritten, and Claude sessions you open yourself in a terminal are not affected.
+  - Codex reads them from `tower.rules` files that only Tower writes: `~/.codex/rules/tower.rules`, and `<project>/.codex/rules/tower.rules` for project rules (read in trusted projects). Codex cannot take rules per run, so every Codex run on this computer reads them, triggers and public agents included; the panel says so next to each Codex rule. Tower adds a project file to the repository's own exclude list so it stays out of git. It never changes a rules file it did not write, a committed one, or one reached through a linked folder, and only the Tower on the default state folder writes the file for every project.
+  - Up to 200 rules. To remove Tower's Codex rules without Tower, delete the `tower.rules` files named above.
+  - Only allow rules are managed; deny and ask rules stay in each agent's own settings. Requests come only from turns you started on this computer; agents cannot save, edit or decide rules.
+
 ## [1.74.1] - 2026-09-29
 
 ### Fixed

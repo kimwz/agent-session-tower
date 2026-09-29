@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PermissionRequestInputSchema, PermissionRuleInputSchema } from '../permissions.js';
 import { GitHubAuthSchema, HttpConditionSchema, HttpRequestSchema, ScheduleSchema, SecretInputSchema, TriggerInputSchema, TriggerSettingsSchema } from '../triggers.js';
 
 const id = z.string().min(1).max(200);
@@ -60,6 +61,16 @@ export const OPERATIONS = {
   'secrets.list': { input: z.object({}).strict(), write: false, agent: true, summary: 'List saved header secrets by name and origin. Values are never shown.' },
   'secrets.create': { input: z.object({ secret: SecretInputSchema }).strict(), write: true, ownerOnly: true, summary: 'Save a header value that is sent only to one origin.' },
   'secrets.delete': { input: z.object({ id: uuid }).strict(), write: true, ownerOnly: true, summary: 'Delete a saved header secret.' },
+  'permissions.request': { input: PermissionRequestInputSchema, write: true, agent: true,
+    summary: 'Ask the owner to allow an action Claude Code or Codex refused or keeps asking approval for (a permission rule, the auto-mode classifier, or a sandbox), when the task needs it. kind "command" is a command prefix without arguments you do not need (e.g. "gh pr merge"; no quotes, pipes or wildcards) and applies to Claude Code and Codex; kind "claude" is a Claude Code permission rule for other tools (e.g. "WebFetch(domain:example.com)"). scope "project" allows it in this folder only; ask for "global" only when it is needed everywhere. Ask for the narrowest rule and say why in reason. The owner decides in Tower: never work around the refusal. An allowed rule applies from your next turn, so say what waits on it and end your turn (or do other work first); the owner can send the decision to this conversation, and permissions_list shows it.' },
+  'permissions.list': { input: z.object({ cwd: z.string().max(4096).optional() }).strict(), write: false, agent: true,
+    summary: 'List the allow rules Tower keeps for this folder (or cwd) and every project, and the permission requests this conversation sent with their status.' },
+  'permissions.overview': { input: z.object({ cwd: z.string().max(4096).optional() }).strict(), write: false, ownerOnly: true, summary: 'Read every permission rule, request and rules file, or one folder’s.' },
+  'permissions.save': { input: z.object({ id: uuid.optional(), rule: PermissionRuleInputSchema }).strict(), write: true, ownerOnly: true, summary: 'Add or change an allow rule.' },
+  'permissions.delete': { input: z.object({ id: uuid }).strict(), write: true, ownerOnly: true, summary: 'Delete an allow rule.' },
+  'permissions.decide': { input: z.object({ id: uuid, approve: z.boolean(), rule: PermissionRuleInputSchema.optional(), resume: z.boolean().optional() }).strict(), write: true, ownerOnly: true,
+    summary: 'Allow a permission request, as asked or as edited, or refuse it; with resume, tell the requesting conversation so it goes on.' },
+  'permissions.acknowledge': { input: z.object({}).strict(), write: true, ownerOnly: true, summary: 'Dismiss the notice about an earlier permission record that could not be read.' },
 } as const;
 
 export type OperationName = keyof typeof OPERATIONS;
