@@ -362,7 +362,7 @@ export class WorktreeJanitor {
         if (this.stopping) { await discard(); return; }
         if (hidden && !now.finishedRoots.has(entry.root)) {
           // Judged again until nothing changed while it was judged: a conversation that started there meanwhile keeps it.
-          const state = hiddenState(now.sessions, this.options.runs());
+          const state = hiddenState(now.sessions, now.open, this.options.runs());
           if (state === settled) break;
           if (attempt === 3) { await discard(); return; }
           const blocker = await this.hiddenBlocker(worktree.path, now);
@@ -443,9 +443,9 @@ const KEPT_SUFFIX = '-kept';
 function hiddenRun(session: Session): boolean { return Boolean(session.launchedByAgent || session.parentLink === 'exec'); }
 
 /** Everything a helpers' folder is judged on, as one value: sessions, where they work, how far along, and the runs. */
-function hiddenState(sessions: Session[], runs: Run[]): string {
+function hiddenState(sessions: Session[], open: Session[], runs: Run[]): string {
   return JSON.stringify([sessions.map(session => [session.id, session.updatedAt, session.cwd, session.status, Boolean(session.activeProcess)]),
-    runs.map(run => [run.id, run.status, run.sessionId])]);
+    open.map(session => session.id), runs.map(run => [run.id, run.status, run.sessionId])]);
 }
 
 async function archivesSize(root: string): Promise<number> {

@@ -622,3 +622,24 @@ test('a conversation started in a helpers’ folder while it is judged keeps it'
   const [result] = await worktreeCleanupFor(state, ['claude:maker']);
   assert.deepEqual([result?.reason, result?.detail], ['openSession', 'owner-here']);
 });
+
+test('a closed conversation reopened in a helpers’ folder while it is judged keeps it', async t => {
+  const { dir, state, add, transcript, session } = await setup(t);
+  const review = join(dir, 'work.wt-review');
+  const rows = add(`git worktree add --detach ${review} HEAD`, ['--detach', review, 'HEAD']);
+  const start = Date.now();
+  const world = { sessions: [session('maker', await transcript('maker', rows), { updatedAt: iso(start) }),
+    session('r1', undefined, { provider: 'codex', id: 'codex:r1', cwd: review, launchedByAgent: true, updatedAt: iso(start) }),
+    session('owner-here', undefined, { cwd: review, updatedAt: iso(start) })], closed: new Set<string>(['claude:owner-here']), now: start + 60 * 60_000 };
+  let armed = false, reopened = false;
+  const cleaner = janitor(state, world, {
+    sessions: () => [...world.sessions],
+    closedIds: async () => new Set(world.closed),
+    reserved: async () => { armed = true; return []; },
+    runs: () => { if (armed && !reopened) { reopened = true; world.closed.delete('claude:owner-here'); } return []; },
+  });
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.ok(reopened);
+  assert.ok(existsSync(review));
+});
