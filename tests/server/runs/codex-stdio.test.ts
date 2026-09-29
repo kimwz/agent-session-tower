@@ -416,3 +416,13 @@ test('the master\'s Codex accepts only a ChatGPT sign-in, checked before its thr
   assert.deepEqual(ordinary.launches[0].args, ['app-server', '--stdio'], 'other sessions keep their own configuration');
   assert.equal(ordinary.sent.some(frame => frame.method === 'account/read'), false);
 });
+
+test('the agent\'s words go out by message as they stream, and what it did not stream is added when the message completes', async t => {
+  const replies: Array<[string, string, boolean]> = [];
+  const f = await fixture(t, 'complete', { onReply: (id: string, text: string, done: boolean) => { replies.push([id, text, done]); } });
+  await f.run.start(); await f.run.done;
+  assert.equal(replies.map(([, text]) => text).join(''), 'Hello Codex');
+  assert.ok(replies.every(([id]) => id === 'message:0'));
+  assert.equal(replies.at(-1)![2], true, 'the message is complete');
+  assert.equal(replies.filter(([, , done]) => done).length, 1);
+});

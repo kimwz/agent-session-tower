@@ -835,3 +835,60 @@ test('writing that comes while the last part is awaited is what goes if that par
     assert.deepEqual(requests(), ['배포해 줘 대신 운영은 건드리지 마'], 'called off, not sent');
   } finally { page.end(); }
 });
+
+test('a first response still waiting is dropped once its answer comes, a late one is not played, and one playing is never cut', async () => {
+  const page = await harness();
+  try {
+    const of = (id: string, kind: MasterSay['kind'], request: string) => ({ ...page.say(id, kind), request });
+    page.voice.say(page.say('before', 'answer'));
+    page.voice.say(of('ack-q1', 'ack', 'q1'));
+    page.voice.say(of('answer-q1', 'answer', 'q1'));
+    page.voice.say(of('late-q1', 'working', 'q1'));
+    const played = () => page.audio.played.filter(src => src.startsWith('/api/'));
+    assert.deepEqual(played(), ['/api/master/voice/audio/before']);
+    page.audio.onended!();
+    mock.timers.tick(400);
+    await flush();
+    assert.deepEqual(played(), ['/api/master/voice/audio/before', '/api/master/voice/audio/answer-q1'], 'the waiting first response went; the answer follows');
+    page.audio.onended!();
+    mock.timers.tick(400);
+    // A first response already playing when its answer comes is heard out; the answer waits for it.
+    page.voice.say(of('ack-q2', 'ack', 'q2'));
+    page.voice.say(of('answer-q2', 'answer', 'q2'));
+    assert.equal(played().at(-1), '/api/master/voice/audio/ack-q2');
+    page.audio.onended!();
+    mock.timers.tick(400);
+    await flush();
+    assert.equal(played().at(-1), '/api/master/voice/audio/answer-q2');
+  } finally { page.end(); }
+});
+
+test('an answer read while it is written is waited for as long as the longest answer, and cut-off audio is fetched again from where it was', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as unknown as { currentTime: number; onplaying: (() => void) | null; onerror: (() => void) | null; onended: (() => void) | null; played: string[] };
+    page.voice.say({ ...page.say('long', 'answer'), streaming: true });
+    mock.timers.tick(10);
+    audio.onplaying?.();
+    mock.timers.tick(60_000);
+    await flush();
+    assert.deepEqual(page.results(), [], 'still playing after a minute');
+    // The web restarts: the audio is cut twice, and each time fetched again from where it was in the whole.
+    audio.currentTime = 20;
+    audio.onerror?.();
+    mock.timers.tick(1_000);
+    await flush();
+    assert.equal(audio.played.at(-1), '/api/master/voice/audio/long?at=20.00');
+    audio.currentTime = 5;
+    audio.onerror?.();
+    mock.timers.tick(2_000);
+    await flush();
+    assert.equal(audio.played.at(-1), '/api/master/voice/audio/long?at=25.00', 'the place is kept across cuts');
+    assert.deepEqual(page.results(), []);
+    audio.onended?.();
+    await flush();
+    assert.deepEqual(page.results(), ['long:played']);
+    const report = posts.find(post => post.path.endsWith('/played'))!;
+    assert.equal(report.body.startedMs, 10, 'how long the sound took to start, on the page\'s clock');
+  } finally { page.end(); }
+});

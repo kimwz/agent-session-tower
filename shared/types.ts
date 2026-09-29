@@ -186,7 +186,20 @@ export interface Run {
    * wait began and `tasks` how many are still running (0 while Claude is about to take a finished one).
    */
   backgroundWait?: { since: string; tasks: number };
+  /**
+   * The master's turns only: what it writes, text block by text block as it streams, so its words can be read aloud
+   * while they are written. Unlike `output`, it holds no tool notes and is never cut at its start.
+   */
+  replies?: RunReply[];
+  /** Replies were dropped or cut to stay small: they no longer hold every word of the turn. */
+  repliesTrimmed?: true;
 }
+/**
+ * One text block the agent wrote, in order. `id` is the message's id and the block's place in it (`message:block`), so
+ * blocks of one message share the part before the colon. Its text only grows; `done` once the block is complete, `cut`
+ * when it grew too long to keep more.
+ */
+export interface RunReply { id: string; text: string; done?: true; cut?: true }
 export interface RunInstructions { text: string; required?: boolean }
 export interface RunApproval {
   id: string;

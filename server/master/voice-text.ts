@@ -39,7 +39,7 @@ function tone(plain: string, model: string, kind: VoiceKind): string {
   if (!TAGGED_MODELS.has(model) || kind === 'notice' || kind === 'error' || SERIOUS.test(plain)) return '';
   return kind !== 'ack' && GOOD_NEWS.test(plain) ? VOICE_TONES.excited : VOICE_TONES.bright;
 }
-type VoiceKind = 'answer' | 'report' | 'error' | 'notice' | 'ack';
+export type VoiceKind = 'answer' | 'report' | 'error' | 'notice' | 'ack';
 /** Brackets already in the text become parentheses on tagged models, so they are read, not taken as directions. */
 const untagged = (text: string, model: string) => TAGGED_MODELS.has(model) ? text.replace(/\[/g, '(').replace(/\]/g, ')') : text;
 
@@ -149,6 +149,36 @@ export function voicedParts(text: string, model: string, kind: VoiceKind): strin
     if (cut) break;
   }
   if (cut) part += (part && !/\s$/.test(part) ? ' ' : '') + VOICE_REST;
+  if (part.trim()) parts.push(part);
+  return parts.map(item => item.trim()).filter(Boolean).map(item => tag ? `${tag} ${item}` : item);
+}
+
+/**
+ * The tone tag of a chunk of an answer read while it is written: the first chunk sets it as `tone` does for a whole
+ * answer; serious words in any later chunk make it calm, and calm stays for the rest of the answer (never brighter
+ * again). `before` is the tag used so far, undefined for the first chunk.
+ */
+export function streamTone(plain: string, model: string, kind: VoiceKind, before?: string): string {
+  const now = tone(untagged(plain, model), model, kind);
+  if (before === undefined) return now;
+  return before === '' || now === '' ? '' : before;
+}
+
+/**
+ * What is sent to speech for one chunk of an answer read while it is written: whole sentences in parts of at most
+ * `PART` characters, each with the tag in front. Nothing is repeated or dropped between parts.
+ */
+export function voicedChunk(plain: string, model: string, tag: string): string[] {
+  const text = untagged(plain, model).trim();
+  if (!text) return [];
+  const parts: string[] = [];
+  let part = '';
+  for (const sentence of sentences(text)) {
+    for (const piece of pieces(sentence, PART)) {
+      if (part && part.length + piece.length > PART) { parts.push(part); part = ''; }
+      part += piece;
+    }
+  }
   if (part.trim()) parts.push(part);
   return parts.map(item => item.trim()).filter(Boolean).map(item => tag ? `${tag} ${item}` : item);
 }

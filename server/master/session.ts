@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { MASTER_FOLDER, type MasterBinding, type MasterTaskState } from '../../shared/master.js';
-import type { AutoPromptJob, ChatMessage, Provider, Run, SessionDetail, Snapshot } from '../../shared/types.js';
+import type { AutoPromptJob, ChatMessage, Provider, Run, RunReply, SessionDetail, Snapshot } from '../../shared/types.js';
+import type { MasterEntryData } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { ApiTarget } from './api-target.js';
 import { REPORT_MARK, VOICE_MARK, writeMasterGuide } from './guide.js';
@@ -69,14 +70,30 @@ export interface Followed {
   workingSaid?: true;
 }
 
-interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; followed: Followed[] }
+/**
+ * A turn read aloud while the master wrote it: `started` before its first words went to speech, `stopped` when it was
+ * not heard to the end, `done` when it was. Kept by turn (the run steered messages joined), so a turn is never read
+ * twice, whichever request of it is looked at, and after a restart.
+ */
+export interface VoicedTurn { turn: string; state: 'started' | 'stopped' | 'done'; at: string }
+const VOICED = 200;
+
+interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; followed: Followed[]; voiced?: VoicedTurn[] }
 
 /** What the voice gets from the master session. */
 export interface VoiceSide {
   speaks(report: boolean): 'pending' | 'unspoken' | undefined;
   deliver(): void;
   working(origin: { key: string; session?: string }): Promise<void>;
+  /** The master's words for a turn so far, to read while they are written. */
+  stream?(input: { turn: string; kind: 'answer' | 'report'; key: string; request?: string; voiceSession?: string; replies: readonly RunReply[] }): void;
+  /** Whether a turn is being read while it is written. */
+  streaming?(turn: string): boolean;
+  /** A turn with a voiced record ended: the rest is read, and its entry added (never waiting to be read again). */
+  finishStream?(input: { turn: string; replies?: readonly RunReply[]; completed: boolean; data?: MasterEntryData }): void;
+  timings?: { mark(key: string | undefined, field: 'request' | 'text' | 'end', at?: number, about?: { kind?: 'answer' | 'report' }): void };
 }
+const FINISHED_RUN = new Set<Run['status']>(['completed', 'error', 'cancelled']);
 
 export interface MasterSessionOptions {
   stateDir: string;
@@ -108,6 +125,9 @@ export class MasterSession {
   private writes: Promise<unknown> = Promise.resolve();
   private readonly sending = new Set<string>();
   private closed = false;
+  private followAgain = false;
+  private unsubscribeLive?: () => void;
+  private lookScheduled = false;
 
   constructor(private readonly options: MasterSessionOptions) {
     this.folder = join(options.stateDir, MASTER_FOLDER);
@@ -117,7 +137,10 @@ export class MasterSession {
   async start(): Promise<void> {
     const saved = await readPrivateJson(this.path).catch(() => undefined) as Partial<FollowFile> | undefined;
     if (saved?.version === 1 && Array.isArray(saved.followed) && Array.isArray(saved.masterRuns) && typeof saved.baselineAt === 'string') {
-      this.file = { version: 1, baselineAt: saved.baselineAt, masterRuns: saved.masterRuns.filter(id => typeof id === 'string'), followed: saved.followed.filter(item => item && typeof item.id === 'string') };
+      this.file = { version: 1, baselineAt: saved.baselineAt, masterRuns: saved.masterRuns.filter(id => typeof id === 'string'), followed: saved.followed.filter(item => item && typeof item.id === 'string'),
+        voiced: (Array.isArray(saved.voiced) ? saved.voiced : []).filter(item => item && typeof item.turn === 'string')
+          // What was being read when the host stopped is not read on: its place in the words is gone.
+          .map(item => item.state === 'started' ? { ...item, state: 'stopped' as const } : item) };
     }
     // A report that was being sent when the host stopped may have arrived: it is looked for before it goes again. A
     // spoken request cut off the same way is not followed (nor sent again), so no late "could not answer" is read aloud.
@@ -129,6 +152,51 @@ export class MasterSession {
     await writeMasterGuide(this.folder);
     this.timer = setInterval(() => { void this.follow(); }, this.options.followMs ?? FOLLOW_MS);
     this.timer.unref();
+    this.unsubscribeLive = this.options.live.subscribe?.(() => this.changed());
+  }
+
+  /**
+   * Tower's state changed: the master's words so far go to the voice, and a followed turn that ended is looked at at
+   * once (not at the next regular look). Once per change burst.
+   */
+  private changed(): void {
+    if (this.lookScheduled || this.closed) return;
+    this.lookScheduled = true;
+    setImmediate(() => {
+      this.lookScheduled = false;
+      if (this.closed) return;
+      const snapshot = this.options.live.snapshot();
+      if (!snapshot) return;
+      let ended = false;
+      const seen = new Set<string>();
+      for (const item of this.file.followed) {
+        if (item.state !== 'running' || !item.runId || item.node) continue;
+        const run = (snapshot.runs ?? []).find(entry => entry.id === item.runId);
+        if (!run) continue;
+        const turn = turnOf(run, snapshot);
+        if (FINISHED_RUN.has(turn.status) || FINISHED_RUN.has(run.status)) { ended = true; continue; }
+        if ((item.kind !== 'spoken' && item.kind !== 'report') || seen.has(turn.id)) continue;
+        seen.add(turn.id);
+        if (turn.replies?.some(reply => reply.text.trim())) this.voice?.timings?.mark(timingKey(item), 'text');
+        if (!turn.replies || this.voiced(turn.id)) continue;
+        this.voice?.stream?.({ turn: turn.id, kind: item.kind === 'spoken' ? 'answer' : 'report', key: timingKey(item),
+          ...(item.kind === 'spoken' && item.key ? { request: item.key } : {}), ...(item.kind === 'spoken' && item.voice ? { voiceSession: item.voice } : {}), replies: turn.replies });
+      }
+      if (ended) void this.follow();
+    });
+  }
+
+  /** The voiced record of a turn, if it has one. */
+  private voiced(turn: string): VoicedTurn | undefined { return this.file.voiced?.find(item => item.turn === turn); }
+
+  /** Kept for the voice (awaited before a turn's first words go to speech). */
+  async voicedState(turn: string, state: VoicedTurn['state']): Promise<void> {
+    const voiced = this.file.voiced ??= [];
+    const known = voiced.find(item => item.turn === turn);
+    if (known) { known.state = state; known.at = new Date().toISOString(); }
+    else voiced.push({ turn, state, at: new Date().toISOString() });
+    if (voiced.length > VOICED) voiced.splice(0, voiced.length - VOICED);
+    await this.save();
   }
 
   setVoice(voice: VoiceSide): void { this.voice = voice; }
@@ -199,6 +267,7 @@ export class MasterSession {
     // On disk before it goes: sent again with the same key, or after a restart, it is not sent twice.
     const item: Followed = { id: randomUUID(), kind: 'spoken', title: truncate(input.text, 80), sessionId: binding.sessionId, prompt, createdAt: new Date().toISOString(), state: 'running', voice: input.voiceSession, key: input.key };
     this.add(item);
+    this.voice?.timings?.mark(timingKey(item), 'request', Date.now(), { kind: 'answer' });
     await this.save();
     this.options.room.add({ kind: 'owner', text: input.text, voice: true });
     const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true })
@@ -238,9 +307,15 @@ export class MasterSession {
 
   /** One look at Tower: new work the master handed out, work that ended, reports to send and answers to read. */
   follow(): Promise<void> {
-    return this.following ??= this.followOnce().catch(error => {
+    // Asked again while a look is under way: one more look follows it, so a turn that ended meanwhile is not left for
+    // the next regular look.
+    if (this.following) { this.followAgain = true; return this.following; }
+    return this.following = this.followOnce().catch(error => {
       console.error(`Master could not follow its work: ${error instanceof Error ? error.message : String(error)}`);
-    }).finally(() => { this.following = undefined; });
+    }).finally(() => {
+      this.following = undefined;
+      if (this.followAgain && !this.closed) { this.followAgain = false; void this.follow(); }
+    });
   }
 
   private async followOnce(): Promise<void> {
@@ -314,18 +389,22 @@ export class MasterSession {
     const together = run ? (snapshot.runs ?? []).filter(entry => entry.id !== run.id && (entry.id === target || entry.steering?.targetRunId === target)
       && Date.parse(entry.createdAt) > Date.parse(run.createdAt)).map(entry => normalize(entry.prompt)) : [];
     if (target) item.turn = target;
-    const found = item.sessionId && ended !== 'unknown' ? await this.finalAnswer(item, run, together).catch(() => undefined) : undefined;
+    const turnRun = run ? turnOf(run, snapshot) : undefined;
+    // The master's own words, as it wrote them, when every word is there; otherwise read back from its history.
+    const written = turnRun && (item.kind === 'spoken' || item.kind === 'report') && ended === 'completed' ? lastMessage(turnRun) : undefined;
+    const found = written ? { text: written } : item.sessionId && ended !== 'unknown' ? await this.finalAnswer(item, run, together).catch(() => undefined) : undefined;
+    if (item.kind === 'spoken' || item.kind === 'report') this.voice?.timings?.mark(timingKey(item), 'end');
     item.state = ended;
     if (found?.text) item.answer = truncate(found.text, 3000);
     if (item.kind === 'delegated') {
       item.report = 'pending';
       if (!found && run?.error) item.answer = `Error: ${truncate(run.error, 500)}`;
-    } else this.speak(item, ended);
+    } else this.speak(item, ended, turnRun);
     return true;
   }
 
   /** A spoken request's answer, or the answer to a report while voice is on, handed to the voice to read aloud. */
-  private speak(item: Followed, ended: MasterTaskState): void {
+  private speak(item: Followed, ended: MasterTaskState, turnRun?: Run): void {
     const voice = this.voice;
     if (!voice) return;
     // A turn several messages were steered into is answered, and read aloud, once.
@@ -333,13 +412,21 @@ export class MasterSession {
     if (turn && this.file.followed.some(other => other !== item && other.spoke && (other.turn ?? other.runId) === turn)) return;
     const report = item.kind === 'report';
     const state = voice.speaks(report);
-    if (!state) return;
-    const speak = { state, ...(item.voice && !report ? { session: item.voice } : {}) };
-    if (ended === 'completed' && item.answer) {
-      // Only an answer read aloud stands for its turn; a failure does not keep the turn's answer from being read.
-      item.spoke = true;
-      this.options.room.add(report ? { kind: 'event', text: item.answer, speak } : { kind: 'master', text: item.answer, turnId: item.id, final: true, speak });
-    } else this.options.room.add({ kind: 'error', text: ended === 'cancelled' ? '요청이 멈췄습니다.' : '요청에 답하지 못했습니다. 마스터 창에서 확인해 주세요.', speak });
+    const speak = state && { state, ...(item.voice && !report ? { session: item.voice } : {}) };
+    const request = !report && item.key ? { request: item.key } : {};
+    const data: MasterEntryData | undefined = !speak ? undefined : ended === 'completed' && item.answer
+      ? report ? { kind: 'event', text: item.answer, speak } : { kind: 'master', text: item.answer, turnId: item.id, final: true, speak, ...request }
+      : { kind: 'error', text: ended === 'cancelled' ? '요청이 멈췄습니다.' : '요청에 답하지 못했습니다. 마스터 창에서 확인해 주세요.', speak };
+    // Read (or begun to be read) while it was written: the rest is read, and nothing of it is read twice.
+    if (turn && (this.voiced(turn) || voice.streaming?.(turn)) && voice.finishStream) {
+      if (ended === 'completed' && item.answer) item.spoke = true;
+      voice.finishStream({ turn, ...(turnRun?.replies ? { replies: turnRun.replies } : {}), completed: ended === 'completed', ...(data ? { data } : {}) });
+      return;
+    }
+    if (!data) return;
+    // Only an answer read aloud stands for its turn; a failure does not keep the turn's answer from being read.
+    if (data.kind !== 'error') item.spoke = true;
+    this.options.room.add(data);
     voice.deliver();
   }
 
@@ -390,7 +477,9 @@ export class MasterSession {
   private reported(run: Run, binding: MasterBinding, prompt: string): void {
     this.remember(run.id);
     if (!this.file.followed.some(item => item.kind === 'report' && item.runId === run.id)) {
-      this.add({ id: randomUUID(), kind: 'report', title: 'report', sessionId: binding.sessionId, runId: run.id, prompt: run.prompt ?? prompt, createdAt: run.createdAt ?? new Date().toISOString(), state: 'running' });
+      const item: Followed = { id: randomUUID(), kind: 'report', title: 'report', sessionId: binding.sessionId, runId: run.id, prompt: run.prompt ?? prompt, createdAt: run.createdAt ?? new Date().toISOString(), state: 'running' };
+      this.add(item);
+      this.voice?.timings?.mark(timingKey(item), 'request', Date.now(), { kind: 'report' });
     }
   }
 
@@ -523,10 +612,34 @@ export class MasterSession {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.unsubscribeLive?.();
     if (this.timer) clearInterval(this.timer);
     await this.following?.catch(() => {});
     await this.writes;
   }
+}
+
+/** The run whose words answer `run`: the turn it was steered into, when it was. */
+function turnOf(run: Run, snapshot: Snapshot): Run {
+  const target = run.steering?.targetRunId;
+  return (target && (snapshot.runs ?? []).find(entry => entry.id === target)) || run;
+}
+
+/** The key a request's timing record is kept under: a spoken request's key, or the report's own id. */
+function timingKey(item: Followed): string { return item.key ?? item.id; }
+
+/**
+ * The last thing the master wrote in a turn: every text block of its last message with words, joined. Nothing when
+ * the turn's replies are not whole (dropped or cut to stay small) or not there (an older worker).
+ */
+export function lastMessage(run: Run): string | undefined {
+  const replies = run.replies;
+  if (!replies || run.repliesTrimmed) return undefined;
+  const message = (reply: RunReply) => reply.id.slice(0, reply.id.lastIndexOf(':'));
+  const last = [...replies].reverse().find(reply => reply.text.trim());
+  if (!last) return undefined;
+  const text = replies.filter(reply => message(reply) === message(last) && reply.text.trim()).map(reply => reply.text.trim()).join('\n');
+  return text || undefined;
 }
 
 function truncate(text: string, length: number): string { return text.length > length ? `${text.slice(0, length)}…` : text; }

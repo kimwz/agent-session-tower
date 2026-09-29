@@ -88,6 +88,10 @@ export interface MasterSay {
   /** Where the page fetches the audio (same origin). */
   audio: string;
   expiresAt: number;
+  /** The spoken request it belongs to (its key), for the first response and the answer to keep their order. */
+  request?: string;
+  /** Read while the master is still writing it: its audio grows until the words end, so it may play long. */
+  streaming?: true;
 }
 
 export type MasterCallState = 'sending' | 'succeeded' | 'failed' | 'uncertain' | 'not-admitted';
@@ -99,7 +103,7 @@ export type MasterTaskState = 'running' | 'completed' | 'error' | 'cancelled' | 
  */
 export type MasterEntryData =
   | { kind: 'owner'; text: string; voice?: true }
-  | { kind: 'master'; text: string; turnId: string; final: boolean; speak?: MasterSpeak }
+  | { kind: 'master'; text: string; turnId: string; final: boolean; speak?: MasterSpeak; request?: string }
   | { kind: 'event'; text: string; speak?: MasterSpeak }
   | { kind: 'error'; text: string; speak?: MasterSpeak };
 

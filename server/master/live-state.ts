@@ -29,6 +29,7 @@ export class LiveState {
   private closed = false;
   private revision = 0;
   private connectedAt = 0;
+  private readonly listeners = new Set<() => void>();
 
   constructor(private readonly open: OpenStream, private readonly idleMs = IDLE_MS) {
     this.idleTimer = setInterval(() => { if (this.controller && Date.now() - this.lastUse > this.idleMs) this.disconnect(); }, 30_000);
@@ -69,8 +70,15 @@ export class LiveState {
   /** Connected and heard from within `ms`. */
   live(ms = 30_000): boolean { return Boolean(this.controller && this.local && Date.now() - this.receivedAt < ms); }
 
+  /** Called after every change received (a snapshot or a patch, of this computer or a joined one). */
+  subscribe(listener: () => void): () => void {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  }
+
   close(): void {
     this.closed = true;
+    this.listeners.clear();
     clearInterval(this.idleTimer);
     this.disconnect();
   }
@@ -151,6 +159,9 @@ export class LiveState {
     } else return true;
     this.revision++;
     for (const wake of this.waiters.splice(0)) wake();
+    for (const listener of [...this.listeners]) {
+      try { listener(); } catch (error) { console.error(`Master live state listener failed: ${error instanceof Error ? error.message : String(error)}`); }
+    }
     return true;
   }
 }

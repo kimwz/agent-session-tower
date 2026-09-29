@@ -81,8 +81,9 @@ export async function startMasterHost(options: MasterHostOptions) {
     };
   };
   const broadcastOverview = () => room.broadcast({ type: 'overview', seq: 0, overview: overview() });
-  // A host of another build steps aside unless a report is on its way or a tool is being answered.
-  const working = () => pending > 1 || Boolean(session?.busy());
+  // A host of another build steps aside unless a report is on its way, a tool is being answered, or something is being
+  // read aloud (a turn read while it is written, audio being made, or a page's word awaited).
+  const working = () => pending > 1 || Boolean(session?.busy()) || Boolean(voice?.busy());
   const dispatch = async (method: string, args: Record<string, unknown>) => {
     const master = session!;
     const speech = voice!;
@@ -129,7 +130,8 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'voiceRequest': return speech.voiceRequest({ session: args.session, clientMessageId: args.clientMessageId, text: args.text, local: args.local === true });
       case 'voiceActivity': return speech.voiceActivity({ session: args.session, speaking: args.speaking, sinceSpeechMs: args.sinceSpeechMs });
       case 'voiceKnown': return speech.voiceKnown({ session: args.session });
-      case 'voicePlayed': return speech.voicePlayed({ session: args.session, id: args.id, result: args.result });
+      case 'voicePlayed': return speech.voicePlayed({ session: args.session, id: args.id, result: args.result, startedMs: args.startedMs });
+      case 'voiceTimings': return speech.timings.list();
       case 'voiceVoices': return speech.voiceVoices();
       case 'voicePreview': return speech.voicePreview({ voiceId: args.voiceId });
       case 'shutdown': {
@@ -149,7 +151,12 @@ export async function startMasterHost(options: MasterHostOptions) {
     if (req.method === 'GET' && url.pathname === '/events') { lastRequest = Date.now(); events(res, url.searchParams.get('epoch') ?? '', Number(url.searchParams.get('after') ?? '-1')); return; }
     // Audio read aloud, streamed to the page through the web as it is made.
     const audio = /^\/audio\/((?:(?:clip|preview)-[a-f0-9]{64})|[0-9a-f-]{36})$/.exec(url.pathname);
-    if (req.method === 'GET' && audio) { lastRequest = Date.now(); void voice!.serveAudio(audio[1], res).catch(() => { if (!res.headersSent) res.writeHead(500); res.destroy(); }); return; }
+    if (req.method === 'GET' && audio) {
+      lastRequest = Date.now();
+      const at = Number(url.searchParams.get('at') ?? '0');
+      void voice!.serveAudio(audio[1], res, Number.isFinite(at) && at > 0 && at <= 1_200 ? at : 0).catch(() => { if (!res.headersSent) res.writeHead(500); res.destroy(); });
+      return;
+    }
     if (req.method !== 'POST' || url.pathname !== '/rpc') { res.writeHead(404); res.end(); return; }
     pending++;
     const reply: MasterHostReply = { protocol: MASTER_PROTOCOL, stateDir: paths.stateDir, version: APP_VERSION };
@@ -212,7 +219,8 @@ export async function startMasterHost(options: MasterHostOptions) {
     tools = new MasterTools({ tower, live, ...(readDb ? { readDb } : {}), broadcast: event => room.broadcast(event), started: (target, body, answer) => session!.started(target, body, answer), delegated: () => session!.delegatedTable() });
     const elevenLabs = new ElevenLabs({ key: () => settings.voiceKey(), ...options.voice?.elevenLabs });
     voice = new MasterVoice({ dataDir: paths.data, settings, room, elevenLabs, ...(options.voice?.timing ? { timing: options.voice.timing } : {}),
-      hooks: { hide: text => text, connectedSince: () => tower.connectedSince(), send: input => session!.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }) } });
+      hooks: { hide: text => text, connectedSince: () => tower.connectedSince(), send: input => session!.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }),
+        streamState: (turn, state) => session!.voicedState(turn, state) } });
     session.setVoice(voice);
     await voice.start();
     await session.start();

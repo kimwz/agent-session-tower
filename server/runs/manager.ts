@@ -21,6 +21,7 @@ import { findExecutable, providerDirectories, PROVIDERS } from '../providers/dis
 import { towerInstructionsBlock } from '../sessions/parser.js';
 import { isCreatedSession, isSavedRun, UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
+import { ReplyLog } from './replies.js';
 import { checkClaudeSubscription, markMaster, MASTER_TOOL_TIMEOUT_SECONDS, subscriptionOnly, withoutKeys } from './subscription.js';
 import { awaitToolServers, NO_RUN_TOOLS, type RunTools } from './session-mcp.js';
 import { automatedOrigin, ownerOrigin, parseRunOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
@@ -874,6 +875,7 @@ export class RunManager extends EventEmitter {
     // chose when the thread started, and Slack's tools require the automatic one.
     const owner = ownerOrigin(run.origin);
     const approvalsReviewer = mcpServers?.tower_slack || owner ? 'auto_review' as const : creating ? run.codexApprovalsReviewer : undefined;
+    const codexReplies = master ? new ReplyLog(run) : undefined;
     const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
       executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
       mcpServers, ...(master ? { subscriptionOnly: true } : {}),
@@ -901,6 +903,7 @@ export class RunManager extends EventEmitter {
         started = true; run.startedAt = startedAt ?? new Date().toISOString(); this.changed();
       },
       onOutput: text => { if (!FINISHED.has(run.status)) this.append(run, text); },
+      ...(codexReplies ? { onReply: (id: string, text: string, done: boolean) => { if (!FINISHED.has(run.status) && codexReplies.add(id, text, done)) this.notifyOutput(); } } : {}),
       onApproval: approval => { if (run.status === 'running') { run.approvals = [...(run.approvals || []), approval]; this.changed(); } },
       onApprovalCancelled: id => {
         if (!run.approvals?.some(approval => approval.id === id)) return;
@@ -1015,6 +1018,12 @@ export class RunManager extends EventEmitter {
     // What Claude itself put in the output, apart from Tower's notes: its final result is shown only if nothing was.
     let shown = false;
     const show = (text: string) => { shown = true; this.append(run, text); };
+    // The master's words, block by block, so they can be read aloud as they are written.
+    const replies = this.masterSession(session) ? new ReplyLog(run) : undefined;
+    let replyMessage = '';
+    /** Messages whose words came as partial text: their complete form adds nothing. */
+    const streamedMessages = new Set<string>();
+    const replied = (changed: boolean) => { if (changed) this.notifyOutput(); };
     let modeNoted = false;
     let contextInput: { model: string; usedTokens: number } | undefined;
     let identitySaved: Promise<void> = Promise.resolve();
@@ -1178,6 +1187,14 @@ export class RunManager extends EventEmitter {
           if (validModelId(model) && usedTokens !== undefined) contextInput = { model, usedTokens };
         }
       }
+      if (replies && mainContext && event.type === 'stream_event') {
+        const part = event.event;
+        const block = `${replyMessage}:${Number(part?.index) || 0}`;
+        if (part?.type === 'message_start') replyMessage = typeof part.message?.id === 'string' ? part.message.id : randomUUID();
+        else if (part?.type === 'content_block_start' && part.content_block?.type === 'text') replied(replies.add(block, typeof part.content_block.text === 'string' ? part.content_block.text : ''));
+        else if (part?.type === 'content_block_delta' && part.delta?.type === 'text_delta' && typeof part.delta.text === 'string') { streamedMessages.add(replyMessage); replied(replies.add(block, part.delta.text)); }
+        else if (part?.type === 'content_block_stop') replied(replies.finish(block));
+      }
       if (event.type === 'stream_event') {
         if (event.event?.type === 'message_start') messageHasPartial = false;
         const delta = event.event?.delta;
@@ -1186,7 +1203,9 @@ export class RunManager extends EventEmitter {
         }
         if (event.event?.type === 'message_stop' && messageHasPartial) show('\n\n');
       } else if (event.type === 'assistant') {
-        for (const block of event.message?.content ?? []) {
+        const messageId = typeof event.message?.id === 'string' ? event.message.id : randomUUID();
+        for (const [index, block] of (event.message?.content ?? []).entries()) {
+          if (block.type === 'text' && replies && mainContext && !streamedMessages.has(messageId)) replied(replies.add(`${messageId}:a${index}`, String(block.text), true));
           if (block.type === 'text' && !messageHasPartial) show(String(block.text) + '\n\n');
           if (block.type === 'tool_use') show(`[${block.name}]\n`);
         }
@@ -1336,6 +1355,11 @@ export class RunManager extends EventEmitter {
 
   private append(run: Run, value: string): void {
     run.output = (run.output + value).slice(-MAX_OUTPUT);
+    this.notifyOutput();
+  }
+
+  /** What a run shows changed: told at most every 200 ms. */
+  private notifyOutput(): void {
     if (!this.notifyTimer) {
       this.notifyTimer = setTimeout(() => { this.notifyTimer = undefined; this.outputChanged(); }, 200);
       this.notifyTimer.unref();

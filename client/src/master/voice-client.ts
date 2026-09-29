@@ -1,5 +1,6 @@
 import { VOICE_TURN_FINISHED } from '../../../shared/decisions';
 import type { MasterSay, MasterViewContext, MasterVoiceSettings, MasterVoiceStatus } from '../../../shared/master';
+import { SayOrder } from '../../../shared/master/voice-order';
 import { post } from './api';
 import { base64, digest, END_HOLD_MS, endHoldMs, fitUtterance, joinSegments, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from './voice-sound';
 
@@ -46,6 +47,11 @@ const CLOSE_MS = 10_000;
 /** A spare token older than this is traded for a fresh one (they last 15 minutes). */
 const SPARE_MS = 10 * 60_000;
 const QUEUE = 20;
+/** An answer read while it is written has no known length: it is given up on only after the longest one read (5,000 characters). */
+const STREAMING_PLAY_MS = 5_000 * 200 + 30_000;
+/** Audio cut off partway (the web restarting) is fetched again from where it was, this many times within this long. */
+const RESUMES = 3;
+const RESUME_WITHIN_MS = 30_000;
 const STT_ERRORS = new Set(['auth_error', 'quota_exceeded', 'rate_limited', 'queue_overflow', 'resource_exhausted', 'session_time_limit_exceeded', 'input_error', 'invalid_request', 'chunk_size_exceeded', 'insufficient_audio_activity', 'transcriber_error', 'unaccepted_terms', 'commit_throttled', 'error']);
 
 export interface VoiceView {
@@ -94,7 +100,13 @@ interface Utterance {
  * A say being played. A notice's moment to object starts at `armedAt`; with listening on, `heard` counts the
  * microphone samples heard since it began (on the audio's clock), which it must reach as well.
  */
-interface Playing { say: MasterSay; startedAt: number; replay?: boolean; failed?: boolean; cancelled?: boolean; spokeAt?: number; armedAt?: number; heard?: number; timers: Array<ReturnType<typeof setTimeout>> }
+interface Playing {
+  say: MasterSay; startedAt: number; replay?: boolean; failed?: boolean; cancelled?: boolean; spokeAt?: number; armedAt?: number; heard?: number; timers: Array<ReturnType<typeof setTimeout>>;
+  /** When the page was told to play it, and when its sound started (for the host's timing records). */
+  receivedAt?: number; playingAt?: number;
+  /** Where in the audio the current source starts (seconds), and how often it was fetched again. */
+  base: number; resumes: number; firstErrorAt?: number;
+}
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -133,7 +145,9 @@ export class VoiceSession {
   private lastPresenceAt = 0;
   private speechToTell = false;
   private reporting = false;
-  private readonly queue: Array<{ say: MasterSay; replay?: boolean }> = [];
+  private readonly queue: Array<{ say: MasterSay; replay?: boolean; receivedAt?: number }> = [];
+  /** The order of a spoken request's first response and its answer (shared/master/voice-order.ts). */
+  private readonly order = new SayOrder();
   private readonly seen = new Set<string>();
   private current?: Playing;
   private blocked?: MasterSay;
@@ -264,7 +278,10 @@ export class VoiceSession {
     if (this.over || say.session !== this.sessionDigest || this.seen.has(say.id) || say.expiresAt < Date.now()) return;
     this.seen.add(say.id);
     if (this.seen.size > 500) this.seen.delete(this.seen.values().next().value!);
-    this.queue.push({ say });
+    const order = this.order.admit(say, this.queue.map(item => item.say));
+    for (const dropped of order.drop) { const index = this.queue.findIndex(item => item.say === dropped); if (index >= 0) this.queue.splice(index, 1); }
+    if (!order.admit) return;
+    this.queue.push({ say, receivedAt: Date.now() });
     while (this.queue.length > QUEUE) { const dropped = this.queue.shift()!; if (!dropped.replay) this.report(dropped.say, 'failed'); }
     this.next();
   }
@@ -653,13 +670,19 @@ export class VoiceSession {
     const say = item.say;
     if (!item.replay && say.expiresAt < Date.now()) { this.report(say, 'failed'); this.next(); return; }
     this.disarm();
-    const current: Playing = { say, startedAt: Date.now(), ...(item.replay ? { replay: true } : {}), timers: [] };
+    const current: Playing = { say, startedAt: Date.now(), ...(item.replay ? { replay: true } : {}), ...(item.receivedAt ? { receivedAt: item.receivedAt } : {}), timers: [], base: 0, resumes: 0 };
     this.current = current;
     this.show({});
     // A player that never ends or fails is given up on after a while, so the queue goes on.
-    current.timers.push(setTimeout(() => { if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); } else this.finishPlay(current, 'failed'); }, Math.max(30_000, say.text.length * 200)));
+    current.timers.push(setTimeout(() => { if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); } else this.finishPlay(current, 'failed'); },
+      say.streaming ? STREAMING_PLAY_MS : Math.max(30_000, say.text.length * 200)));
+    this.audio.onplaying = () => { if (this.current === current && current.playingAt === undefined) current.playingAt = Date.now(); };
     this.audio.onended = () => { if (this.current === current) say.kind === 'notice' ? this.noticeEnded(current) : this.finishPlay(current, 'played'); };
-    this.audio.onerror = () => { if (this.current === current) say.kind === 'notice' ? (current.failed = true, this.decideNotice(current)) : this.finishPlay(current, 'failed'); };
+    this.audio.onerror = () => {
+      if (this.current !== current) return;
+      if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); return; }
+      if (!this.resume(current)) this.finishPlay(current, 'failed');
+    };
     this.audio.src = say.audio;
     this.audio.play().catch((error: unknown) => {
       if (this.current !== current) return;
@@ -670,12 +693,33 @@ export class VoiceSession {
     });
   }
 
+  /**
+   * An answer whose audio was cut off partway (the web restarting in the middle) is fetched again from where it was,
+   * a few times within a while: `base` keeps the place in the whole audio across several cuts.
+   */
+  private resume(current: Playing): boolean {
+    const kind = current.say.kind;
+    if ((kind !== 'answer' && kind !== 'report') || current.playingAt === undefined || current.resumes >= RESUMES) return false;
+    const now = Date.now();
+    current.firstErrorAt ??= now;
+    if (now - current.firstErrorAt > RESUME_WITHIN_MS) return false;
+    current.resumes++;
+    const at = current.base + (Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : 0);
+    current.base = at;
+    current.timers.push(setTimeout(() => {
+      if (this.current !== current) return;
+      this.audio.src = `${current.say.audio}?at=${at.toFixed(2)}`;
+      this.audio.play().catch(() => this.finishPlay(current, 'failed'));
+    }, 1_000 * current.resumes));
+    return true;
+  }
+
   private finishPlay(current: Playing, result: 'played' | 'stopped' | 'failed'): void {
     if (this.current !== current || current.say.kind === 'notice') return;
     for (const timer of current.timers) clearTimeout(timer);
     this.current = undefined;
     this.audio.pause();
-    if (!current.replay) this.report(current.say, result);
+    if (!current.replay) this.report(current.say, result, current.playingAt !== undefined && current.receivedAt !== undefined ? current.playingAt - current.receivedAt : undefined);
     else if (result === 'failed') this.show({ error: '다시 들을 수 없습니다. 답은 화면에 있습니다.' });
     // A report read aloud turns listening back on, so the owner can answer it.
     if (current.say.kind === 'report' && result === 'played') { this.lastActivityAt = Date.now(); void this.listen(); }
@@ -716,9 +760,15 @@ export class VoiceSession {
     setTimeout(() => this.next(), COOLDOWN_MS);
   }
 
-  private report(say: MasterSay, result: string): void {
+  /**
+   * Tells the host how something it gave to play went (and how long the sound took to start), tried again a few
+   * times so a web restarting just then does not lose it.
+   */
+  private report(say: MasterSay, result: string, startedMs?: number): void {
     if (say.kind === 'ack' || say.kind === 'working') return;
-    void post('/api/master/voice/played', this.options.token(), { session: this.session, id: say.id, result }).catch(() => {});
+    const send = (left: number) => void post('/api/master/voice/played', this.options.token(), { session: this.session, id: say.id, result, ...(startedMs !== undefined ? { startedMs } : {}) })
+      .catch(() => { if (left > 0 && !this.over) setTimeout(() => send(left - 1), 3_000); });
+    send(3);
   }
 
   // ─── keeping the master told ─────────────────────────────────────────────────────────────────────────────────

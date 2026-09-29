@@ -104,12 +104,12 @@ export class MasterClient {
    * Relays audio the master is reading aloud, as it is made. Audio whose making failed is cut off here too, so the
    * page never takes part of it for the whole.
    */
-  async pipeAudio(response: ServerResponse, id: string): Promise<void> {
+  async pipeAudio(response: ServerResponse, id: string, at = 0): Promise<void> {
     await this.ensureHost();
     const token = await this.credential();
     const paths = await this.hostPaths();
     await new Promise<void>((resolve, reject) => {
-      const req = request({ socketPath: paths.socket, path: `/audio/${encodeURIComponent(id)}`, headers: { authorization: `Bearer ${token}` } }, upstream => {
+      const req = request({ socketPath: paths.socket, path: `/audio/${encodeURIComponent(id)}${at > 0 ? `?at=${at}` : ''}`, headers: { authorization: `Bearer ${token}` } }, upstream => {
         if (response.destroyed || response.writableEnded) { upstream.destroy(); resolve(); return; }
         if (upstream.statusCode !== 200) { upstream.resume(); response.writeHead(upstream.statusCode === 404 ? 404 : 502).end(); resolve(); return; }
         response.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', ...(upstream.headers['content-length'] ? { 'Content-Length': upstream.headers['content-length'] } : {}) });

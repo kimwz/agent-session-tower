@@ -40,6 +40,8 @@ export interface CodexStdioOptions {
   onSession(id: string): void | Promise<void>;
   onStarted?(turnId: string, startedAt?: string): void;
   onOutput(text: string): void;
+  /** The agent's words by message, as they stream (`done` once the message is complete). */
+  onReply?(id: string, text: string, done: boolean): void;
   onApproval(approval: RunApproval): void;
   onApprovalCancelled?(id: string): void;
   onFinished(result: CodexStdioResult): void;
@@ -363,6 +365,7 @@ class StdioRun implements CodexStdioRun {
       if (streamed.length > MAX_FRAME || this.streamedText.size >= 256 && !this.streamedText.has(key)) throw new Error('Codex sent too much unfinished message output.');
       this.streamedText.set(key, streamed);
       this.options.onOutput(params.delta);
+      this.options.onReply?.(`${params.itemId}:0`, params.delta, false);
     } else if (value.method === 'item/completed' && record(params.item)) {
       if (threadId === this.threadId) this.completeItem(params.item);
       else this.items.delete(key);
@@ -496,6 +499,8 @@ class StdioRun implements CodexStdioRun {
     if (item.type === 'agentMessage' && typeof item.text === 'string') {
       const streamed = this.streamedText.get(key) || '';
       this.options.onOutput((item.text.startsWith(streamed) ? item.text.slice(streamed.length) : `\n${item.text}`) + '\n\n');
+      // Words it did not stream are added; a message whose text differs from what streamed keeps what was sent.
+      this.options.onReply?.(`${item.id}:0`, item.text.startsWith(streamed) ? item.text.slice(streamed.length) : '', true);
       this.streamedText.delete(key);
     } else if (item.type === 'commandExecution') this.options.onOutput(`$ ${String(item.command || '')}\n${String(item.aggregatedOutput || '').slice(-4000)}\n`);
     else if (item.type === 'fileChange') this.options.onOutput(`Updated ${Array.isArray(item.changes) ? item.changes.map((change: RecordValue) => String(change.path || '')).join(', ') : 'workspace files'}\n`);
