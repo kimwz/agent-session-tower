@@ -271,3 +271,20 @@ test('a pin on either copy of a skill pins it, and merging the copies keeps it p
   await f.service.mutate('pin', { dir: after.skills[0].dir, pinned: false });
   assert.equal(await f.service.turnNotes(session('x', f.project)), undefined);
 });
+
+test('a pin on a copy survives a merge that stops half way', async t => {
+  const f = await fixture(t, () => reflection());
+  const files = (f.service as unknown as { files: { homes: { agentsHome: string; claudeHome: string; codexHome: string; trash: string }; merge: (dir: string, cwd?: string) => Promise<unknown> } }).files;
+  for (const root of [files.homes.agentsHome, files.homes.claudeHome, files.homes.codexHome]) {
+    await mkdir(join(root, 'skills', 'wrangler'), { recursive: true });
+    await writeFile(join(root, 'skills', 'wrangler', 'SKILL.md'), '---\nname: wrangler\ndescription: Deploy Workers.\n---\nSteps\n');
+  }
+  const claudeCopy = join(files.homes.claudeHome, 'skills', 'wrangler');
+  await (f.service as unknown as { state: { update(change: (state: { pinned: { dir: string }[] }) => void): Promise<void> } }).state.update(state => { state.pinned.push({ dir: claudeCopy }); });
+  // The merge replaces the Claude copy, then fails on the next one.
+  const merge = files.merge.bind(files);
+  files.merge = async (dir, cwd) => { await merge(dir, cwd).catch(() => {}); throw new Error('disk full'); };
+  await assert.rejects(f.service.mutate('merge', { dir: claudeCopy }));
+  assert.equal((await f.service.overview()).skills[0].pinned, true);
+  assert.match((await f.service.turnNotes(session('x', f.project)))!, /wrangler/);
+});

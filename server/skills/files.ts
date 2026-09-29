@@ -146,7 +146,7 @@ export class SkillFiles {
       try { await rename(link, copy.dir); }
       catch (error) {
         await unlink(link).catch(() => {});
-        await rename(kept, copy.dir).catch(() => {});
+        await move(kept, copy.dir).catch(() => {});
         throw error;
       }
     }
@@ -161,13 +161,7 @@ export class SkillFiles {
   private async trash(dir: string): Promise<string> {
     await mkdir(this.homes.trash, { recursive: true, mode: 0o700 });
     const target = join(this.homes.trash, `${new Date().toISOString().replace(/[:.]/g, '-')}-${basename(dir)}-${randomUUID().slice(0, 8)}`);
-    try { await rename(dir, target); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
-      // Another volume (a project on an external disk): the folder is removed after its copy is kept.
-      await cp(dir, target, { recursive: true, verbatimSymlinks: true });
-      await rm(dir, { recursive: true, force: true });
-    }
+    await move(dir, target);
     return target;
   }
 
@@ -295,6 +289,16 @@ export function projectFolders(cwd: string | undefined, home: string): string[] 
     folders.push(dir = parent);
   }
   return folders;
+}
+
+/** Moves a folder; across volumes (a project on an external disk) it is copied, then the original removed. */
+async function move(from: string, to: string): Promise<void> {
+  try { await rename(from, to); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
+    await cp(from, to, { recursive: true, verbatimSymlinks: true });
+    await rm(from, { recursive: true, force: true });
+  }
 }
 
 /** A folder's files and contents in one hash; undefined when it is too large to compare. */

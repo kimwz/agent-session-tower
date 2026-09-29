@@ -150,9 +150,9 @@ export class SkillService {
       case 'link': await this.files.link(text(body.dir), cwd); break;
       case 'merge': {
         const before = this.withPins(await this.files.list(cwd)).find(item => folders(item).includes(text(body.dir)));
-        const merged = await this.files.merge(text(body.dir), cwd);
-        // A pin on a copy that is now a link moves to the kept folder.
-        if (before?.pinned) await this.pin({ ...merged, copies: before.copies }, true);
+        // A pin moves to the kept folder first, so it holds even if the merge stops half way.
+        if (before?.pinned) await this.pin(before, true);
+        await this.files.merge(text(body.dir), cwd);
         break;
       }
       case 'delete': {
