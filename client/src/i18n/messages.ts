@@ -1935,6 +1935,7 @@ export const english: Record<string, string> = {
   "컴퓨터 상태: {0}": "Computer status: {0}",
   "컴퓨터 상태": "Computer status",
   "코어 {0}개 · 부하 {1}": "{0} cores · load {1}",
+  "코어 {0}개": "{0} cores",
   "{0} / {1} GB 사용": "{0} / {1} GB used",
   "{0} / {1} GB 사용 · {2} GB 남음": "{0} / {1} GB used · {2} GB free",
   "측정: {0}": "Measured: {0}",

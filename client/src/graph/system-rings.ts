@@ -1,9 +1,9 @@
 import { systemPercents } from '../../../shared/system-status';
 import type { SystemStatus } from '../../../shared/types';
 
-export type RingLevel = 'normal' | 'high' | 'critical';
+type RingLevel = 'normal' | 'high' | 'critical';
 export type RingKind = 'cpu' | 'memory' | 'disk';
-export interface Ring { kind: RingKind; letter: string; percent?: number; level: RingLevel }
+interface Ring { kind: RingKind; letter: string; percent?: number; level: RingLevel }
 
 /** Amber from 75%, red from 90%: the same line for CPU, memory and disk. */
 export function ringLevel(percent: number | undefined): RingLevel {
