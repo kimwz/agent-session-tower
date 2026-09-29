@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.81.0] - 2026-09-29
+
+### Added
+- **One skill for several projects.** A skill kept in Tower now applies to every project or to the projects you choose for it, picked from a searchable list of the projects Tower knows. Tower links it into each chosen project's `.agents/skills` and `.claude/skills` (or the global folders when it applies everywhere) and names it at the start of its turns only there, so a deploy skill can go to the projects that deploy automatically and a working-method skill to all of them. Changing the projects moves the links; a project that already has a different skill of the same name, or whose skills folder is a link, is refused before anything changes. Opened from a project folder, each skill has a switch for that project.
+- A project folder's menu shows a dot on **이 폴더의 스킬** when a suggested skill is waiting for it.
+- Backups carry each skill's projects; importing one applies it to the projects this Tower knows, and replacing a skill keeps where it applies here.
+
+### Changed
+- **The Skills panel opens on the skills kept in Tower** (none until you register or move one there), one quiet row each with where it applies; a click opens it. **추천** sits beside it with its count. Every other skill on the computer, your guidance, backups and the suggestion settings moved behind the ⋯ menu.
+- Skills Tower already kept apply where they did: global ones to every project, a project's own to that project.
+
 ## [1.80.1] - 2026-09-29
 
 ### Changed

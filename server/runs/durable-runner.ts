@@ -27,8 +27,15 @@ interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: n
   spawn?: (command: { execPath: string; args: string[] }) => void }
 
 /** A disposable UI connection. Only the independent worker owns provider lifetimes. */
-/** Tower's own skill folder, guidance and backups came later than skills themselves: an older worker lacks them. */
-export function skillsCapability(operation: string, args: unknown[]): 'skills' | 'towerSkills' {
+/**
+ * Tower's own skill folder, guidance and backups came later than skills themselves, and projects per skill later still:
+ * an older worker lacks them, and would ignore the projects a request or a backup names.
+ */
+export function skillsCapability(operation: string, args: unknown[]): 'skills' | 'towerSkills' | 'skillTargets' {
+  const body = (value: unknown) => value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const withTargets = (bundle: unknown) => Array.isArray(body(bundle).skills) && (body(bundle).skills as unknown[]).some(skill => body(skill).targets !== undefined);
+  if (operation === 'skillsMutate' && (args[0] === 'assign' || args[0] === 'save' && body(args[1]).targets !== undefined || args[0] === 'import' && withTargets(body(args[1]).bundle))) return 'skillTargets';
+  if (operation === 'skillsImportPlan' && withTargets(args[0])) return 'skillTargets';
   return operation === 'skillsExport' || operation === 'skillsImportPlan' || operation === 'skillsMutate' && ['adopt', 'guidance', 'import'].includes(String(args[0])) ? 'towerSkills' : 'skills';
 }
 

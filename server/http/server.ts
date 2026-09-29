@@ -340,7 +340,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         const body = await readJson(req, path === '/api/skills/export' ? 200_000 : MAX_SKILL_BUNDLE_BYTES + 1024 * 1024);
         return json(res, 200, path === '/api/skills/export' ? await backend.skills.exportBundle(body) : await backend.skills.importPlan(body));
       }
-      const skillAction = path.match(/^\/api\/skills\/(save|pin|link|merge|adopt|guidance|import|delete|dismiss|settings|backfill)$/);
+      const skillAction = path.match(/^\/api\/skills\/(save|pin|assign|link|merge|adopt|guidance|import|delete|dismiss|settings|backfill)$/);
       if (skillAction && req.method === 'POST') {
         if (!backend.skills) return json(res, 503, { error: '스킬을 사용할 수 없습니다.' });
         // A backup being imported comes with the request; everything else is small.

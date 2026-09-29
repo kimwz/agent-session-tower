@@ -31,6 +31,19 @@ export interface Skill {
   copies?: SkillCopy[];
   /** The copies' contents differ (usually each names its own agent), so they are not merged. */
   copiesDiffer?: boolean;
+  /** For a skill kept in Tower: the projects it applies to. Absent from older workers and for other skills. */
+  targets?: SkillTargets;
+}
+/** Where a Tower skill applies: linked for the agents there, and named at the start of Tower's turns there when pinned. */
+export interface SkillTargets { all: boolean; projects: string[] }
+export const MAX_SKILL_TARGETS = 200;
+/** The value an editor opened with, sent back so a change made elsewhere meanwhile is never overwritten. */
+export function targetsRevision(targets: SkillTargets | undefined): string {
+  return targets ? `${targets.all ? 'all' : 'some'}:${[...targets.projects].sort().join('\n')}` : '';
+}
+/** Whether a skill with these targets applies to work in `cwd` (the project folder or a folder inside it). */
+export function targetsCover(targets: SkillTargets, cwd: string): boolean {
+  return targets.all || targets.projects.some(project => cwd === project || cwd.startsWith(project.endsWith('/') ? project : `${project}/`));
 }
 export interface SkillCopy { dir: string; providers: SkillProvider[] }
 export interface SkillDetail extends Skill { body: string }
@@ -74,7 +87,9 @@ export interface GuidanceOverview { owner: string; revision: string; tower: stri
 export const SKILL_BUNDLE_FORMAT = 'agent-session-tower.skills';
 export const MAX_SKILL_BUNDLE_BYTES = 20 * 1024 * 1024;
 export interface SkillBundleFile { path: string; mode: number; base64: string }
-export interface SkillBundleSkill { name: string; description: string; scope: SkillScope; project?: { cwd: string; title: string }; pinned: boolean; files: SkillBundleFile[] }
+export interface SkillBundleSkill { name: string; description: string; scope: SkillScope; project?: { cwd: string; title: string }; pinned: boolean; files: SkillBundleFile[];
+  /** Where it applied on the computer that made the backup. Absent from older backups. */
+  targets?: { all: boolean; projects: { cwd: string; title: string }[] } }
 export interface SkillBundle { format: typeof SKILL_BUNDLE_FORMAT; version: 1; exportedAt: string; from: string; guidance?: string; skills: SkillBundleSkill[] }
 /** What importing each item of a bundle would do here. */
 export interface SkillImportItem {
@@ -89,6 +104,10 @@ export interface SkillImportItem {
   cwd?: string;
   pinned: boolean;
   description: string;
+  /** Where a new import will apply here: the backup's targets that this Tower knows. */
+  targets?: SkillTargets;
+  /** Projects of the backup's targets this Tower does not know; they are left out. */
+  unknownProjects?: number;
 }
 export interface SkillImportPlan { items: SkillImportItem[]; guidance: boolean; exportedAt: string; from: string }
 export interface SkillImportChoice { index: number; action: 'add' | 'replace' | 'skip'; cwd?: string }
@@ -106,7 +125,11 @@ export interface SkillOverview {
   /** The project the listing is for; its skills come with the global ones. */
   cwd?: string;
 }
-export interface SkillSummary { proposals: number }
+export interface SkillSummary {
+  proposals: number;
+  /** Project folders a ready proposal belongs to. Absent from older workers. */
+  projects?: string[];
+}
 
 export const SKILL_NAME = /^[a-z0-9][a-z0-9-]{0,63}$/;
 export const MAX_SKILL_DESCRIPTION = 1024;
