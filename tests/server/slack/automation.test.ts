@@ -702,6 +702,7 @@ test('autoReply rule delegation grants one truthful report and participant menti
   // The first thing a rule asks for, before any delegation.
   await f.manager.tool(id, 'slack_react', { name: ':hourglass_flowing_sand:', action: 'add' });
   assert.equal(f.manager.list()[0].ownerConditionalReply, undefined, 'a reaction grants nothing');
+  await assert.rejects(f.manager.tool(id, 'slack_send', { text: 'Done' }), /No immediate owner send authorization/);
   await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', ruleId: 'review', prompt: 'Deploy the fix' });
   const consent = f.manager.list()[0].ownerConditionalReply!;
   assert.equal(consent.ruleId, 'review'); assert.equal(consent.mode, 'composed'); assert.match(consent.instruction!, /Confirm only a finished review/);
