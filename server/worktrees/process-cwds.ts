@@ -49,6 +49,13 @@ export async function processCommands(): Promise<ProgramLine[] | undefined> {
 
 async function processCwdsByPid(): Promise<Map<number, string>> {
   const cwds = new Map<number, string>();
+  if (process.platform === 'linux') {
+    try {
+      const pids = (await readdir('/proc')).filter(name => /^\d+$/.test(name));
+      await Promise.all(pids.map(async pid => { const cwd = await readlink(`/proc/${pid}/cwd`).catch(() => undefined); if (cwd) cwds.set(Number(pid), cwd); }));
+      return cwds;
+    } catch { /* Fall back to lsof. */ }
+  }
   try {
     const { stdout } = await execute(process.platform === 'darwin' ? '/usr/sbin/lsof' : 'lsof', ['-nP', '-a', '-d', 'cwd', '-F', 'pn'], { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 })
       .catch(error => ({ stdout: typeof (error as { stdout?: unknown }).stdout === 'string' ? (error as { stdout: string }).stdout : '' }));
