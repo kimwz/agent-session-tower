@@ -13,6 +13,7 @@ import { absoluteTime, api, copyText, providerLabels, statusLabels } from '../co
 import { mergeLatestPage, prependOlderPage, type ChatHistory } from './chat-history';
 import { ChatTranscript } from './ChatTranscript';
 import { PinnedPrompt } from './PinnedPrompt';
+import { WorktreeCleanupNote } from './WorktreeCleanupNote';
 import { RunControl } from './RunControl';
 import { DraftAttachments } from './ChatAttachments';
 import { addDraftFiles, formatAttachmentSize, prepareDraftAttachments } from './chat-attachments';
@@ -230,7 +231,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
         {current && <span className={`provider-square ${current.provider} ${current.status}`} role="img" aria-label={providerLabels[current.provider]} title={providerLabels[current.provider]}><ProviderIcon provider={current.provider} /></span>}
         {current ? <SessionTitleEditor key={current.id} session={current} token={token} connected={reachable} onSaved={updated => { onSessionUpdate(updated); setDetail(previous => previous ? { ...previous, session: { ...previous.session, customTitle: updated.customTitle } } : previous); onSnapshotRefresh(); }} /> : <h2 className="chat-loading-title">{t("대화 불러오는 중")}</h2>}
         <div className="chat-header-actions">
-          {onSessionClose && <button className="icon-button session-close-button" aria-label={sessionClosed ? t("세션 다시 열기") : t("세션 종료")} title={sessionClosed ? t("그래프에 다시 표시") : t("그래프에서 숨기기 · 실행 중인 작업은 계속됩니다")} disabled={changingClosed || !reachable || !token} onClick={() => { setSendError(''); void Promise.resolve(onSessionClose()).catch(error => setSendError(error instanceof Error ? error.message : t("세션 상태를 저장하지 못했습니다."))); }}>{changingClosed ? <LoaderCircle className="spin" size={15} /> : sessionClosed ? <ArchiveRestore size={16} /> : <Archive size={16} />}</button>}
+          {onSessionClose && <button className="icon-button session-close-button" aria-label={sessionClosed ? t("세션 다시 열기") : t("세션 종료")} title={sessionClosed ? t("그래프에 다시 표시") : t("그래프에서 숨기기 · 실행 중인 작업은 계속되고, 작업이 끝나면 이 세션이 만든 워크트리를 정리합니다")} disabled={changingClosed || !reachable || !token} onClick={() => { setSendError(''); void Promise.resolve(onSessionClose()).catch(error => setSendError(error instanceof Error ? error.message : t("세션 상태를 저장하지 못했습니다."))); }}>{changingClosed ? <LoaderCircle className="spin" size={15} /> : sessionClosed ? <ArchiveRestore size={16} /> : <Archive size={16} />}</button>}
           <button className="icon-button close-chat" onClick={onClose} aria-label={t("대화 닫기")} title={t("닫기 (Esc)")}><X size={18} /></button>
         </div>
       </div>
@@ -253,6 +254,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
         {detail?.resetToLatest && <p className="muted" role="status">{t("대화가 갱신되어 최근 내용부터 표시합니다.")}{detail.hasMore && t(" 앞선 내용은 ‘이전 대화 불러오기’에서 확인할 수 있습니다.")}</p>}
         {detail && !detail.hasMore && detail.messages.length > 0 && <div className="conversation-start"><span>{t("세션 시작")}</span><time>{absoluteTime(detail.session.createdAt)}</time></div>}
         {detail && <div className="chat-transcript"><ChatTranscript key={sessionId} messages={detail.messages} runMatches={runProjection.matches} provider={detail.session.provider} /></div>}
+        {detail?.worktrees && <WorktreeCleanupNote items={detail.worktrees} />}
         {detail && detail.messages.length === 0 && !loadError && <div className="empty-chat"><MessageSquare size={27} /><h3>{t("대화가 시작될 자리")}</h3><p>{t("이 세션에 첫 요청을 보내거나")}<br />{t("에이전트의 활동을 기다리세요.")}</p></div>}
       </>}
     </div>
