@@ -121,7 +121,7 @@ test('the host answers a page\'s voice requests, refusing what is not its call, 
   cleanup.push(() => client.dispose());
   const overview = await client.call('overview') as MasterOverview;
   assert.deepEqual(overview.voice?.today, { sttSeconds: 0, ttsChars: 0, dollars: 0 });
-  assert.deepEqual(overview.settings.voice, { voiceId: 'cgSgspJ2msm6clMCkdW9', model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0 });
+  assert.deepEqual(overview.settings.voice, { voiceId: 'cgSgspJ2msm6clMCkdW9', model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0, playbackRate: 1 });
   assert.equal(overview.voiceConfigured, false);
   const session = '0190f1c2-3d4e-7f00-8a00-000000000003';
   await assert.rejects(client.call('voiceOn', { tabId: session }), { statusCode: 409 }, 'no master session yet');
@@ -134,6 +134,11 @@ test('the host answers a page\'s voice requests, refusing what is not its call, 
   await assert.rejects(client.call('settings', { body: { voice: { model: 'nobody' } } }), { statusCode: 400 });
   const saved = await client.call('settings', { body: { voiceKey: 'el-test-0123456789abcdef', voice: { endSilenceMs: 1200 } } }) as MasterOverview;
   assert.equal(saved.settings.voice.endSilenceMs, 1200);
+  // Reading speed: from 1 (as made) to 2, kept to twentieths.
+  for (const playbackRate of [0.9, 2.5, Number.NaN, '1.4']) await assert.rejects(client.call('settings', { body: { voice: { playbackRate } } }), { statusCode: 400 });
+  const faster = await client.call('settings', { body: { voice: { playbackRate: 1.43 } } }) as MasterOverview;
+  assert.equal(faster.settings.voice.playbackRate, 1.45);
+  assert.equal(faster.settings.voice.endSilenceMs, 1200, 'the rest is kept');
   assert.equal(saved.voiceKeyHint, '…cdef');
   assert.doesNotMatch(JSON.stringify(saved), /0123456789ab/);
 });

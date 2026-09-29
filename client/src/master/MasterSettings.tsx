@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { LoaderCircle, Mic, Play, RefreshCw, Square, Trash2 } from 'lucide-react';
-import { DEFAULT_MASTER_VOICE, MASTER_TTS_MODELS, type MasterOverview, type MasterVoiceSettings } from '../../../shared/master';
+import { DEFAULT_MASTER_VOICE, MASTER_PLAYBACK_RATES, MASTER_TTS_MODELS, type MasterOverview, type MasterVoiceSettings } from '../../../shared/master';
 import { api } from '../common/lib';
 import { post } from './api';
 import { useWords } from './strings';
 import { voiceUsage } from './VoiceBar';
+import { applyPlaybackRate } from './voice-sound';
 
 /** The master's settings: its session, and voice. The master itself has no limits to set. */
 export function MasterSettingsView({ token, overview, onNewSession }: { token: string; overview: MasterOverview | undefined; onNewSession(): void }) {
@@ -45,7 +46,7 @@ export function MasterSettingsView({ token, overview, onNewSession }: { token: s
         <button className="master-primary" disabled={busy || !voiceKey.trim()}>{words('저장', 'Save')}</button>
       </form>
       <p>{voiceUsage(overview.voice, words)}</p>
-      <VoicePicker token={token} voices={voices} current={(settings.voice ?? DEFAULT_MASTER_VOICE).voiceId} model={(settings.voice ?? DEFAULT_MASTER_VOICE).model} busy={busy} onChoose={voiceId => void voice({ voiceId })} />
+      <VoicePicker token={token} voices={voices} current={(settings.voice ?? DEFAULT_MASTER_VOICE).voiceId} model={(settings.voice ?? DEFAULT_MASTER_VOICE).model} rate={(settings.voice ?? DEFAULT_MASTER_VOICE).playbackRate ?? 1} busy={busy} onChoose={voiceId => void voice({ voiceId })} onRate={playbackRate => void voice({ playbackRate })} />
       <label className="master-field">{words('읽어 주기 모델', 'Reading model')}
         <select value={(settings.voice ?? DEFAULT_MASTER_VOICE).model} disabled={busy} onChange={event => void voice({ model: event.target.value as MasterVoiceSettings['model'] })}>
           {MASTER_TTS_MODELS.map(model => <option key={model} value={model}>{model === 'eleven_v3_conversational' ? words('v3 대화형 (빠름, 추천)', 'v3 conversational (fast, recommended)') : model === 'eleven_v3' ? words('v3 (표현력, 느림, 두 배 비쌈)', 'v3 (expressive, slower, twice the price)') : words('flash v2.5 (가장 빠름, 밝은 말투 없음)', 'flash v2.5 (fastest, no bright tone)')}</option>)}
@@ -68,10 +69,16 @@ export function MasterSettingsView({ token, overview, onNewSession }: { token: s
 
 interface VoiceChoice { id: string; name: string; category?: string }
 
-/** The account's voices, each with a short Korean sample to hear before choosing it. */
-function VoicePicker({ token, voices, current, model, busy, onChoose }: { token: string; voices: VoiceChoice[]; current: string; model: string; busy: boolean; onChoose(voiceId: string): void }) {
+/**
+ * The account's voices, each with a short Korean sample to hear before choosing it, and how fast answers are read:
+ * samples play at that speed, and choosing one plays the current voice's sample at it.
+ */
+function VoicePicker({ token, voices, current, model, rate, busy, onChoose, onRate }: { token: string; voices: VoiceChoice[]; current: string; model: string; rate: number; busy: boolean; onChoose(voiceId: string): void; onRate(rate: number): void }) {
   const words = useWords();
   const player = useRef<HTMLAudioElement | null>(null);
+  /** The speed samples play at: the one just chosen, before the saved settings come back with it. */
+  const speed = useRef(rate);
+  useEffect(() => { speed.current = rate; }, [rate]);
   /** Counts clicks: a sample that arrives after another was asked for (or stopped) is not played. */
   const asked = useRef(0);
   const [playing, setPlaying] = useState<{ id: string; loading: boolean }>();
@@ -79,13 +86,13 @@ function VoicePicker({ token, voices, current, model, busy, onChoose }: { token:
   const stop = () => { asked.current++; player.current?.pause(); setPlaying(undefined); };
   // Stopped when the settings close, and when the model changes: a sample shows how the chosen model reads.
   useEffect(() => stop, [model]);
-  const preview = async (id: string) => {
-    const again = playing?.id === id;
+  const preview = async (id: string, restart = false) => {
+    const again = playing?.id === id && !restart;
     stop(); setError('');
     if (again) return;
     const mine = asked.current;
     const element = (player.current ??= new Audio());
-    element.onended = element.onerror = null;
+    element.onended = element.onerror = element.onplaying = null;
     // Started by the click itself: phones play later sound only from an element a click already played.
     element.src = '/master-silence.wav';
     void element.play().catch(() => {});
@@ -95,7 +102,9 @@ function VoicePicker({ token, voices, current, model, busy, onChoose }: { token:
       if (asked.current !== mine) return;
       element.onended = () => { if (asked.current === mine) setPlaying(undefined); };
       element.onerror = () => { if (asked.current === mine) { setPlaying(undefined); setError(words('미리 듣기를 재생하지 못했습니다.', 'Could not play the sample.')); } };
+      element.onplaying = () => applyPlaybackRate(element, speed.current);
       element.src = audio;
+      applyPlaybackRate(element, speed.current);
       setPlaying({ id, loading: false });
       await element.play();
     } catch (reason) {
@@ -124,6 +133,18 @@ function VoicePicker({ token, voices, current, model, busy, onChoose }: { token:
           </div>;
         })}
       </div>}
+    <div className="master-rates" role="radiogroup" aria-label={words('읽는 속도', 'Reading speed')}>
+      <span>{words('읽는 속도', 'Reading speed')}</span>
+      {MASTER_PLAYBACK_RATES.map(value => <label key={value} className={Math.abs(value - rate) < 0.01 ? 'chosen' : undefined}>
+        <input type="radio" name="master-rate" value={value} checked={Math.abs(value - rate) < 0.01} disabled={busy} onChange={() => {}} onClick={() => {
+          speed.current = value;
+          if (Math.abs(value - rate) >= 0.01) onRate(value);
+          // Heard at once (the chosen speed again too), started by the click itself: phones play only then.
+          if (voices.length) void preview(current, true);
+        }} />{value.toFixed(1)}×
+      </label>)}
+    </div>
+    <small className="master-rates-hint">{words('높낮이는 그대로 두고 빠르게 재생합니다. 답, 맡긴 일 소식, 미리 듣기에 모두 적용됩니다.', 'Plays faster with the pitch kept: answers, news of finished work and samples alike.')}</small>
     {error && <span className="master-error" role="alert">{error}</span>}
   </div>;
 }

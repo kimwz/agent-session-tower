@@ -195,3 +195,19 @@ export function base64(bytes: Uint8Array): string {
   for (let index = 0; index < bytes.length; index += 0x8000) text += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
   return btoa(text);
 }
+
+/** The part of an audio element that sets how fast it plays (older Safari names keeping the pitch its own way). */
+export interface RatedMedia { playbackRate: number; defaultPlaybackRate: number; preservesPitch?: boolean; webkitPreservesPitch?: boolean }
+
+/**
+ * Plays an element at `rate` (1 to 2; anything else is 1) with its pitch kept. The default rate is set too, since
+ * loading a new source puts the rate back to it; iPhone Safari may still put it back to 1 once loaded, so this is
+ * called again when sound starts. Nothing is touched when it is already so.
+ */
+export function applyPlaybackRate(element: RatedMedia, rate: number | undefined): void {
+  const speed = typeof rate === 'number' && Number.isFinite(rate) ? Math.min(2, Math.max(1, rate)) : 1;
+  if (element.preservesPitch !== true) element.preservesPitch = true;
+  if ('webkitPreservesPitch' in element && element.webkitPreservesPitch !== true) element.webkitPreservesPitch = true;
+  if (element.defaultPlaybackRate !== speed) element.defaultPlaybackRate = speed;
+  if (element.playbackRate !== speed) element.playbackRate = speed;
+}

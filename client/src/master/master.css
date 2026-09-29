@@ -46,6 +46,14 @@
 .master-voices > div.chosen .master-voice-choose { color:var(--bright); }
 .master-voice-preview { flex:none; display:grid; place-items:center; width:28px; height:26px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--text); cursor:pointer; }
 .master-voice-preview:hover:not(:disabled) { color:var(--bright); border-color:var(--muted); }
+.master-rates { display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin-top:6px; }
+.master-rates > span { margin-right:4px; }
+.master-rates label { position:relative; display:inline-flex; align-items:center; height:26px; padding:0 9px; border:1px solid var(--line); border-radius:6px; background:var(--surface); color:var(--text); font-size:12px; cursor:pointer; font-variant-numeric:tabular-nums; }
+.master-rates label.chosen { border-color:var(--teal); color:var(--bright); background:var(--surface-raised); }
+.master-rates input { position:absolute; opacity:0; width:0; height:0; }
+.master-rates label:has(input:focus-visible) { outline:2px solid var(--teal); outline-offset:1px; }
+.master-rates label:has(input:disabled) { opacity:.6; cursor:default; }
+.master-rates-hint { display:block; color:var(--muted); font-size:11px; margin-top:4px; }
 .master-field select, .master-field input { border:1px solid var(--line); border-radius:7px; background:var(--bg); color:var(--bright); padding:7px 8px; }
 
 @media (max-width:680px) {

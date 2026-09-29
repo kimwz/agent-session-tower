@@ -50,9 +50,17 @@ class FakeAudio {
   static refuse = false;
   /** Holds the unlocking silence's play() until the test lets it finish. */
   static slowSilence?: () => void;
-  src = '';
+  /** As a browser does, a new source starts at the default rate. */
+  private source = '';
+  get src(): string { return this.source; }
+  set src(value: string) { this.source = value; this.playbackRate = this.defaultPlaybackRate; }
+  playbackRate = 1;
+  defaultPlaybackRate = 1;
+  preservesPitch = true;
   preload = '';
   played: string[] = [];
+  /** The rate each source was played at. */
+  rates: number[] = [];
   onended: (() => void) | null = null;
   onerror: (() => void) | null = null;
   constructor() { FakeAudio.all.push(this); }
@@ -60,6 +68,7 @@ class FakeAudio {
   play(): Promise<void> {
     if (FakeAudio.refuse && this.src !== '/master-silence.wav') return Promise.reject(new DOMException('Autoplay refused', 'NotAllowedError'));
     this.played.push(this.src);
+    this.rates.push(this.playbackRate);
     if (this.src === '/master-silence.wav' && FakeAudio.slow) return new Promise(resolve => { FakeAudio.slowSilence = resolve; });
     return Promise.resolve();
   }
@@ -136,9 +145,10 @@ async function harness({ rate = 16_000, frame = 160, failTokens = 0 } = {}) {
   tokenFailures = failTokens;
   mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: 1_000_000 });
   let view: View | undefined;
+  const settings = { voiceId: 'v', model: 'eleven_v3_conversational' as const, endSilenceMs: 1_000, listenMinutes: 5, readReports: true, dailyDollars: 0, playbackRate: 1 };
   const voice = new VoiceSession({
     token: () => 'page-token', tabId: 'tab-1', viewContext: () => undefined,
-    settings: () => ({ voiceId: 'v', model: 'eleven_v3_conversational', endSilenceMs: 1_000, listenMinutes: 5, readReports: true, dailyDollars: 0 }),
+    settings: () => settings,
     onView: next => { view = next; }, onEnded: () => {},
   });
   await voice.start();
@@ -185,7 +195,7 @@ async function harness({ rate = 16_000, frame = 160, failTokens = 0 } = {}) {
     return socket;
   };
   const usages = () => posts.filter(post => post.path.endsWith('/usage')).map(post => post.body.seconds);
-  return { voice, audio, frames, deliver, hear, hearSlowly, say, results, usages, speak, view: () => view!, end: () => { voice.stop(); mock.timers.reset(); } };
+  return { voice, audio, settings, frames, deliver, hear, hearSlowly, say, results, usages, speak, view: () => view!, end: () => { voice.stop(); mock.timers.reset(); } };
 }
 
 test('nothing plays until an utterance\'s connection has really closed (or ten seconds passed), and only what was sent is paid', async () => {
@@ -937,5 +947,37 @@ test('one failed fetch told twice (an error and a refused play) is tried again o
     // nothing more; one try started after it.
     assert.deepEqual(fetches, ['/api/master/voice/audio/twice?at=3.00'], 'never two tries of one failure');
     assert.deepEqual(page.results(), []);
+  } finally { page.end(); }
+});
+
+test('what is read aloud plays at the speed set, pitch kept, for every source, a fetch again from where it was, and a speed chosen meanwhile', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as unknown as FakeAudio & { currentTime: number; onplaying: (() => void) | null };
+    page.settings.playbackRate = 1.4;
+    page.voice.say(page.say('ack-1', 'ack'));
+    assert.equal(audio.rates.at(-1), 1.4, 'a first reply plays at the speed');
+    assert.equal(audio.preservesPitch, true);
+    audio.onended!();
+    mock.timers.tick(400);
+    await flush();
+
+    page.voice.say({ ...page.say('long', 'answer'), streaming: true });
+    assert.deepEqual([audio.played.at(-1), audio.rates.at(-1)], ['/api/master/voice/audio/long', 1.4]);
+    audio.onplaying?.();
+    // A browser that puts the rate back once the sound loads (iPhone Safari) is set again when sound starts.
+    audio.playbackRate = 1;
+    audio.onplaying?.();
+    assert.equal(audio.playbackRate, 1.4);
+    // Chosen while it plays: heard within a second.
+    page.settings.playbackRate = 1.8;
+    mock.timers.tick(1_000);
+    assert.equal(audio.playbackRate, 1.8);
+    // Cut off 20 seconds into the audio itself (not the clock): fetched again from there, at the speed.
+    audio.currentTime = 20;
+    audio.onerror!();
+    mock.timers.tick(1_000);
+    await flush();
+    assert.deepEqual([audio.played.at(-1), audio.rates.at(-1)], ['/api/master/voice/audio/long?at=20.00', 1.8]);
   } finally { page.end(); }
 });

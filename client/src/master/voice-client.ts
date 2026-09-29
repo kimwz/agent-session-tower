@@ -2,7 +2,7 @@ import { VOICE_TURN_FINISHED } from '../../../shared/decisions';
 import type { MasterSay, MasterViewContext, MasterVoiceSettings, MasterVoiceStatus } from '../../../shared/master';
 import { SayOrder } from '../../../shared/master/voice-order';
 import { post } from './api';
-import { base64, digest, END_HOLD_MS, endHoldMs, fitUtterance, joinSegments, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from './voice-sound';
+import { applyPlaybackRate, base64, digest, END_HOLD_MS, endHoldMs, fitUtterance, joinSegments, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from './voice-sound';
 
 const PRESENCE_MS = 5_000;
 const REPORT_MS = 2_000;
@@ -683,7 +683,7 @@ export class VoiceSession {
     // A player that never ends or fails is given up on after a while, so the queue goes on.
     current.timers.push(setTimeout(() => { if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); } else this.finishPlay(current, 'failed'); },
       say.streaming ? STREAMING_PLAY_MS : Math.max(30_000, say.text.length * 200)));
-    this.audio.onplaying = () => { if (this.current !== current) return; current.playingAt ??= Date.now(); current.sourcePlayed = true; };
+    this.audio.onplaying = () => { if (this.current !== current) return; this.pace(); current.playingAt ??= Date.now(); current.sourcePlayed = true; };
     this.audio.onended = () => { if (this.current === current) say.kind === 'notice' ? this.noticeEnded(current) : this.finishPlay(current, 'played'); };
     this.audio.onerror = () => {
       if (this.current !== current) return;
@@ -691,6 +691,7 @@ export class VoiceSession {
       this.lost(current, current.fetch);
     };
     this.audio.src = say.audio;
+    this.pace();
     this.audio.play().catch((error: unknown) => {
       if (this.current !== current) return;
       if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); return; }
@@ -726,10 +727,20 @@ export class VoiceSession {
       current.retrying = false;
       const fetch = ++current.fetch;
       this.audio.src = `${current.say.audio}?at=${at.toFixed(2)}`;
+      this.pace();
       // Refused again (the web still away): another try, while tries and time are left.
       this.audio.play().catch(() => this.lost(current, fetch));
     }, 1_000 * current.resumes));
     return true;
+  }
+
+  /**
+   * Plays at the speed set now, pitch kept: for each source (a new one starts at the default rate), when its sound
+   * starts, and while it plays, so a speed chosen meanwhile is heard at once. `currentTime` stays the place in the
+   * audio itself, so fetching again from there is unchanged.
+   */
+  private pace(): void {
+    applyPlaybackRate(this.audio, this.options.settings().playbackRate);
   }
 
   private finishPlay(current: Playing, result: 'played' | 'stopped' | 'failed'): void {
@@ -794,6 +805,7 @@ export class VoiceSession {
   private tick(): void {
     if (this.over) return;
     const now = Date.now();
+    if (this.current) this.pace();
     if (this.listening && !this.utterance && !this.current && listenExpired(this.lastActivityAt, this.options.settings().listenMinutes, now)) this.mute();
     if (this.listening && !this.utterance) this.prefetch();
     if (this.listening && (this.speechToTell || now - this.lastReportAt >= REPORT_MS)) this.activity(now);

@@ -1,6 +1,6 @@
 import { mkdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DEFAULT_MASTER_SETTINGS, DEFAULT_MASTER_VOICE, MASTER_TTS_MODELS, type MasterBinding, type MasterSettings, type MasterTtsModel, type MasterVoiceSettings } from '../../shared/master.js';
+import { DEFAULT_MASTER_SETTINGS, DEFAULT_MASTER_VOICE, MASTER_PLAYBACK_RATES, MASTER_TTS_MODELS, type MasterBinding, type MasterSettings, type MasterTtsModel, type MasterVoiceSettings } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 const invalid = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
@@ -37,6 +37,9 @@ function readVoice(value: unknown, fallback: MasterVoiceSettings, saved: boolean
     } else if (key === 'dailyDollars') {
       if (typeof item !== 'number' || !Number.isFinite(item) || item < 0 || item > 1000) throw invalid('하루 한도가 올바르지 않습니다.');
       next.dailyDollars = Math.round(item * 100) / 100;
+    } else if (key === 'playbackRate') {
+      if (typeof item !== 'number' || !Number.isFinite(item) || item < MASTER_PLAYBACK_RATES[0] || item > MASTER_PLAYBACK_RATES[MASTER_PLAYBACK_RATES.length - 1]) throw invalid('읽는 속도가 올바르지 않습니다.');
+      next.playbackRate = Math.round(item * 20) / 20;
     } else if (saved && LEGACY_VOICE_KEYS.has(key)) continue;
     else throw invalid('음성 설정이 올바르지 않습니다.');
   }

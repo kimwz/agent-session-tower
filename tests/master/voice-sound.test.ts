@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { base64, endHoldMs, END_HOLD_MS, fitUtterance, joinSegments, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from '../../client/src/master/voice-sound.js';
+import { applyPlaybackRate, base64, endHoldMs, END_HOLD_MS, fitUtterance, joinSegments, listenExpired, noticeOutcome, SpeechGate, toPcm16, UTTERANCE_BYTES } from '../../client/src/master/voice-sound.js';
 
 /** Feeds the gate a loudness for a while, 10 ms a frame (or `step`: a worklet's 128 samples at 48 kHz are 2.67 ms), and returns its events. */
 function feed(gate: SpeechGate, rms: number, ms: number, from: number, step = 10): { events: Array<{ at: number; event: string }>; end: number } {
@@ -115,4 +115,19 @@ test('the parts of one utterance join into one text, a word cut between two part
   assert.equal(joinSegments(['열아홉, 스-', '스물, 스물하나']), '열아홉, 스물, 스물하나');
   assert.equal(joinSegments([' 하나 ', '둘']), '하나 둘');
   assert.equal(joinSegments([]), '');
+});
+
+test('a playback speed sets the rate a new source starts at too, keeps the pitch, and stays between 1 and 2', () => {
+  const element = { playbackRate: 1, defaultPlaybackRate: 1, preservesPitch: false, webkitPreservesPitch: false };
+  applyPlaybackRate(element, 1.6);
+  assert.deepEqual(element, { playbackRate: 1.6, defaultPlaybackRate: 1.6, preservesPitch: true, webkitPreservesPitch: true });
+  applyPlaybackRate(element, 3);
+  assert.equal(element.playbackRate, 2);
+  applyPlaybackRate(element, 0.5);
+  assert.equal(element.playbackRate, 1);
+  applyPlaybackRate(element, undefined);
+  assert.equal(element.defaultPlaybackRate, 1);
+  const plain: { playbackRate: number; defaultPlaybackRate: number; preservesPitch?: boolean } = { playbackRate: 1, defaultPlaybackRate: 1 };
+  applyPlaybackRate(plain, Number.NaN);
+  assert.deepEqual(plain, { playbackRate: 1, defaultPlaybackRate: 1, preservesPitch: true }, 'no Safari-only field is added');
 });

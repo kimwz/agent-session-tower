@@ -27,8 +27,15 @@ export interface MasterVoiceSettings {
   readReports: boolean;
   /** Dollars of voice a day; 0 means no limit. */
   dailyDollars: number;
+  /**
+   * How fast the page plays what is read aloud (1 as made, up to 2), keeping its pitch. Played faster rather than made
+   * faster: ElevenLabs' own speed is not offered for v3 voices, and goes only to 1.2 elsewhere.
+   */
+  playbackRate: number;
 }
-export const DEFAULT_MASTER_VOICE: MasterVoiceSettings = { voiceId: DEFAULT_MASTER_VOICE_ID, model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0 };
+/** Speeds offered in the settings; any value from the first to the last is accepted. */
+export const MASTER_PLAYBACK_RATES = [1, 1.2, 1.4, 1.6, 1.8, 2] as const;
+export const DEFAULT_MASTER_VOICE: MasterVoiceSettings = { voiceId: DEFAULT_MASTER_VOICE_ID, model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0, playbackRate: 1 };
 
 /** The session the master talks through, and the ones it replaced (kept as ordinary sessions). */
 export interface MasterBinding { sessionId: string; provider: Provider; startedAt: string }
