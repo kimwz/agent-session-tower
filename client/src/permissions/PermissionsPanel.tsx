@@ -163,7 +163,7 @@ function RuleList({ overview, cwd, busy, onNew, onEdit, onDelete }: { overview: 
       </li>)}</ul> : <p className="auth-empty">{key === 'global' ? t('모든 프로젝트에 쓰는 규칙이 아직 없습니다.') : t('이 프로젝트에만 쓰는 규칙이 아직 없습니다.')}</p>}
     </div>)}
     <details className="skills-watching"><summary>{t('규칙이 적용되는 곳')}</summary>
-      <p className="auth-hint"><strong>Claude Code</strong> · {t('내가 Tower에서 시작한 턴(내 에이전트가 시작한 작업 포함)에 설정으로 함께 넘깁니다. 트리거, Slack, GitHub, 공개 에이전트처럼 바깥 내용을 다루는 턴과 터미널에서 직접 연 Claude 세션에는 적용되지 않고, 사용자 설정 파일도 바꾸지 않습니다. 한 프로젝트 규칙은 그 폴더와 하위 폴더에서 시작한 턴에 적용됩니다.')}</p>
+      <p className="auth-hint"><strong>Claude Code</strong> · {t('트리거, Slack, GitHub, 공개 에이전트를 포함해 이 컴퓨터에서 Tower가 시작하는 모든 턴에 설정으로 함께 넘깁니다. 승인을 기다리도록 설정한 작업도 허용한 동작은 묻지 않습니다. 터미널에서 직접 연 Claude 세션에는 적용되지 않고, 사용자 설정 파일도 바꾸지 않습니다. 한 프로젝트 규칙은 그 폴더와 하위 폴더에서 시작한 턴에 적용됩니다.')}</p>
       <p className="auth-hint"><strong>Codex</strong> · {t('Tower만 쓰는 tower.rules 파일에 씁니다. Codex는 실행마다 규칙을 따로 받을 수 없어서, 트리거와 공개 에이전트를 포함한 이 컴퓨터의 모든 Codex 실행이 읽습니다. 프로젝트 규칙은 신뢰한 프로젝트에서만 읽고, 프로젝트 파일은 git 제외 목록에 넣어 저장소에 올라가지 않게 합니다.')}</p>
       <p className="auth-hint">{t('바뀐 규칙은 두 에이전트 모두 다음 턴부터 적용됩니다.')}</p>
       <ul className="permission-history">{overview.targets.map(target => <li key={target.path}><span className="skill-badge codex">Codex</span><code>{target.path}</code><small>{t('규칙 {0}개', { 0: target.rules })}</small></li>)}</ul>

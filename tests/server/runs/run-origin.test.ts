@@ -160,7 +160,7 @@ test('a damaged origin record never reads back as owner work', async t => {
   assert.deepEqual(manager.list().find(run => run.id === runId)?.origin, { kind: 'unknown' }, 'the run itself is kept');
 });
 
-test('trigger sessions never create folders, pre-trust only chosen folders, and run Claude in auto mode when unattended, without the owner\'s allow rules', async t => {
+test('trigger sessions never create folders, pre-trust only chosen folders, and run Claude in auto mode when unattended; every turn gets the owner\'s allow rules', async t => {
   const f = await fixture(t);
   const launches: string[][] = [];
   const trusted: string[] = [];
@@ -183,11 +183,18 @@ test('trigger sessions never create folders, pre-trust only chosen folders, and 
   const unattendedArgs = launches.find(args => args.includes('--permission-mode'))!;
   assert.equal(unattendedArgs[unattendedArgs.indexOf('--permission-mode') + 1], 'auto');
   assert.equal(launches.filter(args => args.includes('--permission-mode')).length, 1);
-  assert.equal(launches.filter(args => args.includes('--settings')).length, 0, 'trigger work, public agents included, keeps the classifier\'s review');
-  // The owner's own turn in the same folder gets them.
+  // Trigger work gets the rules the owner allowed, whether or not it approves automatically.
+  assert.deepEqual(launches.map(args => args[args.indexOf('--settings') + 1]), [allowed, allowed]);
+  // So do the owner's own turn, a public agent's or GitHub watch's turn on outside content, and a Slack turn.
   await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Mine' }, { origin: { kind: 'owner' } });
-  await until(() => launches.length === 3);
-  assert.equal(launches[2][launches[2].indexOf('--settings') + 1], allowed);
+  await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Outside request' }, { origin: { kind: 'trigger', triggerId: 'public-agent', eventId: 'r1' }, untrustedInput: true, unattended: true, createFolder: false });
+  await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'From Slack' }, { origin: { kind: 'slack' }, untrustedInput: true, createFolder: false });
+  await until(() => launches.length === 5);
+  assert.deepEqual(launches.slice(2).map(args => args[args.indexOf('--settings') + 1]), [allowed, allowed, allowed]);
+  // A folder without rules gets no settings.
+  await manager.create({ provider: 'claude', cwd: join(f.directory, '..'), prompt: 'Elsewhere' }, { origin: { kind: 'owner' } });
+  await until(() => launches.length === 6);
+  assert.ok(!launches[5].includes('--settings'));
   await manager.close();
 });
 

@@ -57,7 +57,7 @@ interface RunnerOptions {
   firstTurnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
   /** Notes for every turn, such as the owner's pinned skills; asked and limited like `firstTurnNotes`. */
   turnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
-  /** Settings for the owner's own automatically approved Claude Code turns: the owner's allow rules for its folder. */
+  /** Settings for every Claude Code turn Tower starts: the owner's allow rules for its folder. */
   claudeSettings?: (cwd: string) => string | undefined;
   /** Pre-accepts the native folder trust prompt for a newly created session. */
   trustWorkspace?: (provider: Provider, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
@@ -957,13 +957,11 @@ export class RunManager extends EventEmitter {
     if (tools.towerTools) run.towerTools = tools.towerTools;
     // A capability in a tool server's environment would be visible in the process list as an argument,
     // so such a configuration goes to a private file that lives only as long as the turn.
-    if (automaticApprovals(run)) {
-      args.push('--permission-mode', 'auto');
-      // The owner's allow rules go only to the owner's own work (and what the owner's agents started) on conversations
-      // that never took outside content: public agents, Slack, GitHub and trigger turns keep the classifier's review.
-      const settings = ownerOrigin(run.origin) && !this.sessionOrigin(session.id)?.untrustedInput ? this.options.claudeSettings?.(session.cwd) : undefined;
-      if (settings) args.push('--settings', settings);
-    }
+    if (automaticApprovals(run)) args.push('--permission-mode', 'auto');
+    // The owner's allow rules go to every turn Tower starts, as Codex reads them in every run: the owner also set up the
+    // triggers, Slack and GitHub watches and public agents that start work here, and chose what that work may do.
+    const settings = this.options.claudeSettings?.(session.cwd);
+    if (settings) args.push('--settings', settings);
     for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
     const prompt = attachmentPrompt(run.prompt, attachments);
     const input = {
