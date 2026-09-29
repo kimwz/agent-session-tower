@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.72.0] - 2026-09-29
+
+### Changed
+- **The master reads its answer aloud while it writes it.** The first sentence is heard about a second after the master starts writing, instead of after the whole turn ended (5–11 seconds later before). Measured on real answers: the first sound came 0.7–1.1 s after the first words.
+  - What the master writes before using a tool is read at once, then its answer after the tool; each is heard once. When the turn ends, only what was not read yet is read.
+  - A finished turn is answered at once, no longer at the next five-second look.
+  - The recorded "네, 확인해 볼게요." still comes first; the answer waits for it, and one still waiting when the answer begins is dropped. "아직 하고 있어요." is no longer said once the answer has begun.
+  - The tone is set by the first words; once serious words come, the rest of the answer is read calmly.
+  - Restarting the web or replacing the master's host neither repeats nor loses what is read: audio cut off partway is fetched again from where it was, and a host that is reading is not replaced.
+  - When each answer's first sound came is kept for the latest 200 answers: `GET /api/master/voice/timings` and `master/voice-timings.json` in the state folder.
+
 ## [1.71.0] - 2026-09-29
 
 ### Fixed
