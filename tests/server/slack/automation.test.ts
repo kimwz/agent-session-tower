@@ -928,3 +928,111 @@ test('an autoReply rule gives work delegated for a follow-up its own result repo
   assert.equal(follow.conditionalReply.status, 'pending');
   assert.deepEqual(follow.conditionalReply.requestIds, [follow.requestId]);
 });
+
+test('Tower puts its working reaction on a new request at once and takes it off when the work settles', async t => {
+  const f = await fixture(t);
+  const coordinator: Run = { id: 'coordinator-run', sessionId: 'coordinator', prompt: '', status: 'running', createdAt: '', output: '' };
+  const calls: string[] = [];
+  let release!: () => void;
+  const blocked = new Promise<void>(resolve => { release = resolve; });
+  f.options.react = async (_mention, name, action, ts) => { calls.push(`${action}:${name}:${ts}`); };
+  f.options.workingReaction = () => 'loading';
+  f.options.startConversation = async () => ({ sessionId: coordinator.sessionId, runId: coordinator.id });
+  f.options.getSessionRuns = () => [coordinator];
+  // An earlier request whose thread fetch hangs holds the conversation pass, but not the reaction.
+  const fetch = f.options.fetchThread;
+  f.options.fetchThread = async input => { if (input.ts === '0.1') await blocked; return fetch(input); };
+  await f.manager.ingest({ ...mention, id: 'event-0', ts: '0.1', threadTs: '0.0' });
+  const stuck = f.manager.tick();
+  await f.manager.ingest(mention);
+  for (let wait = 0; calls.length < 2 && wait < 200; wait++) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepEqual(calls, ['add:loading:0.1', 'add:loading:1.1'], 'both requests are marked while the first thread fetch hangs');
+  release(); await stuck; await f.manager.tick();
+  assert.deepEqual(calls.slice(2), [], 'nothing comes off while the coordinator works');
+  coordinator.status = 'completed';
+  await f.manager.tick();
+  assert.deepEqual(calls.slice(2).sort(), ['remove:loading:0.1', 'remove:loading:1.1']);
+  assert.deepEqual(f.manager.list()[1].workingMarks, [{ ts: '1.1', name: 'loading', state: 'off' }]);
+  await f.manager.tick(); assert.equal(calls.length, 4, 'each mark is handled once');
+});
+
+test('no working reaction without the setting, and a failed start still takes the reaction off', async t => {
+  const f = await fixture(t);
+  const calls: string[] = [];
+  f.options.react = async (_mention, name, action, ts) => { calls.push(`${action}:${name}:${ts}`); };
+  f.options.startConversation = async () => { throw new Error('provider missing'); };
+  await f.manager.ingest(mention); await f.manager.tick();
+  assert.deepEqual(calls, []); assert.equal(f.manager.list()[0].workingMarks, undefined);
+  f.options.workingReaction = () => 'loading';
+  await f.manager.ingest({ ...mention, id: 'event-2', ts: '2.1', threadTs: '2.0' }); await f.manager.tick();
+  assert.equal(f.manager.list()[1].status, 'error');
+  assert.deepEqual(calls, ['add:loading:2.1', 'remove:loading:2.1']);
+});
+
+test('working reactions whose outcome is uncertain are taken off with a real call after a restart, and failures are not retried', async t => {
+  const f = await fixture(t);
+  const calls: string[] = [];
+  f.options.react = async (_mention, name, action, ts) => { calls.push(`${action}:${name}:${ts}`); if (action === 'remove' && ts === '2.1') throw new Error('ratelimited'); };
+  f.options.workingReaction = () => 'loading';
+  f.options.startConversation = async () => { throw new Error('provider missing'); };
+  await f.manager.ingest({ ...mention, id: 'event-2', ts: '2.1', threadTs: '2.0' }); await f.manager.tick();
+  assert.deepEqual(f.manager.list()[0].workingMarks, [{ ts: '2.1', name: 'loading', state: 'off', error: 'ratelimited' }]);
+  // A worker that stopped after Slack took the reaction but before it recorded that.
+  const path = join(f.directory, 'slack-automation.json');
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  saved.workflows[0].workingMarks = [{ ts: '2.1', name: 'loading', state: 'add' }, { ts: '2.2', name: 'eyes', state: 'on' }];
+  await writeFile(path, JSON.stringify(saved));
+  calls.length = 0;
+  const restarted = new SlackAutomationManager(f.options); await restarted.start(); await restarted.tick(); await restarted.tick();
+  assert.deepEqual(calls, ['remove:loading:2.1', 'remove:eyes:2.2']);
+  assert.deepEqual(restarted.list()[0].workingMarks?.map(mark => mark.state), ['off', 'off']);
+  saved.workflows[0].workingMarks = [{ ts: '2.1', name: 'not an emoji', state: 'add' }];
+  await writeFile(path, JSON.stringify(saved));
+  await assert.rejects(new SlackAutomationManager(f.options).start(), /working marks are invalid/);
+});
+
+test('a follow-up for the owner gets the working reaction on its own message before it reaches the conversation', async t => {
+  const f = await followUpFixture(t);
+  const calls: string[] = [];
+  f.options.react = async (_mention, name, action, ts) => { calls.push(`${action}:${name}:${ts}`); };
+  f.options.workingReaction = () => 'loading';
+  f.coordinator.status = 'running';
+  await f.manager.followUp(f.later('4.0', '<@U1> deploy to dev please', true));
+  await f.manager.tick();
+  assert.deepEqual(calls, ['add:loading:4.0'], 'a mention of the owner is marked at once, while the conversation is still busy');
+  assert.equal(f.resumed.length, 0);
+  await f.manager.followUp(f.later('2.0', 'thanks!'));
+  await f.manager.followUp(f.later('3.0', 'merged, can I merge the next one?'));
+  await f.manager.tick();
+  assert.deepEqual(calls, ['add:loading:4.0', 'add:loading:3.0'], 'a message judged not for the owner gets nothing');
+  f.coordinator.status = 'completed';
+  await f.manager.tick();
+  assert.equal(f.resumed.length, 1);
+  assert.match(f.resumed[0].instructions!, /pass its ts \(4\.0, 3\.0\) to slack_react/);
+  assert.equal(calls.length, 2, 'the delivered turn is queued, so the marks stay');
+  for (const run of f.runs) run.status = 'completed';
+  await f.manager.tick();
+  assert.deepEqual(calls.slice(2).sort(), ['remove:loading:3.0', 'remove:loading:4.0']);
+});
+
+test('slack_react can mark a follow-up the conversation received, and nothing else', async t => {
+  const f = await followUpFixture(t);
+  await f.manager.setRules([{ ...rule, autoReply: true }]);
+  const targets: string[] = [];
+  const request = { ...mention, id: 'event-auto', threadTs: '5.0', ts: '5.1' };
+  f.options.react = async (target, name, action, ts) => { assert.equal(target.ts, request.ts); targets.push(`${action}:${name}:${ts}`); };
+  await f.manager.ingest(request); await f.manager.tick();
+  const id = f.manager.list()[1].id;
+  await f.manager.followUp({ ...f.later('3.0', '<@U1> deploy to dev please', true), threadTs: '5.0' });
+  await f.manager.followUp({ ...f.later('3.5', 'thanks!'), threadTs: '5.0' });
+  await f.manager.tick();
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', prompt: 'Deploy dev', ruleId: 'review' });
+  await f.manager.tool(id, 'slack_react', { name: 'loading', action: 'add', ts: '3.0' });
+  await f.manager.tool(id, 'slack_react', { name: 'white_check_mark', action: 'add' });
+  await assert.rejects(f.manager.tool(id, 'slack_react', { name: 'x', action: 'add', ts: '3.5' }), /ts must be/);
+  await assert.rejects(f.manager.tool(id, 'slack_react', { name: 'x', action: 'add', ts: '9.9' }), /ts must be/);
+  assert.deepEqual(targets, ['add:loading:3.0', `add:white_check_mark:${request.ts}`]);
+  assert.deepEqual(f.manager.list()[1].reactions?.map(reaction => reaction.ts), ['3.0', undefined]);
+  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  assert.equal(restarted.list()[1].reactions?.length, 2);
+});
