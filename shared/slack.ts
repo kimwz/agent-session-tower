@@ -10,7 +10,7 @@ export interface SlackRule {
   provider: Provider;
   model?: string;
   cwd?: string;
-  /** Owner pre-authorization: delegating with this rule permits one truthful result reply and progress reactions on the request. */
+  /** Owner pre-authorization: delegating with this rule permits one truthful result reply. Reactions need no authorization. */
   autoReply?: boolean;
 }
 export interface SlackMessage { user: string; text: string; ts: string }
