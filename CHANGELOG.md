@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.75.0] - 2026-09-29
+## [1.77.0] - 2026-09-29
 
 ### Changed
 - **The master's floating button stands alone until you need more.** Nothing sits beside it by default: today's voice cost and the voice line no longer stay next to it after voice is turned off.
@@ -12,6 +12,30 @@ format, and saved browser preferences are the compatibility surface.
   - The microphone icon starts a voice conversation. The button then turns into a microphone, and pressing it ends the conversation: what was playing stops, and speech still being written down is dropped rather than sent. The conversation window stays as it was. There is no separate "음성 끄기" button any more. Shift+M still opens and closes the conversation.
   - "듣기 끄기" is now **마이크 뮤트** / **뮤트 해제**. A muted microphone stays muted until you unmute it, even after news of finished work is read aloud (which used to turn listening back on); answers and news are still read.
 - **Long speech stays readable while you talk.** What is being written down shows up to five lines (four on phones) and keeps its latest words in view as it grows, with a blinking caret while writing goes on and a fade at the top when earlier words scroll out. Scroll up to read what came before; scrolling back down, or starting a new sentence, follows again.
+
+## [1.76.0] - 2026-09-29
+
+### Added
+- **Skills and your guidance are kept in Tower.** So they can be backed up and moved to another computer, choosing which ones go.
+  - A skill made in Tower (new, or an accepted proposal) is now kept in Tower's own folder, `<state>/skills` (`global/<name>`, and `projects/<folder>-<hash>/<name>` with the project's path beside it). Claude Code and Codex reach it through links in `~/.agents/skills` and `~/.claude/skills`, or in the project's `.agents/skills` and `.claude/skills`. In a git project those links are added to the repository's own `.git/info/exclude`, so they never show up as changes.
+  - This means a project skill made in Tower is no longer a file of the repository: to share one with a team, commit a copy yourself.
+  - Skills elsewhere show a **타워로 옮기기** (move into Tower) button: the folder is copied into Tower and a link takes its place, identical per-agent copies included, so the agents keep using the same skill. A move is recorded before it starts; if Tower stops half way, it is finished (or undone, when the copy was not complete) at the next start. A pin on the skill moves with it. Skills git tracks (a repository's shared skills, a dotfiles repository), skills with a link inside, and per-agent copies that differ are not moved. Moving a skill installed with the `skills` command warns that later `skills` updates change the folder kept in Tower.
+  - **Tower keeps** and **Not linked** marks: a skill kept in Tower whose links are missing (for example right after an import on a new computer) is still listed, and **link** puts them back.
+  - **지침** (guidance) tab: your own guidance, kept in `<state>/guidance/owner.md`, goes to every Claude Code and Codex conversation after Tower's own text. Tower's built-in text is shown there too.
+  - **백업** (backup) tab: tick the skills kept in Tower and your guidance, and download them as one file. On another computer, open the file there: each skill shows what will happen (added; replaces the Tower skill of that name, when you choose so; skipped when a skill of that name exists outside Tower). A project skill goes to a project folder you choose, pins can come along, and the guidance in the backup is shown and taken only when you choose to (replacing or following yours, and only when every chosen skill came in). Files in a backup are checked before anything is written (names, paths, SKILL.md, 20 MB).
+  - Needs the execution worker of this version; until it switches, the new tabs say so.
+
+## [1.75.0] - 2026-09-29
+
+### Added
+- **Permissions: one place for what Claude Code and Codex may do without asking, and agents can ask you for a permission.** Open it from the shield button in the header (the badge counts requests waiting for you), or for one project from its folder menu ("이 폴더의 권한").
+  - A rule is either a command prefix such as `gh pr merge` (allowed with any arguments, for Claude Code, Codex or both) or a Claude Code rule for other tools such as `WebFetch(domain:example.com)`. It applies to every project or to one project. Each rule shows exactly what each agent reads (`Bash(gh pr merge *)`, `prefix_rule(pattern=["gh", "pr", "merge"], decision="allow")`). Quotes, pipes, redirects and wildcards are refused, and broad rules such as a bare `git` or `python` get a warning.
+  - An agent in a turn you started from Tower asks with the new `permissions_request` tool when Claude Code or Codex refused or keeps asking about an action the task needs (for example the auto-mode classifier refusing `gh pr merge`). It gives the narrowest rule and why, and is told not to work around the refusal. The request shows under Requests with its reason, the conversation and the exact rules. You can allow it, edit it first (for example make it apply to every project or to both agents), or refuse it.
+  - With "결정을 요청한 대화에 보내 이어서 진행" (on by default), your decision goes to that conversation as your next message, after the turn under way if the agent is still working. The agent then goes on, since an allowed rule applies from its next turn. `permissions_list` also shows an agent its requests and the rules for its folder.
+  - Claude Code receives the rules as settings of the turns you start from Tower (and work your agents start): every project's rules, and a project's rules in that folder and the folders inside it. Turns that handle outside content (triggers, Slack, GitHub, public agents) keep the auto-mode classifier's review. Your own settings files are never rewritten, and Claude sessions you open yourself in a terminal are not affected.
+  - Codex reads them from `tower.rules` files that only Tower writes: `~/.codex/rules/tower.rules`, and `<project>/.codex/rules/tower.rules` for project rules (read in trusted projects). Codex cannot take rules per run, so every Codex run on this computer reads them, triggers and public agents included; the panel says so next to each Codex rule. Tower adds a project file to the repository's own exclude list so it stays out of git. It never changes a rules file it did not write, a committed one, or one reached through a linked folder, and only the Tower on the default state folder writes the file for every project.
+  - Up to 200 rules. To remove Tower's Codex rules without Tower, delete the `tower.rules` files named above.
+  - Only allow rules are managed; deny and ask rules stay in each agent's own settings. Requests come only from turns you started on this computer; agents cannot save, edit or decide rules.
 
 ## [1.74.1] - 2026-09-29
 

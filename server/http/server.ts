@@ -4,7 +4,8 @@ import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readWebAsset } from './web-assets.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
 import { ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus, parseAutoPrompt, parseAutoPromptSuggestion, parseCreateSession, parseMessage, readJson, UUID } from './requests.js';
-import type { SkillDetail, SkillOverview, SkillSummary } from '../../shared/skills.js';
+import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSummary } from '../../shared/skills.js';
+import { MAX_SKILL_BUNDLE_BYTES } from '../../shared/skills.js';
 import type { RequestContext } from './request-context.js';
 import type { RemoteExclusionStore } from '../remote/exclusions.js';
 import { handleLinkRoute, type LinkRoutes } from '../link/routes.js';
@@ -47,6 +48,8 @@ export interface Backend {
     detail(input: Record<string, unknown>): Promise<SkillDetail>;
     summary(): Promise<SkillSummary>;
     mutate(action: string, body: Record<string, unknown>): Promise<SkillOverview>;
+    exportBundle(body: Record<string, unknown>): Promise<SkillBundle>;
+    importPlan(bundle: unknown): Promise<SkillImportPlan>;
   };
   snapshot(): Snapshot;
   detail(id: string, before?: number, limit?: number): Promise<SessionDetail | undefined>;
@@ -332,10 +335,16 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (path === '/api/skills/summary') return json(res, 200, await backend.skills.summary());
         return json(res, 200, path === '/api/skills' ? await backend.skills.overview(input) : await backend.skills.detail(input));
       }
-      const skillAction = path.match(/^\/api\/skills\/(save|pin|link|merge|delete|dismiss|settings|backfill)$/);
+      if ((path === '/api/skills/export' || path === '/api/skills/import-plan') && req.method === 'POST') {
+        if (!backend.skills) return json(res, 503, { error: '스킬을 사용할 수 없습니다.' });
+        const body = await readJson(req, path === '/api/skills/export' ? 200_000 : MAX_SKILL_BUNDLE_BYTES + 1024 * 1024);
+        return json(res, 200, path === '/api/skills/export' ? await backend.skills.exportBundle(body) : await backend.skills.importPlan(body));
+      }
+      const skillAction = path.match(/^\/api\/skills\/(save|pin|link|merge|adopt|guidance|import|delete|dismiss|settings|backfill)$/);
       if (skillAction && req.method === 'POST') {
         if (!backend.skills) return json(res, 503, { error: '스킬을 사용할 수 없습니다.' });
-        return json(res, 200, await backend.skills.mutate(skillAction[1], await readJson(req, 200_000)));
+        // A backup being imported comes with the request; everything else is small.
+        return json(res, 200, await backend.skills.mutate(skillAction[1], await readJson(req, skillAction[1] === 'import' ? MAX_SKILL_BUNDLE_BYTES + 1024 * 1024 : 400_000)));
       }
       if (path === '/api/decisions' && req.method === 'GET') {
         if (!decisions) return json(res, 503, { error: '빠른 판단을 사용할 수 없습니다.' });
