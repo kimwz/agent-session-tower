@@ -20,7 +20,6 @@ const message = (role: ChatMessage['role'], text: string, at: number): ChatMessa
 
 async function fixture(t: test.TestContext, answer: (request: AutoPromptModelRequest) => unknown) {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'tower-advisor-')));
-  t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, 'home'), project = join(home, 'work', 'shop'), other = join(home, 'work', 'blog');
   await mkdir(project, { recursive: true }); await mkdir(other, { recursive: true });
   const stateDir = join(root, 'state');
@@ -34,6 +33,8 @@ async function fixture(t: test.TestContext, answer: (request: AutoPromptModelReq
     model: async request => { calls.push(request); return answer(request); }, advise: false,
   });
   await service.start();
+  // State writes the test started without waiting finish before the folder goes.
+  t.after(async () => { service.close(); await service.flush().catch(() => {}); await rm(root, { recursive: true, force: true }); });
   // Requests before the advisor started are left to the 7-day analysis; these fixtures begin earlier than that.
   const internals = service as unknown as { state: { update(change: (state: { startedAt: string }) => void): Promise<void> }; advisor: { tick(): Promise<void>; now: () => number; deps: { now?: () => number } } };
   internals.advisor.deps.now = () => NOW;
