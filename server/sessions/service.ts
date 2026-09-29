@@ -52,6 +52,7 @@ export class SessionService extends EventEmitter {
   private readonly proofFile?: LaunchProofFile;
   private readonly launchMarks?: string;
   private markRead: { changedAt: number; at: number; marks: LaunchMark[] } = { changedAt: -1, at: 0, marks: [] };
+  private processesAt = 0;
   private proofsLoaded = false;
   private proofsChanged = false;
   /** Another worker is taking over: this one neither looks at sessions nor saves proofs until it resumes. */
@@ -166,7 +167,7 @@ export class SessionService extends EventEmitter {
         if (changedAt !== this.markRead.changedAt || Date.now() - this.markRead.at > 60_000) this.markRead = { changedAt, at: Date.now(), marks: await readLaunchMarks(this.launchMarks) };
         // A run that left a mark since the processes were last looked at is looked at now, while it may still be running.
         if (this.markRead.marks.some(mark => mark.at >= this.lastProcesses - 2000) && Date.now() - this.lastProcesses > 1000) await this.inspect();
-        const { proofs, used } = matchLaunchMarks(this.markRead.marks, this.processes.owners ?? new Map(), this.processes.started ?? new Map(), live, this.processes.parents ?? new Map(), this.lastProcesses);
+        const { proofs, used } = matchLaunchMarks(this.markRead.marks, this.processes.owners ?? new Map(), this.processes.started ?? new Map(), live, this.processes.parents ?? new Map(), this.processesAt);
         let fresh = false;
         for (const [id, launcher] of proofs) if (!this.launchers.has(id)) { this.launchers.set(id, [launcher]); this.proofsChanged = true; fresh = true; }
         // A mark goes only once its proof is on disk: until then it is the only record of who started the run.
@@ -199,7 +200,10 @@ export class SessionService extends EventEmitter {
   }
 
   private async inspect(): Promise<void> {
+    // When the listing began: a process started after that may be missing from it.
+    const began = Date.now();
     this.processes = await this.readProcesses();
+    this.processesAt = began;
     this.lastProcesses = Date.now();
     // The first observation is the proof: it is taken while the run is young and its launcher alive.
     for (const [id, parents] of this.processes.launchers ?? []) if (!this.launchers.has(id)) { this.launchers.set(id, parents); this.proofsChanged = true; }
