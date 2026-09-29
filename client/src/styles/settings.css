@@ -1,0 +1,145 @@
+/* One way into every setting: the settings button, and the dialog with sections on the left and one on the right. */
+.settings-entry { position:relative; display:inline-flex; }
+.settings-button { position:relative; display:inline-flex; align-items:center; gap:7px; height:32px; padding:0 12px 0 10px; border:1px solid #31415a; border-radius:8px; background:#142030; color:#c5d6ed; font-size:12.5px; font-weight:500; white-space:nowrap; }
+.settings-button:hover:not(:disabled), .settings-button.active { border-color:#4d6788; background:#1d2d42; color:var(--bright); }
+.settings-button:disabled { opacity:.5; cursor:default; }
+.settings-button:focus-visible { outline:2px solid #97c4ff; outline-offset:2px; }
+.settings-button.urgent { border-color:#8c4450; }
+.settings-button .settings-mark { position:absolute; top:-7px; right:-7px; box-shadow:0 0 0 2px #0d131d; }
+.settings-button .settings-dot { position:absolute; top:-3px; right:-3px; box-shadow:0 0 0 2px #0d131d; }
+.settings-button.urgent .settings-mark { animation:settings-attention 2.4s ease-out infinite; }
+@keyframes settings-attention { 0% { box-shadow:0 0 0 2px #0d131d, 0 0 0 2px #f0616d88; } 70%, 100% { box-shadow:0 0 0 2px #0d131d, 0 0 0 9px #f0616d00; } }
+.settings-entry .remote-join-notice { top:calc(100% + 10px); }
+
+.settings-mark { flex:none; min-width:18px; height:18px; padding:0 5px; border-radius:9px; background:#e7a13c; color:#1b1204; font-size:10.5px; font-weight:700; line-height:18px; text-align:center; font-variant-numeric:tabular-nums; }
+.settings-mark.urgent { background:#f0616d; color:#fff; }
+.settings-dot { flex:none; display:inline-block; width:7px; height:7px; border-radius:50%; background:var(--amber); }
+
+/* When the header gives the canvas its room, the settings button stays where it was. */
+.canvas-only .app-header .header-actions { display:flex; }
+.canvas-only .app-header .header-actions > :not(.settings-entry) { display:none; }
+.canvas-only .settings-entry { pointer-events:auto; }
+.canvas-only .settings-button { background:#142030ed; }
+.canvas-only .canvas-quick-controls { right:140px; }
+
+.settings-dialog { width:min(980px, calc(100vw - 32px)); height:min(720px, calc(100dvh - 40px)); max-width:none; max-height:none; padding:0; border:1px solid #2c3a4d; border-radius:14px; background:#101722; color:var(--text); overflow:hidden; box-shadow:0 24px 80px #000a; }
+.settings-dialog::backdrop { background:#030812b8; }
+.settings-shell { display:grid; grid-template-columns:220px minmax(0, 1fr); height:100%; }
+
+.settings-nav { display:flex; flex-direction:column; gap:16px; min-height:0; overflow-y:auto; padding:18px 10px 14px; border-right:1px solid var(--line); background:#0c121b; }
+.settings-nav-head { display:flex; align-items:center; justify-content:space-between; padding:2px 10px 0; }
+.settings-nav-head h2 { margin:0; font-size:15px; font-weight:600; color:var(--bright); }
+.settings-nav .settings-nav-close { display:none; }
+.settings-nav-group { display:flex; flex-direction:column; gap:2px; }
+.settings-nav-group h3 { margin:0 10px 4px; color:var(--subtle); font-size:11px; font-weight:600; }
+.settings-nav-foot { margin-top:auto; padding-top:10px; border-top:1px solid var(--line); }
+.settings-nav button { display:flex; align-items:center; gap:10px; width:100%; min-height:34px; padding:6px 10px; border-radius:8px; color:#b6c4d6; font-size:13px; text-align:left; }
+.settings-nav button > svg:first-child { flex:none; color:#8ea3bd; }
+.settings-nav button > span:not(.settings-mark) { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.settings-nav button:hover { background:#172232; color:var(--text); }
+.settings-nav button.selected { background:#1f3350; color:var(--bright); }
+.settings-nav button.selected > svg:first-child { color:#a9c7f5; }
+.settings-nav button:focus-visible { outline:2px solid #97c4ff; outline-offset:-2px; }
+.settings-nav-chevron { display:none; }
+
+.settings-main { display:flex; flex-direction:column; min-width:0; min-height:0; }
+.settings-section { display:flex; flex-direction:column; flex:1; min-height:0; }
+.settings-section[hidden] { display:none; }
+.settings-pane { display:flex; flex-direction:column; flex:1; min-height:0; height:100%; }
+.settings-pane.auth-panel { padding:0; }
+.settings-pane > .settings-pane-head { display:flex; align-items:flex-start; gap:12px; padding:22px 20px 14px 26px; }
+.settings-pane-head > .settings-pane-title { display:block; flex:1; min-width:0; }
+.settings-pane-title h2, .settings-pane.slack-panel .settings-pane-title h2 { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:0; color:var(--bright); font-size:19px; font-weight:600; letter-spacing:-.2px; }
+.settings-pane-title p, .settings-pane.slack-panel .settings-pane-title p { margin:5px 0 0; color:var(--muted); font-size:12.5px; line-height:1.5; }
+.settings-pane-actions { display:flex; flex:none; align-items:center; gap:6px; }
+.settings-pane-actions .trigger-computer { display:flex; flex-direction:row; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
+.settings-close, .settings-back { flex:none; }
+.settings-back { display:none; }
+.settings-tabs { display:flex; flex:none; gap:2px; width:max-content; max-width:calc(100% - 52px); margin:0 26px 4px; padding:3px; overflow-x:auto; border:1px solid var(--line); border-radius:9px; background:#0b111a; }
+.settings-tabs button { display:inline-flex; align-items:center; gap:6px; padding:6px 12px; border-radius:6px; color:var(--muted); font-size:12.5px; white-space:nowrap; }
+.settings-tabs button svg { flex:none; }
+.settings-tabs button:hover { color:var(--text); }
+.settings-tabs button.active { background:#223550; color:var(--bright); box-shadow:0 1px 2px #0006; }
+.settings-tabs button:focus-visible { outline:2px solid #97c4ff; outline-offset:-2px; }
+.settings-tabs .settings-mark { min-width:16px; height:16px; line-height:16px; font-size:10px; }
+.settings-pane-body { flex:1; min-height:0; overflow-y:auto; padding:14px 26px 28px; }
+.settings-pane-body > .auth-hint:first-child { margin-top:0; }
+.settings-pane.auth-panel .settings-pane-body > section:first-of-type { margin-top:14px; }
+.trigger-body { display:grid; gap:12px; }
+
+.settings-folder-chip { display:inline-flex; align-items:center; gap:5px; padding:2px 3px 2px 8px; border:1px solid #33465f; border-radius:12px; background:#15223a; color:#b9cbe4; font-size:11.5px; font-weight:500; letter-spacing:0; }
+.settings-folder-chip button { display:inline-flex; padding:3px; border-radius:50%; color:#8ea3bd; }
+.settings-folder-chip button:hover { background:#24354d; color:var(--bright); }
+
+/* The general section: grouped rows, a label on the left and its control on the right. */
+.settings-group-title { margin:22px 0 8px 2px; color:var(--muted); font-size:11.5px; font-weight:600; }
+.settings-group-title:first-child { margin-top:2px; }
+.settings-group { overflow:hidden; border:1px solid var(--line); border-radius:10px; background:#0d141e; }
+.settings-row { display:flex; align-items:center; justify-content:space-between; gap:16px; min-height:50px; padding:8px 14px; color:var(--text); font-size:13px; }
+.settings-row + .settings-row { border-top:1px solid var(--line); }
+.settings-row > span { display:flex; flex-direction:column; gap:2px; }
+.settings-row small { color:var(--subtle); font-size:11.5px; }
+.settings-row kbd { font:inherit; }
+label.settings-row { cursor:pointer; }
+.settings-row select { min-width:120px; padding:6px 8px; border:1px solid #334962; border-radius:7px; background:#132235; color:#c5d6ed; font-size:12.5px; }
+.settings-row .chat-font-controls { margin:0; }
+.settings-row .secondary-button { display:inline-flex; align-items:center; gap:6px; }
+.settings-segmented { display:flex; gap:2px; padding:3px; border:1px solid var(--line); border-radius:8px; background:#0b111a; }
+.settings-segmented button { display:inline-flex; align-items:center; gap:5px; padding:5px 10px; border-radius:5px; color:var(--muted); font-size:12px; white-space:nowrap; }
+.settings-segmented button[aria-pressed="true"] { background:#223550; color:var(--bright); }
+.settings-segmented button:disabled { opacity:.45; cursor:default; }
+.settings-switch { position:relative; flex:none; width:38px; height:22px; margin:0; border-radius:11px; background:#2a3749; appearance:none; cursor:pointer; transition:background .15s; }
+.settings-switch::after { content:''; position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:#dfe7f2; transition:transform .15s; }
+.settings-switch:checked { background:#3f7fd8; }
+.settings-switch:checked::after { transform:translateX(16px); }
+.settings-switch:disabled { opacity:.45; cursor:default; }
+.settings-switch:focus-visible, .settings-segmented button:focus-visible, .settings-row select:focus-visible { outline:2px solid #97c4ff; outline-offset:2px; }
+
+/* A conversation covers the right of the page, header included; the settings button stays beside it. */
+@media (min-width:681px) {
+  .has-chat .app-header .header-actions { margin-right:var(--chat-panel-width, 0px); }
+}
+/* With little room left beside a wide conversation, the header keeps only its controls. */
+@media (min-width:681px) and (max-width:1100px) {
+  .has-chat .app-header .brand h1, .has-chat .app-header .brand-local, .has-chat .app-header .header-center, .has-chat .app-header .connection-state { display:none; }
+  .has-chat .app-header .header-actions { flex:none; }
+}
+
+@media (max-width:900px) {
+  .settings-button { width:34px; padding:0; justify-content:center; }
+  .settings-button-label { display:none; }
+  .canvas-only .canvas-quick-controls { right:70px; }
+}
+
+/* On a phone the settings are two pages, as the phone's own settings are: the list, then one section. */
+@media (max-width:680px) {
+  .canvas-only .canvas-quick-controls { right:56px; }
+  .settings-dialog { width:100vw; height:100dvh; border:0; border-radius:0; }
+  .settings-shell { grid-template-columns:minmax(0, 1fr); }
+  .settings-shell.reading .settings-nav { display:none; }
+  .settings-shell.listing .settings-main { display:none; }
+  .settings-nav { gap:22px; padding:14px 14px 24px; border-right:0; background:#101722; }
+  .settings-nav-head { padding:4px 2px 0 4px; }
+  .settings-nav-head h2 { font-size:24px; }
+  .settings-nav .settings-nav-close { display:inline-flex; }
+  .settings-nav-group { gap:0; overflow:hidden; border-radius:12px; background:#162030; }
+  .settings-nav-group h3 { margin:0; padding:10px 14px 4px; background:#101722; }
+  .settings-nav-foot { margin-top:0; padding-top:0; border-top:0; }
+  .settings-nav button { min-height:48px; padding:10px 14px; border-radius:0; font-size:15px; }
+  .settings-nav button + button { border-top:1px solid #243145; }
+  .settings-nav-chevron { display:block; flex:none; color:var(--subtle); }
+  .settings-pane > .settings-pane-head { display:grid; grid-template-columns:1fr auto; gap:8px 10px; padding:12px 14px 10px 16px; }
+  .settings-back { display:inline-flex; align-items:center; gap:2px; justify-self:start; margin-left:-6px; padding:4px 6px 4px 0; color:var(--blue); font-size:14px; }
+  .settings-close { grid-column:2; grid-row:1; }
+  .settings-pane-title { grid-column:1 / -1; }
+  .settings-pane-actions { grid-column:1 / -1; }
+  .settings-pane-title h2, .settings-pane.slack-panel .settings-pane-title h2 { font-size:22px; }
+  .settings-tabs { max-width:calc(100% - 32px); margin:0 16px 4px; }
+  .settings-pane-body { padding:12px 16px 28px; }
+  .settings-row { min-height:52px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-button.urgent .settings-mark { animation:none; }
+  .settings-switch, .settings-switch::after { transition:none; }
+}

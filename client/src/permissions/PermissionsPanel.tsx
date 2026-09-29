@@ -1,29 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
-import { Check, LoaderCircle, Pencil, Plus, ShieldCheck, Trash2, TriangleAlert, X } from 'lucide-react';
+import { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { FolderChip } from '../settings/FolderChip';
+import { SettingsFrameContext, SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
+import { Check, LoaderCircle, Pencil, Plus, Trash2, TriangleAlert } from 'lucide-react';
 import type { PermissionOverview, PermissionProvider, PermissionRequest, PermissionRule, PermissionRuleInput } from '../../../shared/permissions';
 import { claudeRule, codexRule, ruleIsBroad, ruleProblem } from '../../../shared/permissions';
 import { authPost } from '../auth/AuthGate';
 import { locale, translateMessage, useI18n } from '../i18n/i18n';
-import { onOpenPermissions } from './permissions-open';
 
-const operation = <T,>(token: string, name: string, input: unknown = {}) => authPost<{ result: T }>(`/api/v1/permissions.${name}`, token, input).then(response => response.result);
+export const permissionOperation = <T,>(token: string, name: string, input: unknown = {}) => authPost<{ result: T }>(`/api/v1/permissions.${name}`, token, input).then(response => response.result);
 const folderName = (path: string) => path.split('/').filter(Boolean).at(-1) || path;
 const date = (value: string) => { const time = new Date(value); return Number.isNaN(time.getTime()) ? '' : time.toLocaleString(locale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }); };
-
-/** The header button: every allow rule, and how many agent requests wait for the owner. */
-export function PermissionsButton({ token, projects, onOpenSession }: { token: string; projects: string[]; onOpenSession: (id: string) => void }) {
-  const { t } = useI18n();
-  const [open, setOpen] = useState<{ cwd?: string } | null>(null);
-  const [count, setCount] = useState(0);
-  const refresh = useCallback(() => { if (token) void operation<PermissionOverview>(token, 'overview').then(overview => setCount(overview.pending)).catch(() => setCount(0)); }, [token]);
-  useEffect(() => { refresh(); const timer = setInterval(refresh, 60_000); return () => clearInterval(timer); }, [refresh]);
-  useEffect(() => onOpenPermissions(cwd => setOpen({ cwd })), []);
-  const label = count ? t('권한 · 요청 {0}개', { 0: count }) : t('권한');
-  return <><button className={`icon-button skills-button ${open ? 'active' : ''}`} title={label} aria-label={label} disabled={!token} onClick={() => setOpen({})}>
-    <ShieldCheck size={18} />{count > 0 && <span className="skills-count" aria-hidden="true">{count > 9 ? '9+' : count}</span>}
-  </button>{open && <PermissionsPanel token={token} cwd={open.cwd} projects={projects} onOpenSession={id => { setOpen(null); onOpenSession(id); }} onClose={() => { setOpen(null); refresh(); }} />}</>;
-}
 
 /** A rule being written: `id` edits a saved rule; `deciding` allows that request as edited. */
 type Draft = PermissionRuleInput & { id?: string; deciding?: string };
@@ -32,9 +18,9 @@ export const ruleDraft = (rule: PermissionRuleInput & { id?: string }): Draft =>
 type Tab = 'requests' | 'rules';
 
 /** Allow rules for Claude Code and Codex in one list, everywhere or for one folder, and the requests agents sent. */
-export function PermissionsPanel({ token, cwd, projects, onClose, onOpenSession }: { token: string; cwd?: string; projects: string[]; onClose: () => void; onOpenSession: (id: string) => void }) {
+export function PermissionsPanel({ token, cwd, projects, pending: waiting, onClearFolder, onChanged, onOpenSession }: { token: string; cwd?: string; projects: string[]; pending: number; onClearFolder: () => void; onChanged: () => void; onOpenSession: (id: string) => void }) {
   const { t } = useI18n();
-  const dialog = useRef<HTMLDialogElement>(null);
+  const { active } = useContext(SettingsFrameContext);
   const [overview, setOverview] = useState<PermissionOverview | null>(null);
   const [tab, setTab] = useState<Tab>('rules');
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -44,19 +30,24 @@ export function PermissionsPanel({ token, cwd, projects, onClose, onOpenSession 
   const [resume, setResume] = useState(true);
   const shown = useCallback((all: PermissionOverview): PermissionOverview => cwd ? { ...all, rules: all.rules.filter(rule => rule.scope === 'global' || rule.cwd === cwd), requests: all.requests.filter(request => request.cwd === cwd),
     targets: all.targets.filter(target => target.scope === 'global' || target.cwd === cwd), pending: all.requests.filter(request => request.cwd === cwd && request.status === 'pending').length } : all, [cwd]);
+  // The requests tab is chosen once, on opening; later reloads leave the owner where they are.
+  const opened = useRef(false);
+  // Asked again when shown again and when the page sees the number of waiting requests change.
   useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    const element = dialog.current;
-    element?.showModal();
-    void operation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(value => { setOverview(value); if (value.pending) setTab('requests'); }).catch(error => setError(error instanceof Error ? error.message : String(error)));
-    return () => { element?.close(); if (opener?.isConnected) opener.focus(); };
-  }, [token, cwd]);
+    if (!active) return;
+    void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(value => { if (!opened.current && value.pending) setTab('requests'); opened.current = true; setOverview(value); }).catch(error => setError(error instanceof Error ? error.message : String(error)));
+  }, [token, cwd, active, waiting]);
+  useSettingsGuard({
+    escape: () => { if (!draft) return false; setDraft(null); return true; },
+    leave: () => !draft || window.confirm(t('저장하지 않은 변경 사항을 버릴까요?')),
+  });
   async function act(name: string, input: unknown, done = '') {
     if (busy) return false;
     setBusy(true); setError(''); setNotice('');
     try {
-      const next = await operation<PermissionOverview>(token, name, input);
+      const next = await permissionOperation<PermissionOverview>(token, name, input);
       setOverview(shown(next));
+      onChanged();
       if (next.resumed && 'error' in next.resumed) setError(t('결정은 저장했지만 대화에 알리지 못했습니다: {0}', { 0: translateMessage(next.resumed.error) }));
       else if (done) setNotice(next.resumed ? `${done} ${t("요청한 대화에 알렸습니다.")}` : done);
       return true;
@@ -66,7 +57,6 @@ export function PermissionsPanel({ token, cwd, projects, onClose, onOpenSession 
   }
   const pending = overview?.requests.filter(request => request.status === 'pending') ?? [];
   const decided = overview?.requests.filter(request => request.status !== 'pending') ?? [];
-  const title = cwd ? t('{0}의 권한', { 0: folderName(cwd) }) : t('권한');
   const newRule = (): Draft => ({ kind: 'command', value: '', providers: ['claude', 'codex'], scope: cwd ? 'project' : 'global', ...(cwd ? { cwd } : {}) });
   async function save(next: Draft) {
     const rule: PermissionRuleInput = { kind: next.kind, value: next.value, providers: next.providers, scope: next.scope, ...(next.scope === 'project' && next.cwd ? { cwd: next.cwd } : {}), ...(next.note?.trim() ? { note: next.note.trim() } : {}) };
@@ -74,8 +64,9 @@ export function PermissionsPanel({ token, cwd, projects, onClose, onOpenSession 
       : await act('save', { ...(next.id ? { id: next.id } : {}), rule }, t('규칙을 저장했습니다.'));
     if (ok) { setDraft(null); if (next.deciding && pending.length <= 1) setTab('rules'); }
   }
-  return createPortal(<dialog ref={dialog} className="auth-dialog skills-dialog permissions-dialog" aria-labelledby="permissions-title" onCancel={event => { if (draft) { event.preventDefault(); setDraft(null); } else onClose(); }} onClick={event => { if (event.target === event.currentTarget && !draft) onClose(); }}><div className="auth-panel">
-    <header><h2 id="permissions-title"><ShieldCheck size={17} />{title}</h2><div><button className="icon-button" aria-label={t('닫기')} onClick={onClose}><X size={20} /></button></div></header>
+  return <SettingsPane title={t('권한')} scope="auth-panel skills-scope" chip={cwd ? <FolderChip cwd={cwd} onClear={onClearFolder} /> : undefined}
+    description={t('Claude Code와 Codex가 묻지 않고 할 수 있는 일')}
+    tabs={draft || !overview ? undefined : [{ id: 'requests' as Tab, label: t('요청'), count: pending.length, urgent: true }, { id: 'rules' as Tab, label: t('규칙 {0}', { 0: overview.rules.length }) }]} tab={tab} onTab={setTab}>
     <p className="auth-hint">{cwd ? t('이 프로젝트에서 Claude Code와 Codex가 묻지 않고 할 수 있는 일입니다. 이 프로젝트의 규칙과 모든 프로젝트에 쓰이는 규칙이 함께 보입니다.')
       : t('Claude Code와 Codex가 묻거나 막지 않고 할 수 있는 일을 한곳에서 관리합니다. 에이전트가 막힌 작업에 필요한 권한을 요청하면 여기서 허용합니다.')}</p>
     {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
@@ -84,10 +75,6 @@ export function PermissionsPanel({ token, cwd, projects, onClose, onOpenSession 
       <button type="button" className="secondary-button" disabled={busy} onClick={() => void act('acknowledge', {})}>{t('확인했습니다')}</button></div></div>}
     {draft ? <RuleEditor draft={draft} cwd={cwd} projects={projects} busy={busy} onCancel={() => setDraft(null)} onSave={next => void save(next)} />
       : !overview ? !error && <LoaderCircle className="spin" aria-label={t('불러오는 중')} /> : <>
-      <nav className="skills-tabs" role="tablist" aria-label={t('권한 메뉴')}>
-        <button role="tab" aria-selected={tab === 'requests'} className={tab === 'requests' ? 'active' : ''} onClick={() => setTab('requests')}>{t('요청')}{pending.length > 0 && <span className="skills-count inline">{pending.length}</span>}</button>
-        <button role="tab" aria-selected={tab === 'rules'} className={tab === 'rules' ? 'active' : ''} onClick={() => setTab('rules')}>{t('규칙 {0}', { 0: overview.rules.length })}</button>
-      </nav>
       {tab === 'requests' && <section className="permission-requests">
         {pending.length > 0 && <label className="skill-pinned permission-resume"><input type="checkbox" checked={resume} disabled={busy} onChange={event => setResume(event.target.checked)} />{t('결정을 요청한 대화에 보내 이어서 진행')}
           <small>{t('허용하거나 거절하면 그 대화에 내 메시지로 결과를 보냅니다. 에이전트가 일하는 중이면 그 턴이 끝난 뒤에 보냅니다. 허용한 규칙은 다음 턴부터 적용됩니다.')}</small></label>}
@@ -103,7 +90,7 @@ export function PermissionsPanel({ token, cwd, projects, onClose, onOpenSession 
       {tab === 'rules' && <RuleList overview={overview} cwd={cwd} busy={busy} onNew={() => setDraft(newRule())} onEdit={rule => setDraft(ruleDraft(rule))}
         onDelete={rule => { if (window.confirm(t('{0} 규칙을 삭제할까요? 다음 턴부터 적용되지 않습니다.', { 0: rule.value }))) void act('delete', { id: rule.id }, t('규칙을 삭제했습니다.')); }} />}
     </>}
-  </div></dialog>, document.body);
+  </SettingsPane>;
 }
 
 function Providers({ providers }: { providers: PermissionProvider[] }) {

@@ -2,6 +2,7 @@ import type { MasterDirectiveResult, MasterFilter, MasterScreenCommand } from '.
 import { setChatFontSize } from '../chat/chat-appearance';
 import { setLanguage } from '../i18n/i18n';
 import { scopedId } from '../remote/scope';
+import { openSettings } from '../settings/settings-open';
 
 /** What the master may do on the owner's screen: the page's own actions and setters, handed down. */
 export interface MasterControls {
@@ -16,8 +17,8 @@ export interface MasterControls {
 export interface ScreenAnswer { result: MasterDirectiveResult; note?: string }
 
 /**
- * Does a screen command the way the owner would: through the page's own controls, and for the header's panels by
- * pressing their own buttons (marked `data-master-panel`), so everything they do on a press happens the same way.
+ * Does a screen command the way the owner would: through the page's own controls, and for the settings' sections
+ * through the same opening the settings button uses.
  */
 export function runScreenCommand(command: MasterScreenCommand, controls: MasterControls): ScreenAnswer {
   switch (command.kind) {
@@ -35,12 +36,9 @@ export function runScreenCommand(command: MasterScreenCommand, controls: MasterC
       else if (command.panel === 'newSession') controls.openNewSession(cwd, command.title || command.prompt ? { title: command.title ?? '', prompt: command.prompt ?? '' } : undefined);
       // Without a folder, Auto Prompt starts on the computer named, or on this one.
       else if (command.panel === 'autoPrompt') controls.openAutoPrompt(cwd, cwd ? undefined : command.node ?? '');
-      else {
-        const button = document.querySelector<HTMLButtonElement>(`[data-master-panel="${command.panel}"]`);
-        if (!button || button.disabled) {
-          return { result: 'unavailable', note: command.panel === 'account' ? 'Account management opens only on a page of this computer itself.' : 'That panel cannot be opened on this page right now.' };
-        }
-        button.click();
+      // Every other panel is a section of the settings, opened as the owner's own settings button would.
+      else if (!openSettings({ section: command.panel })) {
+        return { result: 'unavailable', note: command.panel === 'account' ? 'Account management opens only on a page of this computer itself.' : 'That panel cannot be opened on this page right now.' };
       }
       break;
     }

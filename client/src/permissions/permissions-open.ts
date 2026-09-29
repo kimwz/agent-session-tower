@@ -1,9 +1,4 @@
-/** Opens the permissions panel from anywhere on the page, such as a project folder's menu; the header button shows it. */
-const listeners = new Set<(cwd?: string) => void>();
+import { openSettings } from '../settings/settings-open';
 
-export function openPermissions(cwd?: string): void { for (const listener of listeners) listener(cwd); }
-
-export function onOpenPermissions(listener: (cwd?: string) => void): () => void {
-  listeners.add(listener);
-  return () => { listeners.delete(listener); };
-}
+/** Opens the permissions from anywhere on the page, such as a project folder's menu, narrowed to that folder. */
+export function openPermissions(cwd?: string): boolean { return openSettings({ section: 'permissions', cwd }); }

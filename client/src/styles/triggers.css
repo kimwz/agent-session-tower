@@ -1,6 +1,4 @@
-/* Triggers reuse the Slack automation dialog; only what differs is defined here. */
-.trigger-button { position: relative; }
-.trigger-button.attention::after { content: ''; position: absolute; top: 6px; right: 6px; width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
+/* Triggers reuse the Slack automation styles; only what differs is defined here. */
 .trigger-dialog .slack-tabs button svg { flex: none; }
 .trigger-note { margin: 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
 .trigger-note.trigger-warn { color: var(--amber); }
@@ -102,7 +100,6 @@
   .trigger-header-row { grid-template-columns: 1fr 1fr; }
   .trigger-url { grid-template-columns: 1fr; }
 }
-.slack-head .trigger-computer { display: flex; flex-direction: row; flex: none; align-items: center; gap: 6px; margin-left: auto; font-size: 12px; color: var(--muted); }
 .trigger-computer select { max-width: 200px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); font: inherit; }
 
 /* Public agents */

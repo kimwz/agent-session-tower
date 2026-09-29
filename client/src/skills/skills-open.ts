@@ -1,17 +1,11 @@
 import { useSyncExternalStore } from 'react';
 import type { SkillSummary } from '../../../shared/skills';
+import { openSettings } from '../settings/settings-open';
 
-/** Opens the skills panel from anywhere on the page, such as a project folder's menu; the header button shows it. */
-const listeners = new Set<(cwd?: string) => void>();
+/** Opens the skills from anywhere on the page, such as a project folder's menu, narrowed to that folder. */
+export function openSkills(cwd?: string): boolean { return openSettings({ section: 'skills', cwd }); }
 
-export function openSkills(cwd?: string): void { for (const listener of listeners) listener(cwd); }
-
-export function onOpenSkills(listener: (cwd?: string) => void): () => void {
-  listeners.add(listener);
-  return () => { listeners.delete(listener); };
-}
-
-/** The latest proposal count the header button fetched, so a project folder's menu can point at its own proposals. */
+/** The latest proposal count the settings button fetched, so a project folder's menu can point at its own proposals. */
 let summary: SkillSummary = { proposals: 0 };
 const watchers = new Set<() => void>();
 export function publishSkillSummary(next: SkillSummary): void { summary = next; for (const watcher of watchers) watcher(); }

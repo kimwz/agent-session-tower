@@ -1,11 +1,6 @@
 import { useSlackReadState } from '../slack/use-slack-read-state';
 import { WorkspaceOverlayProvider } from '../workspace/WorkspaceOverlay';
 import { AuthGate } from '../auth/AuthGate';
-import { AccountButton } from '../auth/AccountPanel';
-import { NotificationButton } from '../notifications/NotificationPanel';
-import { DecisionButton } from '../decisions/DecisionPanel';
-import { SkillsButton } from '../skills/SkillsPanel';
-import { PermissionsButton } from '../permissions/PermissionsPanel';
 import { TriggerMonitorPanel } from '../triggers/TriggerMonitorPanel';
 import { GitHubReplyProposals } from '../triggers/GitHubReplyProposals';
 import { useTriggerEvents, useTriggerReadState } from '../triggers/use-trigger-monitor';
@@ -15,8 +10,8 @@ import { SlackConversationAlert } from '../slack/SlackConversationAlert';
 import { useSlackMonitor } from '../slack/use-slack-monitor';
 import { slackChatSelection, slackCoordinatorSessionIds } from '../slack/slack-chat-selection';
 import { finishedAutomationSessionIds } from '../../../shared/automation-sessions';
-import { TriggerButton } from '../triggers/TriggerPanel';
-import { RemoteButton } from '../remote/RemotePanel';
+import { SettingsButton } from '../settings/SettingsButton';
+import type { SettingsContext } from '../settings/SettingsDialog';
 import { ToolVersion, TowerUpdateBadge } from './AutoUpdate';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -322,7 +317,6 @@ function TowerApp() {
   const projects = useMemo(() => projectGroupChoices(allMainSessions, groups), [allMainSessions, groups, language]);
   // Triggers and the sharing list belong to each computer; this computer's panel reaches joined computers' triggers too.
   const localProjects = useMemo(() => projects.filter(([key]) => !nodeOf(key)), [projects]);
-  const skillProjects = useMemo(() => localProjects.map(([key]) => key), [localProjects]);
   const triggerComputers = useMemo(() => hosts.flatMap(host => host.node ? [{ node: host.node, name: host.name, providers: host.providers, ready: Boolean(host.triggers), connected: host.status === 'connected' }] : []), [hosts]);
   // What a trigger on another computer can aim at, named as that computer knows it.
   const triggerTargets = useCallback((node: string) => ({
@@ -379,6 +373,9 @@ function TowerApp() {
     refresh();
   }, [refresh, selectSession, snapshots]);
 
+  const settingsContext = useMemo((): SettingsContext => ({ token, triggers: snapshot?.triggers, providers: snapshot?.providers || [], projects: localProjects, sessions: snapshot?.sessions || [],
+    computers: triggerComputers, targets: triggerTargets, controlledBy: snapshot?.controlledBy || [], showHidden, onShowHiddenChange: setShowHidden, onOpenSession: selectSession }),
+  [token, snapshot?.triggers, snapshot?.providers, localProjects, snapshot?.sessions, triggerComputers, triggerTargets, snapshot?.controlledBy, showHidden, selectSession]);
   const chatHostEntry = activeChatId ? hostOf(hosts, nodeOf(activeChatId)) : undefined;
   const chatHost = chatHostEntry?.node ? { name: chatHostEntry.name, live: chatHostEntry.live, canWork: chatHostEntry.canWork, problem: hostProblem(chatHostEntry), workspace: chatHostEntry.workspace, workspaceNote: workspaceNote(chatHostEntry) }
     : activeChatId && nodeOf(activeChatId) ? { name: t("더 이상 연결되지 않은 컴퓨터"), live: false, canWork: false, workspace: false, problem: t("그 컴퓨터는 더 이상 연결되어 있지 않습니다.") } : undefined;
@@ -397,7 +394,7 @@ function TowerApp() {
     canvasPointerScope.current = !!canvasRef.current?.contains(event.target) || event.target === event.currentTarget || event.target.matches('.workspace');
   }}>
     <header className="app-header"><div className="brand"><button ref={sidebarToggleRef} className="icon-button sidebar-toggle" onClick={() => sidebarIsDrawer ? setShowSidebar(value => !value) : setSidebarCollapsed(value => !value)} aria-label={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} title={sidebarOpen ? t("세션 목록 접기") : t("세션 목록 열기")} aria-controls="session-sidebar" aria-expanded={sidebarOpen}>{sidebarOpen ? <PanelLeftClose size={19} /> : <PanelLeftOpen size={19} />}</button><span className="brand-mark"><BrandMark /></span><h1>Agent Session Tower</h1><span className="brand-local">local</span></div><div className="header-center"><Monitor size={13} /><span>{snapshot?.hostname || t("이 Mac")}</span><span className="header-divider" /><span className="localhost">{window.location.host}</span></div><div className="header-actions"><span className={`connection-state ${connection}`} role="status">{connection === 'offline' ? <WifiOff size={12} /> : <i />}{connection === 'connected' ? t("실시간 연결") : connection === 'offline' ? t("재연결 중") : t("연결 중")}</span><TowerUpdateBadge snapshot={snapshot} />{outdatedRunner(snapshot) && <span className="runner-outdated" role="status" title={snapshot?.runnerUpdate === 'automatic' ? t("요청은 이전 버전({0}) 실행 워커에서 처리되어 최근 기능이 적용되지 않습니다. 진행 중인 작업이 모두 끝나는 순간 새 버전으로 자동 교체됩니다.", { 0: outdatedRunner(snapshot)! })
-          : t("요청은 이전 버전({0}) 실행 워커에서 처리되어 최근 기능이 적용되지 않습니다. 진행 중인 작업과 터미널이 없고 Slack 감시를 끈 상태에서 Tower를 종료하고 30초 뒤 다시 시작하면 교체됩니다.", { 0: outdatedRunner(snapshot) === 'legacy' ? t("이전") : outdatedRunner(snapshot)! })}><TriangleAlert size={12} />{t("실행 워커 업데이트 대기")}</span>}<button className={`icon-button ${showHelp ? 'active' : ''}`} title={t("사용 안내")} aria-label={t("사용 안내")} aria-expanded={showHelp} onClick={() => setShowHelp(!showHelp)}><CircleHelp size={18} /></button><TriggerButton token={token} overview={snapshot?.triggers} providers={snapshot?.providers || []} projects={localProjects} sessions={snapshot?.sessions || []} computers={triggerComputers} targets={triggerTargets} /><SkillsButton token={token} projects={skillProjects} onOpenSession={selectSession} /><PermissionsButton token={token} projects={skillProjects} onOpenSession={selectSession} /><RemoteButton token={token} projects={localProjects} controlledBy={snapshot?.controlledBy} joined={snapshot?.controllerJoined} /><DecisionButton token={token} /><NotificationButton token={token} /><AccountButton /></div></header>
+          : t("요청은 이전 버전({0}) 실행 워커에서 처리되어 최근 기능이 적용되지 않습니다. 진행 중인 작업과 터미널이 없고 Slack 감시를 끈 상태에서 Tower를 종료하고 30초 뒤 다시 시작하면 교체됩니다.", { 0: outdatedRunner(snapshot) === 'legacy' ? t("이전") : outdatedRunner(snapshot)! })}><TriangleAlert size={12} />{t("실행 워커 업데이트 대기")}</span>}<button className={`icon-button ${showHelp ? 'active' : ''}`} title={t("사용 안내")} aria-label={t("사용 안내")} aria-expanded={showHelp} onClick={() => setShowHelp(!showHelp)}><CircleHelp size={18} /></button><SettingsButton context={settingsContext} joined={snapshot?.controllerJoined} /></div></header>
     {connection === 'offline' && <div className="connection-banner" role="alert"><WifiOff size={14} /><span>{t("Monitor와의 연결이 끊겼습니다. 저장된 화면을 표시하며 자동으로 다시 연결합니다.")}</span><button onClick={refresh}>{t("다시 확인")}</button></div>}
     {showHelp && <div className="help-popover"><div className="help-heading"><h2>{t("내 컴퓨터의 에이전트를 한눈에")}</h2><button className="icon-button" onClick={() => setShowHelp(false)} aria-label={t("안내 닫기")}><X size={15} /></button></div><p>{t("Claude Code와 Codex의 로컬 세션 기록을 자동으로 읽습니다. 그래프의 에이전트를 선택하면 실제 대화를 보고 작업을 이어갈 수 있습니다.")}</p><div className="help-statuses"><span><i className="legend-dot working" /><b>{t("작업 중")}</b>{t("현재 실행 중인 작업")}</span><span><i className="legend-dot idle" /><b>{t("대기 중")}</b>{t("입력이나 다음 작업 대기")}</span><span><i className="legend-dot completed" /><b>{t("완료")}</b>{t("작업 종료가 기록된 세션")}</span></div><p>{t("상태는 프로세스와 세션 기록을 함께 확인합니다. 대화 상단의 프로젝트 이름을 누르면 상태 판단 근거를 볼 수 있습니다.")}</p><div className="help-privacy"><ShieldCheck size={16} /><span>{t("로컬에서 실행됩니다. 새 요청은 해당 CLI와 기존 로그인 계정을 사용합니다.")}</span></div><div className="help-shortcuts"><span><kbd>/</kbd> {' '}{t("세션 검색")}</span><span><kbd>Shift N</kbd> {t("새 세션")}</span><span><kbd>Shift P</kbd> Auto Prompt</span><span><kbd>Shift A</kbd> {t("숨긴 폴더 표시 전환")}</span><span><kbd>Esc</kbd> {' '}{t("대화 닫기")}</span><span><kbd>⌘ Enter</kbd> {' '}{t("요청 보내기")}</span></div></div>}
     <div className="workspace">
@@ -408,7 +405,7 @@ function TowerApp() {
       <main ref={canvasRef} className="main-area" tabIndex={-1} onPointerDownCapture={event => {
         // React Flow may prevent the browser's usual blur during a canvas drag.
         // Focus the canvas explicitly while preserving its interactive controls.
-        if (event.button === 0 && event.target instanceof Element && !event.target.closest(`${editingControls}, button, a, summary, [role="button"], .canvas-settings-popover`)) {
+        if (event.button === 0 && event.target instanceof Element && !event.target.closest(`${editingControls}, button, a, summary, [role="button"]`)) {
           event.currentTarget.focus({ preventScroll: true });
         }
       }}>
@@ -417,7 +414,7 @@ function TowerApp() {
         {!snapshot || (snapshot.scanning && sessions.length === 0 && !visiblePins.length && !monitorVisible(!!slack?.connected, snapshot.triggers)) ? <>
           <div className="graph-loading"><div className="loading-constellation"><span /><span /><span /><Monitor size={25} /></div><h3>{t("이 Mac의 에이전트를 찾고 있습니다")}</h3><p>{t("Claude Code와 Codex의 실제 세션 기록을 연결합니다.")}</p></div>
         </> : <Graph slackUnreadIds={slackUnreadIds} slack={slack || undefined} selectedSlackId={selectedSlackId} onSelectSlack={selectSlack}
-          triggerOverview={snapshot.triggers} triggerEvents={triggerEvents} triggerUnreadIds={triggerUnreadIds} selectedTriggerEventId={triggerEventId} onSelectTriggerEvent={selectTriggerEvent} triggerHasMore={triggerHasMore} onMoreTriggers={loadMoreTriggers} token={token} providers={snapshot.providers} hosts={canvasHosts} allHosts={hosts} hostsComplete={hostsComplete} sessions={canvasSessions} allSessions={mainSessions} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} onCanvasClick={closeChat} filterKey={`${filterKey}:${showHidden}`} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} onAutoPrompt={openAutoPrompt} repositories={view?.repositories} onRepositoryAction={repositoryAction} showHidden={showHidden} onShowHiddenChange={setShowHidden} settingsSuspended={showHelp || showNewSession || showAutoPrompt || (sidebarIsDrawer && showSidebar) || (mobileViewport && (!!selectedId || monitorOpen))} emptyState={canvasEmptyState} />}
+          triggerOverview={snapshot.triggers} triggerEvents={triggerEvents} triggerUnreadIds={triggerUnreadIds} selectedTriggerEventId={triggerEventId} onSelectTriggerEvent={selectTriggerEvent} triggerHasMore={triggerHasMore} onMoreTriggers={loadMoreTriggers} token={token} providers={snapshot.providers} hosts={canvasHosts} allHosts={hosts} hostsComplete={hostsComplete} sessions={canvasSessions} allSessions={mainSessions} sessionsReady={!snapshot.scanning} unreadIds={unreadIds} selectedId={selectedMainId} hostname={snapshot.hostname} onSelect={onSelect} onCanvasClick={closeChat} filterKey={`${filterKey}:${showHidden}`} groups={groups} visiblePins={visiblePins} groupSaving={groupSaving} groupErrors={groupErrors} groupActionsDisabled={!token || connection !== 'connected'} onGroupUpdate={updateGroup} onGroupCreate={openNewSession} onAutoPrompt={openAutoPrompt} repositories={view?.repositories} onRepositoryAction={repositoryAction} emptyState={canvasEmptyState} />}
       </main>
       {monitorOpen && !activeChatId && <TriggerMonitorPanel token={token} slack={slack} slackError={slackError} mentionId={selectedSlackId} jobs={snapshot?.autoPrompts || []} slackUnreadIds={slackUnreadIds} onSlackRead={acknowledgeSlack}
         events={triggerEvents} eventId={triggerEventId} triggerUnreadIds={triggerUnreadIds} onTriggerRead={acknowledgeTrigger} hasMore={triggerHasMore} onMore={() => void loadMoreTriggers()} onEventUpdate={updateTriggerEvent} onClose={closeChat} onSelectMention={selectSlack} onSelectEvent={selectTriggerEvent} onNavigate={onSelect} />}

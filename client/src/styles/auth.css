@@ -9,8 +9,6 @@
 .auth-form input:focus { outline:2px solid #91baff; outline-offset:2px; }
 .auth-hint { color:#91a1b7; font-size:12px; line-height:1.7; }
 .auth-error { color:#ffadb2; font-size:13px; line-height:1.6; }
-.auth-dialog { width:min(900px, calc(100vw - 32px)); max-height:calc(100dvh - 40px); border:1px solid #344255; border-radius:12px; padding:0; color:#e4edf9; background:#111a27; }
-.auth-dialog::backdrop { background:#030812b8; }
 .auth-panel { padding:24px; }
 .auth-panel > header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .auth-panel > header > div { display:flex; gap:6px; }

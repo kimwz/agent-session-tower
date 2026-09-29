@@ -3,8 +3,7 @@
 .app.canvas-only { position:relative; }
 .canvas-only .app-header { position:absolute; inset:0 0 auto; border-color:transparent; background:transparent; pointer-events:none; }
 .canvas-only .app-header .brand > :not(.sidebar-toggle),
-.canvas-only .app-header .header-center,
-.canvas-only .app-header .header-actions { display:none; }
+.canvas-only .app-header .header-center { display:none; }
 .canvas-only .sidebar-toggle { pointer-events:auto; background:#142030ed; }
 .canvas-only .sidebar-toggle:hover { background:#2a405c; }
 .graph-canvas { container:canvas / inline-size; }
@@ -25,24 +24,10 @@
 .sidebar-filters button:focus-visible, .sidebar-filters select:focus-visible { outline:2px solid #97c4ff; outline-offset:2px; }
 .canvas-quick-controls { position:absolute; z-index:5; top:14px; right:14px; display:flex; align-items:center; gap:6px; max-width:calc(100% - 28px); }
 .canvas-zoom-controls { display:flex; align-items:center; gap:1px; padding:3px; border:1px solid #31415a; border-radius:7px; background:#142030ed; }
-.canvas-zoom-controls>button, .canvas-settings-trigger { display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; padding:0; color:#a2b9d5; border-radius:4px; }
-.canvas-zoom-controls>button:hover, .canvas-settings-trigger:hover { color:#e0ecfb; background:#2a405c; }
+.canvas-zoom-controls>button { display:inline-flex; align-items:center; justify-content:center; width:30px; height:30px; padding:0; color:#a2b9d5; border-radius:4px; }
+.canvas-zoom-controls>button:hover { color:#e0ecfb; background:#2a405c; }
 .canvas-zoom-controls>span { min-width:35px; text-align:center; color:#a0b4ce; font-size:10px; font-variant-numeric:tabular-nums; }
 .canvas-zoom-controls>i { height:15px; width:1px; margin:0 4px; background:#344660; }
-.canvas-settings { position:relative; flex-shrink:0; }
-.canvas-settings-trigger { width:38px; height:38px; border:1px solid #31415a; border-radius:7px; background:#142030ed; }
-.canvas-settings-trigger[aria-expanded="true"] { border-color:#6684a9; background:#2a405c; color:#e0ecfb; }
-.canvas-settings-popover { position:absolute; top:calc(100% + 8px); right:0; width:232px; max-width:calc(100cqw - 28px); max-height:calc(100dvh - 140px); overflow-y:auto; padding:12px; border:1px solid #3a506e; border-radius:9px; background:#142030; box-shadow:0 10px 30px #0005; }
-.canvas-settings-popover header { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; }
-.canvas-settings-popover header strong { color:#cbdcf1; font-size:11px; font-weight:600; }
-.canvas-settings-popover header button { width:24px; height:24px; }
-.canvas-layout-options { display:flex; gap:3px; padding:3px; border:1px solid #31415a; border-radius:6px; }
-.canvas-layout-options button { display:flex; flex:1; align-items:center; justify-content:center; gap:5px; min-height:32px; padding:5px; border-radius:4px; color:#91a8c5; font-size:10px; white-space:nowrap; }
-.canvas-layout-options button[aria-pressed="true"] { color:#d2e1f4; background:#2a3e59; }
-.canvas-setting-option { display:flex; align-items:center; gap:7px; min-height:35px; color:#a8bdd6; font-size:11px; cursor:pointer; }
-.canvas-setting-option:first-of-type { margin-top:8px; }
-.canvas-setting-option input { width:13px; height:13px; margin:0; accent-color:#86add9; cursor:pointer; }
-.canvas-setting-option kbd { margin-left:auto; font:inherit; font-size:10px; color:#728caa; }
 .canvas-quick-controls button:focus-visible, .canvas-quick-controls input:focus-visible { outline:2px solid #97c4ff; outline-offset:2px; }
 .canvas-session-summary { position:absolute; z-index:3; right:16px; bottom:15px; display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:5px 10px; max-width:calc(100% - 32px); color:#8299b6; font-size:10px; line-height:1.5; text-align:right; pointer-events:none; }
 .canvas-session-summary>button { padding:0; color:#b3c9e5; font:inherit; line-height:1.5; text-decoration:underline; text-underline-offset:3px; pointer-events:auto; }
@@ -59,7 +44,6 @@
 .canvas-only .canvas-new-session { left:60px; }
 .canvas-new-session:focus-visible { outline:2px solid #97c4ff; outline-offset:2px; }
 .canvas-new-session:disabled { opacity:.45; cursor:default; }
-.canvas-language-setting { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:10px; padding-top:12px; border-top:1px solid #31415a; color:#a8bdd6; font-size:11px; }
 @media (max-width:680px) {
   .canvas-only .canvas-new-session { left:48px; }
   .canvas-new-session { width:32px; padding:0; }
@@ -127,10 +111,6 @@
 .chat-font-controls button:hover:not(:disabled) { background: #2a405c; }
 .chat-font-controls button:disabled { opacity: .4; cursor: default; }
 .chat-font-controls output { min-width: 34px; text-align: center; font-variant-numeric: tabular-nums; }
-.canvas-chat-settings { border-top: 1px solid #31415a; margin-top: 10px; padding-top: 12px; }
-.canvas-chat-settings h3 { margin: 0 0 10px; color: #cbdcf1; font-size: 11px; font-weight: 600; }
-.canvas-chat-font-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; color: #a8bdd6; font-size: 10px; }
-.canvas-chat-settings .chat-font-controls { margin: 0; gap: 2px; }
 .chat-resize-handle { display: none; }
 .chat-font-controls button:focus-visible, .chat-resize-handle:focus-visible { outline: 2px solid #97c4ff; outline-offset: 2px; }
 @media (min-width: 681px) {

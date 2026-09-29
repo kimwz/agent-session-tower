@@ -1,18 +1,19 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
-import { createPortal } from 'react-dom';
-import { LoaderCircle, LogOut, RefreshCw, UserRoundCog, X } from 'lucide-react';
+import { useCallback, useContext, useEffect, useRef, useState, type FormEvent } from 'react';
+import { SettingsFrameContext, SettingsPane } from '../settings/SettingsPane';
+import { LoaderCircle, LogOut, RefreshCw } from 'lucide-react';
 import type { AuthOverview } from '../../../shared/auth';
 import { api } from '../common/lib';
 import { locale, translateMessage, useI18n } from '../i18n/i18n';
 import { authPost, useAuth } from './AuthGate';
 
-export function AccountButton() {
+/** Account management on a page of this computer itself; elsewhere, signing out. */
+export function AccountSection() {
   const { t } = useI18n();
   const auth = useAuth();
-  const [open, setOpen] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   if (!auth) return null;
+  if (auth.status.local) return <AccountPanel token={auth.status.token} onChanged={auth.refresh} />;
   async function logout() {
     if (!auth || busy) return;
     setBusy(true); setError('');
@@ -20,11 +21,14 @@ export function AccountButton() {
     catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setBusy(false); }
   }
-  return <><button className="icon-button" data-master-panel={auth.status.local ? 'account' : undefined} title={auth.status.local ? t('계정 관리') : t('로그아웃')} aria-label={auth.status.local ? t('계정 관리') : t('로그아웃')} disabled={busy} onClick={() => auth.status.local ? setOpen(true) : void logout()}>{auth.status.local ? <UserRoundCog size={18} /> : <LogOut size={18} />}</button>{error && <span role="alert">{translateMessage(error)}</span>}{open && <AccountPanel token={auth.status.token} onClose={() => setOpen(false)} onChanged={auth.refresh} />}</>;
+  return <SettingsPane title={t('계정')} scope="auth-panel" description={t('계정 관리는 서버 컴퓨터에서만 가능합니다.')}>
+    {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
+    <div className="settings-group"><div className="settings-row"><span>{t('이 브라우저에서 로그아웃')}</span>
+      <button type="button" className="secondary-button" disabled={busy} onClick={() => void logout()}><LogOut size={14} />{t('로그아웃')}</button></div></div>
+  </SettingsPane>;
 }
-export function AccountPanel({ token, onClose, onChanged }: { token: string; onClose: () => void; onChanged: () => Promise<void> }) {
+export function AccountPanel({ token, onChanged }: { token: string; onChanged: () => Promise<void> }) {
   const { t } = useI18n();
-  const dialog = useRef<HTMLDialogElement>(null);
   const [overview, setOverview] = useState<AuthOverview | null>(null);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -40,13 +44,8 @@ export function AccountPanel({ token, onClose, onChanged }: { token: string; onC
     catch (error) { setError(error instanceof Error ? error.message : String(error)); }
     finally { setLoading(false); }
   }, []);
-  useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    const element = dialog.current;
-    element?.showModal();
-    void refresh();
-    return () => { element?.close(); if (opener?.isConnected) opener.focus(); };
-  }, [refresh]);
+  const { active } = useContext(SettingsFrameContext);
+  useEffect(() => { if (active) void refresh(); }, [refresh, active]);
   useEffect(() => { if (overview) setUsername(overview.username || ''); }, [overview?.username]);
   async function mutate(path: string, body: unknown) {
     if (inFlight.current) return false;
@@ -60,7 +59,8 @@ export function AccountPanel({ token, onClose, onChanged }: { token: string; onC
     if (password !== confirmation) { setError(t('비밀번호가 일치하지 않습니다.')); return; }
     if (await mutate('/api/auth/credentials', { username, password })) { setPassword(''); setConfirmation(''); setNotice(t('계정을 저장했습니다. 기존 원격 로그인은 해제됩니다.')); await onChanged(); }
   }
-  return createPortal(<dialog ref={dialog} className="auth-dialog" aria-labelledby="account-title" onCancel={onClose} onClick={event => { if (event.target === event.currentTarget) onClose(); }}><div className="auth-panel"><header><h2 id="account-title">{t('계정 관리')}</h2><div><button className="icon-button" title={t('새로고침')} aria-label={t('새로고침')} disabled={loading || busy} onClick={() => void refresh()}><RefreshCw size={17} className={loading ? 'spin' : ''} /></button><button className="icon-button" aria-label={t('닫기')} onClick={onClose}><X size={20} /></button></div></header><p className="auth-hint">{t('로컬 접속은 로그인 없이 사용할 수 있습니다. 계정 관리는 서버 컴퓨터에서만 가능합니다.')}</p>{error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}{notice && <p role="status">{notice}</p>}{!overview ? loading && <LoaderCircle className="spin" aria-label={t('연결 중')} /> : <><section><h3>{overview.configured ? t('계정 변경') : t('계정 설정')}</h3><form className="auth-form auth-credentials" onSubmit={save}><label>{t('아이디')}<input required autoComplete="username" maxLength={64} value={username} onChange={event => setUsername(event.target.value)} /></label><label>{t('새 비밀번호')}<input required type="password" maxLength={256} autoComplete="new-password" minLength={12} value={password} onChange={event => setPassword(event.target.value)} /></label><label>{t('비밀번호 확인')}<input required type="password" maxLength={256} autoComplete="new-password" minLength={12} value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label><p className="auth-hint">{t('비밀번호는 12자 이상으로 입력하세요. 검증용 해시만 저장됩니다.')}</p><button className="primary-button" disabled={busy || loading}>{busy && <LoaderCircle className="spin" size={14} />}{t('계정 저장')}</button></form></section><section><h3>{t('차단된 IP')} <span className="auth-count">{overview.blockedIps.length}</span></h3><p className="auth-hint">{t('같은 IP에서 누적 {0}회 실패하면 영구 차단됩니다. 성공해도 실패 횟수는 초기화되지 않습니다.', { 0: overview.attemptLimit })}</p><p className="auth-hint">{t('서버를 재시작해도 차단은 유지됩니다. 차단을 해제하면 해당 IP의 실패 횟수도 초기화됩니다.')}</p><AccountRecords overview={overview} busy={busy || loading} onUnblock={ip => void mutate('/api/auth/unblock', { ip })} /></section></>}</div></dialog>, document.body);
+  return <SettingsPane title={t('계정 관리')} scope="auth-panel" description={t('원격 접속용 아이디와 비밀번호, 차단된 IP')}
+    actions={<button className="icon-button" title={t('새로고침')} aria-label={t('새로고침')} disabled={loading || busy} onClick={() => void refresh()}><RefreshCw size={17} className={loading ? 'spin' : ''} /></button>}><p className="auth-hint">{t('로컬 접속은 로그인 없이 사용할 수 있습니다. 계정 관리는 서버 컴퓨터에서만 가능합니다.')}</p>{error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}{notice && <p role="status">{notice}</p>}{!overview ? loading && <LoaderCircle className="spin" aria-label={t('연결 중')} /> : <><section><h3>{overview.configured ? t('계정 변경') : t('계정 설정')}</h3><form className="auth-form auth-credentials" onSubmit={save}><label>{t('아이디')}<input required autoComplete="username" maxLength={64} value={username} onChange={event => setUsername(event.target.value)} /></label><label>{t('새 비밀번호')}<input required type="password" maxLength={256} autoComplete="new-password" minLength={12} value={password} onChange={event => setPassword(event.target.value)} /></label><label>{t('비밀번호 확인')}<input required type="password" maxLength={256} autoComplete="new-password" minLength={12} value={confirmation} onChange={event => setConfirmation(event.target.value)} /></label><p className="auth-hint">{t('비밀번호는 12자 이상으로 입력하세요. 검증용 해시만 저장됩니다.')}</p><button className="primary-button" disabled={busy || loading}>{busy && <LoaderCircle className="spin" size={14} />}{t('계정 저장')}</button></form></section><section><h3>{t('차단된 IP')} <span className="auth-count">{overview.blockedIps.length}</span></h3><p className="auth-hint">{t('같은 IP에서 누적 {0}회 실패하면 영구 차단됩니다. 성공해도 실패 횟수는 초기화되지 않습니다.', { 0: overview.attemptLimit })}</p><p className="auth-hint">{t('서버를 재시작해도 차단은 유지됩니다. 차단을 해제하면 해당 IP의 실패 횟수도 초기화됩니다.')}</p><AccountRecords overview={overview} busy={busy || loading} onUnblock={ip => void mutate('/api/auth/unblock', { ip })} /></section></>}</SettingsPane>;
 }
 export function AccountRecords({ overview, busy, onUnblock }: { overview: AuthOverview; busy: boolean; onUnblock: (ip: string) => void }) {
   const { t } = useI18n();

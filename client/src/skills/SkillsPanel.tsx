@@ -1,33 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { FolderChip } from '../settings/FolderChip';
+import { SettingsFrameContext, SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
 import { Archive, ArrowLeft, Check, ChevronRight, Download, Eye, FolderInput, FolderOpen, Globe, Layers, Link2, LoaderCircle, Merge, MoreHorizontal, Pencil, Pin, PinOff, Plus, RefreshCw, ScrollText, Settings2, Sparkles, Trash2, Upload, X } from 'lucide-react';
-import type { Skill, SkillBundle, SkillDetail, SkillImportChoice, SkillImportPlan, SkillOverview, SkillProposal, SkillScope, SkillSummary, SkillTargets } from '../../../shared/skills';
+import type { Skill, SkillBundle, SkillDetail, SkillImportChoice, SkillImportPlan, SkillOverview, SkillProposal, SkillScope, SkillTargets } from '../../../shared/skills';
 import { MAX_SKILL_DESCRIPTION, proposalReady, SKILL_NAME, targetsCover, targetsRevision } from '../../../shared/skills';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { api } from '../common/lib';
 import { locale, translate as t, translateMessage, useI18n } from '../i18n/i18n';
-import { onOpenSkills, publishSkillSummary } from './skills-open';
 
 const post = <T = SkillOverview>(path: string, token: string, body: unknown) => api<T>(path, { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: JSON.stringify(body) });
 const query = (cwd?: string, extra: Record<string, string> = {}) => { const params = new URLSearchParams({ ...(cwd ? { cwd } : {}), ...extra }).toString(); return params ? `?${params}` : ''; };
 const date = (value: string) => { const time = new Date(value); return Number.isNaN(time.getTime()) ? '' : time.toLocaleDateString(locale(), { month: 'short', day: 'numeric' }); };
 const folderName = (path: string) => path.split('/').filter(Boolean).at(-1) || path;
-
-/** The header button: opens the skills, and shows how many proposals wait for the owner. */
-export function SkillsButton({ token, projects, onOpenSession }: { token: string; projects: string[]; onOpenSession: (id: string) => void }) {
-  const { t } = useI18n();
-  const [open, setOpen] = useState<{ cwd?: string } | null>(null);
-  const [count, setCount] = useState(0);
-  const refresh = useCallback(() => {
-    if (token) void api<SkillSummary>('/api/skills/summary').then(summary => { setCount(summary.proposals); publishSkillSummary(summary); }).catch(() => { setCount(0); publishSkillSummary({ proposals: 0 }); });
-  }, [token]);
-  useEffect(() => { refresh(); const timer = setInterval(refresh, 60_000); return () => clearInterval(timer); }, [refresh]);
-  useEffect(() => onOpenSkills(cwd => setOpen({ cwd })), []);
-  const label = count ? t('스킬 · 추천 {0}개', { 0: count }) : t('스킬');
-  return <><button className={`icon-button skills-button ${open ? 'active' : ''}`} data-master-panel="skills" title={label} aria-label={label} disabled={!token} onClick={() => setOpen({})}>
-    <Sparkles size={18} />{count > 0 && <span className="skills-count" aria-hidden="true">{count > 9 ? '9+' : count}</span>}
-  </button>{open && <SkillsPanel token={token} cwd={open.cwd} projects={projects} onOpenSession={id => { setOpen(null); onOpenSession(id); }} onClose={() => { setOpen(null); refresh(); }} />}</>;
-}
 
 type Draft = { dir?: string; revision?: string; name: string; description: string; body: string; scope: SkillScope; projectCwd?: string; pinned: boolean; proposalId?: string; external?: boolean; separate?: string;
   /** A skill kept in Tower: where it applies, and the value it was opened with. */
@@ -48,9 +32,9 @@ const targetsBody = (targets: SkillTargets) => targets.all ? { all: true } : { a
  * The owner's skills: the ones kept in Tower first, each applying to the projects chosen for it; proposals beside them;
  * every other skill on the computer, guidance, backups and the advisor behind the ⋯ menu.
  */
-export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { token: string; cwd?: string; projects: string[]; onClose: () => void; onOpenSession: (id: string) => void }) {
+export function SkillsPanel({ token, cwd, projects, onClearFolder, onChanged, onOpenSession }: { token: string; cwd?: string; projects: string[]; onClearFolder: () => void; onChanged: () => void; onOpenSession: (id: string) => void }) {
   const { t } = useI18n();
-  const dialog = useRef<HTMLDialogElement>(null);
+  const { active } = useContext(SettingsFrameContext);
   const [overview, setOverview] = useState<SkillOverview | null>(null);
   const [view, setView] = useState<View>('mine');
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -58,24 +42,19 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const load = useCallback(async () => setOverview(await api<SkillOverview>(`/api/skills${query(cwd)}`)), [cwd]);
-  useEffect(() => {
-    const opener = document.activeElement as HTMLElement | null;
-    const element = dialog.current;
-    element?.showModal();
-    void load().catch(error => setError(error instanceof Error ? error.message : String(error)));
-    return () => { element?.close(); if (opener?.isConnected) opener.focus(); };
-  }, [load]);
+  // Asked again when shown again: proposals arrive while the owner looks elsewhere.
+  useEffect(() => { if (active) void load().catch(error => setError(error instanceof Error ? error.message : String(error))); }, [load, active]);
   // The 7-day analysis takes minutes; the panel follows it until it ends.
   const analysing = overview?.advisor.backfill?.running;
   useEffect(() => {
-    if (!analysing) return;
+    if (!analysing || !active) return;
     const timer = setInterval(() => void load().catch(() => {}), 4_000);
     return () => clearInterval(timer);
-  }, [analysing, load]);
+  }, [analysing, active, load]);
   async function act(action: () => Promise<SkillOverview>, done = '') {
     if (busy) return false;
     setBusy(true); setError(''); setNotice('');
-    try { setOverview(await action()); if (done) setNotice(done); return true; }
+    try { setOverview(await action()); if (done) setNotice(done); onChanged(); return true; }
     catch (error) { setError(error instanceof Error ? error.message : String(error)); return false; }
     finally { setBusy(false); }
   }
@@ -98,12 +77,16 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
     ? mutate('delete', { dir: skill.dir }, t('{0} 스킬을 삭제했습니다.', { 0: skill.name })) : Promise.resolve(false);
   const ready = overview?.proposals.filter(proposalReady) ?? [];
   const watching = overview?.proposals.filter(proposal => !proposalReady(proposal)) ?? [];
-  const title = cwd ? t('{0}의 스킬', { 0: folderName(cwd) }) : t('스킬');
   const secondary: Partial<Record<View, string>> = { all: t('전체 스킬'), guidance: t('내 지침'), backup: t('백업'), settings: t('자동 추천 설정') };
-  return createPortal(<dialog ref={dialog} className="auth-dialog skills-dialog" aria-labelledby="skills-title" onCancel={event => { if (draft) { event.preventDefault(); setDraft(null); } else onClose(); }} onClick={event => { if (event.target === event.currentTarget && !draft) onClose(); }}><div className="auth-panel">
-    <header><h2 id="skills-title"><Sparkles size={17} />{title}</h2><div className="skills-header-actions">
-      {!draft && overview && <MoreMenu view={view} onChoose={setView} />}
-      <button className="icon-button" aria-label={t('닫기')} onClick={onClose}><X size={20} /></button></div></header>
+  // Esc steps back one level: out of the editor, then out of a view behind the ⋯ menu.
+  useSettingsGuard({
+    escape: () => { if (draft) { setDraft(null); return true; } if (secondary[view]) { setView('mine'); return true; } return false; },
+    leave: () => !draft || window.confirm(t('저장하지 않은 변경 사항을 버릴까요?')),
+  });
+  const tabs = draft || !overview || secondary[view] ? undefined : [{ id: 'mine' as View, label: <>{t('내 스킬')}<span className="skills-segment-count">{overview.stored?.length ?? 0}</span></> },
+    { id: 'proposals' as View, label: t('추천'), count: ready.length }];
+  return <SettingsPane title={t('스킬')} scope="auth-panel skills-scope" chip={cwd ? <FolderChip cwd={cwd} onClear={onClearFolder} /> : undefined}
+    description={t('자주 하는 작업 방식을 에이전트가 같은 순서로 따르게 합니다')} actions={!draft && overview && <MoreMenu view={view} onChoose={setView} />} tabs={tabs} tab={view} onTab={setView}>
     {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
     {notice && <p className="notification-notice" role="status">{notice}</p>}
     {draft ? <SkillEditor draft={draft} cwd={cwd} projects={projects} busy={busy} onCancel={() => setDraft(null)}
@@ -114,11 +97,7 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
         if (await mutate('save', body, t('{0} 스킬을 저장했습니다.', { 0: next.name }))) { setDraft(null); if (next.proposalId) setView('mine'); }
       }} />
       : !overview ? !error && <LoaderCircle className="spin" aria-label={t('불러오는 중')} /> : <>
-      {secondary[view] ? <div className="skills-subhead"><button type="button" className="skills-back" onClick={() => setView('mine')}><ArrowLeft size={14} />{t('내 스킬')}</button><h3>{secondary[view]}</h3></div>
-        : <nav className="skills-segments" role="tablist" aria-label={t('스킬 메뉴')}>
-          <button role="tab" aria-selected={view === 'mine'} className={view === 'mine' ? 'active' : ''} onClick={() => setView('mine')}>{t('내 스킬')}<span className="skills-segment-count">{overview.stored?.length ?? 0}</span></button>
-          <button role="tab" aria-selected={view === 'proposals'} className={view === 'proposals' ? 'active' : ''} onClick={() => setView('proposals')}>{t('추천')}{ready.length > 0 && <span className="skills-count inline">{ready.length}</span>}</button>
-        </nav>}
+      {secondary[view] && <div className="skills-subhead"><button type="button" className="skills-back" onClick={() => setView('mine')}><ArrowLeft size={14} />{t('내 스킬')}</button><h3>{secondary[view]}</h3></div>}
       {view === 'mine' && <TowerSkills overview={overview} cwd={cwd} busy={busy} proposals={ready.length} onNew={create} onEdit={skill => void edit(skill)} onProposals={() => setView('proposals')} onAll={() => setView('all')}
         onToggle={(skill, on) => { const targets = skill.targets!;
           void mutate('assign', { dir: skill.dir, targets: targetsBody(toggleTargets(targets, cwd!, on)), targetsRevision: targetsRevision(targets) },
@@ -149,7 +128,7 @@ export function SkillsPanel({ token, cwd, projects, onClose, onOpenSession }: { 
       {view === 'settings' && <AdvisorSettings overview={overview} busy={busy} onChange={body => void mutate('settings', body)}
         onBackfill={() => void mutate('backfill', { days: 7 }, t('최근 7일 요청을 분석하기 시작했습니다. 몇 분 걸립니다.'))} onRefresh={() => void act(async () => api<SkillOverview>(`/api/skills${query(cwd)}`))} />}
     </>}
-  </div></dialog>, document.body);
+  </SettingsPane>;
 }
 
 /** The views used now and then, kept out of sight behind one button. */

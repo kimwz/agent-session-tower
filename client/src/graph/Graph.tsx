@@ -19,7 +19,7 @@ const canvasNodeTypes = { ...nodeTypes, triggerMonitor: TriggerMonitorNode, slac
 import { graphProjectId, graphProjectKey, graphSessionGroups, clearHostPosition, HOST_HEIGHT } from './graph-layout';
 import { defaultGraphPreferences, GRAPH_PREFERENCES_KEY, manualSessionGroups, moveManualGraphNodes, parseGraphPreferences, projectColumns, projectGrid, PROJECT_GAP, reconcileManualGraph, setGraphLayoutMode, setProjectColumns, type GraphLayoutMode, type GraphPreferences, type ProjectFrame } from './graph-layout-preferences';
 import { includePinnedProjectGroups, projectGroupLabel } from '../project-groups/project-groups';
-import { CanvasSettings } from './CanvasSettings';
+import { publishCanvasControls } from './canvas-controls-store';
 import { GRAPH_FIT, graphFitSignature } from './graph-fit';
 import { projectGroupMinimumWidth, projectGroupTitleMeasurer } from '../project-groups/project-group-title';
 
@@ -31,7 +31,7 @@ type GraphProps = { slackUnreadIds?: ReadonlySet<string>; slack?: SlackPublicSta
   /** The list of joined computers is final; until then nothing saved for one of them is forgotten. */
   hostsComplete?: boolean;
   /** Every joined computer, including those the computer filter leaves off the canvas. */
-  allHosts?: Host[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string, draft?: SessionDraft) => void; onAutoPrompt: (cwd?: string, node?: string) => void; repositories?: RepositoryStatus[]; onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; showHidden: boolean; onShowHiddenChange: (showHidden: boolean) => void; settingsSuspended: boolean; emptyState?: ReactNode };
+  allHosts?: Host[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string, draft?: SessionDraft) => void; onAutoPrompt: (cwd?: string, node?: string) => void; repositories?: RepositoryStatus[]; onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; emptyState?: ReactNode };
 
 const noEvents: TriggerEvent[] = [];
 
@@ -46,7 +46,7 @@ function viewportTransitionDuration() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 280;
 }
 
-function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, hosts, hostsComplete = true, allHosts, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, showHidden, onShowHiddenChange, settingsSuspended, emptyState }: GraphProps) {
+function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, hosts, hostsComplete = true, allHosts, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, emptyState }: GraphProps) {
   const { language } = useI18n();
   const { fitView, zoomIn, zoomOut, getViewport, setViewport } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
@@ -245,11 +245,13 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     });
   }, [manual, frames, liveProjects, retain]);
 
-  const changeMode = (mode: GraphLayoutMode) => {
-    if (mode === preferences.mode) return;
-    setPreferences(current => setGraphLayoutMode(current, mode));
-    if (mode === 'manual') setManualFitRequest(value => value + 1);
-  };
+  const changeMode = useCallback((mode: GraphLayoutMode) => {
+    setPreferences(current => current.mode === mode ? current : setGraphLayoutMode(current, mode));
+    if (mode === 'manual' && !manual) setManualFitRequest(value => value + 1);
+  }, [manual]);
+  // The settings show and change the canvas's layout and motion while the canvas is on the page.
+  useEffect(() => { publishCanvasControls({ manual, motion, setLayout: changeMode, setMotion }); }, [manual, motion, changeMode]);
+  useEffect(() => () => publishCanvasControls(null), []);
 
   useEffect(() => { setGraphLimit(8); }, [filterKey]);
 
@@ -273,7 +275,6 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     {!showMonitor && emptyState}
     <div className="canvas-quick-controls" aria-label={t("캔버스 보기 도구")}>
       <div className="canvas-zoom-controls" role="group" aria-label={t("그래프 보기 조절")}><button onClick={() => { followingFit.current = false; void zoomOut({ duration: 0 }); }} aria-label={t("그래프 축소")} title={t("축소")}><Minus size={15} /></button><span>{zoom}%</span><button onClick={() => { followingFit.current = false; void zoomIn({ duration: 0 }); }} aria-label={t("그래프 확대")} title={t("확대")}><Plus size={15} /></button><i /><button onClick={() => fitVisibleGraph(GRAPH_FIT)} aria-label={t("전체 그래프 맞춤")} title={t("전체 맞춤")}><Maximize size={15} /></button>{selectedId && nodes.some(n => n.id === selectedId) && <button className="canvas-find-session" onClick={() => fitVisibleGraph({ nodes: [{ id: selectedId }], maxZoom: 1.1, padding: 0.7 })} aria-label={t("선택한 세션 위치로 이동")} title={t("선택한 세션 찾기")}><Scan size={15} /></button>}</div>
-      <CanvasSettings manual={manual} onLayoutChange={changeMode} motion={motion} onMotionChange={setMotion} showHidden={showHidden} onShowHiddenChange={onShowHiddenChange} suspended={settingsSuspended} />
     </div>
     <div className="canvas-session-summary"><span>{t("{0} / {1}개 세션 표시 · {2}개 작업 중", { 0: shown.toLocaleString(), 1: sessions.length.toLocaleString(), 2: working.toLocaleString() })}</span>{!manual && shown < sessions.length && graphLimit < 72 && <button onClick={() => setGraphLimit(value => Math.min(72, value + 8))}>{t("더 표시")}</button>}{!manual && graphLimit > 8 && <button onClick={() => setGraphLimit(8)}>{t("접기")}</button>}</div>
   </div>;

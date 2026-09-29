@@ -42,7 +42,7 @@ The integrated terminal runs an interactive shell in that folder on the Tower se
 - **Check account usage.** See Claude Code and Codex usage as small donuts inside the machine node. Hover or focus for usage windows and reset times.
 - **Create new sessions.** Choose Claude Code or Codex, pick a project folder, and send the first request from the web. A folder that does not exist yet is created, and the folder is marked as trusted for that CLI so it does not stop at the trust prompt.
 - **Route a prompt automatically.** Open **Auto Prompt** from the sparkle button on a machine or folder. A separate Opus or GPT Sol agent chooses a suitable existing session or starts a new one, and shows its reason.
-- **Fast suggestions and quieter notifications (optional).** Save a Jev API key under **Fast judgment** in the header. Auto Prompt then suggests the project and conversation while you type; keep the checkbox on to send there at once. Notifications skip turns that were only an intermediate step.
+- **Fast suggestions and quieter notifications (optional).** Save a Jev API key under **Settings → Fast judgment**. Auto Prompt then suggests the project and conversation while you type; keep the checkbox on to send there at once. Notifications skip turns that were only an intermediate step.
 - **Continue a conversation.** Read the original history and send the next instruction to the same native session. Attach files or paste images.
 - **Insert a queued request into active work.** Click **Send into current turn** on an eligible queued request to deliver it to the same active Claude Code or Codex turn without stopping it. Available for turns controlled by Tower; a different model must wait for the next turn. Unconfirmed delivery is never retried automatically.
 - **Choose a model and reasoning effort.** Keep the agent's defaults or select a model and effort level for your next request, a new session, or an Auto Prompt.
@@ -65,7 +65,7 @@ Stop the running Tower with `Ctrl+C`, then start it with:
 npx --yes github:kimwz/agent-session-tower --host 0.0.0.0 --port 8000
 ```
 
-On the host, open `http://localhost:8000`, expand the navigation, and use the account icon at the upper right to set an ID/password. Then open the printed network address from your other device and sign in. Local access needs no login. Five failed logins from an IP permanently block it; review attempts and unblock IPs in local Account management. Passwords are stored only as salted hashes. Keep the host machine and Tower running.
+On the host, open `http://localhost:8000` and set an ID/password in **Settings → Account** (the button at the upper right). Then open the printed network address from your other device and sign in. Local access needs no login. Five failed logins from an IP permanently block it; review attempts and unblock IPs in local Account management. Passwords are stored only as salted hashes. Keep the host machine and Tower running.
 
 Direct access uses HTTP, so use an encrypted VPN or a separately secured HTTPS deployment. See [remote access details](docs/usage.md#remote-access).
 

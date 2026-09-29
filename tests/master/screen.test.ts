@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { MasterFilter } from '../../shared/master.js';
 import { runScreenCommand, type MasterControls } from '../../client/src/master/screen.js';
+import { onOpenSettings, type SettingsRequest } from '../../client/src/settings/settings-open.js';
 
 /** The page's controls, recording what the master asked of them. */
 function page() {
@@ -35,18 +36,18 @@ test('screen commands go through the page\'s own controls, sessions and folders 
   ]);
 });
 
-test('a header panel opens by pressing its own button; one the page does not offer is reported, never guessed', t => {
-  const pressed: string[] = [];
-  const buttons: Record<string, { disabled: boolean; click(): void }> = {
-    triggers: { disabled: false, click: () => pressed.push('triggers') },
-    remote: { disabled: true, click: () => pressed.push('remote') },
-  };
-  const previous = (globalThis as { document?: unknown }).document;
-  (globalThis as { document?: unknown }).document = { querySelector: (selector: string) => buttons[/data-master-panel="([a-z]+)"/.exec(selector)![1]] ?? null };
-  t.after(() => { (globalThis as { document?: unknown }).document = previous; });
+test('a settings panel opens through the settings, as the owner\'s button would; one the page cannot show is reported, never guessed', t => {
+  const asked: SettingsRequest[] = [];
+  // Stands in for the settings button: this page offers triggers but not account management.
+  const stop = onOpenSettings(request => { asked.push(request); return request.section !== 'account'; });
+  t.after(stop);
   const { controls } = page();
   assert.deepEqual(runScreenCommand({ kind: 'openPanel', panel: 'triggers' }, controls), { result: 'done' });
-  assert.equal(runScreenCommand({ kind: 'openPanel', panel: 'remote' }, controls).result, 'unavailable');
-  assert.match(String(runScreenCommand({ kind: 'openPanel', panel: 'account' }, controls).note), /this computer/);
-  assert.deepEqual(pressed, ['triggers']);
+  assert.deepEqual(runScreenCommand({ kind: 'openPanel', panel: 'skills' }, controls), { result: 'done' });
+  const account = runScreenCommand({ kind: 'openPanel', panel: 'account' }, controls);
+  assert.equal(account.result, 'unavailable');
+  assert.match(String(account.note), /this computer/);
+  assert.deepEqual(asked, [{ section: 'triggers' }, { section: 'skills' }, { section: 'account' }]);
+  stop();
+  assert.equal(runScreenCommand({ kind: 'openPanel', panel: 'remote' }, controls).result, 'unavailable', 'without a settings button on the page nothing opens');
 });
