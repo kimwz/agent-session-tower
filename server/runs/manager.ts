@@ -57,7 +57,7 @@ interface RunnerOptions {
   firstTurnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
   /** Notes for every turn, such as the owner's pinned skills; asked and limited like `firstTurnNotes`. */
   turnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
-  /** Settings for a Claude Code turn Tower approves automatically: the owner's allow rules for its folder. */
+  /** Settings for the owner's own automatically approved Claude Code turns: the owner's allow rules for its folder. */
   claudeSettings?: (cwd: string) => string | undefined;
   /** Pre-accepts the native folder trust prompt for a newly created session. */
   trustWorkspace?: (provider: Provider, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
@@ -959,8 +959,9 @@ export class RunManager extends EventEmitter {
     // so such a configuration goes to a private file that lives only as long as the turn.
     if (automaticApprovals(run)) {
       args.push('--permission-mode', 'auto');
-      // The owner's allow rules go only to turns whose approvals are automatic; other turns keep asking.
-      const settings = this.options.claudeSettings?.(session.cwd);
+      // The owner's allow rules go only to the owner's own work (and what the owner's agents started) on conversations
+      // that never took outside content: public agents, Slack, GitHub and trigger turns keep the classifier's review.
+      const settings = ownerOrigin(run.origin) && !this.sessionOrigin(session.id)?.untrustedInput ? this.options.claudeSettings?.(session.cwd) : undefined;
       if (settings) args.push('--settings', settings);
     }
     for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);

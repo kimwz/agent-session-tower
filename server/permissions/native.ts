@@ -86,8 +86,10 @@ export async function syncCodex(file: string, lines: readonly string[], project?
     await keepUntracked(project, path, lines.length > 0);
   }
   const text = await readFile(path, 'utf8').catch(error => { if (missing(error)) return undefined; throw error; });
-  if (text !== undefined && !text.startsWith(CODEX_HEADER)) throw failure(`${path}는 Tower가 만든 파일이 아니라서 바꾸지 않았습니다.`);
-  if (!lines.length) { if (text !== undefined) await unlink(path); return; }
+  const foreign = text !== undefined && !text.startsWith(CODEX_HEADER);
+  // With nothing to write, someone else's file is simply not Tower's to remove.
+  if (!lines.length) { if (text !== undefined && !foreign) await unlink(path); return; }
+  if (foreign) throw failure(`${path}는 Tower가 만든 파일이 아니라서 바꾸지 않았습니다.`);
   const content = `${CODEX_HEADER}\n${lines.join('\n')}\n`;
   if (content === text) return;
   if (!project) await mkdir(dirname(path), { recursive: true, mode: 0o700 });

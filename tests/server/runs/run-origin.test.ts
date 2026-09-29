@@ -160,7 +160,7 @@ test('a damaged origin record never reads back as owner work', async t => {
   assert.deepEqual(manager.list().find(run => run.id === runId)?.origin, { kind: 'unknown' }, 'the run itself is kept');
 });
 
-test('trigger sessions never create folders, pre-trust only chosen folders, and run Claude in auto mode with the owner\'s allow rules when unattended', async t => {
+test('trigger sessions never create folders, pre-trust only chosen folders, and run Claude in auto mode when unattended, without the owner\'s allow rules', async t => {
   const f = await fixture(t);
   const launches: string[][] = [];
   const trusted: string[] = [];
@@ -183,8 +183,11 @@ test('trigger sessions never create folders, pre-trust only chosen folders, and 
   const unattendedArgs = launches.find(args => args.includes('--permission-mode'))!;
   assert.equal(unattendedArgs[unattendedArgs.indexOf('--permission-mode') + 1], 'auto');
   assert.equal(launches.filter(args => args.includes('--permission-mode')).length, 1);
-  assert.equal(unattendedArgs[unattendedArgs.indexOf('--settings') + 1], allowed);
-  assert.equal(launches.filter(args => args.includes('--settings')).length, 1, 'a turn whose approvals go to the owner keeps asking');
+  assert.equal(launches.filter(args => args.includes('--settings')).length, 0, 'trigger work, public agents included, keeps the classifier\'s review');
+  // The owner's own turn in the same folder gets them.
+  await manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Mine' }, { origin: { kind: 'owner' } });
+  await until(() => launches.length === 3);
+  assert.equal(launches[2][launches[2].indexOf('--settings') + 1], allowed);
   await manager.close();
 });
 

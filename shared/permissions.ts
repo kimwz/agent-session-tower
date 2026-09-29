@@ -74,10 +74,14 @@ const CLAUDE_RULE = /^[A-Za-z][\w-]*(\([^\n\r]{1,300}\))?$/;
 const RUNS_ANYTHING = new Set(['bash', 'sh', 'zsh', 'fish', 'dash', 'ksh', 'env', 'sudo', 'doas', 'xargs', 'exec', 'eval', 'command', 'nohup', 'timeout', 'time', 'nice',
   'python', 'node', 'deno', 'bun', 'ruby', 'perl', 'php', 'lua', 'osascript', 'npx', 'npm', 'pnpm', 'yarn', 'bunx', 'uv', 'uvx', 'pipx', 'make', 'ssh']);
 
+/** Control and invisible format characters, and halves of a character (which no rules file can hold). */
+const UNREADABLE = /[\p{Cc}\p{Cf}]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+
 export const normalizeCommand = (value: string) => value.trim().split(/\s+/).filter(Boolean).join(' ');
 
 /** Why a rule cannot be saved, or undefined when it can. Korean, like Tower's other server messages. */
 export function ruleProblem(rule: Pick<PermissionRuleInput, 'kind' | 'value' | 'providers' | 'scope' | 'cwd'>): string | undefined {
+  if (UNREADABLE.test(rule.value.replace(/[ \t]/g, ' ').replace(/\n/g, ' '))) return '규칙에는 제어 문자나 보이지 않는 문자를 쓸 수 없습니다.';
   if (rule.kind === 'command') {
     const value = normalizeCommand(rule.value);
     if (!value) return '명령어를 입력하세요.';

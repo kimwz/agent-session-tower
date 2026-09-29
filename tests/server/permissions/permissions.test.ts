@@ -187,7 +187,7 @@ test('a project folder that is, or links to, the Codex home\'s parent never gets
   const home = join(root, 'home');
   await mkdir(join(home, '.codex', 'rules'), { recursive: true });
   const global = join(home, '.codex', 'rules', 'tower.rules');
-  await writeFile(global, `${CODEX_HEADER}\nprefix_rule(pattern=["keep"], decision="allow")\n`);
+  await writeFile(global, 'prefix_rule(pattern=["keep"], decision="allow")\n');
   await symlink(home, join(root, 'alias'));
   const service = new PermissionService({ stateDir: join(root, 'state'), env: { CODEX_HOME: join(home, '.codex') }, session: () => undefined });
   await service.start();
@@ -197,4 +197,43 @@ test('a project folder that is, or links to, the Codex home\'s parent never gets
     await assert.rejects(syncCodex(join(cwd, '.codex', 'rules', 'tower.rules'), [], cwd, global), /같은 파일이라서/);
   }
   assert.match(await readFile(global, 'utf8'), /keep/);
+});
+
+test('review fixes: unreadable characters, one request per conversation, cleanup after a lost record, no widening, one global writer', async t => {
+  const base = { kind: 'command' as const, providers: ['codex' as const], scope: 'global' as const };
+  for (const value of ['git\ud800', 'git\u0001', 'gh​pr']) assert.match(ruleProblem({ ...base, value })!, /제어 문자/);
+  assert.equal(ruleProblem({ ...base, value: 'gh pr merge' }), undefined);
+
+  const f = await fixture(t);
+  const claude = await f.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'x' }, agent('claude:one'));
+  const codex = await f.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'x' }, agent('codex:two'));
+  assert.notEqual((codex.request as { id: string }).id, (claude.request as { id: string }).id, 'each conversation hears its own decision');
+  assert.deepEqual(f.service.overview().requests.map(request => request.rule.providers), [['codex'], ['claude']]);
+
+  // A record that could not be read leaves Tower's file for every project behind; the next start removes it.
+  await f.service.save({ kind: 'command', value: 'terraform plan', providers: ['codex'], scope: 'global' });
+  const global = join(f.codexHome, 'rules', 'tower.rules');
+  assert.match(await readFile(global, 'utf8'), /terraform/);
+  await f.service.flush(); f.service.close();
+  await writeFile(join(f.stateDir, 'permissions.json'), JSON.stringify({ version: 1, rules: [{ id: 'x', kind: 'command', value: 'ls', providers: ['claude'], scope: 'project' }], requests: [], codex: [{ path: '/elsewhere/.codex/rules/tower.rules', scope: 'project' }] }));
+  const again = f.make();
+  await again.start();
+  await again.flush();
+  t.after(() => again.close());
+  await assert.rejects(readFile(global, 'utf8'), { code: 'ENOENT' });
+  assert.equal(again.overview().rules.length, 0, 'a project rule without its folder is dropped, not made global');
+
+  // A second Tower (not on the default state folder) never writes the file for every project.
+  const other = new PermissionService({ stateDir: join(f.root, 'other-state'), env: { CODEX_HOME: f.codexHome }, session: () => undefined, globalCodex: false });
+  await other.start();
+  t.after(() => other.close());
+  const saved = await other.save({ kind: 'command', value: 'make build', providers: ['codex'], scope: 'global' });
+  await assert.rejects(readFile(global, 'utf8'), { code: 'ENOENT' });
+  assert.match(saved.targets.find(target => target.scope === 'global')!.error!, /기본 상태 폴더/);
+});
+
+test('editing a rule an approval made saves the rule, never decides the finished request again', async () => {
+  const { ruleDraft } = await import('../../../client/src/permissions/PermissionsPanel.js');
+  const draft = ruleDraft({ id: 'r1', kind: 'command', value: 'gh pr merge', providers: ['claude'], scope: 'global', requestId: 'q1', source: 'request', createdAt: '', updatedAt: '' } as never);
+  assert.deepEqual(draft, { id: 'r1', kind: 'command', value: 'gh pr merge', providers: ['claude'], scope: 'global' });
 });

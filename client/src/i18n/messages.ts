@@ -1,5 +1,11 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  "내가 Tower에서 시작한 턴(내 에이전트가 시작한 작업 포함)에 설정으로 함께 넘깁니다. 트리거, Slack, GitHub, 공개 에이전트처럼 바깥 내용을 다루는 턴과 터미널에서 직접 연 Claude 세션에는 적용되지 않고, 사용자 설정 파일도 바꾸지 않습니다. 한 프로젝트 규칙은 그 폴더와 하위 폴더에서 시작한 턴에 적용됩니다.": "Passed as settings to the turns you start from Tower (and work your agents start). Turns that handle outside content, such as triggers, Slack, GitHub and public agents, and Claude sessions you open in a terminal do not get them, and your settings files are not changed. A project's rules apply to turns started in that folder or a folder inside it.",
+  "Tower만 쓰는 tower.rules 파일에 씁니다. Codex는 실행마다 규칙을 따로 받을 수 없어서, 트리거와 공개 에이전트를 포함한 이 컴퓨터의 모든 Codex 실행이 읽습니다. 프로젝트 규칙은 신뢰한 프로젝트에서만 읽고, 프로젝트 파일은 git 제외 목록에 넣어 저장소에 올라가지 않게 합니다.": "Written to tower.rules files only Tower writes. Codex cannot take rules per run, so every Codex run on this computer reads them, triggers and public agents included. Project rules are read in trusted projects only, and project files go into git's exclude list so they stay out of the repository.",
+  "Codex 규칙은 트리거와 공개 에이전트를 포함한 이 컴퓨터의 모든 Codex 실행에 적용됩니다.": "A Codex rule applies to every Codex run on this computer, triggers and public agents included.",
+  "규칙에는 제어 문자나 보이지 않는 문자를 쓸 수 없습니다.": "A rule cannot contain control or invisible characters.",
+  "규칙은 200개까지 저장할 수 있습니다.": "Up to 200 rules can be saved.",
+  "이 Tower는 기본 상태 폴더를 쓰지 않아 모든 프로젝트용 Codex 규칙 파일을 쓰지 않습니다. 기본 Tower에서 저장하세요.": "This Tower does not use the default state folder, so it does not write the Codex rules file for every project. Save it in the default Tower.",
   "{0}가 모든 프로젝트용 Codex 규칙 파일과 같은 파일이라서 바꾸지 않았습니다.": "{0} is the Codex rules file for every project, so it was not changed.",
   "권한 · 요청 {0}개": "Permissions · {0} requests",
   "권한": "Permissions",
@@ -33,8 +39,6 @@ export const english: Record<string, string> = {
   "모든 프로젝트에 쓰는 규칙이 아직 없습니다.": "No rules for every project yet.",
   "이 프로젝트에만 쓰는 규칙이 아직 없습니다.": "No rules for this project alone yet.",
   "규칙이 적용되는 곳": "Where rules apply",
-  "Tower에서 시작해 자동 승인으로 도는 턴에 설정으로 함께 넘깁니다. 사용자 설정 파일은 바꾸지 않고, 터미널에서 직접 연 Claude 세션에는 적용되지 않습니다. 한 프로젝트 규칙은 그 폴더와 하위 폴더에서 시작한 턴에 적용됩니다.": "Passed as settings to the turns Tower starts with automatic approvals. Your settings files are not changed, and Claude sessions you open yourself in a terminal do not get them. A project's rules apply to turns started in that folder or a folder inside it.",
-  "Tower만 쓰는 tower.rules 파일에 씁니다. 이 컴퓨터의 모든 Codex 세션이 읽고, 프로젝트 규칙은 신뢰한 프로젝트에서만 읽습니다. 프로젝트 파일은 git 제외 목록에 넣어 저장소에 올라가지 않게 합니다.": "Written to tower.rules files only Tower writes. Every Codex session on this computer reads them; project rules are read in trusted projects only. Project files go into git's exclude list so they stay out of the repository.",
   "바뀐 규칙은 두 에이전트 모두 다음 턴부터 적용됩니다.": "Changed rules apply from the next turn for both agents.",
   "규칙 {0}개": "{0} rules",
   "요청 수정 후 허용": "Edit the request and allow",
@@ -68,7 +72,6 @@ export const english: Record<string, string> = {
   "이 폴더의 Codex 규칙 파일은 모든 프로젝트용 파일과 같습니다. 모든 프로젝트 규칙으로 저장하세요.": "This folder's Codex rules file is the one for every project. Save it as a rule for all projects.",
   "권한 규칙을 지금은 바꿀 수 없습니다. 잠시 뒤 다시 시도하세요.": "Permission rules cannot be changed right now. Try again shortly.",
   "같은 규칙이 이미 있습니다.": "The same rule already exists.",
-  "규칙은 500개까지 저장할 수 있습니다.": "Up to 500 rules can be saved.",
   "규칙 파일 경로가 프로젝트 밖을 가리킵니다.": "The rules file path points outside the project.",
   "git 제외 목록을 찾지 못해 규칙 파일을 쓰지 않았습니다.": "Could not find git's exclude list, so the rules file was not written.",
   "{0}가 심볼릭 링크라서 규칙 파일을 바꾸지 않았습니다.": "{0} is a symbolic link, so the rules file was not changed.",

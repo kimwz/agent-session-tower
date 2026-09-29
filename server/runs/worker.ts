@@ -485,7 +485,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       advise: resolve(stateDir) === resolve(defaultStateDir()) });
     // Skills never keep the worker from starting.
     await skills.start().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
-    const permissions = new PermissionService({ stateDir, session: id => runs.getSession(id),
+    const permissions = new PermissionService({ stateDir, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
       resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' } }); } });
     await permissions.start().catch(error => console.error(`Permission rules did not start: ${error instanceof Error ? error.message : String(error)}`));
     runs.setClaudeSettings(cwd => permissions.claudeSettings(cwd));

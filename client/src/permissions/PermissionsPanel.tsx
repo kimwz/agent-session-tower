@@ -25,7 +25,10 @@ export function PermissionsButton({ token, projects, onOpenSession }: { token: s
   </button>{open && <PermissionsPanel token={token} cwd={open.cwd} projects={projects} onOpenSession={id => { setOpen(null); onOpenSession(id); }} onClose={() => { setOpen(null); refresh(); }} />}</>;
 }
 
-type Draft = PermissionRuleInput & { id?: string; requestId?: string };
+/** A rule being written: `id` edits a saved rule; `deciding` allows that request as edited. */
+type Draft = PermissionRuleInput & { id?: string; deciding?: string };
+export const ruleDraft = (rule: PermissionRuleInput & { id?: string }): Draft => ({ ...(rule.id ? { id: rule.id } : {}), kind: rule.kind, value: rule.value, providers: rule.providers, scope: rule.scope,
+  ...(rule.cwd ? { cwd: rule.cwd } : {}), ...(rule.note ? { note: rule.note } : {}) });
 type Tab = 'requests' | 'rules';
 
 /** Allow rules for Claude Code and Codex in one list, everywhere or for one folder, and the requests agents sent. */
@@ -67,9 +70,9 @@ export function PermissionsPanel({ token, cwd, projects, onClose, onOpenSession 
   const newRule = (): Draft => ({ kind: 'command', value: '', providers: ['claude', 'codex'], scope: cwd ? 'project' : 'global', ...(cwd ? { cwd } : {}) });
   async function save(next: Draft) {
     const rule: PermissionRuleInput = { kind: next.kind, value: next.value, providers: next.providers, scope: next.scope, ...(next.scope === 'project' && next.cwd ? { cwd: next.cwd } : {}), ...(next.note?.trim() ? { note: next.note.trim() } : {}) };
-    const ok = next.requestId ? await act('decide', { id: next.requestId, approve: true, rule, resume }, t('요청을 수정해 허용했습니다.'))
+    const ok = next.deciding ? await act('decide', { id: next.deciding, approve: true, rule, resume }, t('요청을 수정해 허용했습니다.'))
       : await act('save', { ...(next.id ? { id: next.id } : {}), rule }, t('규칙을 저장했습니다.'));
-    if (ok) { setDraft(null); if (next.requestId && pending.length <= 1) setTab('rules'); }
+    if (ok) { setDraft(null); if (next.deciding && pending.length <= 1) setTab('rules'); }
   }
   return createPortal(<dialog ref={dialog} className="auth-dialog skills-dialog permissions-dialog" aria-labelledby="permissions-title" onCancel={event => { if (draft) { event.preventDefault(); setDraft(null); } else onClose(); }} onClick={event => { if (event.target === event.currentTarget && !draft) onClose(); }}><div className="auth-panel">
     <header><h2 id="permissions-title"><ShieldCheck size={17} />{title}</h2><div><button className="icon-button" aria-label={t('닫기')} onClick={onClose}><X size={20} /></button></div></header>
@@ -90,14 +93,14 @@ export function PermissionsPanel({ token, cwd, projects, onClose, onOpenSession 
           <small>{t('허용하거나 거절하면 그 대화에 내 메시지로 결과를 보냅니다. 에이전트가 일하는 중이면 그 턴이 끝난 뒤에 보냅니다. 허용한 규칙은 다음 턴부터 적용됩니다.')}</small></label>}
         {pending.length ? pending.map(request => <RequestCard key={request.id} request={request} busy={busy} onOpenSession={onOpenSession}
           onApprove={() => void act('decide', { id: request.id, approve: true, resume }, t('{0} 규칙을 허용했습니다.', { 0: request.rule.value }))}
-          onEdit={() => setDraft({ ...request.rule, requestId: request.id })}
+          onEdit={() => setDraft({ ...ruleDraft(request.rule), deciding: request.id })}
           onDeny={() => void act('decide', { id: request.id, approve: false, resume }, t('요청을 거절했습니다.'))} />)
           : <p className="auth-empty">{t('기다리는 요청이 없습니다. Tower에서 시작한 대화의 에이전트는 막힌 작업에 필요한 권한을 permissions_request 도구로 요청할 수 있습니다.')}</p>}
         {decided.length > 0 && <details className="skills-watching"><summary>{t('처리한 요청 {0}', { 0: decided.length })}</summary>
           <ul className="permission-history">{decided.map(request => <li key={request.id}><span className={`skill-badge ${request.status === 'approved' ? 'pinned' : ''}`}>{request.status === 'approved' ? t('허용') : t('거절')}</span>
             <code>{request.rule.value}</code><small>{folderName(request.cwd)} · {date(request.decidedAt ?? request.createdAt)}</small></li>)}</ul></details>}
       </section>}
-      {tab === 'rules' && <RuleList overview={overview} cwd={cwd} busy={busy} onNew={() => setDraft(newRule())} onEdit={rule => setDraft({ ...rule })}
+      {tab === 'rules' && <RuleList overview={overview} cwd={cwd} busy={busy} onNew={() => setDraft(newRule())} onEdit={rule => setDraft(ruleDraft(rule))}
         onDelete={rule => { if (window.confirm(t('{0} 규칙을 삭제할까요? 다음 턴부터 적용되지 않습니다.', { 0: rule.value }))) void act('delete', { id: rule.id }, t('규칙을 삭제했습니다.')); }} />}
     </>}
   </div></dialog>, document.body);
@@ -108,12 +111,13 @@ function Providers({ providers }: { providers: PermissionProvider[] }) {
 }
 
 /** What each provider will read for this rule, exactly. */
-function NativePreview({ rule }: { rule: Pick<PermissionRuleInput, 'kind' | 'value' | 'providers'> }) {
+function NativePreview({ rule, warnCodex = false }: { rule: Pick<PermissionRuleInput, 'kind' | 'value' | 'providers'>; warnCodex?: boolean }) {
   const { t } = useI18n();
   if (ruleProblem({ ...rule, scope: 'global' })) return null;
   return <dl className="permission-native">
     {rule.providers.includes('claude') && <><dt>Claude Code</dt><dd><code>{claudeRule(rule)}</code></dd></>}
     {rule.kind === 'command' && rule.providers.includes('codex') && <><dt>Codex</dt><dd><code>{codexRule(rule)}</code></dd></>}
+    {warnCodex && rule.kind === 'command' && rule.providers.includes('codex') && <dd className="permission-broad"><TriangleAlert size={13} />{t('Codex 규칙은 트리거와 공개 에이전트를 포함한 이 컴퓨터의 모든 Codex 실행에 적용됩니다.')}</dd>}
     {ruleIsBroad(rule) && <dd className="permission-broad"><TriangleAlert size={13} />{t('넓은 규칙입니다. 이 프로그램으로 하는 거의 모든 일을 묻지 않고 허용합니다.')}</dd>}
   </dl>;
 }
@@ -124,7 +128,7 @@ function RequestCard({ request, busy, onApprove, onEdit, onDeny, onOpenSession }
     <header><code className="permission-value">{request.rule.value}</code><span className="skill-badges"><Providers providers={request.rule.providers} />
       <span className="skill-badge">{request.rule.scope === 'global' ? t('모든 프로젝트') : folderName(request.rule.cwd ?? request.cwd)}</span></span></header>
     <p>{request.reason}</p>
-    <NativePreview rule={request.rule} />
+    <NativePreview rule={request.rule} warnCodex />
     <p className="permission-meta"><button type="button" className="link-button" onClick={() => onOpenSession(request.sessionId)}>{t('요청한 대화 열기')}</button><small>{folderName(request.cwd)} · {date(request.createdAt)}</small></p>
     <footer><span />
       <button type="button" className="secondary-button" disabled={busy} onClick={onDeny}>{t('거절')}</button>
@@ -159,8 +163,8 @@ function RuleList({ overview, cwd, busy, onNew, onEdit, onDelete }: { overview: 
       </li>)}</ul> : <p className="auth-empty">{key === 'global' ? t('모든 프로젝트에 쓰는 규칙이 아직 없습니다.') : t('이 프로젝트에만 쓰는 규칙이 아직 없습니다.')}</p>}
     </div>)}
     <details className="skills-watching"><summary>{t('규칙이 적용되는 곳')}</summary>
-      <p className="auth-hint"><strong>Claude Code</strong> · {t('Tower에서 시작해 자동 승인으로 도는 턴에 설정으로 함께 넘깁니다. 사용자 설정 파일은 바꾸지 않고, 터미널에서 직접 연 Claude 세션에는 적용되지 않습니다. 한 프로젝트 규칙은 그 폴더와 하위 폴더에서 시작한 턴에 적용됩니다.')}</p>
-      <p className="auth-hint"><strong>Codex</strong> · {t('Tower만 쓰는 tower.rules 파일에 씁니다. 이 컴퓨터의 모든 Codex 세션이 읽고, 프로젝트 규칙은 신뢰한 프로젝트에서만 읽습니다. 프로젝트 파일은 git 제외 목록에 넣어 저장소에 올라가지 않게 합니다.')}</p>
+      <p className="auth-hint"><strong>Claude Code</strong> · {t('내가 Tower에서 시작한 턴(내 에이전트가 시작한 작업 포함)에 설정으로 함께 넘깁니다. 트리거, Slack, GitHub, 공개 에이전트처럼 바깥 내용을 다루는 턴과 터미널에서 직접 연 Claude 세션에는 적용되지 않고, 사용자 설정 파일도 바꾸지 않습니다. 한 프로젝트 규칙은 그 폴더와 하위 폴더에서 시작한 턴에 적용됩니다.')}</p>
+      <p className="auth-hint"><strong>Codex</strong> · {t('Tower만 쓰는 tower.rules 파일에 씁니다. Codex는 실행마다 규칙을 따로 받을 수 없어서, 트리거와 공개 에이전트를 포함한 이 컴퓨터의 모든 Codex 실행이 읽습니다. 프로젝트 규칙은 신뢰한 프로젝트에서만 읽고, 프로젝트 파일은 git 제외 목록에 넣어 저장소에 올라가지 않게 합니다.')}</p>
       <p className="auth-hint">{t('바뀐 규칙은 두 에이전트 모두 다음 턴부터 적용됩니다.')}</p>
       <ul className="permission-history">{overview.targets.map(target => <li key={target.path}><span className="skill-badge codex">Codex</span><code>{target.path}</code><small>{t('규칙 {0}개', { 0: target.rules })}</small></li>)}</ul>
     </details>
@@ -175,7 +179,7 @@ function RuleEditor({ draft: initial, cwd, projects, busy, onCancel, onSave }: {
   const problem = draft.value.trim() ? ruleProblem(draft) : undefined;
   const toggle = (provider: PermissionProvider, on: boolean) => set({ providers: (['claude', 'codex'] as const).filter(item => item === provider ? on : draft.providers.includes(item)) });
   return <form className="skill-editor" onSubmit={event => { event.preventDefault(); if (!problem) onSave(draft); }}>
-    <h3>{draft.requestId ? t('요청 수정 후 허용') : draft.id ? t('규칙 편집') : t('규칙 추가')}</h3>
+    <h3>{draft.deciding ? t('요청 수정 후 허용') : draft.id ? t('규칙 편집') : t('규칙 추가')}</h3>
     <fieldset className="skill-scope"><legend>{t('종류')}</legend>
       <label><input type="radio" name="kind" checked={draft.kind === 'command'} disabled={busy} onChange={() => set({ kind: 'command', providers: ['claude', 'codex'] })} />{t('명령어')}</label>
       <label><input type="radio" name="kind" checked={draft.kind === 'claude'} disabled={busy} onChange={() => set({ kind: 'claude', providers: ['claude'] })} />{t('Claude 규칙')}</label>
@@ -193,9 +197,9 @@ function RuleEditor({ draft: initial, cwd, projects, busy, onCancel, onSave }: {
       <label><input type="radio" name="scope" checked={draft.scope === 'project'} disabled={busy || !choices.length} onChange={() => set({ scope: 'project', cwd: draft.cwd ?? choices[0] })} />{t('한 프로젝트')}</label>
       {draft.scope === 'project' && <select value={draft.cwd ?? ''} disabled={busy} aria-label={t('프로젝트')} onChange={event => set({ cwd: event.target.value })}>{choices.map(item => <option key={item} value={item}>{folderName(item)} · {item}</option>)}</select>}
     </fieldset>
-    <NativePreview rule={draft} />
+    <NativePreview rule={draft} warnCodex />
     <label>{t('메모 (선택)')}<input value={draft.note ?? ''} maxLength={500} disabled={busy} placeholder={t('왜 허용하는지')} onChange={event => set({ note: event.target.value })} /></label>
     <footer><button type="button" className="secondary-button" disabled={busy} onClick={onCancel}>{t('취소')}</button>
-      <button type="submit" className="primary-button" disabled={busy || !draft.value.trim() || !!problem}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}{draft.requestId ? t('허용') : t('저장')}</button></footer>
+      <button type="submit" className="primary-button" disabled={busy || !draft.value.trim() || !!problem}>{busy ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}{draft.deciding ? t('허용') : t('저장')}</button></footer>
   </form>;
 }

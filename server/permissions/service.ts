@@ -22,7 +22,8 @@ export interface PermissionState {
 
 interface CodexFile { path: string; scope: PermissionRule['scope']; cwd?: string }
 
-export const MAX_RULES = 500;
+/** Few enough that the settings a Claude turn receives stay far below a command-line argument's limit. */
+export const MAX_RULES = 200;
 export const MAX_PENDING = 50;
 const MAX_DECIDED = 200;
 const DECIDED_DAYS = 30;
@@ -37,6 +38,11 @@ export interface PermissionServiceOptions {
   env?: NodeJS.ProcessEnv;
   /** The folder and provider of a Tower session. */
   session(id: string): { cwd: string; provider: Provider } | undefined;
+  /**
+   * Whether this Tower writes the Codex rules file for every project. Only the Tower on the default state folder does:
+   * another (a development or test Tower) would replace that Tower's rules.
+   */
+  globalCodex?: boolean;
   /** Sends the owner's decision to the requesting conversation as the owner's next message. */
   resume?(sessionId: string, prompt: string): Promise<void>;
   now?: () => Date;
@@ -69,7 +75,8 @@ export class PermissionService {
         await this.commit(() => {}).catch(() => {});
       }
     }
-    await this.serial(() => this.apply());
+    // Rules files are brought in line in the background: a slow disk or git never holds up the worker's start.
+    void this.serial(() => this.apply()).catch(() => {});
   }
 
   /** Waits for changes under way; later calls are refused once closed. */
@@ -120,7 +127,9 @@ export class PermissionService {
       // A rule for every project, or for this project, already covers what a project request asks for.
       const covering = this.state.rules.filter(existing => sameRule({ ...existing, scope: rule.scope, cwd: rule.cwd }, rule) && (existing.scope === 'global' || (rule.scope === 'project' && existing.cwd === rule.cwd)));
       if (rule.providers.every(item => covering.some(existing => existing.providers.includes(item)))) return { request: { status: 'exists' as const }, note: 'This rule is already allowed. Try the action again; a Codex rule applies from the next turn.' };
-      const same = this.state.requests.find(request => request.status === 'pending' && sameRule(request.rule, rule) && request.cwd === session.cwd);
+      // Only this conversation's own request is the same one: another conversation hears its own decision.
+      const same = this.state.requests.find(request => request.status === 'pending' && request.sessionId === caller.sessionId && sameRule(request.rule, rule)
+        && rule.providers.every(item => request.rule.providers.includes(item)));
       if (same) return { request: { id: same.id, status: same.status }, note: WAIT_NOTE };
       if (this.pending() >= MAX_PENDING) throw failure('기다리는 권한 요청이 너무 많습니다. 소유자가 Tower에서 먼저 정리해야 합니다.', 429);
       const request: PermissionRequest = { id: randomUUID(), status: 'pending', rule, reason: input.reason.trim(), sessionId: caller.sessionId, ...(caller.runId ? { runId: caller.runId } : {}),
@@ -213,8 +222,11 @@ export class PermissionService {
   /** Every Codex rules file Tower writes, with the lines it should hold now. */
   private desired(): Map<string, { scope: PermissionRule['scope']; cwd?: string; lines: string[] }> {
     const files = new Map<string, { scope: PermissionRule['scope']; cwd?: string; lines: string[] }>();
+    // The file for every project is always checked, so rules left there by a record that could not be read are removed.
+    if (this.options.globalCodex !== false) files.set(codexRulesPath('global', undefined, this.options.env), { scope: 'global', lines: [] });
     for (const rule of this.state.rules) {
       if (rule.kind !== 'command' || !rule.providers.includes('codex')) continue;
+      if (rule.scope === 'global' && this.options.globalCodex === false) continue;
       const path = codexRulesPath(rule.scope, rule.cwd, this.options.env);
       const file = files.get(path) ?? { scope: rule.scope, ...(rule.cwd ? { cwd: rule.cwd } : {}), lines: [] };
       const line = codexRule(rule);
@@ -244,10 +256,16 @@ export class PermissionService {
   private targets(cwd?: string): PermissionTarget[] {
     const files = this.desired();
     for (const file of this.state.codex) if (this.errors.has(file.path) && !files.has(file.path)) files.set(file.path, { scope: file.scope, ...(file.cwd ? { cwd: file.cwd } : {}), lines: [] });
-    return [...files].filter(([, file]) => !cwd || file.scope === 'global' || file.cwd === cwd)
+    const shown: PermissionTarget[] = [...files].filter(([, file]) => !cwd || file.scope === 'global' || file.cwd === cwd)
       .map(([path, file]) => ({ provider: 'codex' as const, scope: file.scope, ...(file.cwd ? { cwd: file.cwd } : {}), path, rules: file.lines.length, ...(this.errors.has(path) ? { error: this.errors.get(path) } : {}) }));
+    if (this.options.globalCodex === false && this.state.rules.some(rule => rule.scope === 'global' && rule.kind === 'command' && rule.providers.includes('codex'))) {
+      shown.push({ provider: 'codex', scope: 'global', path: codexRulesPath('global', undefined, this.options.env), rules: 0, error: GLOBAL_CODEX_ELSEWHERE });
+    }
+    return shown;
   }
 }
+const GLOBAL_CODEX_ELSEWHERE = '이 Tower는 기본 상태 폴더를 쓰지 않아 모든 프로젝트용 Codex 규칙 파일을 쓰지 않습니다. 기본 Tower에서 저장하세요.';
+
 /** What the requesting agent is told once the owner decided. */
 function decisionMessage(asked: PermissionRuleInput, allowed: PermissionRuleInput | undefined): string {
   const where = (rule: PermissionRuleInput) => rule.scope === 'global' ? 'every project' : 'this project';
@@ -288,7 +306,7 @@ function upsert(state: PermissionState, rule: PermissionRuleInput, id: string | 
     same.updatedAt = at;
     return same;
   }
-  if (state.rules.length >= MAX_RULES) throw failure('규칙은 500개까지 저장할 수 있습니다.', 409);
+  if (state.rules.length >= MAX_RULES) throw failure('규칙은 200개까지 저장할 수 있습니다.', 409);
   const made: PermissionRule = { ...rule, id: randomUUID(), source, ...(requestId ? { requestId } : {}), createdAt: at, updatedAt: at };
   state.rules.push(made);
   return made;
@@ -309,7 +327,9 @@ function normalize(value: unknown): PermissionState {
   const ruleInput = (item: any): PermissionRuleInput | undefined => {
     if (!item || (item.kind !== 'command' && item.kind !== 'claude') || typeof item.value !== 'string') return undefined;
     const providers = (['claude', 'codex'] as const).filter(provider => Array.isArray(item.providers) && item.providers.includes(provider));
-    const rule: PermissionRuleInput = { kind: item.kind, value: text(item.value, 400), providers, scope: item.scope === 'project' && typeof item.cwd === 'string' ? 'project' : 'global',
+    // A project rule that lost its folder is dropped, never widened to every project.
+    if (item.scope === 'project' && typeof item.cwd !== 'string') return undefined;
+    const rule: PermissionRuleInput = { kind: item.kind, value: text(item.value, 400), providers, scope: item.scope === 'project' ? 'project' : 'global',
       ...(item.scope === 'project' && typeof item.cwd === 'string' ? { cwd: item.cwd } : {}), ...(typeof item.note === 'string' ? { note: text(item.note, 500) } : {}) };
     return ruleProblem(rule) ? undefined : rule;
   };
@@ -326,7 +346,8 @@ function normalize(value: unknown): PermissionState {
       createdAt: text(item.createdAt, 40), ...(typeof item.decidedAt === 'string' ? { decidedAt: item.decidedAt } : {}), ...(typeof item.ruleId === 'string' ? { ruleId: item.ruleId } : {}) });
   }
   if (typeof input.lost === 'string') state.lost = input.lost;
-  if (Array.isArray(input.codex)) state.codex = (input.codex as any[]).filter(item => item && typeof item.path === 'string')
-    .map(item => ({ path: item.path, scope: item.scope === 'project' && typeof item.cwd === 'string' ? 'project' as const : 'global' as const, ...(item.scope === 'project' && typeof item.cwd === 'string' ? { cwd: item.cwd } : {}) }));
+  // A project file that lost its folder could no longer be checked before removal, so it is forgotten instead.
+  if (Array.isArray(input.codex)) state.codex = (input.codex as any[]).filter(item => item && typeof item.path === 'string' && (item.scope !== 'project' || typeof item.cwd === 'string'))
+    .map(item => item.scope === 'project' ? { path: item.path, scope: 'project' as const, cwd: item.cwd as string } : { path: item.path, scope: 'global' as const });
   return state;
 }
