@@ -106,8 +106,11 @@ interface Playing {
   receivedAt?: number; playingAt?: number;
   /** Where in the audio the current source starts (seconds), and how often it was fetched again. */
   base: number; resumes: number; firstErrorAt?: number;
-  /** The fetch whose failure was already handled (an error and a refused play() may both tell of one). */
-  failedAttempt?: number;
+  /**
+   * Which fetch of its audio is current (0 the first), and whether another is waiting to start: an error and a refused
+   * play() may both tell of one failed fetch, and it is handled once.
+   */
+  fetch: number; retrying?: boolean;
   /** Whether the current source has played at all (its place counts only then). */
   sourcePlayed?: boolean;
 }
@@ -674,7 +677,7 @@ export class VoiceSession {
     const say = item.say;
     if (!item.replay && say.expiresAt < Date.now()) { this.report(say, 'failed'); this.next(); return; }
     this.disarm();
-    const current: Playing = { say, startedAt: Date.now(), ...(item.replay ? { replay: true } : {}), ...(item.receivedAt ? { receivedAt: item.receivedAt } : {}), timers: [], base: 0, resumes: 0 };
+    const current: Playing = { say, startedAt: Date.now(), ...(item.replay ? { replay: true } : {}), ...(item.receivedAt ? { receivedAt: item.receivedAt } : {}), timers: [], base: 0, resumes: 0, fetch: 0 };
     this.current = current;
     this.show({});
     // A player that never ends or fails is given up on after a while, so the queue goes on.
@@ -685,7 +688,7 @@ export class VoiceSession {
     this.audio.onerror = () => {
       if (this.current !== current) return;
       if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); return; }
-      this.lost(current);
+      this.lost(current, current.fetch);
     };
     this.audio.src = say.audio;
     this.audio.play().catch((error: unknown) => {
@@ -702,9 +705,8 @@ export class VoiceSession {
    * a few times within a while: `base` keeps the place in the whole audio across several cuts.
    */
   /** The current fetch of an answer failed: fetched again if it can be, otherwise the answer failed. Once per fetch. */
-  private lost(current: Playing): void {
-    if (this.current !== current || current.failedAttempt === current.resumes) return;
-    current.failedAttempt = current.resumes;
+  private lost(current: Playing, fetch: number): void {
+    if (this.current !== current || fetch !== current.fetch || current.retrying) return;
     if (!this.resume(current)) this.finishPlay(current, 'failed');
   }
 
@@ -718,11 +720,14 @@ export class VoiceSession {
     const at = current.base + (current.sourcePlayed && Number.isFinite(this.audio.currentTime) ? this.audio.currentTime : 0);
     current.base = at;
     current.sourcePlayed = false;
+    current.retrying = true;
     current.timers.push(setTimeout(() => {
       if (this.current !== current) return;
+      current.retrying = false;
+      const fetch = ++current.fetch;
       this.audio.src = `${current.say.audio}?at=${at.toFixed(2)}`;
       // Refused again (the web still away): another try, while tries and time are left.
-      this.audio.play().catch(() => this.lost(current));
+      this.audio.play().catch(() => this.lost(current, fetch));
     }, 1_000 * current.resumes));
     return true;
   }

@@ -915,3 +915,27 @@ test('a fetch again that is refused while the web is still away is tried again, 
     assert.deepEqual(page.results(), ['cut:played']);
   } finally { page.end(); }
 });
+
+test('one failed fetch told twice (an error and a refused play) is tried again once', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as unknown as { currentTime: number; onplaying: (() => void) | null; onerror: (() => void) | null; onended: (() => void) | null; played: string[] };
+    page.voice.say(page.say('twice', 'answer'));
+    audio.onplaying?.();
+    audio.currentTime = 3;
+    audio.onerror?.();
+    audio.onerror?.();
+    FakeAudio.refuse = true;
+    mock.timers.tick(1_000);
+    await flush();
+    audio.onerror?.();
+    FakeAudio.refuse = false;
+    mock.timers.tick(10_000);
+    await flush();
+    const fetches = audio.played.filter(src => src.includes('twice?at='));
+    // The first try was refused (a refused play is not recorded as played); the late error of that same try starts
+    // nothing more; one try started after it.
+    assert.deepEqual(fetches, ['/api/master/voice/audio/twice?at=3.00'], 'never two tries of one failure');
+    assert.deepEqual(page.results(), []);
+  } finally { page.end(); }
+});
