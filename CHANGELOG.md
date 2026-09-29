@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.79.0] - 2026-09-29
+
+### Added
+- **Worktrees a conversation made are removed once its work is over.** Agents create git worktrees for reviews and parallel work and often leave them behind, each with a full checkout and installed dependencies (node_modules included). When you close a conversation, or 30 minutes after a trigger or Slack task finished its work, Tower removes the worktrees that conversation and the subagents and runs it launched created with `git worktree add`. It keeps a worktree, and says why on the conversation's page, when:
+  - an open conversation also made it, works in it, or refers to the folder in its requests, answers or commands;
+  - a program is working in the folder;
+  - it has uncommitted changes, is locked, or has commits not yet pushed (on a detached checkout: commits no branch or remote has).
+
+  Branches are never deleted, and git never removes a worktree with changes. Files git ignores in the worktree (installed dependencies, build output, a local `.env`) go with it. A kept worktree is checked again every hour. Worktrees an agent's run started on its own, without a conversation known to have launched it, are left alone.
+- The agents' guidance now asks them to remove a review worktree as soon as the review is done.
+
 ## [1.78.2] - 2026-09-29
 
 ### Changed
