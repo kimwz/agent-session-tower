@@ -182,7 +182,7 @@ test('transcripts give Codex creations with their folders and results, and refer
     { type: 'response_item', timestamp: iso(4000), payload: { type: 'function_call_output', call_id: 'c1', output: 'ok' } },
     { type: 'response_item', timestamp: iso(5000), payload: { type: 'custom_tool_call', name: 'exec', call_id: 'c2', input: 'text(await tools.exec_command({cmd:"git worktree add /tmp/other HEAD"}));' } },
   ));
-  assert.deepEqual(await transcriptCreations(codex, 'codex', '/h'), [{ path: '/w/repo.wt', start: 3000, end: 4000 }, { path: '/tmp/other', start: 5000 }]);
+  assert.deepEqual(await transcriptCreations(codex, 'codex', '/h'), [{ path: '/w/repo/../repo.wt', start: 3000, end: 4000 }, { path: '/tmp/other', start: 5000 }]);
   assert.deepEqual([...await transcriptMentions(codex, ['repo.wt', 'ok', 'missing'])], ['repo.wt']);
   await assert.rejects(transcriptCreations(join(dir, 'gone.jsonl'), 'claude', '/h'), { code: 'ENOENT' });
 });
@@ -343,4 +343,24 @@ test('a pause stops a pass before it removes anything, and an interrupted scan i
   cleaner.resume();
   await cleaner.pass();
   assert.equal(existsSync(target), false, 'the scan was read again and the worktree removed once resumed');
+});
+
+test('a repository inside an ignored folder of the worktree keeps it; so does a conversation reopened while transcripts are read', async t => {
+  const { dir, work, state, add, transcript, session } = await setup(t);
+  const outer = join(dir, 'work.wt-holds-repo'), later = join(dir, 'work.wt-later');
+  const rows = [...add(`git worktree add --detach ${outer} HEAD`, ['--detach', outer, 'HEAD']), ...add(`git worktree add --detach ${later} HEAD`, ['--detach', later, 'HEAD'])];
+  await writeFile(join(work, '.git', 'info', 'exclude'), 'vendor/\n');
+  execFileSync('git', ['init', '-q', join(outer, 'vendor', 'other')], { env });
+  await writeFile(join(outer, 'vendor', 'other', 'work.txt'), 'uncommitted work of another repository');
+  // o is an open conversation whose new message is read during the check; meanwhile a is reopened.
+  const world = { sessions: [session('a', await transcript('a', rows)), session('o', await transcript('o', [{ type: 'user', timestamp: iso(Date.now()), message: { content: 'unrelated' } }]), { updatedAt: iso(Date.now() + 5000) })],
+    closed: new Set(['claude:a']) };
+  // o keeps writing: every look sees a newer revision than the one whose transcript was just read.
+  let looks = 0;
+  const cleaner = janitor(state, world, { sessions: () => [world.sessions[0]!, { ...world.sessions[1]!, updatedAt: iso(Date.now() + 5000 + ++looks) }] });
+  await cleaner.start(); t.after(() => cleaner.close());
+  await cleaner.pass();
+  assert.equal((await worktreeCleanupFor(state, ['claude:a'])).find(item => item.path === outer)?.reason, 'nested');
+  assert.equal(existsSync(join(outer, 'vendor', 'other', 'work.txt')), true);
+  assert.equal(existsSync(later), true, 'an open conversation that changed meanwhile is read again first');
 });

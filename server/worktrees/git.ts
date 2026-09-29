@@ -1,4 +1,6 @@
+import { execFile } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
+import { promisify } from 'node:util';
 import { dirname, join, sep } from 'node:path';
 import type { GitRunner } from '../repositories/git.js';
 
@@ -66,6 +68,8 @@ export async function removalBlocker(git: GitRunner, worktree: LinkedWorktree): 
     else if (/^[12u?] /.test(line)) changes++;
   }
   if (changes) return { reason: 'changes', detail: String(changes) };
+  // Another repository or worktree inside it, in a folder git ignores here, would go with it, uncommitted work and all.
+  if (await containsRepository(worktree.path)) return { reason: 'nested' };
   // Branches are never deleted, so their commits stay; commits not yet published mean the work is not over.
   // An upstream that is gone was published and then deleted on the remote, as merged pull requests are.
   if (branch && upstream) return ahead ? { reason: 'unpushed', detail: `${branch} (${ahead})` } : undefined;
@@ -74,6 +78,14 @@ export async function removalBlocker(git: GitRunner, worktree: LinkedWorktree): 
   if (!Number.isFinite(unpublished)) throw new Error('git rev-list gave no count');
   if (unpublished) return branch ? { reason: 'unpushed', detail: `${branch} (${unpublished})` } : { reason: 'unpublished', detail: String(unpublished) };
   return undefined;
+}
+
+const execute = promisify(execFile);
+
+/** Whether any folder below the worktree's own top holds a `.git` (a repository, or another repository's worktree). */
+async function containsRepository(path: string): Promise<boolean> {
+  const { stdout } = await execute('find', [path, '-mindepth', '2', '-name', '.git', '-print', '-quit'], { timeout: 120_000, maxBuffer: 1024 * 1024 });
+  return stdout.trim().length > 0;
 }
 
 /** `git worktree remove` without force: git itself refuses when anything is modified or untracked. */

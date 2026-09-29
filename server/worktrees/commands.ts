@@ -11,7 +11,7 @@ type Token = Word | { op: string };
 const isWord = (token: Token | undefined): token is Word => Boolean(token && 'text' in token);
 
 /** Splits shell text into words and operators; heredoc bodies and comments are dropped. */
-function tokenize(command: string): Token[] {
+function tokenize(command: string): Token[] | undefined {
   const tokens: Token[] = [];
   const heredocs: { delimiter: string; tabs: boolean }[] = [];
   let word = '', active = false, dynamic = false, quoted = false;
@@ -73,8 +73,10 @@ function tokenize(command: string): Token[] {
         if (tabs) i++;
         let j = i + 1;
         while (command[j] === ' ' || command[j] === '\t') j++;
-        const match = /^(['"]?)([A-Za-z0-9_.-]+)\1/.exec(command.slice(j));
-        if (match) { heredocs.push({ delimiter: match[2]!, tabs }); i = j + match[0].length - 1; }
+        const match = /^(?:(['"])([A-Za-z0-9_.-]+)\1|\\?([A-Za-z0-9_.-]+))(?=[\s;&|<>)]|$)/.exec(command.slice(j));
+        // A delimiter this reader cannot read makes the whole call unreadable: its body must never pass for commands.
+        if (!match) return undefined;
+        heredocs.push({ delimiter: match[2] ?? match[3]!, tabs }); i = j + match[0].length - 1;
       }
       tokens.push({ op });
       continue;
@@ -88,21 +90,28 @@ function tokenize(command: string): Token[] {
 const SEPARATORS = new Set([';', '&&', '||', '|', '&', '\n', '(', ')', ';;', '|&']);
 const REDIRECTS = new Set(['<', '>', '>>', '<&', '>&', '&>', '<<<', '<>']);
 
-/** Expands a word to a static path relative to `cwd`, or undefined when it depends on the shell at run time. */
-function pathOf(word: Word, cwd: string | undefined, home: string): string | undefined {
+/**
+ * Expands a word to a static path relative to `cwd`, or undefined when it depends on the shell at run time. The shell's `cd`
+ * reads `..` as text (`logical`); git and the file system follow symlinks first, so a path git is given is kept as written,
+ * `..` included, for the file system to resolve.
+ */
+function pathOf(word: Word, cwd: string | undefined, home: string, logical = false): string | undefined {
   if (word.dynamic || !word.text) return undefined;
   let text = word.text;
   if (!word.quoted && (text === '~' || text.startsWith('~/'))) text = join(home, text.slice(1));
   else if (text.startsWith('~')) return undefined;
-  if (isAbsolute(text)) return normalize(text);
-  return cwd ? resolve(cwd, text) : undefined;
+  if (isAbsolute(text)) return logical ? normalize(text) : text;
+  if (!cwd) return undefined;
+  return logical ? resolve(cwd, text) : `${cwd.replace(/\/+$/, '')}/${text}`;
 }
 
 const GIT_VALUE_OPTIONS = new Set(['-c', '--config-env', '--exec-path', '--namespace', '--super-prefix', '--attr-source']);
 const ADD_VALUE_OPTIONS = new Set(['-b', '-B', '--reason']);
 
 /** Words after which the folder depends on how the shell runs things (conditions, loops, functions, negation). */
-const CONTROL = new Set(['if', 'then', 'elif', 'else', 'fi', 'while', 'until', 'for', 'do', 'done', 'case', 'esac', 'select', 'function', 'time', 'builtin', '!', 'coproc']);
+const CONTROL = new Set(['if', 'then', 'elif', 'else', 'fi', 'while', 'until', 'for', 'do', 'done', 'case', 'esac', 'select', 'function', 'time', 'builtin', '!', 'coproc',
+  // Code run from a string or a file can go anywhere.
+  'eval', 'source', '.']);
 
 /**
  * The absolute paths of `git worktree add` commands in `command`, which starts in `cwd` (undefined when unknown).
@@ -114,6 +123,7 @@ const CONTROL = new Set(['if', 'then', 'elif', 'else', 'fi', 'while', 'until', '
 export function worktreeAddPaths(command: string, cwd: string | undefined, home: string): string[] {
   if (command.length > 200_000) return [];
   const tokens = tokenize(command);
+  if (!tokens) return [];
   const paths: string[] = [];
   let directory = cwd && isAbsolute(cwd) ? normalize(cwd) : undefined;
   let lost = false;
@@ -138,9 +148,10 @@ export function worktreeAddPaths(command: string, cwd: string | undefined, home:
     const first = position++ === 0;
     if (name.dynamic) { lost = true; return; }
     if (name.text === 'cd' || name.text === 'pushd' || name.text === 'popd') {
-      const target = all[index + 1];
+      const target = all.length === index + 2 ? all[index + 1] : undefined;
+      // Exactly one folder: zsh's `cd old new` and options change what it means.
       const plain = target && !target.dynamic && (isAbsolute(target.text) || /^\.\.?(?:\/|$)/.test(target.text) || (!target.quoted && /^~(?:\/|$)/.test(target.text)));
-      directory = !lost && first && !wrapped && name.text !== 'popd' && plain ? pathOf(target, directory, home) : undefined;
+      directory = !lost && first && !wrapped && name.text !== 'popd' && plain ? pathOf(target, directory, home, true) : undefined;
       moved = true;
       return;
     }

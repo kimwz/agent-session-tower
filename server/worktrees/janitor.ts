@@ -70,6 +70,7 @@ export class WorktreeJanitor {
   private removal?: Promise<void>;
   private paused = false;
   private closed = false;
+  private sealed = false;
   /** Per session and transcript revision: the folder names looked for, and those it refers to. */
   private readonly mentions = new Map<string, { searched: Set<string>; found: Set<string> }>();
   private readonly git: GitRunner;
@@ -103,6 +104,8 @@ export class WorktreeJanitor {
   async flush(): Promise<void> {
     if (this.removal) await this.removal.catch(() => {});
     else if (this.running) await Promise.race([this.running, new Promise(resolve => setTimeout(resolve, 5_000).unref?.())]);
+    // Once closed and flushed, the state file belongs to the next worker: a pass that was stuck writes nothing when it ends.
+    if (this.closed) this.sealed = true;
   }
 
   private schedule(ms: number): void {
@@ -216,14 +219,17 @@ export class WorktreeJanitor {
       const reserved = await Promise.all((await this.options.reserved?.() ?? []).map(folder => this.resolved(folder)));
       if (reserved.some(inside)) { keep('reserved'); return; }
       const now = await this.world();
-      if (this.stopping || !now.finishedRoots.has(entry.root)) return;
+      if (!now.finishedRoots.has(entry.root)) return;
       for (const session of now.open) {
         const cwd = session.cwd && await this.resolved(session.cwd);
         if (cwd && inside(cwd)) { keep('openSession', named(session)); return; }
       }
       const referrer = (await this.referrers(now.open, [name])).get(name);
-      if (this.stopping) return;
       if (referrer) { keep('openSession', named(referrer)); return; }
+      // The last look: nothing may have changed while transcripts were read. Between it and the removal nothing waits.
+      const last = await this.world();
+      const read = new Set(now.open.map(session => `${session.id}\0${session.updatedAt}\0${session.cwd}`));
+      if (this.stopping || !last.finishedRoots.has(entry.root) || last.open.some(session => !read.has(`${session.id}\0${session.updatedAt}\0${session.cwd}`))) return;
       this.removal = removeWorktree(this.git, worktree);
       try { await this.removal; } finally { this.removal = undefined; }
       Object.assign(entry, { state: 'removed', reason: undefined, detail: undefined, checkedAt: this.now() });
@@ -256,6 +262,9 @@ export class WorktreeJanitor {
   }
 
   private async save(sessions: Session[]): Promise<void> {
+    // Paused for a handoff, or closed and flushed: the state file may already belong to the next worker. What this pass
+    // learned is kept in memory for the next pass here, or found again by the next worker.
+    if (this.sealed || this.stopping) return;
     const present = new Set(sessions.map(session => session.id));
     for (const id of Object.keys(this.saved.scanned)) if (!present.has(id)) delete this.saved.scanned[id];
     const removed = Object.entries(this.saved.worktrees).filter(([, entry]) => entry.state === 'removed').sort(([, a], [, b]) => b.checkedAt - a.checkedAt);
