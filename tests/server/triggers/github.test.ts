@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
-import { checkGitHub, GitHubError, keyOf, type GitHubCursor, type GitHubFetch, type GitHubIssue, type GitHubResponse } from '../../../server/triggers/github.js';
+import { checkGitHub, GitHubError, keyOf, passed, type GitHubCursor, type GitHubFetch, type GitHubIssue, type GitHubResponse } from '../../../server/triggers/github.js';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
 import type { RunAdmission } from '../../../server/runs/manager.js';
 import type { CreateSessionRequest, Run } from '../../../shared/types.js';
@@ -55,7 +55,7 @@ function fakeGitHub(data: { repos: Record<string, Issue[]>; assigned: Issue[]; l
 
 const issues = (values: Record<string, unknown> = {}) => GitHubSourceSchema.shape.watch.parse({ type: 'issues', repos: ['octo/app'], ...values }) as IssueWatch;
 /** The issues a check offers: matching, and not taken or noted before. */
-const fresh = (result: { issues: GitHubIssue[]; cursor: GitHubCursor }) => result.issues.filter(issue => !(result.cursor.handled ?? []).includes(keyOf(issue))).map(issue => issue.number);
+const fresh = (result: { issues: GitHubIssue[]; cursor: GitHubCursor }, watch = issues()) => { const over = passed(watch, result.cursor); return result.issues.filter(issue => !over.has(keyOf(issue))).map(issue => issue.number); };
 
 test('an issue watch starting from now notes what is there, then offers issues that appear or come to match', async () => {
   const data = { repos: { 'octo/app': [{ number: 1 }, { number: 2, pr: true }] as Issue[] }, assigned: [] };
@@ -65,22 +65,27 @@ test('an issue watch starting from now notes what is there, then offers issues t
     start: 'new', order: 'oldest', concurrency: 1, assign: false, close: false });
   const baseline = await checkGitHub(watch, {}, github.fetch(), 'me', 1);
   assert.deepEqual(fresh(baseline), [], 'what is there at the first check is only noted');
-  assert.deepEqual(baseline.cursor.handled, ['octo/app#1']);
+  assert.deepEqual([baseline.cursor.handled, baseline.cursor.skipped], [[], ['octo/app#1']], 'noted as left alone, not as taken');
   data.repos['octo/app'].push({ number: 3, title: 'Crash on start' }, { number: 4, pr: true }, { number: 5, state: 'closed' }, { number: 6, association: 'NONE' }, { number: 7, association: 'OWNER' });
   const next = await checkGitHub(watch, baseline.cursor, github.fetch(), 'me', 2);
   assert.deepEqual(fresh(next), [3, 7], 'pull requests, closed issues and outsiders are left out');
   assert.equal(next.issues.find(issue => issue.number === 3)?.title, 'Crash on start');
   // An old issue that comes to match later (here: a label to include is added) is offered then.
   const ready = issues({ labels: ['Ready'], start: 'existing' });
-  assert.deepEqual(fresh(await checkGitHub(ready, next.cursor, github.fetch(), 'me', 3)), []);
+  assert.deepEqual(fresh(await checkGitHub(ready, next.cursor, github.fetch(), 'me', 3), ready), []);
   data.repos['octo/app'][0].labels = ['ready'];
-  assert.deepEqual(fresh(await checkGitHub(ready, {}, github.fetch(), 'me', 4)), [1]);
+  assert.deepEqual(fresh(await checkGitHub(ready, next.cursor, github.fetch(), 'me', 4), ready), [1], 'an issue left alone at the start is taken once the watch also takes open ones');
   // Existing issues count from the start when asked, and anyone's when the author scope is any.
-  assert.deepEqual(fresh(await checkGitHub(issues({ start: 'existing', authorAssociation: 'any' }), {}, github.fetch(), 'me', 5)), [1, 3, 6, 7]);
+  const all = issues({ start: 'existing', authorAssociation: 'any' });
+  assert.deepEqual(fresh(await checkGitHub(all, {}, github.fetch(), 'me', 5), all), [1, 3, 6, 7]);
   // Issues closed since are forgotten, so one reopened is offered again.
   data.repos['octo/app'][0].state = 'closed';
   const closed = await checkGitHub(watch, next.cursor, github.fetch(), 'me', 6);
-  assert.ok(!closed.cursor.handled?.includes('octo/app#1'));
+  assert.ok(!closed.cursor.skipped?.includes('octo/app#1'));
+  // Opened in the same second a check started, without milliseconds as GitHub writes it: still before it.
+  const edge = { handled: [], skipped: [], matched: [], checkedAt: 7, baseline: { before: '2026-09-20T00:10:00.000Z' } };
+  data.repos['octo/app'].push({ number: 20, at: '2026-09-20T00:10:00Z' }, { number: 21, at: '2026-09-20T00:09:59Z' });
+  assert.deepEqual(fresh(await checkGitHub(watch, edge, github.fetch(), 'me', 8)).filter(number => number >= 20), [20]);
 });
 
 test('order, labels to include or skip and the assignee are judged on everything GitHub says about an issue', async () => {
@@ -106,10 +111,10 @@ test('without repositories, issues assigned to me come from every repository, an
   assert.throws(() => issues({ repos: [] }), /Name the repositories/);
   const watch = issues({ repos: [], assignee: 'me', authorAssociation: 'any' });
   const baseline = await checkGitHub(watch, {}, github.fetch(), 'me', 1);
-  assert.deepEqual(baseline.cursor.handled, ['octo/app#1']);
+  assert.deepEqual(baseline.cursor.skipped, ['octo/app#1']);
   data.assigned.push({ number: 3, repo: 'octo/app', assignees: ['me'] }, { number: 4, repo: 'octo/lib', pr: true, assignees: ['me'] });
   const next = await checkGitHub(watch, baseline.cursor, github.fetch(), 'me', 2);
-  assert.deepEqual(fresh(next), [3]);
+  assert.deepEqual(fresh(next, watch), [3]);
   // Taken, then unassigned: still open, so it stays remembered, and assigning it again does not run it again.
   const taken = { ...next.cursor, handled: [...next.cursor.handled!, 'octo/app#3'] };
   const moved = data.assigned.splice(2, 1)[0];
@@ -117,11 +122,13 @@ test('without repositories, issues assigned to me come from every repository, an
   const unassigned = await checkGitHub(watch, taken, github.fetch(), 'me', 3);
   assert.ok(unassigned.cursor.handled?.includes('octo/app#3'));
   data.assigned.push(moved);
-  assert.deepEqual(fresh(await checkGitHub(watch, unassigned.cursor, github.fetch(), 'me', 4)), []);
-  // Once it is closed, a check finds out and forgets it.
+  assert.deepEqual(fresh(await checkGitHub(watch, unassigned.cursor, github.fetch(), 'me', 4), watch), []);
+  // Once it is closed, a check finds out and forgets it; lookups happen at most once an hour.
   data.assigned.pop();
   data.repos['octo/app'][0].state = 'closed';
-  assert.ok(!(await checkGitHub(watch, unassigned.cursor, github.fetch(), 'me', 5)).cursor.handled?.includes('octo/app#3'));
+  const soon = await checkGitHub(watch, unassigned.cursor, github.fetch(), 'me', 3 + 60_000);
+  assert.ok(soon.cursor.handled?.includes('octo/app#3'), 'not looked up again within the hour');
+  assert.ok(!(await checkGitHub(watch, unassigned.cursor, github.fetch(), 'me', 3 + 3_600_000)).cursor.handled?.includes('octo/app#3'));
   const pulls = issues({ repos: [], assignee: 'me', authorAssociation: 'any', includePullRequests: true, start: 'existing' });
   assert.deepEqual((await checkGitHub(pulls, {}, github.fetch(), 'me')).issues.map(issue => issue.number), [1, 2, 4], 'pull requests count when asked');
 });
@@ -257,7 +264,7 @@ test('checking now finds new issues at once, and says so when there are none', a
   const data = { repos: { 'octo/app': [{ number: 1 }] as Issue[] }, assigned: [] };
   const f = await fixture(t, fakeGitHub(data));
   const trigger = await f.service.create(watcher(f.project), OWNER);
-  await assert.rejects(f.service.run(trigger.id, OWNER), /nothing new/);
+  await assert.rejects(f.service.run(trigger.id, OWNER), /noted the issues already open/);
   data.repos['octo/app'].push({ number: 2 });
   const event = await f.service.run(trigger.id, OWNER);
   assert.equal(event.kind, 'manual');
@@ -278,7 +285,7 @@ test('a changed gh login is checked again before anything is read, and GitHub ra
   await service.start();
   t.after(async () => { service.close(); await service.settle(); await rm(directory, { recursive: true, force: true }); });
   const trigger = await service.create(watcher(project), OWNER);
-  await assert.rejects(service.run(trigger.id, OWNER), /nothing new/);
+  await assert.rejects(service.run(trigger.id, OWNER), /noted the issues already open/);
   // The gh login changes to another account: the next check notices before reading issues.
   token = 'gho_second'; data.login = 'other';
   (service as unknown as { ghToken?: unknown }).ghToken = undefined;
@@ -315,7 +322,7 @@ test('an edit keeps what was taken: issues opened meanwhile still run, and those
   const data = { repos: { 'octo/app': [{ number: 1 }] as Issue[], 'octo/lib': [{ number: 1 }] as Issue[] }, assigned: [] };
   const f = await fixture(t, fakeGitHub(data));
   const trigger = await f.service.create(watcher(f.project), OWNER);
-  await assert.rejects(f.service.run(trigger.id, OWNER), /nothing new/);
+  await assert.rejects(f.service.run(trigger.id, OWNER), /noted the issues already open/);
   f.clock.now += 60_000;
   data.repos['octo/app'].push({ number: 2, title: 'Opened before the edit', at: new Date(f.clock.now).toISOString() });
   data.repos['octo/lib'].push({ number: 2, title: 'Waiting in lib since before', at: '2026-09-21T00:00:00Z' });

@@ -1,7 +1,7 @@
 import { useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, KeyRound, Plus, Trash2 } from 'lucide-react';
 import type { ProviderHealth, Session } from '../../../shared/types';
-import { GITHUB_API, type CoordinatorRule, type GitHubCheck, type IssuePreview, type IssuePreviewItem, type HttpCondition, type HttpTestResult, type Trigger, type TriggerInput, type TriggerSecret } from '../../../shared/triggers';
+import { GITHUB_API, type CoordinatorRule, type GitHubCheck, type IssuePreview, type IssuePreviewItem, type IssueWatch, type HttpCondition, type HttpTestResult, type Trigger, type TriggerInput, type TriggerSecret } from '../../../shared/triggers';
 import { EffortPicker, ModelPicker } from '../chat/ModelPicker';
 import { absoluteTime, sessionTitle } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
@@ -250,7 +250,7 @@ function GitHubFields({ token, source, onChange, onAccount, triggerId, handlerKi
     <label>{t('저장소')}<textarea rows={2} required={watch.type === 'issues' && watch.assignee !== 'me'} placeholder="owner/name" value={repos} onChange={event => { setRepos(event.target.value); const names = list(event.target.value);
       setWatch(watch.type === 'issues' ? { ...watch, repos: names } : { ...watch, ...(names.length ? { repos: names } : { repos: undefined }) }); }} />
       <small>{watch.type === 'issues' ? t('한 줄에 하나씩 owner/name. 담당자를 나로 고르면 비워서 모든 저장소를 볼 수 있습니다.') : t('비우면 모든 저장소. 한 줄에 하나씩 owner/name.')}</small></label>
-    {watch.type === 'issues' && <IssueOptions watch={watch} handlerKind={handlerKind} onChange={setWatch} />}
+    {watch.type === 'issues' && <IssueOptions key={triggerId ?? 'new'} watch={watch} handlerKind={handlerKind} onChange={setWatch} />}
     {watch.type === 'review-requested' && <p className="trigger-note">{t('리뷰어로 지정되거나 Draft가 Ready for review로 바뀌면 실행하고, 리뷰를 남긴 뒤 다시 요청받으면 또 실행합니다. 처음 확인할 때 이미 요청된 PR로는 실행하지 않습니다.')}</p>}
     <div className="trigger-account">
       {/* The sign-in is checked on the computer that uses it, so on another computer it stays as it is. */}
@@ -268,7 +268,6 @@ function GitHubFields({ token, source, onChange, onAccount, triggerId, handlerKi
   </>;
 }
 
-type IssueWatch = Extract<GitHubSource['watch'], { type: 'issues' }>;
 /** Which open issues count, from when, in what order, how many at once, and what Tower does to each. */
 function IssueOptions({ watch, handlerKind, onChange }: { watch: IssueWatch; handlerKind: TriggerInput['handler']['kind']; onChange: (watch: IssueWatch) => void }) {
   const { t } = useI18n();
@@ -304,6 +303,7 @@ function IssuePreviewPanel({ token, source, triggerId }: { token: string; source
   // A preview of other options is not left on screen as if it were this one's.
   const shape = JSON.stringify([source.watch, source.auth, source.account]);
   useEffect(() => { asked.current++; setPreview(''); setLoading(false); }, [shape]);
+  const ready = Boolean(source.account) && source.watch.type === 'issues' && (source.watch.repos.length > 0 || source.watch.assignee === 'me');
   const load = async () => {
     const mine = ++asked.current;
     setLoading(true);
@@ -314,8 +314,8 @@ function IssuePreviewPanel({ token, source, triggerId }: { token: string; source
     finally { if (mine === asked.current) setLoading(false); }
   };
   return <div className="trigger-issue-preview">
-    <button type="button" className="secondary-button" disabled={loading || !source.account} onClick={() => void load()}>{loading ? t('불러오는 중') : t('처리 순서 미리보기')}</button>
-    {!source.account && <small>{t('연결을 확인하면 미리 볼 수 있습니다.')}</small>}
+    <button type="button" className="secondary-button" disabled={loading || !ready} onClick={() => void load()}>{loading ? t('불러오는 중') : t('처리 순서 미리보기')}</button>
+    {!source.account ? <small>{t('연결을 확인하면 미리 볼 수 있습니다.')}</small> : !ready && <small>{t('저장소를 적거나 담당자를 나로 고르면 미리 볼 수 있습니다.')}</small>}
     {typeof preview === 'string' ? preview && <p className="slack-error">{translateMessage(preview)}</p> : <>
       <p className="trigger-note">{t('열린 이슈 {0}개 · 처리 예정 {1} · 처리 중 {2} · 처리함 {3} · 건너뜀 {4}', { 0: preview.total, 1: preview.counts.next, 2: preview.counts.working, 3: preview.counts.taken, 4: preview.counts.existing })}</p>
       {preview.issues.length ? <ol className="trigger-issue-list">{preview.issues.map(issue => <li key={`${issue.repository}#${issue.number}`} className={issue.status}>
@@ -357,7 +357,7 @@ function AdvancedSettings({ input, onChange }: { input: TriggerInput; onChange: 
       {/* Keyed by the kind of watch, so what the fields show always matches what is saved. */}
       {watch?.type === 'issues' && <>
         <IssueFilters watch={watch} onChange={setWatch} />
-        {watch.assignee === 'me' && <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.includePullRequests} onChange={event => setWatch({ ...watch, includePullRequests: event.target.checked })} />{t('풀 리퀘스트도 포함')}</label>}
+        <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.includePullRequests} onChange={event => setWatch({ ...watch, includePullRequests: event.target.checked })} />{t('풀 리퀘스트도 포함')}</label>
       </>}
       {watch?.type === 'review-requested' && <>
         <label className="wide">{t('리뷰 판정')}<select value={watch.verdicts} onChange={event => setWatch({ ...watch, verdicts: event.target.value as 'comment' | 'any' })}>

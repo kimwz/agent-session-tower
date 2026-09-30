@@ -51,7 +51,7 @@ test('a new GitHub trigger from the panel needs repositories and a checked accou
   const parsed = TriggerInputSchema.parse(ready);
   assert.equal(parsed.source.kind === 'github' && parsed.source.watch.type === 'issues' && JSON.stringify(parsed.source.watch.authorAssociation), '["OWNER","MEMBER","COLLABORATOR"]');
   setLanguage('en');
-  assert.equal(scheduleLabel(parsed, (key, values) => translate(key, values)), 'GitHub · Issues · New issues · Oldest first · octo/app +1 · Every 5 min');
+  assert.equal(scheduleLabel(parsed, (key, values) => translate(key, values)), 'GitHub · Issues · From now · Oldest first · octo/app +1 · Every 5 min');
 });
 
 test('a GitHub coordinator trigger from the panel carries its rules and approval choice', () => {

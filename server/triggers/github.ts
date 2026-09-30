@@ -1,4 +1,4 @@
-import type { GitHubWatch } from '../../shared/triggers.js';
+import type { GitHubWatch, IssueWatch } from '../../shared/triggers.js';
 
 /** One GitHub API answer, reduced to what checking needs. */
 export interface GitHubResponse { status: number; body: unknown; etag?: string; truncated?: boolean; remaining?: number; reset?: number }
@@ -26,8 +26,10 @@ export interface GitHubIssue {
 export interface GitHubCursor {
   /** Pull requests asking for a review at the last complete check, as `owner/name#number`. */
   reviews?: string[];
-  /** Issues taken, or already there when an issue watch started from now, as `owner/name#number`; kept while open. */
+  /** Issues taken, as `owner/name#number`; kept while they are open, whatever the filters say later. */
   handled?: string[];
+  /** Issues left alone because they were already there when a watch starting from now began; kept while open. */
+  skipped?: string[];
   /** Issues that matched at the last check, taken or waiting for a place. */
   matched?: string[];
   /** When the last complete check finished. */
@@ -38,8 +40,8 @@ export interface GitHubCursor {
    * watch). The very first check of a watch that starts from now notes all of them.
    */
   baseline?: { before?: string; watermarks?: Record<string, number> };
-  /** Where the no-repository mode goes on checking whether remembered issues closed. */
-  verifyFrom?: number;
+  /** When remembered issues missing from the assigned list were last looked up. */
+  verifiedAt?: number;
 }
 
 /** A failed check. `retryAt` is when GitHub's rate limit allows the next one. */
@@ -52,6 +54,7 @@ const OPEN_PAGES = 10;
 const MAX_OPEN = 5000;
 /** Remembered issues missing from the assigned list whose state one check looks up. */
 const VERIFY_PER_CHECK = 30;
+const VERIFY_EVERY_MS = 60 * 60_000;
 const SEARCH_PAGE = 100;
 /** GitHub's search never returns more than this many results. */
 const SEARCH_MAX = 1000;
@@ -110,7 +113,6 @@ export async function checkGitHub(watch: GitHubWatch, previous: GitHubCursor, fe
   return watch.type === 'review-requested' ? checkReviews(watch, previous, fetch) : checkIssues(watch, previous, fetch, account, now);
 }
 
-type IssueWatch = Extract<GitHubWatch, { type: 'issues' }>;
 
 /** Whether an open issue passes the watch's filters, judged on everything GitHub said about it, before any shortening. */
 export function wanted(watch: IssueWatch, item: Item, account: string): boolean {
@@ -172,9 +174,14 @@ export function noted(watch: IssueWatch, previous: GitHubCursor, issues: GitHubI
   const matched = new Set(previous.matched ?? []);
   return issues.filter(issue => {
     if (baseline.watermarks) { const mark = baseline.watermarks[issue.repository.toLowerCase()]; return mark === undefined || issue.number <= mark; }
-    if (baseline.before) return !matched.has(keyOf(issue)) && issue.createdAt < baseline.before;
+    if (baseline.before) return !matched.has(keyOf(issue)) && Date.parse(issue.createdAt) < Date.parse(baseline.before);
     return true;
   }).map(keyOf);
+}
+
+/** The issues a watch passes over: those it took, and, while it starts from now, those it left alone. */
+export function passed(watch: IssueWatch, cursor: GitHubCursor): Set<string> {
+  return new Set([...cursor.handled ?? [], ...watch.start === 'new' ? cursor.skipped ?? [] : []]);
 }
 
 /**
@@ -184,29 +191,36 @@ export function noted(watch: IssueWatch, previous: GitHubCursor, issues: GitHubI
 async function checkIssues(watch: IssueWatch, previous: GitHubCursor, fetch: GitHubFetch, account: string, now: number): Promise<{ issues: GitHubIssue[]; cursor: GitHubCursor }> {
   const read = await readIssues(watch, fetch, account);
   let handled = previous.handled ?? [];
-  let verifyFrom = previous.verifyFrom ?? 0;
-  if (read.complete) handled = handled.filter(key => read.open.has(key));
+  let skipped = previous.skipped ?? [];
+  let verifiedAt = previous.verifiedAt;
+  if (read.complete) { handled = handled.filter(key => read.open.has(key)); skipped = skipped.filter(key => read.open.has(key)); }
   else {
     // The assigned list is not every open issue: a remembered issue missing from it is forgotten only once it is
-    // known to be closed or gone, a few per check.
-    const missing = handled.filter(key => !read.open.has(key));
-    const start = missing.length ? verifyFrom % missing.length : 0;
+    // known to be closed or gone. A few are looked up at most once an hour, so the shared request budget is not used
+    // up; those still open go to the back of the line.
+    const due = previous.verifiedAt === undefined || now - previous.verifiedAt >= VERIFY_EVERY_MS;
+    const missing = due ? [...handled, ...skipped].filter(key => !read.open.has(key)).slice(0, VERIFY_PER_CHECK) : [];
+    if (missing.length) verifiedAt = now;
     const closed = new Set<string>();
-    for (const key of [...missing.slice(start), ...missing.slice(0, start)].slice(0, VERIFY_PER_CHECK)) {
+    for (const key of missing) {
       const [, repo, number] = /^(.+)#(\d+)$/.exec(key) ?? [];
       if (!repo) { closed.add(key); continue; }
       const response = await fetch(`/repos/${repo}/issues/${number}`);
       refused(response);
-      const gone = response.status === 404 || response.status === 410;
+      // Not found, gone, or no longer visible to the account (a rate limit was already refused above).
+      const gone = [403, 404, 410, 451].includes(response.status);
       if (!gone && (response.status < 200 || response.status > 299)) throw new GitHubError(`GitHub answered HTTP ${response.status} for ${repo}#${number}.`);
       if (gone || (record(response.body) && response.body.state !== 'open')) closed.add(key);
     }
-    handled = handled.filter(key => !closed.has(key));
-    verifyFrom = start + Math.min(VERIFY_PER_CHECK, missing.length) - closed.size;
+    const open = new Set(missing.filter(key => !closed.has(key)));
+    const requeue = (list: string[]) => [...list.filter(key => !closed.has(key) && !open.has(key)), ...list.filter(key => open.has(key))];
+    handled = requeue(handled);
+    skipped = requeue(skipped);
   }
-  handled = [...new Set([...handled, ...noted(watch, previous, read.issues)])];
-  if (handled.length > MAX_OPEN) throw new GitHubError(`More than ${MAX_OPEN} issues are remembered for this trigger; narrow it to some repositories.`);
-  return { issues: read.issues, cursor: { handled, matched: read.issues.map(keyOf), checkedAt: now, ...(read.complete ? {} : { verifyFrom }) } };
+  const taken = new Set(handled);
+  skipped = [...new Set([...skipped, ...noted(watch, previous, read.issues).filter(key => !taken.has(key))])];
+  if (handled.length + skipped.length > MAX_OPEN) throw new GitHubError(`More than ${MAX_OPEN} issues are remembered for this trigger; narrow it to some repositories.`);
+  return { issues: read.issues, cursor: { handled, skipped, matched: read.issues.map(keyOf), checkedAt: now, ...(verifiedAt !== undefined && !read.complete ? { verifiedAt } : {}) } };
 }
 
 /**

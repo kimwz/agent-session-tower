@@ -96,7 +96,7 @@ test('a new issue opens one coordinator conversation that reads the issue and co
   const f = await fixture(t);
   await assert.rejects(f.service.create({ ...coordinatorTrigger(), source: { kind: 'schedule', schedule: { type: 'interval', everySeconds: 60 }, catchUp: 'latest' } }, OWNER), /available for GitHub triggers/);
   const trigger = await f.service.create(coordinatorTrigger(), OWNER);
-  await assert.rejects(f.service.run(trigger.id, OWNER), /nothing new/);
+  await assert.rejects(f.service.run(trigger.id, OWNER), /noted the issues already open/);
   f.issues.push({ number: 2 });
   const event = await f.service.run(trigger.id, OWNER);
   await f.settle();
@@ -130,7 +130,7 @@ test('a new issue opens one coordinator conversation that reads the issue and co
 test('a comment is posted only after the owner approves it, once, and an uncertain post is never repeated', async t => {
   const f = await fixture(t);
   const trigger = await f.service.create(coordinatorTrigger(), OWNER);
-  await assert.rejects(f.service.run(trigger.id, OWNER), /nothing new/);
+  await assert.rejects(f.service.run(trigger.id, OWNER), /noted the issues already open/);
   f.issues.push({ number: 2 });
   await f.service.run(trigger.id, OWNER);
   await f.settle();
@@ -152,7 +152,7 @@ test('a comment is posted only after the owner approves it, once, and an uncerta
 test('a comment whose post may have arrived is marked uncertain and not sent again', async t => {
   const f = await fixture(t, { postFails: true });
   const trigger = await f.service.create(coordinatorTrigger(), OWNER);
-  await assert.rejects(f.service.run(trigger.id, OWNER), /nothing new/);
+  await assert.rejects(f.service.run(trigger.id, OWNER), /noted the issues already open/);
   f.issues.push({ number: 2 });
   await f.service.run(trigger.id, OWNER);
   await f.settle();
@@ -167,7 +167,7 @@ test('a comment whose post may have arrived is marked uncertain and not sent aga
 test('nothing is posted when GitHub now acts as another account', async t => {
   const f = await fixture(t);
   const trigger = await f.service.create(coordinatorTrigger(), OWNER);
-  await assert.rejects(f.service.run(trigger.id, OWNER), /nothing new/);
+  await assert.rejects(f.service.run(trigger.id, OWNER), /noted the issues already open/);
   f.issues.push({ number: 2 });
   await f.service.run(trigger.id, OWNER);
   await f.settle();
@@ -209,7 +209,7 @@ test('only the owner can turn on automatic replies; an agent can keep them uncha
 test('with owner approvals, delegated work waits for the owner, fixed when the conversation began', async t => {
   const f = await fixture(t);
   const trigger = await f.service.create(coordinatorTrigger({ handler: { kind: 'coordinator', rules: [rule], approvals: 'owner' } }), OWNER);
-  await assert.rejects(f.service.run(trigger.id, OWNER), /nothing new/);
+  await assert.rejects(f.service.run(trigger.id, OWNER), /noted the issues already open/);
   f.issues.push({ number: 2 });
   await f.service.run(trigger.id, OWNER);
   await f.settle();
@@ -228,7 +228,7 @@ test('with owner approvals, delegated work waits for the owner, fixed when the c
 test('a comment refused before it leaves (rate limit) can be approved again', async t => {
   const f = await fixture(t);
   const trigger = await f.service.create(coordinatorTrigger(), OWNER);
-  await assert.rejects(f.service.run(trigger.id, OWNER), /nothing new/);
+  await assert.rejects(f.service.run(trigger.id, OWNER), /noted the issues already open/);
   f.issues.push({ number: 2 });
   await f.service.run(trigger.id, OWNER);
   await f.settle();

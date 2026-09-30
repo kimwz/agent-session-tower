@@ -16,12 +16,16 @@ format, and saved browser preferences are the compatibility surface.
 - Each issue is worked on once while it stays open; it is remembered even if it is unassigned or a label changes, and taken again only after it is closed and reopened (it used to run again when it was assigned again). Editing what a trigger covers keeps what it took and what was waiting for its turn; with **시작점** set to from now, issues that newly match but were opened before the last check are left alone.
 - Saved triggers move to the new kind by themselves and take nothing they had already seen: new-issue triggers start from now (as many at once as their overlapping runs used to), open-issue queues keep going, and assigned-to-me triggers keep the issues already assigned.
 - The overlap setting is no longer shown for issue triggers; how many issues run at once is the concurrency option. At the hourly maximum an issue trigger waits instead of pausing.
+- Switching **시작점** to also take open issues takes the ones a from-now trigger had left alone; switching back to from now leaves the rest of the backlog and takes only issues that appear afterwards.
+- Each check reads the watched repositories' whole open lists (up to 1,000 open issues and pull requests per repository), within the shared budget of 60 trigger requests a minute. Without repositories, issues that left your assigned list are looked up at most once an hour to learn whether they closed.
+- While the worker is still on 1.86 after the update, saving an issue trigger or its preview fails until the worker switches; a 1.86 page, controller or agent that sends the earlier kinds is refused by 1.87. Going back to 1.86 cannot read the saved triggers (it sets the file aside); keep a copy of `trigger-engine.json` before downgrading.
 
 ### Added
 - **처리 순서 미리보기** in the issue trigger editor lists the open issues the chosen options would work on, in order, marking each as up next (numbered), in progress, done before, or skipped because it was already there. It reads GitHub only; nothing is recorded or run. Agents can ask for the same list (`triggers_previewIssues`).
 
 ### Fixed
 - Checkboxes in the trigger editor sit beside their text again instead of above it.
+- The pull request option applies to every issue trigger and is always shown, so a hidden setting never changes what runs.
 
 ## [1.86.0] - 2026-09-30
 

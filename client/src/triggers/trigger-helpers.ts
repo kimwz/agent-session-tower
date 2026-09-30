@@ -1,5 +1,5 @@
 import { createContext } from 'react';
-import type { Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOverview } from '../../../shared/triggers';
+import type { IssueWatch, Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOverview } from '../../../shared/triggers';
 import { isOperationName, OPERATIONS } from '../../../shared/api/operations';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { authPost } from '../auth/AuthGate';
@@ -93,7 +93,6 @@ export function blankGitHubSource(schedule: Source['schedule'] = { type: 'interv
   return { kind: 'github', schedule, auth: { type: 'gh' }, account: '', watch: blankIssueWatch([]) };
 }
 type Watch = GitHubSource['watch'];
-type IssueWatch = Extract<Watch, { type: 'issues' }>;
 /** A new issue watch: issues that appear from now, oldest first, one at a time, leaving the issue itself alone. */
 export function blankIssueWatch(repos: string[]): IssueWatch {
   return { type: 'issues', repos, assignee: 'any', authorAssociation: [...MEMBERS], includePullRequests: false, start: 'new', order: 'oldest', concurrency: 1, assign: false, close: false };
@@ -109,7 +108,8 @@ export function switchedWatch(kept: Partial<Record<Watch['type'], Watch>>, type:
 /** An issue watch in a few words: whose issues, from when, in what order. */
 export function issueWatchLabel(watch: IssueWatch, t: Translate): string {
   const parts = [watch.assignee === 'me' ? t('나에게 할당된 이슈') : watch.assignee === 'none' ? t('담당자 없는 이슈') : t('이슈'),
-    watch.start === 'existing' ? t('열린 이슈 포함') : t('새 이슈'), watch.order === 'newest' ? t('최신 순') : t('오래된 순')];
+    watch.start === 'existing' ? t('열린 이슈 포함') : t('지금부터'), watch.order === 'newest' ? t('최신 순') : t('오래된 순')];
+  if (watch.labels?.length) parts.push(t('{0}만', { 0: watch.labels.join(', ') }));
   if (watch.excludeLabels?.length) parts.push(t('{0} 제외', { 0: watch.excludeLabels.join(', ') }));
   return parts.join(' · ');
 }

@@ -14,7 +14,7 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { CATCH_UP_WINDOW_MS, LATE_AFTER_MS, latestSlot, nextSlot, previewSlots, validateSchedule } from './schedule.js';
 import { evaluate, performHttp, type ConditionState, type HttpOutcome } from './http.js';
 import { SecretStore, type StoredSecret } from './secrets.js';
-import { checkGitHub, GitHubError, keyOf, noted, readIssues, refused, type GitHubCursor, type GitHubFetch, type GitHubIssue, type GitHubResponse } from './github.js';
+import { checkGitHub, GitHubError, keyOf, noted, passed, readIssues, refused, type GitHubCursor, type GitHubFetch, type GitHubIssue, type GitHubResponse } from './github.js';
 import { findExecutable } from '../providers/discovery.js';
 import { execFile } from 'node:child_process';
 
@@ -483,14 +483,22 @@ export class TriggerService extends EventEmitter {
       const unlock = this.lock(id);
       if (!unlock) throw failure('This trigger is checking GitHub right now. Try again in a moment.', 409);
       let fired: TriggerEvent[];
+      const first = this.state.cursors[id]?.github?.checkedAt === undefined;
       try {
         await this.commit(state => { const position = state.cursors[id]; if (position) position.polling = { slot: this.now(), revision: trigger.revision, method: 'GET' }; }, 'settle');
         fired = await this.pollGitHub(trigger, this.now(), actor);
       } finally { unlock(); }
       const problem = this.state.cursors[id]?.lastError;
-      const full = trigger.source.watch.type === 'issues' && this.unfinished(id) >= trigger.source.watch.concurrency;
+      const watch = trigger.source.watch;
+      const full = watch.type === 'issues' && this.unfinished(id) >= watch.concurrency;
+      const hour = this.now() - 60 * 60 * 1000;
+      const limited = watch.type === 'issues' && this.state.recentFires.filter(item => item.triggerId === id && item.at > hour).length >= trigger.policy.maxEventsPerHour;
+      const noted = watch.type === 'issues' && watch.start === 'new' && first && !problem;
       if (!fired.length) throw failure(full ? 'Every place of this trigger is taken; the next issue is taken when a run ends.'
-        : problem ? `GitHub could not be checked: ${problem}` : 'Checked GitHub: nothing new since the last check.', problem && !full ? 502 : 409);
+        : problem ? `GitHub could not be checked: ${problem}`
+        : limited ? 'This trigger reached its runs for this hour; the next issue is taken when the hour allows.'
+        : noted ? 'Checked GitHub and noted the issues already open; issues that appear from now on will run.'
+        : 'Checked GitHub: nothing new since the last check.', problem && !full ? 502 : 409);
       void this.tick().catch(() => {});
       return structuredClone(fired[0]);
     }
@@ -728,6 +736,7 @@ export class TriggerService extends EventEmitter {
       if (source.watch.type === 'issues') {
         const watch = source.watch;
         const handled = new Set(result.cursor.handled ?? []);
+        const passedOver = passed(watch, result.cursor);
         // An issue still being worked on is never taken twice, even after the remembered list was reset.
         const working = new Set(state.events.filter(item => item.triggerId === current.id && UNFINISHED.has(item.status)).flatMap(item => { const ref = issueRef(item); return ref ? [keyOf(ref)] : []; }));
         const now = this.now();
@@ -738,7 +747,7 @@ export class TriggerService extends EventEmitter {
         for (const issue of result.issues) {
           if (room <= 0) break;
           const key = keyOf(issue);
-          if (handled.has(key) || working.has(key)) continue;
+          if (passedOver.has(key) || working.has(key)) continue;
           const dedup = `issue:${issue.repository}#${issue.number}:${slot}`;
           const event = this.fire(state, current, manual ? `manual:${randomUUID()}:${dedup}` : dedup, slot, manual ? 'manual' : 'github', manual, watch.concurrency > 1 ? 'parallel' : 'skip');
           if (!event) break;
@@ -879,13 +888,11 @@ export class TriggerService extends EventEmitter {
       if (login.toLowerCase() !== source.account.toLowerCase()) throw new GitHubError(`GitHub is signed in as ${login}, not ${source.account}.`);
       read = await readIssues(watch, fetch, source.account);
     } catch (error) { throw failure(error instanceof Error ? error.message : String(error), 502); }
-    // What the saved trigger remembers counts only while it watches with the same connection; an edit is judged as saving it would.
-    const cursor = saved && saved.source.kind === 'github' && saved.source.watch.type === 'issues' && saved.enabled
-      && JSON.stringify(saved.source.auth) === JSON.stringify(source.auth) && saved.source.account.toLowerCase() === source.account.toLowerCase()
-      ? keptGitHub(saved, { ...saved, source }, this.state.cursors[saved.id]) ?? {} : {};
+    // What the saved trigger remembers counts while it is on; an edit is judged as saving it would.
+    const cursor = saved?.enabled ? keptGitHub(saved, { ...saved, source }, this.state.cursors[saved.id]) ?? {} : {};
     const working = new Set(saved ? this.state.events.filter(event => event.triggerId === saved.id && UNFINISHED.has(event.status)).flatMap(event => { const ref = issueRef(event); return ref ? [keyOf(ref)] : []; }) : []);
     const handled = new Set(cursor.handled ?? []);
-    const left = new Set(noted(watch, cursor, read.issues));
+    const left = new Set([...watch.start === 'new' ? cursor.skipped ?? [] : [], ...noted(watch, cursor, read.issues)]);
     let position = 0;
     const issues: IssuePreviewItem[] = read.issues.map(issue => {
       const key = keyOf(issue);
@@ -1550,7 +1557,10 @@ function keptGitHub(before: Trigger, after: Trigger, cursor: Cursor | undefined)
     const scope = ({ repos, assignee, labels, excludeLabels, authors, authorAssociation, includePullRequests, start }: typeof a.watch) =>
       JSON.stringify([repos, assignee, labels, excludeLabels, authors, authorAssociation, includePullRequests, start]);
     const kept = cursor.github;
-    if (scope(a.watch) === scope(b.watch) || b.watch.start !== 'new' || kept.checkedAt === undefined) return kept;
+    // A baseline not yet taken (after moving from an earlier kind, or an earlier edit) stays: it is already the earlier one.
+    if (scope(a.watch) === scope(b.watch) || b.watch.start !== 'new' || kept.checkedAt === undefined || kept.baseline) return kept;
+    // Switched to start from now: the backlog it was working through is left alone too.
+    if (a.watch.start !== 'new') return { ...kept, baseline: {} };
     return { ...kept, baseline: { before: new Date(kept.checkedAt).toISOString() } };
   }
   // What a review may decide does not change which requests are seen.

@@ -346,3 +346,33 @@ test('the preview lists the issues in order with where each stands, and records 
   assert.equal(f.service.events().length, events, 'no run starts');
   await assert.rejects(f.service.previewIssues(source, 'missing', OWNER), /not found/);
 });
+
+test('switching the starting point: to open issues takes those left alone, back to from now leaves the backlog', async t => {
+  const repos = { 'octo/app': [{ number: 1 }, { number: 2 }, { number: 3 }] as Issue[] };
+  const f = await fixture(t, fakeGitHub(repos));
+  const fromNow = queue(f.project, { start: 'new', assign: false, close: false });
+  const trigger = await f.service.create(fromNow, OWNER);
+  f.clock.now += 300_000;
+  await f.step();
+  assert.deepEqual(numbers(f.service), []);
+  const source = fromNow.source as Extract<TriggerInput['source'], { kind: 'github' }>;
+  const left = await f.service.previewIssues(source, trigger.id, OWNER);
+  assert.deepEqual(left.counts, { next: 0, working: 0, taken: 0, existing: 3 }, 'issues left alone are shown as skipped, not as done');
+  const withOpen = { ...fromNow, source: { ...source, watch: { ...source.watch, start: 'existing' as const } } };
+  const edited = await f.service.update(trigger.id, withOpen, trigger.revision, OWNER);
+  f.clock.now += 300_000;
+  await f.step();
+  assert.deepEqual(numbers(f.service), [1]);
+  await f.service.update(trigger.id, fromNow, edited.revision, OWNER);
+  f.finish(0);
+  f.clock.now += 1000;
+  await f.step();
+  f.clock.now += 300_000;
+  await f.step();
+  assert.deepEqual(numbers(f.service), [1], 'the rest of the backlog is left alone');
+  repos['octo/app'].push({ number: 4 });
+  f.clock.now += 300_000;
+  await f.step();
+  await f.step();
+  assert.deepEqual(numbers(f.service), [1, 4], 'and new issues still run');
+});
