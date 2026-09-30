@@ -304,6 +304,8 @@ async function main() {
       ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}),
       // Only an older worker is waiting to be replaced; a newer one left by an update that was undone stays as it is.
       ...(runs.runnerVersion() && (runs.runnerVersion() === 'legacy' || newerVersion(APP_VERSION, runs.runnerVersion()!)) ? { runnerUpdate: runs.supports('handoff') ? 'automatic' as const : 'manual' as const } : {}),
+      ...(runs.runnerVersion() && runs.runnerVersion() !== 'legacy' && newerVersion(APP_VERSION, runs.runnerVersion()!) && runs.supports('forceUpdate') ? { runnerForceUpdate: true } : {}),
+      ...(runs.updateDrain() ? { updateDrain: runs.updateDrain() } : {}),
       ...(controllers.length ? { controlledBy: controllers } : {}),
       ...(joined ? { controllerJoined: joined } : {}),
       ...(remoteNodes?.ready ? { nodes } : {}),
@@ -521,6 +523,10 @@ async function main() {
         }
         return response;
       },
+    },
+    forceRunnerUpdate: async () => {
+      try { const answer = await runs.forceUpdate(); changed(); return { status: 202, body: answer }; }
+      catch (error) { return { status: (error as { statusCode?: number }).statusCode ?? 500, body: { error: error instanceof Error ? error.message : 'The update could not start.' } }; }
     },
     towerUpdate: async version => {
       if (!updates.managed) return { status: 409, body: { code: 'not-service', error: 'This Tower does not run as the background service, so it cannot replace itself.' } };

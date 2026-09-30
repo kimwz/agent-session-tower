@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.86.0] - 2026-09-30
+
+### Added
+- **Update now.** When the header shows **실행 워커 업데이트 대기** (worker update pending) and the worker can do it, a **지금 업데이트** button switches to the new version without waiting for a moment when nothing runs. New turns wait. Every running turn is asked to reach a safe stopping point, note what is done and what remains, and end. After at most 10 minutes, turns still running are stopped. Tower then switches to the new worker, and every interrupted conversation continues there with a turn that first checks what was already done. Messages sent meanwhile start after the switch; nothing queued is dropped. Slack and GitHub coordinator conversations, triggers and public agents follow their conversation into the continuation. Work a coordinator delegated is stopped at the deadline, and its coordinator hears how it ended and decides what follows. While it waits, the header counts down. The button is not offered while a service update is still being verified, nor by a worker from before this version, which still switches at its next quiet moment. A turn you stop yourself while it waits is not brought back. If the switch still cannot happen 10 minutes after the deadline, new turns start again on the current worker.
+
+### Fixed
+- A restarted worker no longer starts restored turns before their tools and trigger checks are set up.
+- A delegated task's result notice that a full queue refused is sent again later instead of being marked as failed, and the task's run is kept until its workflow is done with it.
+
 ## [1.85.0] - 2026-09-30
 
 ### Added

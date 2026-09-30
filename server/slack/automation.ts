@@ -237,8 +237,34 @@ export class SlackAutomationManager extends EventEmitter {
     return Boolean(this.processing) || Boolean(this.marking) || this.admissions.size > 0 || this.toolOperations.size > 0
       || this.list().some(item => !terminal.has(item.status) && !this.waiting(item));
   }
+  /**
+   * Only work this worker is doing right now (a tick, a reaction, an admission, a tool call). A workflow waiting on a
+   * provider turn is not counted: its state is saved and the next worker follows it.
+   */
+  transient(): boolean {
+    return Boolean(this.processing) || Boolean(this.marking) || this.admissions.size > 0 || this.toolOperations.size > 0;
+  }
+  /**
+   * Delegated runs whose workflow is not finished with them: the coordinator is still to hear their result, or may
+   * still report it (`tower_task_complete` checks the run). Tower keeps these runs through pruning and restarts.
+   */
+  retainedRuns(): string[] {
+    // Read on every run change, so it looks at the saved items directly instead of rebuilding the whole list.
+    const ids: string[] = [];
+    for (const item of this.items) {
+      const tasks = item.delegatedTasks;
+      if (!tasks?.length) continue;
+      // Done with its delegated runs once every result was handed over and no owner reply still waits on one. The saved
+      // status of a conversation stays 'running', so it is not what decides.
+      if (item.ownerConditionalReply?.status !== 'pending' && tasks.every(task => task.notifiedRunId || task.notificationError || task.submissionError)) continue;
+      for (const task of tasks) if (task.delegatedRunId) ids.push(task.delegatedRunId);
+    }
+    return ids;
+  }
   /** During a worker handoff, newly received mentions wait for the successor instead of starting here. */
   hold(): void { this.held = true; }
+  /** A forced update that gave up: new mentions start here again. */
+  release(): void { this.held = false; }
   /**
    * Saves the current state again and reports failure, so a handoff never leaves an older file behind. A reaction
    * call already underway is waited for first; held, no new one starts.
@@ -591,6 +617,8 @@ export class SlackAutomationManager extends EventEmitter {
       } catch (error) {
         const recovered = this.options.findConversation?.(correlation);
         if (recovered) task.notifiedRunId = recovered.runId;
+        // A full queue, a runner not accepting yet, or a save that failed admitted nothing: sent on a later tick.
+        else if ((error as { retryable?: unknown })?.retryable === true) delete task.notificationClaimed;
         else task.notificationError = (error instanceof Error ? error.message : 'Result notification failed.').slice(0, 1500);
         await this.save(item, {});
       }

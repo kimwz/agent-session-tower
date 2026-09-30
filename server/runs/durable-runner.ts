@@ -11,7 +11,7 @@ import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest
 import type { RunAdmission } from './manager.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { markMaster, subscriptionOnly } from './subscription.js';
-import { MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerCapability, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
+import { FORCE_UPDATE_DEADLINE_MS, MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths, type RunnerCapability, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage, type UpdateDrainStatus } from './runner-protocol.js';
 import { readHandoff } from './handoff.js';
 import type { TriggerOverview } from '../../shared/triggers.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
@@ -118,6 +118,23 @@ export class DurableRunManager extends EventEmitter {
     await this.call('requestHandoff', [this.workerCommand()]);
     return true;
   }
+
+  /**
+   * The owner's "update now": the worker starts no new turn, asks running turns to wrap up, stops those still running
+   * at the deadline, then hands off; the conversations it stopped go on in the new worker.
+   */
+  async forceUpdate(deadlineMs = FORCE_UPDATE_DEADLINE_MS): Promise<{ deadline: string }> {
+    const own = this.options.version ?? APP_VERSION;
+    const worker = this.snapshot?.version;
+    if (!this.snapshot || !worker || worker === own || newerVersion(worker, own)) throw Object.assign(new Error('The execution worker already runs this version.'), { statusCode: 409 });
+    if (!this.supports('forceUpdate')) throw Object.assign(new Error('This execution worker predates updating on request; it switches at its next quiet moment.'), { statusCode: 409 });
+    // While a service update is still being verified, the web may yet go back to the version the worker runs.
+    if (await this.options.handoffHeld?.().catch(() => false)) throw Object.assign(new Error('Tower is still verifying this update. Try again in a few minutes.'), { statusCode: 409 });
+    return await this.call('forceHandoff', [this.workerCommand(), { deadlineMs }]) as { deadline: string };
+  }
+
+  /** While a forced update waits for running turns to wrap up. */
+  updateDrain(): UpdateDrainStatus | undefined { return this.snapshot?.updateDrain; }
 
   private async poll(): Promise<void> {
     try { await this.call('snapshot'); this.unreachableSince = undefined; this.recovery = undefined; await this.releaseHandoff(); return; }

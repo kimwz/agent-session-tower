@@ -50,6 +50,7 @@ export function isSavedSchedule(value: unknown, run: Partial<Run>): boolean {
   return typeof scheduled.at === 'string' && Number.isFinite(Date.parse(scheduled.at))
     && typeof scheduled.afterRunId === 'string' && UUID.test(scheduled.afterRunId) && scheduled.afterRunId !== run.id
     && (scheduled.backgroundRecoveryAttempt === undefined || (Number.isInteger(scheduled.backgroundRecoveryAttempt) && scheduled.backgroundRecoveryAttempt >= 1 && scheduled.backgroundRecoveryAttempt <= 3))
+    && (scheduled.resume === undefined || scheduled.resume === 'update')
     && run.steering === undefined && !run.attachments?.length;
 }
 

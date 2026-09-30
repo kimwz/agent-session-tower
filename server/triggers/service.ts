@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { continuedRun, continuedRunById } from '../runs/continuations.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -226,6 +227,8 @@ export class TriggerService extends EventEmitter {
   close(): void { this.pause(); }
   /** New scheduled times are left for the successor worker; its catch-up runs them. */
   hold(): void { this.held = true; }
+  /** A forced update that gave up: scheduled times fire here again. */
+  release(): void { this.held = false; }
 
   hasActive(): boolean { return this.state.triggers.some(trigger => trigger.enabled) || this.state.events.some(event => UNFINISHED.has(event.status)); }
   /** Work a handoff must wait for: a tick, a save, or a claim whose submission is not yet recorded. */
@@ -1157,9 +1160,11 @@ export class TriggerService extends EventEmitter {
         continue;
       }
       const job = event.input.target.mode === 'auto' ? this.options.executor.getAutoPrompt(event.requestId) : undefined;
-      const run = runs.find(item => item.id === (event.dispatch?.runId ?? job?.runId)) ?? runs.find(item => item.autoPromptId === event.requestId);
+      // A turn a forced worker update ended goes on in Tower's continuation; the event follows it.
+      const run = continuedRunById(runs, event.dispatch?.runId ?? job?.runId) ?? continuedRun(runs, runs.find(item => item.autoPromptId === event.requestId));
       const patch: Partial<TriggerEvent> = {};
-      if (run && event.dispatch?.runId !== run.id) patch.dispatch = { ...event.dispatch, runId: run.id, sessionId: run.sessionId };
+      // A queued continuation is not recorded yet: it is removed again when the turn turns out to have finished itself.
+      if (run && !(run.status === 'queued' && run.scheduled?.resume === 'update') && event.dispatch?.runId !== run.id) patch.dispatch = { ...event.dispatch, runId: run.id, sessionId: run.sessionId };
       if (job?.decision?.action === 'create' && job.sessionId && !event.dispatch?.createdSessionId) patch.dispatch = { ...event.dispatch, ...patch.dispatch, createdSessionId: job.sessionId };
       if (job && (job.status === 'error' || job.status === 'cancelled') && !run) Object.assign(patch, { status: job.status === 'error' ? 'error' : 'cancelled', error: job.error });
       else if (run?.status === 'completed') patch.status = 'completed';

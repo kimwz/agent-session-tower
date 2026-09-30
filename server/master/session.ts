@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { continuedRunById } from '../runs/continuations.js';
 import { join } from 'node:path';
 import { MASTER_FOLDER, type MasterBinding, type MasterTaskState } from '../../shared/master.js';
 import type { AutoPromptJob, ChatMessage, Provider, Run, RunReply, SessionDetail, Snapshot } from '../../shared/types.js';
@@ -38,6 +39,8 @@ export interface Followed {
   title: string;
   sessionId?: string;
   runId?: string;
+  /** The run that currently carries this work on after a forced worker update; `runId` stays the first one. */
+  currentRunId?: string;
   jobId?: string;
   node?: string;
   prompt?: string;
@@ -171,7 +174,7 @@ export class MasterSession {
       const covered = new Set<string>();
       for (const item of this.file.followed) {
         if (item.state !== 'running' || !item.runId || item.node) continue;
-        const run = (snapshot.runs ?? []).find(entry => entry.id === item.runId);
+        const run = continuedRunById(snapshot.runs ?? [], item.currentRunId ?? item.runId);
         if (!run) continue;
         const turn = turnOf(run, snapshot);
         covered.add(turn.id);
@@ -338,7 +341,10 @@ export class MasterSession {
     for (const item of this.file.followed.filter(entry => entry.state === 'running')) {
       if (this.closed) return;
       const where = item.node ? this.options.live.node(item.node) ?? await this.nodeSnapshot(item.node) : snapshot;
+      const current = item.currentRunId;
       if (where && await this.check(item, where)) changed = true;
+      // Saved as soon as it moves, so the chain is still found after a restart.
+      if (item.currentRunId !== current) changed = true;
     }
     if (await this.reconcile(snapshot, binding)) changed = true;
     if (await this.sendReports(binding)) changed = true;
@@ -360,7 +366,8 @@ export class MasterSession {
       changed = true;
     }
     for (const run of snapshot.runs ?? []) {
-      if (!ours(run.origin) || !after(run.createdAt) || run.sessionId === binding.sessionId || this.file.followed.some(item => item.runId === run.id)) continue;
+      // Tower's continuation after a forced update carries on a run already followed; it is not new work.
+      if (run.scheduled?.resume === 'update' || run.updateWrapUp || !ours(run.origin) || !after(run.createdAt) || run.sessionId === binding.sessionId || this.file.followed.some(item => item.runId === run.id)) continue;
       this.add({ id: randomUUID(), kind: 'delegated', title: truncate(run.prompt, 80), runId: run.id, sessionId: run.sessionId, prompt: run.prompt, createdAt: run.createdAt, state: 'running' });
       changed = true;
     }
@@ -382,7 +389,10 @@ export class MasterSession {
     }
     let run: Run | undefined;
     if (!ended && item.runId) {
-      run = (snapshot.runs ?? []).find(entry => entry.id === item.runId);
+      // The item keeps its first run's ID, so discovery still knows that run; its continuation is looked up each time.
+      run = continuedRunById(snapshot.runs ?? [], item.currentRunId ?? item.runId);
+      // Remembered once it started, so the chain is found again after its earlier runs leave the history.
+      if (run && run.id !== (item.currentRunId ?? item.runId) && run.status !== 'queued') item.currentRunId = run.id;
       if (run && (run.status === 'completed' || run.status === 'error' || run.status === 'cancelled')) ended = run.status;
     }
     if (!ended && Date.now() - Date.parse(item.createdAt) > UNKNOWN_MS && !run && !(item.jobId && !item.runId && (snapshot.autoPrompts ?? []).some(entry => entry.id === item.jobId))) ended = 'unknown';

@@ -96,6 +96,8 @@ export interface HttpOptions {
   service?: boolean;
   /** Moves this Tower to a version (the latest release when none is given), when it runs as the background service. */
   towerUpdate?: (version?: string) => Promise<{ status: number; body: unknown }>;
+  /** The owner's "update now": running turns wrap up, the rest stop at a deadline, and the worker switches. */
+  forceRunnerUpdate?: () => Promise<{ status: number; body: unknown }>;
   /** Push notifications to the owner's browsers; managed only from this Tower's own pages. */
   notifications?: {
     overview(): NotificationOverview;
@@ -138,7 +140,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, service, notifications, decisions, master }: HttpOptions) {
+export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, forceRunnerUpdate, service, notifications, decisions, master }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -283,6 +285,11 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (!isOperationName(operation[1])) return json(res, 404, { error: 'Unknown Tower operation.' });
         if (!backend.api) return json(res, 503, { error: 'Tower operations are unavailable.' });
         return json(res, 200, { result: await backend.api(operation[1], await readJson(req, 1_000_000)) });
+      }
+      if (path === '/api/runner/force-update' && req.method === 'POST') {
+        if (!forceRunnerUpdate) return json(res, 503, { error: 'Updates are unavailable.' });
+        const answer = await forceRunnerUpdate();
+        return json(res, answer.status, answer.body);
       }
       if (path === '/api/tower/update' && req.method === 'POST') {
         // Like account management, replacing this computer's Tower is for someone at this computer.

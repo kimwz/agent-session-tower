@@ -5,7 +5,8 @@ import { requestedEffort, requestedModel } from '../providers/models.js';
 import { SteeringError, type SteeringInput } from './steering.js';
 import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../../shared/app-identity.js';
 
-type Result = { status: 'completed' | 'error' | 'cancelled'; error?: string };
+/** `withdrawn`: the submission left the app's queue before its turn started, so it can be sent again later. */
+type Result = { status: 'completed' | 'error' | 'cancelled'; error?: string; withdrawn?: boolean };
 type Item = { id: string; type: string; clientId?: string | null; text?: string; command?: string; aggregatedOutput?: string; changes?: { path: string }[] };
 type Turn = { id: string; status: 'completed' | 'interrupted' | 'failed' | 'inProgress'; items?: Item[]; error?: { message?: string } | null };
 type Notice = { method: string; params: { threadId?: string; turnId?: string; itemId?: string; delta?: string; item?: Item; turn?: Turn } };
@@ -30,6 +31,11 @@ export interface CodexBridgeRun {
   canSteer?(): boolean;
   steer?(input: SteeringInput): Promise<void>;
   cancel(): Promise<void>;
+  /**
+   * Takes a submission that has not started back out of the app's queue. Never interrupts a started turn: that
+   * answers `started`, and the turn goes on.
+   */
+  withdraw?(): Promise<'withdrawn' | 'started' | 'finished' | 'unknown'>;
   close(): void;
   done: Promise<void>;
 }
@@ -150,6 +156,8 @@ class BridgeRun implements CodexBridgeRun {
   private startPromise?: Promise<void>;
   private cancelPromise?: Promise<void>;
   private cancelRequested = false;
+  /** While a withdrawal asks the app, this bridge does not start the queued submission itself. */
+  private withdrawing = false;
   private steeringPending = false;
   private submitted = false;
   private queueId?: string;
@@ -243,6 +251,24 @@ class BridgeRun implements CodexBridgeRun {
     return this.cancelPromise = this.confirmCancellation();
   }
 
+  async withdraw(): Promise<'withdrawn' | 'started' | 'finished' | 'unknown'> {
+    if (this.settled) return 'finished';
+    if (this.turnId) return 'started';
+    if (this.cancelRequested || this.withdrawing) return 'unknown';
+    if (!this.startPromise) { this.finish({ status: 'cancelled', withdrawn: true }); return 'withdrawn'; }
+    this.withdrawing = true;
+    try {
+      await this.startPromise.catch(() => {});
+      if (this.settled) return 'finished';
+      if (this.turnId || !this.queueId) return this.turnId ? 'started' : 'unknown';
+      const result = await this.rpc.request<{ deleted: boolean }>('thread/queue/delete', { threadId: this.options.threadId, queuedSubmissionId: this.queueId });
+      if (this.settled) return 'finished';
+      if (result.deleted) { this.finish({ status: 'cancelled', withdrawn: true }); return 'withdrawn'; }
+      return 'started';
+    } catch { return this.settled ? 'finished' : 'unknown'; }
+    finally { this.withdrawing = false; if (!this.settled) this.schedule(); }
+  }
+
   private async confirmCancellation(): Promise<void> {
     const timeout = setTimeout(() => this.finish({ status: 'error', error: '12초 안에 Codex 작업 종료를 확인하지 못했습니다. 취소가 완료된 것으로 처리하지 않았습니다. 원래 앱에서 확인하세요.' }), 12_000);
     timeout.unref();
@@ -313,9 +339,9 @@ class BridgeRun implements CodexBridgeRun {
         return;
       }
       this.missingSince = undefined;
-      if (this.cancelRequested) return;
+      if (this.cancelRequested || this.withdrawing) return;
       const state = await this.rpc.request<{ thread: { status: { type: string } } }>('thread/read', { threadId: this.options.threadId, includeTurns: false });
-      if (this.settled || this.turnId || this.cancelRequested || state.thread.status.type === 'active') return;
+      if (this.settled || this.turnId || this.cancelRequested || this.withdrawing || state.thread.status.type === 'active') return;
       try {
         const started = await this.rpc.request<{ turn: Turn }>('thread/queue/start', { threadId: this.options.threadId, queuedSubmissionId: this.queueId });
         if (!this.settled) this.acceptTurn(started.turn);

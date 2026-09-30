@@ -193,7 +193,11 @@ export interface Run {
    * until `at` and then resumes the conversation with the agent's own prompt. Background recovery uses the same
    * queue; its persisted attempt count limits retries after unexpected provider exits.
    */
-  scheduled?: { at: string; afterRunId: string; backgroundRecoveryAttempt?: number };
+  /** Tower's own request that a running turn wrap up for a forced worker update; not work of its own. */
+  updateWrapUp?: true;
+  scheduled?: { at: string; afterRunId: string; backgroundRecoveryAttempt?: number;
+    /** Tower's own continuation for a turn a forced worker update ended; watchers of `afterRunId` follow it. */
+    resume?: 'update' };
   /**
    * The turn has answered but background work it started (a background command, Monitor or agent) is still running
    * inside the provider process. Tower keeps the turn open so the agent can pick up the results; `since` is when the
@@ -353,6 +357,10 @@ export interface Snapshot {
   triggers?: TriggerOverview;
   /** While the worker runs another build: whether it will hand over by itself. */
   runnerUpdate?: 'automatic' | 'manual';
+  /** The owner asked to update now: running turns are wrapping up until `deadline`, then the worker switches. */
+  updateDrain?: { startedAt: string; deadline: string; running: number };
+  /** The attached worker can switch on request ("update now"). */
+  runnerForceUpdate?: boolean;
   /** Names of the other Towers controlling this computer right now. */
   controlledBy?: string[];
   /** The latest computer that started controlling this one, for a notice here. */

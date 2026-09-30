@@ -4,7 +4,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { homedir, hostname } from 'node:os';
-import type { AutoPromptRequest, CreateSessionRequest, MessageAttachments, RunApprovalResponse, Snapshot } from '../../shared/types.js';
+import type { AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunApprovalResponse, Snapshot } from '../../shared/types.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { AutoPromptManager } from '../auto-prompt/manager.js';
 import { SlackService } from '../slack/service.js';
@@ -43,7 +43,7 @@ import { installAgentGuidance } from '../agent-guidance/install.js';
 import { PermissionService } from '../permissions/service.js';
 import { skillHomes } from '../skills/files.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
-import { MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
+import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
 const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan']);
 
@@ -70,6 +70,12 @@ export interface RunnerHostOptions {
   inFlight?: () => boolean;
   /** Stops automatic intake from starting new work when a handoff has waited too long for a quiet moment. */
   holdIntake?: () => void;
+  /** Undoes `holdIntake` when a forced update gives up and this worker stays in service. */
+  releaseIntake?: () => void;
+  /** Only work underway this instant; a forced update waits for this instead of `inFlight`. */
+  transient?: () => boolean;
+  /** Delegated work of a Slack or GitHub workflow: a forced update neither wraps it up nor resumes it. */
+  delegated?: (run: Run) => boolean;
   /** Pauses automatic intake and saves pending writes at a quiet moment. Nothing is cancelled or closed. */
   quiesce?: () => Promise<void>;
   /** Undoes quiesce when the handoff cannot be recorded, so the worker stays fully in service. */
@@ -109,6 +115,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   let closing = false;
   let handoff: { successor: SuccessorCommand; requestedAt: number; held?: boolean; retryAt?: number } | undefined;
   let draining = false;
+  /** The owner asked to switch now: running turns wrap up until this time, then stop. */
+  let forced: { deadline: number } | undefined;
   const changed = () => { revision++; };
   const snapshot = (): RunnerSnapshot => {
     const sessions = options.runs.sessionList(options.sessions.list());
@@ -117,7 +125,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       settled: [...options.runs.settledRunIds()], autoPrompts: options.autoPrompts?.list() ?? [], version: APP_VERSION,
       capabilities: [...RUNNER_CAPABILITIES], ...(options.handoffNonce ? { handoff: options.handoffNonce } : {}),
       ...(options.triggers ? { triggers: options.triggers.overview() } : {}),
-      coordinators: [...new Set([...(options.slack?.coordinatorSessionIds() ?? []), ...(options.github?.coordinatorSessionIds() ?? [])])] };
+      coordinators: [...new Set([...(options.slack?.coordinatorSessionIds() ?? []), ...(options.github?.coordinatorSessionIds() ?? [])])],
+      ...(forced ? { updateDrain: options.runs.updateDrainStatus() } : {}) };
   };
   const coordinator = (sessionId: string) => Boolean(options.slack?.coordinatorSessionIds().includes(sessionId) || options.github?.sessionWorkflow(sessionId));
   /** A paired controller's request: refused for coordinator conversations, and run once per request ID. */
@@ -141,6 +150,21 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         // The latest web build wins; the worker leaves only at a moment when nothing is running.
         handoff = { successor: parseSuccessor(args[0], paths.stateDir), requestedAt: handoff?.requestedAt ?? Date.now(), held: handoff?.held, retryAt: handoff?.retryAt };
         return { accepted: true };
+      }
+      case 'forceHandoff': {
+        // The owner's explicit request: no new turn starts, running turns wrap up, and at the deadline the rest stop.
+        const successor = parseSuccessor(args[0], paths.stateDir);
+        const input = record(args[1]);
+        const deadlineMs = input.deadlineMs === undefined ? FORCE_UPDATE_DEADLINE_MS : input.deadlineMs;
+        if (typeof deadlineMs !== 'number' || !Number.isInteger(deadlineMs) || deadlineMs < 0 || deadlineMs > 60 * 60 * 1000) throw Object.assign(new Error('Invalid wrap-up time.'), { statusCode: 400 });
+        handoff = { successor, requestedAt: handoff?.requestedAt ?? Date.now(), held: true, retryAt: undefined };
+        if (!forced) {
+          forced = { deadline: Date.now() + deadlineMs };
+          options.holdIntake?.();
+          options.runs.beginUpdateDrain(forced.deadline, options.delegated ?? (() => false));
+          changed();
+        }
+        return { accepted: true, deadline: new Date(forced.deadline).toISOString() };
       }
       case 'create': {
         const admitted = admission(args[1]);
@@ -294,12 +318,25 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   let handoffTimer: ReturnType<typeof setInterval> | undefined;
   // Status alone is not enough: a cancelled turn may still be closing its provider process.
   const quiet = () => !pending && !options.runs.busy() && !options.autoPrompts?.busy()
-    // A continuation scheduled for later is saved and delivered by the successor.
-    && !options.runs.hasWorkWithin(5 * 60 * 1000)
     && !options.autoPrompts?.list().some(job => !['completed', 'error', 'cancelled'].includes(job.status))
     && !options.terminals?.hasActive()
-    && !options.inFlight?.();
+    // A forced update hands queued turns and the workflows waiting on them to the successor; otherwise a continuation
+    // scheduled for later is saved and delivered by the successor, but nothing due soon or underway may be left behind.
+    && (forced ? !(options.transient ?? options.inFlight)?.() : !options.runs.hasWorkWithin(5 * 60 * 1000) && !options.inFlight?.());
   const handOff = async () => {
+    if (forced && !closing && !draining) {
+      options.runs.driveUpdateDrain();
+      // A switch that still cannot happen well after the deadline must not keep new work waiting for good.
+      if (Date.now() > forced.deadline + FORCE_UPDATE_GIVE_UP_MS) {
+        console.error('The forced update could not hand off; new turns start again on this worker.');
+        forced = undefined;
+        options.runs.endUpdateDrain();
+        options.releaseIntake?.();
+        // The ordinary handoff goes on waiting for a quiet moment, its long hold counted from now.
+        if (handoff) { handoff.held = false; handoff.requestedAt = Date.now(); }
+        changed();
+      }
+    }
     if (!handoff || closing || draining || (handoff.retryAt && Date.now() < handoff.retryAt)) return;
     if (!handoff.held && Date.now() - handoff.requestedAt >= (options.handoffHoldMs ?? 6 * 60 * 60 * 1000)) { handoff.held = true; options.holdIntake?.(); }
     if (!quiet()) return;
@@ -432,7 +469,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   const shims = await installLaunchShims(stateDir).catch(error => { console.error(`Launch shims were not installed: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
   const terminals = new WorkspaceTerminals({ keepAliveOnDisconnect: true });
   const runs = new RunManager({ stateDir, ...(shims ? { launchMarks: { shims, marks: launchMarksDir(stateDir) } } : {}), getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true),
-    openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }), trustWorkspace });
+    openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }), trustWorkspace,
+    // Restored turns wait until tools, gates and limits below are set up.
+    holdUntilReady: true });
   // Only the Tower on the account's own state folder keeps its Claude Code and Codex current, so two never update one install.
   // It is there even with automatic updates off: an install a previous worker left running is still waited for.
   const tools = resolve(stateDir) === resolve(defaultStateDir()) ? new ToolUpdates({ stateDir, env: process.env,
@@ -462,6 +501,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const github = new GitHubCoordinator({ stateDir, runs, autoPrompts, refresh: context.refresh, language: () => slack.language(),
       github: (triggerId, fresh) => { if (!triggerEngine) throw new Error('Triggers are still starting.'); return triggerEngine.githubClient(triggerId, fresh); } });
     coordinators = () => new Set([...slack.coordinatorSessionIds(), ...github.coordinatorSessionIds()]);
+    // A delegated task's run stays until its coordinator has finished with it, across pruning and restarts.
+    runs.setRetained(() => [...slack.automation.retainedRuns(), ...github.automation.retainedRuns()]);
     const capabilities = new CapabilityRegistry(capability => capability.kind !== 'owner-run'
       || runs.list().some(run => run.id === capability.runId && (run.status === 'running' || run.status === 'queued')));
     capabilities.grant(await sessionToolsKey(stateDir), { kind: 'session-reader' });
@@ -559,11 +600,17 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
     await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
       onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); worktrees.close(); await worktrees.flush(); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || Boolean(tools?.busy()), holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); worktrees.pause(); },
+      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || Boolean(tools?.busy()),
+      transient: () => slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || Boolean(tools?.busy()),
+      // Work a Slack or GitHub coordinator delegated: its coordinator hears how it ended and decides what follows.
+      delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
+      releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); worktrees.resume(); },
+      holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); worktrees.pause(); },
       quiesce: async () => { tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); worktrees.pause(); permissions.pause(); await Promise.all([worktrees.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
       resume: () => { tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); worktrees.resume(); permissions.resume(); sessions.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
       onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); worktrees.close(); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+    runs.markReady();
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});
