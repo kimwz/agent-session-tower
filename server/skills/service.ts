@@ -97,9 +97,17 @@ export class SkillService {
       if (this.state.get().seeded.includes(skill.name)) continue;
       const present = (await this.files.list()).some(item => item.scope === 'global' && item.name === skill.name)
         || Boolean(await stat(await this.files.towerDir(skill.name)).catch(() => undefined));
-      if (!present) await this.create({ name: skill.name, description: skill.description, body: skill.body }, { all: true, projects: [] });
+      let made = !present;
+      if (made) {
+        try { await this.create({ name: skill.name, description: skill.description, body: skill.body }, { all: true, projects: [] }); }
+        catch (error) {
+          // Something of that name already sits where the skill would be linked: that stays, and Tower does not ask again.
+          if (!(error instanceof SkillError && error.statusCode === 409)) throw error;
+          made = false;
+        }
+      }
       await this.state.update(state => { if (!state.seeded.includes(skill.name)) state.seeded.push(skill.name); });
-      if (!present) this.options.onChange?.();
+      if (made) this.options.onChange?.();
     }
   }
   close(): void { this.advisor.stop(); }

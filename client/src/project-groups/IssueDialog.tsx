@@ -87,6 +87,7 @@ export function IssueDialog({ cwd, providers: localProviders, hosts = [], token,
   const status = submitting ? t("이슈 등록 세션을 시작하고 있습니다.")
     : !connected ? t("다시 연결되면 세션을 시작할 수 있습니다.")
       : !token ? t("연결을 확인하고 있습니다.")
+        : machine !== undefined && !host ? t("그 컴퓨터는 더 이상 연결되어 있지 않습니다.")
         : machine !== undefined && host && hostProblem(host) ? hostProblem(host)!
           : !providerAvailable ? t("{0}를 현재 사용할 수 없습니다.", { 0: providerLabels[provider] }) : '';
 

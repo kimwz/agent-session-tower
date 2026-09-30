@@ -69,3 +69,23 @@ test('a Tower on another state folder makes no default skill in the account', as
   assert.equal(await lstat(f.stored).catch(() => undefined), undefined);
   assert.equal(await f.linked(), false);
 });
+
+test('something else of that name where the skill would be linked stays, and Tower does not try again', async t => {
+  const f = await fixture(t);
+  const other = join(f.homes.claudeHome, 'skills', ISSUE_SKILL);
+  await mkdir(other, { recursive: true });
+  await writeFile(join(other, 'notes.txt'), 'not a skill');
+  await f.start();
+  assert.equal(await readFile(join(other, 'notes.txt'), 'utf8'), 'not a skill');
+  assert.equal(await lstat(f.stored).catch(() => undefined), undefined);
+  assert.deepEqual(await f.seeded(), [ISSUE_SKILL], 'recorded, so no error on every start');
+});
+
+test('a skills.json from before default skills gets them made once', async t => {
+  const f = await fixture(t);
+  await mkdir(f.state, { recursive: true });
+  await writeFile(join(f.state, 'skills.json'), JSON.stringify({ version: 1, pinned: [], targets: [], proposals: [], notes: [], excluded: [], reflected: {}, startedAt: '2026-09-01T00:00:00.000Z' }));
+  await f.start();
+  assert.equal(await f.linked(), true);
+  assert.deepEqual(await f.seeded(), [ISSUE_SKILL]);
+});

@@ -14,7 +14,8 @@ issues are filed, follow those instead of this skill.
 
 ## 1. Find the repository
 - Use the remote of the folder's git repository: \`git remote get-url origin\`, or the only remote when there is no \`origin\`.
-- GitHub: use \`gh\` (\`gh auth status\` must pass). GitLab: use \`glab\`. Other hosts: do not guess.
+- GitHub: use \`gh\` (\`gh auth status\` must pass). GitLab: use \`glab\` with the matching commands (\`glab issue list\`,
+  \`glab label list\`, \`glab issue create\`). Other hosts: do not guess.
 - When there is no remote, no CLI, or no access, do not register anything: report why, with the issue text you prepared.
 
 ## 2. Analyse (read, do not guess)
@@ -28,9 +29,9 @@ issues are filed, follow those instead of this skill.
   something new to it.
 
 ## 4. Settle what is unclear
-- If someone is following this conversation and the request can be read in clearly different ways (which part of the
-  product, expected versus current behaviour, minimal or full scope), ask once, all questions together, with choices.
-- Otherwise do not assume: register the issue and list the questions under "Open questions".
+- Do not stop to ask: the person who asked may not be watching. Make no assumptions either; register the issue and
+  list what is unclear (which part of the product, expected versus current behaviour, minimal or full scope) under
+  "Open questions".
 
 ## 5. Labels
 - Use only labels the repository already has (\`gh label list\`): one kind (bug, enhancement, documentation, …) and,
@@ -47,7 +48,8 @@ issues are filed, follow those instead of this skill.
   - **Done when** — checkable conditions.
   - **Open questions** — only if any.
 - Never put secrets, tokens or personal data in an issue.
-- \`gh issue create --title "<title>" --body-file <file> [--label <label> …]\`
+- \`gh issue create --title "<title>" --body-file - [--label <label> …]\` with the body on standard input (or a file
+  outside the repository), so nothing is left in the working tree.
 
 ## 7. Report
 The issue URL, its title and labels, and any open questions. When a duplicate was found, its link instead.
