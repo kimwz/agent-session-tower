@@ -201,7 +201,6 @@ export async function startMasterHost(options: MasterHostOptions) {
   const close = async (idle = false) => {
     if (closing) return;
     closing = true;
-    // A credential being written again must land before this host removes its files and lock.
     await stopKeeping?.();
     if (idleTimer) clearInterval(idleTimer);
     for (const stream of streams) stream.end();

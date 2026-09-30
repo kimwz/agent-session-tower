@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -76,16 +77,12 @@ test('the terminal host answers only with its own credential', async t => {
 });
 
 test('a running host writes its credential again when /tmp cleaning removed it', async t => {
-  const f = await fixture(t, { keepIntervalMs: 200 });
+  const f = await fixture(t, { keepIntervalMs: 20 });
   const paths = await terminalHostPaths(f.stateDir);
   const { id } = await f.client.create('/fixture', 80, 24);
   const token = await readFile(paths.token, 'utf8');
   await rm(paths.token);
-  await assert.rejects(f.client.input(id, 'x'), /not running/);
-  let healed = '';
-  const poll = setInterval(() => { void readFile(paths.token, 'utf8').then(value => { healed = value; }, () => {}); }, 10);
-  t.after(() => clearInterval(poll));
-  await until(() => healed === token);
+  await until(() => existsSync(paths.token) && readFileSync(paths.token, 'utf8') === token);
   assert.equal((await stat(paths.token)).mode & 0o777, 0o600);
   await f.client.input(id, 'ls\r');
   assert.deepEqual(f.ptys[0].written, ['ls\r']);

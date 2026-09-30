@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import * as fs from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { keepEndpoint } from '../../../server/runs/endpoint-keeper.js';
+import { until } from '../../helpers/until.ts';
 
 const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -22,11 +25,8 @@ test('files older than an hour are touched so /tmp cleaners keep them', async t 
   await utimes(f.socket, old, old);
   const stop = keepEndpoint(f, 10);
   t.after(() => stop());
-  await pause(100);
-  for (const path of [f.token, f.socket]) {
-    const info = await stat(path);
-    assert.ok(Date.now() - info.mtimeMs < 60_000 && Date.now() - info.atimeMs < 60_000, path);
-  }
+  const fresh = (path: string) => { const info = statSync(path); return Date.now() - info.mtimeMs < 60_000 && Date.now() - info.atimeMs < 60_000; };
+  await until(() => fresh(f.token) && fresh(f.socket));
 });
 
 test('an existing credential is never replaced, and nothing is written once stopped', async t => {
@@ -52,6 +52,8 @@ test('stopping waits for a credential being written, so it never lands after the
     lstat: missing as never,
     utimes: (() => Promise.resolve()) as never,
     writeFile: (async () => { started = true; await writing; written = true; }) as never,
+    link: (() => Promise.resolve()) as never,
+    unlink: (() => Promise.resolve()) as never,
   });
   while (!started) await pause(5);
   let stopped = false;
@@ -61,4 +63,21 @@ test('stopping waits for a credential being written, so it never lands after the
   finish();
   await stopping;
   assert.equal(written, true);
+});
+
+test('a credential that could not be written whole is never published, and the next check writes it', async t => {
+  const f = await files(t);
+  let failures = 1;
+  const stop = keepEndpoint(f, 10, {
+    ...fs,
+    writeFile: (async (path: string, data: string, options: object) => {
+      if (failures-- > 0) { await writeFile(path, data.slice(0, 10), options); throw Object.assign(new Error('no space'), { code: 'ENOSPC' }); }
+      await writeFile(path, data, options);
+    }) as never,
+  });
+  t.after(() => stop());
+  const content = await until(() => existsSync(f.token) && readFileSync(f.token, 'utf8'));
+  assert.equal(content, f.value, 'only the whole credential appears');
+  await stop();
+  assert.deepEqual((await readdir(join(f.token, '..'))).filter(name => name.endsWith('.draft')), []);
 });

@@ -378,7 +378,6 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const close = async (idle = false) => {
     if (closing) return;
     closing = true;
-    // A credential being written again must land before this host removes its files and lock.
     await stopKeeping?.();
     if (idleTimer) clearInterval(idleTimer);
     if (handoffTimer) clearInterval(handoffTimer);
