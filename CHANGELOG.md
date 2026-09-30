@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.88.0] - 2026-09-30
+
+### Added
+- **Every Tower version on the canvas.** The version on a computer's card now opens a panel on hover, focus or tap. It lists the version of each of Tower's processes: the web server, the execution worker, the terminal host and the master host. A process that is not running shows as such. One that still runs an older release is marked, with when it moves: the worker when no work runs, the terminal host once every terminal is closed, the master host when it restarts. A dot on the version says something is still waiting to move. The panel is drawn above the canvas, so it stays readable when the canvas is zoomed out. Joined computers show the versions their own state reports.
+- The web server looks at the terminal and master hosts every half minute. It never starts them and never keeps them from stopping when idle: the terminal host is asked once per run.
+
 ## [1.87.0] - 2026-09-30
 
 ### Changed

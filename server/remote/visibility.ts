@@ -123,6 +123,8 @@ export function remoteSnapshot(snapshot: Snapshot, scope: RemoteScope, controlle
     ...(snapshot.repositories ? { repositories: snapshot.repositories.filter(status => !scope.matcher.excludes(status.cwd) && !scope.matcher.excludes(status.root)).map(remoteRepository) } : {}),
     scanning: snapshot.scanning, hostname: snapshot.hostname, version: snapshot.version,
     ...(snapshot.runnerVersion ? { runnerVersion: snapshot.runnerVersion } : {}),
+    // Versions only, for the controlling Tower's version panel.
+    ...(snapshot.componentVersions ? { componentVersions: { terminalHost: snapshot.componentVersions.terminalHost, master: snapshot.componentVersions.master } } : {}),
     ...(snapshot.runnerUpdate ? { runnerUpdate: snapshot.runnerUpdate } : {}),
     // Numbers only: how busy the computer is, for its rings on the controlling Tower's canvas.
     ...(snapshot.system ? { system: snapshot.system } : {}),
