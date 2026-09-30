@@ -177,9 +177,10 @@ export class SkillFiles {
 
   async detail(dir: string, cwd?: string): Promise<SkillDetail> {
     const skill = await this.find(dir, cwd);
-    const text = await readSkillText(join(skill.dir, 'SKILL.md'));
-    if (text === undefined) throw new SkillError('스킬 파일을 읽을 수 없습니다.', 404);
-    return { ...skill, revision: revisionOf(text), body: parseSkillFile(text).body };
+    // Everything shown comes from the read whose revision a save or a confirmation sends back.
+    const read = await readSkillSnapshot(skill.dir);
+    if (!read) throw new SkillError('스킬 파일을 읽을 수 없습니다.', 404);
+    return { ...skill, name: read.name, description: read.description, revision: read.revision, body: read.body };
   }
 
   private queue: Promise<unknown> = Promise.resolve();
