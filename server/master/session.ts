@@ -39,6 +39,8 @@ export interface Followed {
   title: string;
   sessionId?: string;
   runId?: string;
+  /** The run that currently carries this work on after a forced worker update; `runId` stays the first one. */
+  currentRunId?: string;
   jobId?: string;
   node?: string;
   prompt?: string;
@@ -362,7 +364,7 @@ export class MasterSession {
     }
     for (const run of snapshot.runs ?? []) {
       // Tower's continuation after a forced update carries on a run already followed; it is not new work.
-      if (run.scheduled?.resume === 'update' || !ours(run.origin) || !after(run.createdAt) || run.sessionId === binding.sessionId || this.file.followed.some(item => item.runId === run.id)) continue;
+      if (run.scheduled?.resume === 'update' || run.updateWrapUp || !ours(run.origin) || !after(run.createdAt) || run.sessionId === binding.sessionId || this.file.followed.some(item => item.runId === run.id)) continue;
       this.add({ id: randomUUID(), kind: 'delegated', title: truncate(run.prompt, 80), runId: run.id, sessionId: run.sessionId, prompt: run.prompt, createdAt: run.createdAt, state: 'running' });
       changed = true;
     }
@@ -385,7 +387,9 @@ export class MasterSession {
     let run: Run | undefined;
     if (!ended && item.runId) {
       // The item keeps its first run's ID, so discovery still knows that run; its continuation is looked up each time.
-      run = continuedRunById(snapshot.runs ?? [], item.runId);
+      run = continuedRunById(snapshot.runs ?? [], item.currentRunId ?? item.runId);
+      // Remembered once it started, so the chain is found again after its earlier runs leave the history.
+      if (run && run.id !== (item.currentRunId ?? item.runId) && run.status !== 'queued') item.currentRunId = run.id;
       if (run && (run.status === 'completed' || run.status === 'error' || run.status === 'cancelled')) ended = run.status;
     }
     if (!ended && Date.now() - Date.parse(item.createdAt) > UNKNOWN_MS && !run && !(item.jobId && !item.runId && (snapshot.autoPrompts ?? []).some(entry => entry.id === item.jobId))) ended = 'unknown';

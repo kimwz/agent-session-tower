@@ -189,6 +189,8 @@ export class RunManager extends EventEmitter {
   private readonly settledRuns = new Set<string>();
   /** Queued runs accepted while Tower switched workers; a restart keeps them queued (see KEEP_QUEUED). */
   private readonly carried = new Set<string>();
+  /** Runs the owner asked to stop; a Codex app submission taken back for an update is then not queued again. */
+  private readonly ownerStopped = new Set<string>();
   private retained: () => Iterable<string> = () => [];
   /** Runs saved as retained: kept until the automations that know which runs they need are loaded (`markReady`). */
   private readonly restoredRetained = new Set<string>();
@@ -720,7 +722,7 @@ export class RunManager extends EventEmitter {
     if (run.steering) throw new RunError('An inserted instruction belongs to the active turn. Stop the active turn instead.', 409);
     const noted = () => { if (reason && run.status === 'cancelled' && run.error !== reason) { run.error = reason; this.changed(); } };
     // Stopped by the owner, not by the update's deadline: the update does not bring the work back.
-    if (!reason) this.dropUpdateContinuation(runId);
+    if (!reason) { this.dropUpdateContinuation(runId); this.ownerStopped.add(runId); }
     const bridge = this.bridged.get(runId);
     if (bridge) {
       // The shared server owns the process. Interrupt only our correlated turn.
@@ -935,7 +937,7 @@ export class RunManager extends EventEmitter {
         this.bridged.delete(run.id);
         this.reservedSessions.delete(session.id);
         // Taken back out of the app's queue before it started: it waits in Tower's queue for the new worker.
-        if ((result.withdrawn || heldForUpdate) && !started && run.status === 'queued') {
+        if ((result.withdrawn || heldForUpdate) && !started && run.status === 'queued' && !this.ownerStopped.has(run.id)) {
           run.output = UPDATE_WAIT; delete run.towerTools;
           this.changed();
           return;
@@ -1525,7 +1527,7 @@ export class RunManager extends EventEmitter {
   /** Inserts the wrap-up request into a running turn. A request that surely did not reach it is removed and tried again. */
   private sendWrapUp(target: Run, state: UpdateTarget): void {
     const createdAt = new Date().toISOString();
-    const wrapUp: Run = { id: randomUUID(), sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' }, prompt: WRAP_UP_NOTICE, status: 'queued', createdAt,
+    const wrapUp: Run = { id: randomUUID(), sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' }, prompt: WRAP_UP_NOTICE, status: 'queued', createdAt, updateWrapUp: true,
       output: 'Asking the running turn to wrap up for a Tower update.', ...(target.model ? { model: target.model } : {}), ...(target.effort ? { effort: target.effort } : {}) };
     this.runs.set(wrapUp.id, wrapUp);
     this.drain!.wrapUps.add(wrapUp.id);
@@ -1689,6 +1691,7 @@ export class RunManager extends EventEmitter {
     // The runs that finished longest ago go first: a long turn that just finished is still read by its watchers.
     const finished = [...this.runs.values()].filter(run => FINISHED.has(run.status) && !retained.has(run.id)).sort((a, b) => finishedTime(a) - finishedTime(b));
     for (const run of finished.slice(0, Math.max(0, finished.length - MAX_RUNS))) { this.runs.delete(run.id); this.settledRuns.delete(run.id); }
+    for (const id of this.ownerStopped) if (!this.runs.has(id) || FINISHED.has(this.runs.get(id)!.status)) this.ownerStopped.delete(id);
   }
 
   private persist(retained = this.retainedIds()): void {

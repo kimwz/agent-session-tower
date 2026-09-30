@@ -193,6 +193,8 @@ export interface Run {
    * until `at` and then resumes the conversation with the agent's own prompt. Background recovery uses the same
    * queue; its persisted attempt count limits retries after unexpected provider exits.
    */
+  /** Tower's own request that a running turn wrap up for a forced worker update; not work of its own. */
+  updateWrapUp?: true;
   scheduled?: { at: string; afterRunId: string; backgroundRecoveryAttempt?: number;
     /** Tower's own continuation for a turn a forced worker update ended; watchers of `afterRunId` follow it. */
     resume?: 'update' };
