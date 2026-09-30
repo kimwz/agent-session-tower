@@ -4,6 +4,25 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.88.0] - 2026-09-30
+
+### Added
+- **권한 자동 검토.** When an agent asks for a permission with `permissions_request`, Tower's reviewer can decide it instead of waiting for you. Turn it on in 권한 → 요청 and pick the model (Claude opus/sonnet or Codex sol/terra, default reasoning). It applies in every project. A separate, tool-less model run reads:
+  - **what you set down for that work**: prompts you typed in Tower for that conversation (not continuations, notices or the master's messages), a trigger whose instructions you wrote, Tower skills that apply there and your guidance at the text you saved or confirmed, the project's `AGENTS.md`/`CLAUDE.md` as merged on the upstream default branch (never the working tree), and the rules you already allowed;
+  - **the rest as context only**: the request and the agent's reason, the recent conversation, earlier requests. It can never create consent.
+- The reviewer answers one of three ways:
+  - **허용**: the step is part of the task you asked for and not destructive. The rule is added for that project only (a global request is narrowed to the project), with the same or a longer prefix, marked 자동 검토로 허용 with its reason. The requesting conversation is told and continues. The notice runs with that conversation's own origin and approvals, never as yours.
+  - **범위 축소 요청**: the request is withdrawn and the agent is told the narrower rule to ask for; the new request is reviewed again. After two in a day, a conversation's next request goes to you.
+  - **소유자 판단 필요**: the request waits for you with the reviewer's reason. The reviewer never refuses; only you do.
+- Some requests always wait for you, whatever the model says: rules for a whole program or tool, `Bash(…)` written as a Claude rule, file rules outside the project, commands that delete, change the machine, reach secrets or send data out (`rm`, `sudo`, `curl`, `ssh`, `gh api`, `gh secret`, `git reset --hard`, `git push --force`, …), and public agents' requests. A rule equal to one you made is never widened by the reviewer.
+- A rule the reviewer allows in a family with destructive options also gets deny rules. For example, `git push` also denies `--force`, `-f`, `--force-with-lease`, `--delete`, `--mirror`, `+refspec` and `:ref` anywhere after it for Claude Code, and the same options right after the prefix for Codex. Codex rules cannot name options that come after other arguments, so Codex does not block `git push origin main --force` under an allowed `git push`. Claude Code does not block combined short options such as `-vf`.
+- Skills and guidance show **확인 필요** when their text changed since you saved or confirmed it in Tower. Open one and press **이 내용 확인** to let the reviewer rely on it. Skills saved before this release need that once.
+- Agents see the reviewer's verdict and reason in `permissions_list`, and the Tower guidance asks them to name the step of your task that needs a permission.
+
+### Changed
+- The waiting-requests count and badge leave out requests the reviewer is still checking.
+- A review under way when the worker hands over finishes first; waiting reviews continue in the new worker.
+
 ## [1.87.0] - 2026-09-30
 
 ### Changed
