@@ -267,3 +267,16 @@ test('closing a conversation withdraws its waiting requests', async t => {
   assert.equal(await f.service.applyReview(asked.request.id!, { verdict: 'approve', reason: 'ok' }), undefined);
   assert.deepEqual(f.service.overview().rules, []);
 });
+
+test('the conversation hears a result only when whoever allowed the run asked for it', async t => {
+  const f = await fixture(t);
+  const quiet = await f.service.requestRun({ command: 'echo quiet', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(quiet.request.id!, true, undefined, false);
+  const told = await f.service.requestRun({ command: 'echo told', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(told.request.id!, true, undefined, true);
+  await f.runner.flush();
+  const runOf = (id: string) => f.service.overview().requests.find(item => item.id === id)!.run!;
+  assert.equal(runOf(quiet.request.id!).notify, undefined);
+  assert.equal(runOf(told.request.id!).notify, true, 'kept through the runner’s updates');
+  assert.equal(runOf(told.request.id!).status, 'done');
+});

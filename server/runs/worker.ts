@@ -553,9 +553,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       const timer = setTimeout(() => {
         runNotices.delete(timer);
         const now = permissions.overview().requests.find(item => item.id === request.id);
-        if (!now?.run || now.run.delivered) return;
+        if (!now?.run || now.run.delivered || !now.run.notify) return;
+        // The result reaches the conversation as the work it already was; a turn that can no longer be found is not guessed at.
         const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
-        const origin = run?.origin ?? (request.decidedBy === 'owner' ? { kind: 'owner' as const } : undefined);
+        const origin = run?.origin;
         if (!origin || !runs.getSession(request.sessionId)) return;
         const result = now.run.status === 'failed' ? `실패: ${now.run.error ?? '알 수 없는 이유'}` : now.run.timedOut ? '시간 제한으로 중단됨' : `종료 코드 ${now.run.exitCode ?? now.run.signal ?? '?'}`;
         void runs.enqueue(request.sessionId, `${TOWER_NOTICE} 한 번 실행을 요청한 명령이 끝났습니다 (${result}). permissions_runResult에 id "${request.id}"를 주면 출력을 받습니다.`, {},

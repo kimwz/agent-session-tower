@@ -206,7 +206,7 @@ export class PermissionService {
         if (block) return owner(block);
         await this.commit(state => {
           const item = state.requests.find(entry => entry.id === id)!;
-          item.status = 'approved'; item.decidedAt = at; item.decidedBy = 'auto'; item.run = { status: 'waiting' };
+          item.status = 'approved'; item.decidedAt = at; item.decidedBy = 'auto'; item.run = { status: 'waiting', ...(this.autoReview().resume ? { notify: true } : {}) };
           item.review = review({ verdict: 'approve' });
         });
         const item = this.state.requests.find(entry => entry.id === id)!;
@@ -412,7 +412,7 @@ export class PermissionService {
     return this.serial(async () => {
       const request = this.state.requests.find(item => item.id === id);
       if (!request) return;
-      await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.run = { ...run, ...(item.run?.delivered ? { delivered: true } : {}) }; });
+      await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.run = { ...run, ...(item.run?.delivered ? { delivered: true } : {}), ...(item.run?.notify ? { notify: true } : {}) }; });
       if (finishedRun(run)) this.options.onRunFinished?.(this.state.requests.find(item => item.id === id)!);
     });
   }
@@ -494,7 +494,7 @@ export class PermissionService {
       }
       if (request.rule.kind === 'run') {
         // The owner allows the exact command: Tower runs it once, now. Its result reaches the conversation when it is done.
-        await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.status = 'approved'; item.decidedAt = at; item.decidedBy = 'owner'; item.run = { status: 'waiting' }; });
+        await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.status = 'approved'; item.decidedAt = at; item.decidedBy = 'owner'; item.run = { status: 'waiting', ...(resume ? { notify: true } : {}) }; });
         this.options.startRun?.(this.state.requests.find(entry => entry.id === id)!);
         return { request, rule: undefined, run: true };
       }
@@ -756,7 +756,7 @@ function runFields(item: any): Partial<PermissionRequest> {
       ...(Number.isInteger(run.pid) ? { pid: run.pid } : {}), ...(typeof run.started === 'string' ? { started: run.started } : {}), ...(Number.isInteger(run.exitCode) ? { exitCode: run.exitCode } : {}),
       ...(typeof run.signal === 'string' ? { signal: run.signal } : {}), ...(run.timedOut === true ? { timedOut: true } : {}), ...(Number.isInteger(run.stdoutBytes) ? { stdoutBytes: run.stdoutBytes } : {}),
       ...(Number.isInteger(run.stderrBytes) ? { stderrBytes: run.stderrBytes } : {}), ...(run.truncated === true ? { truncated: true } : {}), ...(typeof run.error === 'string' ? { error: text(run.error, 1000) } : {}),
-      ...(run.delivered === true ? { delivered: true } : {}),
+      ...(run.delivered === true ? { delivered: true } : {}), ...(run.notify === true ? { notify: true } : {}),
       ...(run.preview && typeof run.preview === 'object' ? { preview: { stdout: text(run.preview.stdout, 4000), stderr: text(run.preview.stderr, 4000) } } : {}) } } : {}) };
 }
 

@@ -104,6 +104,8 @@ export interface PermissionRun {
   error?: string;
   /** The result reached the agent (runResult), so no message is sent. */
   delivered?: boolean;
+  /** Whoever allowed it asked for the conversation to hear the result (the owner's choice, or the reviewer's setting). */
+  notify?: boolean;
 }
 export interface PermissionRunOutput { stdout: string; stderr: string; truncated: boolean }
 export const MAX_RUN_COMMAND = 4000;
