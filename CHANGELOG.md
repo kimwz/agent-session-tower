@@ -8,7 +8,9 @@ format, and saved browser preferences are the compatibility surface.
 
 ### Changed
 - **Slack conversations reply without waiting for you** (#17). A Slack coordinator can now post in its thread on its own, as it could already add reactions: an acknowledgement, a clarifying question, or a verified result. It follows your rules, including one that asks to review replies first; a reply you did not ask for carries the "Sent by …'s agent" note, as autoReply reports do. Each reply has its own key, so a retry never posts it twice, and a send whose result is uncertain is never repeated.
-- Telling Tower not to send (for example "슬랙에 보내지 마세요") holds every reply in that Slack conversation, including a rule's automatic report, until you give a send permission or approve a reply. While Tower cannot interpret one of your messages there, replies wait until it understands the next one. Proposals, approvals and autoReply reports work as before. GitHub issue comments still need your permission.## [1.89.0] - 2026-09-30
+- Telling Tower not to send (for example "슬랙에 보내지 마세요") holds every reply in that Slack conversation, including a rule's automatic report, until you give a send permission or approve a reply. While Tower cannot interpret one of your messages there, replies wait until it understands the next one. Proposals, approvals and autoReply reports work as before. GitHub issue comments still need your permission.
+
+## [1.89.0] - 2026-09-30
 
 ### Added
 - **권한 자동 검토.** When an agent asks for a permission with `permissions_request`, Tower's reviewer can decide it instead of waiting for you. Turn it on in 권한 → 요청 and pick the model (Claude opus/sonnet or Codex sol/terra, default reasoning). It applies in every project.
