@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent } from 'react';
 
 const fontKey = 'agent-session-tower.chat-font-size';
 const widthKey = 'agent-session-tower.chat-width';
@@ -50,8 +50,9 @@ export function useChatAppearance() {
   const [maxWidth, setMaxWidth] = useState(maximumWidth);
   const drag = useRef<{ pointerId: number; x: number; width: number } | null>(null);
   const width = clamp(preferredWidth, 320, maxWidth);
-  // While a conversation covers the right of the page, the header's settings button moves to its left edge.
-  useEffect(() => {
+  // While a conversation covers the right of the page, the header's settings button moves to its left edge,
+  // in the same frame as the panel, so the canvas tools measured against the button follow it.
+  useLayoutEffect(() => {
     const root = document.documentElement.style;
     root.setProperty('--chat-panel-width', `${width}px`);
     return () => { root.removeProperty('--chat-panel-width'); };
