@@ -395,7 +395,8 @@ const inside = (path: string, folder: string) => path === folder || path.startsW
  * reviewer's to judge, the whole command in view (a specific `kill 13229` or `rm dist/old.log` can be fine).
  */
 export function runBlock(command: string): string | undefined {
-  const text = command.toLowerCase();
+  // Lines joined by a backslash are one command to the shell; the command itself runs as written.
+  const text = command.toLowerCase().replace(/\\\r?\n/g, ' ');
   // A program may be named by its path (/usr/bin/sudo) too.
   if (/(^|[\s;&|(`$'"{])(\S*\/)?(sudo|doas|su)(\s|$|["';&|)`])/.test(text)) return '권한을 올리는 명령(sudo 등)은 소유자가 정합니다.';
   if (/(^|[\s;&|(`$'"{])(\S*\/)?(shutdown|reboot|halt|poweroff|mkfs[\w.]*|diskutil|fdisk)(\s|$|["';&|)`])/.test(text)) return '컴퓨터 전체에 영향을 주는 명령은 소유자가 정합니다.';
