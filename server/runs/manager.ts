@@ -123,6 +123,8 @@ const MAX_RETAINED = 50;
 /** A retained finished run keeps what its result notice uses. */
 const RETAINED_OUTPUT = 20_000;
 const MAX_SAVED_BYTES = 64 * 1024 * 1024;
+/** What builds before 1.86.0 read at most. */
+const LEGACY_SAVED_BYTES = 11_500_000;
 /** Marks, in runs.json, a queued turn accepted while Tower switched workers: a restart keeps it queued. */
 const KEEP_QUEUED = 'keepQueued';
 /** Marks, in runs.json, a finished run an automation still has to report. */
@@ -137,7 +139,11 @@ const DELEGATED_STOPPED = 'Stopped for a Tower update before it finished; it was
 const UPDATE_NOT_STARTED = 'Stopped for a Tower update before it started in the Codex app. Send the instruction again.';
 
 /** A running turn a forced update is ending, and Tower's own continuation for it. */
-interface UpdateTarget { continuation?: string; delegated: boolean; retryAt: number; mayHaveWrapUp: boolean; stopping?: boolean; settled?: boolean }
+interface UpdateTarget { continuation?: string; delegated: boolean; retryAt: number; mayHaveWrapUp: boolean; stopping?: boolean; settled?: boolean;
+  /** The wrap-up request not yet handed over, if one is being sent. */
+  sending?: Run;
+  /** The agent's own continuation, held while it is unknown whether a wrap-up reached the turn. */
+  deferredWakeup?: { wakeup: Wakeup; attempt?: number } }
 interface UpdateDrain { startedAt: number; deadline: number; delegated: (run: Run) => boolean; targets: Map<string, UpdateTarget>; stoppingBridges: Set<string>; wrapUps: Set<string> }
 const MAX_QUEUED = 32;
 const FINISHED = new Set<Run['status']>(['completed', 'error', 'cancelled']);
@@ -156,8 +162,11 @@ const finishedTime = (run: Run) => Date.parse(run.finishedAt ?? run.createdAt) |
 const due = (run: Run, now = Date.now()) => !run.scheduled || Date.parse(run.scheduled.at) <= now;
 
 export class RunError extends Error {
+  /** Nothing was accepted and the same request may succeed a little later (a full queue, a save that failed). */
+  retryable?: boolean;
   constructor(message: string, public readonly statusCode = 400) { super(message); }
 }
+function notAdmitted(error: RunError): RunError { error.retryable = true; return error; }
 
 /** Owns only processes launched by this monitor; never signals an external agent. */
 export class RunManager extends EventEmitter {
@@ -234,6 +243,13 @@ export class RunManager extends EventEmitter {
 
   /** Checked again at the last moment before a provider is started, after every asynchronous step. */
   private refusedAtLaunch(run: Run, session: Session): boolean {
+    // A switch to the new worker began while this turn was being prepared: it waits for the new worker.
+    if (this.drain && run.status === 'queued') {
+      if (run.output !== UPDATE_WAIT) run.output = UPDATE_WAIT;
+      this.reservedSessions.delete(session.id);
+      this.changed();
+      return true;
+    }
     const reason = run.status === 'queued' ? this.launchGate?.(run) : undefined;
     if (!reason) return false;
     run.status = 'cancelled'; run.error = reason; run.finishedAt = new Date().toISOString();
@@ -548,10 +564,10 @@ export class RunManager extends EventEmitter {
   }
 
   private validateAdmission(prompt: string, hasAttachments = false): void {
-    if (!this.started || this.stopping) throw new RunError('The task runner is not accepting instructions.', 503);
+    if (!this.started || this.stopping) throw notAdmitted(new RunError('The task runner is not accepting instructions.', 503));
     if (typeof prompt !== 'string' || (!prompt.trim() && !hasAttachments)) throw new RunError('Enter an instruction or attach a file first.');
     if (prompt.length > MAX_PROMPT) throw new RunError(`Instructions must be at most ${MAX_PROMPT.toLocaleString()} characters.`, 413);
-    if ([...this.runs.values()].filter((run) => run.status === 'queued' && !run.scheduled).length >= MAX_QUEUED) throw new RunError('The task queue is full. Wait for a task to finish.', 429);
+    if ([...this.runs.values()].filter((run) => run.status === 'queued' && !run.scheduled).length >= MAX_QUEUED) throw notAdmitted(new RunError('The task queue is full. Wait for a task to finish.', 429));
   }
 
   /** External content only enters conversations Tower created and can keep marked. */
@@ -701,6 +717,8 @@ export class RunManager extends EventEmitter {
     if (FINISHED.has(run.status)) return;
     if (run.steering) throw new RunError('An inserted instruction belongs to the active turn. Stop the active turn instead.', 409);
     const noted = () => { if (reason && run.status === 'cancelled' && run.error !== reason) { run.error = reason; this.changed(); } };
+    // Stopped by the owner, not by the update's deadline: the update does not bring the work back.
+    if (!reason) this.dropUpdateContinuation(runId);
     const bridge = this.bridged.get(runId);
     if (bridge) {
       // The shared server owns the process. Interrupt only our correlated turn.
@@ -1428,7 +1446,12 @@ export class RunManager extends EventEmitter {
     if (automated(after)) return;
     // A turn a forced update is ending: its update continuation resumes the conversation, unless the turn finished its
     // own work before any wrap-up could reach it; then the agent's plan goes on as usual.
-    if (this.withdrawUpdateContinuation(after) === false) return;
+    if (this.withdrawUpdateContinuation(after) === false) {
+      // A wrap-up still being sent may yet turn out never to have arrived; the agent's plan waits for that answer.
+      const target = this.drain?.targets.get(after.id);
+      if (target?.sending && after.status === 'completed') target.deferredWakeup = { wakeup, ...(backgroundRecoveryAttempt ? { attempt: backgroundRecoveryAttempt } : {}) };
+      return;
+    }
     const live = [...this.runs.values()].filter(run => run.status === 'queued' || run.status === 'running');
     // An instruction inserted into the finished turn still mirrors it until the next change; it is part of that turn.
     if (live.some(run => run.sessionId === after.sessionId && run.steering?.targetRunId !== after.id)
@@ -1456,6 +1479,14 @@ export class RunManager extends EventEmitter {
     if (this.drain || this.stopping) return;
     this.drain = { startedAt: Date.now(), deadline, delegated, targets: new Map(), stoppingBridges: new Set(), wrapUps: new Set() };
     this.changed();
+  }
+
+  /** Gives up a forced update that could not hand off: queued turns start again here; nothing is cancelled. */
+  endUpdateDrain(): void {
+    if (!this.drain) return;
+    this.drain = undefined;
+    this.changed();
+    void this.pump();
   }
 
   /** Shown while a forced update waits for running turns to wrap up. */
@@ -1494,16 +1525,26 @@ export class RunManager extends EventEmitter {
     this.runs.set(wrapUp.id, wrapUp);
     this.drain!.wrapUps.add(wrapUp.id);
     state.mayHaveWrapUp = true;
+    state.sending = wrapUp;
     state.retryAt = Date.now() + WRAP_UP_RETRY_MS;
     // The continuation stays the conversation's newest run: an inserted instruction ends as its turn does.
     const continuation = state.continuation ? this.runs.get(state.continuation) : undefined;
     if (continuation && Date.parse(continuation.createdAt) <= Date.parse(createdAt)) continuation.createdAt = new Date(Date.parse(createdAt) + 1).toISOString();
     this.changed();
     void this.steer(wrapUp.id, { targetRunId: target.id }).catch(() => {}).finally(() => {
+      if (state.sending === wrapUp) delete state.sending;
       // Put back in the queue means it was never handed over; it must not start later as a turn of its own.
-      if (wrapUp.status !== 'queued' || wrapUp.steering || this.runs.get(wrapUp.id) !== wrapUp) return;
+      if (wrapUp.status !== 'queued' || wrapUp.steering || this.runs.get(wrapUp.id) !== wrapUp) { delete state.deferredWakeup; return; }
       this.runs.delete(wrapUp.id);
       state.mayHaveWrapUp = false;
+      // The turn finished on its own meanwhile: it needs no continuation, and the agent's own plan goes ahead.
+      const current = this.runs.get(target.id);
+      if (current?.status === 'completed') {
+        this.withdrawUpdateContinuation(current);
+        const deferred = state.deferredWakeup;
+        delete state.deferredWakeup;
+        if (deferred) this.scheduleContinuation(current, deferred.wakeup, deferred.attempt);
+      }
       this.changed();
     });
   }
@@ -1551,6 +1592,16 @@ export class RunManager extends EventEmitter {
     if (continuation?.status === 'queued') this.runs.delete(continuation.id);
     delete target.continuation;
     return true;
+  }
+
+  /** The owner stopped this turn during a forced update: its update continuation goes too. */
+  private dropUpdateContinuation(runId: string): void {
+    const target = this.drain?.targets.get(runId);
+    if (!target?.continuation) return;
+    const continuation = this.runs.get(target.continuation);
+    if (continuation?.status === 'queued') this.runs.delete(continuation.id);
+    delete target.continuation;
+    delete target.deferredWakeup;
   }
 
   private supersede(run: Run, reason: string): void {
@@ -1624,33 +1675,36 @@ export class RunManager extends EventEmitter {
       }
     }
     this.trackUpdateTargets();
-    this.prune();
-    this.persist(); this.emit('change');
+    const retained = this.retainedIds();
+    this.prune(retained);
+    this.persist(retained); this.emit('change');
   }
 
-  private prune(): void {
-    const retained = this.retainedIds();
+  private prune(retained = this.retainedIds()): void {
     // The runs that finished longest ago go first: a long turn that just finished is still read by its watchers.
     const finished = [...this.runs.values()].filter(run => FINISHED.has(run.status) && !retained.has(run.id)).sort((a, b) => finishedTime(a) - finishedTime(b));
     for (const run of finished.slice(0, Math.max(0, finished.length - MAX_RUNS))) { this.runs.delete(run.id); this.settledRuns.delete(run.id); }
   }
 
-  private persist(): void {
+  private persist(retained = this.retainedIds()): void {
     // This save includes any streamed output that was waiting for its slower cadence.
     this.cancelOutputPersist();
     // Instruction text never reaches disk, where an older Tower could show it. A turn still to run records only that it
     // needs instructions; after a restart it is cancelled rather than started without them.
-    const retained = this.retainedIds();
     for (const id of this.carried) if (this.runs.get(id)?.status !== 'queued') this.carried.delete(id);
     // A wrap-up request is never carried: after a restart it would start as a turn of its own.
     if (this.drain) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain.wrapUps.has(run.id)) this.carried.add(run.id);
-    const data = JSON.stringify(this.list().map(({ approvals: _liveApprovals, canSteer: _liveSteering, ...run }) => {
+    const serialize = (finishedOutput?: number) => JSON.stringify(this.list().map(({ approvals: _liveApprovals, canSteer: _liveSteering, ...run }) => {
       const saved: Record<string, unknown> = { ...run };
+      if (finishedOutput !== undefined && FINISHED.has(run.status)) saved.output = run.output.slice(-finishedOutput);
       if (this.runs.get(run.id)?.instructions?.required && !FINISHED.has(run.status)) saved[NEEDS_INSTRUCTIONS] = true;
       if (this.carried.has(run.id)) saved[KEEP_QUEUED] = true;
       if (retained.has(run.id) && FINISHED.has(run.status)) { saved[RETAIN] = true; saved.output = run.output.slice(-RETAINED_OUTPUT); }
       return saved;
     }));
+    // Older builds refuse a history over 12 MB, so a rollback could not start: long finished output is shortened first.
+    let data = serialize();
+    if (Buffer.byteLength(data) > LEGACY_SAVED_BYTES) data = serialize(2_000);
     // Kept only for turns still to run, in a private file older Towers do not read (see instructionsFile).
     const instructions = JSON.stringify(Object.fromEntries([...this.runs.values()]
       .filter(run => run.instructions?.required && !FINISHED.has(run.status)).map(run => [run.id, run.instructions])));
@@ -1661,7 +1715,11 @@ export class RunManager extends EventEmitter {
       // placeholder, which recovery displays as failed and never submits again.
       if (created !== this.saved.created) { await writePrivateJson(this.createdFile, created); this.saved.created = created; }
       // Instructions before the runs that name them, so a saved marker always finds its text.
-      if (instructions !== (this.saved.instructions ?? '{}')) { await writePrivateJson(this.instructionsFile, instructions); this.saved.instructions = instructions; }
+      // A failure here costs only those turns' restart (they are cancelled then, as before); runs.json is still saved.
+      if (instructions !== (this.saved.instructions ?? '{}')) {
+        try { await writePrivateJson(this.instructionsFile, instructions); this.saved.instructions = instructions; }
+        catch (error) { console.error(`Turn instructions were not saved: ${errorMessage(error)}`); }
+      }
       if (data !== this.saved.runs) { await writePrivateJson(this.stateFile, data); this.saved.runs = data; }
       this.persistenceError = undefined;
     }).catch((error: Error) => { this.persistenceError = error; });
@@ -1695,7 +1753,7 @@ export class RunManager extends EventEmitter {
 
   private async flush(): Promise<void> {
     await this.writes;
-    if (this.persistenceError) throw new RunError(`Cannot save the instruction queue: ${this.persistenceError.message}`, 503);
+    if (this.persistenceError) throw notAdmitted(new RunError(`Cannot save the instruction queue: ${this.persistenceError.message}`, 503));
   }
 }
 

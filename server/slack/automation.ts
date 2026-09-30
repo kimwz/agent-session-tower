@@ -249,8 +249,15 @@ export class SlackAutomationManager extends EventEmitter {
    * still report it (`tower_task_complete` checks the run). Tower keeps these runs through pruning and restarts.
    */
   retainedRuns(): string[] {
-    return this.list().filter(item => !terminal.has(item.status) || item.ownerConditionalReply?.status === 'pending')
-      .flatMap(item => (item.delegatedTasks ?? []).flatMap(task => task.delegatedRunId ? [task.delegatedRunId] : []));
+    // Read on every run change, so it looks at the saved items directly instead of rebuilding the whole list.
+    const ids: string[] = [];
+    for (const item of this.items) {
+      const tasks = item.delegatedTasks;
+      if (!tasks?.length) continue;
+      if (terminal.has(item.status) && item.ownerConditionalReply?.status !== 'pending' && tasks.every(task => task.notifiedRunId || task.notificationError || task.submissionError)) continue;
+      for (const task of tasks) if (task.delegatedRunId) ids.push(task.delegatedRunId);
+    }
+    return ids;
   }
   /** During a worker handoff, newly received mentions wait for the successor instead of starting here. */
   hold(): void { this.held = true; }
@@ -605,10 +612,9 @@ export class SlackAutomationManager extends EventEmitter {
         task.notifiedRunId = resumed.runId; await this.save(item, { status: 'running', runId: resumed.runId });
       } catch (error) {
         const recovered = this.options.findConversation?.(correlation);
-        const status = (error as { statusCode?: unknown })?.statusCode;
         if (recovered) task.notifiedRunId = recovered.runId;
-        // A full queue (429) or a runner not accepting (503) admitted nothing: the notice is sent on a later tick.
-        else if (status === 429 || status === 503) delete task.notificationClaimed;
+        // A full queue, a runner not accepting yet, or a save that failed admitted nothing: sent on a later tick.
+        else if ((error as { retryable?: unknown })?.retryable === true) delete task.notificationClaimed;
         else task.notificationError = (error instanceof Error ? error.message : 'Result notification failed.').slice(0, 1500);
         await this.save(item, {});
       }

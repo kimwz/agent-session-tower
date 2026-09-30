@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { continuedRunById } from '../runs/continuations.js';
 import { join } from 'node:path';
 import { MASTER_FOLDER, type MasterBinding, type MasterTaskState } from '../../shared/master.js';
 import type { AutoPromptJob, ChatMessage, Provider, Run, RunReply, SessionDetail, Snapshot } from '../../shared/types.js';
@@ -360,7 +361,8 @@ export class MasterSession {
       changed = true;
     }
     for (const run of snapshot.runs ?? []) {
-      if (!ours(run.origin) || !after(run.createdAt) || run.sessionId === binding.sessionId || this.file.followed.some(item => item.runId === run.id)) continue;
+      // Tower's continuation after a forced update carries on a run already followed; it is not new work.
+      if (run.scheduled?.resume === 'update' || !ours(run.origin) || !after(run.createdAt) || run.sessionId === binding.sessionId || this.file.followed.some(item => item.runId === run.id)) continue;
       this.add({ id: randomUUID(), kind: 'delegated', title: truncate(run.prompt, 80), runId: run.id, sessionId: run.sessionId, prompt: run.prompt, createdAt: run.createdAt, state: 'running' });
       changed = true;
     }
@@ -382,7 +384,8 @@ export class MasterSession {
     }
     let run: Run | undefined;
     if (!ended && item.runId) {
-      run = (snapshot.runs ?? []).find(entry => entry.id === item.runId);
+      run = continuedRunById(snapshot.runs ?? [], item.runId);
+      if (run && run.id !== item.runId && run.status !== 'queued') { item.runId = run.id; item.sessionId = run.sessionId; }
       if (run && (run.status === 'completed' || run.status === 'error' || run.status === 'cancelled')) ended = run.status;
     }
     if (!ended && Date.now() - Date.parse(item.createdAt) > UNKNOWN_MS && !run && !(item.jobId && !item.runId && (snapshot.autoPrompts ?? []).some(entry => entry.id === item.jobId))) ended = 'unknown';

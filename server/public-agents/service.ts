@@ -563,7 +563,8 @@ export class PublicAgentService extends EventEmitter {
     // A turn a forced worker update ended goes on in Tower's continuation; the request follows it.
     const run = continuedRunById(runs, request.runId) ?? continuedRun(runs, runs.find(item => item.autoPromptId === request.id));
     // The request remembers the run carrying it on, so it still finds it once the earlier one leaves the history.
-    if (run && request.runId !== run.id) { request.runId = run.id; void this.saveData(agent.id); }
+    // Only a continuation that started: a queued one is removed again when the turn turns out to have finished itself.
+    if (run && run.status !== 'queued' && request.runId !== run.id) { request.runId = run.id; void this.saveData(agent.id); }
     if (!run) { this.finish(data, request, { status: 'failed', error: 'The run record is no longer available.', result: 'The outcome of this request could not be confirmed.' }); void this.saveData(agent.id); return; }
     if (!FINISHED.has(run.status)) return;
     const output = run.output ?? '';

@@ -281,7 +281,7 @@ test('a result notice the full queue refused is sent on a later tick; its run is
   f.options.startConversation = async () => ({ sessionId: coordinator.sessionId, runId: coordinator.id });
   f.options.getSessionRuns = () => [coordinator];
   f.options.resumeConversation = async () => {
-    if (refuse) throw Object.assign(new Error('The task queue is full. Wait for a task to finish.'), { statusCode: 429 });
+    if (refuse) throw Object.assign(new Error('The task queue is full. Wait for a task to finish.'), { statusCode: 429, retryable: true });
     resumes++; return { runId: 'notification' };
   };
   await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
@@ -298,6 +298,19 @@ test('a result notice the full queue refused is sent on a later tick; its run is
   refuse = false;
   await f.manager.tick();
   assert.equal(resumes, 1);
+});
+
+test('a result notice refused for good (the CLI is missing) is recorded, not retried forever', async t => {
+  const f = await fixture(t);
+  const coordinator: Run = { id: 'coordinator', sessionId: 'session', prompt: '', status: 'completed', createdAt: '', output: '' };
+  f.options.startConversation = async () => ({ sessionId: coordinator.sessionId, runId: coordinator.id });
+  f.options.getSessionRuns = () => [coordinator];
+  f.options.resumeConversation = async () => { throw Object.assign(new Error('Install the codex CLI and ensure it is in PATH before sending instructions.'), { statusCode: 503 }); };
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'cli', prompt: 'Review' });
+  f.finish('cancelled');
+  await f.manager.tick(); await f.manager.tick();
+  assert.match(f.manager.list()[0].delegatedTasks![0].notificationError ?? '', /Install the codex CLI/);
 });
 
 test('persisted legacy composing work produces only an approval proposal after restart', async t => {

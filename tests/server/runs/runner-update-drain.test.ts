@@ -35,7 +35,7 @@ async function fixture() {
   let launches = 0;
   const manager = new RunManager({ stateDir: directory, getSession: id => id === session.id ? session : undefined,
     refreshSessions: async () => {}, findExecutable: async () => '/fixture/claude', pollMs: 10,
-    spawnProcess: () => { launches++; return child; } });
+    spawnProcess: () => { launches++; if (launches > 1) throw new Error('fixture: one provider process only'); return child; } });
   await manager.start();
   const first = await manager.enqueue(session.id, 'original work', {}, { origin: owner });
   await until(() => received.some(frame => frame.type === 'user' && !frame.uuid));
@@ -112,6 +112,29 @@ test('at the deadline a running turn stops with the reason, and its continuation
   await until(() => f.run(f.first.id)?.status === 'cancelled');
   assert.match(f.run(f.first.id)!.error ?? '', /Tower update/);
   assert.equal(f.continuation()?.status, 'queued');
+});
+
+test('a turn the owner stops during the update is not brought back', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  assert.ok(f.continuation());
+  await f.manager.cancel(f.first.id);
+  assert.equal(f.run(f.first.id)?.status, 'cancelled');
+  assert.equal(f.continuation(), undefined);
+});
+
+test('a forced update that cannot hand off lets queued turns start again', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  const later = await f.manager.enqueue(f.session.id, 'waits for the switch', {}, { origin: owner });
+  f.emit({ type: 'result', session_id: nativeId, is_error: false });
+  await until(() => f.run(f.first.id)?.status === 'completed');
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(f.launches(), 1);
+  f.manager.endUpdateDrain();
+  assert.equal(f.manager.updateDrainStatus(), undefined);
+  await until(() => f.launches() === 2);
+  assert.notEqual(f.run(later.id)?.status, 'cancelled');
 });
 
 test('delegated work is neither wrapped up nor resumed, and says why it stopped', async t => {

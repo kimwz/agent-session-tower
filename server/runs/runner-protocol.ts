@@ -37,6 +37,8 @@ export interface RunnerSnapshot {
 export interface UpdateDrainStatus { startedAt: string; deadline: string; running: number }
 /** How long a forced update lets running turns wrap up before stopping them. */
 export const FORCE_UPDATE_DEADLINE_MS = 10 * 60 * 1000;
+/** How long after the deadline a forced update may still wait to hand off before new turns start here again. */
+export const FORCE_UPDATE_GIVE_UP_MS = 10 * 60 * 1000;
 export interface RunnerReply {
   protocol: number;
   stateDir: string;

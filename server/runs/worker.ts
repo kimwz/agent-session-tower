@@ -43,7 +43,7 @@ import { installAgentGuidance } from '../agent-guidance/install.js';
 import { PermissionService } from '../permissions/service.js';
 import { skillHomes } from '../skills/files.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
-import { FORCE_UPDATE_DEADLINE_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
+import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
 const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan']);
 
@@ -322,7 +322,16 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     // scheduled for later is saved and delivered by the successor, but nothing due soon or underway may be left behind.
     && (forced ? !(options.transient ?? options.inFlight)?.() : !options.runs.hasWorkWithin(5 * 60 * 1000) && !options.inFlight?.());
   const handOff = async () => {
-    if (forced && !closing && !draining) options.runs.driveUpdateDrain();
+    if (forced && !closing && !draining) {
+      options.runs.driveUpdateDrain();
+      // A switch that still cannot happen well after the deadline must not keep new work waiting for good.
+      if (Date.now() > forced.deadline + FORCE_UPDATE_GIVE_UP_MS) {
+        console.error('The forced update could not hand off; new turns start again on this worker.');
+        forced = undefined;
+        options.runs.endUpdateDrain();
+        changed();
+      }
+    }
     if (!handoff || closing || draining || (handoff.retryAt && Date.now() < handoff.retryAt)) return;
     if (!handoff.held && Date.now() - handoff.requestedAt >= (options.handoffHoldMs ?? 6 * 60 * 60 * 1000)) { handoff.held = true; options.holdIntake?.(); }
     if (!quiet()) return;
