@@ -14,6 +14,10 @@ format, and saved browser preferences are the compatibility surface.
   - A trigger's instructions count whoever changed them last.
 - Command rules may carry options. `gh pr merge --squash`, `git push -u origin main` or `git commit -m wip` are reviewed; dangerous options in any spelling git accepts (`--force-with-lease`, `--del`, `-vf`, `+main`, `git checkout -B`, `git log --output=…`) and options before a subcommand (`git -C dir push`) still leave the rule to you.
 - `owner-prompts.json` from 1.89/1.90 is no longer used and can be deleted.
+## [1.90.1] - 2026-09-30
+
+### Fixed
+- **Terminals open again after a long-running terminal host lost its credential.** The terminal host, execution worker and master host keep their connection files in `/tmp`, where cleaners delete old files. When the terminal host's credential was removed, the host kept running and holding its lock, so no new host could start and every new terminal failed after 30 seconds. Each host now writes a removed credential again within 5 seconds and keeps its files fresh so cleaners leave them alone.
 
 ## [1.90.0] - 2026-09-30
 

@@ -46,6 +46,7 @@ import { TOWER_NOTICE } from '../../shared/task-notification.js';
 import { ruleGuards } from '../../shared/permissions.js';
 import { skillHomes } from '../skills/files.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
+import { keepEndpoint } from './endpoint-keeper.js';
 import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
 const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan']);
@@ -319,6 +320,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   options.publicAgents?.on('change', changed);
   let idleTimer: ReturnType<typeof setInterval> | undefined;
   let handoffTimer: ReturnType<typeof setInterval> | undefined;
+  let stopKeeping: (() => Promise<void>) | undefined;
   // Status alone is not enough: a cancelled turn may still be closing its provider process.
   const quiet = () => !pending && !options.runs.busy() && !options.autoPrompts?.busy()
     && !options.autoPrompts?.list().some(job => !['completed', 'error', 'cancelled'].includes(job.status))
@@ -374,6 +376,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const close = async (idle = false) => {
     if (closing) return;
     closing = true;
+    await stopKeeping?.();
     if (idleTimer) clearInterval(idleTimer);
     if (handoffTimer) clearInterval(handoffTimer);
     options.runs.off('change', changed); options.sessions.off('change', changed); options.autoPrompts?.off('change', changed); options.triggers?.off('change', changed); options.publicAgents?.off('change', changed);
@@ -389,6 +392,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     await writeFile(paths.token, token, { flag: 'wx', mode: 0o600 });
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(paths.socket, () => { server.off('error', reject); resolve(); }); });
     await chmod(paths.socket, 0o600);
+    stopKeeping = keepEndpoint({ socket: paths.socket, token: paths.token, value: token });
     handoffTimer = setInterval(() => { void handOff(); }, 1000);
     handoffTimer.unref();
     if (options.onIdle) {
