@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { RunManager } from '../../../server/runs/manager.js';
+import { SteeringError } from '../../../server/runs/steering.js';
 import { continuedRun, continuedRunById } from '../../../server/runs/continuations.js';
 import type { Run, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
@@ -290,4 +291,74 @@ test('watchers follow a turn into the continuation that carries it on', () => {
   const steered: Run = { id: 's', sessionId: 's', prompt: '', output: '', createdAt: now, status: 'cancelled', steering: { targetRunId: 'a', state: 'delivered', requestedAt: now, deliveredAt: now } };
   assert.equal(continuedRun([first, second, third, steered], steered)?.id, 'c', 'an instruction delivered into the turn follows the turn');
   assert.equal(continuedRun([second, third, steered], steered)?.id, 'c', 'also once the turn itself left the history');
+});
+
+/** One Codex conversation whose turn runs in a fake adapter; the test decides how a stop and an insert end. */
+async function codexFixture(onCancel: (finish: (result: { status: 'completed' | 'error' | 'cancelled'; error?: string }) => void) => void) {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-update-codex-'));
+  const id = '20000000-0000-4000-8000-000000000002';
+  const session: Session = { id: `codex:${id}`, nativeId: id, provider: 'codex', title: 'Codex', cwd: directory, project: 'fixture', status: 'completed',
+    statusReason: 'Done', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
+  let cancels = 0;
+  let steers = 0;
+  let reject = true;
+  const manager = new RunManager({ stateDir: directory, getSession: value => value === session.id ? session : undefined, refreshSessions: async () => {},
+    findExecutable: async () => '/fixture/codex', pollMs: 10,
+    openCodexStdio: async options => {
+      let finished = false;
+      const finish = (result: { status: 'completed' | 'error' | 'cancelled'; error?: string }) => { if (finished) return; finished = true; options.onFinished({ ...result, finishedAt: new Date().toISOString() } as never); };
+      return { done: Promise.resolve(), close: () => {}, respondToApproval: async () => {},
+        start: async () => { options.onStarted?.('turn-1'); },
+        canSteer: () => !finished,
+        steer: async () => { steers++; if (reject) throw new SteeringError('The turn did not take it.', 'rejected'); },
+        cancel: async () => { cancels++; onCancel(finish); } };
+    } });
+  await manager.start();
+  const first = await manager.enqueue(session.id, 'long codex work', {}, { origin: owner });
+  await until(() => manager.list().find(run => run.id === first.id)?.status === 'running');
+  const continuation = () => manager.list().find(run => run.scheduled?.resume === 'update');
+  return { manager, first, continuation, cancels: () => cancels, steers: () => steers, accept: () => { reject = false; },
+    run: (runId: string) => manager.list().find(run => run.id === runId),
+    cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
+}
+
+test('a stop the deadline could not confirm is not resumed', async t => {
+  const f = await codexFixture(finish => finish({ status: 'error', error: 'Could not confirm Codex cancellation.' })); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.manager.driveUpdateDrain(Date.now() + 61_000);
+  await until(() => f.run(f.first.id)?.status === 'error');
+  assert.equal(f.continuation(), undefined);
+});
+
+test('a wrap-up the turn refused is tried again and never counts as reached', async t => {
+  let finish!: (result: { status: 'completed' | 'error' | 'cancelled' }) => void;
+  const f = await codexFixture(done => { finish = done; }); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.manager.driveUpdateDrain();
+  await until(() => f.steers() === 1);
+  await until(() => !f.manager.list().some(run => run.updateWrapUp));
+  f.manager.driveUpdateDrain(Date.now() + 31_000);
+  await until(() => f.steers() === 2); // refused requests are sent again
+  await until(() => !f.manager.list().some(run => run.updateWrapUp));
+  // The turn then finishes by itself: nothing reached it, so it is not resumed.
+  f.manager.driveUpdateDrain(Date.now() + 61_000);
+  await until(() => f.cancels() === 1);
+  finish({ status: 'completed' });
+  await until(() => f.run(f.first.id)?.status === 'completed');
+  assert.equal(f.continuation(), undefined);
+});
+
+test('a second forced update after a give-up sends its own stop, and a confirmed stop is resumed', async t => {
+  let finish!: (result: { status: 'completed' | 'error' | 'cancelled' }) => void;
+  const f = await codexFixture(done => { finish = done; }); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.manager.driveUpdateDrain(Date.now() + 61_000);
+  await until(() => f.cancels() === 1);
+  f.manager.endUpdateDrain();
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.manager.driveUpdateDrain(Date.now() + 61_000);
+  await until(() => f.cancels() === 2);
+  finish({ status: 'cancelled' });
+  await until(() => f.run(f.first.id)?.status === 'cancelled');
+  assert.equal(f.continuation()?.scheduled?.afterRunId, f.first.id);
 });

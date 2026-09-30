@@ -144,10 +144,12 @@ interface UpdateTarget { delegated: boolean; retryAt: number;
   sending?: boolean;
   /** A wrap-up request was handed to the turn (it may or may not have taken it). */
   reached?: boolean;
-  /** The deadline stopped it. */
-  stopping?: boolean }
+  /** A deadline asked for its stop (kept across forced updates; decides whether it is carried on). */
+  stopping?: boolean;
+  /** The forced update (its sequence number) whose deadline sent the stop; a later one sends it again. */
+  stopSent?: number }
 /** `active` while new turns wait; after a give-up, turns already stopped or asked to wrap up are still settled. */
-interface UpdateDrain { startedAt: number; deadline: number; delegated: (run: Run) => boolean; active: boolean; targets: Map<string, UpdateTarget>; stoppingBridges: Set<string>; wrapUps: Set<string> }
+interface UpdateDrain { sequence: number; startedAt: number; deadline: number; delegated: (run: Run) => boolean; active: boolean; targets: Map<string, UpdateTarget>; stoppingBridges: Set<string>; wrapUps: Set<string> }
 const MAX_QUEUED = 32;
 const FINISHED = new Set<Run['status']>(['completed', 'error', 'cancelled']);
 /** A scheduled continuation Tower was not running for is still delivered this long after its time. */
@@ -1485,9 +1487,8 @@ export class RunManager extends EventEmitter {
    */
   beginUpdateDrain(deadline: number, delegated: (run: Run) => boolean): void {
     if (this.updating || this.stopping) return;
-    // Turns from an earlier forced update that gave up are still followed until they end; its deadline is asked again.
-    for (const target of this.drain?.targets.values() ?? []) target.stopping = false;
-    this.drain = { startedAt: Date.now(), deadline, delegated, active: true, targets: this.drain?.targets ?? new Map(), stoppingBridges: new Set(), wrapUps: this.drain?.wrapUps ?? new Set() };
+    // Turns from an earlier forced update that gave up are still followed until they end.
+    this.drain = { sequence: (this.drain?.sequence ?? 0) + 1, startedAt: Date.now(), deadline, delegated, active: true, targets: this.drain?.targets ?? new Map(), stoppingBridges: new Set(), wrapUps: this.drain?.wrapUps ?? new Set() };
     this.changed();
   }
 
@@ -1528,8 +1529,8 @@ export class RunManager extends EventEmitter {
       const run = this.runs.get(id);
       if (run?.status !== 'running') continue;
       if (now >= drain.deadline) {
-        if (!target.stopping) { target.stopping = true; void this.cancel(id, target.delegated ? DELEGATED_STOPPED : UPDATE_STOPPED).catch(() => {}); }
-      } else if (!target.delegated && !target.reached && !target.sending && now >= target.retryAt) this.sendWrapUp(run, target);
+        if (target.stopSent !== drain.sequence) { target.stopSent = drain.sequence; target.stopping = true; void this.cancel(id, target.delegated ? DELEGATED_STOPPED : UPDATE_STOPPED).catch(() => {}); }
+      } else if (!target.delegated && !target.stopping && !target.reached && !target.sending && now >= target.retryAt) this.sendWrapUp(run, target);
     }
   }
 
