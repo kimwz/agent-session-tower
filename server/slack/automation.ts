@@ -750,6 +750,8 @@ export class SlackAutomationManager extends EventEmitter {
     if (!text(args.requestId, 200) || (args.runId !== undefined && !text(args.runId, 200)) || !['succeeded', 'failed', 'uncertain'].includes(String(args.outcome)) || !text(args.evidence, 4000)) throw new Error('Explicit task outcome and evidence are required.');
     if (!consent || !(consent.requestIds ?? [consent.requestId]).includes(args.requestId)) throw new Error('No owner authorization for this task.');
     if (consent.status !== 'pending') return structuredClone(consent);
+    // While replies are held the permission waits; the owner lifting the hold lets it be reported.
+    if (item.repliesHeld) return { status: 'blocked', reason: HELD_REFUSAL };
     if (consent.mode === 'composed') {
       for (const requestId of consent.requestIds ?? [consent.requestId]) {
         const task = item.delegatedTasks?.find(value => value.requestId === requestId);
@@ -919,7 +921,7 @@ export class SlackAutomationManager extends EventEmitter {
         } catch {
           // The owner may have asked not to send: hold replies until a message of theirs is understood.
           if (this.channel.openReplies && !item.repliesHeld) await this.save(item, { repliesHeld: 'unclear' });
-          return context('[Tower owner chat receipt: Your message was received, but reply-permission interpretation is temporarily unavailable. No NEW send authorization was recorded.${this.channel.openReplies ? \' Until a message of the owner is understood, Tower holds replies in this conversation.\' : \'\'} Continue discussing the request; explain this issue if sending was requested. A retry in chat is sufficient; do not require a button click.]');
+          return context(`[Tower owner chat receipt: Your message was received, but reply-permission interpretation is temporarily unavailable. No NEW send authorization was recorded.${this.channel.openReplies ? ' Until a message of the owner is understood, Tower holds replies in this conversation.' : ''} Continue discussing the request; explain this issue if sending was requested. A retry in chat is sufficient; do not require a button click.]`);
         }
       }
     }

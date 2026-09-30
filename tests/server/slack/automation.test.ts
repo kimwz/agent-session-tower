@@ -702,13 +702,31 @@ test('an owner message Tower cannot interpret holds Slack replies until one is u
   const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
   await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
   f.options.classifyOwnerReply = async () => { throw new Error('model unavailable'); };
-  assert.match(chatText(await f.manager.ownerChat('owner-chat', '잠깐, 결과는 내가 직접 전할게요')), /holds replies/);
+  const receipt = chatText(await f.manager.ownerChat('owner-chat', '잠깐, 결과는 내가 직접 전할게요'));
+  assert.match(receipt, /Tower holds replies in this conversation/); assert.doesNotMatch(receipt, /\$\{/);
   assert.equal(f.manager.list()[0].repliesHeld, 'unclear');
   await assert.rejects(f.manager.tool(id, 'slack_send', { text: 'Done', requestKey: 'done' }), /asked not to send/);
   f.options.classifyOwnerReply = async () => ({ intent: 'none' });
   chatText(await f.manager.ownerChat('owner-chat', '진행 상황 알려주세요'));
   assert.equal(f.manager.list()[0].repliesHeld, undefined);
   await f.manager.tool(id, 'slack_send', { text: 'Done', requestKey: 'done' });
+  assert.equal(f.counts().sends, 1);
+});
+
+test('a permission bound to a task is not reported while an unclear owner message holds replies', async t => {
+  const f = await conditionalFixture(t);
+  assert.match(chatText(await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요')), /authorization saved/);
+  f.options.classifyOwnerReply = async () => { throw new Error('model unavailable'); };
+  chatText(await f.manager.ownerChat('owner-chat', '잠깐, 결과는 내가 직접 전할게요'));
+  f.run.status = 'completed';
+  const args = { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Verified deployment.', text: '배포를 마쳤습니다.' };
+  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  assert.equal((await restarted.tool(f.id, 'tower_task_complete', args) as { status: string }).status, 'blocked');
+  assert.equal(restarted.list()[0].ownerConditionalReply?.status, 'pending', 'the permission waits');
+  assert.equal(f.counts().sends, 0);
+  f.options.classifyOwnerReply = async () => ({ intent: 'none' });
+  chatText(await restarted.ownerChat('owner-chat', '계속 진행해 주세요'));
+  await restarted.tool(f.id, 'tower_task_complete', args);
   assert.equal(f.counts().sends, 1);
 });
 
