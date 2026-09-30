@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { resolveModel } from '../models/settings.js';
+import { EFFORT_OFF } from '../../shared/models.js';
 import { mkdir } from 'node:fs/promises';
 import { delimiter, join } from 'node:path';
 import { findExecutable, providerDirectories } from '../providers/discovery.js';
@@ -147,7 +149,9 @@ export class FirstReplyMaker {
     const env = withoutKeys({ ...process.env, ...this.options.env });
     delete env.CLAUDECODE;
     delete env.CLAUDE_CODE_SESSION_ID;
-    env.MAX_THINKING_TOKENS = '0';
+    // The `voice.firstReply` role (Settings › Models); the reply is always Claude's.
+    const { model, effort } = await resolveModel(this.options.stateDir, 'voice.firstReply');
+    if (effort === EFFORT_OFF) env.MAX_THINKING_TOKENS = '0';
     env.PATH = providerDirectories(env).join(delimiter);
     const cwd = join(this.options.stateDir, 'tmp', 'first-reply');
     const run = this.options.afterUpdating ?? afterUpdating;
@@ -159,7 +163,7 @@ export class FirstReplyMaker {
       await (this.options.checkSubscription ?? checkClaudeSubscription)(executable, cwd, env);
       const args = ['-p', '--safe-mode', '--tools', '', '--disable-slash-commands', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
         '--no-session-persistence', '--no-chrome', '--permission-prompts', 'none', '--system-prompt', FIRST_REPLY_PROMPT,
-        '--model', 'haiku', '--output-format', 'stream-json', '--verbose', '--input-format', 'stream-json'];
+        ...(model ? ['--model', model] : []), ...(effort && effort !== EFFORT_OFF ? ['--effort', effort] : []), '--output-format', 'stream-json', '--verbose', '--input-format', 'stream-json'];
       const child = (this.options.spawnProcess ?? spawn)(executable, args, { cwd, env, shell: false, detached: true, stdio: 'pipe' }) as ChildProcessWithoutNullStreams;
       const item: Waiting = { child, checkedAt: Date.now(), exited: false };
       this.all.add(item);

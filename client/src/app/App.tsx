@@ -1,3 +1,4 @@
+import { loadModelSettings } from '../models/model-settings';
 import { useSlackReadState } from '../slack/use-slack-read-state';
 import { WorkspaceOverlayProvider } from '../workspace/WorkspaceOverlay';
 import { AuthGate } from '../auth/AuthGate';
@@ -69,6 +70,8 @@ function TowerApp() {
   const [loadError, setLoadError] = useState('');
   const [token, setToken] = useState('');
   const { slack, error: slackError } = useSlackMonitor(connection === 'connected', token);
+  // Forms start from Settings › Models; read once so they open with it.
+  useEffect(() => { if (token && connection === 'connected') loadModelSettings(token).catch(() => {}); }, [token, connection]);
   const [selectedId, setSelectedId] = useState<string | null>(readSelection);
   const { mentionId: selectedSlackId, chatId: activeChatId } = slackChatSelection(slack?.events || [], requestedSlackId, selectedId);
   const [triggerEventId, setTriggerEventId] = useState<string | null>(null);
@@ -320,7 +323,7 @@ function TowerApp() {
   const projects = useMemo(() => projectGroupChoices(allMainSessions, groups), [allMainSessions, groups, language]);
   // Triggers and the sharing list belong to each computer; this computer's panel reaches joined computers' triggers too.
   const localProjects = useMemo(() => projects.filter(([key]) => !nodeOf(key)), [projects]);
-  const triggerComputers = useMemo(() => hosts.flatMap(host => host.node ? [{ node: host.node, name: host.name, providers: host.providers, ready: Boolean(host.triggers), connected: host.status === 'connected' }] : []), [hosts]);
+  const triggerComputers = useMemo(() => hosts.flatMap(host => host.node ? [{ node: host.node, name: host.name, providers: host.providers, ready: Boolean(host.triggers), connected: host.status === 'connected', models: Boolean(host.models) }] : []), [hosts]);
   // What a trigger on another computer can aim at, named as that computer knows it.
   const triggerTargets = useCallback((node: string) => ({
     projects: projects.filter(([key]) => nodeOf(key) === node).map(([key, title]): [string, string] => [localPart(key), title]),

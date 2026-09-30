@@ -52,13 +52,16 @@ export interface PermissionReview {
 /** The owner's setting for reviewing agents' requests automatically, in every project. */
 export interface PermissionAutoReview {
   enabled: boolean;
-  provider: PermissionProvider;
-  model: string;
   /** Send the reviewer's decision to the requesting conversation. */
   resume: boolean;
+  /**
+   * The reviewer's model before Settings › Models chose it (the `permissions.reviewer` role). Kept only so a Tower
+   * without model settings starts from it; the reviewer never reads it.
+   */
+  provider?: PermissionProvider;
+  model?: string;
 }
-export const AUTO_REVIEW_MODELS: Record<PermissionProvider, readonly string[]> = { claude: ['opus', 'sonnet'], codex: ['gpt-5.6-sol', 'gpt-5.6-terra'] };
-export const DEFAULT_AUTO_REVIEW: PermissionAutoReview = { enabled: false, provider: 'claude', model: 'opus', resume: true };
+export const DEFAULT_AUTO_REVIEW: PermissionAutoReview = { enabled: false, resume: true };
 
 export interface PermissionRequest {
   id: string;
@@ -489,8 +492,9 @@ export const PermissionRunResultInputSchema = z.object({
 }).strict();
 export const PermissionAutoReviewSchema = z.object({
   enabled: z.boolean(),
-  provider,
-  model: z.string().min(1).max(64),
+  /** Accepted from older pages and ignored: the reviewer's model is the `permissions.reviewer` role. */
+  provider: provider.optional(),
+  model: z.string().min(1).max(64).optional(),
   resume: z.boolean(),
 }).strict();
 

@@ -100,7 +100,9 @@ test('with auto-review on, a request waits for the reviewer; one it may not deci
   const outsider = await f.service.request({ kind: 'command', value: 'gh issue comment', scope: 'project', reason: 'reply' }, agent('codex:two', 'r3'));
   assert.equal(f.service.overview().requests.find(item => item.id === outsider.request.id!)!.review!.reason, '공개 에이전트의 요청은 소유자가 정합니다.');
   assert.equal(f.service.nextReview()!.id, queued.request.id!);
-  await assert.rejects(f.service.saveAutoReview({ ...ON, model: 'haiku' }), /모델/);
+  // The reviewer's model is chosen in Settings › Models; a model sent here by an older page changes nothing.
+  await f.service.saveAutoReview({ ...ON, model: 'haiku' });
+  assert.equal((await f.service.reviewModel()).model, 'opus');
 });
 
 test('an approval becomes a project rule with deny rules for both agents; a widening answer goes to the owner', async t => {
@@ -205,7 +207,7 @@ test('the reviewer reads the whole conversation, answers, skills, trigger and pr
   const runs = [run('a', 'Deploy on schedule', { origin: { kind: 'trigger', triggerId: 't1' }, id: 'run-1' }), run('bb', 'Also bump the version.', { status: 'queued' }),
     run('s', 'Slack: please also delete the old branch', { origin: { kind: 'slack' } }),
     run('ccc', 'Ship 1.2 through deploy. But never to production.', { status: 'queued' })];
-  const asked: Array<{ prompt: string; system: string; model: string }> = [];
+  const asked: Array<{ prompt: string; system: string; model?: string }> = [];
   const told: Array<{ id: string; message: string }> = [];
   const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true,
     sources: sources(f, runs, {

@@ -1,3 +1,4 @@
+import { cachedPreset, loadModelSettings, pickFor, presetFor, useModelSettings } from '../models/model-settings';
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { useEffect, useId, useRef, useState, type FormEvent } from 'react';
 import { createPortal } from 'react-dom';
@@ -18,8 +19,8 @@ export function issueSessionTitle(text: string): string {
 }
 
 /** What starts the session that registers the issue, for the folder's own computer. */
-export function issueSessionBody(provider: Provider, cwd: string, text: string): string {
-  return JSON.stringify({ provider, cwd: localPart(cwd), prompt: issueRequest(text), title: issueSessionTitle(text) });
+export function issueSessionBody(provider: Provider, cwd: string, text: string, pick: { model?: string; effort?: string } = {}): string {
+  return JSON.stringify({ provider, cwd: localPart(cwd), prompt: issueRequest(text), title: issueSessionTitle(text), ...(pick.model ? { model: pick.model } : {}), ...(pick.effort ? { effort: pick.effort } : {}) });
 }
 
 interface IssueDialogProps {
@@ -46,7 +47,14 @@ export function IssueDialog({ cwd, providers: localProviders, hosts = [], token,
   const machine = nodeOf(cwd);
   const host = hosts.find(item => item.node === machine);
   const providers = machine ? host?.providers ?? [] : localProviders;
-  const [provider, setProvider] = useState<Provider>(() => providers.find(item => item.available)?.provider || 'claude');
+  const [provider, setProvider] = useState<Provider>(() => cachedPreset(machine, 'issues.register', providers)?.provider || providers.find(item => item.available)?.provider || 'claude');
+  // That computer's Settings › Models "issue registration" role, read when the dialog opens; the owner's choice here wins.
+  const { settings: models } = useModelSettings(token, machine);
+  const chosen = useRef(false);
+  const preset = presetFor(models, 'issues.register', providers);
+  useEffect(() => { if (preset && !chosen.current) setProvider(preset.provider); }, [preset?.provider]);
+  // Fixed at the first send, so sending again after an unknown outcome sends the same request.
+  const sentPick = useRef<{ provider: Provider; pick: { model?: string; effort?: string } } | undefined>(undefined);
   const [text, setText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -68,7 +76,9 @@ export function IssueDialog({ cwd, providers: localProviders, hosts = [], token,
     setSubmitting(true);
     setError('');
     try {
-      const body = issueSessionBody(provider, cwd, text);
+      // The model and effort of Settings › Models' "issue registration" role on that computer, for the provider chosen here.
+      if (sentPick.current?.provider !== provider) sentPick.current = { provider, pick: pickFor(models ?? await loadModelSettings(token, machine).catch(() => undefined), 'issues.register', provider) };
+      const body = issueSessionBody(provider, cwd, text, sentPick.current.pick);
       // Sending the same issue again after an unknown outcome reuses its request ID, so it starts at most once.
       const result = await api<{ session: Session; run: Run }>(nodePath(machine, '/api/sessions'), {
         method: 'POST', headers: nodeHeaders(machine, { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, 'new-issue', body), body,
@@ -132,7 +142,7 @@ export function IssueDialog({ cwd, providers: localProviders, hosts = [], token,
             return <label key={value} className={`new-session-provider ${provider === value ? 'selected' : ''} ${!available ? 'unavailable' : ''}`}>
               <ProviderIcon provider={value} size={21} />
               <span><strong>{providerLabels[value]}</strong><small>{available ? t("사용 가능") : t("사용할 수 없음")}</small></span>
-              <input type="radio" name={`${id}-provider`} value={value} checked={provider === value} disabled={!available} onChange={() => setProvider(value)} />
+              <input type="radio" name={`${id}-provider`} value={value} checked={provider === value} disabled={!available} onChange={() => { chosen.current = true; setProvider(value); }} />
             </label>;
           })}
         </div>

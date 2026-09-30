@@ -1,3 +1,4 @@
+import type { ResolvedModel } from '../../../shared/models';
 import { createContext } from 'react';
 import type { IssueWatch, Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOverview } from '../../../shared/triggers';
 import { isOperationName, OPERATIONS } from '../../../shared/api/operations';
@@ -122,10 +123,11 @@ export function issueActionsLabel(event: Pick<TriggerEvent, 'issueActions'>, t: 
   return [actions.assignedAt && t('담당자 할당됨'), actions.closedAt && t('이슈 닫음'), actions.keptOpen && t('이슈를 열어 둠'), ...said].filter(Boolean).join(' · ');
 }
 
-/** A new trigger of one kind, with the defaults its editor starts from. */
-export function blankTrigger(kind: SourceKind = 'schedule'): TriggerInput {
+/** A new trigger of one kind, with the defaults its editor starts from; its model is Settings › Models' "new trigger" choice. */
+export function blankTrigger(kind: SourceKind = 'schedule', preset?: ResolvedModel): TriggerInput {
   const source: Source = kind === 'http' ? blankHttpSource() : kind === 'github' ? blankGitHubSource()
     : { kind: 'schedule', schedule: { type: 'cron', expression: '0 9 * * 1-5', timezone: browserZone() }, catchUp: 'latest' };
   return { name: '', enabled: true, source,
-    handler: { kind: 'task', instructions: '', provider: 'codex', approvals: 'auto', target: { node: 'local', mode: 'auto' } }, policy: { overlap: 'skip', maxEventsPerHour: 20 } };
+    handler: { kind: 'task', instructions: '', provider: preset?.provider ?? 'codex', ...(preset?.model ? { model: preset.model } : {}), ...(preset?.effort ? { effort: preset.effort } : {}),
+      approvals: 'auto', target: { node: 'local', mode: 'auto' } }, policy: { overlap: 'skip', maxEventsPerHour: 20 } };
 }

@@ -1,3 +1,4 @@
+import { pickFor, presetFor, useModelSettings } from '../models/model-settings';
 import { useState } from 'react';
 import { Bot, LoaderCircle, Settings, X } from 'lucide-react';
 import type { MasterBinding, MasterOverview } from '../../../shared/master';
@@ -37,8 +38,16 @@ export function MasterPanel({ token, overview, voice, top, onClose, onStarted }:
 /** The master's first message, which starts its session with the chosen tool. */
 function MasterStart({ token, replace, current, onCancel, onStarted }: { token: string; replace: boolean; current?: Provider; onCancel?: () => void; onStarted(binding: MasterBinding): void }) {
   const words = useWords();
-  const [provider, setProvider] = useState<Provider>(current ?? 'claude');
-  const [model, setModel] = useState('');
+  // Settings › Models' "master agent" role; the owner may still change both here. An untouched model is the role's.
+  const { settings } = useModelSettings(token);
+  const [chosen, setChosen] = useState<Provider | undefined>(current);
+  const provider = chosen ?? presetFor(settings, 'master.session', [])?.provider ?? 'claude';
+  const setProvider = (next: Provider) => { setChosen(next); setEdited(undefined); };
+  const [edited, setEdited] = useState<string>();
+  const role = pickFor(settings, 'master.session', provider);
+  const model = edited ?? role.model ?? '';
+  const setModel = (next: string) => setEdited(next);
+  const effort = edited === undefined ? role.effort : undefined;
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -46,7 +55,7 @@ function MasterStart({ token, replace, current, onCancel, onStarted }: { token: 
     if (!text.trim() || busy) return;
     setBusy(true); setError('');
     try {
-      const answer = await post<{ binding: MasterBinding }>('/api/master/start', token, { provider, text: text.trim(), ...(model.trim() ? { model: model.trim() } : {}), ...(replace ? { replace: true } : {}) });
+      const answer = await post<{ binding: MasterBinding }>('/api/master/start', token, { provider, text: text.trim(), ...(model.trim() ? { model: model.trim() } : {}), ...(effort ? { effort } : {}), ...(replace ? { replace: true } : {}) });
       onStarted(answer.binding);
     } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
     finally { setBusy(false); }
@@ -64,7 +73,7 @@ function MasterStart({ token, replace, current, onCancel, onStarted }: { token: 
         </select>
       </label>
       <label className="master-field">{words('모델 (비우면 기본)', 'Model (empty for the default)')}
-        <input value={model} disabled={busy} onChange={event => setModel(event.target.value)} placeholder={provider === 'claude' ? 'opus' : 'gpt-5.6-sol'} maxLength={80} />
+        <input value={model} disabled={busy} onChange={event => setModel(event.target.value)} placeholder={provider === 'claude' ? words('Claude 기본값', 'Claude default') : words('Codex 기본값', 'Codex default')} maxLength={80} />
       </label>
       <label className="master-field">{words('첫 메시지', 'First message')}
         <textarea rows={3} value={text} disabled={busy} maxLength={32_000} onChange={event => setText(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); void start(); } }}

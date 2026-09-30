@@ -1,3 +1,4 @@
+import { cachedPreset } from '../models/model-settings';
 import type { ProviderHealth } from '../../../shared/types';
 import { ModelPicker } from '../chat/ModelPicker';
 import { useEffect, useId, useRef, useState } from 'react';
@@ -109,7 +110,7 @@ export function SlackPanel({ token, onClose, providers = [], projects = [] }: { 
 /** Adds a blank rule; the Verse8 example is offered only while there are no rules yet. */
 export function SlackRuleActions({ rules, onAdd }: { rules: SlackRule[]; onAdd: (rule: Omit<SlackRule, 'id'>) => void }) {
   const { t } = useI18n();
-  return <div className="slack-actions"><button type="button" className="secondary-button" onClick={() => onAdd({ name: '', enabled: false, condition: '', instructions: '', replyInstructions: '', provider: 'codex' })}><Plus size={14} />{t('지침 추가')}</button>{!rules.length && <button type="button" className="secondary-button" onClick={() => onAdd({ name: 'Verse8 PR 리뷰', enabled: false, condition: 'Verse8 관련 GitHub PR의 리뷰를 요청하는 멘션', instructions: '요청한 PR과 변경 내용을 확인하고 리뷰를 수행하세요. 접근할 수 없거나 리뷰를 완료하지 못하면 완료했다고 말하지 마세요.', replyInstructions: '리뷰를 완료하고 지적 사항이 없으면 "확인 했습니다.", 리뷰 코멘트를 작성했다면 "코멘트 확인 부탁드립니다"를 답변 후보에 포함하세요. 후보를 1, 2, 3번으로 제안하고 사용자의 전송 승인을 기다리세요.', provider: 'codex' })}>{t('Verse8 PR 예시 추가')}</button>}</div>;
+  return <div className="slack-actions"><button type="button" className="secondary-button" onClick={() => { const preset = cachedPreset(undefined, 'slack.newRule', []); onAdd({ name: '', enabled: false, condition: '', instructions: '', replyInstructions: '', provider: preset?.provider ?? 'codex', ...(preset?.model ? { model: preset.model } : {}) }); }}><Plus size={14} />{t('지침 추가')}</button>{!rules.length && <button type="button" className="secondary-button" onClick={() => onAdd({ name: 'Verse8 PR 리뷰', enabled: false, condition: 'Verse8 관련 GitHub PR의 리뷰를 요청하는 멘션', instructions: '요청한 PR과 변경 내용을 확인하고 리뷰를 수행하세요. 접근할 수 없거나 리뷰를 완료하지 못하면 완료했다고 말하지 마세요.', replyInstructions: '리뷰를 완료하고 지적 사항이 없으면 "확인 했습니다.", 리뷰 코멘트를 작성했다면 "코멘트 확인 부탁드립니다"를 답변 후보에 포함하세요. 후보를 1, 2, 3번으로 제안하고 사용자의 전송 승인을 기다리세요.', provider: 'codex' })}>{t('Verse8 PR 예시 추가')}</button>}</div>;
 }
 
 export function SlackRules({ rules, onChange, providers = [], projects = [], expanded, onExpand, channel = 'slack', autoReview = true }: { rules: SlackRule[]; onChange: (rules: SlackRule[]) => void; providers?: ProviderHealth[]; expanded?: string | null; onExpand?: (id: string | null) => void;

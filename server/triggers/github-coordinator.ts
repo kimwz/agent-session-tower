@@ -5,6 +5,7 @@ import type { SlackMention, SlackMessage, SlackWorkflow } from '../../shared/sla
 import type { AutoPromptJob, AutoPromptRequest, Run, RunOrigin } from '../../shared/types.js';
 import type { AutoPromptManager } from '../auto-prompt/manager.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
+import { resolveModel } from '../models/settings.js';
 import type { RunManager } from '../runs/manager.js';
 import { SlackAutomationManager, type CoordinatorChannel } from '../slack/automation.js';
 import { SLACK_SESSION_TOOLS } from '../slack/mcp-bridge.js';
@@ -165,8 +166,8 @@ export class GitHubCoordinator extends EventEmitter {
       match: async () => { throw new Error('Not used by conversation coordinators.'); },
       composeReply: async () => { throw new Error('Not used by conversation coordinators.'); },
       classifyOwnerReply: async (message, workflow) => {
-        const provider = workflow.rules[0]?.provider ?? 'codex';
-        return (options.model ?? runAutoPromptModel)({ provider, model: workflow.rules[0]?.model ?? (provider === 'claude' ? 'opus' : 'gpt-5.6-sol'),
+        const model = await resolveModel(options.stateDir, 'github.replyIntent', { provider: workflow.rules[0]?.provider ?? 'codex', override: { provider: workflow.rules[0]?.provider ?? 'codex', model: workflow.rules[0]?.model } });
+        return (options.model ?? runAutoPromptModel)({ ...model,
           systemPrompt: OWNER_REPLY_INTENT_PROMPT.replace(' or permission to act on GitHub', '').replace(/Slack/g, 'GitHub').replace(/슬랙/g, '깃허브'),
           prompt: JSON.stringify({ ownerMessage: message, tasks: (workflow.delegatedTasks ?? []).map(task => ({ requestId: task.requestId, status: options.autoPrompts.get(task.requestId)?.status, notified: !!task.notifiedRunId })) }),
           schema: OWNER_REPLY_INTENT_SCHEMA, signal: AbortSignal.timeout(30_000),

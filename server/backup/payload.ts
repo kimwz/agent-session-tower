@@ -1,3 +1,4 @@
+import { parseModelSettings } from '../../shared/models.js';
 import { join } from 'node:path';
 import type { BackupPart } from '../../shared/backup.js';
 import type { SkillBundle, SkillAdvisorSettings } from '../../shared/skills.js';
@@ -31,6 +32,7 @@ export interface SkillBackup {
 export const WORKER_FILES = {
   'trigger-secrets.json': 'triggerSecrets',
   'permissions.json': 'permissions',
+  'models.json': 'models',
   'slack-connection.json': 'slack',
   'slack-tone.json': 'slack',
   'slack-automation.json': 'slack',
@@ -156,6 +158,8 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
           next = [...incoming, ...(Array.isArray(existing) ? existing.filter(item => record(item) && !ids.has(String(item.id))) : [])];
           break;
         }
+        // Read again by every call, so it applies as soon as it is written. Read like a saved file: roles this version does not know are dropped.
+        case 'models.json': if (!record(incoming)) throw new Error('invalid'); next = parseModelSettings(incoming); break;
         // What the worker's services refuse at start is never written: one would keep the worker from starting.
         case 'slack-connection.json': if (!validSlackConnection(incoming)) throw new Error('invalid'); next = incoming; break;
         case 'public-agents.json': {
@@ -212,7 +216,7 @@ export function payloadParts(payload: BackupPayload): BackupPart[] {
   if (payload.web.backup !== undefined) parts.add('backup');
   return ORDER.filter(part => parts.has(part));
 }
-const ORDER: BackupPart[] = ['triggers', 'triggerSecrets', 'permissions', 'slack', 'github', 'publicAgents', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'master', 'backup'];
+const ORDER: BackupPart[] = ['triggers', 'triggerSecrets', 'permissions', 'models', 'slack', 'github', 'publicAgents', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'master', 'backup'];
 
 /** A decrypted payload, checked for its shape; the parts themselves are checked when each is restored. */
 export function parsePayload(value: unknown): BackupPayload {

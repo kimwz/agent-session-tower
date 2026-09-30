@@ -49,6 +49,7 @@ import { loadLinkIdentity } from './link/identity.js';
 import { ControllerLinks } from './link/controller.js';
 import { NodeLinks } from './link/node.js';
 import { runLinkCommand } from './link/cli.js';
+import { runModelsCommand } from './models/cli.js';
 import { RemoteNodes } from './link/nodes.js';
 import { linkRequest } from './link/transport.js';
 import { RemoteAudit } from './remote/audit.js';
@@ -83,6 +84,7 @@ Usage: agent-session-tower [run] [options]
   doctor               Check local CLI availability
   join <code>          Let another Tower control this computer (the code comes from its Remote computers panel)
   service <action>     install | uninstall | status: keep Tower running in the background (macOS)
+  models <command>     list | get <role> | args <role>: the models Tower's roles use (models --help)
   --port <number>      Listening port (default: 8000)
   --host <IPv4>        Bind address (default: 127.0.0.1; 0.0.0.0 for remote access)
   --public-url <url>   Also accept requests for this origin from a reverse proxy or tunnel (repeatable)
@@ -125,6 +127,7 @@ async function main() {
     await runUpdateHelper(resolve(args[1]), args[2], serviceSteps(resolve(args[1]), Number(args[3])), args[4] === '--resume');
     return;
   }
+  if (args[0] === 'models') { await runModelsCommand(args.slice(1)); return; }
   if (args[0] === 'join' || args[0] === 'service') {
     await runLinkCommand(args);
     return;
@@ -462,7 +465,7 @@ async function main() {
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.
-    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
+    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
     handle: (req, res, principal) => remoteRouter.handle(req, res, principal),
     update: {
       request: version => updates.request(version),

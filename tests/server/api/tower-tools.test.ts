@@ -197,7 +197,7 @@ test('the standing session key opens only the read-only session tools, for any c
   const key = 'b'.repeat(64);
   f.capabilities.grant(key, { kind: 'session-reader' });
   const { tools } = await handleMcpRequest(f.context, key, { method: 'tools/list' }) as { tools: Array<{ name: string }> };
-  assert.deepEqual(tools.map(tool => tool.name).sort(), ['sessions_list', 'sessions_read', 'sessions_search']);
+  assert.deepEqual(tools.map(tool => tool.name).sort(), ['models_get', 'sessions_list', 'sessions_read', 'sessions_search']);
   await assert.rejects(handleMcpRequest(f.context, key, { method: 'tools/call', name: 'triggers_create', arguments: { requestKey: 'k', trigger: schedule(f.project) } }), { statusCode: 404 });
   await assert.rejects(handleMcpRequest(f.context, key, { method: 'tools/call', name: 'autoPrompt_submit', arguments: {} }), { statusCode: 404 });
   // No sessions service in this fixture: the call reaches the operation and reports that.
@@ -227,7 +227,7 @@ test('the session tool server answers through the worker with the key kept in th
   let replies;
   try { replies = await out([list, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'triggers_list', arguments: {} } }]); }
   finally { await host.close(); await runs.close(); await rm((await runnerPaths(f.stateDir)).directory, { recursive: true, force: true }); }
-  assert.deepEqual(replies[0].result.tools.map((tool: { name: string }) => tool.name).sort(), ['sessions_list', 'sessions_read', 'sessions_search']);
+  assert.deepEqual(replies[0].result.tools.map((tool: { name: string }) => tool.name).sort(), ['models_get', 'sessions_list', 'sessions_read', 'sessions_search']);
   assert.equal(replies[1].result.isError, true, 'nothing but the session tools');
   assert.equal(await sessionToolsKey(f.stateDir), await sessionToolsKey(f.stateDir), 'the key is kept');
 });

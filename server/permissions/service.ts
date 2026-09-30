@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { resolveModel } from '../models/settings.js';
+import type { ResolvedModel } from '../../shared/models.js';
 import { mkdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  AUTO_REVIEW_MODELS, CONVERSATION_RULE_HOURS, DEFAULT_AUTO_REVIEW, MAX_RUN_COMMAND, MAX_RUN_SECONDS, autoReviewBlock, waitingForOwner, claudeRule, codexRule, normalizeCommand, ruleGuards, ruleIsNarrower, rulesOverlap, ruleProblem, sameRule,
+  CONVERSATION_RULE_HOURS, DEFAULT_AUTO_REVIEW, MAX_RUN_COMMAND, MAX_RUN_SECONDS, autoReviewBlock, waitingForOwner, claudeRule, codexRule, normalizeCommand, ruleGuards, ruleIsNarrower, rulesOverlap, ruleProblem, sameRule,
   type PermissionAutoReview, type PermissionOverview, type PermissionProvider, type PermissionRequest, type PermissionReview, type PermissionReviewVerdict,
   type PermissionRule, type PermissionRuleInput, type PermissionRun, type PermissionRunOutput, type PermissionTarget,
 } from '../../shared/permissions.js';
@@ -144,12 +146,14 @@ export class PermissionService {
   }
 
   autoReview(): PermissionAutoReview { return { ...(this.state.autoReview ?? DEFAULT_AUTO_REVIEW) }; }
+  /** The reviewer's provider and model come from the `permissions.reviewer` role (Settings › Models). */
+  reviewModel(): Promise<ResolvedModel> { return resolveModel(this.options.stateDir, 'permissions.reviewer'); }
 
-  /** The owner turns the reviewer on or off, or picks its model. Turning it off leaves waiting requests to the owner. */
+  /** The owner turns the reviewer on or off (its model is chosen in Settings › Models). Turning it off leaves waiting requests to the owner. */
   saveAutoReview(input: PermissionAutoReview): Promise<PermissionOverview> {
     return this.serial(async () => {
-      if (!AUTO_REVIEW_MODELS[input.provider]?.includes(input.model)) throw failure('자동 검토에 쓸 수 없는 모델입니다.');
-      const settings: PermissionAutoReview = { enabled: input.enabled, provider: input.provider, model: input.model, resume: input.resume };
+      const { provider, model } = this.autoReview();
+      const settings: PermissionAutoReview = { enabled: input.enabled, resume: input.resume, ...(provider ? { provider } : {}), ...(model ? { model } : {}) };
       await this.commit(state => {
         state.autoReview = settings;
         if (!settings.enabled) for (const request of state.requests) {
@@ -173,7 +177,8 @@ export class PermissionService {
       const request = this.state.requests.find(item => item.id === id);
       if (!request || request.status !== 'pending' || (request.review?.status !== 'queued' && request.review?.status !== 'running')) return false;
       if (!this.autoReview().enabled) { await this.setReview(id, { status: 'skipped', reason: '자동 검토가 꺼졌습니다.', at: this.now() }); return false; }
-      await this.setReview(id, { status: 'running', model: this.autoReview().model, at: this.now() });
+      const model = await this.reviewModel().then(resolved => resolved.model ?? resolved.provider, () => undefined);
+      await this.setReview(id, { status: 'running', ...(model ? { model } : {}), at: this.now() });
       return true;
     });
   }
@@ -779,9 +784,9 @@ function normalize(value: unknown): PermissionState {
   if (typeof input.lost === 'string') state.lost = input.lost;
   const review = input.autoReview as Partial<PermissionAutoReview> | undefined;
   if (review && typeof review === 'object') {
-    const provider: PermissionProvider = review.provider === 'codex' ? 'codex' : 'claude';
-    state.autoReview = { enabled: review.enabled === true, provider, model: typeof review.model === 'string' && AUTO_REVIEW_MODELS[provider].includes(review.model) ? review.model : AUTO_REVIEW_MODELS[provider][0]!,
-      resume: review.resume !== false };
+    state.autoReview = { enabled: review.enabled === true, resume: review.resume !== false,
+      ...(review.provider === 'claude' || review.provider === 'codex' ? { provider: review.provider } : {}),
+      ...(typeof review.model === 'string' && review.model.length <= 64 ? { model: review.model } : {}) };
   }
   // A project file that lost its folder could no longer be checked before removal, so it is forgotten instead.
   if (Array.isArray(input.codex)) state.codex = (input.codex as any[]).filter(item => item && typeof item.path === 'string' && (item.scope !== 'project' || typeof item.cwd === 'string'))

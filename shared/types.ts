@@ -307,7 +307,11 @@ export interface AutoPromptJob {
   prompt: string;
   /** The reviewer a trigger or Slack thread started with. Tower's own turns always use the automatic one. */
   codexApprovalsReviewer?: CodexApprovalsReviewer;
+  /** The router's model from the `autoPrompt.router` role when the job was accepted; empty for the CLI default. */
   routerModel: string;
+  /** Set when the router runs on another provider than the work. */
+  routerProvider?: Provider;
+  routerEffort?: string;
   status: 'queued' | 'routing' | 'dispatching' | 'completed' | 'error' | 'cancelled';
   stage?: 'directory' | 'session';
   createdAt: string;

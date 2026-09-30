@@ -381,7 +381,7 @@ test('ambiguous folders, invalid decisions, and inconsistent new-task resume dec
   await assert.rejects(f.manager.submit(request(f.directory)), /목록/);
 });
 
-test('unavailable provider or explicitly unavailable Sol model rejects before routing', async t => {
+test('unavailable provider or an explicitly unavailable routing model rejects before routing', async t => {
   const f = await fixture(t);
   f.current.providers[0].available = false;
   const unavailable = request(f.cwd);
@@ -390,7 +390,7 @@ test('unavailable provider or explicitly unavailable Sol model rejects before ro
   f.current.providers[0].available = true;
   f.current.providers[0].models = [{ id: 'other-model', label: 'Other' }];
   const unsupported = request(f.cwd);
-  await assert.rejects(f.manager.submit(unsupported), { statusCode: 422, message: '선택한 Codex 계정에서 라우팅 모델 GPT Sol을 사용할 수 없습니다.' });
+  await assert.rejects(f.manager.submit(unsupported), { statusCode: 422, message: '선택한 Codex 계정에서 라우팅 모델 gpt-5.6-sol을 사용할 수 없습니다. 설정 › 모델에서 라우팅 모델을 바꾸세요.' });
   assert.equal(f.manager.get(unsupported.requestId), undefined);
   assert.equal(f.calls.length, 0);
   f.respond(async () => create());

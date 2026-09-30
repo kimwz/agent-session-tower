@@ -11,6 +11,8 @@ import { AttachmentStore, attachmentMetadata, type StoredAttachment } from '../s
 import { RunError, type RunAdmission, type RunManager } from '../runs/manager.js';
 import { ownerOrigin, parseRunOrigin } from '../runs/origin.js';
 import { runAutoPromptModel } from './native.js';
+import { resolveModel } from '../models/settings.js';
+import type { ResolvedModel } from '../../shared/models.js';
 import type { ExclusionMatcher } from '../remote/exclusions.js';
 import { remoteWorkingSnapshot } from '../remote/visibility.js';
 import { directories, eligible, type Directory } from './inventory.js';
@@ -29,7 +31,6 @@ interface Entry { job: AutoPromptJob; fingerprint: string; staged: Attachment[] 
 type Relation = 'continuation' | 'adjacent' | 'new';
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const TERMINAL = new Set<AutoPromptJob['status']>(['completed', 'error', 'cancelled']);
-const MODELS = { claude: 'opus', codex: 'gpt-5.6-sol' } as const;
 const MAX_PENDING = 8;
 const MAX_HISTORY = 100;
 const MAX_INPUT = 160_000;
@@ -76,11 +77,17 @@ function modelInput(value: unknown): string {
  * conversation to continue. A new conversation without a folder (Slack, triggers) still has its folder routed.
  */
 const routed = (request: Pick<AutoPromptRequest, 'cwd' | 'sessionMode' | 'targetSessionId'>) => !(request.cwd && (request.sessionMode === 'new' || request.targetSessionId !== undefined));
-function providerReady(snapshot: Snapshot, provider: AutoPromptJob['provider'], routing: boolean): void {
+const providerName = (provider: AutoPromptJob['provider']) => provider === 'claude' ? 'Claude Code' : 'Codex';
+function providerReady(snapshot: Snapshot, provider: AutoPromptJob['provider'], router?: Pick<ResolvedModel, 'provider' | 'model'>): void {
   const health = snapshot.providers.find(value => value.provider === provider);
-  if (!health?.available) throw new RunError(`${provider === 'claude' ? 'Claude Code' : 'Codex'}를 사용할 수 없습니다. 설치와 로그인을 확인하세요.`, 422);
-  if (routing && provider === 'codex' && health.models?.length && !health.models.some(model => model.id === MODELS.codex)) throw new RunError('선택한 Codex 계정에서 라우팅 모델 GPT Sol을 사용할 수 없습니다.', 422);
+  if (!health?.available) throw new RunError(`${providerName(provider)}를 사용할 수 없습니다. 설치와 로그인을 확인하세요.`, 422);
+  if (!router) return;
+  const routing = snapshot.providers.find(value => value.provider === router.provider);
+  if (!routing?.available) throw new RunError(`라우팅에 쓰는 ${providerName(router.provider)}를 사용할 수 없습니다. 설치와 로그인을 확인하거나 설정 › 모델에서 라우팅 모델을 바꾸세요.`, 422);
+  // Codex lists what the account may use; Claude's list is only its aliases, so any Claude model is tried as it is.
+  if (router.provider === 'codex' && router.model && routing.models?.length && !routing.models.some(model => model.id === router.model)) throw new RunError(`선택한 Codex 계정에서 라우팅 모델 ${router.model}을 사용할 수 없습니다. 설정 › 모델에서 라우팅 모델을 바꾸세요.`, 422);
 }
+const routerOf = (job: AutoPromptJob): Pick<ResolvedModel, 'provider' | 'model'> => ({ provider: job.routerProvider ?? job.provider, ...(job.routerModel ? { model: job.routerModel } : {}) });
 function attachmentContext(attachments: StoredAttachment[]) {
   return attachments.map(({ metadata, content }) => ({ name: metadata.name, mimeType: metadata.mimeType, size: metadata.size,
     ...(/^(text\/|application\/(?:json|xml|javascript|yaml)(?:$|[;+]))/.test(metadata.mimeType) ? {
@@ -200,7 +207,8 @@ export class AutoPromptManager extends EventEmitter {
     const inventory = directories(snapshot);
     if (!inventory.length) throw new RunError('라우팅할 작업 폴더가 없습니다. 먼저 프로젝트 폴더를 추가하세요.');
     if (input.cwd) await this.checkDirectory(input.cwd, inventory);
-    providerReady(snapshot, input.provider, routed(input));
+    const router = await resolveModel(this.options.stateDir, 'autoPrompt.router', { provider: input.provider });
+    providerReady(snapshot, input.provider, routed(input) ? router : undefined);
     const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments });
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, staged: prepared.attachments, job: {
@@ -212,7 +220,7 @@ export class AutoPromptManager extends EventEmitter {
       ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
       ...(input.model ? { model: input.model } : {}),
       ...(input.effort ? { effort: input.effort } : {}),
-      routerModel: MODELS[input.provider], status: 'queued', createdAt: now, updatedAt: now,
+      routerModel: router.model ?? '', ...(router.provider !== input.provider ? { routerProvider: router.provider } : {}), ...(router.effort ? { routerEffort: router.effort } : {}), status: 'queued', createdAt: now, updatedAt: now,
       ...(prepared.attachments.length ? { attachments: prepared.attachments.map(({ name, mimeType, size }) => ({ name, mimeType, size })) } : {}),
     } };
     try {
@@ -297,12 +305,12 @@ export class AutoPromptManager extends EventEmitter {
     await this.options.refresh(); active();
     let snapshot = await this.snapshotFor(job.origin); active();
     if (job.origin?.controllerId) this.update(job, { exclusionRevision: this.options.remote!.matcher().revision });
-    providerReady(snapshot, job.provider, routed(job));
+    providerReady(snapshot, job.provider, routed(job) ? routerOf(job) : undefined);
     const inventory = directories(snapshot);
     const staged = await this.attachments.resolve(job.id, entry.staged); active();
     const request = { prompt: job.prompt, attachments: attachmentContext(staged) };
     const invoke = (prompt: string, schema: Record<string, unknown>, extra: string) => {
-      const input = { provider: job.provider, model: job.routerModel, systemPrompt: `${SYSTEM}\n${extra}`, prompt, schema, signal,
+      const input = { ...routerOf(job), ...(job.routerEffort ? { effort: job.routerEffort } : {}), systemPrompt: `${SYSTEM}\n${extra}`, prompt, schema, signal,
         imagePaths: staged.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) };
       return this.options.model ? this.options.model(input) : runAutoPromptModel(input, { stateDir: this.options.stateDir });
     };
@@ -383,7 +391,7 @@ export class AutoPromptManager extends EventEmitter {
     await this.checkDirectory(cwd, directories(await this.snapshotFor(job.origin))); active();
     const validate = () => {
       const current = this.snapshotNow(job.origin);
-      providerReady(current, job.provider, routed(job));
+      providerReady(current, job.provider, routed(job) ? routerOf(job) : undefined);
       if (!directories(current).some(directory => directory.cwd === cwd)) throw new RunError('라우팅 중 프로젝트 폴더가 변경되었습니다. 다시 시도하세요.', 409);
       if (decision.action === 'resume') {
         const session = current.sessions.find(session => session.id === decision.sessionId);
@@ -474,6 +482,7 @@ function validEntry(value: unknown): value is Entry {
     && (job.model === undefined || validModelId(job.model))
     && (job.effort === undefined || validEffort(job.effort))
     && typeof job.prompt === 'string' && job.prompt.length <= 32_000 && typeof job.routerModel === 'string'
+    && (job.routerProvider === undefined || ['claude', 'codex'].includes(String(job.routerProvider))) && (job.routerEffort === undefined || validEffort(job.routerEffort))
     && typeof job.createdAt === 'string' && typeof job.updatedAt === 'string'
     && ['queued', 'routing', 'dispatching', 'completed', 'error', 'cancelled'].includes(String(job.status))
     && (job.cwd === undefined || typeof job.cwd === 'string' && isAbsolute(job.cwd) && job.cwd.length <= 4096)

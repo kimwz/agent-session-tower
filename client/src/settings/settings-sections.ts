@@ -1,5 +1,5 @@
 /** The settings' sections, in the order the menu lists them. */
-export const SETTINGS_SECTIONS = ['general', 'triggers', 'skills', 'permissions', 'decisions', 'remote', 'notifications', 'backup', 'account'] as const;
+export const SETTINGS_SECTIONS = ['general', 'models', 'triggers', 'skills', 'permissions', 'decisions', 'remote', 'notifications', 'backup', 'account'] as const;
 export type SettingsSection = typeof SETTINGS_SECTIONS[number];
 
 /** What waits for the owner in the settings: counts to act on, and marks that only ask for a look. */

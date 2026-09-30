@@ -75,9 +75,10 @@ export class PermissionReviewer {
     try {
       const prompt = await reviewInput(request, this.options.sources);
       const before = JSON.stringify(JSON.parse(prompt).authority);
-      const answer = await this.options.model({ provider: settings.provider, model: settings.model, systemPrompt: REVIEW_SYSTEM, prompt,
+      const model = await service.reviewModel();
+      const answer = await this.options.model({ ...model, systemPrompt: REVIEW_SYSTEM, prompt,
         schema: REVIEW_SCHEMA as unknown as Record<string, unknown>, signal: controller.signal }, { timeoutMs: this.options.timeoutMs ?? REVIEW_TIMEOUT_MS });
-      result = parse(answer, request, settings.model);
+      result = parse(answer, request, model.model ?? model.provider);
       // The owner said more, or confirmed or changed something, while the model answered: review again with that.
       if (JSON.stringify(JSON.parse(await reviewInput(request, this.options.sources)).authority) !== before) {
         const again = (this.requeued.get(request.id) ?? 0) + 1;

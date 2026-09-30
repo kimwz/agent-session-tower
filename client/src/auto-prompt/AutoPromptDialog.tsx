@@ -1,3 +1,4 @@
+import { cachedPick, cachedPreset, useModelPreset } from '../models/model-settings';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronDown, ChevronRight, Folder, LoaderCircle, Monitor, Paperclip, Send, Sparkles, Square, TriangleAlert, X, BrainCircuit } from 'lucide-react';
@@ -81,6 +82,13 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
   const [draft, setDraft] = useState(0);
   const pending = !!job && autoPromptPending(job);
   const locked = !!attemptId || preparing || submitting;
+  // That computer's Settings › Models, once read: it fills the choice until the owner makes one here.
+  const chosenModel = useRef(false);
+  const preset = useModelPreset(token, machine, 'autoPrompt.new', providers);
+  useEffect(() => {
+    if (!visible || !preset || chosenModel.current || locked) return;
+    setProvider(preset.provider); setModel(preset.model); setEffort(preset.effort);
+  }, [visible, machine, preset?.provider, preset?.model, preset?.effort]);
   const providerAvailable = providers.some(item => item.provider === provider && item.available);
   const providerHealth = providers.find(item => item.provider === provider);
   const unavailable = !connected || !token || !providerAvailable || (machine !== undefined && !host?.canWork);
@@ -137,8 +145,11 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
       const chosen = nodeOf(folder) ?? node;
       setMachine(chosen);
       setCwd(folder ? localPart(folder) : '');
-      setProvider((chosen ? machines.find(item => item.node === chosen)?.providers ?? [] : here).find(item => item.available)?.provider || 'claude');
-      setModel(undefined); setEffort(undefined);
+      const usable = chosen ? machines.find(item => item.node === chosen)?.providers ?? [] : here;
+      chosenModel.current = false;
+      const preset = cachedPreset(chosen, 'autoPrompt.new', usable);
+      setProvider(preset?.provider || usable.find(item => item.available)?.provider || 'claude');
+      setModel(preset?.model); setEffort(preset?.effort);
     }
     element.showModal();
     if (attempt.current) element.focus();
@@ -279,14 +290,17 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
       {hosts.length > 1 && <label className="auto-prompt-directory auto-prompt-machine"><span className="sr-only">{t('컴퓨터')}</span><Monitor size={16} aria-hidden="true" /><select aria-label={t('컴퓨터')} value={machine ?? ''} disabled={locked} onChange={event => {
         const next = event.target.value || undefined;
         setMachine(next); setCwd('');
-        setProvider((next ? hosts.find(item => item.node === next)?.providers ?? [] : localProviders).find(item => item.available)?.provider || 'claude');
-        setModel(undefined); setEffort(undefined); setError('');
+        const usable = next ? hosts.find(item => item.node === next)?.providers ?? [] : localProviders;
+        chosenModel.current = false;
+        const preset = cachedPreset(next, 'autoPrompt.new', usable);
+        setProvider(preset?.provider || usable.find(item => item.available)?.provider || 'claude');
+        setModel(preset?.model); setEffort(preset?.effort); setError('');
       }}>{hosts.map(item => <option key={item.node ?? ''} value={item.node ?? ''}>{item.node ? item.canWork ? item.name : t('{0} (지금 사용할 수 없음)', { 0: item.name }) : t('{0} (이 컴퓨터)', { 0: item.name })}</option>)}</select><ChevronDown size={13} aria-hidden="true" /></label>}
       <label className="auto-prompt-directory"><span className="sr-only">{t('작업 폴더')}</span><Folder size={16} aria-hidden="true" /><select aria-label={t('작업 폴더')} title={cwd || 'Auto'} value={cwd} disabled={locked} onChange={event => setCwd(event.target.value)}><option value="">Auto</option>{[...choices].map(([path, label]) => <option key={path} value={path}>{label} · {path}</option>)}</select><ChevronDown size={13} aria-hidden="true" /></label>
       <div className="auto-prompt-providers" role="group" aria-label={t('에이전트 종류')}>
         {(['claude', 'codex'] as const).map(value => {
           const available = providers.some(item => item.provider === value && item.available);
-          return <button key={value} type="button" className={`auto-prompt-provider-button ${value}`} aria-label={value === 'claude' ? 'Claude' : 'Codex'} aria-pressed={provider === value} title={available ? providerLabels[value] : t('{0}를 현재 사용할 수 없습니다.', { 0: providerLabels[value] })} disabled={locked || !available} onClick={() => { if (value !== provider) { setProvider(value); setModel(undefined); setEffort(undefined); } }}><ProviderIcon provider={value} size={24} /></button>;
+          return <button key={value} type="button" className={`auto-prompt-provider-button ${value}`} aria-label={value === 'claude' ? 'Claude' : 'Codex'} aria-pressed={provider === value} title={available ? providerLabels[value] : t('{0}를 현재 사용할 수 없습니다.', { 0: providerLabels[value] })} disabled={locked || !available} onClick={() => { if (value !== provider) { chosenModel.current = true; const pick = cachedPick(machine, 'autoPrompt.new', value); setProvider(value); setModel(pick.model); setEffort(pick.effort); } }}><ProviderIcon provider={value} size={24} /></button>;
         })}
       </div>
     </div>
@@ -303,10 +317,10 @@ export function AutoPromptDialog({ visible, initialCwd, initialNode, providers: 
         if (!event.clipboardData.getData('text/plain')) event.preventDefault();
         addFiles(files);
       }} />
-      <div className="composer-bottom"><button type="button" className="attach-button" aria-label={t('파일 첨부')} title={t('파일 첨부 · 최대 {0}개, 합계 {1} · 이미지 붙여넣기 가능', { 0: MAX_ATTACHMENTS, 1: formatAttachmentSize(MAX_TOTAL_ATTACHMENT_BYTES) })} disabled={locked} onClick={() => fileInput.current?.click()}><Paperclip size={17} aria-hidden="true" /></button><span className="composer-hint">{prompt.length > 24000 ? t('{0} / 32,000자', { 0: prompt.length.toLocaleString() }) : <><kbd>⌘ / Ctrl</kbd><kbd>Enter</kbd><span>{t('전송')}</span></>}</span><ModelPicker provider={providerHealth} value={model} disabled={locked} onChange={next => { setModel(next); setEffort(value => supportedEffort(providerHealth, next || providerHealth?.defaultModel, value)); }} /><EffortPicker provider={providerHealth} model={model || providerHealth?.defaultModel} value={effort} disabled={locked} onChange={setEffort} /><button type="submit" className="send-button" disabled={unavailable || locked || (!prompt.trim() && !attachments.length)} aria-label={submitting || pending ? t('요청 보내는 중') : t('요청 보내기')}>{submitting || pending ? <LoaderCircle size={15} className="spin" /> : <Send size={15} />}<span>{t('보내기')}</span></button></div>
+      <div className="composer-bottom"><button type="button" className="attach-button" aria-label={t('파일 첨부')} title={t('파일 첨부 · 최대 {0}개, 합계 {1} · 이미지 붙여넣기 가능', { 0: MAX_ATTACHMENTS, 1: formatAttachmentSize(MAX_TOTAL_ATTACHMENT_BYTES) })} disabled={locked} onClick={() => fileInput.current?.click()}><Paperclip size={17} aria-hidden="true" /></button><span className="composer-hint">{prompt.length > 24000 ? t('{0} / 32,000자', { 0: prompt.length.toLocaleString() }) : <><kbd>⌘ / Ctrl</kbd><kbd>Enter</kbd><span>{t('전송')}</span></>}</span><ModelPicker provider={providerHealth} value={model} disabled={locked} onChange={next => { chosenModel.current = true; setModel(next); setEffort(value => supportedEffort(providerHealth, next || providerHealth?.defaultModel, value)); }} /><EffortPicker provider={providerHealth} model={model || providerHealth?.defaultModel} value={effort} disabled={locked} onChange={next => { chosenModel.current = true; setEffort(next); }} /><button type="submit" className="send-button" disabled={unavailable || locked || (!prompt.trim() && !attachments.length)} aria-label={submitting || pending ? t('요청 보내는 중') : t('요청 보내기')}>{submitting || pending ? <LoaderCircle size={15} className="spin" /> : <Send size={15} />}<span>{t('보내기')}</span></button></div>
     </form>
     {!job && suggestion && <SuggestionRow state={suggestion} accepted={acceptSuggestion} disabled={locked} machine={machine} projects={choices} sessions={sessions} onChange={setAcceptSuggestion} />}
-    {statusLabel && <div className="auto-prompt-progress" role="status"><LoaderCircle size={18} className="spin" aria-hidden="true" /><div><strong>{statusLabel}</strong>{job?.status === 'routing' && !directed(job) && <small title={job.routerModel}>{t('{0}가 요청을 살펴보고 있습니다.', { 0: job.provider === 'claude' ? 'Opus' : 'GPT-5.6 Sol' })}</small>}<small>{t('창을 닫아도 요청은 계속됩니다.')}</small></div>{job && ['queued', 'routing'].includes(job.status) && <button type="button" className="auto-prompt-cancel" disabled={cancelling || !connected || !token} onClick={() => { void cancel(); }}>{cancelling ? <LoaderCircle size={12} className="spin" /> : <Square size={11} />}{t('취소')}</button>}</div>}
+    {statusLabel && <div className="auto-prompt-progress" role="status"><LoaderCircle size={18} className="spin" aria-hidden="true" /><div><strong>{statusLabel}</strong>{job?.status === 'routing' && !directed(job) && <small title={job.routerModel}>{t('{0}가 요청을 살펴보고 있습니다.', { 0: job.routerModel || providerLabels[job.routerProvider ?? job.provider] })}</small>}<small>{t('창을 닫아도 요청은 계속됩니다.')}</small></div>{job && ['queued', 'routing'].includes(job.status) && <button type="button" className="auto-prompt-cancel" disabled={cancelling || !connected || !token} onClick={() => { void cancel(); }}>{cancelling ? <LoaderCircle size={12} className="spin" /> : <Square size={11} />}{t('취소')}</button>}</div>}
     {requestError && <div className="auto-prompt-error" role="alert"><TriangleAlert size={16} aria-hidden="true" /><p>{translateMessage(requestError)}</p>{uncertain && <button type="button" disabled={submitting || unavailable} onClick={() => { void submit(); }}>{t('같은 요청 다시 확인')}</button>}</div>}
     {job?.status === 'cancelled' && <p className="auto-prompt-cancelled" role="status">{t('요청을 취소했습니다. 세션에 보내지 않았습니다.')}</p>}
     {job?.status === 'completed' && <section className="auto-prompt-result" aria-label={t('요청을 보낸 세션')}><div className="auto-prompt-result-heading"><Check size={19} aria-hidden="true" /><h3>{job.decision?.action === 'create' ? t('새 세션에 요청을 보냈습니다') : t('기존 세션에 요청을 보냈습니다')}</h3></div><p className="auto-prompt-result-path"><Folder size={14} aria-hidden="true" /><bdi dir="ltr">{job.decision?.cwd || target?.cwd || cwd}</bdi></p><strong className="auto-prompt-result-session">{target ? sessionTitle(target) : job.sessionId}</strong>{job.decision?.reason && <p className="auto-prompt-result-reason">{job.decision.reason}</p>}</section>}
