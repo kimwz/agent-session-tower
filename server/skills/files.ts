@@ -723,6 +723,17 @@ async function readSkillText(file: string): Promise<string | undefined> {
   } catch { return undefined; }
 }
 
+/**
+ * A skill's SKILL.md as one read: its name, description, body and revision all from the same text, so a revision
+ * check covers everything returned.
+ */
+export async function readSkillSnapshot(dir: string): Promise<{ name: string; description: string; body: string; revision: string } | undefined> {
+  const text = await readSkillText(join(dir, 'SKILL.md'));
+  if (text === undefined) return undefined;
+  const parsed = parseSkillFile(text);
+  return { name: parsed.name?.trim() || basename(dir), description: (parsed.description ?? '').trim(), body: parsed.body, revision: revisionOf(text) };
+}
+
 export function revisionOf(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 16);
 }

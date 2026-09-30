@@ -7,7 +7,7 @@ import { MAX_SKILL_BUNDLE_BYTES, MAX_SKILL_TARGETS, SKILL_BUNDLE_FORMAT, SKILL_N
 import { AGENT_GUIDANCE } from '../agent-guidance/guidance.js';
 import { OWNER_GUIDANCE_FILE, withoutTowerMarkers } from '../agent-guidance/install.js';
 import { writePrivateFile } from '../stores/private-json.js';
-import { revisionOf } from './files.js';
+import { readSkillSnapshot, revisionOf } from './files.js';
 import { parseBundle } from './store.js';
 import { proposalReady, proposalsFor } from '../../shared/skills.js';
 import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
@@ -324,10 +324,11 @@ export class SkillService {
     const unconfirmed: string[] = [];
     for (const item of state.targets) {
       if (!targetsCover(item, folder)) continue;
-      const detail = await this.files.detail(item.dir).catch(() => undefined);
-      if (!detail) continue;
-      if (state.confirmed[item.dir] === detail.revision) skills.push({ name: detail.name, description: detail.description, body: detail.body });
-      else unconfirmed.push(detail.name);
+      // Name, description and body come from the one read whose revision is checked.
+      const read = await readSkillSnapshot(item.dir);
+      if (!read) continue;
+      if (state.confirmed[item.dir] === read.revision) skills.push({ name: read.name, description: read.description, body: read.body });
+      else unconfirmed.push(read.name);
     }
     const guidance = await this.guidance();
     return { skills, ...(guidance.confirmed && guidance.owner.trim() ? { guidance: guidance.owner } : {}), unconfirmed };
