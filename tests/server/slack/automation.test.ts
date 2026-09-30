@@ -668,6 +668,22 @@ test('an immediate owner permission is used first, and a retry of that send post
   assert.equal(f.counts().sends, 2);
 });
 
+test('a call whose own reply was not sent keeps that record when an owner permission arrives, so it posts once', async t => {
+  const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  const send = f.options.sendReply;
+  // Refused before anything was posted: the record stays proposed.
+  f.options.sendReply = async () => { throw Object.assign(new Error('Slack is not connected.'), { notSent: true }); };
+  await assert.rejects(f.manager.tool(id, 'slack_send', { text: 'Done', requestKey: 'report' }));
+  assert.equal(f.manager.list()[0].replies?.[0].status, 'proposed');
+  f.options.sendReply = send;
+  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  assert.match(chatText(await restarted.ownerChat('owner-chat', '슬랙에 보내주세요')), /authorization saved/);
+  await restarted.tool(id, 'slack_send', { text: 'Done', requestKey: 'report' });
+  await restarted.tool(id, 'slack_send', { text: 'Done', requestKey: 'report' });
+  assert.equal(f.counts().sends, 1);
+});
+
 test('the owner telling Tower not to send holds open replies and automatic reports until they allow it again', async t => {
   const f = await fixture(t);
   await f.manager.setRules([{ ...rule, autoReply: true }]);

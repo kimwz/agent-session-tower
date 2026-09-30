@@ -662,10 +662,12 @@ export class SlackAutomationManager extends EventEmitter {
       if (args.requestKey !== undefined && !text(args.requestKey, 200)) throw new Error('requestKey must contain 1–200 characters.');
       // The call's key, whichever way its reply went out: a retry the agent did not see the result of is not a new reply.
       const sendKey = 'agent-' + createHash('sha256').update(JSON.stringify([item.id, args.requestKey ?? args.text])).digest('hex');
-      const earlier = item.replies?.find(reply => reply.requestKey === sendKey || reply.sendKey === sendKey);
-      if (earlier && earlier.text !== args.text) throw new Error('requestKey was already used with different text.');
-      if (earlier && earlier.status !== 'proposed') return structuredClone(earlier);
-      if (immediate?.status === 'pending') return this.consumeComposedReply(item, args.text, sendKey);
+      const earlier = item.replies?.filter(reply => reply.requestKey === sendKey || reply.sendKey === sendKey) ?? [];
+      if (earlier.some(reply => reply.text !== args.text)) throw new Error('requestKey was already used with different text.');
+      const settled = earlier.find(reply => reply.status !== 'proposed');
+      if (settled) return structuredClone(settled);
+      // A call that already has its own reply record keeps it, so one call never ends up with two replies.
+      if (immediate?.status === 'pending' && !earlier.some(reply => reply.requestKey === sendKey)) return this.consumeComposedReply(item, args.text, sendKey);
       return this.sendOpenReply(item, args.text, sendKey);
     }
     if (name === 'tower_task_complete') return this.completeConditionalReply(item, args);
