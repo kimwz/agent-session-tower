@@ -88,10 +88,11 @@ test('a waiting restore can be cancelled, and a different Slack account never re
   const b = await computer(t);
   await write(b.stateDir, 'slack-connection.json', { enabled: true, userToken: 'xoxp-b', account: { teamId: 'T', userId: 'B' } });
   await write(b.stateDir, 'slack-automation.json', { rules: [], workflows: [{ id: 'w', status: 'running' }] });
-  await b.service.apply((await b.service.check(text, PASS)).id);
-  assert.equal((await b.service.cancel())?.status, 'cancelled');
+  const waiting = await b.service.apply((await b.service.check(text, PASS)).id);
+  await assert.rejects(b.service.cancel('another'), /기다리는 복원이 없습니다/, 'only the restore the page shows is cancelled');
+  assert.equal((await b.service.cancel(waiting.id)).status, 'cancelled');
   assert.equal(await readPendingWorker(b.stateDir), undefined);
-  await assert.rejects(b.service.cancel(), /기다리는 복원이 없습니다/);
+  await assert.rejects(b.service.cancel(waiting.id), /기다리는 복원이 없습니다/);
   await b.service.apply((await b.service.check(text, PASS)).id);
   const taken = await takeWorkerRestore(b.stateDir);
   await taken!.finish({ parts: [], errors: [] });
@@ -184,9 +185,12 @@ test('a restore applied while a worker is still applying an earlier one is kept 
   const first = await b.service.apply((await b.service.check(text, PASS)).id);
   const taken = await takeWorkerRestore(b.stateDir);
   assert.equal(taken?.restore.id, first.id);
-  await assert.rejects(b.service.cancel(), /이미 복원을 적용하고/, 'a part being applied cannot be cancelled');
-  // The owner restores again while that worker is still busy with the first one.
-  const second = await b.service.apply((await b.service.check(text, PASS)).id);
+  await assert.rejects(b.service.cancel(first.id), /이미 복원을 적용하고/, 'a part being applied cannot be cancelled');
+  // The owner restores again while that worker is still busy with the first one; a cancel of the first sent at the
+  // same moment never touches the second.
+  const secondCheck = await b.service.check(text, PASS);
+  const [second, cancelled] = await Promise.all([b.service.apply(secondCheck.id), b.service.cancel(first.id).then(() => 'cancelled', () => 'refused')]);
+  assert.equal(cancelled, 'refused');
   await taken!.finish({ parts: [], errors: [] });
   const report = await readReport(b.stateDir);
   assert.equal(report?.id, second.id);

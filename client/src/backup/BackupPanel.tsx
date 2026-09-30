@@ -122,7 +122,7 @@ export function BackupPanel({ token }: { token: string }) {
           <ul>{preview.parts.map(part => <li key={part}>{t(PART_LABELS[part])}{part === 'skills' ? ` · ${t('{0}개', { 0: preview.skills })}` : ''}</li>)}</ul>
           <button className="primary-button" disabled={Boolean(busy)} onClick={applyBackup}>{spin('apply') ?? <RotateCcw size={14} />}{t('이 백업으로 복원')}</button>
         </div>}
-        {overview.restore && <RestoreStatus report={overview.restore} busy={Boolean(busy)} onCancel={() => void act('cancel', async () => { await post('/api/backup/restore/cancel', token); await load(); })} />}
+        {overview.restore && <RestoreStatus report={overview.restore} busy={Boolean(busy)} onCancel={() => void act('cancel', async () => { await post('/api/backup/restore/cancel', token, { id: overview.restore!.id }); await load(); })} />}
       </section>
       {form && <section><h3>{t('자동 백업')}</h3>
         <p className="auth-hint">{t('Cloudflare R2 같은 S3 호환 저장소에 주기적으로 암호화한 백업을 올립니다. 이 컴퓨터가 올린 백업 중 오래된 것은 보관 개수만 남기고 지웁니다.')}</p>

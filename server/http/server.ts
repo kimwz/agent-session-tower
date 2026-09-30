@@ -111,7 +111,7 @@ export interface HttpOptions {
     download(key: unknown): Promise<{ name: string; text: string }>;
     check(file: unknown, passphrase: unknown): Promise<BackupPreview>;
     apply(id: unknown): Promise<RestoreReport>;
-    cancel(): Promise<RestoreReport | undefined>;
+    cancel(id: unknown): Promise<RestoreReport>;
   };
   /** Push notifications to the owner's browsers; managed only from this Tower's own pages. */
   notifications?: {
@@ -363,7 +363,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
             case '/api/backup/remote/download': return sendFile(await backup.download((await readJson(req, 4 * 1024)).key));
             case '/api/backup/restore/check': { const body = await readJson(req, MAX_BACKUP_FILE_BYTES + 64 * 1024); return json(res, 200, await backup.check(body.file, body.passphrase)); }
             case '/api/backup/restore/apply': return json(res, 200, await backup.apply((await readJson(req, 1024)).id));
-            case '/api/backup/restore/cancel': { await readJson(req, 1024); return json(res, 200, await backup.cancel()); }
+            case '/api/backup/restore/cancel': return json(res, 200, await backup.cancel((await readJson(req, 1024)).id));
           }
         }
       }

@@ -107,7 +107,7 @@ export class BackupService {
     this.first.unref(); this.timer.unref();
   }
   close(): void { if (this.first) clearTimeout(this.first); if (this.timer) clearInterval(this.timer); }
-  async flush(): Promise<void> { await this.writes.catch(() => {}); await this.running?.catch(() => {}); }
+  async flush(): Promise<void> { await this.restores.catch(() => {}); await this.writes.catch(() => {}); await this.running?.catch(() => {}); }
 
   async overview(): Promise<BackupOverview> {
     const { passphrase, remote: { secretAccessKey, ...remote }, ...settings } = this.saved.settings;
@@ -253,7 +253,17 @@ export class BackupService {
    * through their stores; the worker's part waits in `restore/` for the next worker, which is asked to take over at
    * its next quiet moment, so no running turn or shell is interrupted.
    */
-  async apply(id: unknown): Promise<RestoreReport> {
+  apply(id: unknown): Promise<RestoreReport> { return this.oneRestore(() => this.applyNow(id)); }
+
+  /** Restores and their cancellation run one at a time, so neither acts on the other's files. */
+  private restores: Promise<unknown> = Promise.resolve();
+  private oneRestore<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.restores.catch(() => {}).then(work);
+    this.restores = next;
+    return next;
+  }
+
+  private async applyNow(id: unknown): Promise<RestoreReport> {
     const item = typeof id === 'string' ? this.checked.get(id) : undefined;
     if (!item || this.now() - item.at > CHECKED_KEPT_MS) throw new BackupError('확인한 백업이 만료되었습니다. 파일을 다시 확인하세요.', 409);
     this.checked.delete(id as string);
@@ -301,9 +311,10 @@ export class BackupService {
   }
 
   /** Stops a restore whose worker part has not been taken yet. What the web and the master applied stays. */
-  async cancel(): Promise<RestoreReport | undefined> {
+  cancel(id: unknown): Promise<RestoreReport> { return this.oneRestore(() => this.cancelNow(id)); }
+  private async cancelNow(id: unknown): Promise<RestoreReport> {
     const report = await readReport(this.options.stateDir);
-    if (report?.status !== 'waiting-worker') throw new BackupError('기다리는 복원이 없습니다.', 409);
+    if (report?.status !== 'waiting-worker' || report.id !== id) throw new BackupError('기다리는 복원이 없습니다.', 409);
     // Once a worker has taken it, it is being applied and can no longer be stopped.
     if (!await removePendingWorker(this.options.stateDir)) throw new BackupError('실행 워커가 이미 복원을 적용하고 있습니다.', 409);
     const next: RestoreReport = { ...report, status: 'cancelled' };
