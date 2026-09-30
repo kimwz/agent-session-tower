@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.92.0] - 2026-09-30
+
+### Added
+- **Agents can ask Tower to run one command once** (`permissions_run`). For a one-off action such as stopping one process (`kill 13229`), an agent no longer needs a lasting rule that allows a whole family of commands. Tower's permission reviewer (or you, in **권한**) judges the exact command. Once it is allowed, Tower runs it in the conversation's folder with no input, stops it after at most 10 minutes, and keeps the first and last 64 KiB of its output. The agent reads the result with `permissions_runResult`; if it ended its turn first, the result arrives as a message. Asking again with the same command returns the same request, so nothing runs twice. `sudo`, disk tools, and downloads piped into a shell always wait for you. After a restart, a command left running is stopped only when Tower can prove it is still the same process; otherwise its result is marked unknown.
+- **Rules for one conversation.** The reviewer can allow a wide rule for one conversation only (`scope: "conversation"`). It reaches only that conversation's Claude Code turns and is removed when the conversation closes or after 24 hours. Codex cannot take rules for one conversation, so Codex agents are pointed to `permissions_run` instead. The rules are listed under **대화 한정** with their expiry.
+
 ## [1.91.0] - 2026-09-30
 
 ### Changed

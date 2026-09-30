@@ -3,18 +3,24 @@ import { z } from 'zod';
 export type PermissionProvider = 'claude' | 'codex';
 /**
  * `command` is a command prefix both providers understand (`gh pr merge`); `claude` is a Claude Code permission rule
- * for anything else (`WebFetch(domain:example.com)`, `mcp__server__tool`).
+ * for anything else (`WebFetch(domain:example.com)`, `mcp__server__tool`). `run` is no rule: a request to run one exact
+ * command once, which Tower runs itself when it is allowed.
  */
-export type PermissionKind = 'command' | 'claude';
-export type PermissionScope = 'global' | 'project';
+export type PermissionKind = 'command' | 'claude' | 'run';
+/** `conversation`: only the turns of one conversation (`sessionId`) receive it, until it expires. Claude Code only. */
+export type PermissionScope = 'global' | 'project' | 'conversation';
 
 export interface PermissionRuleInput {
   kind: PermissionKind;
   value: string;
   providers: PermissionProvider[];
   scope: PermissionScope;
-  /** The project folder of a project rule. */
+  /** The project folder of a project rule; the conversation's folder of a conversation rule. */
   cwd?: string;
+  /** The conversation a conversation rule belongs to. */
+  sessionId?: string;
+  /** When a conversation rule stops applying. */
+  expiresAt?: string;
   note?: string;
 }
 
@@ -71,7 +77,38 @@ export interface PermissionRequest {
   /** Who decided it: the owner, or Tower's reviewer. */
   decidedBy?: 'owner' | 'auto';
   review?: PermissionReview;
+  /** For a `run` request: the command's run, once allowed. */
+  run?: PermissionRun;
+  /** For a `run` request: what makes a retry the same request (the agent's key, or the conversation and command). */
+  key?: string;
+  keyExplicit?: boolean;
+  timeoutSeconds?: number;
 }
+
+/** One exact command Tower ran for a request. The whole output is kept apart (`permission-runs/<id>.json`). */
+export interface PermissionRun {
+  status: 'waiting' | 'running' | 'done' | 'failed';
+  startedAt?: string;
+  finishedAt?: string;
+  /** The leader's pid (and process group) and the start time the OS reported, to know it again after a restart. */
+  pid?: number;
+  started?: string;
+  exitCode?: number;
+  signal?: string;
+  timedOut?: boolean;
+  stdoutBytes?: number;
+  stderrBytes?: number;
+  /** The start of each stream, for the panel and a short answer. */
+  preview?: { stdout: string; stderr: string };
+  truncated?: boolean;
+  error?: string;
+  /** The result reached the agent (runResult), so no message is sent. */
+  delivered?: boolean;
+}
+export interface PermissionRunOutput { stdout: string; stderr: string; truncated: boolean }
+export const MAX_RUN_COMMAND = 4000;
+export const MAX_RUN_SECONDS = 600;
+export const CONVERSATION_RULE_HOURS = 24;
 
 /** A file Tower writes rules into, and whether the last write worked. */
 export interface PermissionTarget {
@@ -113,8 +150,17 @@ const UNREADABLE = /[\p{Cc}\p{Cf}]|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD80
 export const normalizeCommand = (value: string) => value.trim().split(/\s+/).filter(Boolean).join(' ');
 
 /** Why a rule cannot be saved, or undefined when it can. Korean, like Tower's other server messages. */
-export function ruleProblem(rule: Pick<PermissionRuleInput, 'kind' | 'value' | 'providers' | 'scope' | 'cwd'>): string | undefined {
+export function ruleProblem(rule: Pick<PermissionRuleInput, 'kind' | 'value' | 'providers' | 'scope' | 'cwd'> & { sessionId?: string }): string | undefined {
   if (UNREADABLE.test(rule.value.replace(/[ \t]/g, ' ').replace(/\n/g, ' '))) return '규칙에는 제어 문자나 보이지 않는 문자를 쓸 수 없습니다.';
+  if (rule.kind === 'run') {
+    if (!rule.value.trim()) return '실행할 명령을 입력하세요.';
+    if (rule.value.length > MAX_RUN_COMMAND) return '실행할 명령은 4000자 이하로 입력하세요.';
+    return rule.cwd?.startsWith('/') ? undefined : '명령을 실행할 폴더가 필요합니다.';
+  }
+  if (rule.scope === 'conversation') {
+    if (!rule.sessionId) return '대화 한정 규칙에는 대화가 필요합니다.';
+    if (rule.providers.some(provider => provider !== 'claude')) return '대화 한정 규칙은 Claude Code에만 줄 수 있습니다.';
+  }
   if (rule.kind === 'command') {
     const value = normalizeCommand(rule.value);
     if (!value) return '명령어를 입력하세요.';
@@ -128,7 +174,7 @@ export function ruleProblem(rule: Pick<PermissionRuleInput, 'kind' | 'value' | '
   }
   if (!rule.providers.length) return '적용할 에이전트를 하나 이상 고르세요.';
   if (rule.kind === 'claude' && rule.providers.some(provider => provider !== 'claude')) return 'Claude 규칙은 Claude Code에만 적용됩니다.';
-  if (rule.scope === 'project' && !rule.cwd?.startsWith('/')) return '프로젝트 규칙에는 프로젝트 폴더가 필요합니다.';
+  if ((rule.scope === 'project' || rule.scope === 'conversation') && !rule.cwd?.startsWith('/')) return '프로젝트 규칙에는 프로젝트 폴더가 필요합니다.';
   return undefined;
 }
 
@@ -137,6 +183,7 @@ export function ruleProblem(rule: Pick<PermissionRuleInput, 'kind' | 'value' | '
  * Such rules are allowed (the owner decides), but the owner is warned first.
  */
 export function ruleIsBroad(rule: Pick<PermissionRuleInput, 'kind' | 'value'>): boolean {
+  if (rule.kind === 'run') return false;
   if (rule.kind === 'command') {
     const words = normalizeCommand(rule.value).split(' ');
     const program = (words[0] ?? '').split('/').at(-1)!.toLowerCase().replace(/\d+(\.\d+)*$/, '');
@@ -158,8 +205,8 @@ export function codexRule(rule: Pick<PermissionRuleInput, 'value'>): string {
 }
 
 /** Two rules that mean the same thing in the same place. */
-export const sameRule = (a: Pick<PermissionRuleInput, 'kind' | 'value' | 'scope' | 'cwd'>, b: Pick<PermissionRuleInput, 'kind' | 'value' | 'scope' | 'cwd'>) =>
-  a.kind === b.kind && a.scope === b.scope && (a.scope === 'global' || a.cwd === b.cwd)
+export const sameRule = (a: Pick<PermissionRuleInput, 'kind' | 'value' | 'scope' | 'cwd' | 'sessionId'>, b: Pick<PermissionRuleInput, 'kind' | 'value' | 'scope' | 'cwd' | 'sessionId'>) =>
+  a.kind === b.kind && a.scope === b.scope && (a.scope === 'global' || a.cwd === b.cwd) && (a.scope !== 'conversation' || a.sessionId === b.sessionId)
   && (a.kind === 'command' ? normalizeCommand(a.value) === normalizeCommand(b.value) : a.value.trim() === b.value.trim());
 
 /**
@@ -340,7 +387,22 @@ const inside = (path: string, folder: string) => path === folder || path.startsW
  * Why Tower's reviewer may not decide this rule for work in `cwd`, or undefined when it may. Broad rules, Bash rules
  * written as Claude rules, file rules outside the project and the never-allowed commands always wait for the owner.
  */
+/**
+ * Why Tower's reviewer may not allow running this exact command once, or undefined when it may: raising privileges,
+ * acting on the whole machine, or running a download straight into a shell always wait for the owner. The rest is the
+ * reviewer's to judge, the whole command in view (a specific `kill 13229` or `rm dist/old.log` can be fine).
+ */
+export function runBlock(command: string): string | undefined {
+  const text = command.toLowerCase();
+  if (/(^|[\s;&|(`$])(sudo|doas|su)(\s|$)/.test(text)) return '권한을 올리는 명령(sudo 등)은 소유자가 정합니다.';
+  if (/(^|[\s;&|(`$])(shutdown|reboot|halt|poweroff|mkfs[\w.]*|diskutil|fdisk)(\s|$)/.test(text)) return '컴퓨터 전체에 영향을 주는 명령은 소유자가 정합니다.';
+  if (/(^|[\s;&|(`$])dd(\s|$)[^\n]*\bof=\/dev\//.test(text)) return '장치에 직접 쓰는 명령은 소유자가 정합니다.';
+  if (/(curl|wget)\b[^\n|]*\|\s*(sudo\s+)?(sh|bash|zsh|dash|ksh)\b/.test(text)) return '내려받은 것을 바로 셸로 실행하는 명령은 소유자가 정합니다.';
+  return undefined;
+}
+
 export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'>, cwd: string): string | undefined {
+  if (rule.kind === 'run') return runBlock(rule.value);
   if (rule.kind === 'command') {
     const rulewords = lower(rule.value);
     const program = words(rule.value)[0] ?? '';
@@ -406,8 +468,18 @@ export const PermissionRequestInputSchema = z.object({
   kind: z.enum(['command', 'claude']),
   value: z.string().min(1).max(MAX_RULE_LENGTH + 20),
   providers: z.array(provider).min(1).max(2).optional(),
-  scope: z.enum(['project', 'global']),
+  scope: z.enum(['project', 'global', 'conversation']),
   reason: z.string().trim().min(1).max(500),
+}).strict();
+export const PermissionRunInputSchema = z.object({
+  command: z.string().min(1).max(MAX_RUN_COMMAND),
+  reason: z.string().trim().min(1).max(500),
+  timeoutSeconds: z.number().int().min(1).max(MAX_RUN_SECONDS).optional(),
+  key: z.string().trim().min(1).max(200).optional(),
+}).strict();
+export const PermissionRunResultInputSchema = z.object({
+  id: z.string().uuid(),
+  waitSeconds: z.number().int().min(0).max(50).optional(),
 }).strict();
 export const PermissionAutoReviewSchema = z.object({
   enabled: z.boolean(),

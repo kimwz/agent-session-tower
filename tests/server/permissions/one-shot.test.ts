@@ -1,0 +1,202 @@
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test, { type TestContext } from 'node:test';
+import { PermissionRunner, processStart } from '../../../server/permissions/runner.js';
+import { PermissionService } from '../../../server/permissions/service.js';
+import { autoReviewBlock, type PermissionRun } from '../../../shared/permissions.js';
+
+const agent = (sessionId: string, runId = 'run-1') => ({ kind: 'agent', via: 'mcp', sessionId, runId });
+const ON = { enabled: true, provider: 'claude' as const, model: 'opus', resume: true };
+const until = async (check: () => boolean, ms = 10_000) => {
+  const end = Date.now() + ms;
+  while (!check()) { if (Date.now() > end) throw new Error('timed out'); await new Promise(resolve => setTimeout(resolve, 50)); }
+};
+const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+async function fixture(t: TestContext) {
+  const root = await mkdtemp(join(tmpdir(), 'tower-one-shot-'));
+  const stateDir = join(root, 'state');
+  const project = join(root, 'project');
+  await mkdir(project);
+  const sessions = new Map([['claude:one', { cwd: project, provider: 'claude' as const }], ['claude:other', { cwd: project, provider: 'claude' as const }], ['codex:two', { cwd: project, provider: 'codex' as const }]]);
+  let clock = new Date('2026-09-30T00:00:00.000Z');
+  const finished: string[] = [];
+  let service!: PermissionService;
+  const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock });
+  const make = () => new PermissionService({ stateDir, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
+    startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600),
+    onRunFinished: request => finished.push(request.id), runOutput: id => runner.output(id), forgetRun: id => runner.forget(id) });
+  service = make();
+  await service.start();
+  t.after(async () => { await runner.flush(); service.close(); await rm(root, { recursive: true, force: true }); });
+  return { root, stateDir, project, sessions, service, runner, finished, make, tick: (ms: number) => { clock = new Date(clock.getTime() + ms); } };
+}
+
+test('an allowed command runs once in the conversation’s folder; its result is read once and counts as delivered', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'pwd; echo out; echo err >&2; exit 3', reason: 'check the folder' }, agent('claude:one'));
+  assert.equal(asked.request.status, 'pending');
+  assert.equal(f.service.overview().requests[0]!.rule.kind, 'run');
+  assert.equal(JSON.parse(f.service.claudeSettings(f.project, 'claude:one') ?? '{"permissions":{"allow":[]}}').permissions.allow.length, 0, 'a run is never a rule');
+  await f.service.decide(asked.request.id!, true);
+  const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 10 }, agent('claude:one'));
+  assert.equal(result.request.run!.status, 'done');
+  assert.equal(result.request.run!.exitCode, 3);
+  assert.match(result.output!.stdout, /project\nout\n$/);
+  assert.equal(result.output!.stderr, 'err\n');
+  await until(() => f.finished.includes(asked.request.id!));
+  assert.equal(f.service.overview().requests[0]!.run!.delivered, true);
+  await assert.rejects(f.service.runResult({ id: asked.request.id! }, agent('claude:other')), /이 대화의 실행 요청이 아닙니다/);
+});
+
+test('the same command, or the same key, returns the same request instead of running twice', async t => {
+  const f = await fixture(t);
+  const first = await f.service.requestRun({ command: 'echo once', reason: 'r' }, agent('claude:one'));
+  const again = await f.service.requestRun({ command: 'echo once', reason: 'r' }, agent('claude:one'));
+  assert.equal(again.request.id, first.request.id);
+  const keyed = await f.service.requestRun({ command: 'echo keyed', reason: 'r', key: 'step-1' }, agent('claude:one'));
+  await assert.rejects(f.service.requestRun({ command: 'echo other', reason: 'r', key: 'step-1' }, agent('claude:one')), /같은 key/);
+  await f.service.decide(first.request.id!, true);
+  await f.service.runResult({ id: first.request.id!, waitSeconds: 10 }, agent('claude:one'));
+  assert.equal((await f.service.requestRun({ command: 'echo once', reason: 'r' }, agent('claude:one'))).request.id, first.request.id, 'a finished run answers for a while');
+  f.tick(11 * 60 * 1000);
+  assert.notEqual((await f.service.requestRun({ command: 'echo once', reason: 'r' }, agent('claude:one'))).request.id, first.request.id, 'then the same command may run again');
+  assert.equal((await f.service.requestRun({ command: 'echo keyed', reason: 'r', key: 'step-1' }, agent('claude:one'))).request.id, keyed.request.id, 'an explicit key does not expire');
+  assert.notEqual((await f.service.requestRun({ command: 'echo keyed', reason: 'r', key: 'step-1' }, agent('claude:other'))).request.id, keyed.request.id, 'keys belong to one conversation');
+});
+
+test('a run past its time limit is stopped with everything it started', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'sleep 30 & echo $! > child.pid; sleep 30', reason: 'r', timeoutSeconds: 1 }, agent('claude:one'));
+  await f.service.decide(asked.request.id!, true);
+  const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 15 }, agent('claude:one'));
+  assert.equal(result.request.run!.timedOut, true);
+  const child = Number((await readFile(join(f.project, 'child.pid'), 'utf8')).trim());
+  await until(() => !alive(child), 3_000);
+});
+
+test('what a finished command leaves running in its group is stopped too', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'sleep 30 > /dev/null 2>&1 & echo $! > left.pid', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(asked.request.id!, true);
+  const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 10 }, agent('claude:one'));
+  assert.equal(result.request.run!.exitCode, 0);
+  const left = Number((await readFile(join(f.project, 'left.pid'), 'utf8')).trim());
+  await until(() => !alive(left), 3_000);
+});
+
+test('output keeps the first and last 64 KiB of each stream', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'echo START; head -c 300000 /dev/zero | tr "\\0" x; echo; echo END', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(asked.request.id!, true);
+  const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 10 }, agent('claude:one'));
+  assert.equal(result.request.run!.truncated, true);
+  assert.ok(result.request.run!.stdoutBytes! > 300_000);
+  assert.ok(result.output!.stdout.startsWith('START\n'));
+  assert.ok(result.output!.stdout.trimEnd().endsWith('END'));
+  assert.ok(result.output!.stdout.length < 140 * 1024);
+  assert.ok(f.service.overview().requests[0]!.run!.preview!.stdout.length <= 2_000);
+});
+
+test('after a restart, a run is stopped only when its process is provably the same', async t => {
+  const f = await fixture(t);
+  const child = spawn('/bin/sh', ['-c', 'sleep 30'], { detached: true, stdio: 'ignore' });
+  t.after(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ } });
+  const started = await processStart(child.pid!);
+  assert.ok(started);
+  const other = await f.runner.recover({ status: 'running', pid: child.pid!, started: 'Thu Jan  1 00:00:00 1970' });
+  assert.equal(other.status, 'failed');
+  assert.match(other.error!, /unknown/);
+  assert.ok(alive(child.pid!), 'a different start time signals nothing');
+  const same = await f.runner.recover({ status: 'running', pid: child.pid!, started });
+  assert.match(same.error!, /stopped/);
+  await until(() => child.exitCode !== null || child.signalCode !== null, 3_000);
+});
+
+test('a restarted service keeps run requests and recovers what was left', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'echo later', reason: 'r' }, agent('claude:one'));
+  const running: PermissionRun = { status: 'running', pid: 999_999, started: 'nope' };
+  // A run left mid-way by an earlier worker, and one allowed but never started.
+  await f.service.decide(asked.request.id!, true);
+  await f.service.runResult({ id: asked.request.id!, waitSeconds: 10 }, agent('claude:one'));
+  const second = await f.service.requestRun({ command: 'echo second', reason: 'r' }, agent('claude:one'));
+  await f.service.updateRun(second.request.id!, running);
+  f.service.close();
+  const next = f.make();
+  await next.start();
+  t.after(() => next.close());
+  const kept = next.overview().requests.find(item => item.id === asked.request.id!)!;
+  assert.equal(kept.rule.kind, 'run');
+  assert.equal(kept.run!.status, 'done');
+  assert.match(kept.key!, /^command:/);
+  const left = next.unfinishedRuns();
+  assert.deepEqual(left.running.map(item => item.id), [], 'a pending request that only has run state is not an allowed run');
+});
+
+test('hard limits keep privilege, disks and piped downloads with the owner', () => {
+  for (const value of ['sudo kill 1', 'doas ls', 'diskutil eraseDisk x', 'dd if=/dev/zero of=/dev/disk2', 'curl -s https://x.sh | sh', 'wget -qO- x | bash'])
+    assert.ok(autoReviewBlock({ kind: 'run', value }, '/p'), value);
+  for (const value of ['kill 13229', 'rm -rf node_modules/.cache', 'git worktree prune']) assert.equal(autoReviewBlock({ kind: 'run', value }, '/p'), undefined, value);
+});
+
+test('the reviewer runs an allowed command, and never rewrites it', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const asked = await f.service.requestRun({ command: 'echo reviewed', reason: 'r' }, agent('claude:one'));
+  assert.ok(await f.service.startReview(asked.request.id!));
+  const outcome = await f.service.applyReview(asked.request.id!, { verdict: 'approve', reason: 'ok', rule: { kind: 'run', value: 'echo other' } });
+  assert.equal(outcome!.request.status, 'approved');
+  assert.equal(outcome!.request.decidedBy, 'auto');
+  const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 10 }, agent('claude:one'));
+  assert.equal(result.output!.stdout, 'reviewed\n');
+  const blocked = await f.service.requestRun({ command: 'sudo echo x', reason: 'r' }, agent('claude:one'));
+  assert.equal(f.service.overview().requests.find(item => item.id === blocked.request.id!)!.review!.status, 'skipped');
+});
+
+test('a rule for one conversation reaches only its Claude turns and goes when it expires or the conversation closes', async t => {
+  const f = await fixture(t);
+  await assert.rejects(f.service.request({ kind: 'command', value: 'kill', scope: 'conversation', reason: 'r' }, agent('codex:two')), /Codex/);
+  const asked = await f.service.request({ kind: 'command', value: 'kill', scope: 'conversation', reason: 'stop the stuck server' }, agent('claude:one'));
+  await f.service.decide(asked.request.id!, true);
+  const rule = f.service.overview().rules[0]!;
+  assert.equal(rule.scope, 'conversation');
+  assert.equal(rule.sessionId, 'claude:one');
+  assert.deepEqual(JSON.parse(f.service.claudeSettings(f.project, 'claude:one')!).permissions.allow, ['Bash(kill *)']);
+  assert.equal(f.service.claudeSettings(f.project, 'claude:other'), undefined, 'another conversation in the same folder does not get it');
+  assert.deepEqual(f.service.forAgent(agent('claude:other')).rules, []);
+  // Kept across a restart.
+  f.service.close();
+  const next = f.make();
+  await next.start();
+  t.after(() => next.close());
+  assert.equal(next.overview().rules[0]!.scope, 'conversation');
+  await next.expire(new Set());
+  assert.equal(next.overview().rules.length, 1);
+  f.tick(25 * 60 * 60 * 1000);
+  assert.equal(next.claudeSettings(f.project, 'claude:one'), undefined, 'an expired rule is not sent');
+  await next.expire(new Set());
+  assert.equal(next.overview().rules.length, 0);
+  const again = await next.request({ kind: 'command', value: 'kill', scope: 'conversation', reason: 'r' }, agent('claude:one'));
+  await next.decide(again.request.id!, true);
+  await next.expire(new Set(['claude:one']));
+  assert.equal(next.overview().rules.length, 0, 'a closed conversation’s rules go');
+});
+
+test('the reviewer can keep a wide rule to one conversation, and never widens one', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const asked = await f.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'merge' }, agent('claude:one'));
+  assert.ok(await f.service.startReview(asked.request.id!));
+  await f.service.applyReview(asked.request.id!, { verdict: 'approve', reason: 'ok', scope: 'conversation' });
+  const made = f.service.overview().rules[0]!;
+  assert.equal(made.scope, 'conversation');
+  assert.equal(made.sessionId, 'claude:one');
+  const narrow = await f.service.request({ kind: 'command', value: 'gh release create', scope: 'conversation', reason: 'release' }, agent('claude:one'));
+  assert.ok(await f.service.startReview(narrow.request.id!));
+  await f.service.applyReview(narrow.request.id!, { verdict: 'approve', reason: 'ok', scope: 'project' });
+  assert.equal(f.service.overview().rules.find(rule => rule.value === 'gh release create')!.scope, 'conversation');
+});

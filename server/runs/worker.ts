@@ -42,8 +42,9 @@ import { SkillService } from '../skills/service.js';
 import { installAgentGuidance } from '../agent-guidance/install.js';
 import { PermissionService } from '../permissions/service.js';
 import { PermissionReviewer } from '../permissions/reviewer.js';
+import { PermissionRunner } from '../permissions/runner.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
-import { ruleGuards } from '../../shared/permissions.js';
+import { MAX_RUN_SECONDS, ruleGuards, type PermissionRequest } from '../../shared/permissions.js';
 import { skillHomes } from '../skills/files.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
 import { keepEndpoint } from './endpoint-keeper.js';
@@ -545,7 +546,24 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     await skills.start().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
     // Made just below; the permission service only calls it once requests arrive.
     let reviewer!: PermissionReviewer;
-    const permissions = new PermissionService({ stateDir, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
+    // One-shot runs: the command runs in this worker; the conversation hears its end unless it already read the result.
+    const runner: PermissionRunner = new PermissionRunner({ stateDir, update: (id, run): Promise<void> => permissions.updateRun(id, run) });
+    const runNotices = new Set<ReturnType<typeof setTimeout>>();
+    const runFinished = (request: PermissionRequest) => {
+      const timer = setTimeout(() => {
+        runNotices.delete(timer);
+        const now = permissions.overview().requests.find(item => item.id === request.id);
+        if (!now?.run || now.run.delivered) return;
+        const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
+        const origin = run?.origin ?? (request.decidedBy === 'owner' ? { kind: 'owner' as const } : undefined);
+        if (!origin || !runs.getSession(request.sessionId)) return;
+        const result = now.run.status === 'failed' ? `실패: ${now.run.error ?? '알 수 없는 이유'}` : now.run.timedOut ? '시간 제한으로 중단됨' : `종료 코드 ${now.run.exitCode ?? now.run.signal ?? '?'}`;
+        void runs.enqueue(request.sessionId, `${TOWER_NOTICE} 한 번 실행을 요청한 명령이 끝났습니다 (${result}). permissions_runResult에 id "${request.id}"를 주면 출력을 받습니다.`, {},
+          { origin, ...(run?.unattended ? { unattended: true } : {}) }).catch(error => console.error(`A run's result could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`));
+      }, 5_000);
+      runNotices.add(timer);
+    };
+    const permissions: PermissionService = new PermissionService({ stateDir, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
       resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' } }); },
       // A public agent's requests always wait for the owner: its conversations carry outsiders' words.
       autoReviewSkip: request => {
@@ -555,8 +573,23 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         return undefined;
       },
       onReviewQueued: () => reviewer?.wake(),
+      startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? MAX_RUN_SECONDS),
+      onRunFinished: runFinished,
+      runOutput: id => runner.output(id),
+      forgetRun: id => runner.forget(id),
       onAutoReviewChange: settings => { if (!settings.enabled) reviewer?.abort(); } });
     await permissions.start().catch(error => console.error(`Permission rules did not start: ${error instanceof Error ? error.message : String(error)}`));
+    // Runs a previous worker left: allowed ones start now; ones it left running are stopped only when provably its own.
+    void (async () => {
+      const left = permissions.unfinishedRuns();
+      for (const request of left.running) await permissions.updateRun(request.id, await runner.recover(request.run!)).catch(() => {});
+      for (const request of left.start) runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? MAX_RUN_SECONDS);
+    })().catch(error => console.error(`Permission runs did not recover: ${error instanceof Error ? error.message : String(error)}`));
+    // Rules for one conversation go when it is closed or gone, or after their time.
+    const expireRules = async () => { const saved = new ClosedSessionStore(stateDir); await saved.start(); await permissions.expire(saved.closedIds()); };
+    void expireRules().catch(() => {});
+    const expiryTimer = setInterval(() => { void expireRules().catch(() => {}); }, 60 * 60 * 1000);
+    expiryTimer.unref();
     reviewer = new PermissionReviewer({ service: permissions,
       model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }),
       sources: {
@@ -602,7 +635,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         await runs.enqueue(request.sessionId, `${TOWER_NOTICE} ${message}`, {}, { origin: run.origin, ...(run.unattended ? { unattended: true } : {}) });
       } });
 
-    runs.setClaudeSettings(cwd => permissions.claudeSettings(cwd));
+    runs.setClaudeSettings((cwd, sessionId) => permissions.claudeSettings(cwd, sessionId));
     runs.setTurnNotes((_run, session) => skills.turnNotes(session));
     runs.on('change', () => skills.recordRuns());
     // Worktrees a conversation made are removed once the owner closes it or automation finishes it.
@@ -666,9 +699,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         search: async (id, query) => runs.getSession(id) ? (await sessions.search(runs.nativeSessionId(id), query)) ?? { count: 0, matches: [], bytes: 0 } : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
     await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
-      onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || Boolean(tools?.busy()),
-      transient: () => slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || Boolean(tools?.busy()),
+      onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
+      transient: () => slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // Work a Slack or GitHub coordinator delegated: its coordinator hears how it ended and decides what follows.
       delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
       releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); worktrees.resume(); reviewer.release(); },
@@ -676,7 +709,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       quiesce: async () => { tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([worktrees.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
       resume: () => { tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); worktrees.close(); reviewer.close(); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     runs.markReady();
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { claudeRule, codexRule, type PermissionRequest, type PermissionRule } from '../../shared/permissions.js';
+import { claudeRule, codexRule, MAX_RUN_SECONDS, type PermissionRequest, type PermissionRule } from '../../shared/permissions.js';
 import type { ChatMessage, Run } from '../../shared/types.js';
 import { readFile } from 'node:fs/promises';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
@@ -92,7 +92,8 @@ export async function reviewInput(request: PermissionRequest, sources: ReviewSou
   const trigger = triggerId ? sources.trigger(triggerId) : undefined;
   const owned = await sources.authority(request.cwd);
   const project = await projectInstructions(request.cwd);
-  const rules = sources.rules(request.cwd).filter(rule => rule.source === 'owner' || rule.source === 'request')
+  // Another conversation's temporary rules say nothing about this one.
+  const rules = sources.rules(request.cwd).filter(rule => (rule.source === 'owner' || rule.source === 'request') && (rule.scope !== 'conversation' || rule.sessionId === request.sessionId))
     .map(rule => ({ rule: rule.value, kind: rule.kind, scope: rule.scope, providers: rule.providers }));
   // Read last, after every other wait, so words the owner sent meanwhile are in.
   const conversation = await sources.conversation(request.sessionId);
@@ -121,7 +122,15 @@ export async function reviewInput(request: PermissionRequest, sources: ReviewSou
       existingRules: rules,
     },
     context: {
-      request: {
+      request: rule.kind === 'run' ? {
+        kind: 'run',
+        command: rule.value,
+        allows: 'Tower runs exactly this shell command once, now, in the folder below (sh -c, no input, at most the time limit), and gives the agent its output. No rule is added; nothing else is allowed.',
+        timeLimitSeconds: request.timeoutSeconds ?? MAX_RUN_SECONDS,
+        folder: request.cwd,
+        agentReason: request.reason,
+        agentProvider: request.provider,
+      } : {
         kind: rule.kind,
         rule: rule.value,
         allows: rule.kind === 'command' ? `every command that starts with "${rule.value}", followed by any arguments` : `the Claude Code permission rule ${claudeRule(rule)}`,
@@ -175,18 +184,23 @@ The input is JSON with two parts:
 
 Tower already sends rules with dangerous options (in any spelling) to the owner, so a command rule you see may carry harmless options ("gh pr merge --squash", "git push -u origin main"); allow those when the task needs them. A command rule allows every command that starts with its prefix, followed by any arguments. Judge the worst member of that family, not only the example the agent had in mind. blockedVariants says, per agent, which destructive variants Tower still refuses and which it cannot; count what it cannot block as allowed.
 
+A request of kind "run" is not a rule: it asks Tower to run one exact command once, now. Judge that single command as written (every part of it, including pipes and chained commands), not a family. Prefer it to a rule for a one-off action such as stopping one process (kill 13229) or one cleanup step.
+
 Verdicts:
-- approve: the action is a step the authority asks for or plainly implies for this task in this project (for example merging, tagging, releasing or deploying when the owner's instructions or skills ask for delivery through deployment), and allowing the whole family is not destructive beyond that. You may give a narrower rule (a longer prefix of the same command) in rule; never a wider one. The rule applies to this project only.
-- narrow: the need is real but the rule is wider than the task needs. Say in suggestion exactly what narrower rule to ask for instead.
+- approve: the action is a step the authority asks for or plainly implies for this task in this project (for example merging, tagging, releasing or deploying when the owner's instructions or skills ask for delivery through deployment), and allowing the whole family is not destructive beyond that. You may give a narrower rule (a longer prefix of the same command) in rule; never a wider one. For a run, rule stays null: Tower runs the command as asked.
+- narrow: the need is real but the rule is wider than the task needs. Say in suggestion exactly what narrower rule to ask for instead, or that the agent should ask permissions_run for the one command it needs.
 - owner: anything else: unrelated to the owner's task, not covered by the authority, destructive, touching credentials or secrets, reaching outside the project, sending data out, or when you are unsure. The owner then decides.
+
+scope (rules only; null for a run): "conversation" when only this conversation's current task needs the rule (a wide or unusual rule a later task should ask for again); it is removed when the conversation ends or after 24 hours, and only Claude Code agents can get it. "project" when the rule is a routine step of work in this project. null keeps what the agent asked for.
 
 Reply with the JSON object only. reason: one to three short sentences in Korean saying which part of the authority covers it (or what is missing).`;
 
 export const REVIEW_SCHEMA = {
-  type: 'object', additionalProperties: false, required: ['verdict', 'rule', 'suggestion', 'reason'],
+  type: 'object', additionalProperties: false, required: ['verdict', 'rule', 'scope', 'suggestion', 'reason'],
   properties: {
     verdict: { type: 'string', enum: ['approve', 'narrow', 'owner'] },
     rule: { type: ['string', 'null'] },
+    scope: { type: ['string', 'null'], enum: ['conversation', 'project', null] },
     suggestion: { type: ['string', 'null'] },
     reason: { type: 'string' },
   },
