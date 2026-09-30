@@ -359,7 +359,10 @@ export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'
       // Options keep their case (`-B` is not `-b`, `-X` is not `-x`); long options and subcommands are matched in lower case.
       // A subcommand counts only right after the family (`git stash drop`), never as a later word (`git commit -m drop`).
       const rest = words(rule.value).slice(prefix.length);
-      const found = rest.find((word, index) => tokens.some(token => (/^[-+:.]/.test(token) || index === 0)
+      // The subcommand is the first word that is not an option, or an option's value (`gh release --repo o/r delete`).
+      const first = rest.findIndex((word, index) => !word.startsWith('-') && !(index > 0 && rest[index - 1]!.startsWith('-') && !rest[index - 1]!.includes('=')));
+      const subcommands = new Set(rest.slice(0, first < 0 ? rest.length : first + 1).filter(word => !word.startsWith('-')));
+      const found = rest.find(word => tokens.some(token => (/^[-+:.]/.test(token) || subcommands.has(word))
         && (dangerousWord(word, token) || (word.startsWith('--') && dangerousWord(word.toLowerCase(), token)) || (!word.startsWith('-') && dangerousWord(word.toLowerCase(), token)))));
       if (found) return `\`${prefix.join(' ')}\`에 \`${found}\`가 붙은 규칙은 소유자가 정합니다.`;
     }

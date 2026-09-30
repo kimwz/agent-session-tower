@@ -13,6 +13,8 @@ export interface ReviewSources {
   runs(): Run[];
   /** The trigger that started the conversation, kept with the conversation (runs are pruned). */
   sessionTrigger?(sessionId: string): string | undefined;
+  /** Whether outside content (Slack, GitHub, HTTP) ever entered the conversation; kept with it. */
+  outsideInput?(sessionId: string): boolean;
   trigger(id: string): { name: string; instructions: string } | undefined;
   /** The Tower skills that apply in the folder, and the owner guidance. */
   authority(cwd: string): Promise<{ skills: { name: string; description: string; body: string }[]; guidance?: string }>;
@@ -47,19 +49,23 @@ const cut = (value: string, max: number) => value.length > max ? `${value.slice(
  * The owner's words in a conversation: every message they sent (the first is the task), each question the agent asked
  * them with its answer, and what is queued for the conversation but not in its history yet.
  */
-function ownerWords(messages: ChatMessage[], runs: Run[], answers: { at: string; question: string; answer: string }[]): { owner: Word[]; others: Word[] } {
+function ownerWords(messages: ChatMessage[], runs: Run[], answers: { at: string; question: string; answer: string }[], outside: boolean): { owner: Word[]; others: Word[] } {
   const owner: Word[] = [];
   const others: Word[] = [];
   const key = (message: ChatMessage) => message.callId ?? (message.id.endsWith(':result') ? message.id.slice(0, -':result'.length) : message.id);
   const questions = new Map(messages.filter(message => message.role === 'tool' && message.toolName !== 'result' && QUESTION_TOOLS.test(message.toolName ?? '')).map(message => [key(message), message]));
-  // A message Tower sent for a trigger, Slack or an agent is theirs, not the owner's; one whose run is gone counts as the owner's.
-  const sentBy = (text: string) => runs.find(item => item.prompt.trim() && text.trim().startsWith(item.prompt.trim().slice(0, 300)))?.origin?.kind;
+  // Who a message came from: the run that sent exactly it (Tower appends a list of attached files; the newest run wins).
+  // One whose run is gone is the owner's, unless outside content ever entered the conversation: then it is not known.
+  const sentBy = (text: string) => {
+    const found = [...runs].reverse().find(item => { const prompt = item.prompt.trim(); return Boolean(prompt) && (text === prompt || text.startsWith(`${prompt}\n\n첨부 파일 (`)); });
+    return found?.origin?.kind ?? (outside ? 'unknown sender' : 'owner');
+  };
   for (const message of messages) {
     if (message.role === 'user') {
       const text = message.text.trim();
       if (!text || text.startsWith(TOWER_NOTICE) || text.startsWith('This session is being continued from a previous conversation')) continue;
       const by = sentBy(text);
-      (by && by !== 'owner' && by !== 'unknown' ? others : owner).push({ at: message.timestamp, text: message.text, kind: by && by !== 'owner' && by !== 'unknown' ? `sent for ${by}` : 'message' });
+      (by === 'owner' ? owner : others).push({ at: message.timestamp, text: message.text, kind: by === 'owner' ? 'message' : `sent for ${by}` });
     }
     const asked = message.role === 'tool' && message.toolName === 'result' ? questions.get(key(message)) : undefined;
     if (asked) owner.push({ at: message.timestamp, text: `Question: ${asked.text}\nAnswer: ${message.text}`, kind: 'answer' });
@@ -93,7 +99,7 @@ export async function reviewInput(request: PermissionRequest, sources: ReviewSou
   if (!conversation.complete) throw new ReviewSkip('대화 기록을 처음부터 다 읽지 못해 소유자에게 넘깁니다.');
   // Runs and answers are read again now, after the history, so nothing sent during the waits is missed.
   const now = sources.runs().filter(item => item.sessionId === request.sessionId).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  const { owner: words, others } = ownerWords(conversation.messages, now, sources.answers(request.sessionId));
+  const { owner: words, others } = ownerWords(conversation.messages, now, sources.answers(request.sessionId), sources.outsideInput?.(request.sessionId) === true);
   // A restriction said anywhere counts as much as the task, so the owner's words are never cut.
   if (words.some(word => word.text.length >= READER_CUT) || words.reduce((sum, word) => sum + word.text.length, 0) > MAX_OWNER_CHARS) {
     throw new ReviewSkip('소유자가 이 대화에서 한 말이 너무 길어 다 넘길 수 없어 소유자에게 넘깁니다.');

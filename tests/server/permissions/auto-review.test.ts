@@ -313,6 +313,7 @@ test('a rule is classified by all its words: dangerous options in any spelling, 
     'npx rimraf dist', 'npm exec x', 'npm x cowsay', 'node -e x', 'python3 -c x', 'python3.12 manage.py', 'go run main.go', 'git config alias.x', 'find . -delete',
     'git push origin --del', 'git branch --del x', 'git submodule foreach x', 'git checkout -B x', 'git log --output=x',
     'gh pr merge --admin', 'git branch -C main release', 'git fetch --force origin main:main', 'git fetch origin +main:main',
+    'gh release --repo owner/repo delete v1', 'gh pr --repo owner/repo close 33',
     'git push --force-with-lease', 'git push --force-with-lease=main:abc', 'git push origin +main', 'git push origin :main', 'git push -vf origin',
     'git branch -d feature', 'git tag -d v1', '/bin/rm -rf dist', 'xargs rm -rf', 'timeout 5 git push', 'git -C /repo push', 'docker container rm', 'env FOO=1 git push'])
     assert.ok(autoReviewBlock({ kind: 'command', value }, cwd), value);
@@ -458,4 +459,33 @@ test('an instruction queued while the history is being read is part of the owner
   reviewer.wake();
   await reviewer.flush();
   assert.ok(JSON.parse(prompt).authority.ownerWords.some((word: { text: string }) => word.text === 'Do not deploy to production.'));
+});
+
+test('who sent a message is judged by the exact message; an unknown sender is the owner only where no outside content ever came in', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  let prompt = '';
+  const history = [
+    { id: 'a', role: 'user' as const, text: 'Review PR #33', timestamp: '1' },
+    { id: 'b', role: 'user' as const, text: 'Review PR #33, but do not merge or deploy it.', timestamp: '2' },
+    { id: 'c', role: 'user' as const, text: 'An old message whose run is gone', timestamp: '3' },
+  ];
+  const runs = [run('a', 'Review PR #33', { origin: { kind: 'trigger', triggerId: 't' } }), run('bb', 'Review PR #33, but do not merge or deploy it.')];
+  const make = (outside: boolean) => new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {},
+    sources: sources(f, runs, { conversation: async () => ({ messages: history, complete: true }), outsideInput: () => outside }),
+    model: async request => { prompt = request.prompt; return { verdict: 'owner', rule: null, suggestion: null, reason: '확인' }; } });
+  await f.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'merge' }, agent('claude:one'));
+  const trusted = make(false);
+  trusted.wake();
+  await trusted.flush();
+  let input = JSON.parse(prompt);
+  assert.deepEqual(input.authority.ownerWords.map((word: { text: string }) => word.text), ['Review PR #33, but do not merge or deploy it.', 'An old message whose run is gone']);
+  assert.equal(input.context.messagesFromAutomation[0].text, 'Review PR #33');
+  await f.service.request({ kind: 'command', value: 'gh release create', scope: 'project', reason: 'release' }, agent('claude:one', 'r2'));
+  const outside = make(true);
+  outside.wake();
+  await outside.flush();
+  input = JSON.parse(prompt);
+  assert.deepEqual(input.authority.ownerWords.map((word: { text: string }) => word.text), ['Review PR #33, but do not merge or deploy it.']);
+  assert.ok(input.context.messagesFromAutomation.some((word: { kind: string }) => word.kind === 'sent for unknown sender'));
 });

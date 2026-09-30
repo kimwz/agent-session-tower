@@ -557,6 +557,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }),
       sources: {
         runs: () => runs.list(),
+        outsideInput: sessionId => runs.sessionOrigin(sessionId)?.untrustedInput === true,
         sessionTrigger: sessionId => { const origin = runs.sessionOrigin(sessionId); return origin?.kind === 'trigger' ? origin.triggerId : undefined; },
         trigger: id => {
           // A trigger deleted since (or a public agent's, which is no trigger here) has no instructions to read.
