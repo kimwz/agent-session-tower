@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { LoaderCircle, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { BUILTIN_ROLES, EFFORT_OFF, builtinRole, initialModelSettings, type BuiltinRole, type CustomRole, type ModelPick, type ModelProvider, type ModelSettings, type RoleKind, type RoleSetting } from '../../../shared/models';
 import type { ProviderHealth } from '../../../shared/types';
@@ -14,6 +14,8 @@ const GROUPS: { kind: RoleKind; title: string; description: string }[] = [
   { kind: 'default', title: '새 항목 기본값', description: '만들 때 미리 선택되는 값입니다. 이미 만든 항목은 각자 고른 모델을 그대로 씁니다.' },
 ];
 const PROVIDER_LABEL: Record<ModelProvider, string> = { claude: 'Claude', codex: 'Codex' };
+/** The model select's entry that opens a text field for a model the list does not have. */
+const CUSTOM = '__custom__';
 
 /**
  * Settings › Models: which provider, model and reasoning effort each of Tower's own calls uses, what new items start
@@ -105,7 +107,7 @@ function CustomRow({ role, providers, disabled, onChange }: { role: CustomRole; 
     </div>
     <div className="models-role-controls">
       <ProviderSelect value={role.provider} follow={false} disabled={disabled} onChange={provider => provider !== 'follow' && onChange({ ...role, provider })} />
-      <PickRow provider={role.provider} labelled={false} pick={role[role.provider]} health={providers.find(item => item.provider === role.provider)} off={false} disabled={disabled}
+      <PickRow key={role.provider} provider={role.provider} labelled={false} pick={role[role.provider]} health={providers.find(item => item.provider === role.provider)} off={false} disabled={disabled}
         onChange={pick => onChange({ ...role, [role.provider]: pick })} />
       <button type="button" className="icon-button" title={t('역할 삭제')} aria-label={t('역할 삭제')} disabled={disabled} onClick={() => onChange(undefined)}><Trash2 size={14} /></button>
     </div>
@@ -120,26 +122,40 @@ function ProviderSelect({ value, follow, providers = ['claude', 'codex'], disabl
   </select>;
 }
 
-/** A model (typed or picked from that computer's list; empty for the CLI's default) and an effort it supports. */
-function PickRow({ provider, labelled, pick, health, off, disabled, onChange }: { provider: ModelProvider; labelled: boolean; pick: ModelPick; health?: ProviderHealth; off: boolean; disabled: boolean; onChange: (pick: ModelPick) => void }) {
+/** A model picked from that computer's list (empty for the CLI's default), or typed when it is not listed, and an effort it supports. */
+export function PickRow({ provider, labelled, pick, health, off, disabled, onChange }: { provider: ModelProvider; labelled: boolean; pick: ModelPick; health?: ProviderHealth; off: boolean; disabled: boolean; onChange: (pick: ModelPick) => void }) {
   const { t } = useI18n();
-  const list = useId();
   const models = health?.models ?? [];
+  const listed = !pick.model || models.some(model => model.id === pick.model);
+  // Typing stays open once chosen, even while the typed text happens to match a listed model.
+  const [typing, setTyping] = useState(!listed);
   const { efforts, defaultEffort } = modelEfforts(health, pick.model);
   const choices = [...(off ? [{ id: EFFORT_OFF }] : []), ...efforts];
   const unknownModel = !!pick.model && models.length > 0 && !models.some(model => model.id === pick.model);
   const unknownEffort = !!pick.effort && !choices.some(effort => effort.id === pick.effort);
   const set = (next: ModelPick) => onChange({ ...(next.model ? { model: next.model } : {}), ...(next.effort ? { effort: next.effort } : {}) });
+  const name = PROVIDER_LABEL[provider];
   return <div className="models-pick">
-    {labelled && <span className="models-pick-label">{PROVIDER_LABEL[provider]}</span>}
-    <input className="model-picker" list={list} value={pick.model ?? ''} disabled={disabled} maxLength={160} aria-label={t('{0} 모델', { 0: PROVIDER_LABEL[provider] })}
-      placeholder={t('{0} 기본값', { 0: PROVIDER_LABEL[provider] })} onChange={event => set({ ...pick, model: event.target.value.trim() || undefined })} />
-    <datalist id={list}>{models.map(model => <option key={model.id} value={model.id}>{model.label}</option>)}</datalist>
+    {labelled && <span className="models-pick-label">{name}</span>}
+    <select className="model-picker" value={typing ? CUSTOM : pick.model ?? ''} disabled={disabled} aria-label={t('{0} 모델', { 0: name })}
+      onChange={event => {
+        if (event.target.value === CUSTOM) { setTyping(true); return; }
+        setTyping(false);
+        const model = event.target.value || undefined;
+        // An effort the new model does not list is dropped, as in the chat pickers.
+        set({ model, effort: pick.effort && (pick.effort === EFFORT_OFF ? off : modelEfforts(health, model).efforts.some(effort => effort.id === pick.effort)) ? pick.effort : undefined });
+      }}>
+      <option value="">{t('{0} 기본값', { 0: name })}</option>
+      {models.map(model => <option key={model.id} value={model.id}>{model.label === model.id ? model.id : `${model.label} (${model.id})`}</option>)}
+      <option value={CUSTOM}>{t('직접 입력…')}</option>
+    </select>
+    {typing && <input className="model-picker" value={pick.model ?? ''} disabled={disabled} maxLength={160} autoFocus={!pick.model} aria-label={t('{0} 모델 이름', { 0: name })}
+      placeholder={t('모델 이름')} onChange={event => set({ ...pick, model: event.target.value.trim() || undefined })} />}
     <select className="model-picker effort-picker" value={pick.effort ?? ''} disabled={disabled} aria-label={t('추론 수준')} onChange={event => set({ ...pick, effort: event.target.value || undefined })}>
       <option value="">{defaultEffort ? t('기본 추론 ({0})', { 0: effortLabel(defaultEffort) }) : t('기본 추론')}</option>
       {choices.map(effort => <option key={effort.id} value={effort.id}>{effort.id === EFFORT_OFF ? t('생각 끔') : effortLabel(effort.id)}</option>)}
       {unknownEffort && <option value={pick.effort}>{effortLabel(pick.effort!)}</option>}
     </select>
-    {(unknownModel || unknownEffort) && <small className="models-warning">{unknownModel ? t('이 컴퓨터의 {0} 목록에 없는 모델입니다. 그대로 쓰면 실패할 수 있습니다.', { 0: PROVIDER_LABEL[provider] }) : t('이 모델이 알리는 추론 수준이 아닙니다.')}</small>}
+    {(unknownModel || unknownEffort) && <small className="models-warning">{unknownModel ? t('이 컴퓨터의 {0} 목록에 없는 모델입니다. 그대로 쓰면 실패할 수 있습니다.', { 0: name }) : t('이 모델이 알리는 추론 수준이 아닙니다.')}</small>}
   </div>;
 }
