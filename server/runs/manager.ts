@@ -182,7 +182,7 @@ export class RunManager extends EventEmitter {
   private readonly createdSessions = new Map<string, CreatedSession>();
   private readonly runs = new Map<string, Run>();
   /** The owner's answers to agents' questions, per conversation (memory only; see ownerAnswers). */
-  private readonly answers = new Map<string, { at: string; answer: string }[]>();
+  private readonly answers = new Map<string, { at: string; question: string; answer: string }[]>();
   private readonly owned = new Map<string, OwnedProcess>();
   private readonly bridged = new Map<string, CodexBridgeRun>();
   /** Turns that already received their notes. */
@@ -275,7 +275,7 @@ export class RunManager extends EventEmitter {
    * What the owner answered the agent's questions in a conversation, kept from the moment it is sent: native history
    * may not have it yet when Tower's permission reviewer reads the owner's words.
    */
-  ownerAnswers(sessionId: string): { at: string; answer: string }[] { return [...this.answers.get(this.monitorSessionId(sessionId)) ?? []]; }
+  ownerAnswers(sessionId: string): { at: string; question: string; answer: string }[] { return [...this.answers.get(this.monitorSessionId(sessionId)) ?? []]; }
   setClaudeSettings(settings: NonNullable<RunnerOptions['claudeSettings']>): void { this.options.claudeSettings = settings; }
   setRunToolResolver(resolver: NonNullable<RunnerOptions['resolveRunTools']>): void {
     this.options.resolveRunTools = resolver;
@@ -767,9 +767,11 @@ export class RunManager extends EventEmitter {
     if (this.stopping || run.status !== 'running' || (!owned?.claude && !stdio) || !run.approvals?.some(approval => approval.id === approvalId)) {
       throw new RunError('This permission request is no longer pending. Refresh the conversation.', 409);
     }
-    // The owner's own words to the agent, kept before they go (see ownerAnswers).
+    // The owner's own words to the agent, kept whole with what was asked, before they go (see ownerAnswers).
     if (typeof decision === 'object') {
-      const kept = [...this.answers.get(run.sessionId) ?? [], { at: new Date().toISOString(), answer: JSON.stringify(decision).slice(0, 20_000) }].slice(-50);
+      const asked = run.approvals!.find(approval => approval.id === approvalId)!;
+      const question = JSON.stringify(asked.interaction?.type === 'questions' ? asked.interaction.questions : asked.input);
+      const kept = [...this.answers.get(run.sessionId) ?? [], { at: new Date().toISOString(), question, answer: JSON.stringify(decision) }].slice(-50);
       this.answers.set(run.sessionId, kept);
     }
     if (stdio) await stdio.respondToApproval(approvalId, decision);

@@ -201,7 +201,8 @@ test('the reviewer reads the whole conversation, answers, skills, trigger and pr
   const f = await fixture(t);
   await writeFile(join(f.project, 'AGENTS.md'), 'Release: merge, tag, deploy.\n');
   await f.service.saveAutoReview(ON);
-  const runs = [run('a', 'Deploy on schedule', { origin: { kind: 'trigger', triggerId: 't1' }, id: 'run-1' }), run('bb', 'Also bump the version.', { status: 'queued' })];
+  const runs = [run('a', 'Deploy on schedule', { origin: { kind: 'trigger', triggerId: 't1' }, id: 'run-1' }), run('bb', 'Also bump the version.', { status: 'queued' }),
+    run('ccc', 'Ship 1.2 through deploy. But never to production.', { status: 'queued' })];
   const asked: Array<{ prompt: string; system: string; model: string }> = [];
   const told: Array<{ id: string; message: string }> = [];
   const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true,
@@ -214,7 +215,7 @@ test('the reviewer reads the whole conversation, answers, skills, trigger and pr
         { id: 'x1', role: 'tool', toolName: 'Bash', text: 'git status', timestamp: '4' },
         { id: 'x1:result', role: 'tool', toolName: 'result', text: 'clean', timestamp: '5' },
       ] }),
-      answers: () => [{ at: '6', answer: '{"answers":{"Deploy now?":{"answers":["Yes"]}}}' }] }),
+      answers: () => [{ at: '6', question: '[{"question":"Deploy to production now?"}]', answer: '{"answers":{"q":{"answers":["No"]}}}' }] }),
     model: async request => { asked.push({ prompt: request.prompt, system: request.systemPrompt, model: request.model }); return { verdict: 'approve', rule: null, suggestion: null, reason: '배포 지시가 있습니다.' }; },
     notify: async (request, message) => { told.push({ id: request.id, message }); } });
   const { request } = await f.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'merge the release PR' }, agent('claude:one'));
@@ -227,7 +228,8 @@ test('the reviewer reads the whole conversation, answers, skills, trigger and pr
   assert.equal(input.authority.ownerWords[0].task, true);
   assert.ok(texts.some((text: string) => /Question: .*Merge too.*\nAnswer: Yes, merge and tag\./s.test(text)), 'a question and its answer');
   assert.ok(texts.includes('Also bump the version.'), 'queued and not in history yet');
-  assert.ok(texts.some((text: string) => text.includes('Deploy now?')), 'an answer as sent');
+  assert.ok(texts.includes('Ship 1.2 through deploy. But never to production.'), 'a queued message that only starts like one in history is kept');
+  assert.ok(texts.some((text: string) => text.includes('Deploy to production now?') && text.includes('"No"')), 'an answer as sent, with its question');
   assert.ok(!texts.includes('clean'), 'other tool results are not the owner’s words');
   assert.equal(input.authority.trigger.instructions, 'Deploy after merge.');
   assert.deepEqual(input.authority.projectInstructions.map((item: { text: string }) => item.text), ['Release: merge, tag, deploy.\n']);

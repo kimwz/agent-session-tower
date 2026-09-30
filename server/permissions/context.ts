@@ -18,7 +18,7 @@ export interface ReviewSources {
   /** The whole conversation from native history, and whether it could all be read. */
   conversation(sessionId: string): Promise<{ messages: ChatMessage[]; complete: boolean }>;
   /** The owner's answers to the agent's questions, kept as they were sent. */
-  answers(sessionId: string): { at: string; answer: string }[];
+  answers(sessionId: string): { at: string; question: string; answer: string }[];
   rules(cwd: string): PermissionRule[];
   /** The deny rules the asked rule would get, per agent. */
   guards(rule: PermissionRequest['rule']): { claude: string[]; codex: string[] };
@@ -46,7 +46,7 @@ const cut = (value: string, max: number) => value.length > max ? `${value.slice(
  * The owner's words in a conversation: every message they sent (the first is the task), each question the agent asked
  * them with its answer, and what is queued for the conversation but not in its history yet.
  */
-function ownerWords(messages: ChatMessage[], runs: Run[], answers: { at: string; answer: string }[]): { at: string; text: string; kind: string }[] {
+function ownerWords(messages: ChatMessage[], runs: Run[], answers: { at: string; question: string; answer: string }[]): { at: string; text: string; kind: string }[] {
   const words: { at: string; text: string; kind: string }[] = [];
   const questions = new Map(messages.filter(message => message.role === 'tool' && QUESTION_TOOLS.test(message.toolName ?? '')).map(message => [message.id, message]));
   for (const message of messages) {
@@ -54,10 +54,11 @@ function ownerWords(messages: ChatMessage[], runs: Run[], answers: { at: string;
     const asked = message.role === 'tool' && message.id.endsWith(':result') ? questions.get(message.id.slice(0, -':result'.length)) : undefined;
     if (asked) words.push({ at: message.timestamp, text: `Question: ${asked.text}\nAnswer: ${message.text}`, kind: 'answer' });
   }
+  // Only a message history already shows word for word is left out; anything else may add to it (or limit it).
   for (const item of runs.filter(entry => entry.status === 'queued' || entry.status === 'running')) {
-    if (!words.some(word => word.text.trim().startsWith(item.prompt.trim().slice(0, 300)))) words.push({ at: item.createdAt, text: item.prompt, kind: 'sent, not in history yet' });
+    if (!words.some(word => word.kind === 'message' && word.text.trim() === item.prompt.trim())) words.push({ at: item.createdAt, text: item.prompt, kind: 'sent, not in history yet' });
   }
-  for (const item of answers) words.push({ at: item.at, text: item.answer, kind: 'answer as sent' });
+  for (const item of answers) words.push({ at: item.at, text: `Question: ${item.question}\nAnswer: ${item.answer}`, kind: 'answer as sent' });
   return words;
 }
 
