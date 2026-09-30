@@ -47,6 +47,7 @@ test('hard limits: never-allowed commands, broad rules, Bash as a Claude rule an
   for (const value of ['mcp__postgres__list_tables', 'mcp__stripe__list_payments', 'mcp__vercel__list_deployments']) assert.equal(autoReviewBlock({ kind: 'claude', value }, cwd), undefined, value);
   const diff = ruleGuards({ kind: 'command', value: 'git diff' }).claude;
   assert.ok(diff.includes('Bash(git diff * --output=*)') && !diff.some(pattern => pattern.includes('--output*') || pattern.includes(' -O')), 'git diff --output-indicator-new and -O<orderfile> stay allowed');
+  assert.ok(!diff.includes('Bash(git diff * --text)') && diff.includes('Bash(git diff * --textc)'), 'git diff --text stays allowed');
   for (const guard of ['Bash(git fetch * --upload-pack*)', 'Bash(git log * --output=*)', 'Bash(git grep * -O*)']) {
     const [, rest] = /^Bash\(git (\w+) /.exec(guard)!;
     assert.ok(ruleGuards({ kind: 'command', value: `git ${rest}` }).claude.includes(guard), guard);
@@ -504,9 +505,10 @@ test('a trigger’s instructions the owner did not write, and words typed outsid
   await f.service.saveAutoReview(ON);
   let asked = 0;
   const model = async () => { asked += 1; return { verdict: 'approve', rule: null, suggestion: null, reason: 'ok' }; };
-  const triggered = [run('a', 'Deploy on schedule', { origin: { kind: 'trigger', triggerId: 't1' } })];
+  // The trigger's own run was pruned long ago; the conversation still knows its trigger.
+  const triggered: Run[] = [];
   const byAgent = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {}, model,
-    sources: sources(f, triggered, { trigger: () => ({ name: 'deploy', instructions: 'Deploy.', ownerSet: false }) }) });
+    sources: sources(f, triggered, { sessionTrigger: () => 't1', trigger: () => ({ name: 'deploy', instructions: 'Deploy.', ownerSet: false }) }) });
   const first = await f.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'merge' }, agent('claude:one'));
   byAgent.wake();
   await byAgent.flush();

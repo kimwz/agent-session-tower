@@ -568,6 +568,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       sources: {
         runs: () => runs.list(),
         ownerPrompts: sessionId => ownerPrompts.list(sessionId),
+        sessionTrigger: sessionId => { const origin = runs.sessionOrigin(sessionId); return origin?.kind === 'trigger' ? origin.triggerId : undefined; },
         trigger: id => {
           // A trigger deleted since (or a public agent's, which is no trigger here) has no instructions to read.
           let kept: ReturnType<TriggerService['get']> | undefined;

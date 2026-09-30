@@ -9,6 +9,8 @@ const run = promisify(execFile);
 /** Where the reviewer's material comes from; the worker supplies it. */
 export interface ReviewSources {
   runs(): Run[];
+  /** The trigger that started the conversation, kept with the conversation (runs are pruned). */
+  sessionTrigger?(sessionId: string): string | undefined;
   /** What the owner typed in the conversation, and whether the record is whole. */
   ownerPrompts(sessionId: string): { prompts: { at: string; text: string }[]; complete: boolean; sent?: string[] };
   /** A trigger's own instructions, and whether the owner (in a page) made its last change. */
@@ -42,7 +44,7 @@ const cut = (value: string, max: number) => value.length > max ? `${value.slice(
  */
 export async function reviewInput(request: PermissionRequest, sources: ReviewSources): Promise<string> {
   const runs = sources.runs().filter(item => item.sessionId === request.sessionId).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  const triggerId = runs.find(item => item.origin?.kind === 'trigger' && item.origin.triggerId)?.origin?.triggerId;
+  const triggerId = sources.sessionTrigger?.(request.sessionId) ?? runs.find(item => item.origin?.kind === 'trigger' && item.origin.triggerId)?.origin?.triggerId;
   const trigger = triggerId ? sources.trigger(triggerId) : undefined;
   // A trigger's instructions the owner did not write as they stand now (changed by an agent, or gone) may have lost a restriction.
   if (triggerId && !trigger?.ownerSet) throw new ReviewSkip('이 대화를 시작한 트리거의 지시문을 소유자가 지금 모습대로 쓰지 않아 소유자에게 넘깁니다.');

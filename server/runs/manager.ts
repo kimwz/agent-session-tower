@@ -647,8 +647,14 @@ export class RunManager extends EventEmitter {
     this.runs.set(run.id, run);
     this.prune();
     this.changed();
-    try { await this.recordOwner(sessionId, run, false, internal.notice === true); await this.flush(); } // An accepted instruction is durable before launching the provider.
-    catch (error) { this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error; }
+    let recorded = false;
+    try { await this.recordOwner(sessionId, run, false, internal.notice === true); recorded = true; await this.flush(); } // An accepted instruction is durable before launching the provider.
+    catch (error) {
+      this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds);
+      // The owner's words were kept but never sent: the record no longer matches the conversation.
+      if (recorded && run.authored) await this.options.ownerPrompts?.record(sessionId, new Date().toISOString(), { taint: true }).catch(() => {});
+      throw error;
+    }
     finally { this.admissions.delete(run.id); }
     // An accepted instruction replaces the continuation the agent planned; its next turn can schedule again.
     // Tower's own continuation after an update is not the agent's plan: it runs first, then this instruction.

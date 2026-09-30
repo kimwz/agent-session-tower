@@ -276,10 +276,12 @@ export function ruleGuards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>): {
 
 /** Options whose longer relatives are harmless, so they are denied as themselves rather than by their start. */
 const EXACT_OPTIONS = new Set(['--output']);
+/** Harmless git options that are also a start of a dangerous one (`--text` of `--textconv`): never denied as an abbreviation. */
+const REAL_OPTIONS = new Set(['--text', '--ext', '--out', '--prune-tags']);
 
 /** The shorter spellings git accepts for a long option: any unambiguous start, down to one letter (`--d` for `--delete`). */
 function abbreviations(token: string): string[] {
-  return /^--./.test(token) ? Array.from({ length: Math.max(0, token.length - 3) }, (_, index) => token.slice(0, index + 3)) : [];
+  return /^--./.test(token) ? Array.from({ length: Math.max(0, token.length - 3) }, (_, index) => token.slice(0, index + 3)).filter(spelling => !REAL_OPTIONS.has(spelling)) : [];
 }
 
 /** Whether two command rules overlap: one is the other or starts with it. */
