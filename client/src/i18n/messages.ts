@@ -135,6 +135,7 @@ export const english: Record<string, string> = {
   "명령을 한 번 실행합니다.": "Running the command once.",
   "자동 실행": "Auto-run",
   "실행 허용": "Run allowed",
+  "대화 닫힘": "Conversation closed",
   "실행 대기": "Waiting to run",
   "실패: {0}": "Failed: {0}",
   "시간 제한으로 중단": "Stopped at the time limit",

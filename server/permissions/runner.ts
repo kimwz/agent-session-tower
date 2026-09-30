@@ -142,8 +142,7 @@ export class PermissionRunner {
     const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (value, sig) => resolve({ code: value, signal: sig })));
     child.stdout!.on('data', (chunk: Buffer) => stdout.add(chunk));
     child.stderr!.on('data', (chunk: Buffer) => stderr.add(chunk));
-    const started = await processStart(pid);
-    await this.options.update(id, { status: 'running', startedAt, pid, ...(started ? { started } : {}) });
+    // The time limit holds from the start, whatever happens to the saves below.
     let timedOut = false;
     const grace = this.options.killGraceMs ?? KILL_GRACE_MS;
     const timer = setTimeout(() => {
@@ -151,6 +150,10 @@ export class PermissionRunner {
       signalGroup(pid, 'SIGTERM');
       setTimeout(() => { if (groupAlive(pid)) signalGroup(pid, 'SIGKILL'); }, grace).unref();
     }, timeoutSeconds * 1000);
+    const started = await processStart(pid);
+    // A failed save leaves the run `running` without its process: after a restart it is unknown, never started again.
+    await this.options.update(id, { status: 'running', startedAt, pid, ...(started ? { started } : {}) })
+      .catch(error => console.error(`A permission run's process could not be saved: ${error instanceof Error ? error.message : String(error)}`));
     const { code, signal } = await closed;
     clearTimeout(timer);
     // The leader is done; what it left running in its group is stopped too, so a finished run leaves nothing behind.
@@ -179,8 +182,10 @@ export class PermissionRunner {
     if (run.pid && run.started && await processStart(run.pid) === run.started) {
       signalGroup(run.pid, 'SIGTERM');
       await new Promise(resolve => setTimeout(resolve, this.options.killGraceMs ?? KILL_GRACE_MS));
-      if (groupAlive(run.pid) && await processStart(run.pid) === run.started) signalGroup(run.pid, 'SIGKILL');
-      return { ...run, status: 'failed', finishedAt, error: 'Tower restarted while it ran; it was stopped.' };
+      // A group keeps its id while any member lives (the id is not reused meanwhile), so what is left of it is still ours.
+      if (groupAlive(run.pid)) signalGroup(run.pid, 'SIGKILL');
+      await new Promise(resolve => setTimeout(resolve, 200));
+      if (!groupAlive(run.pid)) return { ...run, status: 'failed', finishedAt: this.now(), error: 'Tower restarted while it ran; it was stopped.' };
     }
     return { ...run, status: 'failed', finishedAt, error: 'Tower restarted while it ran; its result is unknown and parts of it may still be running.' };
   }

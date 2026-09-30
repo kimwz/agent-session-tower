@@ -436,8 +436,14 @@ export class PermissionService {
   /** The owner closed a conversation: its rules go at once, so reopening it does not bring them back. */
   forgetConversation(sessionId: string): Promise<PermissionOverview> {
     return this.serial(async () => {
-      if (this.state.rules.some(rule => rule.scope === 'conversation' && rule.sessionId === sessionId)) {
-        await this.commit(state => { state.rules = state.rules.filter(rule => !(rule.scope === 'conversation' && rule.sessionId === sessionId)); });
+      const at = this.now();
+      // Its requests still waiting are withdrawn too, so a review that ends later cannot give it a rule again.
+      const open = (request: PermissionRequest) => request.sessionId === sessionId && request.status === 'pending';
+      if (this.state.rules.some(rule => rule.scope === 'conversation' && rule.sessionId === sessionId) || this.state.requests.some(open)) {
+        await this.commit(state => {
+          state.rules = state.rules.filter(rule => !(rule.scope === 'conversation' && rule.sessionId === sessionId));
+          for (const request of state.requests) if (open(request)) { request.status = 'withdrawn'; request.decidedAt = at; request.decidedBy = 'owner'; }
+        });
       }
       return this.overview();
     });

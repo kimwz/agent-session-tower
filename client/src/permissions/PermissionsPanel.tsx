@@ -123,7 +123,7 @@ function NativePreview({ rule, warnCodex = false, guarded = false }: { rule: Pic
 }
 
 function decidedLabel(request: PermissionRequest, t: (text: string, values?: Record<string, string | number>) => string): string {
-  if (request.status === 'withdrawn') return t('범위 축소 요청');
+  if (request.status === 'withdrawn') return request.decidedBy === 'owner' ? t('대화 닫힘') : t('범위 축소 요청');
   if (request.status === 'approved' && request.rule.kind === 'run') return request.decidedBy === 'auto' ? t('자동 실행') : t('실행 허용');
   if (request.status === 'approved') return request.decidedBy === 'auto' ? t('자동 허용') : t('허용');
   return t('거절');
