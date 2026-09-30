@@ -121,7 +121,6 @@ test('after a restart, work that ended while the web server was down is announce
 
 test('the master\'s turns ending are not announced (its chat and voice give them), while work it asks the owner about is', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-notifications-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
   const sent: string[] = [];
   const fetcher = (async (url: string | URL | Request) => { sent.push(String(url)); return new Response(null, { status: 201 }); }) as typeof fetch;
   let runs: Run[] = [];
@@ -129,7 +128,8 @@ test('the master\'s turns ending are not announced (its chat and voice give them
   const context: NotificationContext = { runs: () => runs, session: id => id === 'm1' ? master : session, project: () => 'app', trigger: () => undefined };
   const service = new NotificationService(dir, context, fetcher);
   await service.start();
-  t.after(() => service.close());
+  // Hooks run in order: the service's last write lands before its folder goes.
+  t.after(async () => { await service.close(); await rm(dir, { recursive: true, force: true }); });
   await service.subscribe({ subscription: subscription() });
   runs = [run('answer', { sessionId: 'm1', origin: { kind: 'owner' }, status: 'completed', finishedAt: new Date(Date.now() + 1000).toISOString() })];
   service.check();
