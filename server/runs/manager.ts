@@ -151,6 +151,8 @@ function backgroundNotice(finished: readonly FinishedTask[]): string {
   return `${TOWER_NOTICE} Background work you started in this conversation has finished${lines.length ? `:\n${lines.join('\n')}` : '.'}\n`
     + 'Continue with what you planned to do once it finished, and report the result.';
 }
+/** When a run finished, for keeping the most recently finished ones. */
+const finishedTime = (run: Run) => Date.parse(run.finishedAt ?? run.createdAt) || 0;
 const due = (run: Run, now = Date.now()) => !run.scheduled || Date.parse(run.scheduled.at) <= now;
 
 export class RunError extends Error {
@@ -318,7 +320,7 @@ export class RunManager extends EventEmitter {
       const valid = saved.slice(-1000).filter(isSavedRun);
       // Every unfinished run and every run an automation still has to report comes back; of the rest, the newest.
       const marked = (value: Run, key: string) => (value as unknown as Record<string, unknown>)[key] === true;
-      const finished = valid.filter(value => FINISHED.has(value.status) && !marked(value, RETAIN));
+      const finished = valid.filter(value => FINISHED.has(value.status) && !marked(value, RETAIN)).sort((a, b) => finishedTime(a) - finishedTime(b));
       const dropped = new Set(finished.slice(0, Math.max(0, finished.length - MAX_RUNS)));
       for (const value of valid) {
         if (dropped.has(value)) continue;
@@ -1628,7 +1630,8 @@ export class RunManager extends EventEmitter {
 
   private prune(): void {
     const retained = this.retainedIds();
-    const finished = [...this.runs.values()].filter(run => FINISHED.has(run.status) && !retained.has(run.id));
+    // The runs that finished longest ago go first: a long turn that just finished is still read by its watchers.
+    const finished = [...this.runs.values()].filter(run => FINISHED.has(run.status) && !retained.has(run.id)).sort((a, b) => finishedTime(a) - finishedTime(b));
     for (const run of finished.slice(0, Math.max(0, finished.length - MAX_RUNS))) { this.runs.delete(run.id); this.settledRuns.delete(run.id); }
   }
 

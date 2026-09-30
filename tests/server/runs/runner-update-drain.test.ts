@@ -181,6 +181,21 @@ test('restore keeps every unfinished run and runs an automation still has to rep
   assert.equal(saved.find(run => run.id === id(0))?.retain, true, 'still retained until the automations are loaded');
 });
 
+test('history keeps the runs that finished last, not the ones created last', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-update-prune-'));
+  const at = (index: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString();
+  const id = (index: number) => `40000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+  // The first run was created first but finished last, like a long turn.
+  const runs = [{ id: id(0), sessionId: `claude:${nativeId}`, prompt: 'long', output: '', createdAt: at(0), finishedAt: at(500), status: 'completed' },
+    ...Array.from({ length: 120 }, (_, index) => ({ id: id(index + 1), sessionId: `claude:${nativeId}`, prompt: 'short', output: '', createdAt: at(index + 1), finishedAt: at(index + 1), status: 'completed' }))];
+  await writeFile(join(directory, 'runs.json'), JSON.stringify(runs));
+  const manager = new RunManager({ stateDir: directory, getSession: () => undefined, refreshSessions: async () => {} });
+  t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
+  await manager.start();
+  assert.ok(manager.list().some(run => run.id === id(0)));
+  assert.equal(manager.list().length, 100);
+});
+
 test('watchers follow a turn into the continuation that carries it on', () => {
   const now = new Date().toISOString();
   const first: Run = { id: 'a', sessionId: 's', prompt: '', output: '', createdAt: now, status: 'cancelled' };
