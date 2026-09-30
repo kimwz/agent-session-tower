@@ -1794,7 +1794,6 @@ async function privateMcpConfig(mcpServers: NonNullable<RunTools['servers']>): P
 }
 function automated(run: Run): boolean { return automatedOrigin(run.origin); }
 /** The owner's own turns always run in the provider's automatic approval mode; triggers and Slack follow their setting. */
-/** Only owner work from a controlling computer's owner or this one's, without outside content, counts as the owner's own words. */
 function automaticApprovals(run: Run): boolean { return run.unattended === true || ownerOrigin(run.origin); }
 /** Modes at least as careful as asking the owner. Anything else is not what an unattended run asked for. */
 const OWNER_APPROVAL_MODES = new Set(['default', 'manual', 'plan', 'dontAsk']);
