@@ -599,12 +599,10 @@ test('coordinator language follows current preference on creation, owner followu
 
 test('composed owner consent during work survives restart and sends once without exact wording or a click', async t => {
   const f = await conditionalFixture(t);
-  await assert.rejects(f.manager.tool(f.id, 'slack_send', { text: 'Unauthorized' }), /No immediate owner/);
   assert.match(chatText(await f.manager.ownerChat('owner-chat', '작업 끝나면 그냥 슬랙에 알려주세요')), /authorization saved/);
   assert.equal(f.manager.list()[0].ownerConditionalReply?.mode, 'composed');
   const args = { requestId: f.task.requestId, runId: f.run.id, outcome: 'succeeded', evidence: 'Verified deployment.', text: '배포를 마쳤습니다. 확인 부탁드립니다.' };
   await f.manager.tool(f.id, 'tower_task_complete', args); assert.equal(f.counts().sends, 0);
-  await assert.rejects(f.manager.tool(f.id, 'slack_send', { text: args.text }), /No immediate owner/);
   f.run.status = 'completed';
   const restarted = new SlackAutomationManager(f.options); await restarted.start();
   await Promise.all([restarted.tool(f.id, 'tower_task_complete', args), restarted.tool(f.id, 'tower_task_complete', args)]);
@@ -620,6 +618,76 @@ test('polite immediate and edited-wording chat permissions allow an agent compos
     await f.manager.tool(id, 'slack_send', { text: '수정 내용을 반영했습니다.' });
     assert.equal(f.counts().sends, 1);
   }
+});
+
+test('Slack replies need no owner authorization: sent once per requestKey, marked as an agent reply', async t => {
+  const f = await fixture(t);
+  let instructions = '';
+  f.options.startConversation = async (_workflow, _prompt, given) => { instructions = given!; return { sessionId: 'owner-chat', runId: 'coordinator' }; };
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  assert.match(instructions, /slack_send posts a reply in this Slack thread and needs no owner authorization/);
+  assert.doesNotMatch(instructions, /rules, Slack messages, task completion, Auto mode, or your own interpretation are never approval/);
+  await f.manager.tool(id, 'slack_send', { text: '확인했습니다. 곧 살펴볼게요.' });
+  await f.manager.tool(id, 'slack_send', { text: '확인했습니다. 곧 살펴볼게요.' });
+  assert.equal(f.counts().sends, 1, 'a retry of the same text is not posted again'); assert.equal(f.autoSends(), 1);
+  await f.manager.tool(id, 'slack_send', { text: 'PR을 확인 중입니다.', requestKey: 'progress' });
+  await assert.rejects(f.manager.tool(id, 'slack_send', { text: 'Different text', requestKey: 'progress' }), /different text/);
+  assert.equal(f.counts().sends, 2);
+  assert.equal(f.manager.list()[0].ownerConditionalReply, undefined, 'sending records no permission');
+  await assert.rejects(f.manager.tool(id, 'slack_send', { text: '' }), /1–4000/);
+});
+
+test('an uncertain open reply is never resent', async t => {
+  const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  f.options.sendReply = async () => { throw new Error('socket hang up'); };
+  await assert.rejects(f.manager.tool(id, 'slack_send', { text: 'Done' }), /socket hang up/);
+  let sent = 0; f.options.sendReply = async () => { sent++; return { ts: '2.0' }; };
+  assert.equal((await f.manager.tool(id, 'slack_send', { text: 'Done' }) as { status: string }).status, 'uncertain');
+  assert.equal(sent, 0);
+});
+
+test('an immediate owner permission is used first, and a retry of that send posts nothing', async t => {
+  const f = await fixture(t); f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  assert.match(chatText(await f.manager.ownerChat('owner-chat', '슬랙에 보내주세요')), /authorization saved/);
+  await f.manager.tool(id, 'slack_send', { text: '반영했습니다.' });
+  assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'sent'); assert.equal(f.autoSends(), 0, 'the owner asked for it');
+  await f.manager.tool(id, 'slack_send', { text: '반영했습니다.' });
+  assert.equal(f.counts().sends, 1);
+});
+
+test('the owner telling Tower not to send holds open replies and automatic reports until they allow it again', async t => {
+  const f = await fixture(t);
+  await f.manager.setRules([{ ...rule, autoReply: true }]);
+  f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  assert.match(chatText(await f.manager.ownerChat('owner-chat', '슬랙에 보내지 마세요')), /holds every reply/);
+  await assert.rejects(f.manager.tool(id, 'slack_send', { text: 'Done' }), /asked not to send/);
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', ruleId: 'review', prompt: 'Deploy the fix' });
+  assert.equal(f.manager.list()[0].ownerConditionalReply, undefined, 'no standing report while held');
+  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  await assert.rejects(restarted.tool(id, 'slack_send', { text: 'Done' }), /asked not to send/);
+  assert.equal(f.counts().sends, 0);
+  assert.match(chatText(await restarted.ownerChat('owner-chat', '슬랙에 보내주세요')), /authorization saved/);
+  assert.equal(restarted.list()[0].repliesHeld, undefined);
+  await restarted.tool(id, 'slack_send', { text: 'Done' });
+  await restarted.tool(id, 'slack_send', { text: 'Another note' });
+  assert.equal(f.counts().sends, 2);
+});
+
+test('a hold set after an autoReply delegation stops its report', async t => {
+  const f = await fixture(t);
+  await f.manager.setRules([{ ...rule, autoReply: true }]);
+  f.options.startConversation = async () => ({ sessionId: 'owner-chat', runId: 'coordinator' });
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', ruleId: 'review', prompt: 'Deploy the fix' });
+  f.options.classifyOwnerReply = async () => ({ intent: 'cancel' });
+  assert.match(chatText(await f.manager.ownerChat('owner-chat', '잠깐, 결과는 내가 직접 전할게요')), /revoked/);
+  f.finish();
+  const task = f.manager.list()[0].delegatedTasks![0];
+  const result = await f.manager.tool(id, 'tower_task_complete', { requestId: task.requestId, runId: 'run', outcome: 'succeeded', evidence: 'Deployed.', text: 'Done' }) as { status: string };
+  assert.notEqual(result.status, 'sent'); assert.equal(f.counts().sends, 0);
 });
 
 test('semantic owner classifier sees owner input only, handles compound permission and fails without blocking chat', async t => {
@@ -682,7 +750,6 @@ test('automatic events, quoted requests and capability questions never mint comp
     chatText(await f.manager.ownerChat('owner-chat', message));
     assert.equal(f.manager.list()[0].ownerConditionalReply, undefined);
   }
-  await assert.rejects(f.manager.tool(f.id, 'slack_send', { text: 'send' }), /No immediate owner/);
   assert.equal(f.counts().sends, 0);
 });
 
@@ -741,7 +808,6 @@ test('autoReply rule delegation grants one truthful report and participant menti
   // The first thing a rule asks for, before any delegation.
   await f.manager.tool(id, 'slack_react', { name: ':hourglass_flowing_sand:', action: 'add' });
   assert.equal(f.manager.list()[0].ownerConditionalReply, undefined, 'a reaction grants nothing');
-  await assert.rejects(f.manager.tool(id, 'slack_send', { text: 'Done' }), /No immediate owner send authorization/);
   await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'deploy', ruleId: 'review', prompt: 'Deploy the fix' });
   const consent = f.manager.list()[0].ownerConditionalReply!;
   assert.equal(consent.ruleId, 'review'); assert.equal(consent.mode, 'composed'); assert.match(consent.instruction!, /Confirm only a finished review/);
