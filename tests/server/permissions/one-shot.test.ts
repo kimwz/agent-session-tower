@@ -441,3 +441,22 @@ test('a late close clean-up leaves rules given after the close', async t => {
   await f.service.forgetConversation('claude:one', closedAt);
   assert.deepEqual(f.service.overview().rules.map(rule => rule.value), ['npm run e2e']);
 });
+
+test('a rule asked before a close and allowed after it goes with the late clean-up', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.request({ kind: 'command', value: 'kill', scope: 'conversation', reason: 'r' }, agent('claude:one'));
+  const closedAt = new Date(Date.parse('2026-09-30T00:00:00.000Z') + 1000).toISOString();
+  f.tick(60_000);
+  await f.service.decide(asked.request.id!, true);
+  await f.service.forgetConversation('claude:one', closedAt);
+  assert.deepEqual(f.service.overview().rules, []);
+});
+
+test('a command runs with the search path an agent’s turn has', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'echo "$PATH"', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(asked.request.id!, true);
+  const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 10 }, agent('claude:one'));
+  const { providerDirectories } = await import('../../../server/providers/discovery.js');
+  assert.equal(result.output!.stdout.trim(), providerDirectories(process.env).join(':'));
+});

@@ -1,6 +1,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { mkdir, readFile, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
+import { providerDirectories } from '../providers/discovery.js';
 import { promisify } from 'node:util';
 import type { PermissionRun, PermissionRunOutput } from '../../shared/permissions.js';
 import { writePrivateJson } from '../stores/private-json.js';
@@ -129,7 +130,10 @@ export class PermissionRunner {
     const stderr = new Kept();
     let child;
     try {
-      child = spawn('/bin/sh', ['-c', command], { cwd, env: process.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      // The same search path an agent's turn has, so a command it could name (gh, npm, …) is found here too.
+      const env: NodeJS.ProcessEnv = { ...process.env, PATH: providerDirectories(process.env).join(delimiter) };
+      delete env.CLAUDECODE; delete env.CLAUDE_CODE_SESSION_ID; delete env.CODEX_THREAD_ID;
+      child = spawn('/bin/sh', ['-c', command], { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (error) {
       await this.options.update(id, { status: 'failed', startedAt, finishedAt: this.now(), error: error instanceof Error ? error.message : String(error) });
       return;

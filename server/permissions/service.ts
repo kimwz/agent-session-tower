@@ -467,7 +467,9 @@ export class PermissionService {
       const before = (time: string) => !closedAt || time <= closedAt;
       // Its requests still waiting are withdrawn too, so a review that ends later cannot give it a rule again.
       const open = (request: PermissionRequest) => request.sessionId === sessionId && request.status === 'pending' && before(request.createdAt);
-      const mine = (rule: PermissionRule) => rule.scope === 'conversation' && rule.sessionId === sessionId && before(rule.updatedAt);
+      // A rule counts from the request it came from: one asked before the close and allowed after it goes too.
+      const origin = (rule: PermissionRule) => this.state.requests.find(request => request.id === rule.requestId)?.createdAt ?? rule.updatedAt;
+      const mine = (rule: PermissionRule) => rule.scope === 'conversation' && rule.sessionId === sessionId && (before(rule.updatedAt) || before(origin(rule)));
       if (this.state.rules.some(mine) || this.state.requests.some(open)) {
         await this.commit(state => {
           state.rules = state.rules.filter(rule => !mine(rule));

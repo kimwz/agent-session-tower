@@ -576,7 +576,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // Only an attempt under way counts as work for a handoff; one waiting to try again is picked up by the next worker.
     const runNotices = new Set<ReturnType<typeof setTimeout>>();
     const runWaits = new Set<ReturnType<typeof setTimeout>>();
-    // Tried for about an hour; a conversation that cannot take it by then reads the result with permissions_runResult.
+    // After about an hour of failures to send, the conversation reads the result with permissions_runResult instead.
     const MAX_TELLS = 120;
     const runFinished = (request: PermissionRequest, delay = 5_000, attempt = 0) => {
       const timer = setTimeout(() => {
@@ -585,12 +585,14 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         if (stopping) return;
         if (paused) { runFinished(request, 30_000, attempt); return; }
         runNotices.add(timer);
-        void tellRun(request).catch(error => { console.error(`A run's result could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`); return 'later' as const; })
+        void tellRun(request).catch(error => { console.error(`A run's result could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`); return 'failed' as const; })
           .then(async next => {
             runNotices.delete(timer);
-            if (next !== 'later' || stopping) return;
-            if (attempt + 1 >= MAX_TELLS) { await permissions.markTold(request.id).catch(() => {}); return; }
-            runFinished(request, 30_000, attempt + 1);
+            if (next === 'done' || stopping) return;
+            // Only failures count toward giving up; a conversation that is just busy is waited for.
+            const failures = next === 'failed' ? attempt + 1 : attempt;
+            if (failures >= MAX_TELLS) { await permissions.markTold(request.id).catch(() => {}); return; }
+            runFinished(request, 30_000, failures);
           });
       }, delay);
       timer.unref();
