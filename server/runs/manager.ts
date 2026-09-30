@@ -1490,7 +1490,15 @@ export class RunManager extends EventEmitter {
 
   /** Gives up a forced update that could not hand off: queued turns start again here; nothing is cancelled. */
   endUpdateDrain(): void {
-    if (!this.drain) return;
+    const drain = this.drain;
+    if (!drain) return;
+    // A turn still running here goes on by itself, and one that finished on its own needs nothing more: only turns the
+    // update stopped keep their continuation.
+    for (const [id, target] of drain.targets) {
+      const run = this.runs.get(id);
+      if (run?.status === 'cancelled' || run?.status === 'error' || target.mayHaveWrapUp && run?.status === 'completed') continue;
+      this.dropUpdateContinuation(id);
+    }
     this.drain = undefined;
     this.changed();
     void this.pump();
@@ -1724,7 +1732,8 @@ export class RunManager extends EventEmitter {
       if (created !== this.saved.created) { await writePrivateJson(this.createdFile, created); this.saved.created = created; }
       // Instructions before the runs that name them, so a saved marker always finds its text.
       // A failure here costs only those turns' restart (they are cancelled then, as before); runs.json is still saved.
-      if (instructions !== (this.saved.instructions ?? '{}')) {
+      if (instructions === (this.saved.instructions ?? '{}')) this.instructionsError = undefined;
+      else {
         try { await writePrivateJson(this.instructionsFile, instructions); this.saved.instructions = instructions; this.instructionsError = undefined; }
         catch (error) { this.instructionsError = error as Error; console.error(`Turn instructions were not saved: ${errorMessage(error)}`); }
       }

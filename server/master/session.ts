@@ -174,7 +174,7 @@ export class MasterSession {
       const covered = new Set<string>();
       for (const item of this.file.followed) {
         if (item.state !== 'running' || !item.runId || item.node) continue;
-        const run = (snapshot.runs ?? []).find(entry => entry.id === item.runId);
+        const run = continuedRunById(snapshot.runs ?? [], item.currentRunId ?? item.runId);
         if (!run) continue;
         const turn = turnOf(run, snapshot);
         covered.add(turn.id);
