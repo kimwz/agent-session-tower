@@ -292,3 +292,9 @@ test('device writes with a quoted path stay with the owner; untold results are f
   await f.service.markTold(told.request.id!);
   assert.deepEqual(f.service.untoldRuns(), []);
 });
+
+test('commands wrapped in a shell’s quotes are checked too', () => {
+  for (const value of [`bash -lc 'sudo apt-get install jq'`, `sh -c "diskutil list"`, `zsh -c 'dd if=a of=/dev/disk2'`, `sh -c 'sudo'`])
+    assert.ok(autoReviewBlock({ kind: 'run', value }, '/p'), value);
+  for (const value of [`echo 'pseudo code'`, `grep -r "sudoers-like" .`, 'git add dd-notes.md']) assert.equal(autoReviewBlock({ kind: 'run', value }, '/p'), undefined, value);
+});
