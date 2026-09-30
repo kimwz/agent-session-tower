@@ -41,7 +41,9 @@ test('collection is asynchronous, keeps worker alive, and never enables or sends
   t.after(async () => { service.close(); await rm(dir, { recursive: true, force: true }); });
   await service.start(); await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   const overview = await service.mutate('tone/collect', {}); assert.equal(overview.tone.status, 'collecting'); assert.equal(service.hasActive(), true);
-  await flush(); assert.ok(resolve); resolve({ guide: 'Use concise polite sentences.' }); await flush();
+  // The model is asked once its role is read from the model settings: wait for the call, not a number of turns.
+  for (const deadline = Date.now() + 5000; !resolve && Date.now() < deadline;) await new Promise(done => setTimeout(done, 10));
+  assert.ok(resolve); resolve({ guide: 'Use concise polite sentences.' }); await flush();
   assert.equal(service.overview().tone.enabled, false); assert.equal(service.overview().tone.sampleCount, 1); assert.equal(service.hasActive(), false);
   // The guide is saved in the background; wait for the file rather than a guessed number of turns.
   let saved: string | undefined;
