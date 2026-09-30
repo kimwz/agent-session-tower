@@ -8,7 +8,7 @@ import { writePrivateJson } from '../stores/private-json.js';
 const exec = promisify(execFile);
 /** Each stream keeps its first and last part. */
 const KEEP_BYTES = 64 * 1024;
-const PREVIEW_CHARS = 2_000;
+const PREVIEW_CHARS = 1_000;
 const KILL_GRACE_MS = 5_000;
 /** Runs at once on this computer; one conversation's run one after another. */
 const MAX_RUNNING = 4;
@@ -54,8 +54,6 @@ export interface RunnerOptions {
   stateDir: string;
   /** Saves the run's state on its request as it changes. */
   update(id: string, run: PermissionRun): Promise<void>;
-  /** The run finished (done or failed). */
-  finished?(id: string): void;
   killGraceMs?: number;
   now?: () => Date;
 }
@@ -106,7 +104,7 @@ export class PermissionRunner {
       this.groups.set(item.id, item.group);
       const work = this.execute(item.id, item.command, item.cwd, item.timeoutSeconds)
         .catch(error => console.error(`A permission run failed: ${error instanceof Error ? error.message : String(error)}`))
-        .finally(() => { this.running.delete(item.id); this.groups.delete(item.id); this.options.finished?.(item.id); this.pump(); });
+        .finally(() => { this.running.delete(item.id); this.groups.delete(item.id); this.pump(); });
       this.running.set(item.id, work);
     }
   }
@@ -139,7 +137,8 @@ export class PermissionRunner {
       return;
     }
     // Listened to at once: a quick command can be done before the waits below.
-    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('close', (value, sig) => resolve({ code: value, signal: sig })));
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => child.once('exit', (value, sig) => resolve({ code: value, signal: sig })));
+    const closed = new Promise<void>(resolve => child.once('close', () => resolve()));
     child.stdout!.on('data', (chunk: Buffer) => stdout.add(chunk));
     child.stderr!.on('data', (chunk: Buffer) => stderr.add(chunk));
     // The time limit holds from the start, whatever happens to the saves below.
@@ -154,23 +153,33 @@ export class PermissionRunner {
     // A failed save leaves the run `running` without its process: after a restart it is unknown, never started again.
     await this.options.update(id, { status: 'running', startedAt, pid, ...(started ? { started } : {}) })
       .catch(error => console.error(`A permission run's process could not be saved: ${error instanceof Error ? error.message : String(error)}`));
-    const { code, signal } = await closed;
+    const { code, signal } = await exited;
     clearTimeout(timer);
-    // The leader is done; what it left running in its group is stopped too, so a finished run leaves nothing behind.
+    // The leader is done; what it left running in its group is stopped too, so a finished run leaves nothing behind
+    // (and a child holding the output open does not keep the run going).
     if (groupAlive(pid)) {
       signalGroup(pid, 'SIGTERM');
       await new Promise(resolve => setTimeout(resolve, Math.min(grace, 1_000)));
       if (groupAlive(pid)) signalGroup(pid, 'SIGKILL');
     }
+    // The rest of the output, once the group is gone; a stray holder of the pipes is not waited for long.
+    await Promise.race([closed, new Promise(resolve => setTimeout(resolve, 2_000))]);
     const output: PermissionRunOutput = { stdout: stdout.text(), stderr: stderr.text(), truncated: stdout.truncated || stderr.truncated };
-    await mkdir(this.dir, { recursive: true, mode: 0o700 });
-    await writePrivateJson(join(this.dir, `${id}.json`), JSON.stringify(output));
-    await this.options.update(id, {
+    const saved = await mkdir(this.dir, { recursive: true, mode: 0o700 }).then(() => writePrivateJson(join(this.dir, `${id}.json`), JSON.stringify(output)))
+      .then(() => undefined, (error: unknown) => error instanceof Error ? error.message : String(error));
+    const finished = (): Promise<void> => this.options.update(id, { ...(saved ? { error: `The command finished, but its output could not be kept: ${saved}` } : {}),
       status: 'done', startedAt, finishedAt: this.now(), pid, ...(started ? { started } : {}),
       ...(code !== null ? { exitCode: code } : {}), ...(signal ? { signal } : {}), ...(timedOut ? { timedOut: true } : {}),
       stdoutBytes: stdout.bytes, stderrBytes: stderr.bytes, truncated: output.truncated,
       preview: { stdout: output.stdout.slice(0, PREVIEW_CHARS), stderr: output.stderr.slice(0, PREVIEW_CHARS) },
     });
+    // The result is saved even when a write fails for a moment; otherwise the run would look unfinished for good.
+    for (let attempt = 1; ; attempt += 1) {
+      try { await finished(); return; } catch (error) {
+        if (attempt >= 3) throw error;
+        await new Promise(resolve => setTimeout(resolve, 1_000 * attempt));
+      }
+    }
   }
 
   /**

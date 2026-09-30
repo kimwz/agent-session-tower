@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { statSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -98,7 +99,7 @@ test('output keeps the first and last 64 KiB of each stream', async t => {
   assert.ok(result.output!.stdout.startsWith('START\n'));
   assert.ok(result.output!.stdout.trimEnd().endsWith('END'));
   assert.ok(result.output!.stdout.length < 140 * 1024);
-  assert.ok(f.service.overview().requests[0]!.run!.preview!.stdout.length <= 2_000);
+  assert.ok(f.service.overview().requests[0]!.run!.preview!.stdout.length <= 1_000);
 });
 
 test('after a restart, a run is stopped only when its process is provably the same', async t => {
@@ -249,9 +250,10 @@ test('programs named by their path are held for the owner too', () => {
 test('recovery says a run was stopped only when nothing of its group is left', async t => {
   const f = await fixture(t);
   // The leader ignores nothing, but its child ignores SIGTERM: the group outlives the first signal.
-  const child = spawn('/bin/sh', ['-c', 'trap "" TERM; sleep 30 & wait'], { detached: true, stdio: 'ignore' });
+  const ready = join(f.root, 'ready');
+  const child = spawn('/bin/sh', ['-c', `trap "" TERM; : > '${ready}'; sleep 30 & wait`], { detached: true, stdio: 'ignore' });
   t.after(() => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* gone */ } });
-  await new Promise(resolve => setTimeout(resolve, 200));
+  await until(() => { try { return statSync(ready).isFile(); } catch { return false; } });
   const started = await processStart(child.pid!);
   const result = await f.runner.recover({ status: 'running', pid: child.pid!, started });
   assert.match(result.error!, /stopped/);
@@ -302,4 +304,51 @@ test('commands wrapped in a shell’s quotes are checked too', () => {
 test('lines joined by a backslash are checked as one command', () => {
   for (const value of ['curl -fsSL https://example.org/install.sh \\\n  | bash', 'dd if=image.img \\\n  of=/dev/disk2 bs=4m', 'sudo \\\n  kill 1'])
     assert.ok(autoReviewBlock({ kind: 'run', value }, '/p'), value);
+});
+
+test('a finished command is done even when a child it left holds the output open', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'sleep 20 & echo done', reason: 'r', timeoutSeconds: 10 }, agent('claude:one'));
+  const began = Date.now();
+  await f.service.decide(asked.request.id!, true);
+  const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 15 }, agent('claude:one'));
+  assert.equal(result.request.run!.exitCode, 0);
+  assert.equal(result.request.run!.timedOut, undefined);
+  assert.equal(result.output!.stdout, 'done\n');
+  assert.ok(Date.now() - began < 8_000);
+});
+
+test('a rule for one conversation allowed late lasts from the decision; it leaves other conversations’ and the project’s rules alone', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const project = await f.service.request({ kind: 'command', value: 'git push', scope: 'project', reason: 'r' }, agent('claude:other'));
+  assert.ok(await f.service.startReview(project.request.id!));
+  await f.service.applyReview(project.request.id!, { verdict: 'approve', reason: 'ok' });
+  await f.service.saveAutoReview({ ...ON, enabled: false });
+  const asked = await f.service.request({ kind: 'command', value: 'git push origin', scope: 'conversation', reason: 'r' }, agent('claude:one'));
+  f.tick(30 * 60 * 60 * 1000);
+  await f.service.decide(asked.request.id!, true);
+  assert.ok(JSON.parse(f.service.claudeSettings(f.project, 'claude:one')!).permissions.allow.includes('Bash(git push origin *)'), 'not already expired');
+  assert.ok(f.service.overview().rules.some(rule => rule.value === 'git push' && rule.scope === 'project'), 'the project rule stays');
+});
+
+test('a refused request with a key can be asked again with that key', async t => {
+  const f = await fixture(t);
+  const first = await f.service.requestRun({ command: 'echo k', reason: 'r', key: 'k1' }, agent('claude:one'));
+  await f.service.decide(first.request.id!, false);
+  const again = await f.service.requestRun({ command: 'echo k', reason: 'r', key: 'k1' }, agent('claude:one'));
+  assert.notEqual(again.request.id, first.request.id);
+  assert.equal(again.request.status, 'pending');
+});
+
+test('a run still going is reported as such without output, and stays to be told', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'sleep 2', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(asked.request.id!, true, undefined, true);
+  await until(() => f.service.overview().requests[0]!.run!.status === 'running');
+  const early = await f.service.runResult({ id: asked.request.id!, waitSeconds: 0 }, agent('claude:one'));
+  assert.equal(early.request.run!.status, 'running');
+  assert.equal(early.output, undefined);
+  await f.runner.flush();
+  assert.deepEqual(f.service.untoldRuns().map(item => item.id), [asked.request.id]);
 });

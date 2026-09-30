@@ -549,18 +549,26 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // One-shot runs: the command runs in this worker; the conversation hears its end unless it already read the result.
     const runner: PermissionRunner = new PermissionRunner({ stateDir, update: (id, run): Promise<void> => permissions.updateRun(id, run) });
     const runNotices = new Set<ReturnType<typeof setTimeout>>();
+    // Read from the web's saved file each time: the owner may close a conversation at any moment.
+    const closedNow = async (sessionId: string) => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds().has(sessionId); };
+    const tellRun = async (request: PermissionRequest) => {
+      const now = permissions.overview().requests.find(item => item.id === request.id);
+      if (!now?.run || now.run.delivered || !now.run.notify) return;
+      // The result reaches the conversation as the work it already was; a turn that can no longer be found is not guessed at.
+      const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
+      const origin = run?.origin;
+      // Nobody left to tell, or the owner closed the conversation: nothing is sent, and it is not tried again.
+      if (!origin || !runs.getSession(request.sessionId) || await closedNow(request.sessionId)) { await permissions.markTold(request.id); return; }
+      const result = now.run.status === 'failed' ? `실패: ${now.run.error ?? '알 수 없는 이유'}` : now.run.timedOut ? '시간 제한으로 중단됨' : `종료 코드 ${now.run.exitCode ?? now.run.signal ?? '?'}`;
+      await runs.enqueue(request.sessionId, `${TOWER_NOTICE} 한 번 실행을 요청한 명령이 끝났습니다 (${result}). permissions_runResult에 id "${request.id}"를 주면 출력을 받습니다.`, {},
+        { origin, ...(run?.unattended ? { unattended: true } : {}) });
+      await permissions.markTold(request.id);
+    };
     const runFinished = (request: PermissionRequest) => {
+      // Counted as work until told, so a handoff waits for it.
       const timer = setTimeout(() => {
-        runNotices.delete(timer);
-        const now = permissions.overview().requests.find(item => item.id === request.id);
-        if (!now?.run || now.run.delivered || !now.run.notify) return;
-        // The result reaches the conversation as the work it already was; a turn that can no longer be found is not guessed at.
-        const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
-        const origin = run?.origin;
-        if (!origin || !runs.getSession(request.sessionId)) return;
-        const result = now.run.status === 'failed' ? `실패: ${now.run.error ?? '알 수 없는 이유'}` : now.run.timedOut ? '시간 제한으로 중단됨' : `종료 코드 ${now.run.exitCode ?? now.run.signal ?? '?'}`;
-        void runs.enqueue(request.sessionId, `${TOWER_NOTICE} 한 번 실행을 요청한 명령이 끝났습니다 (${result}). permissions_runResult에 id "${request.id}"를 주면 출력을 받습니다.`, {},
-          { origin, ...(run?.unattended ? { unattended: true } : {}) }).then(() => permissions.markTold(request.id)).catch(error => console.error(`A run's result could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`));
+        void tellRun(request).catch(error => console.error(`A run's result could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`))
+          .finally(() => runNotices.delete(timer));
       }, 5_000);
       runNotices.add(timer);
     };

@@ -228,7 +228,7 @@ export class PermissionService {
         if (block) return owner(block);
         // Where the owner has a rule of their own that overlaps (`git push --force-with-lease` beside `git push`), the
         // deny rules of an allowed one would override theirs, and theirs could widen it: the owner decides.
-        if (this.state.rules.some(item => item.source !== 'auto' && item.kind === given.kind
+        if (this.state.rules.some(item => item.source !== 'auto' && item.kind === given.kind && (item.scope !== 'conversation' || item.sessionId === request.sessionId)
           && (item.scope === 'global' || within(request.cwd, item.cwd!) || within(item.cwd!, request.cwd))
           && (given.kind === 'command' ? rulesOverlap(item.value, given.value) : sameRule({ ...item, scope: 'global' }, { ...given, scope: 'global' })))) {
           return owner('겹치는 소유자 규칙이 이미 있습니다');
@@ -329,7 +329,8 @@ export class PermissionService {
       // A rule for every project, for this project or for this conversation already covers what the request asks for.
       const now = Date.parse(this.now());
       const covering = this.state.rules.filter(existing => existing.kind === rule.kind && sameRule({ ...existing, scope: 'global', cwd: undefined, sessionId: undefined }, { ...rule, scope: 'global', cwd: undefined, sessionId: undefined })
-        && (existing.scope === 'global' || (existing.scope === 'project' && rule.scope !== 'global' && within(rule.cwd!, existing.cwd!))
+        // Codex reads a project's rules in that folder only, so a folder inside another is not covered for it.
+        && (existing.scope === 'global' || (existing.scope === 'project' && rule.scope !== 'global' && (provider === 'codex' ? existing.cwd === rule.cwd : within(rule.cwd!, existing.cwd!)))
           || (existing.scope === 'conversation' && rule.scope === 'conversation' && existing.sessionId === rule.sessionId && !expired(existing, now))));
       if (rule.providers.every(item => covering.some(existing => existing.providers.includes(item)))) return { request: { status: 'exists' as const }, note: 'This rule is already allowed. Try the action again; a Codex rule applies from the next turn.' };
       // Only this conversation's own request is the same one: another conversation hears its own decision.
@@ -365,7 +366,7 @@ export class PermissionService {
       const key = explicit ? `key:${input.key!.trim()}` : `command:${createHash('sha256').update(command).digest('hex')}`;
       const now = Date.parse(this.now());
       const same = [...this.state.requests].reverse().find(request => request.rule.kind === 'run' && request.sessionId === caller.sessionId && request.key === key
-        && (explicit || request.status === 'pending' || (request.status === 'approved' && !finishedRun(request.run))
+        && ((explicit && request.status !== 'denied' && request.status !== 'withdrawn') || request.status === 'pending' || (request.status === 'approved' && !finishedRun(request.run))
           || (request.status === 'approved' && now - Date.parse(request.run?.finishedAt ?? request.createdAt) < SAME_RUN_MS)));
       if (same) {
         if (same.rule.value !== command) throw failure('같은 key로 다른 명령을 요청했습니다. 다른 명령에는 새 key를 쓰세요.', 409);
@@ -509,7 +510,9 @@ export class PermissionService {
         return { request, rule: undefined, run: true };
       }
       if (edited?.kind === 'run') throw failure('한 번 실행은 규칙으로 바꿔 허용할 수 없습니다.');
-      const rule = await this.checked(clean(edited ?? request.rule));
+      const chosen = edited ?? request.rule;
+      // A rule for one conversation lasts from the decision, however long the request waited.
+      const rule = await this.checked(clean(chosen.scope === 'conversation' ? { ...chosen, expiresAt: this.expiry() } : chosen));
       await this.commit(state => {
         const made = upsert(state, rule, undefined, 'request', id, at);
         replaced = dropOverlappingAuto(state, made);
@@ -606,7 +609,7 @@ const GLOBAL_CODEX_ELSEWHERE = '이 Tower는 기본 상태 폴더를 쓰지 않�
 
 /** What the requesting agent is told once the owner decided. */
 function decisionMessage(asked: PermissionRuleInput, allowed: PermissionRuleInput | undefined): string {
-  const where = (rule: PermissionRuleInput) => rule.scope === 'global' ? 'every project' : 'this project';
+  const where = (rule: PermissionRuleInput) => rule.scope === 'global' ? 'every project' : rule.scope === 'conversation' ? 'this conversation only (for 24 hours)' : 'this project';
   if (!allowed) return `The owner refused your permission request for \`${asked.value}\` in Tower. Do not look for another way to do it: finish what you can without it and report what remains blocked.`;
   const changed = allowed.value !== asked.value || allowed.scope !== asked.scope || allowed.kind !== asked.kind;
   return `The owner allowed \`${allowed.value}\` for ${allowed.providers.map(provider => provider === 'claude' ? 'Claude Code' : 'Codex').join(' and ')} in ${where(allowed)}`
@@ -617,8 +620,8 @@ function decisionMessage(asked: PermissionRuleInput, allowed: PermissionRuleInpu
 function reviewMessage(request: PermissionRequest, allowed?: PermissionRuleInput): string {
   const why = request.review?.reason ? ` Reason: ${request.review.reason}` : '';
   if (allowed) {
-    const changed = allowed.value !== request.rule.value || request.rule.scope !== 'project';
-    return `Tower's permission reviewer allowed \`${allowed.value}\` for ${allowed.providers.map(provider => provider === 'claude' ? 'Claude Code' : 'Codex').join(' and ')} in this project`
+    const changed = allowed.value !== request.rule.value || request.rule.scope !== allowed.scope;
+    return `Tower's permission reviewer allowed \`${allowed.value}\` for ${allowed.providers.map(provider => provider === 'claude' ? 'Claude Code' : 'Codex').join(' and ')} in ${allowed.scope === 'conversation' ? 'this conversation only (for 24 hours)' : 'this project'}`
       + `${changed ? ` (you asked for \`${request.rule.value}\`${request.rule.scope === 'global' ? ' in every project' : ''})` : ''}.${why} It applies from this turn. Continue the task where it waited on this permission.`;
   }
   const instead = request.review?.suggestion ? ` Ask for this instead: ${request.review.suggestion}` : ' Ask for a narrower rule that covers only what the task needs.';
@@ -673,7 +676,9 @@ function clean(input: PermissionRuleInput): PermissionRuleInput {
  */
 function dropOverlappingAuto(state: PermissionState, rule: PermissionRule): string[] {
   const overlaps = (item: PermissionRule) => item.id !== rule.id && item.source === 'auto' && item.kind === 'command' && rule.kind === 'command' && rulesOverlap(item.value, rule.value)
-    && (rule.scope === 'global' || item.scope === 'global' || within(item.cwd!, rule.cwd!) || within(rule.cwd!, item.cwd!));
+    // A rule for one conversation replaces only that conversation's own: the rest of the project keeps its rules.
+    && (rule.scope === 'conversation' ? item.scope === 'conversation' && item.sessionId === rule.sessionId
+      : item.scope !== 'conversation' && (rule.scope === 'global' || item.scope === 'global' || within(item.cwd!, rule.cwd!) || within(rule.cwd!, item.cwd!)));
   const gone = state.rules.filter(overlaps);
   state.rules = state.rules.filter(item => !gone.includes(item));
   return gone.map(item => item.value);
@@ -697,6 +702,8 @@ function upsert(state: PermissionState, rule: PermissionRuleInput, id: string | 
     if (same.source === 'auto' && source !== 'auto') { same.source = source; delete same.requestId; if (requestId) same.requestId = requestId; }
     same.providers = (['claude', 'codex'] as const).filter(item => same.providers.includes(item) || rule.providers.includes(item));
     same.updatedAt = at;
+    // Allowed again: a rule for one conversation lasts from now.
+    if (rule.expiresAt && (!same.expiresAt || same.expiresAt < rule.expiresAt)) same.expiresAt = rule.expiresAt;
     return same;
   }
   if (state.rules.length >= MAX_RULES) throw failure('규칙은 200개까지 저장할 수 있습니다.', 409);

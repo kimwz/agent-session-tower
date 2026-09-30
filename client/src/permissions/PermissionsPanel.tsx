@@ -38,7 +38,9 @@ export function PermissionsPanel({ token, cwd, projects, pending: waitingCount, 
     void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(value => { if (!opened.current && value.pending) setTab('requests'); opened.current = true; setOverview(value); }).catch(error => setError(error instanceof Error ? error.message : String(error)));
   }, [token, cwd, active, waitingCount]);
   // While the reviewer works on a request, the panel follows it: the waiting count does not change until it is done.
-  const reviewing = Boolean(overview?.requests.some(request => request.status === 'pending' && (request.review?.status === 'queued' || request.review?.status === 'running')));
+  // So does a command Tower runs, until it is done.
+  const reviewing = Boolean(overview?.requests.some(request => (request.status === 'pending' && (request.review?.status === 'queued' || request.review?.status === 'running'))
+    || (request.run && (request.run.status === 'waiting' || request.run.status === 'running'))));
   useEffect(() => {
     if (!active || !reviewing) return;
     const timer = setInterval(() => { void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(setOverview).catch(() => {}); }, 4000);
@@ -138,7 +140,7 @@ function RunResult({ run }: { run: NonNullable<PermissionRequest['run']> }) {
   return <div className="permission-run">
     <p className="permission-review-reason">{run.status === 'waiting' || run.status === 'running' ? <LoaderCircle className="spin" size={13} /> : null}<strong>{state}</strong>
       {run.finishedAt ? ` · ${date(run.finishedAt)}` : ''}</p>
-    {output && <details><summary>{t('출력')}{run.truncated || output.length >= 2000 ? ` (${t('앞부분')})` : ''}</summary><pre>{output}</pre></details>}
+    {output && <details><summary>{t('출력')}{run.truncated || output.length >= 1000 ? ` (${t('앞부분')})` : ''}</summary><pre>{output}</pre></details>}
   </div>;
 }
 
