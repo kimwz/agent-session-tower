@@ -435,8 +435,10 @@ export class ProviderCapabilities {
           }
         } catch { capabilities = { usage: unavailable('unreachable') }; }
         const previous = this.providers.find(item => item.provider === provider.provider);
-        // Usage this sign-in cannot show (an API key, another provider) must not keep an earlier account's quota.
-        if (capabilities.usage?.status !== 'available' && capabilities.usage?.reason !== 'not_supported' && !capabilities.usage?.windows.length && previous?.usage?.windows.length) {
+        // Usage this sign-in cannot show (an API key, another provider) must not keep an earlier account's quota;
+        // a CLI missing for a moment (while it updates) says nothing about the account.
+        const unsupported = capabilities.usage?.reason === 'not_supported' && provider.available && !!provider.executable;
+        if (capabilities.usage?.status !== 'available' && !unsupported && !capabilities.usage?.windows.length && previous?.usage?.windows.length) {
           capabilities.usage = { ...capabilities.usage!, windows: previous.usage.windows, updatedAt: previous.usage.updatedAt, stale: true };
         }
         return { ...provider, ...(previous?.models ? { models: previous.models, defaultModel: previous.defaultModel, ...(previous.efforts ? { efforts: previous.efforts } : {}),

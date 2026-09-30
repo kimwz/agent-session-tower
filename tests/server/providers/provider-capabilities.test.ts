@@ -240,6 +240,9 @@ test('a sign-in that cannot show usage drops the saved quota of an earlier accou
   await writeFile(join(directory, 'provider-usage.json'), JSON.stringify({ version: 1, providers: { claude: { updatedAt: new Date().toISOString(), windows: [{ id: 'five_hour', usedPercent: 87, windowMinutes: 300, resetsAt: future }] } } }));
   const cache = new ProviderCapabilities(initial, { health: async () => initial, onChange: () => {}, stateDir: directory, env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
     claudeUsage: async () => ({ status: 'unavailable', windows: [], reason: 'not_supported' }) });
+  const updating = new ProviderCapabilities(initial, { health: async () => [{ ...initial[0], available: false }], onChange: () => {}, stateDir: directory });
+  await updating.refresh(); await updating.stop();
+  assert.equal(updating.list()[0].usage?.windows[0].usedPercent, 87); // a CLI missing while it updates keeps the reading
   await cache.refresh(); await cache.stop();
   assert.deepEqual(cache.list()[0].usage?.windows, []);
   assert.deepEqual(JSON.parse(await readFile(join(directory, 'provider-usage.json'), 'utf8')).providers, {});
