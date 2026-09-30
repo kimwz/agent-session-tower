@@ -154,8 +154,11 @@ export class AttachmentStore {
   }
 }
 
+/** What a message with attachments and no text asks. */
+export const ATTACHMENT_ONLY_PROMPT = '첨부한 파일을 확인하고 내용을 설명해 주세요.';
+
 export function attachmentPrompt(prompt: string, attachments: readonly StoredAttachment[]): string {
   if (!attachments.length) return prompt;
-  const instruction = prompt || '첨부한 파일을 확인하고 내용을 설명해 주세요.';
+  const instruction = prompt || ATTACHMENT_ONLY_PROMPT;
   return `${instruction}\n\n첨부 파일 (사용자가 이번 메시지에 첨부한 로컬 파일):\n${attachments.map(({ metadata, path }) => `- ${JSON.stringify(metadata.name)} (${metadata.mimeType}, ${metadata.size} bytes): ${JSON.stringify(path)}`).join('\n')}`;
 }

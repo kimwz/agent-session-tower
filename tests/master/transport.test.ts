@@ -251,3 +251,24 @@ test('voice goes to the host through the master routes, turning it on with wheth
   assert.equal((await fetch(`http://127.0.0.1:${port}/api/master/voice/audio/../secret`)).status, 404);
   assert.deepEqual(piped, [`clip-${'a'.repeat(64)}`]);
 });
+
+test('only the owner’s own page marks what it sends as typed by the owner; the master’s calls never do', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-master-typed-'));
+  const snapshot: Snapshot = { sessions: [], runs: [], providers: [], scanning: false, hostname: 'here', version: 't', updatedAt: '' };
+  const seen: Array<{ kind: string; typed: boolean }> = [];
+  const note = (kind: string) => (context?: { typed?: boolean }) => { seen.push({ kind, typed: context?.typed === true }); };
+  const backend = { snapshot: () => snapshot, detail: async () => undefined, cancel: async () => {}, subscribe: () => () => {},
+    enqueue: async (_id: string, _prompt: string, _attachments: unknown, context?: { typed?: boolean }) => { note('message')(context); throw Object.assign(new Error('no session'), { statusCode: 404 }); },
+    skills: { overview: async () => ({}), detail: async () => ({}), summary: async () => ({ proposals: 0 }), exportBundle: async () => ({}), importPlan: async () => ({}),
+      mutate: async (_action: string, _body: unknown, context?: { typed?: boolean }) => { note('skill')(context); return {}; } } };
+  const callerSecret = 'e'.repeat(64);
+  const { server, dispose, token } = createMonitorServer({ port: 0, clientDir: dir, backend: backend as never, master: { callerSecret, handle: async () => false } });
+  t.after(async () => { dispose(); await stop(server); await rm(dir, { recursive: true, force: true }); });
+  const port = await listen(server);
+  const post = (path: string, body: unknown, headers: Record<string, string> = {}) => fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token, ...headers }, body: JSON.stringify(body) });
+  await post('/api/sessions/x/messages', { prompt: 'from the page' });
+  await post('/api/sessions/x/messages', { prompt: 'from the master' }, { 'X-Tower-Master': callerSecret });
+  await post('/api/skills/confirm', { dir: '/x', revision: 'r' });
+  await post('/api/skills/confirm', { dir: '/x', revision: 'r' }, { 'X-Tower-Master': callerSecret });
+  assert.deepEqual(seen, [{ kind: 'message', typed: true }, { kind: 'message', typed: false }, { kind: 'skill', typed: true }, { kind: 'skill', typed: false }]);
+});

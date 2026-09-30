@@ -84,7 +84,7 @@ function isTowerInstructions(block: unknown): boolean {
   return typeof value === 'string' && value.startsWith(TOWER_INSTRUCTIONS_OPEN) && value.endsWith(TOWER_INSTRUCTIONS_CLOSE);
 }
 function isInjectedUser(value: string): boolean {
-  return /^(?:# AGENTS\.md instructions|<environment_context>|<recommended_plugins>|<INSTRUCTIONS>|<system-reminder>|\[Request interrupted by user)/.test(value.trim());
+  return /^(?:# AGENTS\.md instructions|<environment_context>|<recommended_plugins>|<INSTRUCTIONS>|<system-reminder>|<in-app-browser-context|\[Request interrupted by user)/.test(value.trim());
 }
 /** A background task's notice: a user row of text alone, marked by Claude Code or tagged. Undefined for anything else. */
 function taskNotification(row: Json, blocks: Json[]): { text: string; failed: boolean } | undefined {

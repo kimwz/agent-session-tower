@@ -47,7 +47,7 @@ export interface Backend {
     overview(input: Record<string, unknown>): Promise<SkillOverview>;
     detail(input: Record<string, unknown>): Promise<SkillDetail>;
     summary(): Promise<SkillSummary>;
-    mutate(action: string, body: Record<string, unknown>): Promise<SkillOverview>;
+    mutate(action: string, body: Record<string, unknown>, context?: RequestContext): Promise<SkillOverview>;
     exportBundle(body: Record<string, unknown>): Promise<SkillBundle>;
     importPlan(bundle: unknown): Promise<SkillImportPlan>;
   };
@@ -249,6 +249,10 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (!authenticated && !login && !publicAsset) return json(res, 401, { error: '로그인이 필요합니다.' });
       const adminRoute = ['/api/auth/overview', '/api/auth/credentials', '/api/auth/unblock'].includes(path);
       if (adminRoute && !identity.local) return json(res, 403, { error: '계정 관리는 로컬 접속에서만 사용할 수 있습니다.' });
+      // The master agent calls with its own secret; what it sends is never taken as the owner's own words.
+      const caller = req.headers['x-tower-master'];
+      const masterCall = Boolean(master && typeof caller === 'string' && caller.length === master.callerSecret.length && timingSafeEqual(Buffer.from(caller), Buffer.from(master.callerSecret)));
+      const typed: RequestContext | undefined = masterCall ? undefined : { typed: true };
       if (req.method === 'POST') {
         const header = req.headers[REQUEST_TOKEN_HEADER.toLowerCase()];
         if (typeof header !== 'string' || !/^[a-f0-9]{64}$/.test(header) || !timingSafeEqual(Buffer.from(header), Buffer.from(token))) {
@@ -261,8 +265,6 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         const readOnly = read !== undefined && isOperationName(read) && !OPERATIONS[read].write;
         if (!login && !readOnly && path !== SUGGESTION_PATH && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
           // The master agent's own calls count apart, so they never use up the owner's budget (or the other way round).
-          const caller = req.headers['x-tower-master'];
-          const masterCall = Boolean(master && typeof caller === 'string' && caller.length === master.callerSecret.length && timingSafeEqual(Buffer.from(caller), Buffer.from(master.callerSecret)));
           // The page where voice is on reports every few seconds, and turns voice off; each has a budget of its own,
           // so neither uses up the owner's changes and a flood of reports never keeps voice from turning off.
           const voice = master && !masterCall ? VOICE_REPORT.exec(path)?.[1] : undefined;
@@ -347,11 +349,11 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         const body = await readJson(req, path === '/api/skills/export' ? 200_000 : MAX_SKILL_BUNDLE_BYTES + 1024 * 1024);
         return json(res, 200, path === '/api/skills/export' ? await backend.skills.exportBundle(body) : await backend.skills.importPlan(body));
       }
-      const skillAction = path.match(/^\/api\/skills\/(save|pin|assign|link|merge|adopt|guidance|import|delete|dismiss|settings|backfill)$/);
+      const skillAction = path.match(/^\/api\/skills\/(save|pin|assign|link|merge|adopt|guidance|confirm|confirmGuidance|forget|import|delete|dismiss|settings|backfill)$/);
       if (skillAction && req.method === 'POST') {
         if (!backend.skills) return json(res, 503, { error: '스킬을 사용할 수 없습니다.' });
         // A backup being imported comes with the request; everything else is small.
-        return json(res, 200, await backend.skills.mutate(skillAction[1], await readJson(req, skillAction[1] === 'import' ? MAX_SKILL_BUNDLE_BYTES + 1024 * 1024 : 400_000)));
+        return json(res, 200, await backend.skills.mutate(skillAction[1], await readJson(req, skillAction[1] === 'import' ? MAX_SKILL_BUNDLE_BYTES + 1024 * 1024 : 400_000), typed));
       }
       if (path === '/api/decisions' && req.method === 'GET') {
         if (!decisions) return json(res, 503, { error: '빠른 판단을 사용할 수 없습니다.' });
@@ -467,7 +469,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (req.method === 'POST' && path === '/api/auto-prompts') {
         const request = parseAutoPrompt(await readJson(req, ATTACHMENT_BODY_BYTES));
         if (!backend.startAutoPrompt) return json(res, 503, { error: 'Auto Prompt를 현재 사용할 수 없습니다.' });
-        return json(res, 202, { job: await backend.startAutoPrompt(request) });
+        return json(res, 202, { job: await backend.startAutoPrompt(request, typed) });
       }
       const autoPromptMatch = url.pathname.match(/^\/api\/auto-prompts\/([a-f\d-]+)(\/cancel)?$/i);
       if (autoPromptMatch && UUID.test(autoPromptMatch[1])) {
@@ -565,7 +567,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (req.method === 'POST' && path === '/api/sessions') {
         const input = parseCreateSession(await readJson(req));
         if (!backend.createSession) return json(res, 503, { error: '새 세션을 생성할 수 없습니다.' });
-        const result = await backend.createSession(input);
+        const result = await backend.createSession(input, typed);
         return json(res, 202, { ...result, session: publicSession(result.session) });
       }
       const detailMatch = path.match(/^\/api\/sessions\/([^/]+)$/);
@@ -607,7 +609,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       const messageMatch = path.match(/^\/api\/sessions\/([^/]+)\/messages$/);
       if (req.method === 'POST' && messageMatch) {
         const message = parseMessage(await readJson(req, ATTACHMENT_BODY_BYTES));
-        const run = await backend.enqueue(messageMatch[1], message.prompt, message.attachments);
+        const run = await backend.enqueue(messageMatch[1], message.prompt, message.attachments, typed);
         return json(res, 202, { run });
       }
       // Provider request IDs are opaque and may contain an encoded slash.
