@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -125,4 +125,21 @@ test('the worker credential cannot reach shells and the terminal credential cann
   assert.notEqual(runnerToken, terminalToken);
   assert.equal(await status(terminal.socket, runnerToken), 403);
   assert.equal(await status(runner.socket, terminalToken), 403);
+});
+
+test('the version shown on the page asks a terminal host once, so looking never keeps it alive', async t => {
+  const f = await fixture(t);
+  const asked: string[] = [];
+  const exchange = (f.client as unknown as { exchange: (method: string, args?: unknown[]) => Promise<unknown> }).exchange.bind(f.client);
+  (f.client as unknown as { exchange: typeof exchange }).exchange = (method, args) => { asked.push(method); return exchange(method, args); };
+  const version = await f.client.displayVersion();
+  assert.match(version ?? '', /^\d+\.\d+\.\d+/);
+  for (let index = 0; index < 3; index++) assert.equal(await f.client.displayVersion(), version);
+  assert.deepEqual(asked, ['ping'], 'one request, then what its reply said');
+  // A host that crashed leaves its credential file behind; it no longer listens, so it shows as not running.
+  const token = await readFile((await terminalHostPaths(f.stateDir)).token, 'utf8');
+  await f.host.close();
+  await writeFile((await terminalHostPaths(f.stateDir)).token, token, { mode: 0o600 });
+  assert.equal(await f.client.displayVersion(), null, 'a host that left shows as not running, without asking');
+  assert.deepEqual(asked, ['ping']);
 });

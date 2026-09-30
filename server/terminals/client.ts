@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
+import { connect } from 'node:net';
 import { request, type ClientRequest, type ServerResponse } from 'node:http';
 import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
@@ -110,6 +111,34 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
     } finally { await file.close(); }
   }
 
+  /** The version of the host each credential belongs to, as its replies said. */
+  private seen?: { token: string; version: string };
+
+  /**
+   * The running host's version for display, without keeping it alive: its credential file says whether one runs, and
+   * a host is asked at most once (its replies are remembered), since every request it answers resets its idle time.
+   */
+  async displayVersion(): Promise<string | null> {
+    let token: string;
+    try { token = await this.credential(); }
+    catch (error) { if ((error as { hostAbsent?: boolean }).hostAbsent) { this.seen = undefined; return null; } throw error; }
+    // A host that crashed leaves its credential and its socket file behind: a bare connection, which reaches no request
+    // handler and so is not use, tells whether it still listens.
+    if (this.seen?.token === token) {
+      const socket = (await this.hostPaths()).socket;
+      const listening = await new Promise<boolean>(resolve => {
+        const probe = connect(socket);
+        probe.setTimeout(2000, () => { probe.destroy(); resolve(true); });
+        probe.once('connect', () => { probe.destroy(); resolve(true); });
+        probe.once('error', () => resolve(false));
+      });
+      if (listening) return this.seen.version;
+      this.seen = undefined;
+      return null;
+    }
+    return this.hostVersion();
+  }
+
   /** The running host's version, without starting one: null when none runs; a failure to ask is an error. */
   async hostVersion(): Promise<string | null> {
     try { return (await this.exchange('ping')).version; }
@@ -133,9 +162,15 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
         });
       });
       req.setTimeout(60_000, () => req.destroy(new Error('Terminal host response timed out.')));
-      req.on('error', error => reject(Object.assign(error, { statusCode: 503, ...(['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '') ? { hostAbsent: true } : {}) })));
+      req.on('error', error => {
+        const absent = ['ENOENT', 'ECONNREFUSED'].includes((error as NodeJS.ErrnoException).code ?? '');
+        if (absent) this.seen = undefined;
+        reject(Object.assign(error, { statusCode: 503, ...(absent ? { hostAbsent: true } : {}) }));
+      });
       req.end(body);
     });
+    // Remembered before anything else is judged, so even a host this web cannot use is asked only once.
+    if (typeof reply.version === 'string') this.seen = { token, version: reply.version };
     if (reply.protocol !== RUNNER_PROTOCOL || reply.stateDir !== paths.stateDir) throw failure('The terminal host is incompatible.', 503);
     if (reply.error) throw failure(reply.error.message, reply.error.statusCode);
     return reply;
