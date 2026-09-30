@@ -278,10 +278,12 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
       controls.style.setProperty('--settings-right', `${area.right - button.left}px`);
       controls.style.setProperty('--settings-middle', `${button.top + button.height / 2 - area.top}px`);
     };
-    const observer = new ResizeObserver(place);
+    // The button can also move without resizing (its margin follows the chat panel), so measure again a frame later.
+    let frame = 0;
+    const observer = new ResizeObserver(() => { place(); cancelAnimationFrame(frame); frame = requestAnimationFrame(place); });
     observer.observe(box); observer.observe(entry);
     place();
-    return () => observer.disconnect();
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); };
   }, []);
   const working = sessions.filter(session => session.status === 'working').length;
   return <div ref={canvas} className={`graph-canvas ${manual ? 'manual-layout' : 'auto-layout'} ${motion ? '' : 'motion-off'} ${settled ? '' : 'settling'}`}>

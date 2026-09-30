@@ -24,6 +24,8 @@
 .canvas-only .canvas-quick-controls { top:calc(var(--settings-middle, 28px) - 16px); right:calc(var(--settings-right, 126px) + 8px); }
 .canvas-only .canvas-zoom-controls { height:32px; padding:2px; }
 .canvas-only .canvas-zoom-controls>button { width:26px; height:26px; }
+/* A canvas too narrow for both drops the tools below the header, as elsewhere. */
+@container canvas-area (max-width:360px) { .canvas-only .canvas-quick-controls { top:60px; right:14px; } }
 
 .settings-dialog { width:min(980px, calc(100vw - 32px)); height:min(720px, calc(100dvh - 40px)); max-width:none; max-height:none; padding:0; border:1px solid #2c3a4d; border-radius:14px; background:#101722; color:var(--text); overflow:hidden; box-shadow:0 24px 80px #000a; }
 .settings-dialog::backdrop { background:#030812b8; }
