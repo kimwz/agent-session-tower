@@ -63,6 +63,8 @@ interface RunnerOptions {
   firstTurnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
   /** Notes for every turn, such as the owner's pinned skills; asked and limited like `firstTurnNotes`. */
   turnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
+  /** Keeps what the owner typed per conversation, from the start of the conversations Tower creates. */
+  ownerPrompts?: { record(sessionId: string, at: string, input: { begin?: boolean; text?: string; taint?: boolean; sent?: string }): Promise<void> };
   /** Settings for every Claude Code turn Tower starts: the owner's allow rules for its folder. */
   claudeSettings?: (cwd: string) => string | undefined;
   /** Pre-accepts the native folder trust prompt for a newly created session. */
@@ -93,6 +95,10 @@ export interface RunAdmission {
   origin?: RunOrigin;
   /** The prompt carries Slack, GitHub or HTTP content. Only a session Tower creates for it may receive it. */
   untrustedInput?: boolean;
+  /** The owner typed the prompt in Tower; recorded as `Run.authored`. Only owner-origin work can be. */
+  authored?: boolean;
+  /** Tower's own message into the conversation (a decision, a notice), never the owner's words. */
+  notice?: boolean;
   /** No one is watching: Claude runs in its automatic permission mode (Codex uses its auto review reviewer). */
   unattended?: boolean;
   /** Triggers never create a missing folder. */
@@ -269,6 +275,24 @@ export class RunManager extends EventEmitter {
 
   setFirstTurnNotes(notes: NonNullable<RunnerOptions['firstTurnNotes']>): void { this.options.firstTurnNotes = notes; }
   setTurnNotes(notes: NonNullable<RunnerOptions['turnNotes']>): void { this.options.turnNotes = notes; }
+  setOwnerPrompts(store: NonNullable<RunnerOptions['ownerPrompts']>): void { this.options.ownerPrompts = store; }
+  /**
+   * Records a conversation's start or the owner's words in it. A record that cannot be saved refuses the work, like a
+   * run that cannot be saved: otherwise a restriction the owner just typed could be missing after a restart.
+   */
+  private async recordOwner(sessionId: string, run: Run, created: boolean, notice = false): Promise<void> {
+    const store = this.options.ownerPrompts;
+    if (!store) return;
+    try {
+      // Owner work that is not what the owner typed here may carry the owner's words all the same.
+      // Every message Tower sends is remembered by its start, so the reviewer can tell words typed elsewhere.
+      await store.record(sessionId, run.createdAt, { ...(created ? { begin: true } : {}), ...(run.authored ? { text: run.prompt } : run.origin?.kind === 'owner' && !notice ? { taint: true } : {}),
+        sent: run.prompt });
+    } catch (error) {
+      console.error(`Owner prompt record failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new RunError('소유자 지시 기록을 저장하지 못했습니다. 디스크 공간과 권한을 확인한 뒤 다시 보내세요.', 503);
+    }
+  }
   setClaudeSettings(settings: NonNullable<RunnerOptions['claudeSettings']>): void { this.options.claudeSettings = settings; }
   setRunToolResolver(resolver: NonNullable<RunnerOptions['resolveRunTools']>): void {
     this.options.resolveRunTools = resolver;
@@ -353,6 +377,7 @@ export class RunManager extends EventEmitter {
           ...(value.attachments ? { attachments: value.attachments.map(item => attachmentMetadata(item)!) } : {}) };
         // A malformed origin never reads back as owner work.
         if (value.origin !== undefined) run.origin = parseRunOrigin(value.origin) ?? { kind: 'unknown' };
+        if (run.authored !== undefined && (run.authored !== true || run.origin?.kind !== 'owner')) delete run.authored;
         // A permission request belongs to a live process, never a restored run.
         delete run.approvals;
         delete run.instructions;
@@ -546,6 +571,7 @@ export class RunManager extends EventEmitter {
     const origin = internal.origin ?? { kind: 'unknown' as const };
     const run: Run = { id: randomUUID(), sessionId: id, origin, prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
+      ...(authoredBy(internal) ? { authored: true as const } : {}),
       ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
     // Provenance commits with the session identity, before any provider starts.
@@ -555,6 +581,7 @@ export class RunManager extends EventEmitter {
     this.prune();
     this.changed();
     try {
+      await this.recordOwner(id, run, true, internal.notice === true);
       // The run is already registered, so a concurrent request with the same ID is refused while this waits.
       // Only an admitted request answers the native trust prompt; a refused one leaves settings untouched.
       if (internal.trustWorkspace !== false) await this.options.trustWorkspace?.(input.provider, cwd, { ...process.env, ...this.options.env }).catch(() => {});
@@ -612,6 +639,7 @@ export class RunManager extends EventEmitter {
     }
     const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
       ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
+      ...(authoredBy(internal) ? { authored: true as const } : {}),
       ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
@@ -619,8 +647,14 @@ export class RunManager extends EventEmitter {
     this.runs.set(run.id, run);
     this.prune();
     this.changed();
-    try { await this.flush(); } // An accepted instruction is durable before launching the provider.
-    catch (error) { this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error; }
+    let recorded = false;
+    try { await this.recordOwner(sessionId, run, false, internal.notice === true); recorded = true; await this.flush(); } // An accepted instruction is durable before launching the provider.
+    catch (error) {
+      this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds);
+      // The owner's words were kept but never sent: the record no longer matches the conversation.
+      if (recorded && run.authored) await this.options.ownerPrompts?.record(sessionId, new Date().toISOString(), { taint: true }).catch(() => {});
+      throw error;
+    }
     finally { this.admissions.delete(run.id); }
     // An accepted instruction replaces the continuation the agent planned; its next turn can schedule again.
     // Tower's own continuation after an update is not the agent's plan: it runs first, then this instruction.
@@ -759,6 +793,12 @@ export class RunManager extends EventEmitter {
     const stdio = this.stdio.get(runId);
     if (this.stopping || run.status !== 'running' || (!owned?.claude && !stdio) || !run.approvals?.some(approval => approval.id === approvalId)) {
       throw new RunError('This permission request is no longer pending. Refresh the conversation.', 409);
+    }
+    // Answers the owner writes reach the agent outside the prompts Tower keeps: the record is not whole from here,
+    // noted before the answer goes, and an answer that cannot be noted is refused like a message.
+    if (typeof decision === 'object' && this.options.ownerPrompts) {
+      await this.options.ownerPrompts.record(run.sessionId, new Date().toISOString(), { taint: true })
+        .catch(() => { throw new RunError('소유자 지시 기록을 저장하지 못했습니다. 디스크 공간과 권한을 확인한 뒤 다시 보내세요.', 503); });
     }
     if (stdio) await stdio.respondToApproval(approvalId, decision);
     else {
@@ -1474,6 +1514,8 @@ export class RunManager extends EventEmitter {
       run.output = 'Tower will resume unfinished background work after an unexpected provider exit.';
       this.append(after, `\n[Tower] Scheduled background recovery ${backgroundRecoveryAttempt}/3.\n`);
     }
+    // Remembered as Tower's own message, so the permission reviewer never takes it for words typed elsewhere.
+    void this.options.ownerPrompts?.record(run.sessionId, run.createdAt, { sent: run.prompt }).catch(() => {});
     this.runs.set(run.id, run);
     this.prune();
     this.changed();
@@ -1780,6 +1822,8 @@ async function privateMcpConfig(mcpServers: NonNullable<RunTools['servers']>): P
 }
 function automated(run: Run): boolean { return automatedOrigin(run.origin); }
 /** The owner's own turns always run in the provider's automatic approval mode; triggers and Slack follow their setting. */
+/** Only owner work from a controlling computer's owner or this one's, without outside content, counts as the owner's own words. */
+function authoredBy(internal: RunAdmission): boolean { return internal.authored === true && internal.origin?.kind === 'owner' && !internal.untrustedInput; }
 function automaticApprovals(run: Run): boolean { return run.unattended === true || ownerOrigin(run.origin); }
 /** Modes at least as careful as asking the owner. Anything else is not what an unattended run asked for. */
 const OWNER_APPROVAL_MODES = new Set(['default', 'manual', 'plan', 'dontAsk']);

@@ -328,6 +328,7 @@ export class TowerApi {
       case 'permissions.delete': return this.permissions().remove(value.id);
       case 'permissions.decide': return this.permissions().decide(value.id, value.approve, value.rule, value.resume === true);
       case 'permissions.acknowledge': return this.permissions().acknowledge();
+      case 'permissions.saveAutoReview': return this.permissions().saveAutoReview(value.settings);
       case 'autoPrompt.get': {
         const job = autoPrompts?.get(value.requestId);
         if (!job) throw failure('Auto Prompt request not found.', 404);

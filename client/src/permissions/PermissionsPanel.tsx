@@ -1,9 +1,9 @@
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { FolderChip } from '../settings/FolderChip';
 import { SettingsFrameContext, SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
-import { Check, LoaderCircle, Pencil, Plus, Trash2, TriangleAlert } from 'lucide-react';
-import type { PermissionOverview, PermissionProvider, PermissionRequest, PermissionRule, PermissionRuleInput } from '../../../shared/permissions';
-import { claudeRule, codexRule, ruleIsBroad, ruleProblem } from '../../../shared/permissions';
+import { Bot, Check, LoaderCircle, Pencil, Plus, Trash2, TriangleAlert } from 'lucide-react';
+import type { PermissionAutoReview, PermissionOverview, PermissionProvider, PermissionRequest, PermissionRule, PermissionRuleInput } from '../../../shared/permissions';
+import { AUTO_REVIEW_MODELS, waitingForOwner as waiting, claudeRule, codexRule, dangerousContinuations, ruleIsBroad, ruleProblem } from '../../../shared/permissions';
 import { authPost } from '../auth/AuthGate';
 import { locale, translateMessage, useI18n } from '../i18n/i18n';
 
@@ -18,7 +18,7 @@ export const ruleDraft = (rule: PermissionRuleInput & { id?: string }): Draft =>
 type Tab = 'requests' | 'rules';
 
 /** Allow rules for Claude Code and Codex in one list, everywhere or for one folder, and the requests agents sent. */
-export function PermissionsPanel({ token, cwd, projects, pending: waiting, onClearFolder, onChanged, onOpenSession }: { token: string; cwd?: string; projects: string[]; pending: number; onClearFolder: () => void; onChanged: () => void; onOpenSession: (id: string) => void }) {
+export function PermissionsPanel({ token, cwd, projects, pending: waitingCount, onClearFolder, onChanged, onOpenSession }: { token: string; cwd?: string; projects: string[]; pending: number; onClearFolder: () => void; onChanged: () => void; onOpenSession: (id: string) => void }) {
   const { t } = useI18n();
   const { active } = useContext(SettingsFrameContext);
   const [overview, setOverview] = useState<PermissionOverview | null>(null);
@@ -29,14 +29,21 @@ export function PermissionsPanel({ token, cwd, projects, pending: waiting, onCle
   const [busy, setBusy] = useState(false);
   const [resume, setResume] = useState(true);
   const shown = useCallback((all: PermissionOverview): PermissionOverview => cwd ? { ...all, rules: all.rules.filter(rule => rule.scope === 'global' || rule.cwd === cwd), requests: all.requests.filter(request => request.cwd === cwd),
-    targets: all.targets.filter(target => target.scope === 'global' || target.cwd === cwd), pending: all.requests.filter(request => request.cwd === cwd && request.status === 'pending').length } : all, [cwd]);
+    targets: all.targets.filter(target => target.scope === 'global' || target.cwd === cwd), pending: all.requests.filter(request => request.cwd === cwd && waiting(request)).length } : all, [cwd]);
   // The requests tab is chosen once, on opening; later reloads leave the owner where they are.
   const opened = useRef(false);
   // Asked again when shown again and when the page sees the number of waiting requests change.
   useEffect(() => {
     if (!active) return;
     void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(value => { if (!opened.current && value.pending) setTab('requests'); opened.current = true; setOverview(value); }).catch(error => setError(error instanceof Error ? error.message : String(error)));
-  }, [token, cwd, active, waiting]);
+  }, [token, cwd, active, waitingCount]);
+  // While the reviewer works on a request, the panel follows it: the waiting count does not change until it is done.
+  const reviewing = Boolean(overview?.requests.some(request => request.status === 'pending' && (request.review?.status === 'queued' || request.review?.status === 'running')));
+  useEffect(() => {
+    if (!active || !reviewing) return;
+    const timer = setInterval(() => { void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(setOverview).catch(() => {}); }, 4000);
+    return () => clearInterval(timer);
+  }, [token, cwd, active, reviewing]);
   useSettingsGuard({
     escape: () => { if (!draft) return false; setDraft(null); return true; },
     leave: () => !draft || window.confirm(t('저장하지 않은 변경 사항을 버릴까요?')),
@@ -49,7 +56,7 @@ export function PermissionsPanel({ token, cwd, projects, pending: waiting, onCle
       setOverview(shown(next));
       onChanged();
       if (next.resumed && 'error' in next.resumed) setError(t('결정은 저장했지만 대화에 알리지 못했습니다: {0}', { 0: translateMessage(next.resumed.error) }));
-      else if (done) setNotice(next.resumed ? `${done} ${t("요청한 대화에 알렸습니다.")}` : done);
+      else if (done) setNotice(`${next.resumed ? `${done} ${t("요청한 대화에 알렸습니다.")}` : done}${next.replaced?.length ? ` ${t('겹치던 자동 허용 규칙 {0}을(를) 지웠습니다.', { 0: next.replaced.join(', ') })}` : ''}`);
       return true;
     }
     catch (error) { setError(error instanceof Error ? error.message : String(error)); return false; }
@@ -66,7 +73,7 @@ export function PermissionsPanel({ token, cwd, projects, pending: waiting, onCle
   }
   return <SettingsPane title={t('권한')} scope="auth-panel skills-scope" chip={cwd ? <FolderChip cwd={cwd} onClear={onClearFolder} /> : undefined}
     description={t('Claude Code와 Codex가 묻지 않고 할 수 있는 일')}
-    tabs={draft || !overview ? undefined : [{ id: 'requests' as Tab, label: t('요청'), count: pending.length, urgent: true }, { id: 'rules' as Tab, label: t('규칙 {0}', { 0: overview.rules.length }) }]} tab={tab} onTab={setTab}>
+    tabs={draft || !overview ? undefined : [{ id: 'requests' as Tab, label: t('요청'), count: pending.filter(waiting).length, urgent: true }, { id: 'rules' as Tab, label: t('규칙 {0}', { 0: overview.rules.length }) }]} tab={tab} onTab={setTab}>
     <p className="auth-hint">{cwd ? t('이 프로젝트에서 Claude Code와 Codex가 묻지 않고 할 수 있는 일입니다. 이 프로젝트의 규칙과 모든 프로젝트에 쓰이는 규칙이 함께 보입니다.')
       : t('Claude Code와 Codex가 묻거나 막지 않고 할 수 있는 일을 한곳에서 관리합니다. 에이전트가 막힌 작업에 필요한 권한을 요청하면 여기서 허용합니다.')}</p>
     {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
@@ -76,6 +83,7 @@ export function PermissionsPanel({ token, cwd, projects, pending: waiting, onCle
     {draft ? <RuleEditor draft={draft} cwd={cwd} projects={projects} busy={busy} onCancel={() => setDraft(null)} onSave={next => void save(next)} />
       : !overview ? !error && <LoaderCircle className="spin" aria-label={t('불러오는 중')} /> : <>
       {tab === 'requests' && <section className="permission-requests">
+        {overview.autoReview && <AutoReviewSettings settings={overview.autoReview} busy={busy} onSave={settings => void act('saveAutoReview', { settings }, settings.enabled ? t('자동 검토 설정을 저장했습니다.') : t('자동 검토를 껐습니다.'))} />}
         {pending.length > 0 && <label className="skill-pinned permission-resume"><input type="checkbox" checked={resume} disabled={busy} onChange={event => setResume(event.target.checked)} />{t('결정을 요청한 대화에 보내 이어서 진행')}
           <small>{t('허용하거나 거절하면 그 대화에 내 메시지로 결과를 보냅니다. 에이전트가 일하는 중이면 그 턴이 끝난 뒤에 보냅니다. 허용한 규칙은 다음 턴부터 적용됩니다.')}</small></label>}
         {pending.length ? pending.map(request => <RequestCard key={request.id} request={request} busy={busy} onOpenSession={onOpenSession}
@@ -84,8 +92,9 @@ export function PermissionsPanel({ token, cwd, projects, pending: waiting, onCle
           onDeny={() => void act('decide', { id: request.id, approve: false, resume }, t('요청을 거절했습니다.'))} />)
           : <p className="auth-empty">{t('기다리는 요청이 없습니다. Tower에서 시작한 대화의 에이전트는 막힌 작업에 필요한 권한을 permissions_request 도구로 요청할 수 있습니다.')}</p>}
         {decided.length > 0 && <details className="skills-watching"><summary>{t('처리한 요청 {0}', { 0: decided.length })}</summary>
-          <ul className="permission-history">{decided.map(request => <li key={request.id}><span className={`skill-badge ${request.status === 'approved' ? 'pinned' : ''}`}>{request.status === 'approved' ? t('허용') : t('거절')}</span>
-            <code>{request.rule.value}</code><small>{folderName(request.cwd)} · {date(request.decidedAt ?? request.createdAt)}</small></li>)}</ul></details>}
+          <ul className="permission-history">{decided.map(request => <li key={request.id}><span className={`skill-badge ${request.status === 'approved' ? 'pinned' : ''}`}>{decidedLabel(request, t)}</span>
+            <code>{request.rule.value}</code><small>{folderName(request.cwd)} · {date(request.decidedAt ?? request.createdAt)}</small>
+            {request.decidedBy === 'auto' && request.review?.reason && <p className="permission-review-reason"><Bot size={13} />{request.review.reason}{request.review.suggestion ? ` → ${request.review.suggestion}` : ''}</p>}</li>)}</ul></details>}
       </section>}
       {tab === 'rules' && <RuleList overview={overview} cwd={cwd} busy={busy} onNew={() => setDraft(newRule())} onEdit={rule => setDraft(ruleDraft(rule))}
         onDelete={rule => { if (window.confirm(t('{0} 규칙을 삭제할까요? 다음 턴부터 적용되지 않습니다.', { 0: rule.value }))) void act('delete', { id: rule.id }, t('규칙을 삭제했습니다.')); }} />}
@@ -98,15 +107,54 @@ function Providers({ providers }: { providers: PermissionProvider[] }) {
 }
 
 /** What each provider will read for this rule, exactly. */
-function NativePreview({ rule, warnCodex = false }: { rule: Pick<PermissionRuleInput, 'kind' | 'value' | 'providers'>; warnCodex?: boolean }) {
+function NativePreview({ rule, warnCodex = false, guarded = false }: { rule: Pick<PermissionRuleInput, 'kind' | 'value' | 'providers'>; warnCodex?: boolean; guarded?: boolean }) {
   const { t } = useI18n();
   if (ruleProblem({ ...rule, scope: 'global' })) return null;
+  const dangers = guarded && rule.kind === 'command' ? dangerousContinuations(rule.value) : [];
   return <dl className="permission-native">
     {rule.providers.includes('claude') && <><dt>Claude Code</dt><dd><code>{claudeRule(rule)}</code></dd></>}
     {rule.kind === 'command' && rule.providers.includes('codex') && <><dt>Codex</dt><dd><code>{codexRule(rule)}</code></dd></>}
     {warnCodex && rule.kind === 'command' && rule.providers.includes('codex') && <dd className="permission-broad"><TriangleAlert size={13} />{t('Codex 규칙은 트리거와 공개 에이전트를 포함한 이 컴퓨터의 모든 Codex 실행에 적용됩니다.')}</dd>}
     {ruleIsBroad(rule) && <dd className="permission-broad"><TriangleAlert size={13} />{t('넓은 규칙입니다. 이 프로그램으로 하는 거의 모든 일을 묻지 않고 허용합니다.')}</dd>}
+    {guarded && rule.kind === 'command' && dangers.length > 0 && <><dt>{t('함께 막는 인자')}</dt><dd><code>{dangers.join('  ')}</code></dd></>}
   </dl>;
+}
+
+function decidedLabel(request: PermissionRequest, t: (text: string, values?: Record<string, string | number>) => string): string {
+  if (request.status === 'withdrawn') return t('범위 축소 요청');
+  if (request.status === 'approved') return request.decidedBy === 'auto' ? t('자동 허용') : t('허용');
+  return t('거절');
+}
+
+/** What Tower's reviewer is doing with, or made of, a request still pending. */
+function ReviewNote({ request }: { request: PermissionRequest }) {
+  const { t } = useI18n();
+  const review = request.review;
+  if (!review) return null;
+  const label = review.status === 'queued' || review.status === 'running' ? t('자동 검토 중')
+    : review.status === 'skipped' ? t('자동 검토 대상 아님') : review.status === 'failed' ? t('자동 검토 실패') : t('자동 검토: 소유자 판단 필요');
+  return <p className="permission-review-reason">{review.status === 'queued' || review.status === 'running' ? <LoaderCircle className="spin" size={13} /> : <Bot size={13} />}
+    <strong>{label}</strong>{review.reason ? ` · ${translateMessage(review.reason)}` : ''}</p>;
+}
+
+/** The owner's setting for Tower's permission reviewer. */
+function AutoReviewSettings({ settings, busy, onSave }: { settings: PermissionAutoReview; busy: boolean; onSave: (settings: PermissionAutoReview) => void }) {
+  const { t } = useI18n();
+  const change = (patch: Partial<PermissionAutoReview>) => {
+    const next = { ...settings, ...patch };
+    if (patch.provider && !AUTO_REVIEW_MODELS[patch.provider].includes(next.model)) next.model = AUTO_REVIEW_MODELS[patch.provider][0]!;
+    onSave(next);
+  };
+  return <div className="permission-auto-review">
+    <label className="skill-pinned"><input type="checkbox" checked={settings.enabled} disabled={busy} onChange={event => change({ enabled: event.target.checked })} />{t('자동 검토')}
+      <small>{t('에이전트가 권한을 요청하면 별도 모델이 이 작업에 대한 소유자의 지시(Tower에서 직접 입력한 요청, 확인한 스킬과 지침)와 작업 내역을 보고, 작업에 필요하고 위험하지 않으면 그 프로젝트에만 허용합니다. 범위가 넓으면 더 좁게 다시 요청하게 하고, 그 밖에는 이유를 남겨 소유자에게 넘깁니다. 옵션이 든 명령 규칙, 넓은 규칙, 삭제·비밀·네트워크 명령, 소유자 규칙과 겹치는 규칙, 공개 에이전트의 요청, Tower 밖이나 이전 버전에서 시작한 대화의 요청은 항상 소유자가 정합니다.')}</small></label>
+    {settings.enabled && <div className="permission-auto-review-options">
+      <label>{t('검토 모델')}<select value={`${settings.provider}:${settings.model}`} disabled={busy} onChange={event => { const [provider, model] = event.target.value.split(':') as [PermissionProvider, string]; change({ provider, model }); }}>
+        {(['claude', 'codex'] as const).flatMap(provider => AUTO_REVIEW_MODELS[provider].map(model => <option key={`${provider}:${model}`} value={`${provider}:${model}`}>{provider === 'claude' ? 'Claude' : 'Codex'} · {model}</option>))}
+      </select></label>
+      <label className="skill-pinned"><input type="checkbox" checked={settings.resume} disabled={busy} onChange={event => change({ resume: event.target.checked })} />{t('검토 결과를 요청한 대화에 알리기')}</label>
+    </div>}
+  </div>;
 }
 
 function RequestCard({ request, busy, onApprove, onEdit, onDeny, onOpenSession }: { request: PermissionRequest; busy: boolean; onApprove: () => void; onEdit: () => void; onDeny: () => void; onOpenSession: (id: string) => void }) {
@@ -115,6 +163,7 @@ function RequestCard({ request, busy, onApprove, onEdit, onDeny, onOpenSession }
     <header><code className="permission-value">{request.rule.value}</code><span className="skill-badges"><Providers providers={request.rule.providers} />
       <span className="skill-badge">{request.rule.scope === 'global' ? t('모든 프로젝트') : folderName(request.rule.cwd ?? request.cwd)}</span></span></header>
     <p>{request.reason}</p>
+    <ReviewNote request={request} />
     <NativePreview rule={request.rule} warnCodex />
     <p className="permission-meta"><button type="button" className="link-button" onClick={() => onOpenSession(request.sessionId)}>{t('요청한 대화 열기')}</button><small>{folderName(request.cwd)} · {date(request.createdAt)}</small></p>
     <footer><span />
@@ -140,9 +189,9 @@ function RuleList({ overview, cwd, busy, onNew, onEdit, onDelete }: { overview: 
     {groups.map(([key, label, rules]) => <div key={key} className="skills-group"><h3 title={key === 'global' ? undefined : key}>{label} <span className="auth-count">{rules.length}</span></h3>
       {rules.length ? <ul>{rules.map(rule => <li key={rule.id} className="skill-row">
         <div className="skill-row-main"><code className="permission-value">{rule.value}</code>
-          <span className="skill-badges"><Providers providers={rule.providers} />{rule.kind === 'claude' && <span className="skill-badge">{t('Claude 규칙')}</span>}{rule.source === 'request' && <span className="skill-badge pinned">{t('요청으로 허용')}</span>}</span>
+          <span className="skill-badges"><Providers providers={rule.providers} />{rule.kind === 'claude' && <span className="skill-badge">{t('Claude 규칙')}</span>}{rule.source === 'request' && <span className="skill-badge pinned">{t('요청으로 허용')}</span>}{rule.source === 'auto' && <span className="skill-badge pinned">{t('자동 검토로 허용')}</span>}</span>
           {rule.note && <p>{rule.note}</p>}
-          <NativePreview rule={rule} /></div>
+          <NativePreview rule={rule} guarded={rule.source === 'auto'} /></div>
         <div className="skill-row-actions">
           <button className="icon-button" title={t('편집')} aria-label={t('{0} 편집', { 0: rule.value })} disabled={busy} onClick={() => onEdit(rule)}><Pencil size={15} /></button>
           <button className="icon-button" title={t('삭제')} aria-label={t('{0} 삭제', { 0: rule.value })} disabled={busy} onClick={() => onDelete(rule)}><Trash2 size={15} /></button>

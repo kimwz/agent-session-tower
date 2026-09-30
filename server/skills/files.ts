@@ -177,9 +177,10 @@ export class SkillFiles {
 
   async detail(dir: string, cwd?: string): Promise<SkillDetail> {
     const skill = await this.find(dir, cwd);
-    const text = await readSkillText(join(skill.dir, 'SKILL.md'));
-    if (text === undefined) throw new SkillError('스킬 파일을 읽을 수 없습니다.', 404);
-    return { ...skill, revision: revisionOf(text), body: parseSkillFile(text).body };
+    // Everything shown comes from the read whose revision a save or a confirmation sends back.
+    const read = await readSkillSnapshot(skill.dir);
+    if (!read) throw new SkillError('스킬 파일을 읽을 수 없습니다.', 404);
+    return { ...skill, name: read.name, description: read.description, revision: read.revision, body: read.body };
   }
 
   private queue: Promise<unknown> = Promise.resolve();
@@ -452,9 +453,11 @@ export class SkillFiles {
     // A skill made in Tower lives in Tower's store; the agents reach it through links.
     const dir = join(await this.storeRoot(input.scope, cwd), name);
     await mkdir(dir);
-    await writeFile(join(dir, 'SKILL.md'), formatSkillFile({ name, description, body: input.body }), { flag: 'wx' });
+    const content = formatSkillFile({ name, description, body: input.body });
+    await writeFile(join(dir, 'SKILL.md'), content, { flag: 'wx' });
     if (input.link !== false) await this.linkNow(dir, cwd);
-    return this.find(dir, cwd);
+    // The revision of what was written, not of what the file holds by now.
+    return { ...await this.find(dir, cwd), revision: revisionOf(content) };
   }
 
   /** Links a skill into every agent's folder of its scope that does not have it yet. */
@@ -514,11 +517,13 @@ export class SkillFiles {
     const parsed = parseSkillFile(text);
     const temporary = join(skill.dir, `.SKILL.md.${process.pid}.${randomUUID()}.tmp`);
     const mode = (await stat(file)).mode & 0o777;
+    const content = formatSkillFile({ name, description, body, frontmatter: parsed.frontmatter });
     try {
-      await writeFile(temporary, formatSkillFile({ name, description, body, frontmatter: parsed.frontmatter }), { flag: 'wx', mode });
+      await writeFile(temporary, content, { flag: 'wx', mode });
       await rename(temporary, file);
     } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
-    return this.find(skill.dir, cwd);
+    // The revision of what was written, not of what the file holds by now.
+    return { ...await this.find(skill.dir, cwd), revision: revisionOf(content) };
   }
 
   /**
@@ -717,6 +722,17 @@ async function readSkillText(file: string): Promise<string | undefined> {
     if (!info.isFile() || info.size > MAX_FILE) return undefined;
     return await readFile(file, 'utf8');
   } catch { return undefined; }
+}
+
+/**
+ * A skill's SKILL.md as one read: its name, description, body and revision all from the same text, so a revision
+ * check covers everything returned.
+ */
+export async function readSkillSnapshot(dir: string): Promise<{ name: string; description: string; body: string; revision: string } | undefined> {
+  const text = await readSkillText(join(dir, 'SKILL.md'));
+  if (text === undefined) return undefined;
+  const parsed = parseSkillFile(text);
+  return { name: parsed.name?.trim() || basename(dir), description: (parsed.description ?? '').trim(), body: parsed.body, revision: revisionOf(text) };
 }
 
 export function revisionOf(text: string): string {

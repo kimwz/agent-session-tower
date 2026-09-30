@@ -162,6 +162,12 @@ export interface Run {
    * mode; this marks the automated work that does too.
    */
   unattended?: boolean;
+  /**
+   * The prompt is what the owner typed in Tower (a page or the owner's Auto Prompt), not something Tower or an agent
+   * queued with an owner origin (continuations, notices, resumed decisions). Tower's permission reviewer takes only
+   * these as the owner's word.
+   */
+  authored?: true;
   /** For a turn the owner started: whether Tower's tools reached it, and if not, why. */
   towerTools?: 'attached' | 'desktop-app' | 'external-input' | 'not-owner-session' | 'remote';
   prompt: string;
@@ -292,6 +298,8 @@ export interface AutoPromptJob {
   unattended?: boolean;
   /** The request carries external content, so it may only start a new session. */
   untrustedInput?: boolean;
+  /** The owner typed the prompt (see `Run.authored`). */
+  authored?: true;
   sessionMode?: 'new';
   targetSessionId?: string;
   routingContext?: string;
