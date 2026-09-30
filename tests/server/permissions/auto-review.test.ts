@@ -48,13 +48,17 @@ test('hard limits: never-allowed commands, broad rules, Bash as a Claude rule an
 
 test('an allowed push is paired with deny rules for its destructive variants', () => {
   const guards = ruleGuards({ kind: 'command', value: 'git push' });
-  for (const pattern of ['Bash(git push --fo*)', 'Bash(git push * --fo*)', 'Bash(git push -f*)', 'Bash(git push * -f*)', 'Bash(git push * +*)', 'Bash(git push * --de*)', 'Bash(git push * --mi*)'])
+  for (const pattern of ['Bash(git push --force*)', 'Bash(git push * --force*)', 'Bash(git push -f*)', 'Bash(git push * -f*)', 'Bash(git push * +*)', 'Bash(git push * --delete*)', 'Bash(git push * --del)', 'Bash(git push * --del *)', 'Bash(git push * --mirr)'])
     assert.ok(guards.claude.includes(pattern), pattern);
   assert.ok(guards.codex.includes('prefix_rule(pattern=["git", "push", "--force"], decision="forbidden")'));
   assert.ok(guards.codex.includes('prefix_rule(pattern=["git", "push", "--del"], decision="forbidden")'), 'git takes abbreviations');
+  // Options that only share a start with a dangerous one stay allowed.
+  const matches = (pattern: string, command: string) => new RegExp(`^${pattern.slice(5, -1).split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`).test(command);
+  for (const command of ['git push --follow-tags', 'git push origin main --follow-tags', 'git push --dry-run']) assert.ok(!guards.claude.some(pattern => matches(pattern, command)), command);
+  for (const command of ['git push --del origin x', 'git push origin main --force', 'git push --force-with-lease']) assert.ok(guards.claude.some(pattern => matches(pattern, command)), command);
   assert.deepEqual(ruleGuards({ kind: 'command', value: 'gh pr merge' }), { claude: [], codex: [] });
   assert.ok(ruleGuards({ kind: 'command', value: 'gh pr' }).claude.includes('Bash(gh pr close)'));
-  assert.ok(ruleGuards({ kind: 'command', value: 'git push origin main' }).claude.includes('Bash(git push origin main * --fo*)'), 'options follow anywhere');
+  assert.ok(ruleGuards({ kind: 'command', value: 'git push origin main' }).claude.includes('Bash(git push origin main * --force*)'), 'options follow anywhere');
   assert.ok(ruleGuards({ kind: 'command', value: 'git checkout' }).claude.includes('Bash(git checkout * --)'), 'a bare -- is a word, not an option start');
 });
 
@@ -100,7 +104,7 @@ test('an approval becomes a project rule with deny rules for both agents; a wide
   assert.deepEqual([rule.source, rule.scope, rule.cwd], ['auto', 'project', f.project]);
   const settings = JSON.parse(f.service.claudeSettings(f.project)!);
   assert.deepEqual(settings.permissions.allow, ['Bash(git push *)']);
-  assert.ok(settings.permissions.deny.includes('Bash(git push * --fo*)'));
+  assert.ok(settings.permissions.deny.includes('Bash(git push * --force*)'));
   const codex = await readFile(join(f.project, '.codex', 'rules', 'tower.rules'), 'utf8');
   assert.match(codex, /prefix_rule\(pattern=\["git", "push"\], decision="allow"\)/);
   assert.match(codex, /prefix_rule\(pattern=\["git", "push", "--force"\], decision="forbidden"\)/);
@@ -294,8 +298,8 @@ test('a rule is classified by all its words: dangerous options in the rule itsel
     assert.ok(autoReviewBlock({ kind: 'command', value }, cwd), value);
   for (const value of ['git push origin main', 'gh pr merge', 'git tag v1.2.3', 'npm run release', 'cargo publish', 'docker compose up'])
     assert.equal(autoReviewBlock({ kind: 'command', value }, cwd), undefined, value);
-  assert.ok(ruleGuards({ kind: 'command', value: 'git reset' }).claude.includes('Bash(git reset * --ha*)'), 'a never-allowed continuation is guarded');
-  assert.ok(ruleGuards({ kind: 'command', value: 'git rebase' }).claude.includes('Bash(git rebase * --ex*)'), 'git rebase --exec runs a shell');
+  assert.ok(ruleGuards({ kind: 'command', value: 'git reset' }).claude.includes('Bash(git reset * --hard*)'), 'a never-allowed continuation is guarded');
+  assert.ok(ruleGuards({ kind: 'command', value: 'git rebase' }).claude.includes('Bash(git rebase * --exec*)'), 'git rebase --exec runs a shell');
   assert.equal(autoReviewBlock({ kind: 'claude', value: 'Edit(//work/shop/src/**)' }, cwd), undefined);
   for (const value of ['Glob(//etc/**)', 'Grep(//work/other)', 'Edit(//work/shop/.git/hooks/**)', 'Write(//work/shop/.claude/settings.json)', 'Edit(//work/shop/**)', 'Edit(//work/shop/*/hooks/**)', 'Edit(//work/shop/{.git,src}/**)'])
     assert.ok(autoReviewBlock({ kind: 'claude', value }, cwd), value);
@@ -348,7 +352,7 @@ test('an agent the reviewer cannot tell is never sent back for a narrower rule; 
   huge.wake();
   await huge.flush();
   const failed = f.service.overview().requests.find(entry => entry.id === big.request.id)!;
-  assert.deepEqual([failed.status, failed.review!.status], ['pending', 'failed']);
+  assert.deepEqual([failed.status, failed.review!.status], ['pending', 'skipped']);
 });
 
 test('the owner’s words reach the reviewer whole, and a review whose end could not be saved is taken again', async t => {
@@ -388,7 +392,7 @@ test('the reviewer leaves it to the owner when the owner’s words are not all k
   assert.equal(asked, 0, 'the model is never asked');
   for (const id of [first.request.id, second.request.id]) {
     const item = f.service.overview().requests.find(entry => entry.id === id)!;
-    assert.deepEqual([item.status, item.review!.status], ['pending', 'failed']);
+    assert.deepEqual([item.status, item.review!.status], ['pending', 'skipped']);
   }
   assert.match(f.service.overview().requests.find(entry => entry.id === second.request.id)!.review!.reason!, /auto-deploy/);
 });
@@ -398,16 +402,16 @@ test('the owner’s words are kept per conversation from its start in Tower, who
   t.after(() => rm(root, { recursive: true, force: true }));
   const store = new OwnerPromptStore(root);
   await store.start();
-  await store.begin('claude:a', '1');
-  await store.add('claude:a', '2', 'Ship it, but ask before pushing.');
-  await store.add('claude:b', '3', 'A conversation Tower did not see start');
+  await store.record('claude:a', '1', { begin: true });
+  await store.record('claude:a', '2', { text: 'Ship it, but ask before pushing.' });
+  await store.record('claude:b', '3', { text: 'A conversation Tower did not see start' });
   const again = new OwnerPromptStore(root);
   await again.start();
   assert.deepEqual(again.list('claude:a'), { prompts: [{ at: '2', text: 'Ship it, but ask before pushing.' }], complete: true });
   assert.equal(again.list('claude:b').complete, false);
   assert.equal(again.list('claude:unknown').complete, false);
-  await again.begin('claude:c', '4');
-  for (let index = 0; index < 5; index += 1) await again.add('claude:c', String(index), 'x'.repeat(100_000));
+  await again.record('claude:c', '4', { begin: true });
+  for (let index = 0; index < 5; index += 1) await again.record('claude:c', String(index), { text: 'x'.repeat(100_000) });
   assert.equal(again.list('claude:c').complete, false, 'too long to keep whole');
 });
 
@@ -422,4 +426,65 @@ test('a narrower-rule answer the agent could not be sent goes back to the owner'
   await reviewer.flush();
   const item = f.service.overview().requests.find(entry => entry.id === request.id)!;
   assert.deepEqual([item.status, item.review!.verdict, item.decidedBy], ['pending', 'owner', undefined]);
+});
+
+test('an owner rule saved beside an overlapping rule the reviewer allowed replaces it, so nothing of the owner’s is denied', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const asked = await f.service.request({ kind: 'command', value: 'git push', providers: ['claude', 'codex'], scope: 'project', reason: 'push' }, agent('claude:one'));
+  await f.service.startReview(asked.request.id!);
+  await f.service.applyReview(asked.request.id!, { verdict: 'approve', reason: 'ok' });
+  const overview = await f.service.save({ kind: 'command', value: 'git push --force-with-lease', providers: ['claude', 'codex'], scope: 'global' });
+  assert.deepEqual(overview.replaced, ['git push']);
+  assert.deepEqual(overview.rules.map(rule => rule.value), ['git push --force-with-lease']);
+  assert.equal(JSON.parse(f.service.claudeSettings(f.project)!).permissions.deny, undefined);
+});
+
+test('an unreadable owner-prompt record starts over: old conversations are not whole, new ones are', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'tower-owner-prompts-bad-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'owner-prompts.json'), '{ not json', { mode: 0o600 });
+  const store = new OwnerPromptStore(root);
+  await store.start();
+  assert.equal(store.list('claude:old').complete, false);
+  await store.record('claude:new', '1', { begin: true });
+  await store.record('claude:new', '2', { text: 'Ship it.' });
+  assert.deepEqual(store.list('claude:new'), { prompts: [{ at: '2', text: 'Ship it.' }], complete: true });
+});
+
+test('owner work that is not typed here makes the record not whole; a record that cannot be saved is not whole either', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'tower-owner-prompts-taint-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new OwnerPromptStore(root);
+  await store.start();
+  await store.record('claude:a', '1', { begin: true, text: 'Deploy after review.' });
+  await store.record('claude:a', '2', { taint: true });
+  assert.equal(store.list('claude:a').complete, false, 'the master or another computer spoke for the owner');
+  // The folder is gone: saving fails, and the conversation is not taken as whole.
+  const broken = new OwnerPromptStore(join(root, 'missing', 'deeper'));
+  await broken.start();
+  await assert.rejects(broken.record('claude:b', '1', { begin: true, text: 'Never push to main.' }));
+  assert.equal(broken.list('claude:b').complete, false);
+});
+
+test('when the owner says more while the model answers, the request is reviewed again with it', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const prompts = [{ at: '1', text: 'Ship the release.' }];
+  let calls = 0;
+  const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {},
+    sources: sources(f, [], { ownerPrompts: () => ({ prompts: [...prompts], complete: true }) }),
+    model: async () => {
+      calls += 1;
+      if (calls === 1) { prompts.push({ at: '2', text: 'Do not push until I say so.' }); return { verdict: 'approve', rule: null, suggestion: null, reason: 'release' }; }
+      return { verdict: 'owner', rule: null, suggestion: null, reason: '소유자가 push를 막았습니다' };
+    } });
+  const { request } = await f.service.request({ kind: 'command', value: 'git push origin main', scope: 'project', reason: 'push' }, agent('claude:one'));
+  reviewer.wake();
+  await reviewer.flush();
+  await new Promise(resolve => setTimeout(resolve, 10));
+  await reviewer.flush();
+  assert.equal(calls, 2);
+  const item = f.service.overview().requests.find(entry => entry.id === request.id)!;
+  assert.deepEqual([item.status, item.review!.verdict, f.service.overview().rules.length], ['pending', 'owner', 0]);
 });

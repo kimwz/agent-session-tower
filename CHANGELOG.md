@@ -26,23 +26,25 @@ format, and saved browser preferences are the compatibility surface.
   - **소유자 판단 필요**: the request waits for you with the reviewer's reason. The reviewer never refuses; only you do.
 - With **검토 결과를 요청한 대화에 알리기** on, the conversation hears the decision and continues. The notice runs with that conversation's own origin and approvals, never as yours.
 - The reviewer does not decide, and the request waits for you, when:
-  - the conversation started outside Tower or before this release, or is too long to keep your words whole;
-  - a skill or your guidance changed since you confirmed it.
+  - the conversation started outside Tower or before this release, is too long to keep your words whole, or got owner messages you did not type in Tower there (the master relaying, another computer, an Auto Prompt through the API);
+  - a skill or your guidance changed, or a confirmed skill was removed, since you confirmed it.
+
+  If you say more in the conversation, or confirm or change something, while the model is answering, the request is reviewed again.
 - Some requests always wait for you, whatever the model says:
   - rules for a whole program or tool, `Bash(…)` written as a Claude rule;
   - file rules outside the project, for the whole project, as a pattern, or in hidden folders (`.git`, `.claude`, `.ssh`);
   - command rules that contain options or special characters (the reviewer allows commands such as `git push origin main` or `gh pr merge`, never `git push --force-with-lease`);
   - programs called by path or in upper case, and wrappers or code runners (`xargs`, `timeout`, `env`, `npx`, `node`, `python3`, `go`);
-  - never-allowed commands at the start of the rule (`git reset --hard`, `gh api`, `gh secret`, `npm exec`, `git config`, …);
+  - never-allowed commands at the start of the rule (`git reset --hard`, `gh api`, `gh secret`, `npm exec`, `git config`, `git credential`, `git remote`, `docker run`, `docker exec`, `kubectl exec`, …);
   - deleting, network and privilege programs anywhere in it (`rm`, `curl`, `ssh`, `sudo`, …);
   - rules that overlap a rule you made yourself;
   - public agents' requests.
 - An allowed rule also gets deny rules for the destructive options of its command (and the dangerous ends of shorter never-allowed commands, such as `git reset` + `--hard`). For example, an allowed `git push` also denies:
-  - for Claude Code, `--force`, `-f`, `--force-with-lease`, `--delete`, `--mirror` and `+refspec` anywhere after it, including the abbreviations git accepts (`--del`);
-  - for Codex, the same options and their abbreviations right after the prefix.
+  - for Claude Code, `--force` (with `--force-with-lease` and `--force=…`), `-f`, `--delete`, `--mirror` and `+refspec` anywhere after it, and every shorter spelling git accepts (`--d`, `--del`, …) as a whole word, so options that only share a start (`--follow-tags`) stay allowed;
+  - for Codex, the same options and their spellings right after the prefix.
 
   Some variants stay open:
-  - Codex rules cannot name options that come after other arguments, so Codex does not block `git push origin main --force` under an allowed `git push`.
+  - Codex rules only match whole words right after the prefix, so Codex does not block `git push origin main --force`, `--force-with-lease=main`, `-fu` or `+main` under an allowed `git push`.
   - Claude Code does not block combined short options such as `-vf`, or a trailing `:ref` that deletes a remote branch (`git push origin :main`).
 - While auto-review is on, skills and guidance show **확인 필요** when their text, or the projects a skill applies to, changed since you saved or confirmed them in Tower. Open one and press **이 내용 확인** to let the reviewer rely on it. Skills saved before this release need that once. The master's or another computer's changes never count as yours.
 - Agents see the reviewer's verdict and reason in `permissions_list`, and the Tower guidance asks them to name the step of your task that needs a permission.
@@ -50,7 +52,7 @@ format, and saved browser preferences are the compatibility surface.
 ### Changed
 - The waiting-requests count and badge leave out requests the reviewer is still checking; the open permissions panel follows a review until it ends.
 - A review under way when the worker hands over finishes first; waiting reviews continue in the new worker.
-- Changing what a rule the reviewer made allows makes it yours, without its deny rules; changing only its note or agents keeps them.
+- Changing what a rule the reviewer made allows makes it yours, without its deny rules; changing only its note or agents keeps them. Saving or allowing a rule of your own that overlaps one the reviewer made (`git push --force-with-lease` beside `git push`) removes the reviewer's, so its deny rules never block yours.
 - Going back to 1.87 reads requests the reviewer withdrew as waiting and its rules as yours, without their deny rules. Delete the 자동 검토로 허용 rules before downgrading.
 
 ## [1.87.0] - 2026-09-30

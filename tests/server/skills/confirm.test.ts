@@ -24,7 +24,7 @@ async function fixture(t: test.TestContext) {
   await service.start();
   await service.settled();
   t.after(async () => { service.close(); await service.flush().catch(() => {}); await rm(root, { recursive: true, force: true }); });
-  return { state, shop, blog, service };
+  return { state, shop, blog, service, homes };
 }
 
 test('the permission reviewer takes a Tower skill as the owner’s word only at the text the owner saved or confirmed', async t => {
@@ -91,4 +91,17 @@ test('a confirmed skill counts for the reviewer only where the owner applied it 
   const again = await f.service.detail({ dir: skill.dir });
   await f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.shop, f.blog] }, targetsRevision: targetsRevision(again.targets) }, { typed: true });
   assert.equal((await f.service.authority(f.blog)).skills.length, 1, 'the owner applied it there');
+});
+
+test('a confirmed skill removed outside Tower keeps counting as changed, even after a restart; deleting it in Tower clears it', async t => {
+  const f = await fixture(t);
+  const saved = await f.service.mutate('save', { name: 'no-push', description: 'Limits.', body: 'Never push to main.', targets: { all: false, projects: [f.shop] }, pinned: true }, { typed: true });
+  const skill = saved.stored!.find(item => item.name === 'no-push')!;
+  await rm(skill.dir, { recursive: true, force: true });
+  assert.deepEqual((await f.service.authority(f.shop)).changed, ['no-push']);
+  const restarted = new SkillService({ stateDir: f.state, homes: f.homes, sessions: () => [], runs: () => [], history: async () => [], model: async () => ({}), advise: false });
+  await restarted.start();
+  await restarted.settled();
+  t.after(async () => { restarted.close(); await restarted.flush().catch(() => {}); });
+  assert.deepEqual((await restarted.authority(f.shop)).changed, ['no-push']);
 });

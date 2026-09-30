@@ -1,9 +1,9 @@
 import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
 import type { PermissionRequest } from '../../shared/permissions.js';
-import { REVIEW_SCHEMA, REVIEW_SYSTEM, reviewInput, type ReviewSources } from './context.js';
+import { REVIEW_SCHEMA, REVIEW_SYSTEM, ReviewSkip, reviewInput, type ReviewSources } from './context.js';
 import type { PermissionReviewResult, PermissionService } from './service.js';
 
-export const REVIEW_TIMEOUT_MS = 3 * 60 * 1000;
+const REVIEW_TIMEOUT_MS = 3 * 60 * 1000;
 /** After Tower could not record a review (a full disk, say), it waits this long before trying again. */
 const RETRY_MS = 60 * 1000;
 
@@ -71,14 +71,21 @@ export class PermissionReviewer {
     let result: PermissionReviewResult;
     try {
       const prompt = await reviewInput(request, this.options.sources);
+      const before = JSON.stringify(JSON.parse(prompt).authority);
       const answer = await this.options.model({ provider: settings.provider, model: settings.model, systemPrompt: REVIEW_SYSTEM, prompt,
         schema: REVIEW_SCHEMA as unknown as Record<string, unknown>, signal: controller.signal }, { timeoutMs: this.options.timeoutMs ?? REVIEW_TIMEOUT_MS });
       result = parse(answer, request, settings.model);
+      // The owner said more, or confirmed or changed something, while the model answered: review again with that.
+      if (JSON.stringify(JSON.parse(await reviewInput(request, this.options.sources)).authority) !== before) {
+        await service.requeueReview(request.id);
+        return;
+      }
       // Sending the agent back only works when it hears about it; otherwise the owner decides.
       if (result.verdict === 'narrow' && (!settings.resume || !this.options.reachable(request))) {
         result = { ...result, verdict: 'owner', reason: `${result.reason} (더 좁게 요청하라고 전할 수 없어 소유자에게 넘깁니다${result.suggestion ? `. 제안: ${result.suggestion}` : ''})` };
       }
     } catch (error) {
+      if (error instanceof ReviewSkip) { await service.failReview(request.id, error.message, 'skipped'); return; }
       await service.failReview(request.id, this.aborted ? '자동 검토가 꺼졌습니다.' : controller.signal.aborted ? '자동 검토가 시간 안에 끝나지 않았습니다.' : (error instanceof Error ? error.message : String(error)).replace(/^Auto Prompt: /, ''));
       return;
     } finally { clearTimeout(timer); this.controller = undefined; }

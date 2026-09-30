@@ -345,6 +345,9 @@ export class SkillService {
       if (state.confirmed[item.dir] === read.revision && owned && targetsCover(owned, folder)) skills.push({ name: read.name, description: read.description, body: read.body });
       else unconfirmed.push(read.name);
     }
+    // A confirmed skill whose record is gone (its folder removed outside Tower) still held the owner's words.
+    const known = new Set(state.targets.map(item => item.dir));
+    for (const [dir, targets] of Object.entries(state.confirmedTargets)) if (!known.has(dir) && state.confirmed[dir] && targetsCover(targets, folder)) changed.push(basename(dir));
     const guidance = await this.guidance();
     if (state.guidanceConfirmed && !guidance.confirmed) changed.push('guidance');
     return { skills, ...(guidance.confirmed && guidance.owner.trim() ? { guidance: guidance.owner } : {}), unconfirmed, changed };
@@ -509,7 +512,9 @@ export class SkillService {
         try { await this.files.remove(skill.dir, skill.managed ? skill.cwd : cwd); }
         catch (error) { if (before) await this.apply(skill.dir, { all: before.all, projects: before.projects }, false).catch(() => {}); throw error; }
         await this.pin(skill, false);
-        if (skill.managed) await this.state.update(state => { state.targets = state.targets.filter(item => item.dir !== skill.dir); });
+        if (skill.managed) await this.state.update(state => { state.targets = state.targets.filter(item => item.dir !== skill.dir);
+          // Deleted by the owner in Tower: nothing of it is the owner's word any more.
+          delete state.confirmed[skill.dir]; delete state.confirmedTargets[skill.dir]; });
         break;
       }
       case 'dismiss': {

@@ -64,7 +64,7 @@ interface RunnerOptions {
   /** Notes for every turn, such as the owner's pinned skills; asked and limited like `firstTurnNotes`. */
   turnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
   /** Keeps what the owner typed per conversation, from the start of the conversations Tower creates. */
-  ownerPrompts?: { begin(sessionId: string, at: string): Promise<void>; add(sessionId: string, at: string, text: string): Promise<void> };
+  ownerPrompts?: { record(sessionId: string, at: string, input: { begin?: boolean; text?: string; taint?: boolean }): Promise<void> };
   /** Settings for every Claude Code turn Tower starts: the owner's allow rules for its folder. */
   claudeSettings?: (cwd: string) => string | undefined;
   /** Pre-accepts the native folder trust prompt for a newly created session. */
@@ -97,6 +97,8 @@ export interface RunAdmission {
   untrustedInput?: boolean;
   /** The owner typed the prompt in Tower; recorded as `Run.authored`. Only owner-origin work can be. */
   authored?: boolean;
+  /** Tower's own message into the conversation (a decision, a notice), never the owner's words. */
+  notice?: boolean;
   /** No one is watching: Claude runs in its automatic permission mode (Codex uses its auto review reviewer). */
   unattended?: boolean;
   /** Triggers never create a missing folder. */
@@ -275,12 +277,13 @@ export class RunManager extends EventEmitter {
   setTurnNotes(notes: NonNullable<RunnerOptions['turnNotes']>): void { this.options.turnNotes = notes; }
   setOwnerPrompts(store: NonNullable<RunnerOptions['ownerPrompts']>): void { this.options.ownerPrompts = store; }
   /** Records a conversation's start or the owner's words in it; a failed record only leaves the reviewer to the owner. */
-  private async recordOwner(sessionId: string, run: Run, created: boolean): Promise<void> {
+  private async recordOwner(sessionId: string, run: Run, created: boolean, notice = false): Promise<void> {
     const store = this.options.ownerPrompts;
     if (!store) return;
     try {
-      if (created) await store.begin(sessionId, run.createdAt);
-      if (run.authored) await store.add(sessionId, run.createdAt, run.prompt);
+      // Owner work that is not what the owner typed here may carry the owner's words all the same.
+      const input = { ...(created ? { begin: true } : {}), ...(run.authored ? { text: run.prompt } : run.origin?.kind === 'owner' && !notice ? { taint: true } : {}) };
+      if (Object.keys(input).length) await store.record(sessionId, run.createdAt, input);
     } catch (error) { console.error(`Owner prompt record failed: ${error instanceof Error ? error.message : String(error)}`); }
   }
   setClaudeSettings(settings: NonNullable<RunnerOptions['claudeSettings']>): void { this.options.claudeSettings = settings; }
@@ -566,12 +569,12 @@ export class RunManager extends EventEmitter {
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
     // Provenance commits with the session identity, before any provider starts.
     this.createdSessions.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}), origin: sessionOriginOf(origin, internal.untrustedInput === true) });
-    await this.recordOwner(id, run, true);
     this.runs.set(run.id, run);
     this.admissions.add(run.id);
     this.prune();
     this.changed();
     try {
+      await this.recordOwner(id, run, true, internal.notice === true);
       // The run is already registered, so a concurrent request with the same ID is refused while this waits.
       // Only an admitted request answers the native trust prompt; a refused one leaves settings untouched.
       if (internal.trustWorkspace !== false) await this.options.trustWorkspace?.(input.provider, cwd, { ...process.env, ...this.options.env }).catch(() => {});
@@ -637,7 +640,7 @@ export class RunManager extends EventEmitter {
     this.runs.set(run.id, run);
     this.prune();
     this.changed();
-    await this.recordOwner(sessionId, run, false);
+    await this.recordOwner(sessionId, run, false, internal.notice === true);
     try { await this.flush(); } // An accepted instruction is durable before launching the provider.
     catch (error) { this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error; }
     finally { this.admissions.delete(run.id); }

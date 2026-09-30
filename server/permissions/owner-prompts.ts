@@ -7,7 +7,7 @@ const MAX_SESSIONS = 400;
 const MAX_BYTES = 40_000_000;
 
 interface Entry { prompts: { at: string; text: string }[]; complete: boolean; updatedAt: string }
-interface State { version: 1; sessions: Record<string, Entry>; forgotten: string[] }
+interface State { version: 1; sessions: Record<string, Entry> }
 
 /**
  * What the owner typed in Tower, per conversation, in `<state>/owner-prompts.json`. Run history keeps only the latest
@@ -16,7 +16,7 @@ interface State { version: 1; sessions: Record<string, Entry>; forgotten: string
  * started elsewhere or before this record existed, one too long, or one forgotten to make room says it is not.
  */
 export class OwnerPromptStore {
-  private state: State = { version: 1, sessions: {}, forgotten: [] };
+  private state: State = { version: 1, sessions: {} };
   private readonly path: string;
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -31,49 +31,58 @@ export class OwnerPromptStore {
         sessions[id] = { prompts: entry.prompts.filter(item => item && typeof item.text === 'string' && typeof item.at === 'string'), complete: entry.complete !== false,
           updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : '' };
       }
-      this.state = { version: 1, sessions, forgotten: Array.isArray(saved?.forgotten) ? saved.forgotten.filter((id): id is string => typeof id === 'string') : [] };
+      this.state = { version: 1, sessions };
     } catch (error) {
-      // An unreadable record is started over, with nothing taken as complete for conversations it held.
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') this.state.forgotten = ['*'];
+      // An unreadable record starts over: the conversations it held are unknown (not whole); those begun from now on are.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`Owner prompt record was unreadable and starts over: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
   /** The owner's prompts in a conversation, oldest first, and whether that is all of them. */
   list(sessionId: string): { prompts: { at: string; text: string }[]; complete: boolean } {
     const entry = this.state.sessions[sessionId];
-    const forgotten = this.state.forgotten.includes(sessionId) || this.state.forgotten.includes('*');
-    return entry ? { prompts: entry.prompts.map(item => ({ ...item })), complete: entry.complete && !forgotten } : { prompts: [], complete: false };
+    return entry ? { prompts: entry.prompts.map(item => ({ ...item })), complete: entry.complete } : { prompts: [], complete: false };
   }
 
-  /** Tower created this conversation: its record starts here, whole, whoever started it. */
-  begin(sessionId: string, at: string): Promise<void> {
-    return this.change(() => { if (!this.state.sessions[sessionId]) this.state.sessions[sessionId] = { prompts: [], complete: true, updatedAt: at }; });
-  }
-
-  add(sessionId: string, at: string, text: string): Promise<void> {
-    return this.change(() => {
-      // A conversation Tower did not see start may hold earlier words of the owner this record never had.
-      const entry = this.state.sessions[sessionId] ?? { prompts: [], complete: false, updatedAt: at };
-      entry.prompts.push({ at, text });
+  /**
+   * The owner's words for one run, at once: the conversation's start (Tower created it), what the owner typed, or that
+   * owner work arrived which was not typed here. A record that could not be saved is not whole from then on.
+   */
+  record(sessionId: string, at: string, input: { begin?: boolean; text?: string; taint?: boolean }): Promise<void> {
+    return this.change(state => {
+      if (input.begin && !state.sessions[sessionId]) state.sessions[sessionId] = { prompts: [], complete: true, updatedAt: at };
+      const entry = state.sessions[sessionId] ?? { prompts: [], complete: false, updatedAt: at };
+      if (input.text !== undefined) entry.prompts.push({ at, text: input.text });
+      if (input.taint) entry.complete = false;
       entry.updatedAt = at;
-      // Too long: the oldest after the first go, and the record says it is no longer whole.
       while (entry.prompts.reduce((sum, item) => sum + item.text.length, 0) > MAX_SESSION_CHARS && entry.prompts.length > 1) { entry.prompts.splice(1, 1); entry.complete = false; }
+      state.sessions[sessionId] = entry;
+    }).catch(error => {
+      // Kept in memory at least, and saved with the next record that succeeds.
+      const entry = this.state.sessions[sessionId] ?? { prompts: [], complete: false, updatedAt: at };
+      entry.complete = false;
       this.state.sessions[sessionId] = entry;
+      throw error;
     });
   }
 
-  private change(apply: () => void): Promise<void> {
+  /** A change is kept only once saved. */
+  private change(apply: (state: State) => void): Promise<void> {
     const next = this.queue.catch(() => {}).then(async () => {
-      apply();
-      const ids = Object.keys(this.state.sessions);
-      if (ids.length > MAX_SESSIONS) {
-        for (const id of ids.sort((a, b) => this.state.sessions[a]!.updatedAt.localeCompare(this.state.sessions[b]!.updatedAt)).slice(0, ids.length - MAX_SESSIONS)) {
-          delete this.state.sessions[id];
-          this.state.forgotten.push(id);
-        }
-        this.state.forgotten = this.state.forgotten.slice(-20_000);
+      const state = structuredClone(this.state);
+      apply(state);
+      // Room is made by forgetting whole conversations (they are then not whole, so the owner decides there): first those
+      // the owner never typed in, then the oldest.
+      const order = () => Object.keys(state.sessions).sort((a, b) => Number(state.sessions[a]!.prompts.length > 0) - Number(state.sessions[b]!.prompts.length > 0)
+        || state.sessions[a]!.updatedAt.localeCompare(state.sessions[b]!.updatedAt));
+      for (const id of order().slice(0, Math.max(0, Object.keys(state.sessions).length - MAX_SESSIONS))) delete state.sessions[id];
+      let text = JSON.stringify(state);
+      while (Buffer.byteLength(text) > MAX_BYTES / 2 && Object.keys(state.sessions).length > 1) {
+        delete state.sessions[order()[0]!];
+        text = JSON.stringify(state);
       }
-      await writePrivateJson(this.path, JSON.stringify(this.state));
+      await writePrivateJson(this.path, text);
+      this.state = state;
     });
     this.queue = next;
     return next;

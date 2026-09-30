@@ -155,12 +155,12 @@ export class PermissionService {
     });
   }
 
-  /** A review that did not finish: the request waits for the owner. */
-  failReview(id: string, error: string): Promise<void> {
+  /** A review that did not finish, or found it may not decide: the request waits for the owner. */
+  failReview(id: string, error: string, status: 'failed' | 'skipped' = 'failed'): Promise<void> {
     return this.serial(async () => {
       const request = this.state.requests.find(item => item.id === id);
       if (!request || request.review?.status !== 'running') return;
-      await this.setReview(id, { ...request.review, status: 'failed', reason: error.slice(0, 500), at: this.now() });
+      await this.setReview(id, { ...request.review, status, reason: error.slice(0, 500), at: this.now() });
     });
   }
 
@@ -230,6 +230,15 @@ export class PermissionService {
         return { request: item, message: reviewMessage(item) };
       }
       return owner();
+    });
+  }
+
+  /** A review whose material changed while it ran: it is done again. */
+  requeueReview(id: string): Promise<void> {
+    return this.serial(async () => {
+      const request = this.state.requests.find(item => item.id === id);
+      if (!request || request.status !== 'pending' || request.review?.status !== 'running') return;
+      await this.setReview(id, { status: 'queued', at: this.now() });
     });
   }
 
@@ -311,9 +320,10 @@ export class PermissionService {
   save(input: PermissionRuleInput & { id?: string }): Promise<PermissionOverview> {
     return this.serial(async () => {
       const rule = await this.checked(clean(input));
-      await this.commit(state => { upsert(state, rule, input.id, 'owner', undefined, this.now()); });
+      let replaced: string[] = [];
+      await this.commit(state => { const made = upsert(state, rule, input.id, 'owner', undefined, this.now()); replaced = dropOverlappingAuto(state, made); });
       await this.apply();
-      return this.overview();
+      return { ...this.overview(), ...(replaced.length ? { replaced } : {}) };
     });
   }
 
@@ -343,6 +353,7 @@ export class PermissionService {
       const rule = await this.checked(clean(edited ?? request.rule));
       await this.commit(state => {
         const made = upsert(state, rule, undefined, 'request', id, at);
+        dropOverlappingAuto(state, made);
         const item = state.requests.find(entry => entry.id === id)!;
         item.status = 'approved'; item.decidedAt = at; item.ruleId = made.id; item.decidedBy = 'owner';
       });
@@ -467,6 +478,18 @@ function clean(input: PermissionRuleInput): PermissionRuleInput {
   const problem = ruleProblem({ ...rule, value: input.kind === 'command' ? input.value : value });
   if (problem) throw failure(problem);
   return rule;
+}
+
+/**
+ * The owner's own rule where the reviewer allowed an overlapping one (`git push --force-with-lease` beside `git push`):
+ * the reviewer's rule would deny what the owner allows, so it goes. Agents ask again, and the owner decides those.
+ */
+function dropOverlappingAuto(state: PermissionState, rule: PermissionRule): string[] {
+  const overlaps = (item: PermissionRule) => item.id !== rule.id && item.source === 'auto' && item.kind === 'command' && rule.kind === 'command' && rulesOverlap(item.value, rule.value)
+    && (rule.scope === 'global' || item.scope === 'global' || within(item.cwd!, rule.cwd!) || within(rule.cwd!, item.cwd!));
+  const gone = state.rules.filter(overlaps);
+  state.rules = state.rules.filter(item => !gone.includes(item));
+  return gone.map(item => item.value);
 }
 
 /** Saves a rule as a new one, into the one it edits, or into an existing rule meaning the same (providers joined). */

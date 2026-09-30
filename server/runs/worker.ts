@@ -551,7 +551,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // Made just below; the permission service only calls it once requests arrive.
     let reviewer!: PermissionReviewer;
     const permissions = new PermissionService({ stateDir, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
-      resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' } }); },
+      resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' }, notice: true }); },
       // A public agent's requests always wait for the owner: its conversations carry outsiders' words.
       autoReviewSkip: request => {
         const origin = runs.sessionOrigin(request.sessionId);
@@ -590,7 +590,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       notify: async (request, message) => {
         const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
         if (!run?.origin) return;
-        await runs.enqueue(request.sessionId, `${TOWER_NOTICE} ${message}`, {}, { origin: run.origin, ...(run.unattended ? { unattended: true } : {}) });
+        await runs.enqueue(request.sessionId, `${TOWER_NOTICE} ${message}`, {}, { origin: run.origin, notice: true, ...(run.unattended ? { unattended: true } : {}) });
       } });
 
     runs.setClaudeSettings(cwd => permissions.claudeSettings(cwd));

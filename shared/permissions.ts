@@ -94,6 +94,8 @@ export interface PermissionOverview {
   resumed?: { sent: true } | { error: string };
   /** Absent from older workers. */
   autoReview?: PermissionAutoReview;
+  /** After the owner saved a rule: rules Tower's reviewer had allowed that overlapped it and were removed. */
+  replaced?: string[];
 }
 
 export const MAX_COMMAND_TOKENS = 12;
@@ -173,6 +175,11 @@ export const NEVER_AUTO: readonly string[] = [
   'npm unpublish', 'npm deprecate', 'npm owner', 'npm token', 'npm login', 'npm adduser', 'kubectl delete', 'docker rm', 'docker rmi', 'docker system prune',
   'terraform destroy', 'terraform apply', 'npm exec', 'pnpm dlx', 'pnpm exec', 'yarn dlx', 'git config', 'git update-index', 'git worktree remove',
   'gh run delete', 'gh extension', 'gh alias', 'npm x', 'cargo run', 'git submodule foreach', 'git bisect run', 'truncate', 'shred', 'unlink',
+  // Containers and clusters run whatever they are given, often with the host's rights.
+  'docker run', 'docker exec', 'docker container run', 'docker container exec', 'docker compose run', 'docker compose exec', 'docker compose down',
+  'kubectl exec', 'kubectl run', 'kubectl cp', 'helm uninstall',
+  // Secrets and where pushes go.
+  'git credential', 'git remote', 'gh repo sync', 'gh cache delete', 'gh label delete', 'gh project delete', 'dropdb', 'redis-cli',
 ];
 
 /**
@@ -243,19 +250,26 @@ export function ruleGuards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>): {
     // Options match by their start (`--force` also covers `--force=…` and `--force-with-lease=…`, `-f` also `-fu`), as do
     // refspecs (`+*`, `:*`); subcommands and bare `--` or `.` match as whole words. Combined short options (`-vf`) are not covered.
     const option = /^-[^-]|^--./.test(token);
-    // git takes any unambiguous start of a long option (`--del` for `--delete`): deny from its first two letters on.
-    const start = token.endsWith('*') ? token : option ? `${token.startsWith('--') ? token.slice(0, 4) : token}*` : undefined;
+    // Options match by their start: `--force*` also covers `--force=…` and `--force-with-lease`, `-f*` also `-fu`.
+    const start = token.endsWith('*') ? token : option ? `${token}*` : undefined;
+    // git also takes any unambiguous start of a long option (`--del` for `--delete`): those spellings are denied as whole
+    // words, so other options that merely share a start (`--follow-tags`, `--format`) stay allowed.
+    for (const spelling of abbreviations(token)) claude.push(`Bash(${value} ${spelling})`, `Bash(${value} ${spelling} *)`, `Bash(${value} * ${spelling})`, `Bash(${value} * ${spelling} *)`);
     // Claude Code reads a rule ending in `:*` as its older prefix syntax, never as a wildcard, so a `:ref` can only be
     // denied when more follows it; a trailing `:ref` is not blocked for Claude.
     if (start?.endsWith(':*')) claude.push(`Bash(${value} ${start} *)`, `Bash(${value} * ${start} *)`);
     else if (start) claude.push(`Bash(${value} ${start})`, `Bash(${value} * ${start})`);
     else claude.push(`Bash(${value} ${token})`, `Bash(${value} ${token} *)`, `Bash(${value} * ${token})`, `Bash(${value} * ${token} *)`);
     if (token.endsWith('*')) continue;
-    // Codex matches whole words: every abbreviation git would take is named.
-    const spellings = token.startsWith('--') ? Array.from({ length: token.length - 3 }, (_, index) => token.slice(0, index + 4)) : [token];
-    for (const spelling of spellings) codex.push(`prefix_rule(pattern=[${[...words(value), spelling].map(word => JSON.stringify(word)).join(', ')}], decision="forbidden")`);
+    // Codex matches whole words: the option and every abbreviation git would take are named.
+    for (const spelling of [...abbreviations(token), token]) codex.push(`prefix_rule(pattern=[${[...words(value), spelling].map(word => JSON.stringify(word)).join(', ')}], decision="forbidden")`);
   }
   return { claude, codex };
+}
+
+/** The shorter spellings git accepts for a long option: any unambiguous start, down to one letter (`--d` for `--delete`). */
+function abbreviations(token: string): string[] {
+  return /^--./.test(token) ? Array.from({ length: Math.max(0, token.length - 3) }, (_, index) => token.slice(0, index + 3)) : [];
 }
 
 /** Whether two command rules overlap: one is the other or starts with it. */
@@ -280,16 +294,7 @@ const WRAPPERS = new Set(['env', 'sudo', 'doas', 'xargs', 'exec', 'eval', 'comma
   'npx', 'pnpx', 'bunx', 'uvx', 'uv', 'pipx', 'node', 'tsx', 'ts-node', 'python', 'python3', 'perl', 'ruby', 'php', 'lua', 'deno', 'bun', 'go', 'osascript', 'awk', 'sed']);
 /** Never-allowed programs that are dangerous wherever they appear in a rule (`xargs rm`, `docker container rm`). */
 const RUN_ANYWHERE = new Set(['rm', 'rmdir', 'sudo', 'doas', 'chmod', 'chown', 'mkfs', 'kill', 'killall', 'pkill', 'curl', 'wget', 'ssh', 'scp', 'sftp', 'rsync', 'prune']);
-/** Programs whose options before the subcommand (`git -C dir push`) hide what the rule is for. */
-const SUBCOMMAND_PROGRAMS = new Set(['git', 'gh', 'docker', 'kubectl', 'npm', 'pnpm', 'yarn', 'cargo', 'terraform', 'helm']);
 
-/** Whether a word of a command is a family's dangerous token: options also in their `=value` and combined short forms. */
-function isToken(word: string, token: string): boolean {
-  if (token.endsWith('*')) return word.length >= token.length && word.startsWith(token.slice(0, -1));
-  if (/^--./.test(token)) return word === token || word.startsWith(`${token}=`) || word.startsWith(`${token}-`);
-  if (/^-[^-]$/.test(token)) return /^-[^-]+$/.test(word) && word.includes(token[1]!);
-  return word === token;
-}
 
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Glob', 'Grep', 'LS']);
 const MCP_TOOL = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/;
@@ -315,7 +320,7 @@ export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'
     // A rule whose own words already make it destructive (`git push origin +main`, `git reset HEAD --hard`).
     for (const [prefix, tokens] of families()) {
       if (!startsWith(rulewords, prefix)) continue;
-      const found = rulewords.slice(prefix.length).find(word => tokens.some(token => isToken(word, token)));
+      const found = rulewords.slice(prefix.length).find(word => tokens.includes(word));
       if (found) return `\`${prefix.join(' ')}\`에 \`${found}\`가 붙은 규칙은 소유자가 정합니다.`;
     }
     return undefined;
