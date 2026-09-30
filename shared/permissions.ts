@@ -106,6 +106,8 @@ export interface PermissionRun {
   delivered?: boolean;
   /** Whoever allowed it asked for the conversation to hear the result (the owner's choice, or the reviewer's setting). */
   notify?: boolean;
+  /** When the result reached the conversation; the record is kept a while from then. */
+  toldAt?: string;
 }
 export interface PermissionRunOutput { stdout: string; stderr: string; truncated: boolean }
 export const MAX_RUN_COMMAND = 4000;

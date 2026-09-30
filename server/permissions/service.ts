@@ -129,11 +129,11 @@ export class PermissionService {
       || (rule.scope === 'project' && within(cwd, rule.cwd!))
       || (rule.scope === 'conversation' && rule.sessionId === sessionId && sessionId !== undefined && !expired(rule, now))));
     const allow = [...new Set(rules.map(claudeRule))];
-    // A rule the reviewer allowed never covers its family's destructive variants: deny comes before allow. Where the owner
-    // allowed an overlapping command for this turn (in any scope), the owner's rule wins and those guards are left out.
-    const owned = rules.filter(rule => rule.source !== 'auto' && rule.kind === 'command');
-    const deny = [...new Set(rules.filter(rule => rule.source === 'auto' && !owned.some(mine => rule.kind === 'command' && rulesOverlap(mine.value, rule.value)))
-      .flatMap(rule => ruleGuards(rule).claude))];
+    // A rule the reviewer allowed never covers its family's destructive variants: deny comes before allow. A guard that
+    // would refuse what the owner allowed for this turn (in any scope) is left out; its other guards stay.
+    const owned = rules.filter(rule => rule.source !== 'auto' && rule.kind === 'command').map(rule => normalizeCommand(rule.value));
+    const deny = [...new Set(rules.filter(rule => rule.source === 'auto').flatMap(rule => ruleGuards(rule).claude)
+      .filter(guard => !owned.some(command => refuses(guard, command) || refuses(guard, `${command} x`))))];
     return allow.length ? JSON.stringify({ permissions: { allow, ...(deny.length ? { deny } : {}) } }) : undefined;
   }
 
@@ -331,11 +331,13 @@ export class PermissionService {
         ...(input.scope !== 'global' ? { cwd: session.cwd } : {}), ...(input.scope === 'conversation' ? { sessionId: caller.sessionId, expiresAt: this.expiry() } : {}) }));
       // A rule for every project, for this project or for this conversation already covers what the request asks for.
       const now = Date.parse(this.now());
-      const covering = this.state.rules.filter(existing => existing.kind === rule.kind && sameRule({ ...existing, scope: 'global', cwd: undefined, sessionId: undefined }, { ...rule, scope: 'global', cwd: undefined, sessionId: undefined })
-        // Codex reads a project's rules in that folder only, so a folder inside another is not covered for it.
-        && (existing.scope === 'global' || (existing.scope === 'project' && rule.scope !== 'global' && rule.providers.every(item => item === 'codex' ? existing.cwd === rule.cwd : within(rule.cwd!, existing.cwd!)))
-          || (existing.scope === 'conversation' && rule.scope === 'conversation' && existing.sessionId === rule.sessionId && !expired(existing, now))));
-      if (rule.providers.every(item => covering.some(existing => existing.providers.includes(item)))) return { request: { status: 'exists' as const }, note: 'This rule is already allowed. Try the action again; a Codex rule applies from the next turn.' };
+      const alike = this.state.rules.filter(existing => existing.kind === rule.kind && sameRule({ ...existing, scope: 'global', cwd: undefined, sessionId: undefined }, { ...rule, scope: 'global', cwd: undefined, sessionId: undefined }));
+      // Each agent asked for is covered by a rule of its own that reaches this folder: Codex reads a project's rules in
+      // that folder only, so a folder inside another is not covered for it.
+      const covers = (existing: PermissionRule, item: PermissionProvider) => existing.providers.includes(item) && (existing.scope === 'global'
+        || (existing.scope === 'project' && rule.scope !== 'global' && (item === 'codex' ? existing.cwd === rule.cwd : within(rule.cwd!, existing.cwd!)))
+        || (existing.scope === 'conversation' && rule.scope === 'conversation' && existing.sessionId === rule.sessionId && !expired(existing, now)));
+      if (rule.providers.every(item => alike.some(existing => covers(existing, item)))) return { request: { status: 'exists' as const }, note: 'This rule is already allowed. Try the action again; a Codex rule applies from the next turn.' };
       // Only this conversation's own request is the same one: another conversation hears its own decision.
       const same = this.state.requests.find(request => request.status === 'pending' && request.sessionId === caller.sessionId && sameRule(request.rule, rule)
         && rule.providers.every(item => request.rule.providers.includes(item)));
@@ -405,7 +407,7 @@ export class PermissionService {
       request = find();
     }
     if (request.run && finishedRun(request.run) && !request.run.delivered) {
-      await this.serial(async () => { await this.commit(state => { const item = state.requests.find(entry => entry.id === input.id); if (item?.run) item.run.delivered = true; }); }).catch(() => {});
+      await this.serial(async () => { await this.commit(state => { const item = state.requests.find(entry => entry.id === input.id); if (item?.run) { item.run.delivered = true; item.run.toldAt = this.now(); } }); }).catch(() => {});
     }
     const output = request.run && finishedRun(request.run) ? await this.options.runOutput?.(request.id) : undefined;
     return { request: runView(request), ...(output ? { output } : {}) };
@@ -416,7 +418,7 @@ export class PermissionService {
     return this.serial(async () => {
       const request = this.state.requests.find(item => item.id === id);
       if (!request) return;
-      await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.run = { ...run, ...(item.run?.delivered ? { delivered: true } : {}), ...(item.run?.notify ? { notify: true } : {}) }; });
+      await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.run = { ...run, ...(item.run?.delivered ? { delivered: true } : {}), ...(item.run?.notify ? { notify: true } : {}), ...(item.run?.toldAt ? { toldAt: item.run.toldAt } : {}) }; });
       if (finishedRun(run)) this.options.onRunFinished?.(this.state.requests.find(item => item.id === id)!);
     });
   }
@@ -434,7 +436,7 @@ export class PermissionService {
 
   /** The result reached the conversation as a message. */
   markTold(id: string): Promise<void> {
-    return this.serial(async () => { await this.commit(state => { const item = state.requests.find(entry => entry.id === id); if (item?.run) item.run.delivered = true; }); });
+    return this.serial(async () => { await this.commit(state => { const item = state.requests.find(entry => entry.id === id); if (item?.run) { item.run.delivered = true; item.run.toldAt = this.now(); } }); });
   }
 
   /** Conversation rules whose time is up, or whose conversation is closed or gone, go. */
@@ -677,6 +679,13 @@ function clean(input: PermissionRuleInput): PermissionRuleInput {
  * The owner's own rule where the reviewer allowed an overlapping one (`git push --force-with-lease` beside `git push`):
  * the reviewer's rule would deny what the owner allows, so it goes. Agents ask again, and the owner decides those.
  */
+/** Whether a Claude `Bash(…)` deny pattern refuses this command. */
+function refuses(guard: string, command: string): boolean {
+  const pattern = /^Bash\((.*)\)$/.exec(guard)?.[1];
+  if (pattern === undefined) return false;
+  return new RegExp(`^${pattern.split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`).test(command);
+}
+
 function dropOverlappingAuto(state: PermissionState, rule: PermissionRule): string[] {
   const overlaps = (item: PermissionRule) => item.id !== rule.id && item.source === 'auto' && item.kind === 'command' && rule.kind === 'command' && rulesOverlap(item.value, rule.value)
     // A rule for one conversation replaces only that conversation's own: the rest of the project keeps its rules.
@@ -718,7 +727,8 @@ function upsert(state: PermissionState, rule: PermissionRuleInput, id: string | 
 function trim(state: PermissionState, now: Date): void {
   const cutoff = now.getTime() - DECIDED_DAYS * 24 * 60 * 60 * 1000;
   // A run counts from when it finished, so a result is kept a while after it arrives however long it waited.
-  const at = (request: PermissionRequest) => Date.parse(request.run?.finishedAt ?? request.decidedAt ?? request.createdAt);
+  // (and from when the conversation heard of it, so it can still read the result it was told about).
+  const at = (request: PermissionRequest) => Date.parse(request.run?.toldAt ?? request.run?.finishedAt ?? request.decidedAt ?? request.createdAt);
   const decided = state.requests.filter(request => request.status !== 'pending' && at(request) >= cutoff).sort((a, b) => at(a) - at(b)).slice(-MAX_DECIDED);
   const keep = new Set(decided);
   // A run still waiting or running, or whose result its conversation has yet to hear, is kept whatever its age.
@@ -779,7 +789,7 @@ function runFields(item: any): Partial<PermissionRequest> {
       ...(Number.isInteger(run.pid) ? { pid: run.pid } : {}), ...(typeof run.started === 'string' ? { started: run.started } : {}), ...(Number.isInteger(run.exitCode) ? { exitCode: run.exitCode } : {}),
       ...(typeof run.signal === 'string' ? { signal: run.signal } : {}), ...(run.timedOut === true ? { timedOut: true } : {}), ...(Number.isInteger(run.stdoutBytes) ? { stdoutBytes: run.stdoutBytes } : {}),
       ...(Number.isInteger(run.stderrBytes) ? { stderrBytes: run.stderrBytes } : {}), ...(run.truncated === true ? { truncated: true } : {}), ...(typeof run.error === 'string' ? { error: text(run.error, 1000) } : {}),
-      ...(run.delivered === true ? { delivered: true } : {}), ...(run.notify === true ? { notify: true } : {}),
+      ...(run.delivered === true ? { delivered: true } : {}), ...(run.notify === true ? { notify: true } : {}), ...(typeof run.toldAt === 'string' ? { toldAt: run.toldAt } : {}),
       ...(run.preview && typeof run.preview === 'object' ? { preview: { stdout: text(run.preview.stdout, 4000), stderr: text(run.preview.stderr, 4000) } } : {}) } } : {}) };
 }
 

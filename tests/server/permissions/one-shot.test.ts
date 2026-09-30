@@ -365,7 +365,9 @@ test('the owner’s rule for one conversation is not blocked by the guards of an
   await f.service.decide(mine.request.id!, true);
   const settings = JSON.parse(f.service.claudeSettings(f.project, 'claude:one')!).permissions;
   assert.ok(settings.allow.includes('Bash(git push --force-with-lease *)'));
-  assert.equal(settings.deny, undefined, 'the owner’s rule wins in that conversation');
+  const refused = (command: string) => settings.deny.some((guard: string) => new RegExp(`^${guard.slice(5, -1).split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`).test(command));
+  assert.ok(!refused('git push --force-with-lease origin main'), 'the owner’s rule wins in that conversation');
+  assert.ok(refused('git push --delete origin main') && refused('git push --mirror'), 'other destructive variants stay refused');
   assert.ok(JSON.parse(f.service.claudeSettings(f.project, 'claude:other')!).permissions.deny.length > 0, 'other conversations keep the guards');
 });
 
@@ -376,4 +378,28 @@ test('a run that waited long keeps its result after it finishes', async t => {
   await f.service.decide(asked.request.id!, true);
   const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 10 }, agent('claude:one'));
   assert.equal(result.output!.stdout, 'late\n');
+});
+
+test('agents asked for are each covered by their own rule', async t => {
+  const f = await fixture(t);
+  const sub = join(f.project, 'sub');
+  await mkdir(sub);
+  f.sessions.set('claude:sub', { cwd: sub, provider: 'claude' });
+  await f.service.save({ kind: 'command', value: 'npm test', providers: ['claude'], scope: 'project', cwd: f.project });
+  await f.service.save({ kind: 'command', value: 'npm test', providers: ['codex'], scope: 'project', cwd: sub });
+  const asked = await f.service.request({ kind: 'command', value: 'npm test', providers: ['claude', 'codex'], scope: 'project', reason: 'r' }, agent('claude:sub'));
+  assert.equal(asked.request.status, 'exists');
+  const parentOnly = await f.service.request({ kind: 'command', value: 'npm run lint', providers: ['claude', 'codex'], scope: 'project', reason: 'r' }, agent('claude:sub'));
+  assert.equal(parentOnly.request.status, 'pending');
+});
+
+test('a result told late is kept a while from then', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'echo told', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(asked.request.id!, true, undefined, true);
+  await f.runner.flush();
+  f.tick(31 * 24 * 60 * 60 * 1000);
+  await f.service.markTold(asked.request.id!);
+  const result = await f.service.runResult({ id: asked.request.id! }, agent('claude:one'));
+  assert.equal(result.output!.stdout, 'told\n');
 });
