@@ -45,14 +45,10 @@ async function fixture() {
     cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
 }
 
-test('a forced update starts no new turn and gives each running turn its continuation at once', async t => {
+test('a forced update starts no new turn while running turns go on', async t => {
   const f = await fixture(); t.after(f.cleanup);
   f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
-  const resume = f.continuation();
-  assert.ok(resume, 'continuation created in the same step');
-  assert.equal(resume.scheduled?.afterRunId, f.first.id);
-  assert.equal(resume.status, 'queued');
-  assert.equal(resume.origin?.kind, 'owner');
+  assert.equal(f.continuation(), undefined, 'nothing is queued for a turn until it ends');
   const later = await f.manager.enqueue(f.session.id, 'another message', {}, { origin: owner });
   f.emit({ type: 'result', session_id: nativeId, is_error: false });
   await until(() => f.run(f.first.id)?.status === 'completed');
@@ -63,10 +59,9 @@ test('a forced update starts no new turn and gives each running turn its continu
   assert.equal(f.manager.updateDrainStatus()?.running, 0);
 });
 
-test('a turn that finishes its own work before any wrap-up keeps no continuation', async t => {
+test('a turn that finishes its own work before any wrap-up gets no continuation', async t => {
   const f = await fixture(); t.after(f.cleanup);
   f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
-  assert.ok(f.continuation());
   f.emit({ type: 'result', session_id: nativeId, is_error: false });
   await until(() => f.run(f.first.id)?.status === 'completed');
   assert.equal(f.continuation(), undefined);
@@ -88,6 +83,8 @@ test('the wrap-up request reaches the running turn once, and the continuation st
   await until(() => f.run(f.first.id)?.status === 'completed');
   const resume = f.continuation();
   assert.ok(resume, 'a wrapped-up turn is resumed');
+  assert.equal(resume.scheduled?.afterRunId, f.first.id);
+  assert.equal(resume.origin?.kind, 'owner');
   const newest = f.manager.list().filter(item => item.sessionId === f.session.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1);
   assert.equal(newest?.id, resume.id);
 });
@@ -114,10 +111,11 @@ test('at the deadline a running turn stops with the reason, and its continuation
   assert.equal(f.continuation()?.status, 'queued');
 });
 
-test('a turn the owner stops during the update is not brought back', async t => {
+test('a turn the owner stops during the update is not brought back, even after its wrap-up', async t => {
   const f = await fixture(); t.after(f.cleanup);
   f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
-  assert.ok(f.continuation());
+  f.manager.driveUpdateDrain();
+  await until(() => f.received.some(frame => frame.uuid && /about to restart/.test(JSON.stringify(frame))));
   await f.manager.cancel(f.first.id);
   assert.equal(f.run(f.first.id)?.status, 'cancelled');
   assert.equal(f.continuation(), undefined);
@@ -143,15 +141,27 @@ test('after a forced update gave up, a turn the owner stops is still not brought
   f.manager.driveUpdateDrain();
   await until(() => f.received.some(frame => frame.uuid && /about to restart/.test(JSON.stringify(frame))));
   f.manager.endUpdateDrain();
-  assert.ok(f.continuation(), 'a turn asked to wrap up keeps its continuation');
   await f.manager.cancel(f.first.id);
+  await until(() => f.run(f.first.id)?.status === 'cancelled');
   assert.equal(f.continuation(), undefined);
+});
+
+test('after a forced update gave up, a turn that wraps up at its request is still resumed', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.manager.driveUpdateDrain();
+  await until(() => f.received.some(frame => frame.uuid && /about to restart/.test(JSON.stringify(frame))));
+  const wrapUp = f.received.find(frame => frame.uuid && /about to restart/.test(JSON.stringify(frame)))!;
+  f.manager.endUpdateDrain();
+  f.emit({ ...wrapUp, isReplay: true });
+  f.emit({ type: 'result', session_id: nativeId, is_error: false });
+  await until(() => f.run(f.first.id)?.status === 'completed');
+  assert.ok(f.continuation());
 });
 
 test('a turn that fails on its own during the update is not resumed', async t => {
   const f = await fixture(); t.after(f.cleanup);
   f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
-  assert.ok(f.continuation());
   f.exit(1);
   await until(() => f.run(f.first.id)?.status === 'error');
   assert.equal(f.continuation(), undefined);
@@ -172,6 +182,8 @@ test('delegated work is neither wrapped up nor resumed, and says why it stopped'
 test('a newer message does not replace the update continuation', async t => {
   const f = await fixture(); t.after(f.cleanup);
   f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.manager.driveUpdateDrain(Date.now() + 61_000);
+  await until(() => f.continuation() !== undefined);
   await f.manager.enqueue(f.session.id, 'while updating', {}, { origin: owner });
   assert.equal(f.continuation()?.status, 'queued');
 });
@@ -181,6 +193,8 @@ test('the next worker keeps queued turns, their instructions and the continuatio
   f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
   const receipt = await f.manager.enqueue(f.session.id, 'slack follow-up', {}, { origin: owner, instructions: { text: 'receipt: approved', required: true } });
   const plain = await f.manager.enqueue(f.session.id, 'plain follow-up', {}, { origin: owner });
+  f.manager.driveUpdateDrain(Date.now() + 61_000);
+  await until(() => f.continuation() !== undefined);
   await f.manager.flushState();
   const saved = JSON.parse(await readFile(join(f.directory, 'runs.json'), 'utf8')) as Record<string, unknown>[];
   assert.equal(JSON.stringify(saved).includes('receipt: approved'), false, 'runs.json never holds instruction text');
