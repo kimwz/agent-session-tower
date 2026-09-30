@@ -255,7 +255,8 @@ export class RunManager extends EventEmitter {
     const next = { ...env };
     this.markLaunches(next);
     const session = this.getSession(sessionId);
-    if (session) next[session.provider === 'codex' ? 'CODEX_THREAD_ID' : 'CLAUDE_CODE_SESSION_ID'] = this.nativeSessionId(sessionId);
+    // The id the provider itself sets for its own tools: the bare native id, as the shims expect it.
+    if (session?.nativeId) next[session.provider === 'codex' ? 'CODEX_THREAD_ID' : 'CLAUDE_CODE_SESSION_ID'] = session.nativeId;
     return next;
   }
 
