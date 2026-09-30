@@ -37,8 +37,6 @@ export interface SkillServiceOptions {
   installGuidance?: () => Promise<void>;
   /** Whether Tower makes its default skills; only the Tower on the account's own state folder links into the account. */
   seed?: boolean;
-  /** Whether Tower's permission reviewer is on; the pages ask the owner to confirm skills only then. */
-  review?: () => boolean;
 }
 
 const MAX_TURN_NOTES = 6_000;
@@ -310,56 +308,23 @@ export class SkillService {
     return skill;
   }
 
-  /** Skills the owner confirmed whose folder is gone outside Tower: the reviewer leaves their projects to the owner until forgotten. */
-  private gone(): { dir: string; name: string }[] {
-    const state = this.state.get();
-    const known = new Set(state.targets.map(item => item.dir));
-    return Object.keys(state.confirmedTargets).filter(dir => !known.has(dir) && state.confirmed[dir]).map(dir => ({ dir, name: basename(dir) }));
-  }
-
-  /** A Tower skill's targets in this state, copied. */
-  private recordIn(state: { targets: SkillTargetRecord[] }, dir: string): { all: boolean; projects: string[] } | undefined {
-    const item = state.targets.find(entry => entry.dir === dir);
-    return item ? { all: item.all, projects: [...item.projects] } : undefined;
-  }
-
   private withTargets(skill: Skill): Skill {
     const item = skill.managed ? this.record(skill.dir) : undefined;
-    const state = this.state.get();
-    // Confirmed: the text and where it applies are as the owner last saved or confirmed them in Tower.
-    return item ? { ...skill, targets: { all: item.all, projects: item.projects },
-      confirmed: state.confirmed[skill.dir] === skill.revision && targetsRevision(state.confirmedTargets[skill.dir]) === targetsRevision(item) } : skill;
+    return item ? { ...skill, targets: { all: item.all, projects: item.projects } } : skill;
   }
 
-  /**
-   * What the owner set down for work in `cwd`, for Tower's permission reviewer: the Tower skills that apply there and
-   * the owner guidance, each only at the revision the owner saved or confirmed in Tower. Others are named in `unconfirmed`.
-   */
-  async authority(cwd: string): Promise<{ skills: { name: string; description: string; body: string }[]; guidance?: string; unconfirmed: string[]; changed: string[] }> {
+  /** What the owner set down for work in `cwd`, for Tower's permission reviewer: the Tower skills that apply there, and the owner guidance. */
+  async authority(cwd: string): Promise<{ skills: { name: string; description: string; body: string }[]; guidance?: string }> {
     await this.ready();
-    const state = this.state.get();
     const folder = resolve(cwd);
     const skills: { name: string; description: string; body: string }[] = [];
-    const unconfirmed: string[] = [];
-    // Confirmed once and changed or gone since: what the owner confirmed may have limited the work.
-    const changed: string[] = [];
-    for (const item of state.targets) {
-      const owned = state.confirmedTargets[item.dir];
-      // Applied here when the owner confirmed it, and no longer: taken off without the owner saying so.
-      if (!targetsCover(item, folder)) { if (owned && state.confirmed[item.dir] && targetsCover(owned, folder)) changed.push(basename(item.dir)); continue; }
-      // Name, description and body come from the one read whose revision is checked.
+    for (const item of this.state.get().targets) {
+      if (!targetsCover(item, folder)) continue;
       const read = await readSkillSnapshot(item.dir);
-      if (!read) { if (state.confirmed[item.dir]) changed.push(basename(item.dir)); continue; }
-      if (state.confirmed[item.dir] && state.confirmed[item.dir] !== read.revision) changed.push(read.name);
-      if (state.confirmed[item.dir] === read.revision && owned && targetsCover(owned, folder)) skills.push({ name: read.name, description: read.description, body: read.body });
-      else unconfirmed.push(read.name);
+      if (read) skills.push({ name: read.name, description: read.description, body: read.body });
     }
-    // A confirmed skill whose record is gone (its folder removed outside Tower) still held the owner's words.
-    const known = new Set(state.targets.map(item => item.dir));
-    for (const [dir, targets] of Object.entries(state.confirmedTargets)) if (!known.has(dir) && state.confirmed[dir] && targetsCover(targets, folder)) changed.push(basename(dir));
     const guidance = await this.guidance();
-    if (state.guidanceConfirmed && !guidance.confirmed) changed.push('guidance');
-    return { skills, ...(guidance.confirmed && guidance.owner.trim() ? { guidance: guidance.owner } : {}), unconfirmed, changed };
+    return { skills, ...(guidance.owner.trim() ? { guidance: guidance.owner } : {}) };
   }
 
   async overview(input: { cwd?: unknown } = {}): Promise<SkillOverview> {
@@ -372,7 +337,7 @@ export class SkillService {
     const pinned = await this.pinned();
     const stored = (await this.files.managed()).map(skill => this.withTargets({ ...skill, pinned: folders(skill).some(dir => pinned.has(dir)) }));
     return { skills: (await this.withPins(await this.files.list(cwd))).map(skill => this.withTargets(skill)), stored, proposals, notes, settings: state.settings, advisor: this.advisor.status(),
-      guidance: await this.guidance(), ...(cwd ? { cwd } : {}), review: this.options.review?.() === true, gone: this.gone() };
+      guidance: await this.guidance(), ...(cwd ? { cwd } : {}) };
   }
 
   summary(): SkillSummary {
@@ -395,16 +360,15 @@ export class SkillService {
     return next;
   }
 
-  /** `typed`: the owner's own page sent it, so what it saves or confirms is the owner's word (see `Skill.confirmed`). */
-  async mutate(action: string, body: Record<string, unknown>, options: { typed?: boolean } = {}): Promise<SkillOverview> {
+  async mutate(action: string, body: Record<string, unknown>): Promise<SkillOverview> {
     await this.ready();
     const cwd = await this.project(body.cwd);
-    await this.exclusive(() => this.change(action, body, cwd, options.typed === true));
+    await this.exclusive(() => this.change(action, body, cwd));
     this.options.onChange?.();
     return this.overview({ cwd });
   }
 
-  private async change(action: string, body: Record<string, unknown>, cwd: string | undefined, typed = false): Promise<void> {
+  private async change(action: string, body: Record<string, unknown>, cwd: string | undefined): Promise<void> {
     switch (action) {
       case 'save': {
         const editing = typeof body.dir === 'string' && body.dir ? body.dir : undefined;
@@ -435,35 +399,7 @@ export class SkillService {
         await this.state.update(state => {
           const proposal = proposalId && state.proposals.find(item => item.id === proposalId && item.status === 'open');
           if (proposal) { proposal.status = 'accepted'; proposal.skillDir = skill.dir; proposal.updatedAt = new Date().toISOString(); }
-          // What the owner just saved (the text written, whatever the file holds by now) is what they confirmed, where it applies now.
-          if (typed) { state.confirmed[skill.dir] = skill.revision; const targets = this.recordIn(state, skill.dir); if (targets) state.confirmedTargets[skill.dir] = targets; }
         });
-        break;
-      }
-      case 'confirm': {
-        if (!typed) throw new SkillError('스킬 내용 확인은 소유자 페이지에서만 할 수 있습니다.', 403);
-        // The owner confirms the text they were shown: its revision must still be the file's.
-        const skill = await this.files.detail(text(body.dir), cwd);
-        if (!text(body.revision) || text(body.revision) !== skill.revision) throw new SkillError('다른 곳에서 이 스킬이 바뀌었습니다. 다시 열어 최신 내용을 확인하세요.', 409);
-        // The projects it applies to are confirmed as the owner saw them too.
-        if (typeof body.targetsRevision !== 'string') throw new SkillError('적용 프로젝트를 함께 확인해야 합니다. 스킬을 다시 여세요.', 409);
-        this.checkRevision(skill.dir, body);
-        await this.state.update(state => { state.confirmed[skill.dir] = skill.revision; const targets = this.recordIn(state, skill.dir); if (targets) state.confirmedTargets[skill.dir] = targets; });
-        break;
-      }
-      case 'forget': {
-        // A confirmed skill whose folder is gone: the owner lets the reviewer stop waiting for it.
-        if (!typed) throw new SkillError('소유자 페이지에서만 할 수 있습니다.', 403);
-        const dir = text(body.dir);
-        if (this.state.get().targets.some(item => item.dir === dir)) throw new SkillError('아직 있는 스킬입니다. 삭제는 스킬에서 하세요.', 409);
-        await this.state.update(state => { delete state.confirmed[dir]; delete state.confirmedTargets[dir]; });
-        break;
-      }
-      case 'confirmGuidance': {
-        if (!typed) throw new SkillError('지침 확인은 소유자 페이지에서만 할 수 있습니다.', 403);
-        const current = await this.guidance();
-        if (text(body.revision) !== current.revision) throw new SkillError('다른 곳에서 지침이 바뀌었습니다. 다시 열어 최신 내용을 확인하세요.', 409);
-        await this.state.update(state => { state.guidanceConfirmed = current.revision; });
         break;
       }
       case 'pin': {
@@ -478,8 +414,6 @@ export class SkillService {
         if (!targets) throw new SkillError('적용 프로젝트를 고르세요.');
         this.checkRevision(skill.dir, body);
         await this.apply(skill.dir, targets);
-        // Where the owner applies a skill in Tower is where the reviewer may rely on it; elsewhere it does not follow.
-        if (typed) await this.state.update(state => { state.confirmedTargets[skill.dir] = { all: targets.all, projects: [...targets.projects] }; });
         break;
       }
       case 'link': {
@@ -509,11 +443,10 @@ export class SkillService {
       case 'guidance': {
         const owner = text(body.owner).replace(/\r\n/g, '\n');
         if (Buffer.byteLength(owner) > 256 * 1024) throw new SkillError('지침이 너무 깁니다.', 413);
-        const written = await this.guidanceChange(async current => {
+        await this.guidanceChange(async current => {
           if (text(body.revision) !== current.revision) throw new SkillError('다른 곳에서 지침이 바뀌었습니다. 다시 열어 최신 내용으로 고치세요.', 409);
           return owner;
         });
-        if (typed) await this.state.update(state => { state.guidanceConfirmed = written; });
         break;
       }
       case 'import': {
@@ -529,10 +462,7 @@ export class SkillService {
         try { await this.files.remove(skill.dir, skill.managed ? skill.cwd : cwd); }
         catch (error) { if (before) await this.apply(skill.dir, { all: before.all, projects: before.projects }, false).catch(() => {}); throw error; }
         await this.pin(skill, false);
-        if (skill.managed) await this.state.update(state => { state.targets = state.targets.filter(item => item.dir !== skill.dir);
-          // Deleted by the owner in Tower: nothing of it is the owner's word any more. Deleted any other way, it still
-          // counts as changed, so what it limited is not silently lifted.
-          if (typed) { delete state.confirmed[skill.dir]; delete state.confirmedTargets[skill.dir]; } });
+        if (skill.managed) await this.state.update(state => { state.targets = state.targets.filter(item => item.dir !== skill.dir); });
         break;
       }
       case 'dismiss': {
@@ -592,8 +522,7 @@ export class SkillService {
   /** The owner's own guidance and Tower's fixed text, as every agent receives them. */
   async guidance(): Promise<GuidanceOverview> {
     const owner = await readFile(this.guidanceFile(), 'utf8').catch(() => '');
-    const revision = revisionOf(owner);
-    return { owner, revision, tower: AGENT_GUIDANCE, installed: Boolean(this.options.installGuidance), confirmed: this.state.get().guidanceConfirmed === revision };
+    return { owner, revision: revisionOf(owner), tower: AGENT_GUIDANCE, installed: Boolean(this.options.installGuidance) };
   }
 
   private guidanceQueue: Promise<unknown> = Promise.resolve();
@@ -627,22 +556,19 @@ export class SkillService {
     return bundle;
   }
 
-  /** Every skill kept in Tower, the owner's guidance and what the owner confirmed of them, for a full backup of Tower. */
+  /** Every skill kept in Tower and the owner's guidance, for a full backup of Tower. */
   async backup(): Promise<SkillBackup> {
     await this.ready();
     return this.exclusive(async () => {
       const stored = await this.files.managed();
       const bundle = await this.exportBundle({ dirs: stored.map(skill => skill.dir) });
-      const state = this.state.get();
-      const guidance = await this.guidance();
-      return { bundle, guidance: guidance.owner, guidanceConfirmed: guidance.confirmed === true, settings: { ...state.settings },
-        confirmed: stored.flatMap((skill, index) => state.confirmed[skill.dir] === skill.revision ? [index] : []) };
+      return { bundle, guidance: (await this.guidance()).owner, settings: { ...this.state.get().settings } };
     });
   }
 
   /**
-   * Writes a full backup's skills back as they were: each skill replaces Tower's skill of that name and applies, is
-   * pinned and is confirmed exactly as in the backup; the guidance is set as it was, empty included. A skill in the
+   * Writes a full backup's skills back as they were: each skill replaces Tower's skill of that name, and applies and is
+   * pinned exactly as in the backup; the guidance is set as it was, empty included. A skill in the
    * way that Tower does not keep, or a project folder missing here, is left out and reported. Skills kept here that
    * the backup does not have stay.
    */
@@ -652,7 +578,7 @@ export class SkillService {
     const restored: string[] = [], skipped: { name: string; reason: string }[] = [];
     const folder = async (cwd: unknown) => typeof cwd === 'string' && isAbsolute(cwd) && (await stat(cwd).catch(() => undefined))?.isDirectory() ? resolve(cwd) : undefined;
     await this.exclusive(async () => {
-      for (const [index, item] of bundle.skills.entries()) {
+      for (const item of bundle.skills) {
         const label = item.project ? `${item.name} (${basename(item.project.cwd)})` : item.name;
         try {
           const cwd = item.scope === 'project' ? await folder(item.project?.cwd) : undefined;
@@ -676,18 +602,12 @@ export class SkillService {
           }
           await this.apply(dir, targets, false);
           await this.pin(skill, item.pinned === true);
-          const confirmed = backup.confirmed.includes(index);
-          await this.state.update(state => {
-            if (confirmed) { state.confirmed[skill.dir] = skill.revision; state.confirmedTargets[skill.dir] = { all: targets.all, projects: [...targets.projects] }; }
-            else { delete state.confirmed[skill.dir]; delete state.confirmedTargets[skill.dir]; }
-          });
           restored.push(label);
           if (missing > 0) skipped.push({ name: label, reason: `적용 프로젝트 ${missing}개가 이 컴퓨터에 없어 빼고 적용했습니다.` });
         } catch (error) { skipped.push({ name: label, reason: error instanceof Error ? error.message : String(error) }); }
       }
-      const revision = await this.guidanceChange(async () => backup.guidance);
+      await this.guidanceChange(async () => backup.guidance);
       await this.state.update(state => {
-        if (backup.guidanceConfirmed) state.guidanceConfirmed = revision; else delete state.guidanceConfirmed;
         if (typeof backup.settings?.enabled === 'boolean') state.settings.enabled = backup.settings.enabled;
         if (backup.settings?.provider === 'claude' || backup.settings?.provider === 'codex') state.settings.provider = backup.settings.provider;
       });

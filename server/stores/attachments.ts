@@ -155,7 +155,7 @@ export class AttachmentStore {
 }
 
 /** What a message with attachments and no text asks. */
-export const ATTACHMENT_ONLY_PROMPT = '첨부한 파일을 확인하고 내용을 설명해 주세요.';
+const ATTACHMENT_ONLY_PROMPT = '첨부한 파일을 확인하고 내용을 설명해 주세요.';
 
 export function attachmentPrompt(prompt: string, attachments: readonly StoredAttachment[]): string {
   if (!attachments.length) return prompt;

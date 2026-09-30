@@ -12,7 +12,7 @@ import { DecisionService } from '../../../server/decisions/service.js';
 import { fakeBucket } from '../../helpers/s3.js';
 
 const PASS = 'correct horse battery';
-const skills: SkillBackup = { bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'a', skills: [] }, guidance: 'Be brief.', guidanceConfirmed: true, confirmed: [], settings: { enabled: true, provider: 'claude' } };
+const skills: SkillBackup = { bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'a', skills: [] }, guidance: 'Be brief.', settings: { enabled: true, provider: 'claude' } };
 
 async function computer(t: TestContext, options: { now?: () => number; host?: string } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-backup-'));

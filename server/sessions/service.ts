@@ -210,7 +210,8 @@ export class SessionService extends EventEmitter {
   }
 
   /** `before` is an opaque byte cursor, stable when new messages are appended. */
-  async detail(id: string, before?: number, limit = 60): Promise<SessionDetail | undefined> {
+  /** `previousUser: false` skips looking back for the user message before the page (a reader going through every page has it). */
+  async detail(id: string, before?: number, limit = 60, options: { previousUser?: boolean } = {}): Promise<SessionDetail | undefined> {
     const state = this.index.get(id);
     if (!state) return undefined;
     if (state.historyStartOrdinal !== undefined && state.historyStartOffset === undefined) {
@@ -224,6 +225,7 @@ export class SessionService extends EventEmitter {
     let fragments: Buffer[] = [];
     let pendingBytes = 0;
     let droppingOversizedLine = false;
+    let skipped = 0;
     let bytesScanned = 0;
     let nextBefore = position;
     const historyStart = state.historyStartOffset ?? 0;
@@ -234,13 +236,14 @@ export class SessionService extends EventEmitter {
       else fragments.push(fragment);
     };
     const finishLine = (start: number): void => {
+      if (droppingOversizedLine) skipped += 1;
       if (!droppingOversizedLine && pendingBytes) {
         try {
           const line = Buffer.concat(fragments.reverse(), pendingBytes).toString('utf8');
           const row = JSON.parse(line);
           const messages = ownHistory(state, row, start) ? parseMessages(state.session.provider, row, start, state.session.createdAt) : [];
           if (messages.length) { collected.push(messages); messageCount += messages.length; }
-        } catch { /* Ignore malformed or oversized lines. */ }
+        } catch { skipped += 1; /* Malformed or oversized lines are left out, and counted. */ }
       }
       fragments = []; pendingBytes = 0; droppingOversizedLine = false;
       nextBefore = start;
@@ -271,8 +274,9 @@ export class SessionService extends EventEmitter {
       // Without this, a >32 MB metadata line returns the same empty page forever.
       if (droppingOversizedLine && messageCount < count) nextBefore = position;
       const hasMore = nextBefore > historyStart;
-      const previousUser = hasMore ? await this.previousUser(file, state, nextBefore, historyStart) : undefined;
-      return { session: { ...state.session }, messages: collected.reverse().flat(), hasMore, nextBefore: hasMore ? nextBefore : undefined, ...(previousUser ? { previousUser } : {}) };
+      const previousUser = hasMore && options.previousUser !== false ? await this.previousUser(file, state, nextBefore, historyStart) : undefined;
+      return { session: { ...state.session }, messages: collected.reverse().flat(), hasMore, nextBefore: hasMore ? nextBefore : undefined, ...(previousUser ? { previousUser } : {}),
+        ...(skipped ? { skipped } : {}) };
     } finally { await file.close(); }
   }
 

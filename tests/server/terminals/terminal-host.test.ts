@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, request } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,12 +24,12 @@ class Pty implements WorkspacePty {
   output(data: string) { for (const listener of this.data) listener(data); }
 }
 
-async function fixture(t: TestContext, options: { idleMs?: number; legacy?: WorkspaceTerminalBackend } = {}) {
+async function fixture(t: TestContext, options: { idleMs?: number; legacy?: WorkspaceTerminalBackend; keepIntervalMs?: number } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-terminal-host-'));
   const ptys: Pty[] = [];
   const terminals = new WorkspaceTerminals({ keepAliveOnDisconnect: true, env: { SHELL: '/bin/fixture-shell' }, platform: 'darwin', spawnPty: () => { const pty = new Pty(); ptys.push(pty); return pty; } });
   let idle = 0;
-  const host = await startTerminalHost({ stateDir, terminals, idleMs: options.idleMs, onIdle: options.idleMs === undefined ? undefined : () => { idle++; terminals.dispose(); } });
+  const host = await startTerminalHost({ stateDir, terminals, idleMs: options.idleMs, keepIntervalMs: options.keepIntervalMs, onIdle: options.idleMs === undefined ? undefined : () => { idle++; terminals.dispose(); } });
   const client = new TerminalHostClient({ stateDir, legacy: options.legacy, hostEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 500 });
   t.after(async () => { client.dispose(); await host.close(); terminals.dispose(); await rm(stateDir, { recursive: true, force: true }); await rm((await runnerPaths(stateDir)).directory, { recursive: true, force: true }); });
   return { stateDir, ptys, terminals, host, client, idle: () => idle };
@@ -73,6 +74,18 @@ test('the terminal host answers only with its own credential', async t => {
   const runnerToken = await readFile((await runnerPaths(f.stateDir)).token, 'utf8').catch(() => 'absent');
   assert.equal(await status(`Bearer ${runnerToken}`), 403, 'the execution worker credential does not open shells');
   assert.equal(await status(`Bearer ${await readFile(paths.token, 'utf8')}`), 200);
+});
+
+test('a running host writes its credential again when /tmp cleaning removed it', async t => {
+  const f = await fixture(t, { keepIntervalMs: 20 });
+  const paths = await terminalHostPaths(f.stateDir);
+  const { id } = await f.client.create('/fixture', 80, 24);
+  const token = await readFile(paths.token, 'utf8');
+  await rm(paths.token);
+  await until(() => existsSync(paths.token) && readFileSync(paths.token, 'utf8') === token);
+  assert.equal((await stat(paths.token)).mode & 0o777, 0o600);
+  await f.client.input(id, 'ls\r');
+  assert.deepEqual(f.ptys[0].written, ['ls\r']);
 });
 
 test('shells an older worker still owns stay reachable until they are closed', async t => {

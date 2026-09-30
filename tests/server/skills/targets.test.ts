@@ -273,3 +273,15 @@ test('a project’s own skill outside Tower is still edited from that project', 
   await f.service.mutate('save', { cwd: f.shop, dir: skill.dir, revision: skill.revision, scope: 'project', name: 'notes', description: 'new', body: 'Body' });
   assert.match(await readFile(join(own, 'SKILL.md'), 'utf8'), /description: "?new/);
 });
+
+test('the permission reviewer gets the Tower skills that apply to a folder, as they are now, and the owner guidance', async t => {
+  const f = await fixture(t);
+  await save(f.service, 'deploy', { all: false, projects: [f.shop] });
+  await save(f.service, 'everywhere', { all: true, projects: [] });
+  const guidance = await f.service.guidance();
+  await f.service.mutate('guidance', { owner: 'Deploy after merge.', revision: guidance.revision });
+  const shop = await f.service.authority(join(f.shop, 'packages'));
+  assert.deepEqual(shop.skills.map(skill => skill.name).sort(), ['deploy', 'everywhere']);
+  assert.equal(shop.guidance?.trim(), 'Deploy after merge.');
+  assert.deepEqual((await f.service.authority(f.blog)).skills.map(skill => skill.name), ['everywhere']);
+});

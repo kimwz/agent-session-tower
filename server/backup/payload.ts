@@ -21,9 +21,6 @@ export interface SkillBackup {
   bundle: SkillBundle;
   /** The owner's guidance, empty included. */
   guidance: string;
-  guidanceConfirmed: boolean;
-  /** Indexes into `bundle.skills` of the skills whose text the owner had saved or confirmed in Tower. */
-  confirmed: number[];
   settings: SkillAdvisorSettings;
 }
 
@@ -173,7 +170,7 @@ export function parsePayload(value: unknown): BackupPayload {
   for (const name of Object.keys(WORKER_FILES) as WorkerFile[]) if (value.worker.files[name] !== undefined) files[name] = value.worker.files[name];
   const triggers = value.worker.triggers, skills = value.worker.skills;
   if (triggers !== undefined && !(record(triggers) && Array.isArray(triggers.triggers) && Array.isArray(triggers.trustedFolders) && record(triggers.secretGrants) && record(triggers.fired) && record(triggers.github))) throw new Error('백업의 트리거가 올바르지 않습니다.');
-  if (skills !== undefined && !(record(skills) && record(skills.bundle) && Array.isArray(skills.bundle.skills) && typeof skills.guidance === 'string' && Array.isArray(skills.confirmed) && record(skills.settings))) throw new Error('백업의 스킬이 올바르지 않습니다.');
+  if (skills !== undefined && !(record(skills) && record(skills.bundle) && Array.isArray(skills.bundle.skills) && typeof skills.guidance === 'string' && record(skills.settings))) throw new Error('백업의 스킬이 올바르지 않습니다.');
   const master = value.master;
   if (master !== undefined && !(record(master) && (master.settings === undefined || record(master.settings)) && (master.voiceKey === undefined || typeof master.voiceKey === 'string'))) throw new Error('백업의 마스터 설정이 올바르지 않습니다.');
   const web = value.web;

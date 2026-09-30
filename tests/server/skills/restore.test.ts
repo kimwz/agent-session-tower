@@ -24,24 +24,22 @@ async function service(f: Awaited<ReturnType<typeof computer>>, cwds: string[]) 
 }
 const exists = (path: string) => lstat(path).then(() => true, () => false);
 
-test('a restore puts skills back exactly as they were: where they apply, pins, confirmations and the guidance', async t => {
+test('a restore puts skills back exactly as they were: where they apply, pins and the guidance', async t => {
   const f = await computer(t);
   const project = join(f.home, 'work', 'shop');
   await mkdir(project, { recursive: true });
   const skills = await service(f, [project]);
-  await skills.mutate('save', { scope: 'global', name: 'review', description: 'Review code.', body: 'Steps', pinned: true }, { typed: true });
-  await skills.mutate('save', { scope: 'global', name: 'scoped', description: 'Only the shop.', body: 'Shop steps', targets: { all: false, projects: [project] } }, { typed: true });
+  await skills.mutate('save', { scope: 'global', name: 'review', description: 'Review code.', body: 'Steps', pinned: true });
+  await skills.mutate('save', { scope: 'global', name: 'scoped', description: 'Only the shop.', body: 'Shop steps', targets: { all: false, projects: [project] } });
   let guidance = (await skills.overview()).guidance!;
-  await skills.mutate('guidance', { owner: 'Answer in Korean.', revision: guidance.revision }, { typed: true });
+  await skills.mutate('guidance', { owner: 'Answer in Korean.', revision: guidance.revision });
   const backup = JSON.parse(JSON.stringify(await skills.backup()));
   assert.equal(backup.bundle.skills.length, 2);
-  assert.equal(backup.confirmed.length, 2, 'both were saved by the owner');
-  assert.equal(backup.guidanceConfirmed, true);
 
   // Afterwards: applied everywhere, unpinned, edited, the guidance changed, and one more skill made.
   const stored = (await skills.overview()).stored!;
   const scoped = stored.find(skill => skill.name === 'scoped')!, review = stored.find(skill => skill.name === 'review')!;
-  await skills.mutate('assign', { dir: scoped.dir, targets: { all: true } }, { typed: true });
+  await skills.mutate('assign', { dir: scoped.dir, targets: { all: true } });
   await skills.mutate('pin', { dir: review.dir, pinned: false });
   await skills.mutate('save', { dir: review.dir, revision: review.revision, scope: 'global', name: 'review', description: 'Review code.', body: 'Changed steps' });
   guidance = (await skills.overview()).guidance!;
@@ -55,17 +53,15 @@ test('a restore puts skills back exactly as they were: where they apply, pins, c
   const after = await skills.overview({ cwd: project });
   const byName = new Map(after.stored!.map(skill => [skill.name, skill]));
   assert.equal(byName.get('review')!.pinned, true);
-  assert.equal(byName.get('review')!.confirmed, true);
   assert.match(await readFile(join(byName.get('review')!.dir, 'SKILL.md'), 'utf8'), /\nSteps\n/);
   assert.deepEqual(byName.get('scoped')!.targets, { all: false, projects: [project] });
   assert.equal(await exists(join(f.agentsHome, 'skills', 'scoped')), false, 'no longer linked everywhere');
   assert.equal(await exists(join(project, '.agents', 'skills', 'scoped')), true);
   assert.ok(byName.has('later'), 'a skill the backup does not have stays');
   assert.equal(after.guidance!.owner, 'Answer in Korean.\n');
-  assert.equal(after.guidance!.confirmed, true);
 
   // An empty guidance in the backup empties it here too.
-  await skills.restore({ ...backup, guidance: '', guidanceConfirmed: false });
+  await skills.restore({ ...backup, guidance: '' });
   assert.equal((await skills.overview()).guidance!.owner, '');
 });
 
