@@ -158,8 +158,8 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
           next = [...incoming, ...(Array.isArray(existing) ? existing.filter(item => record(item) && !ids.has(String(item.id))) : [])];
           break;
         }
-        // Read again by every call, so it applies as soon as it is written.
-        case 'models.json': try { next = parseModelSettings(incoming, true); } catch { throw new Error('invalid'); } break;
+        // Read again by every call, so it applies as soon as it is written. Read like a saved file: roles this version does not know are dropped.
+        case 'models.json': if (!record(incoming)) throw new Error('invalid'); next = parseModelSettings(incoming); break;
         // What the worker's services refuse at start is never written: one would keep the worker from starting.
         case 'slack-connection.json': if (!validSlackConnection(incoming)) throw new Error('invalid'); next = incoming; break;
         case 'public-agents.json': {

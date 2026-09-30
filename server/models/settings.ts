@@ -1,4 +1,5 @@
-import { stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { link, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { initialModelSettings, parseModelSettings, resolveRole, type ModelProvider, type ModelSettings, type ResolvedModel } from '../../shared/models.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -52,7 +53,7 @@ export async function readModelSettings(stateDir: string): Promise<ModelSettings
 
 /** Replaces the settings with the owner's, which must be valid in full. */
 export async function saveModelSettings(stateDir: string, input: unknown): Promise<ModelSettings> {
-  const settings = parseModelSettings(input, true);
+  const settings = parseModelSettings(input, true, await readModelSettings(stateDir));
   await save(stateDir, settings, false);
   return structuredClone(settings);
 }
@@ -61,8 +62,14 @@ async function save(stateDir: string, settings: ModelSettings, onlyIfMissing: bo
   const path = join(stateDir, MODEL_SETTINGS_FILE);
   const previous = writes.get(path) ?? Promise.resolve();
   const next = previous.catch(() => {}).then(async () => {
-    if (onlyIfMissing && await stat(path).then(() => true, () => false)) return;
-    await writePrivateJson(path, JSON.stringify(settings, null, 2) + '\n');
+    const data = JSON.stringify(settings, null, 2) + '\n';
+    if (onlyIfMissing) {
+      // Created only where none exists, even against another process: an owner's save is never replaced by a migration.
+      const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+      await writePrivateJson(temporary, data);
+      try { await link(temporary, path); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+      finally { await unlink(temporary).catch(() => {}); }
+    } else await writePrivateJson(path, data);
     cache.delete(path);
   });
   writes.set(path, next);

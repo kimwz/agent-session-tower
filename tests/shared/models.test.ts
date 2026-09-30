@@ -37,7 +37,8 @@ test('saved settings are read leniently, submitted ones strictly', () => {
     { ...fine, custom: [{ ...fine.custom[0], claude: { model: '--dangerously-skip-permissions' } }] },
     { ...fine, custom: [{ ...fine.custom[0], claude: { effort: 'ultra' } }] },
     { ...fine, custom: [{ ...fine.custom[0], provider: 'codex', codex: { effort: 'off' } }] },
-    { ...fine, roles: { ...fine.roles, 'unknown.role': fine.roles['chat.new'] } },
+    { ...fine, roles: { ...fine.roles, 'chat.new': { provider: 'claude', claude: { effort: 'off' }, codex: {} } } },
+    { ...fine, custom: [{ ...fine.custom[0], claude: { effort: 'off' } }] },
   ]) assert.throws(() => parseModelSettings(bad, true), { statusCode: 400 }, JSON.stringify(bad.custom));
 });
 
@@ -52,4 +53,13 @@ test('a role gives the same model as flags, as JSON and in the turn table', () =
   assert.deepEqual(modelArgs({ provider: 'claude', model: 'haiku', effort: 'off' }), ['--model', 'haiku']);
   assert.deepEqual(customRoleLines(settings), ['- review.codex = codex / gpt-6.1-sol / high', '- review.claude = claude / fable / default — validity check']);
   assert.throws(() => resolveRole(settings, 'review.gemini'), { statusCode: 404 });
+});
+
+test('a save keeps roles it does not name and ignores roles this version does not know', () => {
+  const current = initialModelSettings();
+  current.roles['slack.match'] = { provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol' } };
+  const { 'slack.match': _left, ...others } = current.roles;
+  const saved = parseModelSettings({ version: 1, roles: { ...others, 'future.role': { provider: 'claude', claude: {}, codex: {} } }, custom: [] }, true, current);
+  assert.deepEqual(saved.roles['slack.match'], current.roles['slack.match']);
+  assert.equal((saved.roles as Record<string, unknown>)['future.role'], undefined);
 });

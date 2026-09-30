@@ -86,11 +86,13 @@ export function pickProblem(pick: unknown, provider: ModelProvider): string | un
   return undefined;
 }
 
-function settingProblem(value: unknown, role: Pick<BuiltinRole, 'follow' | 'providers'>): string | undefined {
+function settingProblem(value: unknown, role: Partial<Pick<BuiltinRole, 'follow' | 'providers' | 'kind'>>): string | undefined {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return '역할 설정이 올바르지 않습니다.';
   const setting = value as Record<string, unknown>;
   const providers = role.providers ?? ['claude', 'codex'];
   if (!(providers as readonly unknown[]).includes(setting.provider) && !(role.follow && setting.provider === 'follow')) return '제공자가 올바르지 않습니다.';
+  // Thinking off exists only for Tower's own one-shot calls; sessions and skill roles have no such level.
+  if (role.kind !== 'auto' && (setting.claude as ModelPick | undefined)?.effort === EFFORT_OFF) return '생각 끔은 자동 판단에만 쓸 수 있습니다.';
   return pickProblem(setting.claude, 'claude') ?? pickProblem(setting.codex, 'codex');
 }
 
@@ -98,12 +100,13 @@ const cleanPick = (pick: ModelPick): ModelPick => ({ ...(pick.model ? { model: p
 
 /**
  * Reads saved or submitted settings. `strict` rejects anything invalid (a save); otherwise an invalid role falls back to
- * its initial value and an invalid custom role is dropped, so one bad entry never breaks every call.
+ * its value in `base` and an invalid custom role is dropped, so one bad entry never breaks every call.
  */
-export function parseModelSettings(value: unknown, strict = false): ModelSettings {
+export function parseModelSettings(value: unknown, strict = false, base: ModelSettings = initialModelSettings()): ModelSettings {
   const fail = (message: string) => { throw Object.assign(new Error(message), { statusCode: 400 }); };
   const input = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : strict ? fail('모델 설정이 올바르지 않습니다.') : {};
-  const result = initialModelSettings();
+  // Roles left out keep `base` (a page of another version saves only the roles it knows); roles it does not know are ignored.
+  const result: ModelSettings = { ...structuredClone(base), custom: [] };
   const roles = input.roles && typeof input.roles === 'object' && !Array.isArray(input.roles) ? input.roles as Record<string, unknown> : {};
   for (const role of BUILTIN_ROLES as readonly (BuiltinRole & { id: BuiltinRoleId })[]) {
     const saved = roles[role.id];
@@ -113,7 +116,6 @@ export function parseModelSettings(value: unknown, strict = false): ModelSetting
     const setting = saved as RoleSetting;
     result.roles[role.id] = { provider: setting.provider, claude: cleanPick(setting.claude), codex: cleanPick(setting.codex) };
   }
-  if (strict) for (const id of Object.keys(roles)) if (!isBuiltinRole(id)) fail(`알 수 없는 역할입니다: ${id}`);
   const custom = Array.isArray(input.custom) ? input.custom : input.custom === undefined ? [] : strict ? fail('스킬용 역할 목록이 올바르지 않습니다.') : [];
   if (custom.length > MAX_CUSTOM_ROLES) { if (strict) fail(`스킬용 역할은 ${MAX_CUSTOM_ROLES}개까지 만들 수 있습니다.`); }
   const seen = new Set<string>();

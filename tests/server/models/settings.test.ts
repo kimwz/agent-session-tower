@@ -79,3 +79,27 @@ test('skill roles read the same from the turn table, the CLI and the settings', 
   assert.ok(lines.includes('review.codex = codex / gpt-6.1-sol / high'));
   await assert.rejects(runModelsCommand(['args', 'review.gemini', '--state-dir', directory], () => {}), /review\.gemini/);
 });
+
+test('backups carry the model settings; a restore applies them to the next call and drops roles this version does not know', async t => {
+  const { applyWorkerFiles, collectWorkerFiles } = await import('../../../server/backup/payload.js');
+  const from = await stateDir(t), to = await stateDir(t);
+  const chosen = initialModelSettings();
+  chosen.roles['publicAgents.judge'] = { provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol', effort: 'low' } };
+  await saveModelSettings(from, chosen);
+  const files = await collectWorkerFiles(from);
+  assert.deepEqual(files['models.json'], chosen);
+  await readModelSettings(to);
+  const result = await applyWorkerFiles(to, { 'models.json': { ...chosen, roles: { ...chosen.roles, 'future.role': { provider: 'claude', claude: {}, codex: {} } } } });
+  assert.ok(result.parts.includes('models'));
+  assert.deepEqual(await resolveModel(to, 'publicAgents.judge', { provider: 'claude' }), { provider: 'codex', model: 'gpt-6.1-sol', effort: 'low' });
+  assert.equal((await readModelSettings(to) as any).roles['future.role'], undefined);
+});
+
+test('the first settings never replace ones saved meanwhile', async t => {
+  const directory = await stateDir(t);
+  const chosen = initialModelSettings();
+  chosen.roles['chat.new'] = { provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol' } };
+  // Two readers migrate while the owner saves: whichever finishes last, the owner's save stays.
+  await Promise.all([readModelSettings(directory), saveModelSettings(directory, chosen), readModelSettings(directory)]);
+  assert.deepEqual(await resolveModel(directory, 'chat.new'), { provider: 'codex', model: 'gpt-6.1-sol' });
+});

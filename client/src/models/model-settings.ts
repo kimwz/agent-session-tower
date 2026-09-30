@@ -27,7 +27,9 @@ export function loadModelSettings(token: string, node?: string, force = false): 
 }
 
 export async function saveModelSettings(token: string, settings: ModelSettings, node?: string): Promise<ModelSettings> {
-  const result = await towerOperation<{ settings: ModelSettings }>(token, 'models.update', { settings }, node);
+  const result = await towerOperation<{ settings?: ModelSettings }>(token, 'models.update', { settings }, node);
+  // A retried save on another computer answers only that it was done; the settings are read again then.
+  if (!result?.settings) return (await loadModelSettings(token, node, true))!;
   cache.set(keyOf(node), result.settings);
   notify();
   return result.settings;

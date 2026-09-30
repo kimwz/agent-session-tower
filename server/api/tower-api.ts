@@ -48,7 +48,7 @@ interface Held { kept: KeptTriggers; sessions: Session[] }
  * Operations a controlling computer may use, for the owner there or an agent in a turn started there. Secrets,
  * trigger limits, HTTP tests and GitHub replies stay with this computer's own Tower.
  */
-const REMOTE_OPERATIONS: ReadonlySet<string> = new Set([...REMOTE_PAGE_OPERATIONS, 'sessions.list', 'sessions.read', 'sessions.search', 'projects.list', 'runs.list', 'autoPrompt.submit', 'autoPrompt.get']);
+const REMOTE_OPERATIONS: ReadonlySet<string> = new Set([...REMOTE_PAGE_OPERATIONS, 'sessions.list', 'sessions.read', 'sessions.search', 'projects.list', 'runs.list', 'autoPrompt.submit', 'autoPrompt.get', 'models.get']);
 interface RequestRecord { at: number; fingerprint: string; status: 'pending' | 'done'; result?: unknown }
 
 /**
@@ -168,7 +168,7 @@ export class TowerApi {
     }
     if (name === 'triggers.preview' || name === 'triggers.settings') return this.performLocal(name, value, actor);
     // This computer's own model settings, which its own calls follow; nothing in them points into a folder.
-    if (name === 'models.settings') return this.performLocal(name, value, actor);
+    if (name === 'models.settings' || name === 'models.get') return this.performLocal(name, value, actor);
     if (name === 'models.update') return answer;
     if (name === 'triggers.previewIssues') {
       // It reads only GitHub; a saved trigger it names must be one this computer shows.

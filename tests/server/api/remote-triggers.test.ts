@@ -350,5 +350,7 @@ test('a controlling computer reads and changes this computer\'s model settings, 
   const agent: TriggerActor = { kind: 'agent', via: 'mcp' };
   assert.deepEqual(await f.call('models.get', { role: 'review.codex' }, agent), { role: 'review.codex', provider: 'codex', model: 'gpt-6.1-sol', args: ['-m', 'gpt-6.1-sol'] });
   await assert.rejects(f.call('models.update', { settings }, agent), { statusCode: 403 });
+  // An agent in a turn a controlling computer started looks roles up too.
+  assert.equal((await f.call<{ model: string }>('models.get', { role: 'review.codex' }, { kind: 'agent', via: 'mcp', controllerId: CONTROLLER })).model, 'gpt-6.1-sol');
   await assert.rejects(f.call('models.update', { settings: { ...settings, custom: [{ id: 'bad' }] } }, owner), { statusCode: 400 });
 });
