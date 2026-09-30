@@ -4,6 +4,20 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.94.0] - 2026-09-30
+
+### Added
+- **Settings → Models** (#35): one place for the provider, model and reasoning effort of every Claude/Codex call Tower makes by itself. Every such call now takes its model from a role there:
+  - automatic judgments: Auto Prompt routing, the permission reviewer, skill proposals, Slack mention matching, reply intent, reply drafts and tone guide, GitHub reply intent, public agent judgments and the voice first reply;
+  - starts: the master agent and the folder issue button;
+  - defaults for new items: new chats, Auto Prompt, triggers, Slack and GitHub rules and public agents start with the role's choice, while items already made keep their own model. "Claude default" / "Codex default" (an empty model) leave the choice to the CLI.
+
+  Judgments can run on the same provider as the work they judge, with a model for each provider. Initial values are what each call used before, so nothing changes after the update; the permission reviewer's and skill advisor's earlier choices are carried over, and their pickers now point to Settings → Models.
+- **Roles for skills**: add roles such as `review.codex` and write the role name in a skill instead of a model. Each turn gets the role table in its Tower instructions, and the `models_get` tool and `agent-session-tower models args <role>` give the same model as flags for `codex exec` or `claude -p`.
+- **Remote computers** follow their own model settings; pick the computer in Settings → Models to see and change them there.
+- One-shot judgments now pass their reasoning effort to Claude (`--effort`, or thinking off) and Codex, and accept any model the provider offers.
+- Backups include the model settings.
+
 ## [1.93.0] - 2026-09-30
 
 ### Added
