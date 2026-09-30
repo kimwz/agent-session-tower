@@ -147,7 +147,7 @@ function AutoReviewSettings({ settings, busy, onSave }: { settings: PermissionAu
   };
   return <div className="permission-auto-review">
     <label className="skill-pinned"><input type="checkbox" checked={settings.enabled} disabled={busy} onChange={event => change({ enabled: event.target.checked })} />{t('자동 검토')}
-      <small>{t('에이전트가 권한을 요청하면 별도 모델이 이 작업에 대한 소유자의 지시(Tower에서 직접 입력한 요청, 확인한 스킬과 지침)와 작업 내역을 보고, 작업에 필요하고 위험하지 않으면 그 프로젝트에만 허용합니다. 범위가 넓으면 더 좁게 다시 요청하게 하고, 그 밖에는 이유를 남겨 소유자에게 넘깁니다. 옵션이 든 명령 규칙, 넓은 규칙, 삭제·비밀·네트워크 명령, 소유자 규칙과 겹치는 규칙, 공개 에이전트의 요청, Tower 밖이나 이전 버전에서 시작한 대화의 요청은 항상 소유자가 정합니다.')}</small></label>
+      <small>{t('에이전트가 권한을 요청하면 별도 모델이 이 작업에 대한 소유자의 지시(대화에서 한 말과 질문에 한 답, 적용된 스킬과 지침, 프로젝트 지침)와 작업 내역을 보고, 작업에 필요하고 위험하지 않으면 그 프로젝트에만 허용합니다. 범위가 넓으면 더 좁게 다시 요청하게 하고, 그 밖에는 이유를 남겨 소유자에게 넘깁니다. 위험한 옵션이 든 규칙, 넓은 규칙, 삭제·비밀·네트워크 명령, 소유자 규칙과 겹치는 규칙, 공개 에이전트의 요청은 항상 소유자가 정합니다.')}</small></label>
     {settings.enabled && <div className="permission-auto-review-options">
       <label>{t('검토 모델')}<select value={`${settings.provider}:${settings.model}`} disabled={busy} onChange={event => { const [provider, model] = event.target.value.split(':') as [PermissionProvider, string]; change({ provider, model }); }}>
         {(['claude', 'codex'] as const).flatMap(provider => AUTO_REVIEW_MODELS[provider].map(model => <option key={`${provider}:${model}`} value={`${provider}:${model}`}>{provider === 'claude' ? 'Claude' : 'Codex'} · {model}</option>))}

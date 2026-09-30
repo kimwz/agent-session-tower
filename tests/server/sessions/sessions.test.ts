@@ -568,3 +568,13 @@ test('a conversation keeps its latest user requests, newest first and shortened,
   assert.ok(!requests.some(text => /answer|environment_context/.test(text)));
   assert.deepEqual(service.recentRequests('codex:missing'), []);
 });
+
+test('a history page reports the records it could not read', async (t) => {
+  const { service, codex } = await fixture(t);
+  const current = now();
+  await writeFile(codex, `${lines([row('session_meta', { id: childId, timestamp: current, cwd: '/work' }, current), codexMessage('user', 'Ship it', current)])}{ not json\n${lines([codexMessage('user', 'Then deploy', current)])}`);
+  await service.refresh();
+  const page = await service.detail(`codex:${childId}`);
+  assert.deepEqual(page?.messages.map(message => message.text), ['Ship it', 'Then deploy']);
+  assert.equal(page?.skipped, 1);
+});

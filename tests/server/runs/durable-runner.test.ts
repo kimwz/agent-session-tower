@@ -407,7 +407,7 @@ test('a web Auto Prompt is admitted as the owner’s request but never read as S
   t.after(() => host.close());
   const client = await f.connect();
   await client.submitAutoPrompt({ requestId: '12345678-1234-4234-8234-123456789abc', provider: 'codex', prompt: '1번 보내주세요' });
-  assert.deepEqual(submitted, [{ origin: { kind: 'owner' } }], 'the web did not say the owner typed it');
+  assert.deepEqual(submitted, [{ origin: { kind: 'owner' } }]);
   assert.deepEqual(ownerMessages, []);
 });
 

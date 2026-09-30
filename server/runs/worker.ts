@@ -4,7 +4,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { homedir, hostname } from 'node:os';
-import type { AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunApprovalResponse, Snapshot } from '../../shared/types.js';
+import type { AutoPromptRequest, ChatMessage, CreateSessionRequest, MessageAttachments, Run, RunApprovalResponse, Snapshot } from '../../shared/types.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { AutoPromptManager } from '../auto-prompt/manager.js';
 import { SlackService } from '../slack/service.js';
@@ -42,8 +42,6 @@ import { SkillService } from '../skills/service.js';
 import { installAgentGuidance } from '../agent-guidance/install.js';
 import { PermissionService } from '../permissions/service.js';
 import { PermissionReviewer } from '../permissions/reviewer.js';
-import { ownerWroteTrigger } from '../permissions/context.js';
-import { OwnerPromptStore } from '../permissions/owner-prompts.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
 import { ruleGuards } from '../../shared/permissions.js';
 import { skillHomes } from '../skills/files.js';
@@ -217,7 +215,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         const admitted = admission(args[1]);
         const autoPrompts = options.autoPrompts;
         const request = args[0] as AutoPromptRequest;
-        return remote(admitted, 'autoPrompt', request, undefined, async () => { await context?.refresh(); return autoPrompts.submit(request, { origin: admitted.origin, ...(admitted.authored ? { authored: true } : {}) }); },
+        return remote(admitted, 'autoPrompt', request, undefined, async () => { await context?.refresh(); return autoPrompts.submit(request, { origin: admitted.origin }); },
           value => ({ kind: 'autoPrompt', jobId: value.id }), result => result.kind === 'autoPrompt' ? autoPrompts.get(result.jobId) : undefined);
       } break;
       case 'cancelAutoPrompt': if (options.autoPrompts) return options.autoPrompts.cancel(args[0] as string); break;
@@ -240,7 +238,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'skillsOverview': if (options.skills) return options.skills.overview(record(args[0])); break;
       case 'skillsDetail': if (options.skills) return options.skills.detail(record(args[0])); break;
       case 'skillsSummary': if (options.skills) return options.skills.summary(); break;
-      case 'skillsMutate': if (options.skills) return options.skills.mutate(String(args[0]), record(args[1]), { typed: args[2] === true }); break;
+      case 'skillsMutate': if (options.skills) return options.skills.mutate(String(args[0]), record(args[1])); break;
       case 'skillsExport': if (options.skills) return options.skills.exportBundle(record(args[0])); break;
       case 'skillsImportPlan': if (options.skills) return options.skills.importPlan(args[0]); break;
       case 'publicAgentsOverview': if (options.publicAgents) return options.publicAgents.overview(); break;
@@ -432,12 +430,11 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
  * turn's agent asked for. Trigger and Slack origins are assigned inside the worker, never over RPC.
  */
 function admission(value: unknown): RunAdmission {
-  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown; authored?: unknown } : {};
+  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown } : {};
   const origin = input.origin === undefined ? { kind: 'owner' as const } : parseRunOrigin(input.origin);
   if (!origin || (origin.kind !== 'owner' && origin.kind !== 'agent')) throw Object.assign(new Error('The web connection can only admit owner or agent work.'), { statusCode: 400 });
   if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-f\d-]{36}$/i.test(input.requestId))) throw Object.assign(new Error('Invalid request ID.'), { statusCode: 400 });
-  // The web says when the owner's own page typed it (never for the master's calls); an agent's work never is.
-  return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin, ...(origin.kind === 'owner' && input.authored === true ? { authored: true } : {}),
+  return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin,
     ...(typeof input.requestId === 'string' ? { requestId: input.requestId.toLowerCase() } : {}) };
 }
 
@@ -537,9 +534,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const publicAgents = new PublicAgentService({ stateDir, runs });
     await publicAgents.start();
     // Skill files live in the account's home; only the Tower on its own state folder proposes new ones.
-    // Set once the permission rules are loaded, below.
-    let reviewOn = () => false;
-    const skills = new SkillService({ stateDir, review: () => reviewOn(), homes: skillHomes(stateDir), sessions: () => visible.allSessions(), runs: () => runs.list(), origin: id => runs.sessionOrigin(id),
+    const skills = new SkillService({ stateDir, homes: skillHomes(stateDir), sessions: () => visible.allSessions(), runs: () => runs.list(), origin: id => runs.sessionOrigin(id),
       projects: () => (visible.snapshot().groups ?? []).map(group => group.cwd),
       history: async (session, limit) => (await sessions.detail(runs.nativeSessionId(session.id), undefined, limit))?.messages,
       model: (request, options) => runAutoPromptModel(request, { stateDir, ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) }),
@@ -548,14 +543,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       ...(resolve(stateDir) === resolve(defaultStateDir()) ? { installGuidance: async () => { await installAgentGuidance({ stateDir, claudeHome: process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), codexHome: process.env.CODEX_HOME || join(homedir(), '.codex') }); } } : {}) });
     // Skills never keep the worker from starting.
     await skills.start().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
-    // What the owner typed, per conversation, kept apart from run history (which keeps only the latest runs).
-    const ownerPrompts = new OwnerPromptStore(stateDir);
-    await ownerPrompts.start();
-    runs.setOwnerPrompts(ownerPrompts);
     // Made just below; the permission service only calls it once requests arrive.
     let reviewer!: PermissionReviewer;
     const permissions = new PermissionService({ stateDir, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
-      resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' }, notice: true }); },
+      resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' } }); },
       // A public agent's requests always wait for the owner: its conversations carry outsiders' words.
       autoReviewSkip: request => {
         const origin = runs.sessionOrigin(request.sessionId);
@@ -566,12 +557,11 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       onReviewQueued: () => reviewer?.wake(),
       onAutoReviewChange: settings => { if (!settings.enabled) reviewer?.abort(); } });
     await permissions.start().catch(error => console.error(`Permission rules did not start: ${error instanceof Error ? error.message : String(error)}`));
-    reviewOn = () => permissions.autoReview().enabled;
     reviewer = new PermissionReviewer({ service: permissions,
       model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }),
       sources: {
         runs: () => runs.list(),
-        ownerPrompts: sessionId => ownerPrompts.list(sessionId),
+        outsideInput: sessionId => runs.sessionOrigin(sessionId)?.untrustedInput === true,
         sessionTrigger: sessionId => { const origin = runs.sessionOrigin(sessionId); return origin?.kind === 'trigger' ? origin.triggerId : undefined; },
         trigger: id => {
           // A trigger deleted since (or a public agent's, which is no trigger here) has no instructions to read.
@@ -579,24 +569,37 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
           try { kept = triggerEngine?.get(id); } catch { return undefined; }
           if (!kept?.trigger) return undefined;
           const trigger = kept.trigger;
-          return { name: trigger.name, instructions: trigger.handler.kind === 'task' ? trigger.handler.instructions : trigger.handler.rules.map(rule => `${rule.name}: ${rule.condition}\n${rule.instructions}`).join('\n\n'),
-            // Oldest first, as the audit is kept.
-            ownerSet: ownerWroteTrigger(id, [...triggerEngine!.audit({ limit: 1000 })].reverse()) };
+          return { name: trigger.name, instructions: trigger.handler.kind === 'task' ? trigger.handler.instructions : trigger.handler.rules.map(rule => `${rule.name}: ${rule.condition}\n${rule.instructions}`).join('\n\n') };
         },
         authority: cwd => skills.authority(cwd),
-        history: async (sessionId, limit) => runs.getSession(sessionId) ? (await sessions.detail(runs.nativeSessionId(sessionId), undefined, limit))?.messages : undefined,
+        // The whole conversation, page by page back to its start; incomplete when that cannot be done.
+        conversation: async sessionId => {
+          const session = runs.getSession(sessionId);
+          // A child conversation's history leaves out what it inherited from its parent: not all of the owner's words.
+          if (!session || session.parentId) return { messages: [], complete: false };
+          const pages: ChatMessage[][] = [];
+          let before: number | undefined;
+          for (let page = 0; page < 50; page += 1) {
+            const detail = await sessions.detail(runs.nativeSessionId(sessionId), before, 200, { previousUser: false });
+            if (!detail || detail.skipped) return { messages: pages.reverse().flat(), complete: false };
+            pages.push(detail.messages);
+            if (!detail.hasMore) return { messages: pages.reverse().flat(), complete: true };
+            before = detail.nextBefore;
+          }
+          return { messages: pages.reverse().flat(), complete: false };
+        },
+        answers: sessionId => runs.ownerAnswers(sessionId),
         rules: cwd => permissions.overview(cwd).rules,
         guards: rule => ruleGuards(rule),
         requests: sessionId => permissions.overview().requests.filter(item => item.sessionId === sessionId).reverse(),
       },
-      // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals,
-      // never the owner's, and never as something the owner typed.
+      // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals.
       reachable: request => Boolean(request.runId && runs.list().find(item => item.id === request.runId)?.origin),
       notify: async (request, message) => {
         const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
         // Gone since: the reviewer hands the request back to the owner.
         if (!run?.origin) throw new Error('The requesting conversation can no longer be reached.');
-        await runs.enqueue(request.sessionId, `${TOWER_NOTICE} ${message}`, {}, { origin: run.origin, notice: true, ...(run.unattended ? { unattended: true } : {}) });
+        await runs.enqueue(request.sessionId, `${TOWER_NOTICE} ${message}`, {}, { origin: run.origin, ...(run.unattended ? { unattended: true } : {}) });
       } });
 
     runs.setClaudeSettings(cwd => permissions.claudeSettings(cwd));
