@@ -399,7 +399,7 @@ export function runBlock(command: string): string | undefined {
   // A program may be named by its path (/usr/bin/sudo) too.
   if (/(^|[\s;&|(`$])(\S*\/)?(sudo|doas|su)(\s|$)/.test(text)) return '권한을 올리는 명령(sudo 등)은 소유자가 정합니다.';
   if (/(^|[\s;&|(`$])(\S*\/)?(shutdown|reboot|halt|poweroff|mkfs[\w.]*|diskutil|fdisk)(\s|$)/.test(text)) return '컴퓨터 전체에 영향을 주는 명령은 소유자가 정합니다.';
-  if (/(^|[\s;&|(`$])(\S*\/)?dd(\s|$)[^\n]*\bof=\/dev\//.test(text)) return '장치에 직접 쓰는 명령은 소유자가 정합니다.';
+  if (/(^|[\s;&|(`$])(\S*\/)?dd(\s|$)[^\n]*\bof=["']?\/dev\//.test(text)) return '장치에 직접 쓰는 명령은 소유자가 정합니다.';
   if (/(curl|wget)\b[^\n|]*\|\s*(\S*\/)?((sudo|env)\s+)?(\S*\/)?(sh|bash|zsh|dash|ksh)\b/.test(text)) return '내려받은 것을 바로 셸로 실행하는 명령은 소유자가 정합니다.';
   return undefined;
 }

@@ -423,6 +423,16 @@ export class PermissionService {
     return { start: runs.filter(request => request.run!.status === 'waiting'), running: runs.filter(request => request.run!.status === 'running') };
   }
 
+  /** Finished runs whose conversation asked to hear the result and has not yet (a worker stopped before telling it). */
+  untoldRuns(): PermissionRequest[] {
+    return this.state.requests.filter(request => request.rule.kind === 'run' && request.run && finishedRun(request.run) && request.run.notify && !request.run.delivered);
+  }
+
+  /** The result reached the conversation as a message. */
+  markTold(id: string): Promise<void> {
+    return this.serial(async () => { await this.commit(state => { const item = state.requests.find(entry => entry.id === id); if (item?.run) item.run.delivered = true; }); });
+  }
+
   /** Conversation rules whose time is up, or whose conversation is closed or gone, go. */
   expire(closed: ReadonlySet<string>): Promise<void> {
     return this.serial(async () => {

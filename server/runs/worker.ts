@@ -560,7 +560,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         if (!origin || !runs.getSession(request.sessionId)) return;
         const result = now.run.status === 'failed' ? `실패: ${now.run.error ?? '알 수 없는 이유'}` : now.run.timedOut ? '시간 제한으로 중단됨' : `종료 코드 ${now.run.exitCode ?? now.run.signal ?? '?'}`;
         void runs.enqueue(request.sessionId, `${TOWER_NOTICE} 한 번 실행을 요청한 명령이 끝났습니다 (${result}). permissions_runResult에 id "${request.id}"를 주면 출력을 받습니다.`, {},
-          { origin, ...(run?.unattended ? { unattended: true } : {}) }).catch(error => console.error(`A run's result could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`));
+          { origin, ...(run?.unattended ? { unattended: true } : {}) }).then(() => permissions.markTold(request.id)).catch(error => console.error(`A run's result could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`));
       }, 5_000);
       runNotices.add(timer);
     };
@@ -585,6 +585,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const left = permissions.unfinishedRuns();
     runner.hold(Promise.all(left.running.map(async request => { await permissions.updateRun(request.id, await runner.recover(request.run!)); }))
       .catch(error => console.error(`Permission runs did not recover: ${error instanceof Error ? error.message : String(error)}`)));
+    // Results a stopped worker never told their conversation are told now.
+    for (const request of permissions.untoldRuns()) runFinished(request);
     for (const request of left.start) runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? MAX_RUN_SECONDS, request.sessionId);
     // Rules for one conversation go when it is closed or gone, or after their time.
     const expireRules = async () => { const saved = new ClosedSessionStore(stateDir); await saved.start(); await permissions.expire(saved.closedIds()); };

@@ -280,3 +280,15 @@ test('the conversation hears a result only when whoever allowed the run asked fo
   assert.equal(runOf(told.request.id!).notify, true, 'kept through the runner’s updates');
   assert.equal(runOf(told.request.id!).status, 'done');
 });
+
+test('device writes with a quoted path stay with the owner; untold results are found after a restart', async t => {
+  assert.ok(autoReviewBlock({ kind: 'run', value: `dd if=image.img of="/dev/rdisk2"` }, '/p'));
+  assert.ok(autoReviewBlock({ kind: 'run', value: `dd if=a of='/dev/disk2'` }, '/p'));
+  const f = await fixture(t);
+  const told = await f.service.requestRun({ command: 'echo told', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(told.request.id!, true, undefined, true);
+  await f.runner.flush();
+  assert.deepEqual(f.service.untoldRuns().map(item => item.id), [told.request.id]);
+  await f.service.markTold(told.request.id!);
+  assert.deepEqual(f.service.untoldRuns(), []);
+});
