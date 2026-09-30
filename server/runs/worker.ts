@@ -489,7 +489,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       projects: () => (visible.snapshot().groups ?? []).map(group => group.cwd),
       history: async (session, limit) => (await sessions.detail(runs.nativeSessionId(session.id), undefined, limit))?.messages,
       model: (request, options) => runAutoPromptModel(request, { stateDir, ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) }),
-      advise: resolve(stateDir) === resolve(defaultStateDir()),
+      advise: resolve(stateDir) === resolve(defaultStateDir()), seed: resolve(stateDir) === resolve(defaultStateDir()),
       // Only the Tower on the account's own state folder points the agents' global instructions at itself.
       ...(resolve(stateDir) === resolve(defaultStateDir()) ? { installGuidance: async () => { await installAgentGuidance({ stateDir, claudeHome: process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), codexHome: process.env.CODEX_HOME || join(homedir(), '.codex') }); } } : {}) });
     // Skills never keep the worker from starting.

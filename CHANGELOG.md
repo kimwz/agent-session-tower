@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.85.0] - 2026-09-30
+
+### Added
+- **Register an issue from a project folder.** The header of a folder that is a git repository has an issue button (also in the folder's settings menu). It opens a short form: describe the bug, feature or task in a few words, choose Claude Code or Codex, and send. Tower starts a session in that folder, named **이슈 등록: …**, that reads the related code, checks the open issues for a duplicate, writes the issue up (summary, current and expected behaviour, related code, direction, done when, open questions) and registers it in the repository the folder's git remote points to (GitHub with `gh`, GitLab with `glab`), using only labels the repository already has. It changes no code. Folders on joined computers work the same way.
+- The steps live in a shared Tower skill, **register-issue**, which Tower makes once for every project. Edit it in the Skills panel to change how issues are written; your edits are kept, and a removed skill is not made again. A skill of that name you already have is left as it is. When a project has its own issue skill or instructions (for example a `/issue` skill that files issues in another repository), the session follows those instead.
+- The master agent may register issues whenever you ask, without confirming: it starts the same session in the project's folder.
+
 ## [1.84.1] - 2026-09-30
 
 ### Fixed

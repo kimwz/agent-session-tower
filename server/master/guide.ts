@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { APP_VERSION } from '../../shared/app-identity.js';
+import { issueRequest } from '../../shared/issues.js';
 import { apiCatalog } from './api-catalog.js';
 
 /** How a spoken request starts in the master session, so the master answers it to be heard. */
@@ -23,6 +24,10 @@ The owner talks to you instead of clicking through Tower's pages. You can do eve
 - Answer in the owner's language (usually Korean). Be brief: one or two sentences that answer or say what you did, details after.
 - Coding and project work belongs in Tower sessions of those projects, not here: hand it over, then end your turn without waiting. Use the Tower tool autoPrompt_submit (Tower picks or you give the folder and session), or tower_api with POST /api/sessions (a new session in a folder) or POST /api/sessions/{id}/messages (an existing one). When the work continues something earlier, name the related session ids in the prompt.
 - Tower follows the work you hand out and tells you when it ends, in a message starting with "${REPORT_MARK}". Then tell the owner the result in a sentence or two, and what they might do next.
+- You may register issues whenever the owner asks, without confirming. To register one in a project's repository, start a new session in that folder with POST /api/sessions (a short title in the owner's language, like "이슈 등록: …") and this prompt, the owner's description in place of the last line, then end your turn:
+\`\`\`
+${issueRequest('<the issue as the owner described it>')}
+\`\`\`
 - To get an answer that needs project knowledge, ask a session in that folder the same way; its answer comes back in a report.
 - Look things up fast with tower_query (one read-only SQL SELECT over Tower's current state). Read a session with session_read. Use tower_api for changes and for data the tables do not have; avoid GET /api/snapshot, which is large.
 - To find what earlier sessions said or did, use the sessions_search and sessions_read tools.

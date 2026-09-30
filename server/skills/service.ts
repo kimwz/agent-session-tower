@@ -12,6 +12,7 @@ import { parseBundle } from './store.js';
 import { proposalReady, proposalsFor } from '../../shared/skills.js';
 import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
 import { SkillAdvisor } from './advisor.js';
+import { DEFAULT_SKILLS } from './defaults.js';
 import { SkillError, SkillFiles, type SkillHomes } from './files.js';
 import { SkillStateStore, type SkillTargetRecord } from './state.js';
 import { ClosedSessionStore } from '../stores/closed-sessions.js';
@@ -33,6 +34,8 @@ export interface SkillServiceOptions {
   onChange?: () => void;
   /** Gives the agents the guidance again after the owner changed theirs; only the Tower on the account's own state folder does. */
   installGuidance?: () => Promise<void>;
+  /** Whether Tower makes its default skills; only the Tower on the account's own state folder links into the account. */
+  seed?: boolean;
 }
 
 const MAX_TURN_NOTES = 6_000;
@@ -80,7 +83,32 @@ export class SkillService {
   async start(): Promise<void> {
     await this.ready().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
     this.recordRuns();
+    if (this.options.seed) void this.exclusive(() => this.seed()).catch(error => console.error(`Default skills were not made: ${error instanceof Error ? error.message : String(error)}`));
     if (this.options.advise !== false) this.advisor.start();
+  }
+
+  /**
+   * Makes each default skill once, as a Tower skill for every project. A skill of that name the owner already has keeps
+   * it from being made; one made before is never made again or overwritten, so the owner's edits and removals stand.
+   */
+  private async seed(): Promise<void> {
+    await this.ready();
+    for (const skill of DEFAULT_SKILLS) {
+      if (this.state.get().seeded.includes(skill.name)) continue;
+      const present = (await this.files.list()).some(item => item.scope === 'global' && item.name === skill.name)
+        || Boolean(await stat(await this.files.towerDir(skill.name)).catch(() => undefined));
+      let made = !present;
+      if (made) {
+        try { await this.create({ name: skill.name, description: skill.description, body: skill.body }, { all: true, projects: [] }); }
+        catch (error) {
+          // Something of that name already sits where the skill would be linked: that stays, and Tower does not ask again.
+          if (!(error instanceof SkillError && error.statusCode === 409)) throw error;
+          made = false;
+        }
+      }
+      await this.state.update(state => { if (!state.seeded.includes(skill.name)) state.seeded.push(skill.name); });
+      if (made) this.options.onChange?.();
+    }
   }
   close(): void { this.advisor.stop(); }
   inFlight(): boolean { return this.advisor.inFlight(); }
