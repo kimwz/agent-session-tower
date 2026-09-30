@@ -174,6 +174,7 @@ function RestoreStatus({ report, busy, onCancel }: { report: RestoreReport; busy
     {report.status === 'waiting-worker' && <small>{t('실행 중인 작업이 모두 끝나는 순간 적용됩니다. 작업이 계속 이어지면 늦어질 수 있습니다.')}</small>}
     {report.skills?.skipped.length ? <ul>{report.skills.skipped.map(item => <li key={`${item.name}-${item.reason}`}>{item.name}: {translateMessage(item.reason)}</li>)}</ul> : null}
     {report.errors.map(item => <small key={item} className="auth-error">{translateMessage(item)}</small>)}
+    {report.notes?.map(item => <small key={item}>{t(item)}</small>)}
     {report.before && <small>{t('바뀌기 전 파일: {0}', { 0: report.before })}</small>}
     {report.status === 'waiting-worker' && <button className="secondary-button" disabled={busy} onClick={onCancel}>{t('워커 적용 취소')}</button>}
   </div>;

@@ -293,3 +293,35 @@ test('an upload stopped because Tower shuts down is not a failure, and the next 
   assert.equal(status.lastError, undefined);
   assert.equal(status.lastAttemptAt, undefined, 'the next start backs up at once');
 });
+
+test('restoring keeps the automatic backup passphrase saved here, and adopts the one it was opened with only when none is', async t => {
+  const a = await computer(t);
+  await a.service.saveSettings({ enabled: false, intervalHours: 24, keep: 3, passphrase: 'automatic passphrase', remote: { endpoint: '', bucket: '', prefix: '', region: 'auto', accessKeyId: '' } });
+  const text = (await a.service.export(PASS)).text;
+  const b = await computer(t);
+  await b.service.saveSettings({ enabled: false, intervalHours: 24, keep: 3, passphrase: 'saved here already', remote: { endpoint: '', bucket: '', prefix: '', region: 'auto', accessKeyId: '' } });
+  const kept = await b.service.apply((await b.service.check(text, PASS)).id);
+  assert.equal(kept.notes, undefined);
+  const settings = JSON.parse(await readFile(join(b.stateDir, 'backup-settings.json'), 'utf8')).settings;
+  assert.equal(settings.passphrase, 'saved here already');
+  const c = await computer(t);
+  const adopted = await c.service.apply((await c.service.check(text, PASS)).id);
+  assert.deepEqual(adopted.notes, ['자동 백업은 이제 이 백업을 연 암호로 암호화됩니다.']);
+  assert.equal(JSON.parse(await readFile(join(c.stateDir, 'backup-settings.json'), 'utf8')).settings.passphrase, PASS);
+});
+
+test('a backup from another computer is flagged, only adds to the folders kept from sharing here, and leaves the master alone when it had none', async t => {
+  const { decryptBackup, encryptBackup } = await import('../../../server/backup/crypto.js');
+  const a = await computer(t);
+  await a.exclusions.add('/a/private');
+  const opened = await decryptBackup((await a.service.export(PASS)).text, PASS);
+  assert.equal((opened.payload as { master?: unknown }).master, undefined, 'no master set up, nothing to bring back');
+  const elsewhere = await encryptBackup(opened.payload, PASS, { towerVersion: '1.91.0', from: 'another-computer' });
+  const b = await computer(t);
+  await b.exclusions.add('/b/private');
+  const preview = await b.service.check(elsewhere, PASS);
+  assert.equal(preview.otherComputer, true);
+  await b.service.apply(preview.id);
+  assert.deepEqual(b.exclusions.list().sort(), ['/a/private', '/b/private']);
+  assert.deepEqual(b.master, [], 'the master host is not started or changed');
+});

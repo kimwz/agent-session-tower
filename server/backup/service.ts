@@ -92,6 +92,8 @@ export class BackupService {
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
     try {
       const value = await readPrivateJson(this.path) as Partial<SavedFile>;
+      // This computer's mark survives settings that can no longer be read, so its old backups are still its own.
+      if (record(value) && typeof value.machine === 'string' && /^[0-9a-f]{6}$/.test(value.machine)) this.saved.machine = value.machine;
       if (record(value) && record(value.settings)) {
         const settings = parseSettings({ ...value.settings, enabled: false }, value.settings as SavedSettings);
         this.saved = { version: 1, machine: typeof value.machine === 'string' && /^[0-9a-f]{6}$/.test(value.machine) ? value.machine : this.saved.machine,
@@ -155,7 +157,9 @@ export class BackupService {
       version: 1,
       worker: { files: await collectWorkerFiles(stateDir), ...(triggers ? { triggers } : {}), skills },
       web: { projectGroups: this.options.stores.groups.backupValue(), remoteExclusions: this.options.stores.exclusions.backupValue(), decisions: this.options.stores.decisions.backupValue(), backup: settings },
-      master: { ...(record(master) && master.voice !== undefined ? { settings: { voice: master.voice } } : {}), ...(record(voiceKey) && typeof voiceKey.apiKey === 'string' ? { voiceKey: voiceKey.apiKey } : {}) },
+      // Only a computer that set the master up has anything to bring back.
+      ...(record(master) && master.voice !== undefined || record(voiceKey) && typeof voiceKey.apiKey === 'string'
+        ? { master: { ...(record(master) && master.voice !== undefined ? { settings: { voice: master.voice } } : {}), ...(record(voiceKey) && typeof voiceKey.apiKey === 'string' ? { voiceKey: voiceKey.apiKey } : {}) } } : {}),
     };
   }
 
@@ -268,7 +272,6 @@ export class BackupService {
     let parsed: BackupPayload;
     try { parsed = parsePayload(payload); } catch (error) { throw new BackupError(error instanceof Error ? error.message : String(error)); }
     const now = this.now();
-    for (const [id, item] of this.checked) if (now - item.at > CHECKED_KEPT_MS) this.checked.delete(id);
     // Each holds a whole decrypted backup; only the latest one is kept.
     this.checked.clear();
     const id = randomUUID();
@@ -302,18 +305,25 @@ export class BackupService {
     await removePendingWorker(stateDir);
     const worker = payloadParts({ ...payload, web: {}, master: undefined });
     const applied: BackupPart[] = [], errors: string[] = [];
+    let passphraseAdopted = false;
     const step = async (part: BackupPart, work: () => Promise<unknown>) => {
       try { await work(); applied.push(part); }
       catch (error) { errors.push(`${part}: ${error instanceof Error ? error.message : String(error)}`); }
     };
     const { web, master } = payload;
     if (web.projectGroups !== undefined) await step('projectGroups', () => this.options.stores.groups.restore(web.projectGroups));
-    if (web.remoteExclusions !== undefined) await step('remoteExclusions', () => this.options.stores.exclusions.restore(web.remoteExclusions));
+    // Folders kept from sharing are this computer's own paths: another computer's backup only adds to them.
+    const exclusions = header.from !== hostname() && record(web.remoteExclusions) && Array.isArray(web.remoteExclusions.folders)
+      ? { folders: [...new Set([...(this.options.stores.exclusions.backupValue() as { folders: string[] }).folders, ...web.remoteExclusions.folders as string[]])] } : web.remoteExclusions;
+    if (web.remoteExclusions !== undefined) await step('remoteExclusions', () => this.options.stores.exclusions.restore(exclusions));
     if (web.decisions !== undefined) await step('decisions', () => this.options.stores.decisions.restore(web.decisions));
     if (web.backup !== undefined) await step('backup', () => this.change(() => {
       const incoming = record(web.backup) ? web.backup : {};
-      // The passphrase this backup was opened with protects the backups made from here on.
-      const settings = parseSettings({ ...incoming, passphrase, enabled: false }, structuredClone(DEFAULT_BACKUP_SETTINGS));
+      // A passphrase already saved here stays; without one, the passphrase this backup was opened with protects the
+      // backups made from here on (the report says so).
+      const kept = this.saved.settings.passphrase;
+      const settings = parseSettings({ ...incoming, passphrase: kept ?? passphrase, enabled: false }, structuredClone(DEFAULT_BACKUP_SETTINGS));
+      if (!kept) passphraseAdopted = true;
       const complete = Boolean(settings.remote.endpoint && settings.remote.bucket && settings.remote.accessKeyId && settings.remote.secretAccessKey);
       this.saved = { ...this.saved, settings: { ...settings, enabled: incoming.enabled === true && complete } };
     }));
@@ -321,6 +331,7 @@ export class BackupService {
     if (applied.length) this.options.onChange?.();
     const requestedAt = new Date(this.now()).toISOString();
     const report: RestoreReport = { id: randomUUID(), status: worker.length ? 'waiting-worker' : 'applied', requestedAt, from: header.from, createdAt: header.createdAt, applied, worker, errors, before,
+      ...(passphraseAdopted ? { notes: ['자동 백업은 이제 이 백업을 연 암호로 암호화됩니다.'] } : {}),
       ...(worker.length ? {} : { appliedAt: requestedAt }) };
     await writeReport(stateDir, report);
     if (!worker.length) return report;

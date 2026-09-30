@@ -551,7 +551,6 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       ...(resolve(stateDir) === resolve(defaultStateDir()) ? { installGuidance: async () => { await installAgentGuidance({ stateDir, claudeHome: process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), codexHome: process.env.CODEX_HOME || join(homedir(), '.codex') }); } } : {}) });
     // Skills never keep the worker from starting.
     await skills.start().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
-    const restoredSkills = restoring?.restore.skills ? await skills.restore(restoring.restore.skills).catch(error => ({ restored: [], skipped: [{ name: '스킬', reason: error instanceof Error ? error.message : String(error) }] })) : undefined;
     // Made just below; the permission service only calls it once requests arrive.
     let reviewer!: PermissionReviewer;
     const permissions = new PermissionService({ stateDir, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
@@ -640,8 +639,6 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     } });
     triggerEngine = triggers;
     const restoredTriggers = await triggers.start(restoring?.restore.triggers ? { restore: restoring.restore.triggers } : {});
-    await restoring?.finish({ parts: [...(restoring.restore.triggers ? ['triggers' as const] : []), ...(restoredSkills ? ['skills' as const] : [])], errors: restoredTriggers.errors,
-      ...(restoredSkills ? { skills: restoredSkills } : {}) }).catch(error => console.error(`The restore's outcome was not recorded: ${error instanceof Error ? error.message : String(error)}`));
     // Reviews waiting from before this worker started (or queued while the last one handed over) go on, once the
     // triggers whose instructions they read are in place.
     reviewer.wake();
@@ -689,6 +686,13 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
       onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); worktrees.close(); reviewer.close(); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     runs.markReady();
+    // A restore's skills are written once the worker serves: linking into project folders (on a slow volume, say) never
+    // keeps it from starting. The restore is recorded as done after them; a worker that stops first leaves it to the next.
+    if (restoring) void (async () => {
+      const restoredSkills = restoring.restore.skills ? await skills.restore(restoring.restore.skills).catch(error => ({ restored: [], skipped: [{ name: '스킬', reason: error instanceof Error ? error.message : String(error) }] })) : undefined;
+      await restoring.finish({ parts: [...(restoring.restore.triggers ? ['triggers' as const] : []), ...(restoredSkills ? ['skills' as const] : [])], errors: restoredTriggers.errors,
+        ...(restoredSkills ? { skills: restoredSkills } : {}) });
+    })().catch(error => console.error(`The restore's outcome was not recorded: ${error instanceof Error ? error.message : String(error)}`));
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});

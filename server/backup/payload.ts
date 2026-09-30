@@ -139,6 +139,7 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
         case 'slack-automation.json':
         case 'github-automation.json': {
           if (!record(incoming) || !Array.isArray(incoming.rules)) throw new Error('invalid');
+          // GitHub automation keeps its rules in the same form as Slack's (one coordinator manager for both).
           try { validateSlackRules(incoming.rules); } catch { throw new Error('invalid'); }
           next = { rules: incoming.rules, workflows: record(existing) && Array.isArray(existing.workflows) ? existing.workflows : [] };
           break;
@@ -146,7 +147,7 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
         case 'trigger-secrets.json': {
           // The backup's secrets come in (its value wins for the same one); secrets only this computer has stay, so a
           // trigger kept here never loses the one it uses.
-          if (!Array.isArray(incoming) || !incoming.every(item => record(item) && typeof item.id === 'string')) throw new Error('invalid');
+          if (!Array.isArray(incoming) || !incoming.every(item => record(item) && ['id', 'name', 'origin', 'value', 'createdAt'].every(key => typeof item[key] === 'string'))) throw new Error('invalid');
           const ids = new Set(incoming.map(item => (item as { id: string }).id));
           next = [...incoming, ...(Array.isArray(existing) ? existing.filter(item => record(item) && !ids.has(String(item.id))) : [])];
           break;

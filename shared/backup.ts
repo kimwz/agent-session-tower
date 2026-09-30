@@ -35,6 +35,8 @@ export interface RestoreReport {
   /** Skills written, and those left out with why. */
   skills?: { restored: string[]; skipped: { name: string; reason: string }[] };
   errors: string[];
+  /** What the owner should know that is not a failure. */
+  notes?: string[];
   /** The folder with copies of every file this restore replaced. */
   before?: string;
 }
