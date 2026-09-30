@@ -129,8 +129,11 @@ export class PermissionService {
       || (rule.scope === 'project' && within(cwd, rule.cwd!))
       || (rule.scope === 'conversation' && rule.sessionId === sessionId && sessionId !== undefined && !expired(rule, now))));
     const allow = [...new Set(rules.map(claudeRule))];
-    // A rule the reviewer allowed never covers its family's destructive variants: deny comes before allow.
-    const deny = [...new Set(rules.filter(rule => rule.source === 'auto').flatMap(rule => ruleGuards(rule).claude))];
+    // A rule the reviewer allowed never covers its family's destructive variants: deny comes before allow. Where the owner
+    // allowed an overlapping command for this turn (in any scope), the owner's rule wins and those guards are left out.
+    const owned = rules.filter(rule => rule.source !== 'auto' && rule.kind === 'command');
+    const deny = [...new Set(rules.filter(rule => rule.source === 'auto' && !owned.some(mine => rule.kind === 'command' && rulesOverlap(mine.value, rule.value)))
+      .flatMap(rule => ruleGuards(rule).claude))];
     return allow.length ? JSON.stringify({ permissions: { allow, ...(deny.length ? { deny } : {}) } }) : undefined;
   }
 
@@ -330,7 +333,7 @@ export class PermissionService {
       const now = Date.parse(this.now());
       const covering = this.state.rules.filter(existing => existing.kind === rule.kind && sameRule({ ...existing, scope: 'global', cwd: undefined, sessionId: undefined }, { ...rule, scope: 'global', cwd: undefined, sessionId: undefined })
         // Codex reads a project's rules in that folder only, so a folder inside another is not covered for it.
-        && (existing.scope === 'global' || (existing.scope === 'project' && rule.scope !== 'global' && (provider === 'codex' ? existing.cwd === rule.cwd : within(rule.cwd!, existing.cwd!)))
+        && (existing.scope === 'global' || (existing.scope === 'project' && rule.scope !== 'global' && rule.providers.every(item => item === 'codex' ? existing.cwd === rule.cwd : within(rule.cwd!, existing.cwd!)))
           || (existing.scope === 'conversation' && rule.scope === 'conversation' && existing.sessionId === rule.sessionId && !expired(existing, now))));
       if (rule.providers.every(item => covering.some(existing => existing.providers.includes(item)))) return { request: { status: 'exists' as const }, note: 'This rule is already allowed. Try the action again; a Codex rule applies from the next turn.' };
       // Only this conversation's own request is the same one: another conversation hears its own decision.
@@ -714,10 +717,13 @@ function upsert(state: PermissionState, rule: PermissionRuleInput, id: string | 
 
 function trim(state: PermissionState, now: Date): void {
   const cutoff = now.getTime() - DECIDED_DAYS * 24 * 60 * 60 * 1000;
-  const decided = state.requests.filter(request => request.status !== 'pending' && Date.parse(request.decidedAt ?? request.createdAt) >= cutoff).slice(-MAX_DECIDED);
+  // A run counts from when it finished, so a result is kept a while after it arrives however long it waited.
+  const at = (request: PermissionRequest) => Date.parse(request.run?.finishedAt ?? request.decidedAt ?? request.createdAt);
+  const decided = state.requests.filter(request => request.status !== 'pending' && at(request) >= cutoff).sort((a, b) => at(a) - at(b)).slice(-MAX_DECIDED);
   const keep = new Set(decided);
-  // A run still waiting or running is kept whatever its age.
-  state.requests = state.requests.filter(request => request.status === 'pending' || keep.has(request) || (request.run && !finishedRun(request.run)));
+  // A run still waiting or running, or whose result its conversation has yet to hear, is kept whatever its age.
+  state.requests = state.requests.filter(request => request.status === 'pending' || keep.has(request)
+    || (request.run && (!finishedRun(request.run) || (request.run.notify && !request.run.delivered))));
 }
 
 const text = (value: unknown, max: number) => typeof value === 'string' ? value.slice(0, max) : '';

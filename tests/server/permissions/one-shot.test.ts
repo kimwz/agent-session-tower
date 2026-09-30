@@ -352,3 +352,28 @@ test('a run still going is reported as such without output, and stays to be told
   await f.runner.flush();
   assert.deepEqual(f.service.untoldRuns().map(item => item.id), [asked.request.id]);
 });
+
+test('the owner’s rule for one conversation is not blocked by the guards of an automatic project rule', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const project = await f.service.request({ kind: 'command', value: 'git push', scope: 'project', reason: 'r' }, agent('claude:other'));
+  assert.ok(await f.service.startReview(project.request.id!));
+  await f.service.applyReview(project.request.id!, { verdict: 'approve', reason: 'ok' });
+  assert.ok(JSON.parse(f.service.claudeSettings(f.project, 'claude:one')!).permissions.deny.length > 0, 'the automatic rule keeps its guards');
+  await f.service.saveAutoReview({ ...ON, enabled: false });
+  const mine = await f.service.request({ kind: 'command', value: 'git push --force-with-lease', scope: 'conversation', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(mine.request.id!, true);
+  const settings = JSON.parse(f.service.claudeSettings(f.project, 'claude:one')!).permissions;
+  assert.ok(settings.allow.includes('Bash(git push --force-with-lease *)'));
+  assert.equal(settings.deny, undefined, 'the owner’s rule wins in that conversation');
+  assert.ok(JSON.parse(f.service.claudeSettings(f.project, 'claude:other')!).permissions.deny.length > 0, 'other conversations keep the guards');
+});
+
+test('a run that waited long keeps its result after it finishes', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'echo late', reason: 'r' }, agent('claude:one'));
+  f.tick(40 * 24 * 60 * 60 * 1000);
+  await f.service.decide(asked.request.id!, true);
+  const result = await f.service.runResult({ id: asked.request.id!, waitSeconds: 10 }, agent('claude:one'));
+  assert.equal(result.output!.stdout, 'late\n');
+});

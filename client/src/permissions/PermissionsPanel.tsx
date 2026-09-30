@@ -41,9 +41,10 @@ export function PermissionsPanel({ token, cwd, projects, pending: waitingCount, 
   // So does a command Tower runs, until it is done.
   const reviewing = Boolean(overview?.requests.some(request => (request.status === 'pending' && (request.review?.status === 'queued' || request.review?.status === 'running'))
     || (request.run && (request.run.status === 'waiting' || request.run.status === 'running'))));
+  // Otherwise it looks now and then, for runs and automatic decisions that do not change the waiting count.
   useEffect(() => {
-    if (!active || !reviewing) return;
-    const timer = setInterval(() => { void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(setOverview).catch(() => {}); }, 4000);
+    if (!active) return;
+    const timer = setInterval(() => { void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(setOverview).catch(() => {}); }, reviewing ? 4000 : 15000);
     return () => clearInterval(timer);
   }, [token, cwd, active, reviewing]);
   useSettingsGuard({
@@ -139,7 +140,7 @@ function RunResult({ run }: { run: NonNullable<PermissionRequest['run']> }) {
   const output = [run.preview?.stdout, run.preview?.stderr].filter(Boolean).join('\n');
   return <div className="permission-run">
     <p className="permission-review-reason">{run.status === 'waiting' || run.status === 'running' ? <LoaderCircle className="spin" size={13} /> : null}<strong>{state}</strong>
-      {run.finishedAt ? ` · ${date(run.finishedAt)}` : ''}</p>
+      {run.finishedAt ? ` · ${date(run.finishedAt)}` : ''}{run.status === 'done' && run.error ? ` · ${run.error}` : ''}</p>
     {output && <details><summary>{t('출력')}{run.truncated || output.length >= 1000 ? ` (${t('앞부분')})` : ''}</summary><pre>{output}</pre></details>}
   </div>;
 }

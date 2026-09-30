@@ -559,7 +559,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       const origin = run?.origin;
       // Nobody left to tell, or the owner closed the conversation: nothing is sent, and it is not tried again.
       if (!origin || !runs.getSession(request.sessionId) || await closedNow(request.sessionId)) { await permissions.markTold(request.id); return; }
-      const result = now.run.status === 'failed' ? `실패: ${now.run.error ?? '알 수 없는 이유'}` : now.run.timedOut ? '시간 제한으로 중단됨' : `종료 코드 ${now.run.exitCode ?? now.run.signal ?? '?'}`;
+      const result = now.run.status === 'failed' ? `실패: ${now.run.error ?? '알 수 없는 이유'}` : now.run.timedOut ? '시간 제한으로 중단됨' : `종료 코드 ${now.run.exitCode ?? now.run.signal ?? '?'}${now.run.error ? `, ${now.run.error}` : ''}`;
       await runs.enqueue(request.sessionId, `${TOWER_NOTICE} 한 번 실행을 요청한 명령이 끝났습니다 (${result}). permissions_runResult에 id "${request.id}"를 주면 출력을 받습니다.`, {},
         { origin, ...(run?.unattended ? { unattended: true } : {}) });
       await permissions.markTold(request.id);
