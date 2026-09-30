@@ -14,6 +14,7 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { CATCH_UP_WINDOW_MS, LATE_AFTER_MS, latestSlot, nextSlot, previewSlots, validateSchedule } from './schedule.js';
 import { evaluate, performHttp, type ConditionState, type HttpOutcome } from './http.js';
 import { SecretStore, type StoredSecret } from './secrets.js';
+import type { TriggerBackup } from '../backup/payload.js';
 import { checkGitHub, GitHubError, keyOf, noted, passed, readIssues, refused, type GitHubCursor, type GitHubFetch, type GitHubIssue, type GitHubResponse } from './github.js';
 import { findExecutable } from '../providers/discovery.js';
 import { execFile } from 'node:child_process';
@@ -200,7 +201,11 @@ export class TriggerService extends EventEmitter {
     this.now = options.now ?? Date.now;
   }
 
-  async start(): Promise<void> {
+  /**
+   * `restore`: a backup's triggers and settings, applied before anything fires (see `restoreFrom`). Answers what of it
+   * could not be applied.
+   */
+  async start(options: { restore?: TriggerBackup } = {}): Promise<{ errors: string[] }> {
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
     let saved: unknown;
     try { saved = await readPrivateJson(this.path); }
@@ -213,9 +218,116 @@ export class TriggerService extends EventEmitter {
     this.recoverClaims();
     this.recoverPolls();
     await this.secrets.load();
+    const errors = options.restore ? await this.restoreFrom(options.restore).catch(error => [`트리거를 복원하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`]) : [];
     await this.commit(() => undefined, 'settle').catch(() => {});
     this.started = true;
     this.resume();
+    return { errors };
+  }
+
+  /**
+   * Makes a backup's triggers the definitions here, the way the owner's own edits would: an unchanged trigger keeps
+   * its revision and schedule; a changed or new one gets a new revision and counts from now (never catching up); one
+   * missing from the backup is deleted. What either computer's GitHub watch already took is kept, so it is not taken
+   * again; history stays. Settings, trusted folders and secret grants come from the backup.
+   */
+  private async restoreFrom(backup: TriggerBackup): Promise<string[]> {
+    const errors: string[] = [];
+    const actor: TriggerActor = { kind: 'owner', via: 'ui' };
+    const record = (item: unknown): item is Record<string, any> => !!item && typeof item === 'object' && !Array.isArray(item);
+    const upgraded = upgradeState({ ...empty(), triggers: (Array.isArray(backup.triggers) ? backup.triggers : []) as Trigger[] }, this.now()).triggers as unknown[];
+    const incoming: Trigger[] = [];
+    // Every id the backup names: one it names but cannot restore keeps its definition here rather than being removed.
+    const named = new Set<string>();
+    const settings = TriggerSettingsSchema.safeParse(backup.settings ?? {});
+    if (!settings.success) errors.push('트리거 설정이 올바르지 않아 지금 설정을 유지했습니다.');
+    for (const value of upgraded) if (record(value) && typeof value.id === 'string') named.add(value.id);
+    // Triggers this computer keeps (named in the backup) count toward the limit; only new ones can be left out for it.
+    const local = new Set(this.state.triggers.map(item => item.id));
+    const room = (settings.success ? settings.data : this.state.settings).maxTriggers - [...named].filter(id => local.has(id)).length;
+    let added = 0;
+    for (const value of upgraded) {
+      const input = record(value) ? TriggerInputSchema.safeParse({ name: value.name, enabled: value.enabled, source: value.source, handler: value.handler, policy: value.policy }) : undefined;
+      const name = record(value) && typeof value.name === 'string' ? value.name : '?';
+      if (!record(value) || !input?.success || typeof value.id !== 'string' || !Number.isInteger(value.revision) || incoming.some(item => item.id === value.id)) {
+        errors.push(`트리거 "${name}": 백업의 정의가 올바르지 않아 건너뛰었습니다.`);
+        continue;
+      }
+      if (!local.has(value.id) && added >= room) { errors.push(`트리거 "${name}": 트리거 개수 한도에 걸려 건너뛰었습니다.`); continue; }
+      if (!local.has(value.id)) added++;
+      const trigger: Trigger = { ...(value as unknown as Trigger), ...input.data };
+      // What this computer lacks (a folder, a conversation) keeps it from running here: it comes in turned off.
+      const problem = await this.validate({ name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy }).then(() => undefined, error => error instanceof Error ? error.message : String(error));
+      if (problem && trigger.enabled) { trigger.enabled = false; errors.push(`트리거 "${name}": 꺼서 복원했습니다. ${problem}`); }
+      incoming.push(trigger);
+    }
+    const same = (a: Trigger, b: Trigger) => (['name', 'enabled', 'source', 'handler', 'policy'] as const).every(key => JSON.stringify(a[key]) === JSON.stringify(b[key]));
+    await this.commit(state => {
+      const now = new Date(this.now()).toISOString();
+      if (settings.success) state.settings = settings.data;
+      const localGrants = structuredClone(state.secretGrants), localTrusted = [...state.trustedFolders];
+      // Grants of secrets that exist here; the restored triggers below add any they need.
+      state.secretGrants = Object.fromEntries(Object.entries(record(backup.secretGrants) ? backup.secretGrants : {})
+        .filter(([id, ids]) => this.secrets.get(id) && Array.isArray(ids)).map(([id, ids]) => [id, ids.filter(item => typeof item === 'string')]));
+      /** Triggers the backup names whose definition stays this computer's (not readable, over the limit, or refused below). */
+      const keptHere = new Set<string>();
+      const wanted = new Set([...named, ...incoming.map(item => item.id)]);
+      for (const current of [...state.triggers]) {
+        if (wanted.has(current.id)) continue;
+        state.triggers = state.triggers.filter(item => item.id !== current.id);
+        state.tombstones = [...state.tombstones, current].slice(-MAX_TOMBSTONES);
+        this.cancelQueued(state, current.id, 'The trigger was removed by a restore before this ran.');
+        state.cursors[current.id] = { anchorAt: this.now(), turnedOffAt: this.now() };
+        this.log(state, actor, 'delete', current, current.revision, undefined, `Removed by restoring a backup: ${this.describe(current)}`);
+      }
+      for (const id of named) if (!incoming.some(item => item.id === id)) keptHere.add(id);
+      for (const trigger of incoming) {
+        const current = state.triggers.find(item => item.id === trigger.id);
+        if (current && same(current, trigger)) continue;
+        const draft = structuredClone(state);
+        try {
+          if (current) {
+            const next = this.replace(draft, current, { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy }, actor);
+            // A restored definition counts from now: times missed before the restore never run with it.
+            // What its source observed (GitHub history, an HTTP condition's state) stays: only the timing starts over.
+            if (next.enabled) { const { failures: _failures, lastError: _error, ...previous } = draft.cursors[next.id] ?? { anchorAt: this.now() }; this.schedule(draft, next); draft.cursors[next.id] = { ...previous, ...draft.cursors[next.id]! }; }
+            this.log(draft, actor, 'restore', next, current.revision, next.revision, `Restored from a backup: ${this.changes(current, next)}`);
+          } else {
+            const earlier = [...draft.tombstones, ...(draft.revisions[trigger.id] ?? [])].filter(item => item.id === trigger.id).reduce((max, item) => Math.max(max, item.revision), 0);
+            const next: Trigger = { ...unmarked(trigger), revision: Math.max(trigger.revision, earlier) + 1, createdAt: typeof trigger.createdAt === 'string' ? trigger.createdAt : now, updatedAt: now,
+              createdBy: record(trigger.createdBy) ? trigger.createdBy : actor, updatedBy: actor };
+            this.grantSecrets(draft, next, actor);
+            draft.tombstones = draft.tombstones.filter(item => item.id !== next.id);
+            draft.triggers.push(next);
+            this.schedule(draft, next);
+            if (!next.enabled) delete draft.cursors[next.id].nextAt;
+            this.trust(draft, next, actor);
+            this.log(draft, actor, 'restore', next, undefined, next.revision, `Restored from a backup: ${this.describe(next)}`);
+          }
+          Object.assign(state, draft);
+        } catch (error) {
+          errors.push(`트리거 "${trigger.name}": ${error instanceof Error ? error.message : String(error)}`);
+          keptHere.add(trigger.id);
+        }
+      }
+      // A trigger that keeps its definition here keeps what the owner gave it here too: its secrets and its folder's trust.
+      const kept = state.triggers.filter(item => keptHere.has(item.id));
+      for (const [id, ids] of Object.entries(localGrants)) for (const trigger of kept) if (this.secrets.get(id) && ids.includes(trigger.id)) state.secretGrants[id] = [...new Set([...(state.secretGrants[id] ?? []), trigger.id])];
+      const keptFolders = kept.flatMap(item => item.handler.kind === 'task' && item.handler.target.mode === 'folder' && localTrusted.includes(item.handler.target.cwd) ? [item.handler.target.cwd] : []);
+      const trusted = [...new Set([...(Array.isArray(backup.trustedFolders) ? backup.trustedFolders : []).filter(item => typeof item === 'string'), ...keptFolders])].slice(-200);
+      // Either computer's GitHub history counts, as far as it belongs to the restored definition.
+      for (const trigger of state.triggers) {
+        const saved = record(backup.github) ? backup.github[trigger.id] : undefined;
+        if (trigger.source.kind !== 'github' || !incoming.some(item => item.id === trigger.id && same(item, trigger)) || !record(saved)) continue;
+        const cursor = state.cursors[trigger.id] ??= { anchorAt: this.now() };
+        const github = mergeGitHub(cursor.github, saved as GitHubCursor);
+        if (github) cursor.github = github;
+      }
+      state.fired = { ...(record(backup.fired) ? backup.fired : {}), ...state.fired };
+      // Restoring trusts exactly the folders the backup trusted (and those of triggers kept here), nothing its triggers add.
+      state.trustedFolders = trusted;
+    }, 'settle');
+    return errors;
   }
 
   /** Stops firing and dispatching without discarding anything, for a worker handoff. */
@@ -1530,6 +1642,23 @@ function upgradeState(saved: EngineState, now: number): EngineState {
   return { ...saved, triggers: Array.isArray(saved.triggers) ? saved.triggers.map(upgrade) as Trigger[] : saved.triggers,
     revisions: record(saved.revisions) ? Object.fromEntries(Object.entries(saved.revisions).map(([id, list]) => [id, Array.isArray(list) ? list.map(upgrade) : list])) as EngineState['revisions'] : saved.revisions,
     tombstones: Array.isArray(saved.tombstones) ? saved.tombstones.map(upgrade) as Trigger[] : saved.tombstones, cursors: cursors as EngineState['cursors'] };
+}
+
+/** Two records of one GitHub watch: what either took or noted stays taken; the rest is the current one's. */
+function mergeGitHub(current: GitHubCursor | undefined, value: GitHubCursor): GitHubCursor | undefined {
+  // A backup's record is taken whole or not at all: a partial one (a list lost, a check time kept) would take old issues as new.
+  const strings = (list: unknown) => list === undefined || (Array.isArray(list) && list.every(item => typeof item === 'string'));
+  const baseline = value.baseline as unknown as Record<string, unknown> | undefined;
+  const validBaseline = baseline === undefined || (!!baseline && typeof baseline === 'object' && (baseline.before === undefined || typeof baseline.before === 'string')
+    && (baseline.watermarks === undefined || (!!baseline.watermarks && typeof baseline.watermarks === 'object' && Object.values(baseline.watermarks).every(item => Number.isInteger(item)))));
+  const number = (item: unknown) => item === undefined || (typeof item === 'number' && Number.isFinite(item));
+  if (!strings(value.handled) || !strings(value.skipped) || !strings(value.reviews) || !strings(value.matched) || !validBaseline || !number(value.checkedAt) || !number(value.verifiedAt)) return current;
+  const saved: GitHubCursor = structuredClone(value);
+  if (!current) return saved;
+  const union = (a?: string[], b?: string[]) => a || b ? [...new Set([...(a ?? []), ...(b ?? [])])] : undefined;
+  const handled = union(current.handled, saved.handled), skipped = union(current.skipped, saved.skipped), reviews = union(current.reviews, saved.reviews);
+  const checkedAt = Math.max(current.checkedAt ?? -Infinity, saved.checkedAt ?? -Infinity);
+  return { ...current, ...(handled ? { handled } : {}), ...(skipped ? { skipped } : {}), ...(reviews ? { reviews } : {}), ...(Number.isFinite(checkedAt) ? { checkedAt } : {}) };
 }
 
 /** The GitHub CLI's token for github.com. Nothing is cached on disk by Tower. */

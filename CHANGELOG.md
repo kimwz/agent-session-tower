@@ -4,6 +4,24 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.92.0] - 2026-09-30
+
+### Added
+- **Backup and restore of Tower's settings** (#19). **Settings → Backup** exports everything Tower is set up with on this computer as one file:
+  - triggers (with their header secrets and what GitHub watches already took), permission rules and automatic review;
+  - Slack (connection, rules, tone) and GitHub automation rules;
+  - public agents, fast judgment, folder groups and hiding, and the folders kept from remote sharing;
+  - Tower's skills with where they apply, their pins and your guidance;
+  - the master's voice settings.
+
+  Sessions, conversations, remote computer links, notification devices and the remote login account stay on each computer. The file holds tokens and API keys, so it is always encrypted with a passphrase of at least 8 characters (scrypt and AES-256-GCM).
+- Restoring checks the file first and shows what it holds. Nothing changes until you confirm. Files it replaces are copied to `restore/before-*` in the state folder, and running turns and shells are never interrupted:
+  - folder, sharing, fast judgment, backup and master settings apply at once;
+  - the execution worker hands over at its next quiet moment to a new worker, which applies triggers, permissions, Slack, public agents and skills before it starts them.
+
+  Triggers are restored the way your own edits would be: an unchanged trigger keeps its schedule, and a changed or new one counts from now. An issue or review request either computer's GitHub watch already took is not taken again. A trigger whose folder or conversation this computer lacks comes in turned off. Skills get back exactly the projects they applied to and their pins; a project folder missing on this computer is left out. Settings a service here would refuse are not written. Everything left out is reported. A backup made by a newer Tower is refused until this one is updated. A backup from another computer comes with a reminder to stop the Tower there first, since both would otherwise run the same automation.
+- **Automatic backups** to S3-compatible storage such as Cloudflare R2: set the endpoint, bucket, access key and a passphrase, and Tower uploads an encrypted backup every 24 hours (1–168). It keeps the newest 14 of this computer's backups (1–100); a key that may only write still backs up and shows a warning. **연결 테스트**, **지금 백업**, and the list of stored backups with download are on the same page. The secret key and passphrase are never shown again.
+
 ## [1.91.0] - 2026-09-30
 
 ### Changed

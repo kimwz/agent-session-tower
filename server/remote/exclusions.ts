@@ -147,6 +147,29 @@ export class RemoteExclusionStore extends EventEmitter {
   }
 
   list(): string[] { return this.folders.map(item => item.path); }
+
+  /** The saved list as a backup keeps it: the folders as entered. */
+  backupValue(): { folders: string[] } { return { folders: this.list() }; }
+
+  /**
+   * Replaces the list with a backup's, after the changes already under way. It is saved as a newer revision than
+   * any before, so every reader (the worker, controlling computers) takes it; a list that could not be read is replaced.
+   */
+  restore(value: unknown): Promise<string[]> {
+    const folders = (value as { folders?: unknown } | undefined)?.folders;
+    if (!Array.isArray(folders) || folders.length > MAX_FOLDERS || !folders.every(validFolderPath)) throw invalid('백업의 원격 공유 제외 목록이 올바르지 않습니다.');
+    const unreadable = this.unreadable;
+    this.unreadable = undefined;
+    return this.update(async () => {
+      const next: ExcludedFolder[] = [];
+      for (const path of folders as string[]) {
+        const normalized = normalize(path);
+        const canonical = await canonicalPath(path) ?? normalized;
+        if (!next.some(item => key(item.path) === key(normalized) || key(item.canonical) === key(canonical))) next.push({ path: normalized, canonical });
+      }
+      return next;
+    }).catch(error => { if (unreadable !== undefined) this.markUnreadable(); throw error; });
+  }
   get revision(): number { return this.currentRevision; }
 
   add(path: unknown): Promise<string[]> {

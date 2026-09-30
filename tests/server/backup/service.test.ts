@@ -1,0 +1,362 @@
+import assert from 'node:assert/strict';
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test, { type TestContext } from 'node:test';
+import { BackupService } from '../../../server/backup/service.js';
+import type { SkillBackup } from '../../../server/backup/payload.js';
+import { readPendingWorker, readReport, takeWorkerRestore } from '../../../server/backup/restore-files.js';
+import { ProjectGroupStore } from '../../../server/stores/project-groups.js';
+import { RemoteExclusionStore } from '../../../server/remote/exclusions.js';
+import { DecisionService } from '../../../server/decisions/service.js';
+import { fakeBucket } from '../../helpers/s3.js';
+
+const PASS = 'correct horse battery';
+const skills: SkillBackup = { bundle: { format: 'agent-session-tower.skills', version: 1, exportedAt: '', from: 'a', skills: [] }, guidance: 'Be brief.', settings: { enabled: true, provider: 'claude' } };
+
+async function computer(t: TestContext, options: { now?: () => number; host?: string } = {}) {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-backup-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const groups = new ProjectGroupStore(stateDir), exclusions = new RemoteExclusionStore(stateDir), decisions = new DecisionService(stateDir);
+  await groups.start(); await exclusions.start(); await decisions.start();
+  const handoffs: number[] = [], master: Record<string, unknown>[] = [];
+  const service = new BackupService({ stateDir, version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => { handoffs.push(Date.now()); return true; },
+    stores: { groups, exclusions, decisions }, master: async body => { master.push(body); }, ...(options.now ? { now: options.now } : {}), host: options.host ?? 'studio' });
+  await service.start();
+  return { stateDir, groups, exclusions, decisions, service, handoffs, master };
+}
+const RULE = { id: 'rule', name: 'Rule', enabled: true, condition: 'Asked', instructions: 'Answer', replyInstructions: 'Reply', provider: 'codex' };
+const write = (dir: string, name: string, value: unknown) => mkdir(join(dir, name, '..'), { recursive: true }).then(() => writeFile(join(dir, name), JSON.stringify(value), { mode: 0o600 }));
+
+test('a backup made on one computer restores on another: web settings now, the worker part at its next start', async t => {
+  const a = await computer(t);
+  await write(a.stateDir, 'permissions.json', { version: 1, rules: [{ id: 'r1' }], requests: [{ id: 'a-request' }], codex: [], autoReview: { enabled: true } });
+  await write(a.stateDir, 'slack-automation.json', { rules: [RULE], workflows: [{ id: 'a-work' }] });
+  await write(a.stateDir, 'slack-connection.json', { enabled: true, userToken: 'xoxp-1', appToken: 'xapp-1', account: { teamId: 'T', userId: 'U' } });
+  await write(a.stateDir, 'trigger-engine.json', { version: 1, triggers: [], settings: {}, trustedFolders: ['/work'], secretGrants: {}, fired: {}, cursors: {}, events: [{ id: 'history' }] });
+  await write(a.stateDir, 'master/settings.json', { voice: { voiceId: 'abcdefghij' }, session: { sessionId: 'x', provider: 'claude', startedAt: '' } });
+  await write(a.stateDir, 'master/elevenlabs-key.json', { apiKey: 'eleven-key-1' });
+  await a.groups.set({ cwd: '/work/shop', title: 'Shop', pinned: true });
+  await a.exclusions.add('/work/private');
+  await a.decisions.update({ apiKey: 'jev-key-1234' });
+  const file = await a.service.export(PASS);
+  assert.match(file.name, /^tower-backup-studio-[0-9a-f]{6}-\d{8}T\d{6}Z\.towerbackup$/);
+  assert.doesNotMatch(file.text, /xoxp-1|jev-key|eleven-key/);
+
+  const b = await computer(t);
+  await write(b.stateDir, 'permissions.json', { version: 1, rules: [{ id: 'old' }], requests: [{ id: 'b-request' }], codex: [{ path: '/b/rules' }] });
+  await b.groups.set({ cwd: '/elsewhere', title: 'Gone', pinned: false });
+  await assert.rejects(b.service.check(file.text, 'wrong passphrase'), /암호가 맞지 않거나/);
+  const preview = await b.service.check(file.text, PASS);
+  assert.deepEqual(preview.parts, ['triggers', 'permissions', 'slack', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'master', 'backup']);
+  assert.equal(preview.otherComputer, true, 'another Tower made it, whatever the host name');
+  const again = await a.service.check(file.text, PASS);
+  assert.equal(again.otherComputer, false, 'its own backup, back on the Tower that made it');
+  const report = await b.service.apply(preview.id);
+  await assert.rejects(b.service.apply(preview.id), /만료/, 'a checked backup is applied once');
+  assert.equal(report.status, 'waiting-worker');
+  assert.deepEqual(report.applied, ['projectGroups', 'remoteExclusions', 'decisions', 'backup', 'master']);
+  assert.deepEqual(report.errors, []);
+  assert.deepEqual(b.groups.list(), [{ cwd: '/work/shop', title: 'Shop', pinned: true }]);
+  assert.deepEqual(b.exclusions.list(), ['/work/private']);
+  assert.equal(b.decisions.overview().keyHint, '…1234');
+  assert.deepEqual(b.master, [{ voice: { voiceId: 'abcdefghij' }, voiceKey: 'eleven-key-1' }], 'the master session binding stays this computer’s');
+  assert.equal(b.handoffs.length, 1, 'the worker is asked to hand over');
+  assert.deepEqual(JSON.parse(await readFile(join(report.before!, 'permissions.json'), 'utf8')).rules, [{ id: 'old' }], 'replaced files are kept aside');
+  assert.equal(((await stat(join(b.stateDir, 'restore', 'pending-worker.json'))).mode & 0o777), 0o600);
+  // A worker on the other side of the restore sees the backup's exclusions as newer than its own copy.
+  const worker = new RemoteExclusionStore(b.stateDir);
+  await worker.start();
+  assert.deepEqual(worker.list(), ['/work/private']);
+
+  // The next worker takes its part before its services start.
+  const taken = await takeWorkerRestore(b.stateDir);
+  assert.ok(taken);
+  assert.deepEqual(taken.restore.skills?.guidance, 'Be brief.');
+  const permissions = JSON.parse(await readFile(join(b.stateDir, 'permissions.json'), 'utf8'));
+  assert.deepEqual(permissions, { version: 1, requests: [{ id: 'b-request' }], codex: [{ path: '/b/rules' }], rules: [{ id: 'r1' }], autoReview: { enabled: true } });
+  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'slack-automation.json'), 'utf8')), { rules: [RULE], workflows: [] }, 'work under way stays on its computer');
+  assert.equal(JSON.parse(await readFile(join(b.stateDir, 'slack-connection.json'), 'utf8')).userToken, 'xoxp-1');
+  await taken.finish({ parts: ['triggers', 'skills'], errors: [], skills: { restored: [], skipped: [] } });
+  assert.equal(await readPendingWorker(b.stateDir), undefined);
+  const done = await readReport(b.stateDir);
+  assert.equal(done?.status, 'applied');
+  assert.deepEqual(done?.worker.sort(), ['permissions', 'skills', 'slack', 'triggers']);
+  assert.equal(await takeWorkerRestore(b.stateDir), undefined, 'a later worker has nothing to take');
+});
+
+test('a waiting restore can be cancelled, and a different Slack account never replaces one with work under way', async t => {
+  const a = await computer(t);
+  await write(a.stateDir, 'slack-connection.json', { enabled: true, userToken: 'xoxp-a', account: { teamId: 'T', userId: 'A' } });
+  const text = (await a.service.export(PASS)).text;
+  const b = await computer(t);
+  await write(b.stateDir, 'slack-connection.json', { enabled: true, userToken: 'xoxp-b', account: { teamId: 'T', userId: 'B' } });
+  await write(b.stateDir, 'slack-automation.json', { rules: [], workflows: [{ id: 'w', status: 'running' }] });
+  const waiting = await b.service.apply((await b.service.check(text, PASS)).id);
+  await assert.rejects(b.service.cancel('another'), /기다리는 복원이 없습니다/, 'only the restore the page shows is cancelled');
+  assert.equal((await b.service.cancel(waiting.id)).status, 'cancelled');
+  assert.equal(await readPendingWorker(b.stateDir), undefined);
+  await assert.rejects(b.service.cancel(waiting.id), /기다리는 복원이 없습니다/);
+  await b.service.apply((await b.service.check(text, PASS)).id);
+  const taken = await takeWorkerRestore(b.stateDir);
+  await taken!.finish({ parts: [], errors: [] });
+  assert.equal(JSON.parse(await readFile(join(b.stateDir, 'slack-connection.json'), 'utf8')).userToken, 'xoxp-b');
+  assert.match((await readReport(b.stateDir))!.errors.join(' '), /진행 중인 Slack 작업/);
+  const before = (await readdir(join(b.stateDir, 'restore'))).filter(name => name.startsWith('before-'));
+  assert.ok(before.length >= 1 && before.length <= 3);
+});
+
+test('automatic backups go to the bucket when due, keep only the newest of this computer, and never show secrets', async t => {
+  const bucket = await fakeBucket(t);
+  const clock = { now: Date.parse('2026-09-30T00:00:00Z') };
+  const a = await computer(t, { now: () => clock.now });
+  const settings = { enabled: true, intervalHours: 24, keep: 2, passphrase: PASS, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: 'tower/', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' } };
+  await assert.rejects(a.service.saveSettings({ ...settings, remote: { ...settings.remote, endpoint: 'http://example.com' } }), /https/);
+  const overview = await a.service.saveSettings(settings);
+  assert.equal(JSON.stringify(overview).includes('secret-key'), false);
+  assert.equal(JSON.stringify(overview).includes(PASS), false);
+  assert.equal(overview.settings.remote.secretSet, true);
+  await a.service.test();
+  // Another computer, one whose name starts the same, and one with the same name: none of theirs is removed.
+  const others = ['tower/tower-backup-other-abcdef-20260101T000000Z.towerbackup', 'tower/tower-backup-studio-pro-abcdef-20260101T000000Z.towerbackup', 'tower/tower-backup-studio-000000-20260101T000000Z.towerbackup'];
+  for (const key of others) bucket.objects.set(key, { body: Buffer.from('x'), at: '2026-01-01T00:00:00Z' });
+  for (let day = 0; day < 3; day++) { await a.service.upload(); clock.now += 24 * 60 * 60 * 1000; }
+  const own = [...bucket.objects.keys()].filter(key => !others.includes(key)).sort();
+  assert.deepEqual(others.filter(key => bucket.objects.has(key)), others);
+  assert.equal(own.length, 2, 'only the newest two of its own are kept');
+  assert.match(own[0]!, /^tower\/tower-backup-studio-[0-9a-f]{6}-20261001T000000Z\.towerbackup$/);
+  assert.match(own[1]!, /-20261002T000000Z\.towerbackup$/);
+  const status = (await a.service.overview()).status;
+  assert.equal(status.lastSuccessAt, '2026-10-02T00:00:00.000Z');
+  assert.equal(status.lastKey, own[1]);
+  // What was uploaded restores with the saved passphrase.
+  const downloaded = await a.service.download(own[1]);
+  assert.ok((await a.service.check(downloaded.text, PASS)).parts.includes('backup'));
+  await assert.rejects(a.service.download('elsewhere/x.towerbackup'), /찾을 수 없습니다/);
+  assert.equal((await a.service.remote()).length, 5);
+  // A failure is recorded and does not clear the last success.
+  await a.service.saveSettings({ ...settings, remote: { ...settings.remote, accessKeyId: 'WRONG', secretAccessKey: '' } });
+  await assert.rejects(a.service.upload(), /403/);
+  const failed = (await a.service.overview()).status;
+  assert.match(failed.lastError!, /403/);
+  assert.equal(failed.lastSuccessAt, '2026-10-02T00:00:00.000Z');
+});
+
+test('an automatic backup runs when due, and a failed one is tried again only after a while', async t => {
+  const bucket = await fakeBucket(t);
+  const clock = { now: Date.parse('2026-09-30T00:00:00Z') };
+  const a = await computer(t, { now: () => clock.now });
+  const settings = { enabled: false, intervalHours: 6, keep: 10, passphrase: PASS, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: '', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' } };
+  await a.service.saveSettings(settings);
+  await a.service.runIfDue();
+  assert.equal(bucket.objects.size, 0, 'nothing while it is off');
+  await a.service.saveSettings({ ...settings, enabled: true });
+  await a.service.runIfDue();
+  assert.equal(bucket.objects.size, 1, 'the first one right away');
+  clock.now += 5 * 60 * 60 * 1000;
+  await a.service.runIfDue();
+  assert.equal(bucket.objects.size, 1);
+  clock.now += 60 * 60 * 1000;
+  await a.service.saveSettings({ ...settings, enabled: true, remote: { ...settings.remote, accessKeyId: 'WRONG', secretAccessKey: '' } });
+  await a.service.runIfDue();
+  const attempts = () => bucket.seen.filter(line => line.startsWith('PUT')).length;
+  assert.equal(attempts(), 2, 'due again after six hours; it fails');
+  clock.now += 10 * 60 * 1000;
+  await a.service.runIfDue();
+  assert.equal(attempts(), 2, 'not every ten minutes after a failure');
+  clock.now += 30 * 60 * 1000;
+  await a.service.saveSettings({ ...settings, enabled: true });
+  await a.service.runIfDue();
+  assert.equal(bucket.objects.size, 2);
+});
+
+test('a restore of fast-judgment settings is never overwritten by a change that was already under way', async t => {
+  const a = await computer(t);
+  const change = a.decisions.update({ apiKey: 'first-key-0000' });
+  const restore = a.decisions.restore({ provider: 'jev', apiKey: 'restored-key-9999', features: {} });
+  await Promise.all([change, restore]);
+  assert.equal(a.decisions.overview().keyHint, '…9999');
+  const again = new DecisionService(a.stateDir);
+  await again.start();
+  assert.equal(again.overview().keyHint, '…9999');
+  await assert.rejects(a.decisions.restore({ provider: 'nobody' }), /올바르지 않습니다/);
+});
+
+test('a restore applied while a worker is still applying an earlier one is kept for the next worker, never lost', async t => {
+  const a = await computer(t);
+  const text = (await a.service.export(PASS)).text;
+  const b = await computer(t);
+  const first = await b.service.apply((await b.service.check(text, PASS)).id);
+  const taken = await takeWorkerRestore(b.stateDir);
+  assert.equal(taken?.restore.id, first.id);
+  await assert.rejects(b.service.cancel(first.id), /이미 복원을 적용하고/, 'a part being applied cannot be cancelled');
+  // The owner restores again while that worker is still busy with the first one; a cancel of the first sent at the
+  // same moment never touches the second.
+  const secondCheck = await b.service.check(text, PASS);
+  const [second, cancelled] = await Promise.all([b.service.apply(secondCheck.id), b.service.cancel(first.id).then(() => 'cancelled', () => 'refused')]);
+  assert.equal(cancelled, 'refused');
+  await taken!.finish({ parts: [], errors: [] });
+  const report = await readReport(b.stateDir);
+  assert.equal(report?.id, second.id);
+  assert.equal(report?.status, 'waiting-worker', 'the first worker never marks the second restore done');
+  assert.equal((await readPendingWorker(b.stateDir))?.id, second.id);
+  const next = await takeWorkerRestore(b.stateDir);
+  assert.equal(next?.restore.id, second.id);
+  await next!.finish({ parts: [], errors: [] });
+  assert.equal((await readReport(b.stateDir))?.status, 'applied');
+});
+
+test('a key that may only write still counts as backed up; removing old ones is a warning, not a new upload', async t => {
+  const bucket = await fakeBucket(t, { denyList: true });
+  const clock = { now: Date.parse('2026-09-30T00:00:00Z') };
+  const a = await computer(t, { now: () => clock.now });
+  const settings = { enabled: true, intervalHours: 24, keep: 1, passphrase: PASS, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: 'tower/', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' } };
+  await assert.rejects(a.service.saveSettings({ ...settings, remote: { ...settings.remote, prefix: 'tower/../' } }), /접두어/);
+  await a.service.saveSettings(settings);
+  await assert.rejects(a.service.test(), /list not allowed/, 'the connection test asks for listing too');
+  await a.service.runIfDue();
+  const status = (await a.service.overview()).status;
+  assert.equal(status.lastSuccessAt, '2026-09-30T00:00:00.000Z');
+  assert.match(status.lastWarning!, /정리하지 못했습니다/);
+  clock.now += 60 * 60 * 1000;
+  await a.service.runIfDue();
+  assert.equal(bucket.objects.size, 1, 'not uploaded again before the interval');
+});
+
+test('a backup from a newer Tower is refused, and worker settings a service would refuse are never written', async t => {
+  const a = await computer(t);
+  const newer = new BackupService({ stateDir: a.stateDir, version: '9.0.0', skills: async () => structuredClone(skills), restartWorker: async () => true,
+    stores: { groups: a.groups, exclusions: a.exclusions, decisions: a.decisions }, host: 'studio' });
+  await newer.start();
+  const b = await computer(t);
+  await assert.rejects(b.service.check((await newer.export(PASS)).text, PASS), /9\.0\.0에서 만든 백업/);
+
+  await write(b.stateDir, 'slack-connection.json', { enabled: false, language: 'ko' });
+  await write(b.stateDir, 'slack-automation.json', { rules: [], workflows: [] });
+  await write(b.stateDir, 'public-agents.json', { version: 1, agents: [] });
+  await writeFile(join(b.stateDir, 'permissions.json'), '{ not json', { mode: 0o600 });
+  const { applyWorkerFiles } = await import('../../../server/backup/payload.js');
+  const result = await applyWorkerFiles(b.stateDir, {
+    'slack-connection.json': { enabled: 'yes' },
+    'slack-automation.json': { rules: [{ bogus: true }] },
+    'public-agents.json': { version: 1, agents: [{ id: '../decisions', slug: 'x', name: 'n' }] },
+    'permissions.json': { rules: [] },
+  });
+  assert.deepEqual(result.parts, []);
+  assert.equal(result.errors.length, 4);
+  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'slack-connection.json'), 'utf8')), { enabled: false, language: 'ko' });
+  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'public-agents.json'), 'utf8')), { version: 1, agents: [] });
+  assert.equal(await readFile(join(b.stateDir, 'permissions.json'), 'utf8'), '{ not json', 'a file here that cannot be read is left alone');
+});
+
+test('a restored public agent with another password signs its visitors out, and an unreadable master key stops the backup', async t => {
+  const b = await computer(t);
+  const agent = (password: string, slug = 'A'.repeat(22), conversation = 'visitor') => ({ id: '11111111-1111-4111-8111-111111111111', slug, name: 'Help', scope: 'Answer questions about tea.', cwd: '/work', provider: 'codex', conversation, password, createdAt: '', updatedAt: '' });
+  const { parsePublicAgents } = await import('../../../server/public-agents/service.js');
+  const { applyWorkerFiles } = await import('../../../server/backup/payload.js');
+  const current = { version: 1, agents: [agent('scrypt$old')] };
+  assert.ok(parsePublicAgents(current), 'a public agent this build reads');
+  await write(b.stateDir, 'public-agents.json', current);
+  await write(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json', { version: 1, conversations: [], requests: [], visitors: [{ hash: 'h', authorized: true, conversationId: 'c', tag: 'T', createdAt: '', seenAt: '' }] });
+  await applyWorkerFiles(b.stateDir, { 'public-agents.json': { version: 1, agents: [agent('scrypt$old', 'A'.repeat(22), 'shared')] } });
+  let data = JSON.parse(await readFile(join(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json'), 'utf8'));
+  assert.equal(data.visitors[0].authorized, true, 'the same password keeps them signed in');
+  assert.equal(data.visitors[0].conversationId, undefined, 'another way of sharing starts their conversations anew');
+  await applyWorkerFiles(b.stateDir, { 'public-agents.json': { version: 1, agents: [agent('scrypt$new', 'A'.repeat(22), 'shared')] } });
+  data = JSON.parse(await readFile(join(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json'), 'utf8'));
+  assert.equal(data.visitors[0].authorized, false);
+  await applyWorkerFiles(b.stateDir, { 'public-agents.json': { version: 1, agents: [agent('scrypt$new', 'B'.repeat(22))] } });
+  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json'), 'utf8')).visitors, [], 'a new address forgets visitors');
+
+  await mkdir(join(b.stateDir, 'master'), { recursive: true });
+  await writeFile(join(b.stateDir, 'master', 'elevenlabs-key.json'), '{ broken', { mode: 0o600 });
+  await assert.rejects(b.service.export(PASS), /읽지 못해 백업하지 않았습니다/);
+});
+
+test('an upload stopped because Tower shuts down is not a failure, and the next start tries again when due', async t => {
+  const bucket = await fakeBucket(t);
+  let release!: () => void;
+  const stalled = new Promise<void>(resolve => { release = resolve; });
+  // The bucket answers only once released: the upload is still under way when Tower closes.
+  const fetcher: typeof fetch = async (input, init) => { await Promise.race([stalled, new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))))]); return fetch(input, init); };
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-backup-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const groups = new ProjectGroupStore(stateDir), exclusions = new RemoteExclusionStore(stateDir), decisions = new DecisionService(stateDir);
+  await groups.start(); await exclusions.start(); await decisions.start();
+  const service = new BackupService({ stateDir, version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true, stores: { groups, exclusions, decisions }, fetcher, host: 'studio' });
+  await service.start();
+  await service.saveSettings({ enabled: true, intervalHours: 24, keep: 3, passphrase: PASS, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: '', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' } });
+  const upload = service.upload();
+  await new Promise(resolve => setTimeout(resolve, 200));
+  service.close();
+  await assert.rejects(upload);
+  release();
+  const status = (await service.overview()).status;
+  assert.equal(status.lastError, undefined);
+  assert.equal(status.lastAttemptAt, undefined, 'the next start backs up at once');
+});
+
+test('restoring keeps the automatic backup passphrase saved here, and adopts the one it was opened with only when none is', async t => {
+  const a = await computer(t);
+  await a.service.saveSettings({ enabled: false, intervalHours: 24, keep: 3, passphrase: 'automatic passphrase', remote: { endpoint: '', bucket: '', prefix: '', region: 'auto', accessKeyId: '' } });
+  const text = (await a.service.export(PASS)).text;
+  const b = await computer(t);
+  await b.service.saveSettings({ enabled: false, intervalHours: 24, keep: 3, passphrase: 'saved here already', remote: { endpoint: '', bucket: '', prefix: '', region: 'auto', accessKeyId: '' } });
+  const kept = await b.service.apply((await b.service.check(text, PASS)).id);
+  assert.equal(kept.notes, undefined);
+  const settings = JSON.parse(await readFile(join(b.stateDir, 'backup-settings.json'), 'utf8')).settings;
+  assert.equal(settings.passphrase, 'saved here already');
+  const c = await computer(t);
+  const adopted = await c.service.apply((await c.service.check(text, PASS)).id);
+  assert.deepEqual(adopted.notes, ['자동 백업은 이제 이 백업을 연 암호로 암호화됩니다.']);
+  assert.equal(JSON.parse(await readFile(join(c.stateDir, 'backup-settings.json'), 'utf8')).settings.passphrase, PASS);
+});
+
+test('a backup from another computer is flagged, only adds to the folders kept from sharing here, and leaves the master alone when it had none', async t => {
+  const { decryptBackup, encryptBackup } = await import('../../../server/backup/crypto.js');
+  const a = await computer(t);
+  await a.exclusions.add('/a/private');
+  const opened = await decryptBackup((await a.service.export(PASS)).text, PASS);
+  assert.equal((opened.payload as { master?: unknown }).master, undefined, 'no master set up, nothing to bring back');
+  const elsewhere = await encryptBackup(opened.payload, PASS, { towerVersion: '1.91.0', from: 'another-computer' });
+  const b = await computer(t);
+  await b.exclusions.add('/b/private');
+  const preview = await b.service.check(elsewhere, PASS);
+  assert.equal(preview.otherComputer, true);
+  await b.service.apply(preview.id);
+  assert.deepEqual(b.exclusions.list().sort(), ['/a/private', '/b/private']);
+  assert.deepEqual(b.master, [], 'the master host is not started or changed');
+});
+
+test('a worker that stops after applying files and triggers leaves only the skills for the next one', async t => {
+  const a = await computer(t);
+  await write(a.stateDir, 'trigger-engine.json', { version: 1, triggers: [], settings: {}, trustedFolders: [], secretGrants: {}, fired: {}, cursors: {} });
+  await write(a.stateDir, 'permissions.json', { version: 1, rules: [{ id: 'backed-up' }], requests: [], codex: [] });
+  const text = (await a.service.export(PASS)).text;
+  const b = await computer(t);
+  await b.service.apply((await b.service.check(text, PASS)).id);
+  const first = await takeWorkerRestore(b.stateDir);
+  assert.ok(first?.restore.triggers);
+  await first.applied({ parts: ['triggers'], errors: ['trigger note'] });
+  // The owner changes a permission rule; then the worker stops before its skills were done.
+  await write(b.stateDir, 'permissions.json', { version: 1, rules: [{ id: 'changed-since' }], requests: [], codex: [] });
+  const second = await takeWorkerRestore(b.stateDir);
+  assert.equal(second?.restore.triggers, undefined, 'triggers are not applied again');
+  assert.deepEqual(second?.restore.files, {});
+  assert.ok(second?.restore.skills, 'the skills are still to do');
+  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'permissions.json'), 'utf8')).rules, [{ id: 'changed-since' }], 'what changed since is kept');
+  await second!.finish({ parts: ['skills'], errors: [] });
+  const report = await readReport(b.stateDir);
+  assert.equal(report?.status, 'applied');
+  assert.deepEqual(report?.worker.sort(), ['permissions', 'skills', 'triggers']);
+  assert.ok(report?.errors.includes('trigger note'));
+});
+
+test("a computer keeps its mark across restarts, so its own backups are its own even under another name", async t => {
+  const a = await computer(t);
+  const text = (await a.service.export(PASS)).text;
+  const restarted = new BackupService({ stateDir: a.stateDir, version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true,
+    stores: { groups: a.groups, exclusions: a.exclusions, decisions: a.decisions }, host: 'renamed' });
+  await restarted.start();
+  assert.equal((await restarted.check(text, PASS)).otherComputer, false);
+});

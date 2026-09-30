@@ -103,6 +103,22 @@ function derive(password: string, salt: string): Promise<Buffer> {
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 
 /**
+ * Saved public agent definitions this build can read, or undefined. An id names the agent's data file, so it is only
+ * ever letters, digits and hyphens.
+ */
+export function parsePublicAgents(saved: unknown): StoredAgent[] | undefined {
+  if (!record(saved) || saved.version !== 1 || !Array.isArray(saved.agents)) return undefined;
+  const agents: StoredAgent[] = [];
+  for (const value of saved.agents as StoredAgent[]) {
+    if (!record(value)) return undefined;
+    const parsed = PublicAgentInputSchema.safeParse(Object.fromEntries(Object.entries(value).filter(([key]) => !['id', 'slug', 'password', 'createdAt', 'updatedAt'].includes(key))));
+    if (!parsed.success || typeof value.id !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(value.id) || !PUBLIC_SLUG.test(value.slug)) return undefined;
+    agents.push({ ...parsed.data, id: value.id, slug: value.slug, createdAt: value.createdAt, updatedAt: value.updatedAt, ...(value.password ? { password: value.password } : {}) });
+  }
+  return agents;
+}
+
+/**
  * Public agents live in the execution worker: their model calls and the work they start continue while the web
  * process restarts. Definitions are in public-agents.json; each agent's conversations, requests and visitors are in
  * public-agents/<id>.json.
@@ -136,12 +152,9 @@ export class PublicAgentService extends EventEmitter {
     let saved: unknown;
     try { saved = await readPrivateJson(this.file); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     if (saved !== undefined) {
-      if (!record(saved) || saved.version !== 1 || !Array.isArray(saved.agents)) throw new Error('Saved public agents are invalid.');
-      for (const value of saved.agents as StoredAgent[]) {
-        const parsed = PublicAgentInputSchema.safeParse(Object.fromEntries(Object.entries(value).filter(([key]) => !['id', 'slug', 'password', 'createdAt', 'updatedAt'].includes(key))));
-        if (!parsed.success || typeof value.id !== 'string' || !PUBLIC_SLUG.test(value.slug)) throw new Error('Saved public agents are invalid.');
-        this.agents.set(value.id, { ...parsed.data, id: value.id, slug: value.slug, createdAt: value.createdAt, updatedAt: value.updatedAt, ...(value.password ? { password: value.password } : {}) });
-      }
+      const agents = parsePublicAgents(saved);
+      if (!agents) throw new Error('Saved public agents are invalid.');
+      for (const agent of agents) this.agents.set(agent.id, agent);
     }
     for (const id of this.agents.keys()) {
       let stored: unknown;
