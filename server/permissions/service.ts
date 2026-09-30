@@ -122,7 +122,8 @@ export class PermissionService {
    * The settings a Claude Code turn Tower starts in `cwd` gets: every project's rules, and those of the project the
    * folder is in (the folder itself or one inside it). Undefined when no rule applies.
    */
-  claudeSettings(cwd: string, sessionId?: string): string | undefined {
+  /** The rules a Claude turn in this folder and conversation receives. */
+  private claudeRules(cwd: string, sessionId?: string): PermissionRule[] {
     const now = Date.parse(this.now());
     // A conversation rule reaches only its own conversation's turns, until it expires.
     const rules = this.state.rules.filter(rule => rule.kind !== 'run' && rule.providers.includes('claude') && (rule.scope === 'global'
@@ -131,7 +132,11 @@ export class PermissionService {
     // Where the owner allowed a command overlapping one the reviewer allowed (in any scope that reaches this turn), the
     // owner's rule decides here: the reviewer's rule and its guards are left out of this turn, as a same-scope rule is replaced.
     const owned = rules.filter(rule => rule.source !== 'auto' && rule.kind === 'command');
-    const used = rules.filter(rule => !(rule.source === 'auto' && rule.kind === 'command' && owned.some(mine => rulesOverlap(mine.value, rule.value))));
+    return rules.filter(rule => !(rule.source === 'auto' && rule.kind === 'command' && owned.some(mine => rulesOverlap(mine.value, rule.value))));
+  }
+
+  claudeSettings(cwd: string, sessionId?: string): string | undefined {
+    const used = this.claudeRules(cwd, sessionId);
     const allow = [...new Set(used.map(claudeRule))];
     // A rule the reviewer allowed never covers its family's destructive variants: deny comes before allow.
     const deny = [...new Set(used.filter(rule => rule.source === 'auto').flatMap(rule => ruleGuards(rule).claude))];
@@ -222,6 +227,8 @@ export class PermissionService {
         // This conversation only when the reviewer says so (or it was asked so) and only Claude needs it: Codex takes no per-turn rules.
         const conversation = (result.scope === 'conversation' || asked.scope === 'conversation') && request.provider !== 'codex'
           && (result.rule?.providers ?? asked.providers).every(provider => provider === 'claude');
+        // Meant for this conversation only but it cannot be (a Codex agent, or Codex asked for too): never kept for good.
+        if (result.scope === 'conversation' && !conversation) return owner('이 대화에만 줄 수 없는 규칙이라 소유자에게 넘깁니다');
         let given: PermissionRuleInput;
         try {
           given = clean({ kind: result.rule?.kind ?? asked.kind, value: result.rule?.value ?? asked.value, providers: result.rule?.providers?.length ? result.rule.providers : asked.providers,
@@ -335,7 +342,9 @@ export class PermissionService {
       const alike = this.state.rules.filter(existing => existing.kind === rule.kind && sameRule({ ...existing, scope: 'global', cwd: undefined, sessionId: undefined }, { ...rule, scope: 'global', cwd: undefined, sessionId: undefined }));
       // Each agent asked for is covered by a rule of its own that reaches this folder: Codex reads a project's rules in
       // that folder only, so a folder inside another is not covered for it.
-      const covers = (existing: PermissionRule, item: PermissionProvider) => existing.providers.includes(item) && (existing.scope === 'global'
+      // For Claude, only what its turns in this conversation really receive counts.
+      const reaching = new Set(this.claudeRules(session.cwd, caller.sessionId).map(item => item.id));
+      const covers = (existing: PermissionRule, item: PermissionProvider) => existing.providers.includes(item) && (item !== 'claude' || reaching.has(existing.id)) && (existing.scope === 'global'
         || (existing.scope === 'project' && rule.scope !== 'global' && (item === 'codex' ? existing.cwd === rule.cwd : within(rule.cwd!, existing.cwd!)))
         || (existing.scope === 'conversation' && rule.scope === 'conversation' && existing.sessionId === rule.sessionId && !expired(existing, now)));
       if (rule.providers.every(item => alike.some(existing => covers(existing, item)))) return { request: { status: 'exists' as const }, note: 'This rule is already allowed. Try the action again; a Codex rule applies from the next turn.' };

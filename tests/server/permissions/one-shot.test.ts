@@ -405,3 +405,27 @@ test('a result told late is kept a while from then', async t => {
   const result = await f.service.runResult({ id: asked.request.id! }, agent('claude:one'));
   assert.equal(result.output!.stdout, 'told\n');
 });
+
+test('a reviewer’s rule left out of a conversation’s turns can be asked for again there', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const project = await f.service.request({ kind: 'command', value: 'git push', providers: ['claude'], scope: 'project', reason: 'r' }, agent('claude:other'));
+  assert.ok(await f.service.startReview(project.request.id!));
+  await f.service.applyReview(project.request.id!, { verdict: 'approve', reason: 'ok' });
+  await f.service.saveAutoReview({ ...ON, enabled: false });
+  const mine = await f.service.request({ kind: 'command', value: 'git push origin main', scope: 'conversation', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(mine.request.id!, true);
+  const again = await f.service.request({ kind: 'command', value: 'git push', providers: ['claude'], scope: 'project', reason: 'r' }, agent('claude:one'));
+  assert.equal(again.request.status, 'pending', 'not reported as allowed: this conversation’s turns do not get it');
+  assert.equal((await f.service.request({ kind: 'command', value: 'git push', providers: ['claude'], scope: 'project', reason: 'r' }, agent('claude:other'))).request.status, 'exists');
+});
+
+test('a rule the reviewer means for one conversation but cannot keep there goes to the owner', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const asked = await f.service.request({ kind: 'command', value: 'gh pr merge', providers: ['claude', 'codex'], scope: 'project', reason: 'r' }, agent('claude:one'));
+  assert.ok(await f.service.startReview(asked.request.id!));
+  await f.service.applyReview(asked.request.id!, { verdict: 'approve', reason: 'ok', scope: 'conversation' });
+  assert.equal(f.service.overview().rules.length, 0);
+  assert.equal(f.service.overview().requests[0]!.status, 'pending');
+});
