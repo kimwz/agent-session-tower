@@ -1,7 +1,7 @@
 import { useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, KeyRound, Plus, Trash2 } from 'lucide-react';
 import type { ProviderHealth, Session } from '../../../shared/types';
-import { GITHUB_API, type CoordinatorRule, type GitHubCheck, type HttpCondition, type HttpTestResult, type Trigger, type TriggerInput, type TriggerSecret } from '../../../shared/triggers';
+import { GITHUB_API, type CoordinatorRule, type GitHubCheck, type IssuePreview, type IssuePreviewItem, type HttpCondition, type HttpTestResult, type Trigger, type TriggerInput, type TriggerSecret } from '../../../shared/triggers';
 import { EffortPicker, ModelPicker } from '../chat/ModelPicker';
 import { absoluteTime, sessionTitle } from '../common/lib';
 import { translateMessage, useI18n } from '../i18n/i18n';
@@ -57,7 +57,7 @@ export function TriggerEditor({ trigger, kind, token, providers, projects, sessi
     <Section step={1} title={whatTitle}>
       {source.kind === 'schedule' && <ScheduleFields token={token} schedule={source.schedule} onChange={schedule => setSource({ ...source, schedule })} />}
       {source.kind === 'http' && <HttpFields token={token} source={source} onChange={setSource} />}
-      {source.kind === 'github' && <GitHubFields token={token} source={source} onChange={setSource}
+      {source.kind === 'github' && <GitHubFields token={token} source={source} onChange={setSource} triggerId={trigger?.id} handlerKind={input.handler.kind}
         onAccount={(login, auth) => setInput(previous => previous.source.kind === 'github' && JSON.stringify(previous.source.auth) === JSON.stringify(auth) ? { ...previous, source: { ...previous.source, account: login } } : previous)} />}
     </Section>
     {polled && <Section step={2} title={t('얼마나 자주 확인할까요')} hint={source.kind === 'github' ? t('확인하지 못한 사이에 생긴 이슈도 다음 확인에서 찾습니다.') : t('잠자기나 종료로 확인을 놓쳤다면 다시 켜진 뒤 한 번만 확인합니다.')}>
@@ -211,7 +211,9 @@ function HttpFields({ token, source, onChange }: { token: string; source: HttpSo
 
 const list = (value: string) => value.split(/[\n,]/).map(item => item.trim()).filter(Boolean);
 
-function GitHubFields({ token, source, onChange, onAccount }: { token: string; source: GitHubSource; onChange: (source: GitHubSource) => void;
+function GitHubFields({ token, source, onChange, onAccount, triggerId, handlerKind }: { token: string; source: GitHubSource; onChange: (source: GitHubSource) => void;
+  /** The saved trigger being edited, so the preview shows what it already took. */
+  triggerId?: string; handlerKind: TriggerInput['handler']['kind'];
   /** Sets the checked account, only if the sign-in it was checked with is still the one chosen. */
   onAccount: (login: string, auth: GitHubSource['auth']) => void }) {
   const { t } = useI18n();
@@ -244,11 +246,11 @@ function GitHubFields({ token, source, onChange, onAccount }: { token: string; s
   };
   return <>
     <Choice label={t('무엇을 볼까요')} value={watch.type} onChange={switchWatch}
-      options={[['issue-opened', t('저장소에 새로 열린 이슈')], ['open-issues', t('열린 이슈를 하나씩 차례로 처리')], ['assigned-to-me', t('나에게 새로 할당된 이슈')], ['review-requested', t('나에게 리뷰를 요청한 풀 리퀘스트')]]} />
-    <label>{t('저장소')}<textarea rows={2} required={watch.type === 'issue-opened' || watch.type === 'open-issues'} placeholder="owner/name" value={repos} onChange={event => { setRepos(event.target.value); const names = list(event.target.value);
-      setWatch(watch.type === 'issue-opened' || watch.type === 'open-issues' ? { ...watch, repos: names } : { ...watch, ...(names.length ? { repos: names } : { repos: undefined }) }); }} />
-      <small>{watch.type === 'issue-opened' ? t('한 줄에 하나씩 owner/name. 처음 확인할 때 이미 있던 이슈로는 실행하지 않습니다.')
-        : watch.type === 'open-issues' ? t('한 줄에 하나씩 owner/name. 이미 열려 있던 이슈까지 오래된 것부터 하나씩 처리하고, 실행이 끝나면 다음 이슈를 가져옵니다.') : t('비우면 모든 저장소. 한 줄에 하나씩 owner/name.')}</small></label>
+      options={[['issues', t('이슈')], ['review-requested', t('나에게 리뷰를 요청한 풀 리퀘스트')]]} />
+    <label>{t('저장소')}<textarea rows={2} required={watch.type === 'issues' && watch.assignee !== 'me'} placeholder="owner/name" value={repos} onChange={event => { setRepos(event.target.value); const names = list(event.target.value);
+      setWatch(watch.type === 'issues' ? { ...watch, repos: names } : { ...watch, ...(names.length ? { repos: names } : { repos: undefined }) }); }} />
+      <small>{watch.type === 'issues' ? t('한 줄에 하나씩 owner/name. 담당자를 나로 고르면 비워서 모든 저장소를 볼 수 있습니다.') : t('비우면 모든 저장소. 한 줄에 하나씩 owner/name.')}</small></label>
+    {watch.type === 'issues' && <IssueOptions watch={watch} handlerKind={handlerKind} onChange={setWatch} />}
     {watch.type === 'review-requested' && <p className="trigger-note">{t('리뷰어로 지정되거나 Draft가 Ready for review로 바뀌면 실행하고, 리뷰를 남긴 뒤 다시 요청받으면 또 실행합니다. 처음 확인할 때 이미 요청된 PR로는 실행하지 않습니다.')}</p>}
     <div className="trigger-account">
       {/* The sign-in is checked on the computer that uses it, so on another computer it stays as it is. */}
@@ -262,7 +264,69 @@ function GitHubFields({ token, source, onChange, onAccount }: { token: string; s
       : <p className={source.account ? 'trigger-note' : 'trigger-note trigger-warn'}>{source.account ? t('{0} 계정으로 확인합니다.', { 0: source.account }) : t('저장하기 전에 연결을 확인해 계정을 정하세요.')}</p>
       : check.ok ? <p className="trigger-note">{t('{0} 계정으로 확인합니다.', { 0: check.login ?? '' })}</p> : <p className="slack-error">{translateMessage(check.error ?? '')}</p>}
     {source.auth.type === 'token' && !secrets.length && <p className="trigger-note">{t('연결 탭에서 https://api.github.com 용 비밀로 토큰을 먼저 저장하세요.')}</p>}
+    {watch.type === 'issues' && <IssuePreviewPanel token={token} source={source} triggerId={triggerId} />}
   </>;
+}
+
+type IssueWatch = Extract<GitHubSource['watch'], { type: 'issues' }>;
+/** Which open issues count, from when, in what order, how many at once, and what Tower does to each. */
+function IssueOptions({ watch, handlerKind, onChange }: { watch: IssueWatch; handlerKind: TriggerInput['handler']['kind']; onChange: (watch: IssueWatch) => void }) {
+  const { t } = useI18n();
+  // Typed text is kept as written, so a trailing comma does not vanish while typing.
+  const [labels, setLabels] = useState(watch.labels?.join(', ') ?? '');
+  const [excluded, setExcluded] = useState(watch.excludeLabels?.join(', ') ?? '');
+  const names = (text: string) => { const values = list(text); return values.length ? values : undefined; };
+  return <div className="trigger-grid">
+    <label>{t('담당자')}<select value={watch.assignee} onChange={event => onChange({ ...watch, assignee: event.target.value as IssueWatch['assignee'] })}>
+      <option value="any">{t('누구나')}</option><option value="me">{t('나에게 할당된 이슈만')}</option><option value="none">{t('담당자 없는 이슈만')}</option></select></label>
+    <label>{t('시작점')}<select value={watch.start} onChange={event => onChange({ ...watch, start: event.target.value as IssueWatch['start'] })}>
+      <option value="new">{t('지금부터 생기거나 조건에 맞게 된 이슈')}</option><option value="existing">{t('이미 열린 이슈도 포함')}</option></select></label>
+    <label>{t('포함 라벨')}<input value={labels} placeholder="ready" onChange={event => { setLabels(event.target.value); onChange({ ...watch, labels: names(event.target.value) }); }} /><small>{t('쉼표로 구분, 하나라도 있으면')}</small></label>
+    <label>{t('제외 라벨')}<input value={excluded} placeholder="draft, hold" onChange={event => { setExcluded(event.target.value); onChange({ ...watch, excludeLabels: names(event.target.value) }); }} /><small>{t('쉼표로 구분, 하나라도 있으면 건너뜀')}</small></label>
+    <label>{t('순서')}<select value={watch.order} onChange={event => onChange({ ...watch, order: event.target.value as IssueWatch['order'] })}>
+      <option value="oldest">{t('오래된 순')}</option><option value="newest">{t('최신 순')}</option></select></label>
+    <label>{t('동시에 처리할 이슈 수')}<input type="number" min={1} max={5} value={watch.concurrency} onChange={event => onChange({ ...watch, concurrency: Math.min(5, Math.max(1, Number(event.target.value) || 1)) })} />
+      <small>{t('1이면 한 번에 하나씩 처리합니다.')}</small></label>
+    <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.assign} onChange={event => onChange({ ...watch, assign: event.target.checked })} />{t('처리를 시작할 때 연결한 계정을 담당자로 할당')}</label>
+    <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.close && handlerKind === 'task'} disabled={handlerKind !== 'task'} onChange={event => onChange({ ...watch, close: event.target.checked })} />{t('실행이 끝나면 이슈 닫기')}</label>
+    <p className="trigger-note wide">{handlerKind === 'task' ? t('작업이 끝나지 않았거나 결정이 필요하다고 보고한 실행의 이슈는 열어 둡니다. 이슈마다 한 번, 열려 있는 동안만 처리하고, 시간당 최대 실행에 닿으면 멈추지 않고 기다렸다가 이어서 처리합니다.') : t('코디네이터 처리 지침에서는 이슈를 자동으로 닫지 않습니다.')}</p>
+  </div>;
+}
+
+const PREVIEW_STATUS: Record<IssuePreviewItem['status'], string> = { next: '처리 예정', working: '처리 중', taken: '처리함', existing: '이미 있던 이슈라 건너뜀' };
+/** The open issues the chosen options would work on, in order, read from GitHub on request. */
+function IssuePreviewPanel({ token, source, triggerId }: { token: string; source: GitHubSource; triggerId?: string }) {
+  const { t } = useI18n();
+  const { node } = useContext(TriggerMachine);
+  const [preview, setPreview] = useState<IssuePreview | string>('');
+  const [loading, setLoading] = useState(false);
+  const asked = useRef(0);
+  // A preview of other options is not left on screen as if it were this one's.
+  const shape = JSON.stringify([source.watch, source.auth, source.account]);
+  useEffect(() => { asked.current++; setPreview(''); setLoading(false); }, [shape]);
+  const load = async () => {
+    const mine = ++asked.current;
+    setLoading(true);
+    try {
+      const result = (await towerOperation<{ preview: IssuePreview }>(token, 'triggers.previewIssues', { source, ...(triggerId ? { id: triggerId } : {}) }, node)).preview;
+      if (mine === asked.current) setPreview(result);
+    } catch (cause) { if (mine === asked.current) setPreview(cause instanceof Error ? cause.message : String(cause)); }
+    finally { if (mine === asked.current) setLoading(false); }
+  };
+  return <div className="trigger-issue-preview">
+    <button type="button" className="secondary-button" disabled={loading || !source.account} onClick={() => void load()}>{loading ? t('불러오는 중') : t('처리 순서 미리보기')}</button>
+    {!source.account && <small>{t('연결을 확인하면 미리 볼 수 있습니다.')}</small>}
+    {typeof preview === 'string' ? preview && <p className="slack-error">{translateMessage(preview)}</p> : <>
+      <p className="trigger-note">{t('열린 이슈 {0}개 · 처리 예정 {1} · 처리 중 {2} · 처리함 {3} · 건너뜀 {4}', { 0: preview.total, 1: preview.counts.next, 2: preview.counts.working, 3: preview.counts.taken, 4: preview.counts.existing })}</p>
+      {preview.issues.length ? <ol className="trigger-issue-list">{preview.issues.map(issue => <li key={`${issue.repository}#${issue.number}`} className={issue.status}>
+        <span className="trigger-issue-order">{issue.position ?? '–'}</span>
+        <a href={issue.url} target="_blank" rel="noreferrer noopener">{issue.repository}#{issue.number}</a> <span>{issue.title}</span>
+        {issue.labels.length > 0 && <small>{issue.labels.join(', ')}</small>}
+        <em>{t(PREVIEW_STATUS[issue.status])}</em>
+      </li>)}</ol> : <p className="trigger-note">{t('조건에 맞는 열린 이슈가 없습니다.')}</p>}
+      {preview.total > preview.issues.length && <small>{t('처음 {0}개만 보여 줍니다.', { 0: preview.issues.length })}</small>}
+    </>}
+  </div>;
 }
 
 /** Settings most triggers keep as they are, with what is chosen shown on the closed summary. */
@@ -272,33 +336,29 @@ function AdvancedSettings({ input, onChange }: { input: TriggerInput; onChange: 
   const approvals = input.handler.approvals;
   const setApprovals = (value: 'auto' | 'owner') => onChange({ ...input, handler: { ...input.handler, approvals: value } as TriggerInput['handler'] });
   const overlapLabels: Record<TriggerInput['policy']['overlap'], string> = { skip: '겹치면 건너뛰기', queue: '겹치면 하나만 대기', parallel: '겹쳐도 동시에 실행' };
-  const summary = [approvals === 'auto' ? t('자동 승인') : t('직접 승인'), t(overlapLabels[input.policy.overlap]), t('시간당 {0}회', { 0: input.policy.maxEventsPerHour })];
   const watch = source.kind === 'github' ? source.watch : undefined;
+  // An issue watch works on as many issues at once as it is set to; the overlap setting does not apply to it.
+  const issues = watch?.type === 'issues';
+  const summary = [approvals === 'auto' ? t('자동 승인') : t('직접 승인'), issues ? t('동시에 {0}개', { 0: watch.concurrency }) : t(overlapLabels[input.policy.overlap]), t('시간당 {0}회', { 0: input.policy.maxEventsPerHour })];
   const setWatch = (next: GitHubSource['watch']) => { if (source.kind === 'github') onChange({ ...input, source: { ...source, watch: next } }); };
   return <details className="trigger-advanced"><summary><strong>{t('고급 설정')}</strong><span>{summary.join(' · ')}</span></summary>
     <div className="trigger-grid">
       <label className="wide">{t('승인')}<select value={approvals} onChange={event => setApprovals(event.target.value as 'auto' | 'owner')}>
         <option value="auto">{input.handler.kind === 'coordinator' ? t('맡긴 작업은 자동 승인 (사람 개입 최소)') : t('자동 승인 (사람 개입 최소)')}</option>
         <option value="owner">{input.handler.kind === 'coordinator' ? t('맡긴 작업도 직접 승인 (Tower에서 대기)') : t('직접 승인 (Tower에서 대기)')}</option></select></label>
-      <label>{t('이전 실행이 끝나지 않았을 때')}<select value={input.policy.overlap} onChange={event => onChange({ ...input, policy: { ...input.policy, overlap: event.target.value as 'skip' | 'queue' | 'parallel' } })}>
-        <option value="skip">{t('건너뛰기')}</option><option value="queue">{t('하나만 대기')}</option><option value="parallel">{t('동시에 실행')}</option></select></label>
+      {!issues && <label>{t('이전 실행이 끝나지 않았을 때')}<select value={input.policy.overlap} onChange={event => onChange({ ...input, policy: { ...input.policy, overlap: event.target.value as 'skip' | 'queue' | 'parallel' } })}>
+        <option value="skip">{t('건너뛰기')}</option><option value="queue">{t('하나만 대기')}</option><option value="parallel">{t('동시에 실행')}</option></select></label>}
       <label>{t('시간당 최대 실행')}<input type="number" min={1} max={60} value={input.policy.maxEventsPerHour} onChange={event => onChange({ ...input, policy: { ...input.policy, maxEventsPerHour: Math.min(60, Math.max(1, Number(event.target.value) || 1)) } })} />
-        <small>{t('넘으면 자동으로 일시 정지합니다.')}</small></label>
+        <small>{issues ? t('넘으면 다음 시간까지 기다립니다.') : t('넘으면 자동으로 일시 정지합니다.')}</small></label>
       {source.kind === 'schedule' && <label className="wide">{t('놓친 실행')}<select value={source.catchUp} onChange={event => onChange({ ...input, source: { ...source, catchUp: event.target.value as 'latest' | 'skip' } })}>
         <option value="latest">{t('하루 안에 놓친 가장 최근 시간을 한 번 실행')}</option><option value="skip">{t('건너뛰기')}</option></select>
         <small>{t('컴퓨터가 잠자기 상태였거나 Tower가 꺼져 있던 동안의 실행')}</small></label>}
       {source.kind === 'http' && <label>{t('제한 시간 (초)')}<input type="number" min={1} max={45} value={source.request.timeoutSeconds} onChange={event => onChange({ ...input, source: { ...source, request: { ...source.request, timeoutSeconds: Math.min(45, Math.max(1, Number(event.target.value) || 1)) } } })} /></label>}
       {/* Keyed by the kind of watch, so what the fields show always matches what is saved. */}
-      {watch?.type === 'issue-opened' && <IssueFilters key={watch.type} watch={watch} onChange={setWatch} />}
-      {watch?.type === 'open-issues' && <>
-        <IssueFilters key={watch.type} watch={watch} onChange={setWatch} />
-        <label>{t('동시에 처리할 이슈 수')}<input type="number" min={1} max={5} value={watch.concurrency} onChange={event => setWatch({ ...watch, concurrency: Math.min(5, Math.max(1, Number(event.target.value) || 1)) })} />
-          <small>{t('1이면 한 번에 하나씩 처리합니다.')}</small></label>
-        <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.assign} onChange={event => setWatch({ ...watch, assign: event.target.checked })} />{t('처리를 시작할 때 연결한 계정을 담당자로 할당')}</label>
-        <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.close && input.handler.kind === 'task'} disabled={input.handler.kind !== 'task'} onChange={event => setWatch({ ...watch, close: event.target.checked })} />{t('실행이 끝나면 이슈 닫기')}</label>
-        <p className="trigger-note">{input.handler.kind === 'task' ? t('작업이 끝나지 않았거나 결정이 필요하다고 보고한 실행의 이슈는 열어 둡니다. 시간당 최대 실행에 닿으면 멈추지 않고 기다렸다가 이어서 처리합니다.') : t('코디네이터 처리 지침에서는 이슈를 자동으로 닫지 않습니다.')}</p>
+      {watch?.type === 'issues' && <>
+        <IssueFilters watch={watch} onChange={setWatch} />
+        {watch.assignee === 'me' && <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.includePullRequests} onChange={event => setWatch({ ...watch, includePullRequests: event.target.checked })} />{t('풀 리퀘스트도 포함')}</label>}
       </>}
-      {watch?.type === 'assigned-to-me' && <label className="trigger-checkbox wide"><input type="checkbox" checked={watch.includePullRequests} onChange={event => setWatch({ ...watch, includePullRequests: event.target.checked })} />{t('풀 리퀘스트도 포함')}</label>}
       {watch?.type === 'review-requested' && <>
         <label className="wide">{t('리뷰 판정')}<select value={watch.verdicts} onChange={event => setWatch({ ...watch, verdicts: event.target.value as 'comment' | 'any' })}>
           <option value="comment">{t('Comment 리뷰만 게시')}</option><option value="any">{t('Approve와 Request changes도 허용')}</option></select>
@@ -310,16 +370,13 @@ function AdvancedSettings({ input, onChange }: { input: TriggerInput; onChange: 
   </details>;
 }
 
-type IssueWatch = Extract<GitHubSource['watch'], { type: 'issue-opened' | 'open-issues' }>;
-/** Which new issues count: labels, authors, and how the author relates to the repository. */
-function IssueFilters<W extends IssueWatch>({ watch, onChange }: { watch: W; onChange: (watch: W) => void }) {
+/** Whose issues count: authors, and how the author relates to the repository. */
+function IssueFilters({ watch, onChange }: { watch: IssueWatch; onChange: (watch: IssueWatch) => void }) {
   const { t } = useI18n();
   // Typed text is kept as written, so a trailing comma does not vanish while typing.
-  const [labels, setLabels] = useState(watch.labels?.join(', ') ?? '');
   const [authors, setAuthors] = useState(watch.authors?.join(', ') ?? '');
   const association = watch.authorAssociation === 'any' ? 'any' : [...watch.authorAssociation].sort().join() === [...MEMBERS].sort().join() ? 'members' : 'custom';
   return <>
-    <label>{t('라벨')}<input value={labels} onChange={event => { setLabels(event.target.value); const names = list(event.target.value); onChange({ ...watch, labels: names.length ? names : undefined }); }} /><small>{t('쉼표로 구분, 하나라도 있으면')}</small></label>
     <label>{t('작성자')}<input value={authors} onChange={event => { setAuthors(event.target.value); const names = list(event.target.value); onChange({ ...watch, authors: names.length ? names : undefined }); }} /><small>{t('쉼표로 구분, 비우면 누구나')}</small></label>
     <label className="wide">{t('작성자 범위')}<select value={association} onChange={event => { if (event.target.value !== 'custom') onChange({ ...watch, authorAssociation: event.target.value === 'any' ? 'any' : [...MEMBERS] }); }}>
       <option value="members">{t('저장소 소유자·멤버·협업자 (권장)')}</option><option value="any">{t('누구나 (공개 저장소라면 외부인도)')}</option>

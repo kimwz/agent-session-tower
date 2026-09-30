@@ -342,6 +342,7 @@ export class TowerApi {
       case 'triggers.updateSettings': return { settings: await triggers.updateSettings(value.settings, actor) };
       case 'triggers.testHttp': return { result: await triggers.testHttp(value.request, value.condition, actor) };
       case 'triggers.checkGitHub': return { result: await triggers.checkGitHub(value.auth, actor) };
+      case 'triggers.previewIssues': return { preview: await triggers.previewIssues(value.source, value.id, actor, scope) };
       case 'secrets.list': return { secrets: triggers.secretList() };
       case 'github.conversation': {
         const workflow = this.services.github?.workflow(value.sessionId);

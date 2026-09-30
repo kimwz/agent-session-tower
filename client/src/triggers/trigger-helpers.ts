@@ -75,7 +75,7 @@ export function scheduleLabel(trigger: Pick<Trigger, 'source'>, t: Translate): s
   if (trigger.source.kind === 'github') {
     const watch = trigger.source.watch;
     const repos = watch.repos?.length ? ` · ${watch.repos[0]}${watch.repos.length > 1 ? ` +${watch.repos.length - 1}` : ''}` : '';
-    return `GitHub · ${watch.type === 'issue-opened' ? t('새 이슈') : watch.type === 'open-issues' ? t('열린 이슈 차례로') : watch.type === 'review-requested' ? t('리뷰 요청') : t('나에게 할당')}${repos} · ${when}`;
+    return `GitHub · ${watch.type === 'review-requested' ? t('리뷰 요청') : issueWatchLabel(watch, t)}${repos} · ${when}`;
   }
   if (trigger.source.kind !== 'http') return when;
   let host = trigger.source.request.url;
@@ -90,22 +90,31 @@ export function blankHttpSource(schedule: Source['schedule'] = { type: 'interval
   return { kind: 'http', schedule, request: { method: 'GET', url: '', headers: [], timeoutSeconds: 30 }, condition: { type: 'changed' } };
 }
 export function blankGitHubSource(schedule: Source['schedule'] = { type: 'interval', everySeconds: 300 }): GitHubSource {
-  return { kind: 'github', schedule, auth: { type: 'gh' }, account: '', watch: { type: 'issue-opened', repos: [], authorAssociation: [...MEMBERS] } };
+  return { kind: 'github', schedule, auth: { type: 'gh' }, account: '', watch: blankIssueWatch([]) };
 }
 type Watch = GitHubSource['watch'];
-/** The watch after switching to another kind, with the filters that kind had before (from `kept`) and the repositories typed now. */
+type IssueWatch = Extract<Watch, { type: 'issues' }>;
+/** A new issue watch: issues that appear from now, oldest first, one at a time, leaving the issue itself alone. */
+export function blankIssueWatch(repos: string[]): IssueWatch {
+  return { type: 'issues', repos, assignee: 'any', authorAssociation: [...MEMBERS], includePullRequests: false, start: 'new', order: 'oldest', concurrency: 1, assign: false, close: false };
+}
+/** The watch after switching to another kind, with what that kind had before (from `kept`) and the repositories typed now. */
 export function switchedWatch(kept: Partial<Record<Watch['type'], Watch>>, type: Watch['type'], repos: string[]): Watch {
   const earlier = kept[type];
-  return type === 'assigned-to-me'
-    ? { type, ...(repos.length ? { repos } : {}), includePullRequests: earlier?.type === type && earlier.includePullRequests }
-    : type === 'review-requested'
-      ? { type, ...(repos.length ? { repos } : {}), includeTeams: earlier?.type === type && earlier.includeTeams, verdicts: earlier?.type === type ? earlier.verdicts : 'comment' }
-      : type === 'open-issues'
-        ? { ...(earlier?.type === type ? earlier : { authorAssociation: [...MEMBERS], concurrency: 1, assign: true, close: true }), type, repos }
-        : { ...(earlier?.type === type ? earlier : { authorAssociation: [...MEMBERS] }), type, repos };
+  return type === 'review-requested'
+    ? { type, ...(repos.length ? { repos } : {}), includeTeams: earlier?.type === type && earlier.includeTeams, verdicts: earlier?.type === type ? earlier.verdicts : 'comment' }
+    : { ...(earlier?.type === type ? earlier : blankIssueWatch(repos)), repos };
 }
 
-/** What Tower did to an open-issues run's issue, for the run's line in the history. */
+/** An issue watch in a few words: whose issues, from when, in what order. */
+export function issueWatchLabel(watch: IssueWatch, t: Translate): string {
+  const parts = [watch.assignee === 'me' ? t('나에게 할당된 이슈') : watch.assignee === 'none' ? t('담당자 없는 이슈') : t('이슈'),
+    watch.start === 'existing' ? t('열린 이슈 포함') : t('새 이슈'), watch.order === 'newest' ? t('최신 순') : t('오래된 순')];
+  if (watch.excludeLabels?.length) parts.push(t('{0} 제외', { 0: watch.excludeLabels.join(', ') }));
+  return parts.join(' · ');
+}
+
+/** What Tower did to an issue run's issue, for the run's line in the history. */
 export function issueActionsLabel(event: Pick<TriggerEvent, 'issueActions'>, t: Translate): string {
   const actions = event.issueActions;
   if (!actions) return '';

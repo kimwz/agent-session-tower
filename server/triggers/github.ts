@@ -24,15 +24,22 @@ export interface GitHubIssue {
 
 /** What a trigger remembers between checks. */
 export interface GitHubCursor {
-  /** Per repository: the highest issue number seen, and the first page's ETag. */
-  repos?: Record<string, { watermark: number; etag?: string }>;
-  /** Issues assigned at the last complete check, as `owner/name#number`. */
-  assigned?: string[];
-  assignedEtag?: string;
   /** Pull requests asking for a review at the last complete check, as `owner/name#number`. */
   reviews?: string[];
-  /** Open issues already taken by an open-issues watch, as `owner/name#number`; forgotten once they close. */
+  /** Issues taken, or already there when an issue watch started from now, as `owner/name#number`; kept while open. */
   handled?: string[];
+  /** Issues that matched at the last check, taken or waiting for a place. */
+  matched?: string[];
+  /** When the last complete check finished. */
+  checkedAt?: number;
+  /**
+   * Issues already there are noted instead of taken at the next check: those created before `before` that did not
+   * match at the last check (after an edit), or those up to a number per repository (kept from the earlier new-issue
+   * watch). The very first check of a watch that starts from now notes all of them.
+   */
+  baseline?: { before?: string; watermarks?: Record<string, number> };
+  /** Where the no-repository mode goes on checking whether remembered issues closed. */
+  verifyFrom?: number;
 }
 
 /** A failed check. `retryAt` is when GitHub's rate limit allows the next one. */
@@ -40,14 +47,11 @@ export class GitHubError extends Error {
   constructor(message: string, readonly retryAt?: number) { super(message); }
 }
 
-const ISSUE_PAGE = 30;
-const ISSUE_PAGES = 10;
-const ASSIGNED_PAGE = 100;
-const ASSIGNED_PAGES = 10;
-const MAX_ASSIGNED = 2000;
 const OPEN_PAGE = 100;
 const OPEN_PAGES = 10;
 const MAX_OPEN = 5000;
+/** Remembered issues missing from the assigned list whose state one check looks up. */
+const VERIFY_PER_CHECK = 30;
 const SEARCH_PAGE = 100;
 /** GitHub's search never returns more than this many results. */
 const SEARCH_MAX = 1000;
@@ -77,6 +81,9 @@ function items(response: GitHubResponse, what: string): Item[] {
   return response.body.filter(record);
 }
 
+const labelsOf = (item: Item) => Array.isArray(item.labels) ? item.labels.flatMap(label => typeof label === 'string' ? [label] : record(label) ? [text(label.name)] : []).filter(Boolean) : [];
+const assigneesOf = (item: Item) => Array.isArray(item.assignees) ? item.assignees.map(login).filter(Boolean) : [];
+
 export function issueOf(item: Item, repository?: string): GitHubIssue {
   const fromUrl = /\/repos\/([^/]+\/[^/?#]+)/.exec(text(item.repository_url))?.[1] ?? '';
   const body = text(item.body);
@@ -87,8 +94,8 @@ export function issueOf(item: Item, repository?: string): GitHubIssue {
     body: body.length > BODY_CHARS ? `${body.slice(0, BODY_CHARS)}… [cut]` : body,
     author: login(item.user),
     authorAssociation: text(item.author_association),
-    labels: Array.isArray(item.labels) ? item.labels.flatMap(label => typeof label === 'string' ? [label] : record(label) ? [text(label.name)] : []).filter(Boolean).slice(0, 20) : [],
-    assignees: Array.isArray(item.assignees) ? item.assignees.map(login).filter(Boolean).slice(0, 20) : [],
+    labels: labelsOf(item).slice(0, 20),
+    assignees: assigneesOf(item).slice(0, 20),
     url: text(item.html_url),
     createdAt: text(item.created_at),
     isPullRequest: record(item.pull_request),
@@ -98,95 +105,108 @@ export function issueOf(item: Item, repository?: string): GitHubIssue {
 export const keyOf = (issue: Pick<GitHubIssue, 'repository' | 'number'>) => `${issue.repository.toLowerCase()}#${issue.number}`;
 const lower = (values: readonly string[] | undefined) => values?.map(value => value.toLowerCase());
 
-/** Whether an opened issue passes the watch's filters. */
-export function wanted(watch: Extract<GitHubWatch, { type: 'issue-opened' | 'open-issues' }>, issue: GitHubIssue): boolean {
-  const labels = lower(watch.labels);
+/** One check of a watch. A check that does not finish throws and changes nothing. */
+export async function checkGitHub(watch: GitHubWatch, previous: GitHubCursor, fetch: GitHubFetch, account: string, now = Date.now()): Promise<{ issues: GitHubIssue[]; cursor: GitHubCursor }> {
+  return watch.type === 'review-requested' ? checkReviews(watch, previous, fetch) : checkIssues(watch, previous, fetch, account, now);
+}
+
+type IssueWatch = Extract<GitHubWatch, { type: 'issues' }>;
+
+/** Whether an open issue passes the watch's filters, judged on everything GitHub said about it, before any shortening. */
+export function wanted(watch: IssueWatch, item: Item, account: string): boolean {
+  const labels = labelsOf(item).map(label => label.toLowerCase());
+  const assignees = assigneesOf(item).map(name => name.toLowerCase());
+  const include = lower(watch.labels);
+  const exclude = lower(watch.excludeLabels);
   const authors = lower(watch.authors);
-  if (labels?.length && !issue.labels.some(label => labels.includes(label.toLowerCase()))) return false;
-  if (authors?.length && !authors.includes(issue.author.toLowerCase())) return false;
-  return watch.authorAssociation === 'any' || watch.authorAssociation.includes(issue.authorAssociation as never);
+  if (record(item.pull_request) && !watch.includePullRequests) return false;
+  if (include?.length && !labels.some(label => include.includes(label))) return false;
+  if (exclude?.length && labels.some(label => exclude.includes(label))) return false;
+  if (authors?.length && !authors.includes(login(item.user).toLowerCase())) return false;
+  if (watch.assignee === 'me' && !assignees.includes(account.toLowerCase())) return false;
+  if (watch.assignee === 'none' && assignees.length) return false;
+  return watch.authorAssociation === 'any' || watch.authorAssociation.includes(text(item.author_association) as never);
 }
 
-/**
- * One check of a watch: the issues that are new since the last check, and what to remember for the next.
- * The first check of a repository or of assignments only remembers what is there, so setting a trigger up
- * never starts runs for issues that already existed. A check that does not finish throws and changes nothing.
- */
-export async function checkGitHub(watch: GitHubWatch, previous: GitHubCursor, fetch: GitHubFetch): Promise<{ issues: GitHubIssue[]; cursor: GitHubCursor }> {
-  if (watch.type === 'review-requested') return checkReviews(watch, previous, fetch);
-  if (watch.type === 'open-issues') return checkOpen(watch, previous, fetch);
-  if (watch.type === 'issue-opened') {
-    const repos: NonNullable<GitHubCursor['repos']> = {};
-    const found: GitHubIssue[] = [];
-    for (const repo of watch.repos) {
-      const known = previous.repos?.[repo];
-      const path = (page: number) => `/repos/${repo}/issues?state=all&sort=created&direction=desc&per_page=${ISSUE_PAGE}${page > 1 ? `&page=${page}` : ''}`;
-      const first = await fetch(path(1), known?.etag);
-      if (first.status === 304 && known) { repos[repo] = known; continue; }
-      const all = items(first, repo);
-      const highest = (list: Item[]) => list.reduce((max, item) => Math.max(max, Number(item.number) || 0), 0);
-      if (!known) { repos[repo] = { watermark: highest(all), ...(first.etag ? { etag: first.etag } : {}) }; continue; }
-      // Newest first: read on until the last issue already seen. If that is too far back, nothing is skipped
-      // quietly: the check fails and says so, and the owner starts over from now by turning the trigger off and on.
-      let last = all;
-      for (let page = 2; last.length === ISSUE_PAGE && Math.min(...last.map(item => Number(item.number))) > known.watermark; page++) {
-        if (page > ISSUE_PAGES) throw new GitHubError(`More than ${ISSUE_PAGE * ISSUE_PAGES} issues and pull requests were opened in ${repo} since the last check, more than one check reads, so checking stopped rather than skip some. Trying again will not help. To continue, turn the trigger off and on: it then starts from now in every watched repository, and what was opened in between is not run.`);
-        last = items(await fetch(path(page)), repo);
-        all.push(...last);
-      }
-      // Pull requests share the numbering but are not issues; an issue already closed again is left alone.
-      const fresh = all.filter(item => Number(item.number) > known.watermark && !record(item.pull_request) && item.state === 'open')
-        .map(item => issueOf(item, repo)).filter(issue => wanted(watch, issue)).sort((a, b) => a.number - b.number);
-      found.push(...fresh);
-      repos[repo] = { watermark: Math.max(known.watermark, highest(all)), ...(first.etag ? { etag: first.etag } : {}) };
-    }
-    return { issues: found, cursor: { repos } };
-  }
-  // Only a list that fit on one page is asked for with its ETag: a later page can change while the first does not.
-  const first = await fetch(`/issues?filter=assigned&state=open&per_page=${ASSIGNED_PAGE}`, previous.assignedEtag);
-  if (first.status === 304 && previous.assigned) return { issues: [], cursor: previous };
-  const all = items(first, 'Your assigned issues');
-  let complete = all.length < ASSIGNED_PAGE;
-  for (let page = 2, last = all; !complete && page <= ASSIGNED_PAGES; page++) {
-    last = items(await fetch(`/issues?filter=assigned&state=open&per_page=${ASSIGNED_PAGE}&page=${page}`), 'Your assigned issues');
-    all.push(...last);
-    complete = last.length < ASSIGNED_PAGE;
-  }
-  const repos = lower(watch.repos);
-  const current = all.map(item => issueOf(item)).filter(issue => (!repos?.length || repos.includes(issue.repository.toLowerCase())) && (watch.includePullRequests || !issue.isPullRequest));
-  const keys = current.map(keyOf);
-  const etag = first.etag && all.length < ASSIGNED_PAGE ? { assignedEtag: first.etag } : {};
-  // A partial list (more than ten pages) adds to what is remembered and forgets nothing, so nothing is reported
-  // new twice; past the limit the check fails and the remembered list stays as it was.
-  const remembered = complete || !previous.assigned ? keys : [...new Set([...previous.assigned, ...keys])];
-  if (remembered.length > MAX_ASSIGNED) throw new GitHubError(`More than ${MAX_ASSIGNED} issues are assigned; narrow the trigger to some repositories.`);
-  if (!previous.assigned) return { issues: [], cursor: { assigned: remembered, ...etag } };
-  const before = new Set(previous.assigned);
-  return { issues: current.filter(issue => !before.has(keyOf(issue))), cursor: { assigned: remembered, ...etag } };
+/** The order the watch works in: by when issues were opened. */
+export function ordered(watch: IssueWatch, issues: GitHubIssue[]): GitHubIssue[] {
+  const sorted = [...issues].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.repository.localeCompare(b.repository) || a.number - b.number);
+  return watch.order === 'newest' ? sorted.reverse() : sorted;
 }
 
+/** What one read of an issue watch saw: the matching open issues in order, and every open issue it read. */
+export interface IssueRead { issues: GitHubIssue[]; open: Set<string>; complete: boolean }
+
 /**
- * Every open issue that passes the filters, oldest first, read whole each time. Which of them to take is the
- * service's choice; `handled` is only trimmed here to the issues still open, so one closed and opened again is
- * taken again.
+ * Reads every open issue the watch covers, whole. With repositories, each one's whole open list is read, so an
+ * issue missing from it is known to be closed (`complete`); without, only the account's assigned issues are listed.
  */
-async function checkOpen(watch: Extract<GitHubWatch, { type: 'open-issues' }>, previous: GitHubCursor, fetch: GitHubFetch): Promise<{ issues: GitHubIssue[]; cursor: GitHubCursor }> {
-  const all: GitHubIssue[] = [];
-  for (const repo of watch.repos) {
+export async function readIssues(watch: IssueWatch, fetch: GitHubFetch, account: string): Promise<IssueRead> {
+  const raw: Array<{ item: Item; repo?: string }> = [];
+  const read = async (path: (page: number) => string, what: string, repo?: string) => {
     for (let page = 1; ; page++) {
-      if (page > OPEN_PAGES) throw new GitHubError(`More than ${OPEN_PAGE * OPEN_PAGES} issues and pull requests are open in ${repo}, more than one check reads.`);
-      const list = items(await fetch(`/repos/${repo}/issues?state=open&sort=created&direction=asc&per_page=${OPEN_PAGE}${page > 1 ? `&page=${page}` : ''}`), repo);
-      all.push(...list.filter(item => !record(item.pull_request) && item.state === 'open').map(item => issueOf(item, repo)));
+      if (page > OPEN_PAGES) throw new GitHubError(`More than ${OPEN_PAGE * OPEN_PAGES} issues and pull requests are open in ${what}, more than one check reads.`);
+      const list = items(await fetch(path(page)), what);
+      raw.push(...list.map(item => ({ item, ...(repo ? { repo } : {}) })));
       if (list.length < OPEN_PAGE) break;
     }
+  };
+  const paging = (page: number) => `per_page=${OPEN_PAGE}${page > 1 ? `&page=${page}` : ''}`;
+  if (watch.repos.length) for (const repo of watch.repos) await read(page => `/repos/${repo}/issues?state=open&sort=created&direction=asc&${paging(page)}`, repo, repo);
+  else await read(page => `/issues?filter=assigned&state=open&sort=created&direction=asc&${paging(page)}`, 'Your assigned issues');
+  const open = raw.filter(({ item }) => item.state === 'open');
+  if (open.length > MAX_OPEN) throw new GitHubError(`More than ${MAX_OPEN} issues are open in the watched repositories, more than this trigger keeps track of.`);
+  const issues = open.filter(({ item }) => wanted(watch, item, account)).map(({ item, repo }) => issueOf(item, repo));
+  return { issues: ordered(watch, issues), open: new Set(open.map(({ item, repo }) => keyOf(issueOf(item, repo)))), complete: watch.repos.length > 0 };
+}
+
+/**
+ * The issues a watch that starts from now notes instead of taking: at its first check all that match; after an
+ * edit, those opened before the last check that did not match then; after the move from the earlier new-issue watch,
+ * those up to the number it had seen in each repository.
+ */
+export function noted(watch: IssueWatch, previous: GitHubCursor, issues: GitHubIssue[]): string[] {
+  if (watch.start !== 'new') return [];
+  const baseline = previous.checkedAt === undefined ? previous.baseline ?? {} : previous.baseline;
+  if (!baseline) return [];
+  const matched = new Set(previous.matched ?? []);
+  return issues.filter(issue => {
+    if (baseline.watermarks) { const mark = baseline.watermarks[issue.repository.toLowerCase()]; return mark === undefined || issue.number <= mark; }
+    if (baseline.before) return !matched.has(keyOf(issue)) && issue.createdAt < baseline.before;
+    return true;
+  }).map(keyOf);
+}
+
+/**
+ * One check of an issue watch: every matching open issue in order, and what to remember. Which of them to take is
+ * the service's choice. An issue taken stays remembered while it is open, whatever the filters say later.
+ */
+async function checkIssues(watch: IssueWatch, previous: GitHubCursor, fetch: GitHubFetch, account: string, now: number): Promise<{ issues: GitHubIssue[]; cursor: GitHubCursor }> {
+  const read = await readIssues(watch, fetch, account);
+  let handled = previous.handled ?? [];
+  let verifyFrom = previous.verifyFrom ?? 0;
+  if (read.complete) handled = handled.filter(key => read.open.has(key));
+  else {
+    // The assigned list is not every open issue: a remembered issue missing from it is forgotten only once it is
+    // known to be closed or gone, a few per check.
+    const missing = handled.filter(key => !read.open.has(key));
+    const start = missing.length ? verifyFrom % missing.length : 0;
+    const closed = new Set<string>();
+    for (const key of [...missing.slice(start), ...missing.slice(0, start)].slice(0, VERIFY_PER_CHECK)) {
+      const [, repo, number] = /^(.+)#(\d+)$/.exec(key) ?? [];
+      if (!repo) { closed.add(key); continue; }
+      const response = await fetch(`/repos/${repo}/issues/${number}`);
+      refused(response);
+      const gone = response.status === 404 || response.status === 410;
+      if (!gone && (response.status < 200 || response.status > 299)) throw new GitHubError(`GitHub answered HTTP ${response.status} for ${repo}#${number}.`);
+      if (gone || (record(response.body) && response.body.state !== 'open')) closed.add(key);
+    }
+    handled = handled.filter(key => !closed.has(key));
+    verifyFrom = start + Math.min(VERIFY_PER_CHECK, missing.length) - closed.size;
   }
-  // What was taken is remembered while it stays open, even if it no longer passes the filters, so a label taken
-  // off and put back does not start it again; the open issues themselves are what is limited.
-  if (all.length > MAX_OPEN) throw new GitHubError(`More than ${MAX_OPEN} issues are open in the watched repositories, more than this trigger keeps track of.`);
-  const found = all.filter(issue => wanted(watch, issue));
-  const open = new Set(all.map(keyOf));
-  const handled = (previous.handled ?? []).filter(key => open.has(key));
-  return { issues: found, cursor: { handled } };
+  handled = [...new Set([...handled, ...noted(watch, previous, read.issues)])];
+  if (handled.length > MAX_OPEN) throw new GitHubError(`More than ${MAX_OPEN} issues are remembered for this trigger; narrow it to some repositories.`);
+  return { issues: read.issues, cursor: { handled, matched: read.issues.map(keyOf), checkedAt: now, ...(read.complete ? {} : { verifyFrom }) } };
 }
 
 /**

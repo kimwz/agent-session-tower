@@ -87,7 +87,7 @@ async function fixture(t: TestContext, options: { login?: string; postStatus?: n
 
 const coordinatorTrigger = (values: Partial<TriggerInput> = {}): TriggerInput => ({
   name: 'Issues', enabled: true,
-  source: GitHubSourceSchema.parse({ kind: 'github', schedule: { type: 'interval', everySeconds: 300 }, auth: { type: 'gh' }, account: 'me', watch: { type: 'issue-opened', repos: ['octo/app'] } }),
+  source: GitHubSourceSchema.parse({ kind: 'github', schedule: { type: 'interval', everySeconds: 300 }, auth: { type: 'gh' }, account: 'me', watch: { type: 'issues', repos: ['octo/app'], concurrency: 5 } }),
   handler: { kind: 'coordinator', rules: [rule], approvals: 'auto' },
   policy: { overlap: 'parallel', maxEventsPerHour: 20 }, ...values,
 });

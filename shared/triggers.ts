@@ -68,37 +68,39 @@ export const GitHubAuthSchema = z.discriminatedUnion('type', [
 export type GitHubAuth = z.infer<typeof GitHubAuthSchema>;
 const repository = z.string().trim().max(140).regex(/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/, 'Use owner/name, for example octo-org/website.');
 export const GITHUB_ASSOCIATIONS = ['OWNER', 'MEMBER', 'COLLABORATOR', 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'FIRST_TIMER', 'NONE'] as const;
+const association = z.union([z.literal('any'), z.array(z.enum(GITHUB_ASSOCIATIONS)).min(1)]);
+/**
+ * Open issues, chosen by filters and worked on in order, a set number at a time. Each issue is taken once while it
+ * stays open. `start: 'new'` takes only issues that appear (or come to match) after setup; `existing` also the ones
+ * already open.
+ */
+export const IssueWatchSchema = z.object({
+  type: z.literal('issues'),
+  /** Empty only for issues assigned to the account: then every repository it can see. */
+  repos: z.array(repository).max(20).default([]),
+  assignee: z.enum(['any', 'me', 'none']).default('any'),
+  /** Only issues with at least one of these labels. */
+  labels: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
+  /** Never issues with any of these labels, such as draft or hold. */
+  excludeLabels: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
+  /** Only issues opened by these accounts. */
+  authors: z.array(z.string().trim().min(1).max(39)).max(50).optional(),
+  /** Only authors with this relationship to the repository; by default its owners, members and collaborators. */
+  authorAssociation: association.default(['OWNER', 'MEMBER', 'COLLABORATOR']),
+  /** Pull requests share issue numbers; they count only when asked for. */
+  includePullRequests: z.boolean().default(false),
+  start: z.enum(['new', 'existing']).default('new'),
+  order: z.enum(['oldest', 'newest']).default('oldest'),
+  /** How many issues are worked on at once. */
+  concurrency: z.number().int().min(1).max(5).default(1),
+  /** Assign the issue to the connected account when its run starts. */
+  assign: z.boolean().default(false),
+  /** Close the issue when its run completes, unless the run says to keep it open. Task handlers only. */
+  close: z.boolean().default(false),
+}).strict().refine(watch => watch.repos.length > 0 || watch.assignee === 'me', { message: 'Name the repositories, or watch only issues assigned to you.', path: ['repos'] });
+export type IssueWatch = z.infer<typeof IssueWatchSchema>;
 export const GitHubWatchSchema = z.discriminatedUnion('type', [
-  /** Issues opened in these repositories from now on. */
-  z.object({
-    type: z.literal('issue-opened'),
-    repos: z.array(repository).min(1).max(20),
-    /** Only issues with at least one of these labels. */
-    labels: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
-    /** Only issues opened by these accounts. */
-    authors: z.array(z.string().trim().min(1).max(39)).max(50).optional(),
-    /** Only authors with this relationship to the repository; by default its owners, members and collaborators. */
-    authorAssociation: z.union([z.literal('any'), z.array(z.enum(GITHUB_ASSOCIATIONS)).min(1)]).default(['OWNER', 'MEMBER', 'COLLABORATOR']),
-  }).strict(),
-  /**
-   * Every open issue in these repositories, those opened before setup included, taken one after another: each is
-   * handed to a run, and the next one when a run finishes. Each issue is taken once while it stays open.
-   */
-  z.object({
-    type: z.literal('open-issues'),
-    repos: z.array(repository).min(1).max(20),
-    labels: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
-    authors: z.array(z.string().trim().min(1).max(39)).max(50).optional(),
-    authorAssociation: z.union([z.literal('any'), z.array(z.enum(GITHUB_ASSOCIATIONS)).min(1)]).default(['OWNER', 'MEMBER', 'COLLABORATOR']),
-    /** How many issues are worked on at once. */
-    concurrency: z.number().int().min(1).max(5).default(1),
-    /** Assign the issue to the connected account when its run starts. */
-    assign: z.boolean().default(true),
-    /** Close the issue when its run completes, unless the run says to keep it open. Task handlers only. */
-    close: z.boolean().default(true),
-  }).strict(),
-  /** Open issues newly assigned to the connected account. */
-  z.object({ type: z.literal('assigned-to-me'), repos: z.array(repository).max(20).optional(), includePullRequests: z.boolean().default(false) }).strict(),
+  IssueWatchSchema,
   /**
    * Open, ready pull requests that newly ask the connected account for a review: a new request, a draft marked
    * ready, and a request again after a review all count, since GitHub drops the request once the review is in.
@@ -113,6 +115,21 @@ export const GitHubWatchSchema = z.discriminatedUnion('type', [
   }).strict(),
 ]);
 export type GitHubWatch = z.infer<typeof GitHubWatchSchema>;
+
+/**
+ * Saved watches from before issues had one kind, as that kind: new issues and newly assigned ones start from now,
+ * the open-issues queue keeps taking what is open. Anything else is returned as it is.
+ */
+export function upgradeWatch(watch: unknown, overlap?: unknown): unknown {
+  if (!watch || typeof watch !== 'object') return watch;
+  const old = watch as Record<string, any>;
+  const concurrency = overlap === 'parallel' ? 5 : 1;
+  const filters = { ...(old.labels ? { labels: old.labels } : {}), ...(old.authors ? { authors: old.authors } : {}), ...(old.authorAssociation ? { authorAssociation: old.authorAssociation } : {}) };
+  if (old.type === 'issue-opened') return { type: 'issues', repos: old.repos ?? [], ...filters, start: 'new', concurrency };
+  if (old.type === 'open-issues') return { type: 'issues', repos: old.repos ?? [], ...filters, start: 'existing', concurrency: old.concurrency ?? 1, assign: old.assign ?? true, close: old.close ?? true };
+  if (old.type === 'assigned-to-me') return { type: 'issues', repos: old.repos ?? [], assignee: 'me', authorAssociation: 'any', includePullRequests: old.includePullRequests ?? false, start: 'new', concurrency };
+  return watch;
+}
 export const GitHubSourceSchema = z.object({
   kind: z.literal('github'),
   schedule: ScheduleSchema,
@@ -307,6 +324,20 @@ export const SecretInputSchema = z.object({
     .refine(value => value.length >= 8 && (/^\S+ (\S.*)$/.exec(value)?.[1].length ?? 8) >= 4, 'A secret must be at least 8 characters, with at least 4 after a scheme such as Bearer.'),
 }).strict();
 export type SecretInput = z.infer<typeof SecretInputSchema>;
+/** One issue in an issue watch's preview, in the order the watch works in. */
+export interface IssuePreviewItem {
+  repository: string;
+  number: number;
+  title: string;
+  url: string;
+  labels: string[];
+  assignees: string[];
+  createdAt: string;
+  /** `next`: would be taken, in `position` order; `working`: a run has it; `taken`: taken before; `existing`: already there, so a watch starting from now leaves it. */
+  status: 'next' | 'working' | 'taken' | 'existing';
+  position?: number;
+}
+export interface IssuePreview { issues: IssuePreviewItem[]; total: number; counts: Record<IssuePreviewItem['status'], number> }
 /** What checking a GitHub connection shows: the account it acts as. */
 export interface GitHubCheck { ok: boolean; login?: string; error?: string; rateRemaining?: number }
 /** What a request test shows the owner; nothing is recorded and no run starts. */

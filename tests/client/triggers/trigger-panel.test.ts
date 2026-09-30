@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { blankGitHubSource, blankHttpSource, blankTrigger, eventStatusLabel, scheduleLabel } from '../../../client/src/triggers/TriggerPanel.js';
 import { setLanguage, translate } from '../../../client/src/i18n/i18n.js';
 import { TriggerTypePicker } from '../../../client/src/triggers/TriggerKinds.js';
-import { switchedWatch, triggerAttention } from '../../../client/src/triggers/trigger-helpers.js';
+import { blankIssueWatch, switchedWatch, triggerAttention } from '../../../client/src/triggers/trigger-helpers.js';
 import { TriggerInputSchema } from '../../../shared/triggers.js';
 
 test('a new scheduled run from the panel is exactly what the server accepts once named and instructed', () => {
@@ -49,9 +49,9 @@ test('a new GitHub trigger from the panel needs repositories and a checked accou
   const source = blankGitHubSource();
   const ready = { ...base, source: { ...source, account: 'octocat', watch: { ...source.watch, repos: ['octo/app', 'octo/lib'] } } };
   const parsed = TriggerInputSchema.parse(ready);
-  assert.equal(parsed.source.kind === 'github' && parsed.source.watch.type === 'issue-opened' && JSON.stringify(parsed.source.watch.authorAssociation), '["OWNER","MEMBER","COLLABORATOR"]');
+  assert.equal(parsed.source.kind === 'github' && parsed.source.watch.type === 'issues' && JSON.stringify(parsed.source.watch.authorAssociation), '["OWNER","MEMBER","COLLABORATOR"]');
   setLanguage('en');
-  assert.equal(scheduleLabel(parsed, (key, values) => translate(key, values)), 'GitHub · New issues · octo/app +1 · Every 5 min');
+  assert.equal(scheduleLabel(parsed, (key, values) => translate(key, values)), 'GitHub · Issues · New issues · Oldest first · octo/app +1 · Every 5 min');
 });
 
 test('a GitHub coordinator trigger from the panel carries its rules and approval choice', () => {
@@ -72,17 +72,14 @@ test('adding a trigger starts from a choice of every kind, GitHub included, and 
   for (const kind of ['schedule', 'http', 'github'] as const) assert.equal(blankTrigger(kind).source.kind, kind);
 });
 
-test('switching what a GitHub trigger watches and back keeps the filters the owner had set', () => {
-  const opened = { type: 'issue-opened' as const, repos: ['octo/app'], labels: ['bug'], authors: ['alice'], authorAssociation: 'any' as const };
-  const kept: Parameters<typeof switchedWatch>[0] = { 'issue-opened': opened };
-  const assigned = switchedWatch(kept, 'assigned-to-me', ['octo/app']);
-  assert.deepEqual(assigned, { type: 'assigned-to-me', repos: ['octo/app'], includePullRequests: false });
-  kept['assigned-to-me'] = { type: 'assigned-to-me', repos: ['octo/app'], includePullRequests: true };
-  assert.deepEqual(switchedWatch(kept, 'issue-opened', ['octo/app', 'octo/lib']), { ...opened, repos: ['octo/app', 'octo/lib'] }, 'labels, authors and author scope come back');
-  assert.deepEqual(switchedWatch(kept, 'assigned-to-me', []), { type: 'assigned-to-me', includePullRequests: true }, 'so does including pull requests');
+test('switching what a GitHub trigger watches and back keeps the options the owner had set', () => {
+  const chosen = { ...blankIssueWatch(['octo/app']), labels: ['bug'], excludeLabels: ['hold'], authors: ['alice'], authorAssociation: 'any' as const, start: 'existing' as const, concurrency: 2 };
+  const kept: Parameters<typeof switchedWatch>[0] = { issues: chosen };
   const review = switchedWatch(kept, 'review-requested', ['octo/app']);
   assert.deepEqual(review, { type: 'review-requested', repos: ['octo/app'], includeTeams: false, verdicts: 'comment' }, 'review requests start from comment reviews to me only');
   kept['review-requested'] = { type: 'review-requested', includeTeams: true, verdicts: 'any' };
-  assert.deepEqual(switchedWatch(kept, 'review-requested', []), { type: 'review-requested', includeTeams: true, verdicts: 'any' }, 'and keep their choices');
-  assert.deepEqual(switchedWatch({}, 'issue-opened', []), { type: 'issue-opened', repos: [], authorAssociation: ['OWNER', 'MEMBER', 'COLLABORATOR'] }, 'a first switch starts from the members-only default');
+  assert.deepEqual(switchedWatch(kept, 'issues', ['octo/app', 'octo/lib']), { ...chosen, repos: ['octo/app', 'octo/lib'] }, 'labels, authors, start and concurrency come back');
+  assert.deepEqual(switchedWatch(kept, 'review-requested', []), { type: 'review-requested', includeTeams: true, verdicts: 'any' }, 'and review requests keep their choices');
+  assert.deepEqual(switchedWatch({}, 'issues', []), { type: 'issues', repos: [], assignee: 'any', authorAssociation: ['OWNER', 'MEMBER', 'COLLABORATOR'], includePullRequests: false,
+    start: 'new', order: 'oldest', concurrency: 1, assign: false, close: false }, 'a first switch starts from new issues by members, one at a time, leaving the issue alone');
 });

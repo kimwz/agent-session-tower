@@ -5,8 +5,8 @@ import { mkdir, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunOrigin, Session } from '../../shared/types.js';
 import {
-  GITHUB_API, TriggerInputSchema, type CoordinatorRule, TriggerSettingsSchema, carriesOutsideContent, type GitHubAuth, type GitHubCheck, type HttpCondition, type HttpRequest, type HttpTestResult, type SecretInput, type Trigger, type TriggerActor,
-  type TriggerAuditEntry, type TriggerEvent, type TriggerHandler, type TriggerInput, type TriggerOverview, type TriggerSecret, type TriggerSettings, type TriggerSummary, type TriggerTarget, type TriggerPolicy, type Schedule,
+  GITHUB_API, TriggerInputSchema, upgradeWatch, type CoordinatorRule, TriggerSettingsSchema, carriesOutsideContent, type GitHubAuth, type GitHubCheck, type HttpCondition, type HttpRequest, type HttpTestResult, type SecretInput, type Trigger, type TriggerActor,
+  type TriggerAuditEntry, type TriggerEvent, type TriggerHandler, type TriggerInput, type TriggerOverview, type TriggerSecret, type TriggerSettings, type TriggerSummary, type TriggerTarget, type TriggerPolicy, type IssuePreview, type IssuePreviewItem, type TriggerSource, type Schedule,
 } from '../../shared/triggers.js';
 import { requestedEffort, requestedModel } from '../providers/models.js';
 import type { RunAdmission } from '../runs/manager.js';
@@ -14,7 +14,7 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { CATCH_UP_WINDOW_MS, LATE_AFTER_MS, latestSlot, nextSlot, previewSlots, validateSchedule } from './schedule.js';
 import { evaluate, performHttp, type ConditionState, type HttpOutcome } from './http.js';
 import { SecretStore, type StoredSecret } from './secrets.js';
-import { checkGitHub, GitHubError, keyOf, refused, type GitHubCursor, type GitHubFetch, type GitHubIssue, type GitHubResponse } from './github.js';
+import { checkGitHub, GitHubError, keyOf, noted, readIssues, refused, type GitHubCursor, type GitHubFetch, type GitHubIssue, type GitHubResponse } from './github.js';
 import { findExecutable } from '../providers/discovery.js';
 import { execFile } from 'node:child_process';
 
@@ -82,6 +82,7 @@ const ACCEPT_STATE_BYTES = 8_000_000;
 const MAX_FIRED_PER_TRIGGER = 20_000;
 const MAX_WAITING_PER_TRIGGER = 5;
 const KEEP_FULL_INPUT = 100;
+const MAX_PREVIEW = 100;
 const MAX_PAYLOAD_BODY = 16_000;
 const MAX_REQUESTS_PER_MINUTE = 60;
 const UNFINISHED = new Set<TriggerEvent['status']>(['queued', 'claimed', 'running']);
@@ -487,7 +488,7 @@ export class TriggerService extends EventEmitter {
         fired = await this.pollGitHub(trigger, this.now(), actor);
       } finally { unlock(); }
       const problem = this.state.cursors[id]?.lastError;
-      const full = trigger.source.watch.type === 'open-issues' && this.unfinished(id) >= trigger.source.watch.concurrency;
+      const full = trigger.source.watch.type === 'issues' && this.unfinished(id) >= trigger.source.watch.concurrency;
       if (!fired.length) throw failure(full ? 'Every place of this trigger is taken; the next issue is taken when a run ends.'
         : problem ? `GitHub could not be checked: ${problem}` : 'Checked GitHub: nothing new since the last check.', problem && !full ? 502 : 409);
       void this.tick().catch(() => {});
@@ -700,14 +701,14 @@ export class TriggerService extends EventEmitter {
     let result: { issues: GitHubIssue[]; cursor: GitHubCursor } | undefined;
     let problem: { message: string; retryAt?: number } | undefined;
     // Working through open issues: while every place is taken, there is nothing to ask GitHub.
-    if (source.watch.type === 'open-issues' && this.unfinished(trigger.id) >= source.watch.concurrency) {
+    if (source.watch.type === 'issues' && this.unfinished(trigger.id) >= source.watch.concurrency) {
       return this.commit(state => { const position = state.cursors[trigger.id]; if (position?.polling?.slot === slot) delete position.polling; return []; }, 'settle').catch(() => []);
     }
     try {
       const { fetch, identity } = await this.githubFetch(source.auth, trigger.id);
       const login = await this.githubLogin(fetch, identity);
       if (login.toLowerCase() !== source.account.toLowerCase()) throw new GitHubError(`GitHub is signed in as ${login}, not ${source.account}; this trigger stopped checking until the account is set again.`);
-      result = await checkGitHub(source.watch, this.state.cursors[trigger.id]?.github ?? {}, fetch);
+      result = await checkGitHub(source.watch, this.state.cursors[trigger.id]?.github ?? {}, fetch, source.account, this.now());
     } catch (error) { problem = { message: error instanceof Error ? error.message : String(error), ...((error as GitHubError).retryAt ? { retryAt: (error as GitHubError).retryAt } : {}) }; }
     return this.commit(state => {
       const current = state.triggers.find(item => item.id === trigger.id);
@@ -724,7 +725,7 @@ export class TriggerService extends EventEmitter {
       position.github = result.cursor;
       position.failures = 0; delete position.lastError; delete position.blockedUntil;
       const fired: TriggerEvent[] = [];
-      if (source.watch.type === 'open-issues') {
+      if (source.watch.type === 'issues') {
         const watch = source.watch;
         const handled = new Set(result.cursor.handled ?? []);
         // An issue still being worked on is never taken twice, even after the remembered list was reset.
@@ -738,7 +739,7 @@ export class TriggerService extends EventEmitter {
           if (room <= 0) break;
           const key = keyOf(issue);
           if (handled.has(key) || working.has(key)) continue;
-          const dedup = `open-issue:${issue.repository}#${issue.number}:${slot}`;
+          const dedup = `issue:${issue.repository}#${issue.number}:${slot}`;
           const event = this.fire(state, current, manual ? `manual:${randomUUID()}:${dedup}` : dedup, slot, manual ? 'manual' : 'github', manual, watch.concurrency > 1 ? 'parallel' : 'skip');
           if (!event) break;
           event.payload = issue;
@@ -750,12 +751,12 @@ export class TriggerService extends EventEmitter {
           handled.add(key);
           room--;
         }
-        position.github = { handled: [...handled] };
+        position.github = { ...result.cursor, handled: [...handled] };
         if (manual) this.log(state, manual, 'run', current, current.revision, current.revision, `Checked GitHub now: ${fired.length} issue${fired.length === 1 ? '' : 's'} taken`);
         return structuredClone(fired);
       }
       for (const issue of result.issues) {
-        const key = source.watch.type === 'issue-opened' ? `issue:${issue.repository}#${issue.number}` : `${source.watch.type === 'review-requested' ? 'review' : 'assigned'}:${issue.repository}#${issue.number}:${slot}`;
+        const key = `review:${issue.repository}#${issue.number}:${slot}`;
         const event = this.fire(state, current, manual ? `manual:${randomUUID()}:${key}` : key, slot, manual ? 'manual' : 'github', manual);
         if (!event) continue;
         event.payload = issue;
@@ -861,6 +862,42 @@ export class TriggerService extends EventEmitter {
     } catch (error) { return { ok: false, error: error instanceof Error ? error.message : String(error) }; }
   }
 
+  /**
+   * The open issues an issue watch would work on, in its order, and where each stands for the saved trigger `id`:
+   * what it took, what a run has now, and what a watch starting from now leaves. Only reads GitHub.
+   */
+  async previewIssues(source: Extract<TriggerSource, { kind: 'github' }>, id: string | undefined, actor: TriggerActor, scope?: TriggerScope): Promise<IssuePreview> {
+    const watch = source.watch;
+    if (watch.type !== 'issues') throw failure('Only issue watches have a preview.');
+    if (source.auth.type === 'token' && actor.kind !== 'owner') throw failure('Only the owner can preview with a saved token.', 403);
+    const saved = id ? this.state.triggers.find(item => item.id === id) : undefined;
+    if (id && (!saved || !seen(saved, scope))) throw failure('Trigger not found.', 404);
+    let read;
+    try {
+      const { fetch, identity } = await this.githubFetch(source.auth);
+      const login = await this.githubLogin(fetch, identity);
+      if (login.toLowerCase() !== source.account.toLowerCase()) throw new GitHubError(`GitHub is signed in as ${login}, not ${source.account}.`);
+      read = await readIssues(watch, fetch, source.account);
+    } catch (error) { throw failure(error instanceof Error ? error.message : String(error), 502); }
+    // What the saved trigger remembers counts only while it watches with the same connection; an edit is judged as saving it would.
+    const cursor = saved && saved.source.kind === 'github' && saved.source.watch.type === 'issues' && saved.enabled
+      && JSON.stringify(saved.source.auth) === JSON.stringify(source.auth) && saved.source.account.toLowerCase() === source.account.toLowerCase()
+      ? keptGitHub(saved, { ...saved, source }, this.state.cursors[saved.id]) ?? {} : {};
+    const working = new Set(saved ? this.state.events.filter(event => event.triggerId === saved.id && UNFINISHED.has(event.status)).flatMap(event => { const ref = issueRef(event); return ref ? [keyOf(ref)] : []; }) : []);
+    const handled = new Set(cursor.handled ?? []);
+    const left = new Set(noted(watch, cursor, read.issues));
+    let position = 0;
+    const issues: IssuePreviewItem[] = read.issues.map(issue => {
+      const key = keyOf(issue);
+      const status: IssuePreviewItem['status'] = working.has(key) ? 'working' : handled.has(key) ? 'taken' : left.has(key) ? 'existing' : 'next';
+      return { repository: issue.repository, number: issue.number, title: issue.title, url: issue.url, labels: issue.labels, assignees: issue.assignees, createdAt: issue.createdAt, status,
+        ...(status === 'next' ? { position: ++position } : {}) };
+    });
+    const counts = { next: 0, working: 0, taken: 0, existing: 0 };
+    for (const issue of issues) counts[issue.status]++;
+    return { issues: issues.slice(0, MAX_PREVIEW), total: issues.length, counts };
+  }
+
   private payloadOf(trigger: Trigger, outcome: Extract<HttpOutcome, { ok: true }>, selected?: unknown): unknown {
     const selection = selected !== undefined ? selected : trigger.source.kind === 'http' && trigger.source.condition.type !== 'every-success'
       ? evaluate(trigger.source.condition, outcome, undefined).selected : undefined;
@@ -928,7 +965,7 @@ export class TriggerService extends EventEmitter {
     // Open issues decide their own overlap from how many may be worked on at once.
     const overlap = overlapOverride ?? trigger.policy.overlap;
     const watch = trigger.source.kind === 'github' ? trigger.source.watch : undefined;
-    const issue = trigger.source.kind === 'github' && watch?.type === 'open-issues'
+    const issue = trigger.source.kind === 'github' && watch?.type === 'issues'
       ? { issue: { account: trigger.source.account, assign: watch.assign, close: watch.close && handler.kind === 'task' } } : {};
     // What runs is frozen with the event: a task's instructions and target, or a coordinator's rules.
     const input: TriggerEvent['input'] = handler.kind === 'task'
@@ -1035,7 +1072,7 @@ export class TriggerService extends EventEmitter {
     const trigger = state.triggers.find(item => item.id === event.triggerId);
     const position = state.cursors[event.triggerId];
     // Only while the trigger still works through open issues, and never ahead of a failed check's back-off.
-    if (trigger?.source.kind !== 'github' || trigger.source.watch.type !== 'open-issues' || !position || position.failures) return;
+    if (trigger?.source.kind !== 'github' || trigger.source.watch.type !== 'issues' || !position || position.failures) return;
     if (position.nextAt !== undefined && !position.paused) position.nextAt = Math.min(position.nextAt, this.now());
   }
 
@@ -1421,7 +1458,7 @@ export class TriggerService extends EventEmitter {
 
   private parseState(value: unknown): EngineState | undefined {
     if (!value || typeof value !== 'object' || (value as EngineState).version !== 1) return undefined;
-    const saved = value as EngineState;
+    const saved = upgradeState(value as EngineState, this.now());
     const state = empty();
     const record = (item: unknown): item is Record<string, any> => !!item && typeof item === 'object' && !Array.isArray(item);
     try {
@@ -1433,10 +1470,12 @@ export class TriggerService extends EventEmitter {
       }
       const definition = (value: unknown) => record(value) && typeof value.id === 'string' && Number.isInteger(value.revision)
         && TriggerInputSchema.safeParse({ name: value.name, enabled: value.enabled, source: value.source, handler: value.handler, policy: value.policy }).success;
+      // Kept as parsed, so a definition moved to a newer shape compares equal to the same one saved again.
+      const parsed = (value: Trigger): Trigger => ({ ...value, ...TriggerInputSchema.parse({ name: value.name, enabled: value.enabled, source: value.source, handler: value.handler, policy: value.policy }) });
       if (!record(saved.revisions) || Object.values(saved.revisions).some(list => !Array.isArray(list) || !list.every(definition))) return undefined;
       if (!Array.isArray(saved.tombstones) || !saved.tombstones.every(definition)) return undefined;
-      state.revisions = saved.revisions as Record<string, Trigger[]>;
-      state.tombstones = saved.tombstones as Trigger[];
+      state.revisions = Object.fromEntries(Object.entries(saved.revisions as Record<string, Trigger[]>).map(([id, list]) => [id, list.map(parsed)]));
+      state.tombstones = (saved.tombstones as Trigger[]).map(parsed);
       state.recentFires = Array.isArray(saved.recentFires) ? saved.recentFires.filter(item => record(item) && typeof item.at === 'number' && typeof item.triggerId === 'string') : [];
       if (!record(saved.cursors) || Object.values(saved.cursors).some(cursor => !record(cursor) || typeof cursor.anchorAt !== 'number')) return undefined;
       state.cursors = saved.cursors as Record<string, Cursor>;
@@ -1460,6 +1499,32 @@ export class TriggerService extends EventEmitter {
   }
 }
 
+/**
+ * Saved state from before issues had one kind of watch, moved to it: each old issue watch becomes the issue watch
+ * that does the same (`upgradeWatch`), in triggers, their revisions and deleted ones, and what it had seen goes
+ * with it, so no issue it had already seen starts a run.
+ */
+function upgradeState(saved: EngineState, now: number): EngineState {
+  const record = (item: unknown): item is Record<string, any> => !!item && typeof item === 'object' && !Array.isArray(item);
+  const upgrade = (trigger: unknown) => record(trigger) && record(trigger.source) && trigger.source.kind === 'github'
+    ? { ...trigger, source: { ...trigger.source, watch: upgradeWatch(trigger.source.watch, record(trigger.policy) ? trigger.policy.overlap : undefined) } } : trigger;
+  const cursors = record(saved.cursors) ? Object.fromEntries(Object.entries(saved.cursors).map(([id, cursor]) => {
+    if (!record(cursor) || !record(cursor.github)) return [id, cursor];
+    const old = cursor.github as Record<string, any>;
+    // The new-issue watch knew the highest number seen per repository; the issues up to it are noted, not run.
+    if (record(old.repos)) {
+      const watermarks = Object.fromEntries(Object.entries(old.repos).flatMap(([repo, seen]) => record(seen) && Number.isInteger(seen.watermark) ? [[repo.toLowerCase(), seen.watermark as number]] : []));
+      return [id, { ...cursor, github: { handled: [], checkedAt: now, baseline: { watermarks } } }];
+    }
+    if (Array.isArray(old.assigned)) return [id, { ...cursor, github: { handled: old.assigned.filter((key: unknown) => typeof key === 'string'), checkedAt: now } }];
+    if (Array.isArray(old.handled) && old.checkedAt === undefined) return [id, { ...cursor, github: { ...old, checkedAt: now } }];
+    return [id, cursor];
+  })) : saved.cursors;
+  return { ...saved, triggers: Array.isArray(saved.triggers) ? saved.triggers.map(upgrade) as Trigger[] : saved.triggers,
+    revisions: record(saved.revisions) ? Object.fromEntries(Object.entries(saved.revisions).map(([id, list]) => [id, Array.isArray(list) ? list.map(upgrade) : list])) as EngineState['revisions'] : saved.revisions,
+    tombstones: Array.isArray(saved.tombstones) ? saved.tombstones.map(upgrade) as Trigger[] : saved.tombstones, cursors: cursors as EngineState['cursors'] };
+}
+
 /** The GitHub CLI's token for github.com. Nothing is cached on disk by Tower. */
 async function readGhToken(): Promise<string> {
   const gh = await findExecutable('gh');
@@ -1472,25 +1537,24 @@ async function readGhToken(): Promise<string> {
 }
 
 /**
- * What a GitHub trigger keeps when its definition changes while on: with the same connection and kind of
- * watch, repositories still watched keep what was seen (new ones start from their first check), so an edit
- * never loses issues opened meanwhile. Assignments are kept only when the same set is watched.
+ * What a GitHub trigger keeps when its definition changes while on, with the same connection and kind of watch. An
+ * issue watch keeps the issues it took; when what it watches changed and it starts from now, the issues that newly
+ * match but were opened before the last check are noted instead of taken, while issues opened meanwhile, or waiting
+ * for a place, still run.
  */
 function keptGitHub(before: Trigger, after: Trigger, cursor: Cursor | undefined): GitHubCursor | undefined {
   if (before.source.kind !== 'github' || after.source.kind !== 'github' || !cursor?.github) return undefined;
   const [a, b] = [before.source, after.source];
   if (JSON.stringify(a.auth) !== JSON.stringify(b.auth) || a.account.toLowerCase() !== b.account.toLowerCase() || a.watch.type !== b.watch.type) return undefined;
-  if (b.watch.type === 'issue-opened') {
-    const repos = Object.fromEntries(Object.entries(cursor.github.repos ?? {}).filter(([repo]) => b.watch.type === 'issue-opened' && b.watch.repos.includes(repo)));
-    return { repos };
-  }
-  // Which issues were taken stays while the same issues are watched; how they are worked on may change.
-  if (a.watch.type === 'open-issues' && b.watch.type === 'open-issues') {
-    const seen = ({ repos, labels, authors, authorAssociation }: typeof a.watch) => JSON.stringify([repos, labels, authors, authorAssociation]);
-    return seen(a.watch) === seen(b.watch) ? cursor.github : undefined;
+  if (a.watch.type === 'issues' && b.watch.type === 'issues') {
+    const scope = ({ repos, assignee, labels, excludeLabels, authors, authorAssociation, includePullRequests, start }: typeof a.watch) =>
+      JSON.stringify([repos, assignee, labels, excludeLabels, authors, authorAssociation, includePullRequests, start]);
+    const kept = cursor.github;
+    if (scope(a.watch) === scope(b.watch) || b.watch.start !== 'new' || kept.checkedAt === undefined) return kept;
+    return { ...kept, baseline: { before: new Date(kept.checkedAt).toISOString() } };
   }
   // What a review may decide does not change which requests are seen.
   if (a.watch.type === 'review-requested' && b.watch.type === 'review-requested') return JSON.stringify([a.watch.repos, a.watch.includeTeams]) === JSON.stringify([b.watch.repos, b.watch.includeTeams]) ? cursor.github : undefined;
-  return JSON.stringify(a.watch) === JSON.stringify(b.watch) ? cursor.github : undefined;
+  return undefined;
 }
 

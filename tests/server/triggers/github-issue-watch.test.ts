@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -46,24 +46,24 @@ function fakeGitHub(repos: Record<string, Issue[]>) {
   return { reads, writes, fetch };
 }
 
-const openWatch = (values: Record<string, unknown> = {}) => GitHubSourceSchema.shape.watch.parse({ type: 'open-issues', repos: ['octo/app'], ...values });
+const openWatch = (values: Record<string, unknown> = {}) => GitHubSourceSchema.shape.watch.parse({ type: 'issues', repos: ['octo/app'], start: 'existing', assign: true, close: true, ...values });
 
-test('an open-issues check lists every open issue oldest first, and forgets taken issues once they close', async () => {
+test('an issue watch check lists every open issue oldest first, and forgets taken issues once they close', async () => {
   const repos = { 'octo/app': [{ number: 3 }, { number: 1 }, { number: 2, pr: true }, { number: 4, association: 'NONE' }, { number: 5, state: 'closed' }, { number: 6 }] as Issue[] };
   const github = fakeGitHub(repos);
   const watch = openWatch();
-  assert.deepEqual(watch, { type: 'open-issues', repos: ['octo/app'], authorAssociation: ['OWNER', 'MEMBER', 'COLLABORATOR'], concurrency: 1, assign: true, close: true });
-  const first = await checkGitHub(watch, { handled: ['octo/app#1', 'octo/app#5'] }, github.fetch);
+  assert.deepEqual(watch, { type: 'issues', repos: ['octo/app'], assignee: 'any', authorAssociation: ['OWNER', 'MEMBER', 'COLLABORATOR'], includePullRequests: false, start: 'existing', order: 'oldest', concurrency: 1, assign: true, close: true });
+  const first = await checkGitHub(watch, { handled: ['octo/app#1', 'octo/app#5'] }, github.fetch, 'me');
   assert.deepEqual(first.issues.map(issue => issue.number), [1, 3, 6], 'issues already there count; pull requests and outsiders do not');
   assert.deepEqual(first.cursor.handled, ['octo/app#1'], 'a closed issue is forgotten, so it is taken again if reopened');
   const many = fakeGitHub({ 'octo/app': Array.from({ length: 1001 }, (_, index) => ({ number: index + 1 })) });
-  await assert.rejects(checkGitHub(watch, {}, many.fetch), GitHubError);
+  await assert.rejects(checkGitHub(watch, {}, many.fetch, 'me'), GitHubError);
 });
 
-async function fixture(t: TestContext, github: ReturnType<typeof fakeGitHub>) {
-  const directory = await mkdtemp(join(tmpdir(), 'tower-open-issues-'));
+async function fixture(t: TestContext, github: ReturnType<typeof fakeGitHub>, reuse?: string) {
+  const directory = reuse ?? await mkdtemp(join(tmpdir(), 'tower-open-issues-'));
   const project = join(directory, 'project');
-  await mkdir(project);
+  await mkdir(project, { recursive: true });
   const clock = { now: Date.parse('2026-09-24T00:00:30.000Z') };
   const runs: Run[] = [];
   const executor: TriggerExecutor = {
@@ -90,7 +90,7 @@ async function fixture(t: TestContext, github: ReturnType<typeof fakeGitHub>) {
     runs.push(run);
     return run;
   };
-  return { project, clock, runs, service, step, finish, continueAfter };
+  return { directory, project, clock, runs, service, step, finish, continueAfter };
 }
 
 const queue = (project: string, watch: Record<string, unknown> = {}, policy: TriggerInput['policy'] = { overlap: 'skip', maxEventsPerHour: 20 }): TriggerInput => ({
@@ -262,4 +262,87 @@ test('a close that fails for a while is tried again', async t => {
   f.clock.now += 5 * 60_000;
   await f.step();
   assert.equal(repos['octo/app'][0].state, 'closed');
+});
+
+test('saved triggers of the earlier issue kinds become issue watches that take nothing they had already seen', async t => {
+  const repos = { 'octo/app': [{ number: 1 }, { number: 2 }, { number: 3 }] as Issue[], 'octo/lib': [{ number: 1, assignees: ['me'] }, { number: 2, assignees: ['me'] }] as Issue[] };
+  const github = fakeGitHub(repos);
+  const first = await fixture(t, github);
+  const opened = await first.service.create({ ...queue(first.project), name: 'New issues', policy: { overlap: 'parallel', maxEventsPerHour: 20 } }, OWNER);
+  const assigned = await first.service.create({ ...queue(first.project), name: 'Assigned', source: GitHubSourceSchema.parse({ kind: 'github', schedule: { type: 'interval', everySeconds: 300 }, auth: { type: 'gh' }, account: 'me', watch: { type: 'issues', repos: ['octo/lib'], assignee: 'me' } }) }, OWNER);
+  const queued = await first.service.create({ ...queue(first.project), name: 'Queue' }, OWNER);
+  first.service.close();
+  await first.service.settle();
+  // Rewrite the saved state as 1.86 kept it.
+  const path = join(first.directory, 'trigger-engine.json');
+  const saved = JSON.parse(await readFile(path, 'utf8'));
+  const old: Record<string, unknown> = {
+    [opened.id]: { type: 'issue-opened', repos: ['octo/app'], authorAssociation: ['OWNER', 'MEMBER', 'COLLABORATOR'] },
+    [assigned.id]: { type: 'assigned-to-me', repos: ['octo/lib'], includePullRequests: false },
+    [queued.id]: { type: 'open-issues', repos: ['octo/app'], authorAssociation: ['OWNER', 'MEMBER', 'COLLABORATOR'], concurrency: 1, assign: true, close: true },
+  };
+  for (const trigger of saved.triggers) trigger.source.watch = old[trigger.id];
+  saved.revisions[opened.id] = [{ ...saved.triggers.find((item: { id: string }) => item.id === opened.id), revision: 0 }];
+  saved.cursors[opened.id].github = { repos: { 'octo/app': { watermark: 2, etag: 'x' } } };
+  saved.cursors[assigned.id].github = { assigned: ['octo/lib#1'] };
+  saved.cursors[queued.id].github = { handled: ['octo/app#1'] };
+  await writeFile(path, JSON.stringify(saved));
+  const f = await fixture(t, github, first.directory);
+  const watches = Object.fromEntries(f.service.list().map(trigger => [trigger.name, trigger.source.kind === 'github' ? trigger.source.watch : undefined]));
+  assert.deepEqual(watches['New issues'], { type: 'issues', repos: ['octo/app'], assignee: 'any', authorAssociation: ['OWNER', 'MEMBER', 'COLLABORATOR'], includePullRequests: false,
+    start: 'new', order: 'oldest', concurrency: 5, assign: false, close: false }, 'new issues start from now, as many at once as overlapping runs did');
+  assert.equal(watches.Assigned?.type === 'issues' && watches.Assigned.assignee, 'me');
+  assert.equal(watches.Queue?.type === 'issues' && watches.Queue.start, 'existing');
+  const [earlier] = f.service.get(opened.id).revisions;
+  assert.equal(earlier.source.kind === 'github' && earlier.source.watch.type, 'issues', 'earlier revisions move too');
+  f.clock.now += 300_000;
+  await f.step();
+  const started = f.service.events().map(event => `${event.triggerName} ${event.summary.split(' ')[0]}`).sort();
+  assert.deepEqual(started, ['Assigned octo/lib#2', 'New issues octo/app#3', 'Queue octo/app#2'], 'only what the earlier kinds had not seen yet');
+});
+
+test('an edit to what an issue watch covers leaves an issue that was waiting for a place its turn', async t => {
+  const repos = { 'octo/app': [{ number: 1 }] as Issue[] };
+  const f = await fixture(t, fakeGitHub(repos));
+  const input = queue(f.project, { start: 'new', assign: false, close: false });
+  const trigger = await f.service.create(input, OWNER);
+  f.clock.now += 300_000;
+  await f.step();
+  repos['octo/app'].push({ number: 2 }, { number: 3 });
+  f.clock.now += 300_000;
+  await f.step();
+  assert.deepEqual(numbers(f.service), [2], 'one at a time: #3 waits');
+  const watch = input.source.kind === 'github' ? input.source.watch : undefined;
+  await f.service.update(trigger.id, { ...input, source: { ...input.source, watch: { ...watch!, excludeLabels: ['hold'] } } as TriggerInput['source'] }, trigger.revision, OWNER);
+  f.finish(0);
+  f.clock.now += 1000;
+  await f.step();
+  f.clock.now += 1000;
+  await f.step();
+  assert.deepEqual(numbers(f.service), [2, 3]);
+});
+
+test('the preview lists the issues in order with where each stands, and records nothing', async t => {
+  const repos = { 'octo/app': [{ number: 1 }, { number: 2 }, { number: 3, labels: ['hold'] }, { number: 4 }] as Issue[] };
+  const f = await fixture(t, fakeGitHub(repos));
+  const input = queue(f.project, { assign: false, close: false });
+  const source = input.source as Extract<TriggerInput['source'], { kind: 'github' }>;
+  const fresh = await f.service.previewIssues(source, undefined, OWNER);
+  assert.deepEqual(fresh.issues.map(issue => [issue.number, issue.status, issue.position]), [[1, 'next', 1], [2, 'next', 2], [3, 'next', 3], [4, 'next', 4]]);
+  const fromNow = await f.service.previewIssues({ ...source, watch: { ...source.watch, start: 'new' } as typeof source.watch }, undefined, OWNER);
+  assert.deepEqual(fromNow.counts, { next: 0, working: 0, taken: 0, existing: 4 }, 'a watch starting from now leaves what is there');
+  const trigger = await f.service.create(input, OWNER);
+  f.clock.now += 300_000;
+  await f.step();
+  f.finish(0);
+  f.clock.now += 1000;
+  await f.step();
+  f.clock.now += 1000;
+  await f.step();
+  const events = f.service.events().length;
+  const saved = await f.service.previewIssues({ ...source, watch: { ...source.watch, excludeLabels: ['hold'], order: 'newest' } as typeof source.watch }, trigger.id, OWNER);
+  assert.deepEqual(saved.issues.map(issue => [issue.number, issue.status, issue.position]), [[4, 'next', 1], [2, 'working', undefined], [1, 'taken', undefined]]);
+  assert.equal(saved.total, 3);
+  assert.equal(f.service.events().length, events, 'no run starts');
+  await assert.rejects(f.service.previewIssues(source, 'missing', OWNER), /not found/);
 });
