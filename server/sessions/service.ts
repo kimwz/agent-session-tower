@@ -210,7 +210,8 @@ export class SessionService extends EventEmitter {
   }
 
   /** `before` is an opaque byte cursor, stable when new messages are appended. */
-  async detail(id: string, before?: number, limit = 60): Promise<SessionDetail | undefined> {
+  /** `previousUser: false` skips looking back for the user message before the page (a reader going through every page has it). */
+  async detail(id: string, before?: number, limit = 60, options: { previousUser?: boolean } = {}): Promise<SessionDetail | undefined> {
     const state = this.index.get(id);
     if (!state) return undefined;
     if (state.historyStartOrdinal !== undefined && state.historyStartOffset === undefined) {
@@ -273,7 +274,7 @@ export class SessionService extends EventEmitter {
       // Without this, a >32 MB metadata line returns the same empty page forever.
       if (droppingOversizedLine && messageCount < count) nextBefore = position;
       const hasMore = nextBefore > historyStart;
-      const previousUser = hasMore ? await this.previousUser(file, state, nextBefore, historyStart) : undefined;
+      const previousUser = hasMore && options.previousUser !== false ? await this.previousUser(file, state, nextBefore, historyStart) : undefined;
       return { session: { ...state.session }, messages: collected.reverse().flat(), hasMore, nextBefore: hasMore ? nextBefore : undefined, ...(previousUser ? { previousUser } : {}),
         ...(skipped ? { skipped } : {}) };
     } finally { await file.close(); }

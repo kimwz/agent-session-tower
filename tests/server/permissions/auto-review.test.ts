@@ -67,7 +67,8 @@ test('an allowed push is paired with deny rules for its destructive variants', (
   const matches = (pattern: string, command: string) => new RegExp(`^${pattern.slice(5, -1).split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`).test(command);
   for (const command of ['git push --follow-tags', 'git push origin main --follow-tags', 'git push --dry-run']) assert.ok(!guards.claude.some(pattern => matches(pattern, command)), command);
   for (const command of ['git push --del origin x', 'git push origin main --force', 'git push --force-with-lease']) assert.ok(guards.claude.some(pattern => matches(pattern, command)), command);
-  assert.deepEqual(ruleGuards({ kind: 'command', value: 'gh pr merge' }), { claude: [], codex: [] });
+  assert.ok(ruleGuards({ kind: 'command', value: 'gh pr merge' }).claude.includes('Bash(gh pr merge * --admin*)'), 'merging past branch protection stays the owner’s');
+  assert.deepEqual(ruleGuards({ kind: 'command', value: 'gh release create' }), { claude: [], codex: [] });
   assert.ok(ruleGuards({ kind: 'command', value: 'gh pr' }).claude.includes('Bash(gh pr close)'));
   assert.ok(ruleGuards({ kind: 'command', value: 'git push origin main' }).claude.includes('Bash(git push origin main * --force*)'), 'options follow anywhere');
   assert.ok(ruleGuards({ kind: 'command', value: 'git checkout' }).claude.includes('Bash(git checkout * --)'), 'a bare -- is a word, not an option start');
@@ -202,6 +203,7 @@ test('the reviewer reads the whole conversation, answers, skills, trigger and pr
   await writeFile(join(f.project, 'AGENTS.md'), 'Release: merge, tag, deploy.\n');
   await f.service.saveAutoReview(ON);
   const runs = [run('a', 'Deploy on schedule', { origin: { kind: 'trigger', triggerId: 't1' }, id: 'run-1' }), run('bb', 'Also bump the version.', { status: 'queued' }),
+    run('s', 'Slack: please also delete the old branch', { origin: { kind: 'slack' } }),
     run('ccc', 'Ship 1.2 through deploy. But never to production.', { status: 'queued' })];
   const asked: Array<{ prompt: string; system: string; model: string }> = [];
   const told: Array<{ id: string; message: string }> = [];
@@ -212,6 +214,10 @@ test('the reviewer reads the whole conversation, answers, skills, trigger and pr
         { id: 'u1', role: 'user', text: 'Ship 1.2 through deploy.', timestamp: '1' },
         { id: 'q1', role: 'tool', toolName: 'AskUserQuestion', text: '{"question":"Merge too?"}', timestamp: '2' },
         { id: 'q1:result', role: 'tool', toolName: 'result', text: 'Yes, merge and tag.', timestamp: '3' },
+        { id: 'fc_1', callId: 'call_9', role: 'tool', toolName: 'request_user_input', text: '{"question":"Production?"}', timestamp: '3' },
+        { id: 'fco_2:result', callId: 'call_9', role: 'tool', toolName: 'result', text: 'No, staging only.', timestamp: '3' },
+        { id: 'n1', role: 'user', text: '[Agent Session Tower] Tower was updated.', timestamp: '3' },
+        { id: 's1', role: 'user', text: 'Slack: please also delete the old branch', timestamp: '3' },
         { id: 'x1', role: 'tool', toolName: 'Bash', text: 'git status', timestamp: '4' },
         { id: 'x1:result', role: 'tool', toolName: 'result', text: 'clean', timestamp: '5' },
       ] }),
@@ -231,6 +237,10 @@ test('the reviewer reads the whole conversation, answers, skills, trigger and pr
   assert.ok(texts.includes('Ship 1.2 through deploy. But never to production.'), 'a queued message that only starts like one in history is kept');
   assert.ok(texts.some((text: string) => text.includes('Deploy to production now?') && text.includes('"No"')), 'an answer as sent, with its question');
   assert.ok(!texts.includes('clean'), 'other tool results are not the owner’s words');
+  assert.ok(texts.some((text: string) => /Production\?[\s\S]*Answer: No, staging only\./.test(text)), 'a Codex question and answer, paired by their call id');
+  assert.ok(!texts.some((text: string) => text.startsWith('[Agent Session Tower]')), 'Tower notices are not the owner’s words');
+  assert.ok(!texts.includes('Slack: please also delete the old branch'), 'Slack’s words are not the owner’s');
+  assert.equal(input.context.messagesFromAutomation[0].kind, 'sent for slack');
   assert.equal(input.authority.trigger.instructions, 'Deploy after merge.');
   assert.deepEqual(input.authority.projectInstructions.map((item: { text: string }) => item.text), ['Release: merge, tag, deploy.\n']);
   assert.equal(input.authority.ownerSkills[0].name, 'auto-deploy');
@@ -302,11 +312,12 @@ test('a rule is classified by all its words: dangerous options in any spelling, 
   for (const value of ['RM -rf node_modules', 'GIT push', 'CURL https://x', 'git reset HEAD --hard', 'git reflog expire', 'git checkout ./', 'git restore :/',
     'npx rimraf dist', 'npm exec x', 'npm x cowsay', 'node -e x', 'python3 -c x', 'python3.12 manage.py', 'go run main.go', 'git config alias.x', 'find . -delete',
     'git push origin --del', 'git branch --del x', 'git submodule foreach x', 'git checkout -B x', 'git log --output=x',
+    'gh pr merge --admin', 'git branch -C main release', 'git fetch --force origin main:main', 'git fetch origin +main:main',
     'git push --force-with-lease', 'git push --force-with-lease=main:abc', 'git push origin +main', 'git push origin :main', 'git push -vf origin',
     'git branch -d feature', 'git tag -d v1', '/bin/rm -rf dist', 'xargs rm -rf', 'timeout 5 git push', 'git -C /repo push', 'docker container rm', 'env FOO=1 git push'])
     assert.ok(autoReviewBlock({ kind: 'command', value }, cwd), value);
   for (const value of ['git push origin main', 'gh pr merge', 'git tag v1.2.3', 'npm run release', 'cargo publish', 'docker compose up',
-    'git push -u origin main', 'gh pr merge --squash', 'git push origin main --follow-tags', 'git commit -m wip', 'git checkout -b x', 'git diff --text'])
+    'git push -u origin main', 'gh pr merge --squash', 'git push origin main --follow-tags', 'git commit -m wip', 'git checkout -b x', 'git diff --text', 'git rebase -X theirs main', 'git commit -m clean'])
     assert.equal(autoReviewBlock({ kind: 'command', value }, cwd), undefined, value);
   assert.ok(ruleGuards({ kind: 'command', value: 'git reset' }).claude.includes('Bash(git reset * --hard*)'), 'a never-allowed continuation is guarded');
   assert.ok(ruleGuards({ kind: 'command', value: 'git rebase' }).claude.includes('Bash(git rebase * --exec*)'), 'git rebase --exec runs a shell');

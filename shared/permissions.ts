@@ -192,8 +192,12 @@ export const DANGEROUS_EXTENSIONS: Readonly<Record<string, readonly string[]>> =
   'git': ['--upload-pack', '--receive-pack', '--exec', '--output', '--open-files-in-pager', '--ext-diff', '--textconv'],
   'git grep': ['-O'],
   'git switch': ['-f', '--force', '--discard-changes', '-C'],
+  'git fetch': ['--force', '-f', '+*'],
+  'git pull': ['--force', '-f', '+*'],
+  'gh pr merge': ['--admin'],
+  'gh pr checkout': ['--force', '-f'],
   'git push': ['--force', '-f', '--force-with-lease', '--force-if-includes', '--delete', '-d', '--mirror', '--prune', '+*', ':*'],
-  'git branch': ['-D', '-d', '--delete', '-M', '-m', '--move', '-f', '--force'],
+  'git branch': ['-D', '-d', '--delete', '-M', '-m', '--move', '-C', '-f', '--force'],
   'git tag': ['-d', '--delete', '-f', '--force'],
   'git checkout': ['-f', '--force', '-B', '.', './', ':/', '--'],
   'git rebase': ['-x', '--exec'],
@@ -352,8 +356,11 @@ export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'
     // A rule whose own words already make it destructive (`git push origin +main`, `git reset HEAD --hard`).
     for (const [prefix, tokens] of FAMILIES) {
       if (!startsWith(rulewords, prefix)) continue;
-      // Options keep their case (`-B` is not `-b`); the program and subcommands are matched in lower case.
-      const found = words(rule.value).slice(prefix.length).find(word => tokens.some(token => dangerousWord(word, token) || dangerousWord(word.toLowerCase(), token)));
+      // Options keep their case (`-B` is not `-b`, `-X` is not `-x`); long options and subcommands are matched in lower case.
+      // A subcommand counts only right after the family (`git stash drop`), never as a later word (`git commit -m drop`).
+      const rest = words(rule.value).slice(prefix.length);
+      const found = rest.find((word, index) => tokens.some(token => (/^[-+:.]/.test(token) || index === 0)
+        && (dangerousWord(word, token) || (word.startsWith('--') && dangerousWord(word.toLowerCase(), token)) || (!word.startsWith('-') && dangerousWord(word.toLowerCase(), token)))));
       if (found) return `\`${prefix.join(' ')}\`에 \`${found}\`가 붙은 규칙은 소유자가 정합니다.`;
     }
     return undefined;

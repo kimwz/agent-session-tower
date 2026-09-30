@@ -71,6 +71,8 @@ export interface ChatMessage {
   timestamp: string;
   images?: { source: string; name: string; url: string }[];
   toolName?: string;
+  /** For a tool call and its result: the id they share (Codex gives them different ids of their own). */
+  callId?: string;
   isError?: boolean;
 }
 export interface SessionDetail {

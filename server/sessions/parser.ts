@@ -119,10 +119,10 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
     }
     if (['function_call', 'custom_tool_call', 'local_shell_call'].includes(value.type)) {
       const name = value.name || (value.type === 'local_shell_call' ? 'shell' : 'tool');
-      return [{ id, role: 'tool', toolName: name, text: printJson(value.arguments ?? value.input ?? value.action), timestamp }];
+      return [{ id, role: 'tool', toolName: name, text: printJson(value.arguments ?? value.input ?? value.action), timestamp, ...(value.call_id ? { callId: String(value.call_id) } : {}) }];
     }
     if (['function_call_output', 'custom_tool_call_output'].includes(value.type)) {
-      return [{ id: `${id}:result`, role: 'tool', toolName: 'result', text: printJson(value.output), timestamp }];
+      return [{ id: `${id}:result`, role: 'tool', toolName: 'result', text: printJson(value.output), timestamp, ...(value.call_id ? { callId: String(value.call_id) } : {}) }];
     }
     return [];
   }
@@ -155,10 +155,10 @@ export function parseMessages(provider: Provider, row: Json, byteOffset = 0, fal
     else if (block.type === 'image') prose += '[Image attachment]\n';
     else if (block.type === 'tool_use') {
       flush();
-      messages.push({ id: String(block.id || `${id}:${messages.length}`), role: 'tool', toolName: block.name || 'tool', text: printJson(block.input), timestamp });
+      messages.push({ id: String(block.id || `${id}:${messages.length}`), role: 'tool', toolName: block.name || 'tool', text: printJson(block.input), timestamp, ...(block.id ? { callId: String(block.id) } : {}) });
     } else if (block.type === 'tool_result') {
       flush();
-      messages.push({ id: `${block.tool_use_id || id}:result`, role: 'tool', toolName: 'result', text: text(block.content), timestamp, isError: Boolean(block.is_error) });
+      messages.push({ id: `${block.tool_use_id || id}:result`, role: 'tool', toolName: 'result', text: text(block.content), timestamp, isError: Boolean(block.is_error), ...(block.tool_use_id ? { callId: String(block.tool_use_id) } : {}) });
     }
   }
   flush();

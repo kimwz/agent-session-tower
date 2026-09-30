@@ -239,7 +239,8 @@ async function main() {
   // Load persisted history before shutdown or an HTTP request can touch the runner.
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await exclusions.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
   /** Local browser requests are the owner's; a remote controller's carry its own origin and request ID. */
-  const admit = (context?: RequestContext) => ({ origin: context?.origin ?? OWNER, ...(context?.requestId ? { requestId: context.requestId } : {}) });
+  // `authored` only keeps a 1.89/1.90 worker's permission reviewer working while an update waits for its handoff; newer workers ignore it.
+  const admit = (context?: RequestContext) => ({ origin: context?.origin ?? OWNER, ...(context?.requestId ? { requestId: context.requestId } : {}), ...(context?.origin ? {} : { authored: true }) });
   // The worker has indexed native sessions before it answers, so the session list is complete here.
   const history = nativeHistory(runs);
   const listeners = new Set<() => void>();
@@ -405,7 +406,8 @@ async function main() {
       overview: input => runs.skills('skillsOverview', [input]) as Promise<SkillOverview>,
       detail: input => runs.skills('skillsDetail', [input]) as Promise<SkillDetail>,
       summary: () => runs.skills('skillsSummary', []) as Promise<SkillSummary>,
-      mutate: (action, body) => runs.skills('skillsMutate', [action, body]) as Promise<SkillOverview>,
+      // The third value only lets a 1.89/1.90 worker keep its skill confirmations during an update; newer workers ignore it.
+      mutate: (action, body) => runs.skills('skillsMutate', [action, body, true]) as Promise<SkillOverview>,
       exportBundle: body => runs.skills('skillsExport', [body]) as Promise<SkillBundle>,
       importPlan: bundle => runs.skills('skillsImportPlan', [bundle]) as Promise<SkillImportPlan>,
     },

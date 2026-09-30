@@ -569,11 +569,13 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         authority: cwd => skills.authority(cwd),
         // The whole conversation, page by page back to its start; incomplete when that cannot be done.
         conversation: async sessionId => {
-          if (!runs.getSession(sessionId)) return { messages: [], complete: false };
+          const session = runs.getSession(sessionId);
+          // A child conversation's history leaves out what it inherited from its parent: not all of the owner's words.
+          if (!session || session.parentId) return { messages: [], complete: false };
           const pages: ChatMessage[][] = [];
           let before: number | undefined;
           for (let page = 0; page < 50; page += 1) {
-            const detail = await sessions.detail(runs.nativeSessionId(sessionId), before, 200);
+            const detail = await sessions.detail(runs.nativeSessionId(sessionId), before, 200, { previousUser: false });
             if (!detail || detail.skipped) return { messages: pages.reverse().flat(), complete: false };
             pages.push(detail.messages);
             if (!detail.hasMore) return { messages: pages.reverse().flat(), complete: true };
