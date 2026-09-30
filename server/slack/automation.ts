@@ -237,6 +237,21 @@ export class SlackAutomationManager extends EventEmitter {
     return Boolean(this.processing) || Boolean(this.marking) || this.admissions.size > 0 || this.toolOperations.size > 0
       || this.list().some(item => !terminal.has(item.status) && !this.waiting(item));
   }
+  /**
+   * Only work this worker is doing right now (a tick, a reaction, an admission, a tool call). A workflow waiting on a
+   * provider turn is not counted: its state is saved and the next worker follows it.
+   */
+  transient(): boolean {
+    return Boolean(this.processing) || Boolean(this.marking) || this.admissions.size > 0 || this.toolOperations.size > 0;
+  }
+  /**
+   * Delegated runs whose workflow is not finished with them: the coordinator is still to hear their result, or may
+   * still report it (`tower_task_complete` checks the run). Tower keeps these runs through pruning and restarts.
+   */
+  retainedRuns(): string[] {
+    return this.list().filter(item => !terminal.has(item.status) || item.ownerConditionalReply?.status === 'pending')
+      .flatMap(item => (item.delegatedTasks ?? []).flatMap(task => task.delegatedRunId ? [task.delegatedRunId] : []));
+  }
   /** During a worker handoff, newly received mentions wait for the successor instead of starting here. */
   hold(): void { this.held = true; }
   /**
@@ -590,7 +605,10 @@ export class SlackAutomationManager extends EventEmitter {
         task.notifiedRunId = resumed.runId; await this.save(item, { status: 'running', runId: resumed.runId });
       } catch (error) {
         const recovered = this.options.findConversation?.(correlation);
+        const status = (error as { statusCode?: unknown })?.statusCode;
         if (recovered) task.notifiedRunId = recovered.runId;
+        // A full queue (429) or a runner not accepting (503) admitted nothing: the notice is sent on a later tick.
+        else if (status === 429 || status === 503) delete task.notificationClaimed;
         else task.notificationError = (error instanceof Error ? error.message : 'Result notification failed.').slice(0, 1500);
         await this.save(item, {});
       }

@@ -443,6 +443,45 @@ test('an outdated worker hands off only when nothing is running, and the web fol
   assert.equal(after.origin?.kind, 'owner');
 });
 
+test('updating on request stops the running turn at the deadline, hands off, and leaves its continuation queued', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let handoffs = 0;
+  let successorStarted = 0;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => { successorStarted++; } });
+  t.after(() => host.close());
+  const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' });
+  t.after(() => client.close());
+  await client.start();
+  const run = await client.enqueue(f.session.id, 'Long work');
+  await until(() => f.starts() === 1 && client.list().some(item => item.id === run.id && item.status === 'running'));
+  const answer = await client.forceUpdate(300);
+  assert.ok(Date.parse(answer.deadline) > Date.now() - 1000);
+  await until(() => client.updateDrain() !== undefined);
+  const queued = await client.enqueue(f.session.id, 'Sent while updating');
+  await until(() => f.cancels() === 1 && successorStarted === 1, 5000);
+  assert.equal(handoffs, 1);
+  const read = () => JSON.parse(readFileSync(join(f.stateDir, 'runs.json'), 'utf8')) as Array<Record<string, any>>;
+  // This fixture's quiesce does not flush; the real one waits for the save.
+  await until(() => read().find(item => item.id === run.id)?.error !== undefined);
+  const saved = read();
+  const stopped = saved.find(item => item.id === run.id)!;
+  assert.equal(stopped.status, 'cancelled');
+  assert.match(stopped.error, /Tower update/);
+  const resume = saved.find(item => item.scheduled?.resume === 'update');
+  assert.equal(resume?.status, 'queued');
+  assert.equal(resume?.scheduled.afterRunId, run.id);
+  const carried = saved.find(item => item.id === queued.id)!;
+  assert.equal(carried.status, 'queued');
+  assert.equal(carried.keepQueued, true, 'the next worker keeps it queued');
+});
+
+test('updating on request is refused while the worker already runs this version', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = await f.connect();
+  await assert.rejects(client.forceUpdate(), { statusCode: 409 });
+});
+
 test('while an update of this computer is being tried, the new web does not take the worker over', async t => {
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();

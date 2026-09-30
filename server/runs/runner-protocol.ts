@@ -10,7 +10,7 @@ export const MAX_RPC_BYTES = 40 * 1024 * 1024;
  * Optional operations this worker build serves. A web process checks the attached worker's list
  * before calling one, because an older worker keeps running until it is idle.
  */
-export const RUNNER_CAPABILITIES = ['sessionHistory', 'origins', 'handoff', 'triggers', 'toolCapabilities', 'remoteOrigins', 'remoteTriggers', 'publicAgents', 'autoPromptTargets', 'steerTargets', 'subscriptionOnly', 'skills', 'towerSkills', 'skillTargets'] as const;
+export const RUNNER_CAPABILITIES = ['sessionHistory', 'origins', 'handoff', 'triggers', 'toolCapabilities', 'remoteOrigins', 'remoteTriggers', 'publicAgents', 'autoPromptTargets', 'steerTargets', 'subscriptionOnly', 'skills', 'towerSkills', 'skillTargets', 'forceUpdate'] as const;
 export type RunnerCapability = typeof RUNNER_CAPABILITIES[number];
 /** One page of a native conversation, read by the worker that already indexes native history. */
 export type SessionHistoryPage = Pick<SessionDetail, 'messages' | 'hasMore' | 'nextBefore' | 'previousUser'>;
@@ -31,7 +31,12 @@ export interface RunnerSnapshot {
   triggers?: TriggerOverview;
   /** Coordinator conversations (Slack, GitHub). Absent from workers that cannot serve remote controllers. */
   coordinators?: string[];
+  /** While the owner's forced update waits for running turns to wrap up. */
+  updateDrain?: UpdateDrainStatus;
 }
+export interface UpdateDrainStatus { startedAt: string; deadline: string; running: number }
+/** How long a forced update lets running turns wrap up before stopping them. */
+export const FORCE_UPDATE_DEADLINE_MS = 10 * 60 * 1000;
 export interface RunnerReply {
   protocol: number;
   stateDir: string;

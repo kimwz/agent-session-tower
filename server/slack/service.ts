@@ -183,6 +183,8 @@ export class SlackService extends EventEmitter {
   hasActive() { return this.settings.enabled || this.tone.overview().status === 'collecting' || this.automation.hasPending(); }
   /** Work already accepted and underway. Monitoring alone does not count; unstarted held mentions do not either. */
   hasInFlight() { return this.tone.overview().status === 'collecting' || this.automation.inFlight(); }
+  /** Work underway this instant; workflows waiting on provider turns carry over to the next worker. */
+  hasTransient() { return this.tone.overview().status === 'collecting' || this.automation.transient(); }
   /** New mentions are still received and saved, but only a successor worker starts them. */
   holdNewWork() { this.automation.hold(); }
   flush() { return this.automation.flush(); }

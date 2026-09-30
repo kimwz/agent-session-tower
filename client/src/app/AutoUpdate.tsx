@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Check, Clock, Copy, LoaderCircle, TriangleAlert } from 'lucide-react';
 import type { AutoUpdateStatus, ToolUpdate, ToolUpdateReason } from '../../../shared/link';
 import type { Provider, Snapshot } from '../../../shared/types';
-import { absoluteTime, copyText, providerLabels } from '../common/lib';
+import { absoluteTime, api, copyText, outdatedRunner, providerLabels } from '../common/lib';
+import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { useI18n } from '../i18n/i18n';
 
 const newer = (a?: string, b?: string) => {
@@ -95,4 +96,45 @@ export function TowerUpdateBadge({ snapshot }: { snapshot: Pick<Snapshot, 'versi
       <TriangleAlert size={12} />{t('Tower 업데이트 재시도 대기')}</span>;
   }
   return null;
+}
+
+/**
+ * The execution worker still on an older build. When it can switch on request, "update now" asks running turns to
+ * wrap up, stops those still running after ten minutes, and resumes them on the new version; meanwhile the badge
+ * counts down.
+ */
+export function RunnerUpdateBadge({ snapshot, token }: { snapshot: Pick<Snapshot, 'version' | 'runnerVersion' | 'runnerUpdate' | 'runnerForceUpdate' | 'updateDrain' | 'runs'> | null | undefined; token: string }) {
+  const { t } = useI18n();
+  const [now, setNow] = useState(() => Date.now());
+  const [sending, setSending] = useState(false);
+  const drain = snapshot?.updateDrain;
+  useEffect(() => {
+    if (!drain) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [drain]);
+  if (drain) {
+    const left = Math.max(0, Math.ceil((Date.parse(drain.deadline) - now) / 1000));
+    const clock = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+    return <span className="runner-outdated" role="status" title={t('진행 중인 턴에 마무리를 요청했고 새 작업은 대기합니다. 마감까지 끝나지 않은 턴은 중지한 뒤 새 버전에서 이어서 진행합니다.')}>
+      <LoaderCircle size={12} className="spin" aria-hidden="true" />{drain.running ? t('업데이트 중 · 턴 {0}개 마무리 대기 · {1}', { 0: drain.running, 1: clock }) : t('새 버전으로 전환 중')}</span>;
+  }
+  const outdated = outdatedRunner(snapshot);
+  if (!snapshot || !outdated) return null;
+  const title = snapshot.runnerUpdate === 'automatic'
+    ? t('요청은 이전 버전({0}) 실행 워커에서 처리되어 최근 기능이 적용되지 않습니다. 진행 중인 작업이 모두 끝나는 순간 새 버전으로 자동 교체됩니다.', { 0: outdated })
+    : t('요청은 이전 버전({0}) 실행 워커에서 처리되어 최근 기능이 적용되지 않습니다. 진행 중인 작업과 터미널이 없고 Slack 감시를 끈 상태에서 Tower를 종료하고 30초 뒤 다시 시작하면 교체됩니다.', { 0: outdated === 'legacy' ? t('이전') : outdated });
+  const updateNow = async () => {
+    const running = snapshot.runs.filter(run => run.status === 'running' && !run.steering).length;
+    if (!window.confirm(t('진행 중인 턴 {0}개에 마무리를 요청하고 새 작업은 대기시킵니다. 최대 10분 뒤 남은 턴을 중지하고 새 버전으로 전환한 다음, 중단된 대화를 이어서 진행합니다. 지금 업데이트할까요?', { 0: running }))) return;
+    setSending(true);
+    try { await api('/api/runner/force-update', { method: 'POST', headers: { 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token }, body: '{}' }); }
+    catch (error) { window.alert(error instanceof Error ? error.message : t('업데이트를 시작하지 못했습니다.')); }
+    finally { setSending(false); }
+  };
+  return <>
+    <span className="runner-outdated" role="status" title={title}><TriangleAlert size={12} />{t('실행 워커 업데이트 대기')}</span>
+    {snapshot.runnerForceUpdate && <button type="button" className="runner-outdated tower-update" disabled={sending || !token} onClick={() => { void updateNow(); }}
+      title={t('진행 중인 턴에 마무리를 요청하고 최대 10분 뒤 새 버전으로 전환합니다.')}>{sending ? <LoaderCircle size={12} className="spin" aria-hidden="true" /> : null}{t('지금 업데이트')}</button>}
+  </>;
 }

@@ -1,0 +1,190 @@
+import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { PassThrough, Writable } from 'node:stream';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test from 'node:test';
+import { RunManager } from '../../../server/runs/manager.js';
+import { continuedRun } from '../../../server/runs/continuations.js';
+import type { Run, Session } from '../../../shared/types.js';
+import { until } from '../../helpers/until.ts';
+
+const nativeId = '10000000-0000-4000-8000-000000000001';
+const owner = { kind: 'owner' as const };
+
+/** One Claude conversation with a turn running in a fake provider. */
+async function fixture() {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-update-drain-'));
+  const session: Session = { id: `claude:${nativeId}`, nativeId, provider: 'claude', title: 'Fixture', cwd: directory,
+    project: 'fixture', status: 'completed', statusReason: 'Done', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
+  const received: Record<string, any>[] = [];
+  const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+  Object.assign(child, { stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, pid: undefined });
+  const emit = (frame: Record<string, unknown>) => child.stdout.push(JSON.stringify(frame) + '\n');
+  const exit = (code = 0) => { if (child.exitCode !== null) return; Object.assign(child, { exitCode: code }); child.emit('close', code, null); };
+  Object.assign(child, { stdin: new Writable({ write(chunk, _encoding, done) {
+    const input = JSON.parse(String(chunk)); received.push(input);
+    if (input.type === 'control_request') setImmediate(() => emit({ type: 'control_response', response: { subtype: 'success', request_id: input.request_id } }));
+    else if (!input.uuid) setImmediate(() => emit({ type: 'system', subtype: 'init', session_id: nativeId }));
+    done();
+  } }), kill: () => { exit(1); return true; } });
+  child.stdin.on('finish', () => setImmediate(() => exit()));
+  let launches = 0;
+  const manager = new RunManager({ stateDir: directory, getSession: id => id === session.id ? session : undefined,
+    refreshSessions: async () => {}, findExecutable: async () => '/fixture/claude', pollMs: 10,
+    spawnProcess: () => { launches++; return child; } });
+  await manager.start();
+  const first = await manager.enqueue(session.id, 'original work', {}, { origin: owner });
+  await until(() => received.some(frame => frame.type === 'user' && !frame.uuid));
+  const run = (id: string) => manager.list().find(item => item.id === id);
+  const continuation = () => manager.list().find(item => item.scheduled?.resume === 'update');
+  return { manager, directory, session, child, received, emit, exit, first, run, continuation, launches: () => launches,
+    cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
+}
+
+test('a forced update starts no new turn and gives each running turn its continuation at once', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  const resume = f.continuation();
+  assert.ok(resume, 'continuation created in the same step');
+  assert.equal(resume.scheduled?.afterRunId, f.first.id);
+  assert.equal(resume.status, 'queued');
+  assert.equal(resume.origin?.kind, 'owner');
+  const later = await f.manager.enqueue(f.session.id, 'another message', {}, { origin: owner });
+  f.emit({ type: 'result', session_id: nativeId, is_error: false });
+  await until(() => f.run(f.first.id)?.status === 'completed');
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(f.launches(), 1, 'nothing new started');
+  assert.equal(f.run(later.id)?.status, 'queued');
+  assert.match(f.run(later.id)!.output, /switching to its new version/);
+  assert.equal(f.manager.updateDrainStatus()?.running, 0);
+});
+
+test('a turn that finishes its own work before any wrap-up keeps no continuation', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  assert.ok(f.continuation());
+  f.emit({ type: 'result', session_id: nativeId, is_error: false });
+  await until(() => f.run(f.first.id)?.status === 'completed');
+  assert.equal(f.continuation(), undefined);
+});
+
+test('the wrap-up request reaches the running turn once, and the continuation stays the newest run', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.manager.driveUpdateDrain();
+  await until(() => f.received.some(frame => frame.uuid && /about to restart/.test(JSON.stringify(frame))));
+  const wrapUp = f.received.find(frame => frame.uuid && /about to restart/.test(JSON.stringify(frame)))!;
+  assert.equal(wrapUp.priority, 'next');
+  f.manager.driveUpdateDrain();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(f.received.filter(frame => frame.uuid && /about to restart/.test(JSON.stringify(frame))).length, 1, 'never sent twice');
+  f.emit({ ...wrapUp, isReplay: true });
+  await until(() => f.run(wrapUp.uuid)?.steering?.state === 'delivered');
+  f.emit({ type: 'result', session_id: nativeId, is_error: false });
+  await until(() => f.run(f.first.id)?.status === 'completed');
+  const resume = f.continuation();
+  assert.ok(resume, 'a wrapped-up turn is resumed');
+  const newest = f.manager.list().filter(item => item.sessionId === f.session.id).sort((a, b) => a.createdAt.localeCompare(b.createdAt)).at(-1);
+  assert.equal(newest?.id, resume.id);
+});
+
+test('a wakeup the turn scheduled survives when it finished its own work before any wrap-up', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.emit({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'toolu_1', name: 'ScheduleWakeup', input: { delaySeconds: 1200, prompt: 'Read the review and continue.', reason: 'waiting' } }] } });
+  f.emit({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: 'Next wakeup scheduled for 19:52:00 (in 1200s).' }] } });
+  f.emit({ type: 'result', session_id: nativeId, is_error: false });
+  await until(() => f.run(f.first.id)?.status === 'completed');
+  assert.equal(f.continuation(), undefined);
+  const wakeup = f.manager.list().find(item => item.scheduled && item.scheduled.resume === undefined);
+  assert.equal(wakeup?.prompt, 'Read the review and continue.');
+  assert.equal(wakeup?.scheduled?.afterRunId, f.first.id);
+});
+
+test('at the deadline a running turn stops with the reason, and its continuation waits', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.manager.driveUpdateDrain(Date.now() + 61_000);
+  await until(() => f.run(f.first.id)?.status === 'cancelled');
+  assert.match(f.run(f.first.id)!.error ?? '', /Tower update/);
+  assert.equal(f.continuation()?.status, 'queued');
+});
+
+test('delegated work is neither wrapped up nor resumed, and says why it stopped', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, run => run.id === f.first.id);
+  assert.equal(f.continuation(), undefined);
+  f.manager.driveUpdateDrain();
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.equal(f.received.some(frame => /about to restart/.test(JSON.stringify(frame))), false);
+  f.manager.driveUpdateDrain(Date.now() + 61_000);
+  await until(() => f.run(f.first.id)?.status === 'cancelled');
+  assert.match(f.run(f.first.id)!.error ?? '', /not resumed automatically/);
+});
+
+test('a newer message does not replace the update continuation', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  await f.manager.enqueue(f.session.id, 'while updating', {}, { origin: owner });
+  assert.equal(f.continuation()?.status, 'queued');
+});
+
+test('the next worker keeps queued turns, their instructions and the continuation, and starts them only when ready', async t => {
+  const f = await fixture();
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  const receipt = await f.manager.enqueue(f.session.id, 'slack follow-up', {}, { origin: owner, instructions: { text: 'receipt: approved', required: true } });
+  const plain = await f.manager.enqueue(f.session.id, 'plain follow-up', {}, { origin: owner });
+  await f.manager.flushState();
+  const saved = JSON.parse(await readFile(join(f.directory, 'runs.json'), 'utf8')) as Record<string, unknown>[];
+  assert.equal(JSON.stringify(saved).includes('receipt: approved'), false, 'runs.json never holds instruction text');
+  const kept = JSON.parse(await readFile(join(f.directory, 'run-instructions.json'), 'utf8')) as Record<string, { text: string }>;
+  assert.equal(kept[receipt.id]?.text, 'receipt: approved');
+
+  let launches = 0;
+  const next = new RunManager({ stateDir: f.directory, getSession: id => id === f.session.id ? f.session : undefined,
+    refreshSessions: async () => {}, findExecutable: async () => '/fixture/claude', pollMs: 10, holdUntilReady: true,
+    spawnProcess: () => { launches++; throw new Error('fixture: not started'); } });
+  t.after(async () => { await next.close(); await f.cleanup(); });
+  await next.start();
+  const restored = (id: string) => next.list().find(item => item.id === id);
+  assert.equal(restored(receipt.id)?.status, 'queued');
+  assert.equal(restored(plain.id)?.status, 'queued');
+  assert.equal(next.list().find(item => item.scheduled?.resume === 'update')?.status, 'queued');
+  await new Promise(resolve => setTimeout(resolve, 40));
+  assert.equal(launches, 0, 'nothing starts before the worker is ready');
+});
+
+test('restore keeps every unfinished run and runs an automation still has to report, and 100 finished ones', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-update-restore-'));
+  const at = (index: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString();
+  const id = (index: number) => `30000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
+  const base = (index: number): Run => ({ id: id(index), sessionId: `claude:${nativeId}`, prompt: `p${index}`, output: '', createdAt: at(index), status: 'completed' });
+  const runs: Record<string, unknown>[] = [];
+  runs.push({ ...base(0), retain: true });
+  for (let index = 1; index <= 150; index++) runs.push(base(index));
+  for (let index = 151; index <= 260; index++) runs.push({ ...base(index), status: 'queued', keepQueued: true });
+  await writeFile(join(directory, 'runs.json'), JSON.stringify(runs));
+  const manager = new RunManager({ stateDir: directory, getSession: () => undefined, refreshSessions: async () => {}, holdUntilReady: true });
+  t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
+  await manager.start();
+  const list = manager.list();
+  assert.ok(list.some(run => run.id === id(0)), 'retained run kept');
+  assert.equal(list.filter(run => run.status === 'queued').length, 110);
+  assert.equal(list.filter(run => run.status === 'completed' && run.id !== id(0)).length, 100);
+  assert.ok(list.some(run => run.id === id(150)) && !list.some(run => run.id === id(1)), 'the newest finished runs are kept');
+});
+
+test('watchers follow a turn into the continuation that carries it on', () => {
+  const now = new Date().toISOString();
+  const first: Run = { id: 'a', sessionId: 's', prompt: '', output: '', createdAt: now, status: 'cancelled' };
+  const second: Run = { id: 'b', sessionId: 's', prompt: '', output: '', createdAt: now, status: 'cancelled', scheduled: { at: now, afterRunId: 'a', resume: 'update' } };
+  const third: Run = { id: 'c', sessionId: 's', prompt: '', output: '', createdAt: now, status: 'running', scheduled: { at: now, afterRunId: 'b', resume: 'update' } };
+  const wakeup: Run = { id: 'd', sessionId: 's', prompt: '', output: '', createdAt: now, status: 'queued', scheduled: { at: now, afterRunId: 'c' } };
+  assert.equal(continuedRun([first, second, third, wakeup], first)?.id, 'c');
+  assert.equal(continuedRun([first, wakeup], first)?.id, 'a');
+  assert.equal(continuedRun([], undefined), undefined);
+});

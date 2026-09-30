@@ -275,6 +275,31 @@ test('delegated run survives pruned routing history without being submitted agai
   assert.equal(f.counts().submissions, 1);
 });
 
+test('a result notice the full queue refused is sent on a later tick; its run is kept for the workflow until then', async t => {
+  const f = await fixture(t); let resumes = 0; let refuse = true;
+  const coordinator: Run = { id: 'coordinator', sessionId: 'session', prompt: '', status: 'completed', createdAt: '', output: '' };
+  f.options.startConversation = async () => ({ sessionId: coordinator.sessionId, runId: coordinator.id });
+  f.options.getSessionRuns = () => [coordinator];
+  f.options.resumeConversation = async () => {
+    if (refuse) throw Object.assign(new Error('The task queue is full. Wait for a task to finish.'), { statusCode: 429 });
+    resumes++; return { runId: 'notification' };
+  };
+  await f.manager.ingest(mention); await f.manager.tick(); const id = f.manager.list()[0].id;
+  await f.manager.tool(id, 'tower_auto_prompt', { requestKey: 'full', prompt: 'Review' });
+  f.finish('cancelled');
+  await f.manager.tick(); await f.manager.tick();
+  assert.equal(resumes, 0);
+  const task = f.manager.list()[0].delegatedTasks![0];
+  assert.equal(task.notificationError, undefined, 'nothing was admitted, so nothing is uncertain');
+  assert.equal(task.notificationClaimed, undefined);
+  assert.deepEqual(f.manager.retainedRuns(), ['run']);
+  assert.equal(f.manager.transient(), false, 'a workflow waiting on turns is not work underway');
+  assert.equal(f.manager.inFlight(), true);
+  refuse = false;
+  await f.manager.tick();
+  assert.equal(resumes, 1);
+});
+
 test('persisted legacy composing work produces only an approval proposal after restart', async t => {
   const f = await fixture(t); await f.manager.ingest(mention); await f.manager.tick(); f.finish();
   const path = join(f.directory, 'slack-automation.json'); const saved = JSON.parse(await readFile(path, 'utf8'));
