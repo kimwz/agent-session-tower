@@ -431,3 +431,20 @@ test('when the owner says more while the model answers, the request is reviewed 
   assert.deepEqual([item.status, item.review!.verdict, f.service.overview().rules.length], ['pending', 'owner', 0]);
 });
 
+
+test('an instruction queued while the history is being read is part of the owner’s words', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const runs: Run[] = [];
+  let prompt = '';
+  const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {},
+    sources: sources(f, runs, { conversation: async () => {
+      runs.push(run('late', 'Do not deploy to production.', { status: 'queued' }));
+      return { messages: [{ id: 'u1', role: 'user', text: 'Ship it.', timestamp: '1' }], complete: true };
+    } }),
+    model: async request => { prompt = request.prompt; return { verdict: 'owner', rule: null, suggestion: null, reason: '제한' }; } });
+  await f.service.request({ kind: 'command', value: 'gh release create', scope: 'project', reason: 'release' }, agent('claude:one'));
+  reviewer.wake();
+  await reviewer.flush();
+  assert.ok(JSON.parse(prompt).authority.ownerWords.some((word: { text: string }) => word.text === 'Do not deploy to production.'));
+});

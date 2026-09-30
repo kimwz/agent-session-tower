@@ -78,7 +78,9 @@ export async function reviewInput(request: PermissionRequest, sources: ReviewSou
   // Read last, after every other wait, so words the owner sent meanwhile are in.
   const conversation = await sources.conversation(request.sessionId);
   if (!conversation.complete) throw new ReviewSkip('대화 기록을 처음부터 다 읽지 못해 소유자에게 넘깁니다.');
-  const words = ownerWords(conversation.messages, runs, sources.answers(request.sessionId));
+  // Runs and answers are read again now, after the history, so nothing sent during the waits is missed.
+  const now = sources.runs().filter(item => item.sessionId === request.sessionId).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const words = ownerWords(conversation.messages, now, sources.answers(request.sessionId));
   // A restriction said anywhere counts as much as the task, so the owner's words are never cut.
   if (words.some(word => word.text.length >= READER_CUT) || words.reduce((sum, word) => sum + word.text.length, 0) > MAX_OWNER_CHARS) {
     throw new ReviewSkip('소유자가 이 대화에서 한 말이 너무 길어 다 넘길 수 없어 소유자에게 넘깁니다.');
