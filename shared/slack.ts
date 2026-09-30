@@ -52,7 +52,8 @@ export interface SlackWorkflow {
   approvals?: 'auto' | 'owner';
   conversationClaimed?: boolean;
   delegatedTasks?: Array<{ requestKey: string; requestId: string; prompt: string; provider: Provider; model?: string; cwd?: string; submitted?: boolean; submissionError?: string; delegatedRunId?: string; createdSessionId?: string; delegatedFinished?: boolean; notificationClaimed?: boolean; notifiedRunId?: string; notificationError?: string }>;
-  replies?: Array<{ requestKey: string; text: string; status: 'proposed' | 'sending' | 'sent' | 'uncertain'; approvedAt?: string; ts?: string }>;
+  /** `sendKey` names the slack_send call an owner permission's reply went out for. */
+  replies?: Array<{ requestKey: string; text: string; status: 'proposed' | 'sending' | 'sent' | 'uncertain'; approvedAt?: string; ts?: string; sendKey?: string }>;
   ownerConditionalReply?: { mode?: 'composed'; ruleId?: string; requestIds?: string[]; instruction?: string; requestId: string; requestKey: string; text: string; status: 'pending' | 'sent' | 'blocked' | 'cancelled' | 'uncertain'; authorizedAt: string; evidence?: string };
   ownerReplySelection?: { requestKey: string; text: string };
   /** The owner told Tower not to send: no reply goes out, nor does a rule's automatic report, until the owner allows it again. */

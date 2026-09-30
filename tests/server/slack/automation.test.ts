@@ -655,6 +655,17 @@ test('an immediate owner permission is used first, and a retry of that send post
   assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'sent'); assert.equal(f.autoSends(), 0, 'the owner asked for it');
   await f.manager.tool(id, 'slack_send', { text: '반영했습니다.' });
   assert.equal(f.counts().sends, 1);
+  // A new permission in between does not make a retry of the same call a new reply.
+  assert.match(chatText(await f.manager.ownerChat('owner-chat', '이 문구로 슬랙에 보내주세요')), /authorization saved/);
+  await f.manager.tool(id, 'slack_send', { text: '반영했습니다.' });
+  assert.equal(f.counts().sends, 1);
+  assert.equal(f.manager.list()[0].ownerConditionalReply?.status, 'pending');
+  const restarted = new SlackAutomationManager(f.options); await restarted.start();
+  await restarted.tool(id, 'slack_send', { text: '진행 중입니다.', requestKey: 'progress' });
+  assert.equal(restarted.list()[0].ownerConditionalReply?.status, 'sent');
+  await assert.rejects(restarted.tool(id, 'slack_send', { text: 'Other', requestKey: 'progress' }), /different text/);
+  await restarted.tool(id, 'slack_send', { text: '진행 중입니다.', requestKey: 'progress' });
+  assert.equal(f.counts().sends, 2);
 });
 
 test('the owner telling Tower not to send holds open replies and automatic reports until they allow it again', async t => {

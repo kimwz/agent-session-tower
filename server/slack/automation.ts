@@ -189,7 +189,8 @@ export class SlackAutomationManager extends EventEmitter {
           || (task.model !== undefined && !validModelId(task.model))
           || (task.cwd !== undefined && (!text(task.cwd, 4096) || !isAbsolute(task.cwd)))))) throw new Error('Saved Slack tasks are invalid.');
         if (item.replies !== undefined && (!Array.isArray(item.replies) || item.replies.length > 100 || item.replies.some(reply => !record(reply)
-          || !text(reply.requestKey, 200) || !text(reply.text, 4000) || !['proposed', 'sending', 'sent', 'uncertain'].includes(String(reply.status))))) throw new Error('Saved Slack replies are invalid.');
+          || !text(reply.requestKey, 200) || !text(reply.text, 4000) || !['proposed', 'sending', 'sent', 'uncertain'].includes(String(reply.status))
+          || (reply.sendKey !== undefined && !text(reply.sendKey, 200))))) throw new Error('Saved Slack replies are invalid.');
         if (item.ownerReplySelection !== undefined && (!record(item.ownerReplySelection) || !text(item.ownerReplySelection.requestKey, 200) || !text(item.ownerReplySelection.text, 4000))) throw new Error('Saved Slack owner selection is invalid.');
         if (item.ownerConditionalReply !== undefined) {
           const consent = item.ownerConditionalReply;
@@ -653,13 +654,19 @@ export class SlackAutomationManager extends EventEmitter {
     if (name === this.toolName('send')) {
       const consent = item.ownerConditionalReply;
       const immediate = consent?.mode === 'composed' && consent.requestId === 'immediate' ? consent : undefined;
-      if (immediate?.status === 'pending' || !this.channel.openReplies) {
+      if (!this.channel.openReplies) {
         if (!immediate) throw new Error('No immediate owner send authorization. Ask in Tower chat, not necessarily by button.');
         return this.consumeComposedReply(item, args.text);
       }
-      // A retry of the send the owner's permission covered, whose result the agent did not see, is not a new reply.
-      if (immediate && item.replies?.some(reply => reply.requestKey === immediate.requestKey && reply.text === args.text)) return structuredClone(immediate);
-      return this.sendOpenReply(item, args);
+      if (!text(args.text, 4000)) throw new Error('Reply text must contain 1–4000 characters.');
+      if (args.requestKey !== undefined && !text(args.requestKey, 200)) throw new Error('requestKey must contain 1–200 characters.');
+      // The call's key, whichever way its reply went out: a retry the agent did not see the result of is not a new reply.
+      const sendKey = 'agent-' + createHash('sha256').update(JSON.stringify([item.id, args.requestKey ?? args.text])).digest('hex');
+      const earlier = item.replies?.find(reply => reply.requestKey === sendKey || reply.sendKey === sendKey);
+      if (earlier && earlier.text !== args.text) throw new Error('requestKey was already used with different text.');
+      if (earlier && earlier.status !== 'proposed') return structuredClone(earlier);
+      if (immediate?.status === 'pending') return this.consumeComposedReply(item, args.text, sendKey);
+      return this.sendOpenReply(item, args.text, sendKey);
     }
     if (name === 'tower_task_complete') return this.completeConditionalReply(item, args);
     if (name === this.toolName('react')) {
@@ -794,30 +801,25 @@ export class SlackAutomationManager extends EventEmitter {
     return structuredClone(consent);
   }
   /** A reply the coordinator sends on its own in a channel with open replies; the owner's "don't send" still holds it. */
-  private async sendOpenReply(item: SlackWorkflow, args: Record<string, unknown>): Promise<unknown> {
+  private async sendOpenReply(item: SlackWorkflow, replyText: string, requestKey: string): Promise<unknown> {
     if (item.repliesHeld) throw new Error(HELD_REFUSAL);
-    if (!text(args.text, 4000)) throw new Error('Reply text must contain 1–4000 characters.');
-    if (args.requestKey !== undefined && !text(args.requestKey, 200)) throw new Error('requestKey must contain 1–200 characters.');
-    const requestKey = 'agent-' + createHash('sha256').update(JSON.stringify([item.id, args.requestKey ?? args.text])).digest('hex');
-    let reply = item.replies?.find(value => value.requestKey === requestKey);
-    if (reply && reply.text !== args.text) throw new Error('requestKey was already used with different text.');
-    if (reply && reply.status !== 'proposed') return structuredClone(reply);
-    if (!reply) {
+    if (!item.replies?.some(value => value.requestKey === requestKey)) {
       if ((item.replies?.length ?? 0) >= 100) throw new Error('Too many replies.');
-      reply = { requestKey, text: args.text, status: 'proposed' };
-      await this.save(item, { replies: [...(item.replies ?? []), reply] });
+      await this.save(item, { replies: [...(item.replies ?? []), { requestKey, text: replyText, status: 'proposed' }] });
     }
-    return this.sendApprovedReply(item.id, requestKey, args.text);
+    return this.sendApprovedReply(item.id, requestKey, replyText);
   }
-  private async consumeComposedReply(item: SlackWorkflow, replyText: unknown): Promise<unknown> {
+  /** `sendKey` links the slack_send call that used the permission to its reply, so a retry of that call finds it. */
+  private async consumeComposedReply(item: SlackWorkflow, replyText: unknown, sendKey?: string): Promise<unknown> {
     const consent = item.ownerConditionalReply!;
     if (consent.status !== 'pending') return structuredClone(consent);
     if (!text(replyText, 4000)) throw new Error('Provide the reply text authorized by the owner request.');
     let reply = item.replies?.find(value => value.requestKey === consent.requestKey);
     if (reply && reply.text !== replyText) throw new Error('Authorized send already claimed with different text.');
+    if (reply && sendKey) reply.sendKey = sendKey;
     if (!reply) {
       if ((item.replies?.length ?? 0) >= 100) throw new Error('Too many replies.');
-      reply = { requestKey: consent.requestKey, text: replyText, status: 'proposed' };
+      reply = { requestKey: consent.requestKey, text: replyText, status: 'proposed', ...(sendKey ? { sendKey } : {}) };
       await this.save(item, { replies: [...(item.replies ?? []), reply] });
     }
     try { await this.sendApprovedReply(item.id, consent.requestKey, replyText); consent.status = 'sent'; }
