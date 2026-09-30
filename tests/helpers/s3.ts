@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 /** A bucket in memory that checks each request is signed by the expected key. */
-export async function fakeBucket(t: { after(fn: () => unknown): void }, options: { denyList?: boolean } = {}) {
+export async function fakeBucket(t: { after(fn: () => unknown): void }, options: { denyList?: boolean; pageSize?: number } = {}) {
   const objects = new Map<string, { body: Buffer; at: string }>();
   const seen: string[] = [];
   const read = async (req: IncomingMessage) => { const parts: Buffer[] = []; for await (const part of req) parts.push(part as Buffer); return Buffer.concat(parts); };
@@ -18,9 +18,12 @@ export async function fakeBucket(t: { after(fn: () => unknown): void }, options:
     if (req.method === 'DELETE') { objects.delete(key); res.writeHead(204); res.end(); return; }
     if (req.method === 'GET' && key) { const item = objects.get(key); if (!item) { res.writeHead(404); res.end('<Error><Code>NoSuchKey</Code></Error>'); return; } res.writeHead(200, { 'content-length': item.body.length }); res.end(item.body); return; }
     const prefix = url.searchParams.get('prefix') ?? '';
-    const list = [...objects].filter(([name]) => name.startsWith(prefix));
+    const all = [...objects].filter(([name]) => name.startsWith(prefix)).sort(([a], [b]) => a < b ? -1 : 1);
+    const from = Number(url.searchParams.get('continuation-token') ?? 0);
+    const list = all.slice(from, from + (options.pageSize ?? all.length));
+    const more = from + list.length < all.length;
     res.writeHead(200, { 'content-type': 'application/xml' });
-    res.end(`<?xml version="1.0"?><ListBucketResult><IsTruncated>false</IsTruncated>${list.map(([name, item]) => `<Contents><Key>${name.replace(/&/g, '&amp;')}</Key><Size>${item.body.length}</Size><LastModified>${item.at}</LastModified></Contents>`).join('')}</ListBucketResult>`);
+    res.end(`<?xml version="1.0"?><ListBucketResult><IsTruncated>${more}</IsTruncated>${more ? `<NextContinuationToken>${from + list.length}</NextContinuationToken>` : ''}${list.map(([name, item]) => `<Contents><Key>${name.replace(/&/g, '&amp;')}</Key><Size>${item.body.length}</Size><LastModified>${item.at}</LastModified></Contents>`).join('')}</ListBucketResult>`);
   });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise(resolve => server.close(resolve)));

@@ -152,3 +152,20 @@ test('a restored trigger never runs a time missed before the restore, and one th
   assert.equal(f.runs.length - before, 2, 'from the next time on, both run');
   assert.ok(f.runs.some(run => run.prompt.includes('Changed instructions')));
 });
+
+test('the trigger limit counts triggers kept here, and a kept trigger keeps its trusted folder', async t => {
+  const f = await fixture(t);
+  let { service } = await f.open();
+  await service.updateSettings({ ...service.settings(), maxTriggers: 2 }, OWNER);
+  const kept = await service.create(hourly(f.project, { name: 'Kept' }), OWNER);
+  const template = (await collectTriggers(f.directory))!.triggers[0] as Trigger;
+  const fresh = (name: string) => ({ ...template, id: randomUUID(), name });
+  // The backup names A, B and the kept one (in a shape this build cannot read), with no trusted folders.
+  const backup = backupOf([fresh('A'), fresh('B'), { id: kept.id, revision: 1, name: 'Kept', source: { kind: 'unknown' } } as unknown as Trigger],
+    { settings: { ...service.settings(), maxTriggers: 2 }, trustedFolders: [], github: { [kept.id]: { handled: 'not a list' } as never } });
+  let errors: string[];
+  ({ service, errors } = await f.reopen(service, backup));
+  assert.deepEqual(service.list().map(item => item.name).sort(), ['A', 'Kept']);
+  assert.ok(errors.some(error => /"B".*한도/.test(error)));
+  assert.deepEqual((await collectTriggers(f.directory))!.trustedFolders, [f.project]);
+});

@@ -109,7 +109,9 @@ export class BackupService {
     this.timer = setInterval(tick, CHECK_EVERY);
     this.first.unref(); this.timer.unref();
   }
-  close(): void { if (this.first) clearTimeout(this.first); if (this.timer) clearInterval(this.timer); }
+  /** Stops the schedule and any upload under way; the next start backs up again when due. */
+  close(): void { if (this.first) clearTimeout(this.first); if (this.timer) clearInterval(this.timer); this.closing.abort(); }
+  private readonly closing = new AbortController();
   async flush(): Promise<void> { await this.restores.catch(() => {}); await this.writes.catch(() => {}); await this.running?.catch(() => {}); }
 
   async overview(): Promise<BackupOverview> {
@@ -141,8 +143,13 @@ export class BackupService {
     const stateDir = this.options.stateDir;
     const skills = await this.options.skills();
     const triggers = await collectTriggers(stateDir);
-    const master = await readPrivateJson(join(stateDir, 'master', 'settings.json')).catch(() => undefined);
-    const voiceKey = await readPrivateJson(join(stateDir, 'master', 'elevenlabs-key.json')).catch(() => undefined);
+    // Missing is "none"; unreadable fails the backup rather than record a key as absent (a restore would remove it).
+    const optional = (path: string) => readPrivateJson(path).catch(error => {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+      throw new BackupError(`${path}을(를) 읽지 못해 백업하지 않았습니다: ${error instanceof Error ? error.message : String(error)}`, 500);
+    });
+    const master = await optional(join(stateDir, 'master', 'settings.json'));
+    const voiceKey = await optional(join(stateDir, 'master', 'elevenlabs-key.json'));
     const { passphrase: _passphrase, ...settings } = this.saved.settings;
     return {
       version: 1,
@@ -167,7 +174,7 @@ export class BackupService {
   private client(settings: SavedSettings = this.saved.settings): S3Client {
     const { remote } = settings;
     if (!remote.secretAccessKey) throw new BackupError('비밀 액세스 키를 입력하세요.');
-    return new S3Client({ endpoint: remote.endpoint, bucket: remote.bucket, region: remote.region || 'auto', accessKeyId: remote.accessKeyId, secretAccessKey: remote.secretAccessKey }, this.options.fetcher);
+    return new S3Client({ endpoint: remote.endpoint, bucket: remote.bucket, region: remote.region || 'auto', accessKeyId: remote.accessKeyId, secretAccessKey: remote.secretAccessKey }, this.options.fetcher, undefined, this.closing.signal);
   }
   private ownPrefix(settings: SavedSettings): string { return `${settings.remote.prefix}tower-backup-${this.host}-${this.saved.machine}-`; }
   /** Exactly this computer's automatic backups: its own name and mark, then a time and nothing else. */

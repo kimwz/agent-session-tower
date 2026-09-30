@@ -146,7 +146,13 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
         case 'trigger-secrets.json': if (!Array.isArray(incoming)) throw new Error('invalid'); next = incoming; break;
         // What the worker's services refuse at start is never written: one would keep the worker from starting.
         case 'slack-connection.json': if (!validSlackConnection(incoming)) throw new Error('invalid'); next = incoming; break;
-        case 'public-agents.json': if (!parsePublicAgents(incoming)) throw new Error('invalid'); next = incoming; break;
+        case 'public-agents.json': {
+          const agents = parsePublicAgents(incoming);
+          if (!agents) throw new Error('invalid');
+          await signOutChangedVisitors(stateDir, parsePublicAgents(existing) ?? [], agents);
+          next = incoming;
+          break;
+        }
         default: if (!record(incoming)) throw new Error('invalid'); next = incoming;
       }
       await writePrivateJson(join(stateDir, name), JSON.stringify(next));
@@ -156,6 +162,23 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
     }
   }
   return { parts: [...parts], errors };
+}
+
+/**
+ * A restored public agent whose password or address differs from this computer's signs its visitors out, as changing
+ * them on the page does: a visitor let in under one password is never let in under another.
+ */
+async function signOutChangedVisitors(stateDir: string, current: { id: string; slug: string; password?: unknown }[], restored: { id: string; slug: string; password?: unknown }[]): Promise<void> {
+  for (const agent of restored) {
+    const before = current.find(item => item.id === agent.id);
+    const moved = !before || before.slug !== agent.slug, repassworded = !before || JSON.stringify(before.password) !== JSON.stringify(agent.password);
+    if (!moved && !repassworded) continue;
+    const path = join(stateDir, 'public-agents', `${agent.id}.json`);
+    const data = await readOptional(path);
+    if (!record(data) || !Array.isArray(data.visitors)) continue;
+    const visitors = moved ? [] : data.visitors.map(visitor => record(visitor) ? { ...visitor, authorized: false } : visitor);
+    await writePrivateJson(path, JSON.stringify({ ...data, visitors }));
+  }
 }
 
 /** Which parts a payload holds, in the order the page lists them. */

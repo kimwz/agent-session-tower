@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { S3Client, endpointUrl, signV4, unsafeKey } from '../../../server/backup/s3.js';
 import { fakeBucket } from '../../helpers/s3.js';
 
@@ -41,4 +43,17 @@ test('a query is sent exactly as it was signed, and keys that a URL would rewrit
   assert.equal(unsafeKey('a//b'), true);
   assert.equal(unsafeKey('tower/'), false);
   assert.equal(unsafeKey(''), false);
+});
+
+test('listing follows continuation pages, and a download larger than allowed is stopped even without its length', async t => {
+  const bucket = await fakeBucket(t, { pageSize: 2 });
+  const client = new S3Client({ endpoint: bucket.endpoint, bucket: 'bucket', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret' });
+  for (let i = 0; i < 5; i++) bucket.objects.set(`tower/${i}.towerbackup`, { body: Buffer.from('x'), at: '2026-09-30T00:00:00Z' });
+  assert.deepEqual((await client.list('tower/')).map(item => item.key), [0, 1, 2, 3, 4].map(i => `tower/${i}.towerbackup`));
+  assert.equal(bucket.seen.filter(line => line.includes('list-type')).length, 3);
+  const server = createServer((_req, res) => { res.writeHead(200, { 'transfer-encoding': 'chunked' }); for (let i = 0; i < 64; i++) res.write(Buffer.alloc(16 * 1024)); res.end(); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const chunked = new S3Client({ endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, bucket: 'bucket', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret' });
+  await assert.rejects(chunked.get('big.towerbackup', 32 * 1024), /너무 큽니다/);
 });

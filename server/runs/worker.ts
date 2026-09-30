@@ -155,7 +155,9 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'requestHandoff': {
         // The latest web build wins; the worker leaves only at a moment when nothing is running.
         const patient = record(args[1]).patient === true && (!handoff || handoff.patient === true);
-        handoff = { successor: parseSuccessor(args[0], paths.stateDir), requestedAt: handoff?.requestedAt ?? Date.now(), held: handoff?.held, retryAt: handoff?.retryAt, ...(patient ? { patient } : {}) };
+        // An ordinary handoff waits its own long hold from when it is asked, not from an earlier patient one.
+        const since = handoff && !handoff.patient ? handoff.requestedAt : Date.now();
+        handoff = { successor: parseSuccessor(args[0], paths.stateDir), requestedAt: patient && handoff ? handoff.requestedAt : since, held: handoff?.held, retryAt: handoff?.retryAt, ...(patient ? { patient } : {}) };
         return { accepted: true };
       }
       case 'forceHandoff': {

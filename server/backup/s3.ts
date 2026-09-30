@@ -49,7 +49,8 @@ const tag = (xml: string, name: string) => { const found = new RegExp(`<${name}>
 
 export class S3Client {
   private readonly base: URL;
-  constructor(private readonly target: S3Target, private readonly fetcher: typeof fetch = fetch, private readonly now: () => Date = () => new Date()) {
+  /** `signal` stops every request under way (Tower shutting down). */
+  constructor(private readonly target: S3Target, private readonly fetcher: typeof fetch = fetch, private readonly now: () => Date = () => new Date(), private readonly signal?: AbortSignal) {
     this.base = endpointUrl(target.endpoint);
     if (!target.bucket || !/^[a-z0-9][a-z0-9.-]{1,62}$/.test(target.bucket)) throw new BackupError('버킷 이름이 올바르지 않습니다.');
     if (!target.accessKeyId || !target.secretAccessKey) throw new BackupError('액세스 키를 입력하세요.');
@@ -68,7 +69,7 @@ export class S3Client {
     const signed = signV4({ method, url, headers, payloadHash: sha256(body ?? ''), region: this.target.region || 'auto', accessKeyId: this.target.accessKeyId, secretAccessKey: this.target.secretAccessKey, now: this.now() });
     const { host: _host, ...sent } = signed;
     let response: Response;
-    try { response = await this.fetcher(url, { method, headers: sent, ...(body ? { body: new Uint8Array(body) } : {}), signal: AbortSignal.timeout(timeoutMs), redirect: 'error' }); }
+    try { response = await this.fetcher(url, { method, headers: sent, ...(body ? { body: new Uint8Array(body) } : {}), signal: this.signal ? AbortSignal.any([this.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs), redirect: 'error' }); }
     catch (error) { throw new BackupError(`저장소에 연결하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`, 502); }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
@@ -86,9 +87,18 @@ export class S3Client {
     const response = await this.request('GET', this.url(key), undefined, {}, 120_000);
     const length = Number(response.headers.get('content-length'));
     if (Number.isFinite(length) && length > maxBytes) { await response.body?.cancel(); throw new BackupError('백업 파일이 너무 큽니다.', 413); }
-    const data = Buffer.from(await response.arrayBuffer());
-    if (data.length > maxBytes) throw new BackupError('백업 파일이 너무 큽니다.', 413);
-    return data;
+    // Read piece by piece, so a body larger than it says is stopped as soon as it passes the limit.
+    const parts: Buffer[] = [];
+    let size = 0;
+    const reader = response.body?.getReader();
+    for (;;) {
+      const next = await reader?.read();
+      if (!next || next.done) break;
+      size += next.value.length;
+      if (size > maxBytes) { await reader!.cancel().catch(() => {}); throw new BackupError('백업 파일이 너무 큽니다.', 413); }
+      parts.push(Buffer.from(next.value));
+    }
+    return Buffer.concat(parts);
   }
 
   async delete(key: string): Promise<void> {

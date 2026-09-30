@@ -245,3 +245,23 @@ test('a backup from a newer Tower is refused, and worker settings a service woul
   assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'public-agents.json'), 'utf8')), { version: 1, agents: [] });
   assert.equal(await readFile(join(b.stateDir, 'permissions.json'), 'utf8'), '{ not json', 'a file here that cannot be read is left alone');
 });
+
+test('a restored public agent with another password signs its visitors out, and an unreadable master key stops the backup', async t => {
+  const b = await computer(t);
+  const agent = (password: string, slug = 'A'.repeat(22)) => ({ id: '11111111-1111-4111-8111-111111111111', slug, name: 'Help', scope: 'Answer questions about tea.', cwd: '/work', provider: 'codex', password, createdAt: '', updatedAt: '' });
+  const { parsePublicAgents } = await import('../../../server/public-agents/service.js');
+  const { applyWorkerFiles } = await import('../../../server/backup/payload.js');
+  const current = { version: 1, agents: [agent('scrypt$old')] };
+  assert.ok(parsePublicAgents(current), 'a public agent this build reads');
+  await write(b.stateDir, 'public-agents.json', current);
+  await write(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json', { version: 1, conversations: [], requests: [], visitors: [{ hash: 'h', authorized: true, tag: 'T', createdAt: '', seenAt: '' }] });
+  await applyWorkerFiles(b.stateDir, { 'public-agents.json': { version: 1, agents: [agent('scrypt$new')] } });
+  const data = JSON.parse(await readFile(join(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json'), 'utf8'));
+  assert.equal(data.visitors[0].authorized, false);
+  await applyWorkerFiles(b.stateDir, { 'public-agents.json': { version: 1, agents: [agent('scrypt$new', 'B'.repeat(22))] } });
+  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json'), 'utf8')).visitors, [], 'a new address forgets visitors');
+
+  await mkdir(join(b.stateDir, 'master'), { recursive: true });
+  await writeFile(join(b.stateDir, 'master', 'elevenlabs-key.json'), '{ broken', { mode: 0o600 });
+  await assert.rejects(b.service.export(PASS), /읽지 못해 백업하지 않았습니다/);
+});
