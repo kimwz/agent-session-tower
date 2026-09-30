@@ -365,9 +365,8 @@ test('the owner’s rule for one conversation is not blocked by the guards of an
   await f.service.decide(mine.request.id!, true);
   const settings = JSON.parse(f.service.claudeSettings(f.project, 'claude:one')!).permissions;
   assert.ok(settings.allow.includes('Bash(git push --force-with-lease *)'));
-  const refused = (command: string) => settings.deny.some((guard: string) => new RegExp(`^${guard.slice(5, -1).split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`).test(command));
-  assert.ok(!refused('git push --force-with-lease origin main'), 'the owner’s rule wins in that conversation');
-  assert.ok(refused('git push --delete origin main') && refused('git push --mirror'), 'other destructive variants stay refused');
+  assert.deepEqual(settings.allow, ['Bash(git push --force-with-lease *)'], 'the owner’s rule decides in that conversation; the reviewer’s rule is left out');
+  assert.equal(settings.deny, undefined);
   assert.ok(JSON.parse(f.service.claudeSettings(f.project, 'claude:other')!).permissions.deny.length > 0, 'other conversations keep the guards');
 });
 
@@ -389,8 +388,11 @@ test('agents asked for are each covered by their own rule', async t => {
   await f.service.save({ kind: 'command', value: 'npm test', providers: ['codex'], scope: 'project', cwd: sub });
   const asked = await f.service.request({ kind: 'command', value: 'npm test', providers: ['claude', 'codex'], scope: 'project', reason: 'r' }, agent('claude:sub'));
   assert.equal(asked.request.status, 'exists');
-  const parentOnly = await f.service.request({ kind: 'command', value: 'npm run lint', providers: ['claude', 'codex'], scope: 'project', reason: 'r' }, agent('claude:sub'));
-  assert.equal(parentOnly.request.status, 'pending');
+  await f.service.save({ kind: 'command', value: 'npm run lint', providers: ['claude', 'codex'], scope: 'project', cwd: f.project });
+  const both = await f.service.request({ kind: 'command', value: 'npm run lint', providers: ['claude', 'codex'], scope: 'project', reason: 'r' }, agent('claude:sub'));
+  assert.equal(both.request.status, 'pending', 'Codex does not read the parent folder’s rules');
+  const claudeOnly = await f.service.request({ kind: 'command', value: 'npm run lint', providers: ['claude'], scope: 'project', reason: 'r' }, agent('claude:sub'));
+  assert.equal(claudeOnly.request.status, 'exists', 'Claude does');
 });
 
 test('a result told late is kept a while from then', async t => {

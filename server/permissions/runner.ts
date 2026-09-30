@@ -120,7 +120,11 @@ export class PermissionRunner {
     const startedAt = this.now();
     // Saved before the command starts: a worker that stops from here on leaves a run whose result is unknown, never
     // one that would start again.
-    await this.options.update(id, { status: 'running', startedAt });
+    try { await this.retry(() => this.options.update(id, { status: 'running', startedAt })); } catch (error) {
+      // Not started: said so, if that can be saved at all.
+      await this.options.update(id, { status: 'failed', startedAt, finishedAt: this.now(), error: `Tower could not record the start: ${error instanceof Error ? error.message : String(error)}` }).catch(() => {});
+      return;
+    }
     const stdout = new Kept();
     const stderr = new Kept();
     let child;
@@ -174,8 +178,12 @@ export class PermissionRunner {
       preview: { stdout: output.stdout.slice(0, PREVIEW_CHARS), stderr: output.stderr.slice(0, PREVIEW_CHARS) },
     });
     // The result is saved even when a write fails for a moment; otherwise the run would look unfinished for good.
+    await this.retry(finished);
+  }
+
+  private async retry(save: () => Promise<void>): Promise<void> {
     for (let attempt = 1; ; attempt += 1) {
-      try { await finished(); return; } catch (error) {
+      try { await save(); return; } catch (error) {
         if (attempt >= 3) throw error;
         await new Promise(resolve => setTimeout(resolve, 1_000 * attempt));
       }

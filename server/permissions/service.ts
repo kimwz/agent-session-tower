@@ -128,12 +128,13 @@ export class PermissionService {
     const rules = this.state.rules.filter(rule => rule.kind !== 'run' && rule.providers.includes('claude') && (rule.scope === 'global'
       || (rule.scope === 'project' && within(cwd, rule.cwd!))
       || (rule.scope === 'conversation' && rule.sessionId === sessionId && sessionId !== undefined && !expired(rule, now))));
-    const allow = [...new Set(rules.map(claudeRule))];
-    // A rule the reviewer allowed never covers its family's destructive variants: deny comes before allow. A guard that
-    // would refuse what the owner allowed for this turn (in any scope) is left out; its other guards stay.
-    const owned = rules.filter(rule => rule.source !== 'auto' && rule.kind === 'command').map(rule => normalizeCommand(rule.value));
-    const deny = [...new Set(rules.filter(rule => rule.source === 'auto').flatMap(rule => ruleGuards(rule).claude)
-      .filter(guard => !owned.some(command => refuses(guard, command) || refuses(guard, `${command} x`))))];
+    // Where the owner allowed a command overlapping one the reviewer allowed (in any scope that reaches this turn), the
+    // owner's rule decides here: the reviewer's rule and its guards are left out of this turn, as a same-scope rule is replaced.
+    const owned = rules.filter(rule => rule.source !== 'auto' && rule.kind === 'command');
+    const used = rules.filter(rule => !(rule.source === 'auto' && rule.kind === 'command' && owned.some(mine => rulesOverlap(mine.value, rule.value))));
+    const allow = [...new Set(used.map(claudeRule))];
+    // A rule the reviewer allowed never covers its family's destructive variants: deny comes before allow.
+    const deny = [...new Set(used.filter(rule => rule.source === 'auto').flatMap(rule => ruleGuards(rule).claude))];
     return allow.length ? JSON.stringify({ permissions: { allow, ...(deny.length ? { deny } : {}) } }) : undefined;
   }
 
@@ -679,13 +680,6 @@ function clean(input: PermissionRuleInput): PermissionRuleInput {
  * The owner's own rule where the reviewer allowed an overlapping one (`git push --force-with-lease` beside `git push`):
  * the reviewer's rule would deny what the owner allows, so it goes. Agents ask again, and the owner decides those.
  */
-/** Whether a Claude `Bash(…)` deny pattern refuses this command. */
-function refuses(guard: string, command: string): boolean {
-  const pattern = /^Bash\((.*)\)$/.exec(guard)?.[1];
-  if (pattern === undefined) return false;
-  return new RegExp(`^${pattern.split('*').map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*')}$`).test(command);
-}
-
 function dropOverlappingAuto(state: PermissionState, rule: PermissionRule): string[] {
   const overlaps = (item: PermissionRule) => item.id !== rule.id && item.source === 'auto' && item.kind === 'command' && rule.kind === 'command' && rulesOverlap(item.value, rule.value)
     // A rule for one conversation replaces only that conversation's own: the rest of the project keeps its rules.
