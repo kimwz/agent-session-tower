@@ -58,8 +58,8 @@
 .trigger-test-result p { margin: 0; }
 .trigger-test-result pre { margin: 0; max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; word-break: break-all; }
 .trigger-checkbox { display: flex; align-items: center; gap: 8px; }
-/* The panel's labels stack their text over the field; a checkbox sits beside its text. */
-.trigger-scope label.trigger-checkbox { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
+/* The panel's labels stack their text over the field; a checkbox sits beside its text, from the left. */
+.slack-panel label.trigger-checkbox, .trigger-scope label.trigger-checkbox { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
 .trigger-panel .slack-rule-editor, .trigger-section .slack-rule-editor { padding-left: 16px; }
 .trigger-advanced { border: 1px solid var(--line); border-radius: 10px; }
 .trigger-advanced summary { display: flex; align-items: baseline; gap: 10px; padding: 12px 14px; cursor: pointer; }

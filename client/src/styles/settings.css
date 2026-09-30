@@ -20,7 +20,10 @@
 .canvas-only .app-header .header-actions > :not(.settings-entry) { display:none; }
 .canvas-only .settings-entry { pointer-events:auto; }
 .canvas-only .settings-button { background:#142030ed; }
-.canvas-only .canvas-quick-controls { right:140px; }
+/* The canvas tools line up just left of it, measured, since its width follows the language and its marks. */
+.canvas-only .canvas-quick-controls { top:calc(var(--settings-middle, 28px) - 16px); right:calc(var(--settings-right, 126px) + 8px); }
+.canvas-only .canvas-zoom-controls { height:32px; padding:2px; }
+.canvas-only .canvas-zoom-controls>button { width:26px; height:26px; }
 
 .settings-dialog { width:min(980px, calc(100vw - 32px)); height:min(720px, calc(100dvh - 40px)); max-width:none; max-height:none; padding:0; border:1px solid #2c3a4d; border-radius:14px; background:#101722; color:var(--text); overflow:hidden; box-shadow:0 24px 80px #000a; }
 .settings-dialog::backdrop { background:#030812b8; }
@@ -51,8 +54,8 @@
 .settings-pane-head > .settings-pane-title { display:block; flex:1; min-width:0; }
 .settings-pane-title h2, .settings-pane.slack-panel .settings-pane-title h2 { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin:0; color:var(--bright); font-size:19px; font-weight:600; letter-spacing:-.2px; }
 .settings-pane-title p, .settings-pane.slack-panel .settings-pane-title p { margin:5px 0 0; color:var(--muted); font-size:12.5px; line-height:1.5; }
-.settings-pane-actions { display:flex; flex:none; align-items:center; gap:6px; }
-.settings-pane-actions .trigger-computer { display:flex; flex-direction:row; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
+.settings-pane-actions { display:flex; flex:none; align-items:center; gap:6px; min-height:29px; }
+.settings-pane-actions .trigger-computer { display:flex; flex-direction:row; align-items:center; gap:6px; font-size:12px; color:var(--muted); white-space:nowrap; }
 .settings-close, .settings-back { flex:none; }
 .settings-back { display:none; }
 .settings-tabs { display:flex; flex:none; gap:2px; width:max-content; max-width:calc(100% - 52px); margin:0 26px 4px; padding:3px; overflow-x:auto; border:1px solid var(--line); border-radius:9px; background:#0b111a; }
@@ -108,12 +111,10 @@ label.settings-row { cursor:pointer; }
 @media (max-width:900px) {
   .settings-button { width:34px; padding:0; justify-content:center; }
   .settings-button-label { display:none; }
-  .canvas-only .canvas-quick-controls { right:70px; }
 }
 
 /* On a phone the settings are two pages, as the phone's own settings are: the list, then one section. */
 @media (max-width:680px) {
-  .canvas-only .canvas-quick-controls { right:56px; }
   .settings-dialog { width:100vw; height:100dvh; border:0; border-radius:0; }
   .settings-shell { grid-template-columns:minmax(0, 1fr); }
   .settings-shell.reading .settings-nav { display:none; }

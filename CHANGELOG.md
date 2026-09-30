@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.92.1] - 2026-09-30
+
+### Fixed
+- Alignment fixes (#25):
+  - with the sidebar closed, the canvas zoom tools sit on the settings button's line, at its height and just left of it, in every language and width;
+  - checkboxes in the trigger editor (assign, close, include pull requests and teams) sit beside their text from the left instead of centered above it;
+  - the trigger panel's computer picker keeps its label on one line.
+- **Slack automation** offers the Verse8 PR example only while there are no rules yet.
+
 ## [1.92.0] - 2026-09-30
 
 ### Added

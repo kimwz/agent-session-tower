@@ -267,13 +267,29 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     return () => window.clearTimeout(timeout);
   }, [manualFitRequest, manual, fitVisibleGraph]);
 
+  // With the sidebar closed the header floats over the canvas; the view tools sit on the settings button's line, just left of it.
+  const quickControls = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const box = canvas.current, controls = quickControls.current, entry = document.querySelector<HTMLElement>('.settings-entry');
+    if (!box || !controls || !entry) return;
+    const place = () => {
+      const area = box.getBoundingClientRect(), button = entry.getBoundingClientRect();
+      if (!button.width) return;
+      controls.style.setProperty('--settings-right', `${area.right - button.left}px`);
+      controls.style.setProperty('--settings-middle', `${button.top + button.height / 2 - area.top}px`);
+    };
+    const observer = new ResizeObserver(place);
+    observer.observe(box); observer.observe(entry);
+    place();
+    return () => observer.disconnect();
+  }, []);
   const working = sessions.filter(session => session.status === 'working').length;
   return <div ref={canvas} className={`graph-canvas ${manual ? 'manual-layout' : 'auto-layout'} ${motion ? '' : 'motion-off'} ${settled ? '' : 'settling'}`}>
     <ReactFlow onPaneClick={onCanvasClick} onDoubleClick={onCanvasDoubleClick} zoomOnDoubleClick={false} nodes={nodes} edges={edges} onNodesChange={onNodesChange} onNodeDragStart={() => { followingFit.current = false; }} nodeTypes={canvasNodeTypes} fitView fitViewOptions={GRAPH_FIT} minZoom={0.15} maxZoom={1.75} nodesDraggable={manual} nodeDragThreshold={5} nodesConnectable={false} edgesFocusable={false} elementsSelectable={false} panActivationKeyCode={null} proOptions={{ hideAttribution: true }} onMove={(event, viewport) => { if (event) followingFit.current = false; setZoom(Math.round(viewport.zoom * 100)); }} aria-label={t("프로젝트별 에이전트 세션 그래프")} colorMode="dark">
       <Background variant={BackgroundVariant.Dots} gap={22} size={1} color="#283343" />
     </ReactFlow>
     {!showMonitor && emptyState}
-    <div className="canvas-quick-controls" aria-label={t("캔버스 보기 도구")}>
+    <div ref={quickControls} className="canvas-quick-controls" aria-label={t("캔버스 보기 도구")}>
       <div className="canvas-zoom-controls" role="group" aria-label={t("그래프 보기 조절")}><button onClick={() => { followingFit.current = false; void zoomOut({ duration: 0 }); }} aria-label={t("그래프 축소")} title={t("축소")}><Minus size={15} /></button><span>{zoom}%</span><button onClick={() => { followingFit.current = false; void zoomIn({ duration: 0 }); }} aria-label={t("그래프 확대")} title={t("확대")}><Plus size={15} /></button><i /><button onClick={() => fitVisibleGraph(GRAPH_FIT)} aria-label={t("전체 그래프 맞춤")} title={t("전체 맞춤")}><Maximize size={15} /></button>{selectedId && nodes.some(n => n.id === selectedId) && <button className="canvas-find-session" onClick={() => fitVisibleGraph({ nodes: [{ id: selectedId }], maxZoom: 1.1, padding: 0.7 })} aria-label={t("선택한 세션 위치로 이동")} title={t("선택한 세션 찾기")}><Scan size={15} /></button>}</div>
     </div>
     <div className="canvas-session-summary"><span>{t("{0} / {1}개 세션 표시 · {2}개 작업 중", { 0: shown.toLocaleString(), 1: sessions.length.toLocaleString(), 2: working.toLocaleString() })}</span>{!manual && shown < sessions.length && graphLimit < 72 && <button onClick={() => setGraphLimit(value => Math.min(72, value + 8))}>{t("더 표시")}</button>}{!manual && graphLimit > 8 && <button onClick={() => setGraphLimit(8)}>{t("접기")}</button>}</div>
