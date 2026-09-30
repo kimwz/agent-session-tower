@@ -1,0 +1,55 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { BUILTIN_ROLES, customRoleLines, initialModelSettings, modelArgs, parseModelSettings, resolveRole, type ModelSettings } from '../../shared/models.js';
+
+test('every role starts with what its call used before the roles existed', () => {
+  const settings = initialModelSettings();
+  const table = (provider?: 'claude' | 'codex') => Object.fromEntries(BUILTIN_ROLES.map(role => [role.id, resolveRole(settings, role.id, { provider })]));
+  // Judgments on the provider of their work: Opus for Claude work, GPT-5.6 Sol for Codex work, no effort.
+  const follow = ['autoPrompt.router', 'slack.match', 'slack.replyIntent', 'slack.replyDraft', 'slack.toneGuide', 'github.replyIntent', 'publicAgents.judge'];
+  for (const id of follow) {
+    assert.deepEqual(table('claude')[id], { provider: 'claude', model: 'opus' }, id);
+    assert.deepEqual(table('codex')[id], { provider: 'codex', model: 'gpt-5.6-sol' }, id);
+  }
+  assert.deepEqual(table()['permissions.reviewer'], { provider: 'claude', model: 'opus' });
+  assert.deepEqual(table()['skills.advisor'], { provider: 'claude', model: 'sonnet' });
+  assert.deepEqual(resolveRole(settings, 'skills.advisor', { provider: 'codex' }), { provider: 'claude', model: 'sonnet' }, 'a fixed role ignores the work provider');
+  assert.deepEqual(table()['voice.firstReply'], { provider: 'claude', model: 'haiku', effort: 'off' });
+  // Forms and starts that passed no model keep the CLI's default, on the provider each form preselected.
+  for (const id of ['master.session', 'issues.register', 'chat.new', 'autoPrompt.new', 'publicAgents.new']) assert.deepEqual(table()[id], { provider: 'claude' }, id);
+  for (const id of ['triggers.new', 'slack.newRule', 'github.newRule']) assert.deepEqual(table()[id], { provider: 'codex' }, id);
+  assert.equal(BUILTIN_ROLES.length, follow.length + 11, 'a new role gets a line here');
+});
+
+test('saved settings are read leniently, submitted ones strictly', () => {
+  const saved = { version: 1, roles: { 'slack.match': { provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol', effort: 'high' } }, 'voice.firstReply': { provider: 'codex', claude: {}, codex: {} } },
+    custom: [{ id: 'review.codex', provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol', effort: 'high' } }, { id: 'bad id', provider: 'codex', claude: {}, codex: {} }] };
+  const read = parseModelSettings(saved);
+  assert.deepEqual(resolveRole(read, 'slack.match', { provider: 'claude' }), { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' });
+  assert.deepEqual(resolveRole(read, 'voice.firstReply'), { provider: 'claude', model: 'haiku', effort: 'off' }, 'the voice reply is Claude only; an invalid entry falls back');
+  assert.deepEqual(read.custom.map(role => role.id), ['review.codex']);
+  assert.throws(() => parseModelSettings(saved, true), /Claude|제공자|역할/);
+  const fine: ModelSettings = { ...initialModelSettings(), custom: [{ id: 'review.claude', label: 'PR 리뷰', provider: 'claude', claude: { model: 'fable', effort: 'max' }, codex: {} }] };
+  assert.deepEqual(parseModelSettings(fine, true), fine);
+  for (const bad of [
+    { ...fine, custom: [{ ...fine.custom[0], id: 'autoPrompt.router' }] },
+    { ...fine, custom: [fine.custom[0], fine.custom[0]] },
+    { ...fine, custom: [{ ...fine.custom[0], claude: { model: '--dangerously-skip-permissions' } }] },
+    { ...fine, custom: [{ ...fine.custom[0], claude: { effort: 'ultra' } }] },
+    { ...fine, custom: [{ ...fine.custom[0], provider: 'codex', codex: { effort: 'off' } }] },
+    { ...fine, roles: { ...fine.roles, 'unknown.role': fine.roles['chat.new'] } },
+  ]) assert.throws(() => parseModelSettings(bad, true), { statusCode: 400 }, JSON.stringify(bad.custom));
+});
+
+test('a role gives the same model as flags, as JSON and in the turn table', () => {
+  const settings: ModelSettings = { ...initialModelSettings(), custom: [
+    { id: 'review.codex', provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol', effort: 'high' } },
+    { id: 'review.claude', label: 'validity check', provider: 'claude', claude: { model: 'fable' }, codex: {} },
+  ] };
+  assert.deepEqual(modelArgs(resolveRole(settings, 'review.codex')), ['-m', 'gpt-6.1-sol', '-c', 'model_reasoning_effort=high']);
+  assert.deepEqual(modelArgs(resolveRole(settings, 'review.claude')), ['--model', 'fable']);
+  assert.deepEqual(modelArgs({ provider: 'claude', model: 'opus', effort: 'max' }), ['--model', 'opus', '--effort', 'max']);
+  assert.deepEqual(modelArgs({ provider: 'claude', model: 'haiku', effort: 'off' }), ['--model', 'haiku']);
+  assert.deepEqual(customRoleLines(settings), ['- review.codex = codex / gpt-6.1-sol / high', '- review.claude = claude / fable / default — validity check']);
+  assert.throws(() => resolveRole(settings, 'review.gemini'), { statusCode: 404 });
+});

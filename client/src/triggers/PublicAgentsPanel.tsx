@@ -1,3 +1,4 @@
+import { cachedPreset } from '../models/model-settings';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ArrowLeft, Copy, Globe2, KeyRound, MessagesSquare, Pencil, Plus, RefreshCw, Settings, Trash2, X } from 'lucide-react';
@@ -13,7 +14,12 @@ type View = { page: 'list' } | { page: 'edit'; agent?: Agent } | { page: 'detail
 type Tab = 'agents' | 'listener';
 type Translate = (key: string, values?: Record<string, string | number>) => string;
 
-const blank = (projects: [string, string][]): PublicAgentInput => ({ name: '', description: '', scope: '', workInstructions: '', cwd: projects[0]?.[0] ?? '', provider: 'claude', intakeProvider: 'claude', conversation: 'visitor', enabled: true });
+/** A new public agent; its work model is Settings › Models' "new public agent" choice. */
+const blank = (projects: [string, string][]): PublicAgentInput => {
+  const preset = cachedPreset(undefined, 'publicAgents.new', []);
+  return { name: '', description: '', scope: '', workInstructions: '', cwd: projects[0]?.[0] ?? '', provider: preset?.provider ?? 'claude',
+    ...(preset?.model ? { model: preset.model } : {}), ...(preset?.effort ? { effort: preset.effort } : {}), intakeProvider: 'claude', conversation: 'visitor', enabled: true };
+};
 
 export function requestStatusLabel(status: PublicRequestStatus, t: Translate): string {
   return t(({ reviewing: '검토 중', rejected: '거절됨', queued: '대기 중', dispatching: '시작 중', running: '진행 중', summarizing: '결과 검토 중', completed: '완료', failed: '실패' } as const)[status]);

@@ -74,6 +74,11 @@ export const OPERATIONS = {
     summary: 'Allow a permission request, as asked or as edited, or refuse it; with resume, tell the requesting conversation so it goes on.' },
   'permissions.saveAutoReview': { input: z.object({ settings: PermissionAutoReviewSchema }).strict(), write: true, ownerOnly: true,
     summary: 'Turn Tower\'s permission reviewer on or off, choose its model, and whether it tells the requesting conversation.' },
+  'models.settings': { input: z.object({}).strict(), write: false, ownerOnly: true, summary: 'Read which provider, model and reasoning effort each of Tower\'s own calls, form defaults and skill roles use.' },
+  'models.update': { input: z.object({ settings: z.record(z.string(), z.unknown()) }).strict(), write: true, ownerOnly: true,
+    summary: 'Replace the model settings: every built-in role and the skill roles.' },
+  'models.get': { input: z.object({ role: z.string().min(1).max(120) }).strict(), write: false, agent: true,
+    summary: 'Look up the model a role names, such as a skill\'s review.codex: its provider, model and reasoning effort, and the command-line flags that select them (for codex exec or claude -p). Use it when a skill names a model role instead of a model.' },
   'permissions.acknowledge': { input: z.object({}).strict(), write: true, ownerOnly: true, summary: 'Dismiss the notice about an earlier permission record that could not be read.' },
 } as const;
 
@@ -83,5 +88,6 @@ export type OperationName = keyof typeof OPERATIONS;
  * The worker answers them with only what this computer shares.
  */
 export const REMOTE_PAGE_OPERATIONS: ReadonlySet<string> = new Set(['triggers.list', 'triggers.get', 'triggers.events', 'triggers.event', 'triggers.audit', 'triggers.deleted',
-  'triggers.preview', 'triggers.previewIssues', 'triggers.settings', 'triggers.create', 'triggers.update', 'triggers.setEnabled', 'triggers.delete', 'triggers.restore', 'triggers.revert', 'triggers.run', 'secrets.list']);
+  'triggers.preview', 'triggers.previewIssues', 'triggers.settings', 'triggers.create', 'triggers.update', 'triggers.setEnabled', 'triggers.delete', 'triggers.restore', 'triggers.revert', 'triggers.run', 'secrets.list',
+  'models.settings', 'models.update']);
 export const isOperationName = (value: unknown): value is OperationName => typeof value === 'string' && Object.hasOwn(OPERATIONS, value);

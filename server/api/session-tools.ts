@@ -10,7 +10,7 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
  * agent's shell could not, so no turn goes without them; only the tool-less routing and public intake calls have none.
  */
 export const SESSION_TOOLS_SERVER = 'tower_sessions';
-export const SESSION_TOOL_OPERATIONS: ReadonlySet<string> = new Set(['sessions.list', 'sessions.read', 'sessions.search']);
+export const SESSION_TOOL_OPERATIONS: ReadonlySet<string> = new Set(['sessions.list', 'sessions.read', 'sessions.search', 'models.get']);
 const KEY_FILE = 'session-tools-key.json';
 
 /** The worker's standing credential for these tools; it opens nothing else. Made once, kept owner-only. */

@@ -71,7 +71,7 @@ export interface SkillProposal {
 export interface SkillNote { at: string; sessionId: string; title: string; cwd: string; note: string }
 
 export type SkillAdvisorProvider = 'claude' | 'codex';
-export const SKILL_ADVISOR_MODELS: Record<SkillAdvisorProvider, string> = { claude: 'sonnet', codex: 'gpt-5.6-terra' };
+/** `provider` is what the advisor ran on before Settings › Models (the `skills.advisor` role); only a first migration reads it. */
 export interface SkillAdvisorSettings { enabled: boolean; provider: SkillAdvisorProvider }
 export interface SkillAdvisorStatus {
   running: boolean;

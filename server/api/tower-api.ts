@@ -8,6 +8,8 @@ import type { RunAdmission } from '../runs/manager.js';
 import type { PermissionService } from '../permissions/service.js';
 import type { SessionSearch, SessionSearchResult } from '../sessions/service.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { readModelSettings, resolveModel, saveModelSettings } from '../models/settings.js';
+import { modelArgs } from '../../shared/models.js';
 import type { TriggerScope, TriggerService } from '../triggers/service.js';
 import { remoteRequestTime } from '../remote/request-ledger.js';
 import { remoteJob, remoteJobVisible, type RemoteScope } from '../remote/visibility.js';
@@ -165,6 +167,9 @@ export class TowerApi {
       return read;
     }
     if (name === 'triggers.preview' || name === 'triggers.settings') return this.performLocal(name, value, actor);
+    // This computer's own model settings, which its own calls follow; nothing in them points into a folder.
+    if (name === 'models.settings') return this.performLocal(name, value, actor);
+    if (name === 'models.update') return answer;
     if (name === 'triggers.previewIssues') {
       // It reads only GitHub; a saved trigger it names must be one this computer shows.
       if (value.id) {
@@ -328,6 +333,12 @@ export class TowerApi {
       case 'permissions.delete': return this.permissions().remove(value.id);
       case 'permissions.decide': return this.permissions().decide(value.id, value.approve, value.rule, value.resume === true);
       case 'permissions.acknowledge': return this.permissions().acknowledge();
+      case 'models.settings': return { settings: await readModelSettings(this.services.stateDir) };
+      case 'models.update': return { settings: await saveModelSettings(this.services.stateDir, value.settings) };
+      case 'models.get': {
+        const resolved = await resolveModel(this.services.stateDir, value.role);
+        return { role: value.role, ...resolved, args: modelArgs(resolved) };
+      }
       case 'permissions.saveAutoReview': return this.permissions().saveAutoReview(value.settings);
       case 'autoPrompt.get': {
         const job = autoPrompts?.get(value.requestId);

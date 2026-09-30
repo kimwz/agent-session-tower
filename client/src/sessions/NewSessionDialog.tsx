@@ -8,6 +8,7 @@ import { api, providerLabels } from '../common/lib';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { EffortPicker, ModelPicker, supportedEffort } from '../chat/ModelPicker';
 import { hostProblem, type Host } from '../remote/hosts';
+import { cachedPick, cachedPreset, useModelPreset } from '../models/model-settings';
 import { localPart, nodeHeaders, nodeOf, nodePath, scopeRun, scopeSession, settleRequest } from '../remote/scope';
 
 /** A request prepared elsewhere for the user to review and send. */
@@ -41,12 +42,20 @@ export function NewSessionDialog({ providers: localProviders, hosts = [], projec
   const host = hosts.find(item => item.node === machine);
   const providers = machine ? host?.providers ?? [] : localProviders;
   const projects = allProjects.filter(([key]) => nodeOf(key) === machine).map(([key, label]): [string, string] => [localPart(key), label]);
-  const [provider, setProvider] = useState<Provider>(() => providers.find(item => item.available)?.provider || 'claude');
+  // Settings › Models' "new chat" choice, once this page has read it; the owner's own choice here is never replaced.
+  const [preset] = useState(() => cachedPreset(machine, 'chat.new', providers));
+  const [provider, setProvider] = useState<Provider>(() => preset?.provider || providers.find(item => item.available)?.provider || 'claude');
   const [cwd, setCwd] = useState(initialCwd ? localPart(initialCwd) : projects[0]?.[0] || '');
   const [title, setTitle] = useState(draft?.title ?? '');
   const [prompt, setPrompt] = useState(draft?.prompt ?? '');
-  const [model, setModel] = useState<string>();
-  const [effort, setEffort] = useState<string>();
+  const [model, setModel] = useState<string | undefined>(preset?.model);
+  const [effort, setEffort] = useState<string | undefined>(preset?.effort);
+  const touched = useRef(false);
+  const latePreset = useModelPreset(token, machine, 'chat.new', providers);
+  useEffect(() => {
+    if (!latePreset || touched.current) return;
+    setProvider(latePreset.provider); setModel(latePreset.model); setEffort(latePreset.effort);
+  }, [latePreset?.provider, latePreset?.model, latePreset?.effort]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [folderError, setFolderError] = useState('');
@@ -55,11 +64,13 @@ export function NewSessionDialog({ providers: localProviders, hosts = [], projec
   const unavailable = !connected || !token || !providerAvailable || (machine !== undefined && !host?.canWork);
   const chooseMachine = (next: string | undefined) => {
     const nextProviders = next ? hosts.find(item => item.node === next)?.providers ?? [] : localProviders;
+    const nextPreset = cachedPreset(next, 'chat.new', nextProviders);
+    touched.current = false;
     setMachine(next);
-    setProvider(nextProviders.find(item => item.available)?.provider || 'claude');
+    setProvider(nextPreset?.provider || nextProviders.find(item => item.available)?.provider || 'claude');
     const folder = allProjects.find(([key]) => nodeOf(key) === next)?.[0];
     setCwd(folder ? localPart(folder) : '');
-    setModel(undefined); setEffort(undefined); setFolderError(''); setError('');
+    setModel(nextPreset?.model); setEffort(nextPreset?.effort); setFolderError(''); setError('');
   };
   const uniqueProjects = [...new Map(projects).entries()];
 
@@ -164,7 +175,7 @@ export function NewSessionDialog({ providers: localProviders, hosts = [], projec
             return <label key={value} className={`new-session-provider ${provider === value ? 'selected' : ''} ${!available ? 'unavailable' : ''}`}>
               <ProviderIcon provider={value} size={21} />
               <span><strong>{providerLabels[value]}</strong><small>{available ? t("사용 가능") : t("사용할 수 없음")}</small></span>
-              <input type="radio" name={`${id}-provider`} value={value} checked={provider === value} disabled={!available} onChange={() => { setProvider(value); setModel(undefined); setEffort(undefined); }} />
+              <input type="radio" name={`${id}-provider`} value={value} checked={provider === value} disabled={!available} onChange={() => { touched.current = true; const pick = cachedPick(machine, 'chat.new', value); setProvider(value); setModel(pick.model); setEffort(pick.effort); }} />
             </label>;
           })}
         </div>
@@ -184,8 +195,8 @@ export function NewSessionDialog({ providers: localProviders, hosts = [], projec
       <div className="new-session-field">
         <span className="new-session-label" id={`${id}-model`}>{t("모델 · 추론 수준")}</span>
         <div className="new-session-model-row" role="group" aria-labelledby={`${id}-model`}>
-          <ModelPicker provider={providerHealth} value={model} disabled={submitting} onChange={next => { setModel(next); setEffort(value => supportedEffort(providerHealth, next || providerHealth?.defaultModel, value)); }} />
-          <EffortPicker provider={providerHealth} model={model || providerHealth?.defaultModel} value={effort} disabled={submitting} onChange={setEffort} />
+          <ModelPicker provider={providerHealth} value={model} disabled={submitting} onChange={next => { touched.current = true; setModel(next); setEffort(value => supportedEffort(providerHealth, next || providerHealth?.defaultModel, value)); }} />
+          <EffortPicker provider={providerHealth} model={model || providerHealth?.defaultModel} value={effort} disabled={submitting} onChange={next => { touched.current = true; setEffort(next); }} />
         </div>
       </div>
 

@@ -1,3 +1,4 @@
+import { useModelSettings } from '../models/model-settings';
 import { useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { SettingsFrameContext, SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
 import { Gauge, History, Pencil, Play, Plug, Plus, RotateCcw, Trash2, Zap } from 'lucide-react';
@@ -15,7 +16,9 @@ export { blankGitHubSource, blankHttpSource, blankTrigger, eventStatusLabel, sch
 type Tab = 'triggers' | 'history' | 'connections' | 'limits';
 interface Context { token: string; providers: ProviderHealth[]; projects: [string, string][]; sessions: Session[] }
 /** A joined computer; `ready` when its triggers can be managed from here now (connected, with a Tower that can). */
-export interface TriggerComputer { node: string; name: string; providers: ProviderHealth[]; ready: boolean; connected: boolean }
+export interface TriggerComputer { node: string; name: string; providers: ProviderHealth[]; ready: boolean; connected: boolean;
+  /** Its model settings can be read and changed from here. */
+  models?: boolean }
 /** Folders and conversations a trigger on that computer can aim at, named as that computer knows them. */
 export type TriggerTargets = (node: string) => { projects: [string, string][]; sessions: Session[] };
 /** What the triggers tab shows: the list, the kind picker for a new trigger, or the editor. */
@@ -39,6 +42,8 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
   const { projects, sessions } = node && targets ? targets(node) : { projects: ownProjects, sessions: ownSessions };
   const available = node ? !away : Boolean(ownOverview);
   const target = node || undefined;
+  // New triggers and rules start from that computer's Settings › Models.
+  useModelSettings(token, computer?.models || !target ? target : undefined);
   // An answer for a computer no longer shown, or older than a later one, is dropped; so is a change's outcome.
   const asked = useRef(0);
   const shown = useRef(target);

@@ -6,7 +6,7 @@ export const MIN_BACKUP_PASSPHRASE = 8;
 export const MAX_BACKUP_FILE_BYTES = 40 * 1024 * 1024;
 
 /** What a restore brings back, in the words the page shows. */
-export type BackupPart = 'triggers' | 'triggerSecrets' | 'permissions' | 'slack' | 'github' | 'publicAgents' | 'skills' | 'decisions' | 'projectGroups' | 'remoteExclusions' | 'master' | 'backup';
+export type BackupPart = 'triggers' | 'triggerSecrets' | 'permissions' | 'models' | 'slack' | 'github' | 'publicAgents' | 'skills' | 'decisions' | 'projectGroups' | 'remoteExclusions' | 'master' | 'backup';
 
 /** A checked backup, before it is applied. */
 export interface BackupPreview {

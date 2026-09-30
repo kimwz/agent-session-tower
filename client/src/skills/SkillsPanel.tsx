@@ -299,8 +299,7 @@ function AdvisorSettings({ overview, busy, onChange, onBackfill, onRefresh }: { 
   return <section className="skills-settings">
     <label className="skill-pinned"><input type="checkbox" checked={settings.enabled} disabled={busy} onChange={event => onChange({ enabled: event.target.checked })} />{t('세션이 끝나면 작업 방식을 정리하고 스킬 추천')}
       <small>{t('이 컴퓨터에서 직접 한 세션이 10분 동안 조용하면, 그 세션의 요청과 마지막 답변 앞부분, 지금 있는 스킬과 추천 목록을 아래 모델에 보내 작업 방식을 한두 문장으로 정리합니다. 트리거, Slack, 다른 에이전트나 다른 컴퓨터가 시작한 작업과 닫은 세션은 읽지 않습니다. 대화 기록은 남지 않으며 하루 40번까지 부릅니다.')}</small></label>
-    <label className="decision-provider">{t('정리할 모델')}<select value={settings.provider} disabled={busy} onChange={event => onChange({ provider: event.target.value })}>
-      <option value="claude">Claude Sonnet</option><option value="codex">Codex GPT-5.6 Terra</option></select></label>
+    <p className="auth-hint">{t('정리할 모델은 설정 › 모델의 "스킬 제안"에서 정합니다.')}</p>
     <p className="auth-hint">{advisor.running ? t('지금 세션을 정리하고 있습니다.') : advisor.lastRunAt ? t('마지막 정리 {0}', { 0: time(advisor.lastRunAt) }) : t('아직 정리한 세션이 없습니다.')}
       {advisor.lastError && <><br /><span className="auth-error">{t('마지막 오류: {0}', { 0: advisor.lastError })}</span></>}</p>
     <h3>{t('지난 작업 분석')}</h3>

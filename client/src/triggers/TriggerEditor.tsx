@@ -1,3 +1,5 @@
+import { cachedPreset } from '../models/model-settings';
+import type { ResolvedModel } from '../../../shared/models';
 import { useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { ArrowLeft, KeyRound, Plus, Trash2 } from 'lucide-react';
 import type { ProviderHealth, Session } from '../../../shared/types';
@@ -30,11 +32,11 @@ function Choice<T extends string>({ value, options, onChange, label }: { value: 
 export function TriggerEditor({ trigger, kind, token, providers, projects, sessions, busy, onCancel, onSave }: EditorContext & { trigger?: Trigger; kind: SourceKind; busy: boolean; onCancel: () => void; onSave: (input: TriggerInput) => void }) {
   const { t } = useI18n();
   const machine = useContext(TriggerMachine);
-  const [input, setInput] = useState<TriggerInput>(() => trigger ? { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy } : blankTrigger(kind));
+  const [input, setInput] = useState<TriggerInput>(() => trigger ? { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy } : blankTrigger(kind, cachedPreset(machine.node, 'triggers.new', providers)));
   const source = input.source;
   const polled = source.kind !== 'schedule';
   // A coordinator exists only for GitHub; any other source runs a task.
-  const task: TaskHandler = input.handler.kind === 'task' ? input.handler : { ...blankTrigger().handler as TaskHandler, approvals: input.handler.approvals };
+  const task: TaskHandler = input.handler.kind === 'task' ? input.handler : { ...blankTrigger('schedule', cachedPreset(machine.node, 'triggers.new', providers)).handler as TaskHandler, approvals: input.handler.approvals };
   const coordinator = input.handler.kind === 'coordinator' ? input.handler : undefined;
   // Each review request is its own pull request, so one waiting for a review does not hold back the next.
   const reviews = (value: Source) => value.kind === 'github' && value.watch.type === 'review-requested';
@@ -42,7 +44,7 @@ export function TriggerEditor({ trigger, kind, token, providers, projects, sessi
     ...(reviews(next) && !reviews(previous.source) && previous.policy.overlap === 'skip' ? { policy: { ...previous.policy, overlap: 'parallel' as const } } : {}) }));
   const setTask = (patch: Partial<TaskHandler>) => setInput({ ...input, handler: { ...task, ...patch } });
   const setMode = (mode: 'task' | 'coordinator') => setInput({ ...input, handler: mode === 'coordinator'
-    ? { kind: 'coordinator', rules: coordinator?.rules ?? [newRule()], approvals: input.handler.approvals } : { ...task, approvals: input.handler.approvals } });
+    ? { kind: 'coordinator', rules: coordinator?.rules ?? [newRule(cachedPreset(machine.node, 'github.newRule', providers))], approvals: input.handler.approvals } : { ...task, approvals: input.handler.approvals } });
   const Icon = KIND_ICONS[source.kind];
   // A coordinator answers on GitHub with that computer's sign-in; it is set up there.
   const hereOnly = Boolean(machine.node) && input.handler.kind === 'coordinator';
@@ -123,16 +125,19 @@ function TaskFields({ task, kind, providers, projects, sessions, onChange }: { t
   </>;
 }
 
-const newRule = (): CoordinatorRule => ({ id: crypto.randomUUID(), name: '', enabled: true, condition: '', instructions: '', replyInstructions: '', provider: 'codex' });
+/** A new coordinator rule; its model is Settings › Models' "new GitHub rule" choice (rules keep no effort). */
+const newRule = (preset?: ResolvedModel): CoordinatorRule => ({ id: crypto.randomUUID(), name: '', enabled: true, condition: '', instructions: '', replyInstructions: '',
+  provider: preset?.provider ?? 'codex', ...(preset?.model ? { model: preset.model } : {}) });
 
 /** Rules a GitHub coordinator follows, in the same editor Slack uses. */
 function CoordinatorFields({ handler, providers, projects, onChange }: { handler: CoordinatorHandler; providers: ProviderHealth[]; projects: [string, string][]; onChange: (handler: CoordinatorHandler) => void }) {
   const { t } = useI18n();
+  const machine = useContext(TriggerMachine);
   const [expanded, setExpanded] = useState<string | null>(handler.rules.length === 1 ? handler.rules[0].id : null);
   return <>
     <p className="trigger-note">{t('이슈마다 대화를 하나 엽니다. 코디네이터는 첫 번째로 맞는 지침 하나만 따르고, 작업은 프로젝트 에이전트에게 맡기며, 댓글은 Tower에서 승인해야 게시됩니다.')}</p>
     <SlackRules channel="github" autoReview={handler.approvals === 'auto'} rules={handler.rules} providers={providers} projects={projects} expanded={expanded} onExpand={setExpanded} onChange={rules => onChange({ ...handler, rules: rules as CoordinatorRule[] })} />
-    {handler.rules.length < 20 && <button type="button" className="secondary-button trigger-add" onClick={() => { const rule = newRule(); onChange({ ...handler, rules: [...handler.rules, rule] }); setExpanded(rule.id); }}><Plus size={13} />{t('지침 추가')}</button>}
+    {handler.rules.length < 20 && <button type="button" className="secondary-button trigger-add" onClick={() => { const rule = newRule(cachedPreset(machine.node, 'github.newRule', providers)); onChange({ ...handler, rules: [...handler.rules, rule] }); setExpanded(rule.id); }}><Plus size={13} />{t('지침 추가')}</button>}
   </>;
 }
 

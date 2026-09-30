@@ -244,6 +244,7 @@ export class DurableRunManager extends EventEmitter {
   /** Tower operations run in the worker; an outdated worker is told apart from a real error. */
   async api(operation: string, input: unknown, internal?: Pick<RunAdmission, 'origin' | 'requestId'>): Promise<unknown> {
     if (!this.supports('triggers')) throw Object.assign(new Error('The execution worker has not updated yet. Triggers become available once it hands over to the new version.'), { statusCode: 503 });
+    if (operation.startsWith('models.') && !this.supports('models')) throw Object.assign(new Error('The execution worker has not updated yet. Model settings become available once it hands over to the new version.'), { statusCode: 503, disposition: 'not-admitted' });
     if (!internal?.origin?.controllerId) return this.call('api', [operation, input]);
     // An older worker would answer a controlling computer as the owner here, folders kept from sharing included.
     if (!this.supports('remoteTriggers')) throw Object.assign(new Error('The execution worker on this computer has not updated yet, so it cannot take remote requests for this. Nothing was done.'), { statusCode: 503, disposition: 'not-admitted' });

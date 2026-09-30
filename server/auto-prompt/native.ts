@@ -7,11 +7,15 @@ import type { Provider } from '../../shared/types.js';
 import { MAX_ATTACHMENTS, MAX_IMAGE_ATTACHMENT_BYTES, MAX_TOTAL_ATTACHMENT_BYTES } from '../../shared/attachments.js';
 import { rasterMime } from '../stores/attachments.js';
 import { findExecutable, providerDirectories } from '../providers/discovery.js';
+import { CLAUDE_EFFORT_LEVELS, validEffort, validModelId } from '../providers/models.js';
+import { EFFORT_OFF } from '../../shared/models.js';
 import { defaultStateDir } from '../state-dir.js';
 
 export interface AutoPromptModelRequest {
   provider: Provider;
-  model: string;
+  /** From the role's resolved model (server/models/settings.ts); absent uses the CLI's own default. */
+  model?: string;
+  effort?: string;
   systemPrompt: string;
   prompt: string;
   schema: Record<string, unknown>;
@@ -28,8 +32,6 @@ export interface AutoPromptNativeDependencies {
   killGraceMs?: number;
 }
 
-/** Routing and judgments use the strong models; the skill advisor's summaries use the light ones. */
-const MODELS: Record<Provider, readonly string[]> = { claude: ['opus', 'sonnet'], codex: ['gpt-5.6-sol', 'gpt-5.6-terra'] };
 const MAX_OUTPUT = 1_000_000;
 const MAX_ERROR_OUTPUT = 64_000;
 const MAX_PROMPT = 512_000;
@@ -101,7 +103,8 @@ function codexArgs(options: AutoPromptModelRequest, directory: string, images: s
     'features.skip_host_skill_discovery': true,
   };
   return ['exec', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--strict-config',
-    '--skip-git-repo-check', '-C', directory, '--sandbox', 'read-only', '--model', options.model,
+    '--skip-git-repo-check', '-C', directory, '--sandbox', 'read-only', ...(options.model ? ['--model', options.model] : []),
+    ...(options.effort ? ['-c', `model_reasoning_effort=${JSON.stringify(options.effort)}`] : []),
     '--output-schema', join(directory, 'schema.json'), '--json', '--color', 'never',
     ...Object.entries(settings).flatMap(([key, value]) => ['-c', `${key}=${JSON.stringify(value)}`]),
     ...images.flatMap(path => ['--image', path]), '-'];
@@ -135,7 +138,8 @@ async function imagesForRequest(paths: readonly string[], directory: string): Pr
 /** Reasoning only. The caller validates the returned decision before dispatch. */
 export async function runAutoPromptModel(options: AutoPromptModelRequest, dependencies: AutoPromptNativeDependencies = {}): Promise<unknown> {
   if (options.signal.aborted) throw cancelled();
-  if (!['claude', 'codex'].includes(options.provider) || !MODELS[options.provider].includes(options.model)) throw failure('routing model is unsupported.');
+  if (!['claude', 'codex'].includes(options.provider) || (options.model !== undefined && !validModelId(options.model))
+    || (options.effort !== undefined && !(options.provider === 'claude' ? [...CLAUDE_EFFORT_LEVELS, EFFORT_OFF].includes(options.effort) : validEffort(options.effort) && options.effort !== EFFORT_OFF))) throw failure('routing model is unsupported.');
   const schema = JSON.stringify(options.schema);
   if (!record(options.schema) || typeof options.prompt !== 'string' || typeof options.systemPrompt !== 'string'
     || Buffer.byteLength(options.prompt) > MAX_PROMPT || Buffer.byteLength(options.systemPrompt) > 64_000 || Buffer.byteLength(schema) > 64_000) throw failure('routing input is invalid or too large.');
@@ -143,6 +147,7 @@ export async function runAutoPromptModel(options: AutoPromptModelRequest, depend
   env.PATH = providerDirectories(env).join(delimiter);
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_SESSION_ID;
+  if (options.provider === 'claude' && options.effort === EFFORT_OFF) env.MAX_THINKING_TOKENS = '0';
   // Never while the CLI is being updated, its lookup included: a half-replaced install would fail the routing for no
   // reason of its own.
   return afterUpdating(dependencies.stateDir ?? defaultStateDir(), options.provider, options.signal, () => routeWith(options, dependencies, env, schema));
@@ -165,7 +170,8 @@ async function routeWith(options: AutoPromptModelRequest, dependencies: AutoProm
       '-p', '--safe-mode', '--tools', '', '--disable-slash-commands', '--strict-mcp-config',
       '--mcp-config', '{"mcpServers":{}}', '--no-session-persistence', '--no-chrome',
       '--permission-prompts', 'none', '--system-prompt', options.systemPrompt,
-      '--model', options.model, '--json-schema', schema, '--output-format', 'stream-json', '--verbose', '--input-format', 'stream-json',
+      ...(options.model ? ['--model', options.model] : []), ...(options.effort && options.effort !== EFFORT_OFF ? ['--effort', options.effort] : []),
+      '--json-schema', schema, '--output-format', 'stream-json', '--verbose', '--input-format', 'stream-json',
     ];
     const stdin = options.provider === 'codex' ? options.prompt : JSON.stringify({
       type: 'user', message: { role: 'user', content: [{ type: 'text', text: options.prompt }, ...images.blocks] },

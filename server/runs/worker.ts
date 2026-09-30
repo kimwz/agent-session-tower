@@ -47,6 +47,7 @@ import { TOWER_NOTICE } from '../../shared/task-notification.js';
 import { ruleGuards } from '../../shared/permissions.js';
 import { skillHomes } from '../skills/files.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
+import { modelRoleNotes } from '../models/notes.js';
 import { keepEndpoint } from './endpoint-keeper.js';
 import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
@@ -611,7 +612,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       } });
 
     runs.setClaudeSettings(cwd => permissions.claudeSettings(cwd));
-    runs.setTurnNotes((_run, session) => skills.turnNotes(session));
+    runs.setTurnNotes(async (_run, session) => {
+      const notes = await Promise.all([skills.turnNotes(session), modelRoleNotes(stateDir).catch(() => undefined)]);
+      return notes.filter(Boolean).join('\n\n') || undefined;
+    });
     runs.on('change', () => skills.recordRuns());
     // Worktrees a conversation made are removed once the owner closes it or automation finishes it.
     const worktrees = new WorktreeJanitor({ stateDir, sessions: () => visible.allSessions(), runs: () => runs.list(),

@@ -9,6 +9,7 @@ import {
 } from '../../shared/public-agents.js';
 import type { Run, RunOrigin } from '../../shared/types.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
+import { resolveModel } from '../models/settings.js';
 import { requestedEffort, requestedModel } from '../providers/models.js';
 import type { RunManager } from '../runs/manager.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -94,7 +95,6 @@ export interface VisitResult { state: PublicVisitorState; token?: string }
 const refuse = (code: string, statusCode: number) => Object.assign(new Error(code), { statusCode });
 const invalid = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
-const modelFor = (provider: 'claude' | 'codex') => provider === 'claude' ? 'opus' : 'gpt-5.6-sol';
 const tokens = (text: string) => Math.ceil(Buffer.byteLength(text) / 3);
 const newSlug = () => randomBytes(16).toString('base64url').slice(0, 22);
 function derive(password: string, salt: string): Promise<Buffer> {
@@ -143,6 +143,8 @@ export class PublicAgentService extends EventEmitter {
     this.now = options.now ?? Date.now;
     this.model = options.model ?? runAutoPromptModel;
   }
+  /** The model that talks with visitors and reviews requests and results, on the agent's intake provider. */
+  private judge(agent: Pick<PublicAgent, 'intakeProvider'>) { return resolveModel(this.options.stateDir, 'publicAgents.judge', { provider: agent.intakeProvider }); }
   private get file() { return join(this.options.stateDir, 'public-agents.json'); }
   private dataFile(id: string) { return join(this.options.stateDir, 'public-agents', `${id}.json`); }
   private iso() { return new Date(this.now()).toISOString(); }
@@ -460,7 +462,7 @@ export class PublicAgentService extends EventEmitter {
         requests,
         ...(reported.length ? { justFinished: reported } : {}),
       });
-      const answer = await this.model({ provider: agent.intakeProvider, model: modelFor(agent.intakeProvider), systemPrompt: intakeSystemPrompt(agent), prompt, schema: INTAKE_SCHEMA,
+      const answer = await this.model({ ...await this.judge(agent), systemPrompt: intakeSystemPrompt(agent), prompt, schema: INTAKE_SCHEMA,
         signal: AbortSignal.timeout(MODEL_TIMEOUT) }, { stateDir: this.options.stateDir }) as { reply?: unknown; submitRequest?: unknown };
       if (!this.alive(agent, data) || !data.conversations.includes(conversation)) return;
       const reply = typeof answer?.reply === 'string' ? answer.reply.trim().slice(0, 8000) : '';
@@ -490,7 +492,7 @@ export class PublicAgentService extends EventEmitter {
     const until = Math.max(conversation.activeFrom, conversation.messages.length - KEEP_AFTER_COMPACT);
     if (until <= conversation.activeFrom) return;
     const folded = conversation.messages.slice(conversation.activeFrom, until).map(({ role, text, visitor }) => ({ from: role === 'agent' ? 'agent' : role === 'visitor' ? `visitor${visitor ? ` ${visitor}` : ''}` : 'tower', text }));
-    const answer = await this.model({ provider: agent.intakeProvider, model: modelFor(agent.intakeProvider), systemPrompt: compactSystemPrompt(),
+    const answer = await this.model({ ...await this.judge(agent), systemPrompt: compactSystemPrompt(),
       prompt: JSON.stringify({ previousSummary: conversation.summary ?? '', messages: folded }), schema: COMPACT_SCHEMA, signal: AbortSignal.timeout(MODEL_TIMEOUT) }, { stateDir: this.options.stateDir }) as { summary?: unknown };
     if (typeof answer?.summary !== 'string' || !answer.summary.trim()) throw new Error('Compaction returned no summary.');
     conversation.summary = answer.summary.trim().slice(0, 6000);
@@ -531,7 +533,7 @@ export class PublicAgentService extends EventEmitter {
   private async review(agent: StoredAgent, data: AgentData, request: StoredRequest): Promise<void> {
     let patch: Partial<StoredRequest>;
     try {
-      const answer = await this.model({ provider: agent.intakeProvider, model: modelFor(agent.intakeProvider), systemPrompt: reviewSystemPrompt(),
+      const answer = await this.model({ ...await this.judge(agent), systemPrompt: reviewSystemPrompt(),
         prompt: JSON.stringify({ ownerScope: agent.scope, request: request.request }), schema: REVIEW_SCHEMA, signal: AbortSignal.timeout(MODEL_TIMEOUT) }, { stateDir: this.options.stateDir }) as { allowed?: unknown; reason?: unknown };
       const reason = typeof answer?.reason === 'string' ? answer.reason.trim().slice(0, 1000) : '';
       // Only an explicit yes lets it through.
@@ -593,7 +595,7 @@ export class PublicAgentService extends EventEmitter {
   private async summarize(agent: StoredAgent, data: AgentData, request: StoredRequest): Promise<void> {
     let text: string;
     try {
-      const answer = await this.model({ provider: agent.intakeProvider, model: modelFor(agent.intakeProvider), systemPrompt: resultSystemPrompt(),
+      const answer = await this.model({ ...await this.judge(agent), systemPrompt: resultSystemPrompt(),
         prompt: JSON.stringify({ ownerScope: agent.scope, request: request.request, finished: request.succeeded === true, candidateSummary: request.candidate ?? '' }), schema: RESULT_SCHEMA,
         signal: AbortSignal.timeout(MODEL_TIMEOUT) }, { stateDir: this.options.stateDir }) as { text?: unknown };
       text = typeof answer?.text === 'string' ? answer.text.trim().slice(0, 6000) : '';

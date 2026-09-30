@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
+import { resolveModel } from '../models/settings.js';
 import { sep } from 'node:path';
 import type { ChatMessage, Session } from '../../shared/types.js';
 import type { Skill, SkillEvidence, SkillProposal } from '../../shared/skills.js';
-import { SKILL_ADVISOR_MODELS, SKILL_NAME } from '../../shared/skills.js';
+import { SKILL_NAME } from '../../shared/skills.js';
 import { isTaskNotification } from '../../shared/task-notification.js';
 import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
 import type { SkillStateStore } from './state.js';
@@ -185,7 +186,7 @@ export class SkillAdvisor {
     try {
       const prompt = await this.reflectPrompt(session, requests, messages ?? []);
       if (!await this.readable(session)) return;
-      const result = await this.deps.model({ ...this.request(), prompt, schema: REFLECT_SCHEMA as unknown as Record<string, unknown> }, { timeoutMs: REFLECT_TIMEOUT_MS });
+      const result = await this.deps.model({ ...await this.request(), prompt, schema: REFLECT_SCHEMA as unknown as Record<string, unknown> }, { timeoutMs: REFLECT_TIMEOUT_MS });
       await this.apply(session, result, upTo);
       this.failures.delete(session.id);
       this.lastRunAt = new Date(this.now()).toISOString(); this.lastError = undefined;
@@ -198,9 +199,9 @@ export class SkillAdvisor {
     }
   }
 
-  private request() {
-    const provider = this.deps.state.get().settings.provider;
-    return { provider, model: SKILL_ADVISOR_MODELS[provider], systemPrompt: SYSTEM, signal: new AbortController().signal };
+  /** The light model of the `skills.advisor` role (Settings › Models). */
+  private async request() {
+    return { ...await resolveModel(this.deps.stateDir, 'skills.advisor'), systemPrompt: SYSTEM, signal: new AbortController().signal };
   }
 
   private async context(cwd?: string): Promise<string> {
@@ -283,7 +284,7 @@ export class SkillAdvisor {
       // Sessions someone else joined while the requests were being read are left out of what is sent.
       for (const [label, session] of [...labels]) if (!await this.readable(session)) { labels.delete(label); blocks.splice(blocks.findIndex(block => block.startsWith(`${label} · `)), 1); }
       if (!blocks.length) { this.backfillStatus = { at: new Date(this.now()).toISOString(), proposals: 0 }; return 0; }
-      const result = await this.deps.model({ ...this.request(), schema: BACKFILL_SCHEMA as unknown as Record<string, unknown>, prompt: [
+      const result = await this.deps.model({ ...await this.request(), schema: BACKFILL_SCHEMA as unknown as Record<string, unknown>, prompt: [
         context,
         `The owner's requests over the last ${days} days, by session (newest sessions first):\n\n${blocks.join('\n\n')}`,
         'Find the ways of working the owner repeats across these sessions (the same procedure, review or verification habit, delivery rule or report style asked for again and again) and write each as a skill. Only patterns seen in at least two sessions, or stated by the owner as a standing rule. At most 8.',

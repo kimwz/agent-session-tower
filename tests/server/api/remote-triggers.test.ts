@@ -336,3 +336,19 @@ test('work the canvas no longer shows is looked up here, never by a controlling 
   assert.deepEqual(ids(await f.call('sessions.search', { query: 'release' })), ['codex:shared']);
   await assert.rejects(f.call('sessions.read', { id: 'codex:finished-slack-work' }), { statusCode: 404 });
 });
+
+test('a controlling computer reads and changes this computer\'s model settings, which this computer\'s calls follow; agents only look roles up', async t => {
+  const f = await fixture(t);
+  const read = await f.call<{ settings: { roles: Record<string, { provider: string }> } }>('models.settings', {});
+  assert.equal(read.settings.roles['autoPrompt.router']!.provider, 'follow');
+  const settings = structuredClone(read.settings) as any;
+  settings.roles['autoPrompt.router'] = { provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol', effort: 'high' } };
+  settings.custom = [{ id: 'review.codex', provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol' } }];
+  await f.call('models.update', { settings });
+  const { resolveModel } = await import('../../../server/models/settings.js');
+  assert.deepEqual(await resolveModel(f.root, 'autoPrompt.router', { provider: 'claude' }), { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' });
+  const agent: TriggerActor = { kind: 'agent', via: 'mcp' };
+  assert.deepEqual(await f.call('models.get', { role: 'review.codex' }, agent), { role: 'review.codex', provider: 'codex', model: 'gpt-6.1-sol', args: ['-m', 'gpt-6.1-sol'] });
+  await assert.rejects(f.call('models.update', { settings }, agent), { statusCode: 403 });
+  await assert.rejects(f.call('models.update', { settings: { ...settings, custom: [{ id: 'bad' }] } }, owner), { statusCode: 400 });
+});

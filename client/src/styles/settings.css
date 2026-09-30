@@ -146,3 +146,31 @@ label.settings-row { cursor:pointer; }
   .settings-button.urgent .settings-mark { animation:none; }
   .settings-switch, .settings-switch::after { transition:none; }
 }
+
+/* Settings › Models: one row per role, the text on the left and its provider, model and effort on the right. */
+.models-body { display: flex; flex-direction: column; gap: 18px; }
+.models-group { display: flex; flex-direction: column; gap: 8px; }
+.models-group h3 { margin: 0; font-size: 14px; color: var(--text); }
+.models-group > .auth-hint { margin: 0 0 4px; }
+.models-group > .secondary-button { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; }
+.models-role { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(0, 1.6fr); gap: 12px; align-items: start; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: rgba(13, 19, 29, .6); }
+.models-role-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.models-role-text strong { font-size: 13px; color: var(--text); }
+.models-role-text small { font-size: 12px; line-height: 1.5; color: var(--muted); }
+.models-role-text code { font-size: 11px; color: #7f93ad; }
+.models-role-text input { min-height: 30px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; font-size: 12px; }
+.models-role-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-width: 0; }
+.models-role-controls > select { flex: 0 0 auto; }
+.models-pick { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex: 1 1 100%; min-width: 0; }
+.models-pick-label { min-width: 48px; font-size: 12px; color: var(--muted); }
+.models-role .model-picker { height: 30px; padding: 4px 8px; border: 1px solid #334962; border-radius: 6px; background: #132235; color: #c5d6ed; font: inherit; font-size: 12px; color-scheme: dark; }
+.models-role select.model-picker { padding-right: 20px; }
+.models-pick input.model-picker { flex: 1 1 140px; min-width: 110px; }
+.models-warning { flex: 1 1 100%; font-size: 11px; color: #e0b36a; }
+.models-actions { display: flex; gap: 8px; position: sticky; bottom: 0; padding: 10px 0; background: var(--bg); }
+.models-actions button { display: inline-flex; align-items: center; gap: 6px; }
+@media (max-width: 680px) {
+  .models-role { grid-template-columns: 1fr; }
+}
+.models-scope .primary-button { padding: 6px 12px; border: 1px solid #5278a9; border-radius: 7px; background: #254c7a; color: #edf5ff; font-size: 13px; font-weight: 600; cursor: pointer; }
+.models-scope .primary-button:disabled { opacity: .5; cursor: not-allowed; }

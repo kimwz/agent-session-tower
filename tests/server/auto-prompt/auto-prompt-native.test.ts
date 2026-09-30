@@ -165,6 +165,28 @@ for (const mode of ['missing-structured', 'error-result', 'tool-call']) {
     await assert.rejects(runAutoPromptModel(f.request, f.dependencies));
   });
 }
+test('judgments pass the role\'s reasoning effort, turn Claude\'s thinking off, and leave an unset model to the CLI', async t => {
+  const codex = await fixture(t);
+  assert.deepEqual(await runAutoPromptModel({ ...codex.request, effort: 'high' }, codex.dependencies), DECISION);
+  assert.ok(codex.launched().args.includes('model_reasoning_effort="high"'));
+  const claude = await fixture(t, 'claude');
+  assert.deepEqual(await runAutoPromptModel({ ...claude.request, effort: 'xhigh' }, claude.dependencies), DECISION);
+  assert.equal(claude.launched().args[claude.launched().args.indexOf('--effort') + 1], 'xhigh');
+  assert.equal(claude.launched().options.env.MAX_THINKING_TOKENS, process.env.MAX_THINKING_TOKENS);
+  const off = await fixture(t, 'claude');
+  assert.deepEqual(await runAutoPromptModel({ ...off.request, model: 'haiku', effort: 'off' }, off.dependencies), DECISION);
+  assert.ok(!off.launched().args.includes('--effort'));
+  assert.equal(off.launched().options.env.MAX_THINKING_TOKENS, '0');
+  // Any argv-safe model now runs as asked, a Claude alias outside the catalog included; none leaves the CLI's own.
+  const fable = await fixture(t, 'claude');
+  await runAutoPromptModel({ ...fable.request, model: 'fable' }, fable.dependencies);
+  assert.equal(fable.launched().args[fable.launched().args.indexOf('--model') + 1], 'fable');
+  const unset = await fixture(t);
+  await runAutoPromptModel({ ...unset.request, model: undefined }, unset.dependencies);
+  assert.ok(!unset.launched().args.includes('--model'));
+  assert.ok(!unset.launched().args.some(arg => arg.startsWith('model_reasoning_effort')));
+});
+
 test('Claude reports only bounded event names for unsupported protocol frames', async t => {
   const knownName = await fixture(t, 'claude', 'unknown-system');
   await assert.rejects(runAutoPromptModel(knownName.request, knownName.dependencies), {
@@ -275,11 +297,15 @@ test('orphaned descendant holding stdout is terminated before routing settles', 
   assert.fail('orphan process survived routing cleanup');
 });
 
-test('already cancelled and unsupported-model requests never launch a native process', async t => {
+test('already cancelled and invalid model or effort requests never launch a native process', async t => {
   const f = await fixture(t);
   f.controller.abort();
   await assert.rejects(runAutoPromptModel(f.request, f.dependencies), { name: 'AbortError' });
-  await assert.rejects(runAutoPromptModel({ ...f.request, signal: new AbortController().signal, model: 'automatic-fallback' }, f.dependencies), /unsupported/);
+  const live = { ...f.request, signal: new AbortController().signal };
+  await assert.rejects(runAutoPromptModel({ ...live, model: '--dangerously-skip-permissions' }, f.dependencies), /unsupported/);
+  await assert.rejects(runAutoPromptModel({ ...live, effort: 'high; rm -rf' }, f.dependencies), /unsupported/);
+  // Thinking off is Claude's alone.
+  await assert.rejects(runAutoPromptModel({ ...live, provider: 'codex', model: 'gpt-5.6-sol', effort: 'off' }, f.dependencies), /unsupported/);
   assert.equal(f.launched(), undefined);
 });
 

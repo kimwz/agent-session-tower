@@ -22,6 +22,8 @@ export interface Host {
   updating?: boolean;
   /** Its triggers can be managed from this page now. */
   triggers?: boolean;
+  /** Its model settings can be read and changed from here (Settings › Models). */
+  models?: boolean;
   /** Some state of it is known to this page, even if out of date. */
   known: boolean;
   version?: string;
@@ -94,7 +96,7 @@ export function combinedView(local: Snapshot | null, nodes: ReadonlyMap<string, 
   if (!listed.length) return { view: local, hosts: [here], complete };
   const parts = listed.flatMap(node => { const snapshot = nodes.get(node.id); return snapshot ? [named(node.id, snapshot)] : []; });
   const hosts = [here, ...listed.map((node): Host => ({ node: node.id, name: node.label || node.name, status: node.status, live: node.status === 'connected' && node.streaming,
-    canWork: node.status === 'connected' && node.streaming && node.features.includes('work'), workspace: node.status === 'connected' && node.features.includes('workspace'), ...(node.features.includes('read') ? { reporting: true } : {}), ...(node.status === 'connected' && node.features.includes('triggers') ? { triggers: true } : {}), known: Boolean(nodes.get(node.id)) && !nodes.get(node.id)!.scanning, ...(node.updating ? { updating: true } : {}), ...(node.version ? { version: node.version, versions: versionsOf(node.version, nodes.get(node.id)) } : {}), providers: nodes.get(node.id)?.providers ?? [],
+    canWork: node.status === 'connected' && node.streaming && node.features.includes('work'), workspace: node.status === 'connected' && node.features.includes('workspace'), ...(node.features.includes('read') ? { reporting: true } : {}), ...(node.status === 'connected' && node.features.includes('triggers') ? { triggers: true } : {}), ...(node.status === 'connected' && node.features.includes('models') ? { models: true } : {}), known: Boolean(nodes.get(node.id)) && !nodes.get(node.id)!.scanning, ...(node.updating ? { updating: true } : {}), ...(node.version ? { version: node.version, versions: versionsOf(node.version, nodes.get(node.id)) } : {}), providers: nodes.get(node.id)?.providers ?? [],
     // A computer out of reach shows no rings rather than old numbers that look current.
     ...(node.status === 'connected' && node.streaming && nodes.get(node.id)?.system ? { system: nodes.get(node.id)!.system } : {}) }))];
   return { hosts, complete, view: { ...local,
