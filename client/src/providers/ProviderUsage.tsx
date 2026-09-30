@@ -41,7 +41,7 @@ export function ProviderUsageMeter({ provider, health }: { provider: Provider; h
       <strong>{t('{0} 계정 사용량', { 0: providerLabels[provider] })}</strong>
       <p>{t('모든 기기에서 공유하는 계정 한도입니다.')}</p>
       {windows.length ? <dl>{windows.map(window => <UsageWindowDetail key={window.id} window={window} now={now} />)}</dl> : <p className="usage-unavailable">{usageUnavailableReason(usage)}</p>}
-      {stale && <p className="usage-stale">{t('이전 정보 · 새 사용량을 불러오지 못했습니다.')}</p>}
+      {stale && <p className="usage-stale">{usage?.status === 'loading' ? t('이전 정보 · 새 사용량 확인 중') : t('이전 정보 · 새 사용량을 불러오지 못했습니다.')}</p>}
       {usage?.updatedAt && <small>{t('확인: {0}', { 0: relativeTime(usage.updatedAt) })}</small>}
     </div>}
   </div>;

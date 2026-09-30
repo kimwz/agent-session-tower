@@ -219,16 +219,40 @@ test('a restarted cache shows the last saved quota as stale until a new reading 
   assert.doesNotMatch(JSON.stringify(file), /token|email/);
 
   answer = { status: 'error', windows: [], reason: 'rate_limited' };
-  let changes = 0;
-  const second = new ProviderCapabilities(initial, { ...options, onChange: () => { changes++; } });
+  let restored!: () => void;
+  const loaded = new Promise<void>(resolve => { restored = resolve; });
+  const second = new ProviderCapabilities(initial, { ...options, onChange: () => restored() });
   t.after(() => second.stop());
-  await new Promise(resolve => setTimeout(resolve, 20));
-  assert.equal(second.list()[0].usage?.stale, true); assert.equal(second.list()[0].usage?.windows[0].usedPercent, 42); assert.equal(changes, 1);
+  await loaded;
+  assert.equal(second.list()[0].usage?.status, 'loading'); assert.equal(second.list()[0].usage?.stale, true); assert.equal(second.list()[0].usage?.windows[0].usedPercent, 42);
   await second.refresh();
   const usage = second.list()[0].usage!;
   assert.equal(usage.reason, 'rate_limited'); assert.equal(usage.stale, true); assert.equal(usage.windows[0].usedPercent, 42);
   await second.stop();
   assert.equal(JSON.parse(await readFile(join(directory, 'provider-usage.json'), 'utf8')).providers.claude.windows[0].usedPercent, 42);
+});
+
+test('a sign-in that cannot show usage drops the saved quota of an earlier account', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-usage-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const initial: ProviderHealth[] = [{ provider: 'claude', available: true, executable: '/fixture/claude', sessionCount: 0 }];
+  const future = new Date(Date.now() + 3600_000).toISOString();
+  await writeFile(join(directory, 'provider-usage.json'), JSON.stringify({ version: 1, providers: { claude: { updatedAt: new Date().toISOString(), windows: [{ id: 'five_hour', usedPercent: 87, windowMinutes: 300, resetsAt: future }] } } }));
+  const cache = new ProviderCapabilities(initial, { health: async () => initial, onChange: () => {}, stateDir: directory, env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' },
+    claudeUsage: async () => ({ status: 'unavailable', windows: [], reason: 'not_supported' }) });
+  await cache.refresh(); await cache.stop();
+  assert.deepEqual(cache.list()[0].usage?.windows, []);
+  assert.deepEqual(JSON.parse(await readFile(join(directory, 'provider-usage.json'), 'utf8')).providers, {});
+});
+
+test('stopping while the saved quota loads starts no provider read', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-usage-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const initial: ProviderHealth[] = [{ provider: 'claude', available: true, executable: '/fixture/claude', sessionCount: 0 }];
+  let reads = 0;
+  const cache = new ProviderCapabilities(initial, { health: async () => initial, onChange: () => {}, stateDir: directory, read: async () => { reads++; return {}; } });
+  cache.start(); await cache.stop();
+  assert.equal(reads, 0);
 });
 
 test('Claude usage is read at most every three minutes and backs off after 429s', async t => {
@@ -255,4 +279,12 @@ test('Claude usage is read at most every three minutes and backs off after 429s'
   answers.push({ status: 'error', windows: [], reason: 'unreachable' });
   await minutes(15); assert.equal(calls.length, 7);
   await minutes(1); assert.equal(calls.length, 8); // other failures keep the normal cadence
+  await minutes(14); assert.equal(calls.length, 8); // an unreachable read between 429s keeps the 15-minute step
+  await minutes(1); assert.equal(calls.length, 9);
+  await minutes(15); assert.equal(calls.length, 10);
+  answers.push({ status: 'available', windows: [{ id: 'five_hour', usedPercent: 6, resetsAt: new Date(clock + 16.5 * 60_000).toISOString() }], updatedAt: new Date(clock).toISOString() });
+  await minutes(15); assert.equal(calls.length, 11);
+  await minutes(1); assert.equal(calls.length, 11);
+  await minutes(1); assert.equal(calls.length, 12); // a window that has reset is read again at once
+  clock -= 3600_000; await cache.refresh(); assert.equal(calls.length, 13); // a clock set back never stretches the wait
 });

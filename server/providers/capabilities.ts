@@ -330,12 +330,13 @@ export class ProviderCapabilities {
   private failures = 0;
   private claudeUsageAfter = 0;
   private claudeRateLimits = 0;
+  private lastClaudeUsage?: ProviderUsage;
   private readonly loaded?: Promise<void>;
   private saving: Promise<void> = Promise.resolve();
   private saved = '';
   constructor(initial: ProviderHealth[], private readonly options: CapabilityOptions) {
     this.providers = initial.map(provider => ({ ...provider, usage: { status: 'loading', windows: [] } }));
-    if (options.stateDir) this.loaded = this.load(join(options.stateDir, USAGE_FILE));
+    if (options.stateDir) this.loaded = this.load(join(options.stateDir, USAGE_FILE)).catch(() => {});
   }
   private async load(path: string): Promise<void> {
     let saved: Partial<Record<Provider, ProviderUsage>>;
@@ -363,17 +364,22 @@ export class ProviderCapabilities {
   }
   private now(): number { return this.options.now ? this.options.now() : Date.now(); }
   /** Claude usage reads paced on their own: at most one per interval, and longer after 429s. */
-  private async readClaudeUsagePaced(previous: ProviderUsage | undefined, signal: AbortSignal): Promise<ProviderUsage> {
+  private async readClaudeUsagePaced(signal: AbortSignal): Promise<ProviderUsage> {
     const now = this.now();
-    if (previous && previous.status !== 'loading' && now < this.claudeUsageAfter) return previous;
+    const last = this.lastClaudeUsage;
+    // A window that has reset needs a new reading; a clock set back never stretches the wait.
+    const waiting = now < this.claudeUsageAfter && this.claudeUsageAfter - now <= CLAUDE_RATE_LIMIT_BACKOFF.at(-1)!;
+    if (last && waiting && !last.windows.some(window => window.resetsAt && Date.parse(window.resetsAt) <= now)) return last;
     const usage = await (this.options.claudeUsage || (signal => readClaudeUsage({ env: this.options.env, signal })))(signal);
+    if (signal.aborted) return usage;
     if (usage.reason === 'rate_limited') {
       this.claudeUsageAfter = now + CLAUDE_RATE_LIMIT_BACKOFF[Math.min(this.claudeRateLimits, CLAUDE_RATE_LIMIT_BACKOFF.length - 1)];
       this.claudeRateLimits++;
-    } else {
+    } else if (usage.status === 'available') {
       this.claudeRateLimits = 0;
-      this.claudeUsageAfter = usage.status === 'available' ? now + CLAUDE_USAGE_INTERVAL : 0;
-    }
+      this.claudeUsageAfter = now + CLAUDE_USAGE_INTERVAL;
+    } else this.claudeUsageAfter = 0;
+    this.lastClaudeUsage = usage;
     return usage;
   }
   list(): ProviderHealth[] {
@@ -407,6 +413,7 @@ export class ProviderCapabilities {
   }
   private async read(): Promise<void> {
     await this.loaded;
+    if (this.stopped) return;
     this.controller = new AbortController();
     const timeout = setTimeout(() => this.controller?.abort(), this.options.timeoutMs || 12_000); timeout.unref();
     const signal = this.controller.signal;
@@ -423,13 +430,13 @@ export class ProviderCapabilities {
             capabilities = await (this.options.unlessUpdating ? this.options.unlessUpdating('codex', read) : read()) ?? { usage: previous?.usage ?? { status: 'loading', windows: [] } };
           }
           else {
-            const previous = this.providers.find(item => item.provider === 'claude')?.usage;
-            const [usage, defaultEffort] = await Promise.all([this.readClaudeUsagePaced(previous, signal), readClaudeDefaultEffort(this.options.env || process.env)]);
+            const [usage, defaultEffort] = await Promise.all([this.readClaudeUsagePaced(signal), readClaudeDefaultEffort(this.options.env || process.env)]);
             capabilities = { usage, models: CLAUDE_MODELS.map(copyModel), efforts: CLAUDE_EFFORTS.map(effort => ({ ...effort })), ...(defaultEffort ? { defaultEffort } : {}) };
           }
         } catch { capabilities = { usage: unavailable('unreachable') }; }
         const previous = this.providers.find(item => item.provider === provider.provider);
-        if (capabilities.usage?.status !== 'available' && !capabilities.usage?.windows.length && previous?.usage?.windows.length) {
+        // Usage this sign-in cannot show (an API key, another provider) must not keep an earlier account's quota.
+        if (capabilities.usage?.status !== 'available' && capabilities.usage?.reason !== 'not_supported' && !capabilities.usage?.windows.length && previous?.usage?.windows.length) {
           capabilities.usage = { ...capabilities.usage!, windows: previous.usage.windows, updatedAt: previous.usage.updatedAt, stale: true };
         }
         return { ...provider, ...(previous?.models ? { models: previous.models, defaultModel: previous.defaultModel, ...(previous.efforts ? { efforts: previous.efforts } : {}),
