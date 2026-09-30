@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.94.1] - 2026-09-30
+
+### Fixed
+- **Settings → Models** picks each model from the computer's whole list (for Claude: Fable 5.1, Opus 5.5, Sonnet 5.5, Haiku 4.5) instead of a text field whose suggestions narrowed to what was already typed; **직접 입력…** (type a model) still takes a model the list does not have.
+- Claude's model lists (chat, new session, triggers, Settings → Models) include **Fable** and name the model each alias selects.
+
 ## [1.94.0] - 2026-09-30
 
 ### Added

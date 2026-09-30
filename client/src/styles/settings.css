@@ -166,6 +166,7 @@ label.settings-row { cursor:pointer; }
 .models-role .model-picker { height: 30px; padding: 4px 8px; border: 1px solid #334962; border-radius: 6px; background: #132235; color: #c5d6ed; font: inherit; font-size: 12px; color-scheme: dark; }
 .models-role select.model-picker { padding-right: 20px; }
 .models-pick input.model-picker { flex: 1 1 140px; min-width: 110px; }
+.models-pick > select.model-picker:not(.effort-picker) { flex: 1 1 170px; min-width: 140px; }
 .models-warning { flex: 1 1 100%; font-size: 11px; color: #e0b36a; }
 .models-actions { display: flex; gap: 8px; position: sticky; bottom: 0; padding: 10px 0; background: var(--bg); }
 .models-actions button { display: inline-flex; align-items: center; gap: 6px; }

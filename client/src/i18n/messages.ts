@@ -2269,4 +2269,7 @@ export const english: Record<string, string> = {
   "공개 에이전트를 만들 때 미리 선택됩니다.": "Preselected when you create a public agent.",
   "검토 모델은 설정 › 모델의 \"권한 자동 리뷰어\"에서 정합니다.": "The reviewer's model is chosen under Settings › Models, \"Permission reviewer\".",
   "정리할 모델은 설정 › 모델의 \"스킬 제안\"에서 정합니다.": "The model that sums up sessions is chosen under Settings › Models, \"Skill proposals\".",
+  "직접 입력…": "Type a model\u2026",
+  "{0} 모델 이름": "{0} model name",
+  "모델 이름": "Model name",
 };
