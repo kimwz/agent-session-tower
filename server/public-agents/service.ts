@@ -175,6 +175,8 @@ export class PublicAgentService extends EventEmitter {
   close(): void { this.pause(); }
   /** No new model call or run starts; what visitors send is still saved for the next worker. */
   hold(): void { this.held = true; }
+  /** A forced update that gave up: visitors' requests are taken here again. */
+  release(): void { this.held = false; }
   inFlight(): boolean { return this.working.size > 0 || this.pendingWrites > 0 || Boolean(this.ticking); }
   hasActive(): boolean {
     return [...this.data.values()].some(data => data.conversations.some(item => item.needsTurn || item.events.length) || data.requests.some(item => !DONE.has(item.status)));
@@ -564,7 +566,7 @@ export class PublicAgentService extends EventEmitter {
     const run = continuedRunById(runs, request.runId) ?? continuedRun(runs, runs.find(item => item.autoPromptId === request.id));
     // The request remembers the run carrying it on, so it still finds it once the earlier one leaves the history.
     // Only a continuation that started: a queued one is removed again when the turn turns out to have finished itself.
-    if (run && run.status !== 'queued' && request.runId !== run.id) { request.runId = run.id; void this.saveData(agent.id); }
+    if (run && !(run.status === 'queued' && run.scheduled?.resume === 'update') && request.runId !== run.id) { request.runId = run.id; void this.saveData(agent.id); }
     if (!run) { this.finish(data, request, { status: 'failed', error: 'The run record is no longer available.', result: 'The outcome of this request could not be confirmed.' }); void this.saveData(agent.id); return; }
     if (!FINISHED.has(run.status)) return;
     const output = run.output ?? '';

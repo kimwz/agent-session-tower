@@ -384,8 +384,8 @@ export class MasterSession {
     }
     let run: Run | undefined;
     if (!ended && item.runId) {
+      // The item keeps its first run's ID, so discovery still knows that run; its continuation is looked up each time.
       run = continuedRunById(snapshot.runs ?? [], item.runId);
-      if (run && run.id !== item.runId && run.status !== 'queued') { item.runId = run.id; item.sessionId = run.sessionId; }
       if (run && (run.status === 'completed' || run.status === 'error' || run.status === 'cancelled')) ended = run.status;
     }
     if (!ended && Date.now() - Date.parse(item.createdAt) > UNKNOWN_MS && !run && !(item.jobId && !item.runId && (snapshot.autoPrompts ?? []).some(entry => entry.id === item.jobId))) ended = 'unknown';

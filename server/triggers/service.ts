@@ -227,6 +227,8 @@ export class TriggerService extends EventEmitter {
   close(): void { this.pause(); }
   /** New scheduled times are left for the successor worker; its catch-up runs them. */
   hold(): void { this.held = true; }
+  /** A forced update that gave up: scheduled times fire here again. */
+  release(): void { this.held = false; }
 
   hasActive(): boolean { return this.state.triggers.some(trigger => trigger.enabled) || this.state.events.some(event => UNFINISHED.has(event.status)); }
   /** Work a handoff must wait for: a tick, a save, or a claim whose submission is not yet recorded. */
@@ -1162,7 +1164,7 @@ export class TriggerService extends EventEmitter {
       const run = continuedRunById(runs, event.dispatch?.runId ?? job?.runId) ?? continuedRun(runs, runs.find(item => item.autoPromptId === event.requestId));
       const patch: Partial<TriggerEvent> = {};
       // A queued continuation is not recorded yet: it is removed again when the turn turns out to have finished itself.
-      if (run && run.status !== 'queued' && event.dispatch?.runId !== run.id) patch.dispatch = { ...event.dispatch, runId: run.id, sessionId: run.sessionId };
+      if (run && !(run.status === 'queued' && run.scheduled?.resume === 'update') && event.dispatch?.runId !== run.id) patch.dispatch = { ...event.dispatch, runId: run.id, sessionId: run.sessionId };
       if (job?.decision?.action === 'create' && job.sessionId && !event.dispatch?.createdSessionId) patch.dispatch = { ...event.dispatch, ...patch.dispatch, createdSessionId: job.sessionId };
       if (job && (job.status === 'error' || job.status === 'cancelled') && !run) Object.assign(patch, { status: job.status === 'error' ? 'error' : 'cancelled', error: job.error });
       else if (run?.status === 'completed') patch.status = 'completed';

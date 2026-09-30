@@ -298,6 +298,7 @@ test('a result notice the full queue refused is sent on a later tick; its run is
   refuse = false;
   await f.manager.tick();
   assert.equal(resumes, 1);
+  assert.deepEqual(f.manager.retainedRuns(), [], 'handed over: the run is no longer kept for it');
 });
 
 test('a result notice refused for good (the CLI is missing) is recorded, not retried forever', async t => {

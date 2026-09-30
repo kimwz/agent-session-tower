@@ -70,6 +70,8 @@ export interface RunnerHostOptions {
   inFlight?: () => boolean;
   /** Stops automatic intake from starting new work when a handoff has waited too long for a quiet moment. */
   holdIntake?: () => void;
+  /** Undoes `holdIntake` when a forced update gives up and this worker stays in service. */
+  releaseIntake?: () => void;
   /** Only work underway this instant; a forced update waits for this instead of `inFlight`. */
   transient?: () => boolean;
   /** Delegated work of a Slack or GitHub workflow: a forced update neither wraps it up nor resumes it. */
@@ -329,6 +331,9 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         console.error('The forced update could not hand off; new turns start again on this worker.');
         forced = undefined;
         options.runs.endUpdateDrain();
+        options.releaseIntake?.();
+        // The ordinary handoff goes on waiting for a quiet moment, its long hold counted from now.
+        if (handoff) { handoff.held = false; handoff.requestedAt = Date.now(); }
         changed();
       }
     }
@@ -599,6 +604,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       transient: () => slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || Boolean(tools?.busy()),
       // Work a Slack or GitHub coordinator delegated: its coordinator hears how it ended and decides what follows.
       delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
+      releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); worktrees.resume(); },
       holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); worktrees.pause(); },
       quiesce: async () => { tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); worktrees.pause(); permissions.pause(); await Promise.all([worktrees.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
       resume: () => { tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); worktrees.resume(); permissions.resume(); sessions.resume(); },

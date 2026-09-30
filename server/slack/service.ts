@@ -187,6 +187,7 @@ export class SlackService extends EventEmitter {
   hasTransient() { return this.tone.overview().status === 'collecting' || this.automation.transient(); }
   /** New mentions are still received and saved, but only a successor worker starts them. */
   holdNewWork() { this.automation.hold(); }
+  releaseNewWork() { this.automation.release(); }
   flush() { return this.automation.flush(); }
   private client(teamId: string) {
     if (!this.settings.userToken || this.settings.account?.teamId !== teamId) throw new Error('Slack 계정 연결이 필요합니다.');

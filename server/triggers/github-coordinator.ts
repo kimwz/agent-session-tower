@@ -247,5 +247,6 @@ export class GitHubCoordinator extends EventEmitter {
   hasPending() { return this.automation.hasPending(); }
   inFlight() { return this.automation.inFlight(); }
   hold() { this.automation.hold(); }
+  release() { this.automation.release(); }
   flush() { return this.automation.flush(); }
 }

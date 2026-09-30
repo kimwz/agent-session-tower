@@ -208,6 +208,8 @@ export class RunManager extends EventEmitter {
   private stopping = false;
   private writes: Promise<void> = Promise.resolve();
   private persistenceError?: Error;
+  /** The last save of required instructions failed: a handoff would lose them, so `flushState` refuses. */
+  private instructionsError?: Error;
 
   constructor(options: RunnerOptions) {
     super();
@@ -913,6 +915,8 @@ export class RunManager extends EventEmitter {
     if (!this.options.openCodexBridge) return false;
     const attachments = await this.attachments.resolve(run.sessionId, run.attachments);
     let started = false;
+    /** Closed before it was sent because Tower is switching workers: the run waits for the new worker. */
+    let heldForUpdate = false;
     const bridge = await this.options.openCodexBridge({
       // The desktop app shows every block it is sent: a turn goes there only without instructions it must have, and without
       // its notes.
@@ -931,7 +935,7 @@ export class RunManager extends EventEmitter {
         this.bridged.delete(run.id);
         this.reservedSessions.delete(session.id);
         // Taken back out of the app's queue before it started: it waits in Tower's queue for the new worker.
-        if (result.withdrawn && !started && run.status === 'queued') {
+        if ((result.withdrawn || heldForUpdate) && !started && run.status === 'queued') {
           run.output = UPDATE_WAIT; delete run.towerTools;
           this.changed();
           return;
@@ -951,6 +955,7 @@ export class RunManager extends EventEmitter {
     if (!bridge) return false;
     await this.prepareLaunch(run);
     if (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session)) {
+      heldForUpdate = run.status === 'queued' && this.drain !== undefined;
       bridge.close(); this.reservedSessions.delete(session.id); return true;
     }
     this.bridged.set(run.id, bridge);
@@ -1717,8 +1722,8 @@ export class RunManager extends EventEmitter {
       // Instructions before the runs that name them, so a saved marker always finds its text.
       // A failure here costs only those turns' restart (they are cancelled then, as before); runs.json is still saved.
       if (instructions !== (this.saved.instructions ?? '{}')) {
-        try { await writePrivateJson(this.instructionsFile, instructions); this.saved.instructions = instructions; }
-        catch (error) { console.error(`Turn instructions were not saved: ${errorMessage(error)}`); }
+        try { await writePrivateJson(this.instructionsFile, instructions); this.saved.instructions = instructions; this.instructionsError = undefined; }
+        catch (error) { this.instructionsError = error as Error; console.error(`Turn instructions were not saved: ${errorMessage(error)}`); }
       }
       if (data !== this.saved.runs) { await writePrivateJson(this.stateFile, data); this.saved.runs = data; }
       this.persistenceError = undefined;
@@ -1726,7 +1731,10 @@ export class RunManager extends EventEmitter {
   }
 
   /** Waits for every accepted change to reach disk, without stopping or cancelling anything. */
-  async flushState(): Promise<void> { this.persist(); await this.flush(); }
+  async flushState(): Promise<void> {
+    this.persist(); await this.flush();
+    if (this.instructionsError) throw new RunError(`Cannot save instructions of turns still to run: ${this.instructionsError.message}`, 503);
+  }
 
   /**
    * Holds new launches of `provider` while its CLI is updated, but only when none of its runs is starting or running;

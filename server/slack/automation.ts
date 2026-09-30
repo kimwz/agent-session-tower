@@ -254,13 +254,17 @@ export class SlackAutomationManager extends EventEmitter {
     for (const item of this.items) {
       const tasks = item.delegatedTasks;
       if (!tasks?.length) continue;
-      if (terminal.has(item.status) && item.ownerConditionalReply?.status !== 'pending' && tasks.every(task => task.notifiedRunId || task.notificationError || task.submissionError)) continue;
+      // Done with its delegated runs once every result was handed over and no owner reply still waits on one. The saved
+      // status of a conversation stays 'running', so it is not what decides.
+      if (item.ownerConditionalReply?.status !== 'pending' && tasks.every(task => task.notifiedRunId || task.notificationError || task.submissionError)) continue;
       for (const task of tasks) if (task.delegatedRunId) ids.push(task.delegatedRunId);
     }
     return ids;
   }
   /** During a worker handoff, newly received mentions wait for the successor instead of starting here. */
   hold(): void { this.held = true; }
+  /** A forced update that gave up: new mentions start here again. */
+  release(): void { this.held = false; }
   /**
    * Saves the current state again and reports failure, so a handoff never leaves an older file behind. A reaction
    * call already underway is waited for first; held, no new one starts.
