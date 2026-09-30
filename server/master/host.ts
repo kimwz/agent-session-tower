@@ -17,6 +17,7 @@ import { TowerClient, type WebCredentials } from './tower-client.js';
 import { ElevenLabs, type ElevenLabsOptions } from './elevenlabs.js';
 import { FirstReplyMaker } from './first-reply.js';
 import { MasterVoice, type MasterVoiceOptions, type VoiceTiming } from './voice.js';
+import { keepEndpoint } from '../runs/endpoint-keeper.js';
 
 export const MASTER_PROTOCOL = 1;
 const MAX_REQUEST = 256 * 1024;
@@ -196,9 +197,11 @@ export async function startMasterHost(options: MasterHostOptions) {
   }
 
   let idleTimer: ReturnType<typeof setInterval> | undefined;
+  let stopKeeping: (() => void) | undefined;
   const close = async (idle = false) => {
     if (closing) return;
     closing = true;
+    stopKeeping?.();
     if (idleTimer) clearInterval(idleTimer);
     for (const stream of streams) stream.end();
     server.closeAllConnections();
@@ -231,6 +234,7 @@ export async function startMasterHost(options: MasterHostOptions) {
     await chmod(paths.socket, 0o600);
     // The credential appears last: a web that can read it can already talk to this host.
     await writeFile(paths.token, token, { flag: 'wx', mode: 0o600 });
+    stopKeeping = keepEndpoint({ socket: paths.socket, token: paths.token, value: token });
     idleTimer = setInterval(() => {
       // With a master session it stays, to report the work handed out whenever it ends.
       if (closing || pending || streams.size || settings.current().session || Date.now() - lastRequest < (options.idleMs ?? IDLE_MS)) return;

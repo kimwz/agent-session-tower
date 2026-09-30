@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.90.1] - 2026-09-30
+
+### Fixed
+- **Terminals open again after a long-running terminal host lost its credential.** The terminal host, execution worker and master host keep their connection files in `/tmp`, where cleaners delete old files. When the terminal host's credential was removed, the host kept running and holding its lock, so no new host could start and every new terminal failed after 30 seconds. Each host now writes a removed credential again within 5 seconds and keeps its files fresh so cleaners leave them alone.
+
 ## [1.90.0] - 2026-09-30
 
 ### Changed

@@ -4,6 +4,7 @@ import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { acquireStateLock, MonitorAlreadyRunning } from '../instance/state-lock.js';
+import { keepEndpoint } from '../runs/endpoint-keeper.js';
 import { MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths } from '../runs/runner-protocol.js';
 import { WorkspaceTerminals, type TerminalOwner } from '../workspace-terminals.js';
 
@@ -28,6 +29,8 @@ export interface TerminalHostOptions {
   idleMs?: number;
   onIdle?: () => void | Promise<void>;
   releaseStateLock?: () => Promise<void>;
+  /** How often the socket and credential are checked (tests only). */
+  keepIntervalMs?: number;
 }
 
 /**
@@ -88,9 +91,11 @@ export async function startTerminalHost(options: TerminalHostOptions) {
   });
   server.requestTimeout = 0;
   let idleTimer: ReturnType<typeof setInterval> | undefined;
+  let stopKeeping: (() => void) | undefined;
   const close = async (idle = false) => {
     if (closing) return;
     closing = true;
+    stopKeeping?.();
     if (idleTimer) clearInterval(idleTimer);
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));
@@ -104,6 +109,7 @@ export async function startTerminalHost(options: TerminalHostOptions) {
     await writeFile(paths.token, token, { flag: 'wx', mode: 0o600 });
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(paths.socket, () => { server.off('error', reject); resolve(); }); });
     await chmod(paths.socket, 0o600);
+    stopKeeping = keepEndpoint({ socket: paths.socket, token: paths.token, value: token }, options.keepIntervalMs);
     if (options.onIdle) {
       idleTimer = setInterval(() => {
         if (closing || pending || options.terminals.hasActive() || Date.now() - lastRequest < (options.idleMs ?? 30_000)) return;

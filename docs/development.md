@@ -119,6 +119,8 @@ Owner-started Claude turns with outstanding background results can recover from 
 
 Terminal shells run in a separate terminal host (`--terminal-host`) with its own lock in `<state-dir>/terminal-runtime/`, socket and credential. Replacing the worker never touches shells. The web starts the host when a shell is opened; the host exits after 30 seconds with no shell and no web request. Shells opened in a worker from before the terminal host remain reachable through that worker until closed.
 
+The worker, terminal host and master host keep their `/tmp` socket and credential alive while they run (`server/runs/endpoint-keeper.ts`): every 5 seconds a credential that a `/tmp` cleaner removed is written again with the same value, and files older than an hour are touched. Without it, a host that lost its credential still holds its lock, so no replacement can start and its clients are locked out.
+
 The first upgrade from an older in-process runner needs a handoff or a fully drained old server: its old SIGTERM handler still cancels work. Do not start a new worker against the same state files while the old runner is writing them. Test with fixtures; never kill the old process merely to test restart behavior.
 
 ### Conversation image previews
