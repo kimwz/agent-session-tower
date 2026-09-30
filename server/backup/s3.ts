@@ -92,7 +92,7 @@ export class S3Client {
     let size = 0;
     const reader = response.body?.getReader();
     for (;;) {
-      const next = await reader?.read();
+      const next = await reader?.read().catch(error => { throw new BackupError(`저장소에서 받는 중 끊겼습니다: ${error instanceof Error ? error.message : String(error)}`, 502); });
       if (!next || next.done) break;
       size += next.value.length;
       if (size > maxBytes) { await reader!.cancel().catch(() => {}); throw new BackupError('백업 파일이 너무 큽니다.', 413); }

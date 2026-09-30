@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
-import { collectTriggers, type TriggerBackup } from '../../../server/backup/payload.js';
+import { applyWorkerFiles, collectTriggers, type TriggerBackup } from '../../../server/backup/payload.js';
 import type { Run } from '../../../shared/types.js';
 import type { Trigger, TriggerActor, TriggerInput } from '../../../shared/triggers.js';
 
@@ -168,4 +168,40 @@ test('the trigger limit counts triggers kept here, and a kept trigger keeps its 
   assert.deepEqual(service.list().map(item => item.name).sort(), ['A', 'Kept']);
   assert.ok(errors.some(error => /"B".*한도/.test(error)));
   assert.deepEqual((await collectTriggers(f.directory))!.trustedFolders, [f.project]);
+});
+
+test('a GitHub watch record is taken whole: its baseline comes along, and a malformed one is ignored', async t => {
+  const f = await fixture(t);
+  const a = github('22222222-2222-4222-8222-222222222222', ['octo/app#1'], 1000);
+  const baseline = { handled: ['octo/app#1'], checkedAt: 1000, baseline: { before: '2026-09-01T00:00:00.000Z' }, matched: ['octo/app#1'] };
+  let { service } = await f.open(backupOf([a.trigger], { github: { [a.trigger.id]: baseline } }));
+  assert.deepEqual((await collectTriggers(f.directory))!.github[a.trigger.id], baseline, 'nothing of it is dropped');
+  const broken = { handled: 'octo/app#9', skipped: ['octo/app#2'], checkedAt: 5000 } as never;
+  ({ service } = await f.reopen(service, backupOf([a.trigger], { github: { [a.trigger.id]: broken } })));
+  assert.deepEqual((await collectTriggers(f.directory))!.github[a.trigger.id], baseline, 'a malformed record changes nothing');
+  assert.equal(service.list().length, 1);
+});
+
+test('a trigger whose backed-up definition needs a secret this computer no longer has keeps its own definition, secret and grant', async t => {
+  const f = await fixture(t);
+  let { service } = await f.open();
+  const http = (secretId: string): TriggerInput => ({ name: 'Status', enabled: true,
+    source: { kind: 'http', schedule: { type: 'interval', everySeconds: 300 }, request: { method: 'GET', url: 'https://status.example.com/', headers: [{ name: 'authorization', secretId }], timeoutSeconds: 5 }, condition: { type: 'every-success' } } as TriggerInput['source'],
+    handler: { kind: 'task', instructions: 'Look', provider: 'codex', approvals: 'auto', target: { node: 'local', mode: 'folder', cwd: f.project } }, policy: { overlap: 'skip', maxEventsPerHour: 20 } });
+  const first = await service.createSecret({ name: 'Old', origin: 'https://status.example.com', value: 'Bearer old' }, OWNER);
+  const trigger = await service.create(http(first.id), OWNER);
+  // The first secret is deleted, then the backup is made: it has the trigger still naming it.
+  await service.deleteSecret(first.id, OWNER);
+  const backup = (await collectTriggers(f.directory))!;
+  const second = await service.createSecret({ name: 'New', origin: 'https://status.example.com', value: 'Bearer new' }, OWNER);
+  await service.update(trigger.id, http(second.id), trigger.revision, OWNER);
+  service.close(); await service.settle();
+  await applyWorkerFiles(f.directory, { 'trigger-secrets.json': [] });
+  let errors: string[];
+  ({ service, errors } = await f.open(backup));
+  const kept = service.list().find(item => item.id === trigger.id)!;
+  assert.equal(kept.source.kind === 'http' && 'secretId' in kept.source.request.headers[0]! ? kept.source.request.headers[0].secretId : undefined, second.id);
+  assert.ok(errors.some(error => /Status/.test(error)));
+  assert.deepEqual((await collectTriggers(f.directory))!.secretGrants[second.id], [trigger.id]);
+  assert.deepEqual(service.secretList().map(item => item.id), [second.id], 'the secret only this computer had stays');
 });

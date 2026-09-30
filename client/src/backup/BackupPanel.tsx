@@ -121,6 +121,7 @@ export function BackupPanel({ token }: { token: string }) {
         </form>
         {preview && <div className="backup-preview">
           <p>{t('{0}에서 {1}에 만든 백업 (Tower {2})', { 0: preview.from, 1: date(preview.createdAt), 2: preview.towerVersion })}</p>
+          {preview.otherComputer && <p className="auth-error">{t('다른 컴퓨터에서 만든 백업입니다. 그 컴퓨터의 Tower가 계속 켜져 있으면 트리거, Slack, GitHub 자동화, 공개 에이전트가 두 곳에서 함께 동작합니다. 옮기는 중이라면 원래 컴퓨터의 Tower를 먼저 끄세요.')}</p>}
           <ul>{preview.parts.map(part => <li key={part}>{t(PART_LABELS[part])}{part === 'skills' ? ` · ${t('{0}개', { 0: preview.skills })}` : ''}</li>)}</ul>
           <button className="primary-button" disabled={Boolean(busy)} onClick={applyBackup}>{spin('apply') ?? <RotateCcw size={14} />}{t('이 백업으로 복원')}</button>
         </div>}

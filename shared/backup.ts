@@ -16,6 +16,8 @@ export interface BackupPreview {
   towerVersion: string;
   parts: BackupPart[];
   skills: number;
+  /** Made on another computer: its triggers and Slack would also run there while its Tower is on. */
+  otherComputer: boolean;
 }
 
 /** Where the last restore is: waiting for the execution worker to take its part, or done. */

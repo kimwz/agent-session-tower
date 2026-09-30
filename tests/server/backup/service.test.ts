@@ -49,6 +49,7 @@ test('a backup made on one computer restores on another: web settings now, the w
   await assert.rejects(b.service.check(file.text, 'wrong passphrase'), /암호가 맞지 않거나/);
   const preview = await b.service.check(file.text, PASS);
   assert.deepEqual(preview.parts, ['triggers', 'permissions', 'slack', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'master', 'backup']);
+  assert.equal(preview.otherComputer, false, 'made on this same computer');
   const report = await b.service.apply(preview.id);
   await assert.rejects(b.service.apply(preview.id), /만료/, 'a checked backup is applied once');
   assert.equal(report.status, 'waiting-worker');
@@ -248,15 +249,19 @@ test('a backup from a newer Tower is refused, and worker settings a service woul
 
 test('a restored public agent with another password signs its visitors out, and an unreadable master key stops the backup', async t => {
   const b = await computer(t);
-  const agent = (password: string, slug = 'A'.repeat(22)) => ({ id: '11111111-1111-4111-8111-111111111111', slug, name: 'Help', scope: 'Answer questions about tea.', cwd: '/work', provider: 'codex', password, createdAt: '', updatedAt: '' });
+  const agent = (password: string, slug = 'A'.repeat(22), conversation = 'visitor') => ({ id: '11111111-1111-4111-8111-111111111111', slug, name: 'Help', scope: 'Answer questions about tea.', cwd: '/work', provider: 'codex', conversation, password, createdAt: '', updatedAt: '' });
   const { parsePublicAgents } = await import('../../../server/public-agents/service.js');
   const { applyWorkerFiles } = await import('../../../server/backup/payload.js');
   const current = { version: 1, agents: [agent('scrypt$old')] };
   assert.ok(parsePublicAgents(current), 'a public agent this build reads');
   await write(b.stateDir, 'public-agents.json', current);
-  await write(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json', { version: 1, conversations: [], requests: [], visitors: [{ hash: 'h', authorized: true, tag: 'T', createdAt: '', seenAt: '' }] });
-  await applyWorkerFiles(b.stateDir, { 'public-agents.json': { version: 1, agents: [agent('scrypt$new')] } });
-  const data = JSON.parse(await readFile(join(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json'), 'utf8'));
+  await write(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json', { version: 1, conversations: [], requests: [], visitors: [{ hash: 'h', authorized: true, conversationId: 'c', tag: 'T', createdAt: '', seenAt: '' }] });
+  await applyWorkerFiles(b.stateDir, { 'public-agents.json': { version: 1, agents: [agent('scrypt$old', 'A'.repeat(22), 'shared')] } });
+  let data = JSON.parse(await readFile(join(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json'), 'utf8'));
+  assert.equal(data.visitors[0].authorized, true, 'the same password keeps them signed in');
+  assert.equal(data.visitors[0].conversationId, undefined, 'another way of sharing starts their conversations anew');
+  await applyWorkerFiles(b.stateDir, { 'public-agents.json': { version: 1, agents: [agent('scrypt$new', 'A'.repeat(22), 'shared')] } });
+  data = JSON.parse(await readFile(join(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json'), 'utf8'));
   assert.equal(data.visitors[0].authorized, false);
   await applyWorkerFiles(b.stateDir, { 'public-agents.json': { version: 1, agents: [agent('scrypt$new', 'B'.repeat(22))] } });
   assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'public-agents/11111111-1111-4111-8111-111111111111.json'), 'utf8')).visitors, [], 'a new address forgets visitors');
@@ -264,4 +269,27 @@ test('a restored public agent with another password signs its visitors out, and 
   await mkdir(join(b.stateDir, 'master'), { recursive: true });
   await writeFile(join(b.stateDir, 'master', 'elevenlabs-key.json'), '{ broken', { mode: 0o600 });
   await assert.rejects(b.service.export(PASS), /읽지 못해 백업하지 않았습니다/);
+});
+
+test('an upload stopped because Tower shuts down is not a failure, and the next start tries again when due', async t => {
+  const bucket = await fakeBucket(t);
+  let release!: () => void;
+  const stalled = new Promise<void>(resolve => { release = resolve; });
+  // The bucket answers only once released: the upload is still under way when Tower closes.
+  const fetcher: typeof fetch = async (input, init) => { await Promise.race([stalled, new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))))]); return fetch(input, init); };
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-backup-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const groups = new ProjectGroupStore(stateDir), exclusions = new RemoteExclusionStore(stateDir), decisions = new DecisionService(stateDir);
+  await groups.start(); await exclusions.start(); await decisions.start();
+  const service = new BackupService({ stateDir, version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true, stores: { groups, exclusions, decisions }, fetcher, host: 'studio' });
+  await service.start();
+  await service.saveSettings({ enabled: true, intervalHours: 24, keep: 3, passphrase: PASS, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: '', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' } });
+  const upload = service.upload();
+  await new Promise(resolve => setTimeout(resolve, 200));
+  service.close();
+  await assert.rejects(upload);
+  release();
+  const status = (await service.overview()).status;
+  assert.equal(status.lastError, undefined);
+  assert.equal(status.lastAttemptAt, undefined, 'the next start backs up at once');
 });

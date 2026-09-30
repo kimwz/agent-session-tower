@@ -21,7 +21,7 @@ test('backups need a signed-in page and its token, come as a file, and are never
     overview: async () => overview, saveSettings: async body => { calls.push(['settings', body]); return overview; },
     export: async passphrase => { calls.push(['export', passphrase]); return { name: 'tower-backup-here-20260930T000000Z.towerbackup', text: '{"format":"x"}' }; },
     upload: async () => 'key', test: async () => {}, remote: async () => [], download: async () => ({ name: 'a b.towerbackup', text: 'x' }),
-    check: async (file, passphrase) => { calls.push(['check', file, passphrase]); return { id: 'id', createdAt: '', from: 'a', towerVersion: '1', parts: [], skills: 0 }; },
+    check: async (file, passphrase) => { calls.push(['check', file, passphrase]); return { id: 'id', createdAt: '', from: 'a', towerVersion: '1', parts: [], skills: 0, otherComputer: false }; },
     apply: async () => { throw new BackupError('확인한 백업이 만료되었습니다. 파일을 다시 확인하세요.', 409); },
     cancel: async () => { throw new BackupError('기다리는 복원이 없습니다.', 409); },
   };

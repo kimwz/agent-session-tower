@@ -1,5 +1,6 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  "다른 컴퓨터에서 만든 백업입니다. 그 컴퓨터의 Tower가 계속 켜져 있으면 트리거, Slack, GitHub 자동화, 공개 에이전트가 두 곳에서 함께 동작합니다. 옮기는 중이라면 원래 컴퓨터의 Tower를 먼저 끄세요.": "This backup was made on another computer. While its Tower keeps running, triggers, Slack, GitHub automation and public agents run in both places. If you are moving, stop the Tower on the original computer first.",
   "Cloudflare R2 같은 S3 호환 저장소에 주기적으로 암호화한 백업을 올립니다. 이 컴퓨터가 올린 백업 중 오래된 것은 보관 개수만 남기고 지웁니다.": "Uploads an encrypted backup on a schedule to S3-compatible storage such as Cloudflare R2. Of the backups this computer uploaded, only the newest are kept.",
   "GitHub 자동화 규칙": "GitHub automation rules",
   "Slack 연결과 규칙": "Slack connection and rules",

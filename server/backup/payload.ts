@@ -143,7 +143,14 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
           next = { rules: incoming.rules, workflows: record(existing) && Array.isArray(existing.workflows) ? existing.workflows : [] };
           break;
         }
-        case 'trigger-secrets.json': if (!Array.isArray(incoming)) throw new Error('invalid'); next = incoming; break;
+        case 'trigger-secrets.json': {
+          // The backup's secrets come in (its value wins for the same one); secrets only this computer has stay, so a
+          // trigger kept here never loses the one it uses.
+          if (!Array.isArray(incoming) || !incoming.every(item => record(item) && typeof item.id === 'string')) throw new Error('invalid');
+          const ids = new Set(incoming.map(item => (item as { id: string }).id));
+          next = [...incoming, ...(Array.isArray(existing) ? existing.filter(item => record(item) && !ids.has(String(item.id))) : [])];
+          break;
+        }
         // What the worker's services refuse at start is never written: one would keep the worker from starting.
         case 'slack-connection.json': if (!validSlackConnection(incoming)) throw new Error('invalid'); next = incoming; break;
         case 'public-agents.json': {
@@ -168,15 +175,21 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
  * A restored public agent whose password or address differs from this computer's signs its visitors out, as changing
  * them on the page does: a visitor let in under one password is never let in under another.
  */
-async function signOutChangedVisitors(stateDir: string, current: { id: string; slug: string; password?: unknown }[], restored: { id: string; slug: string; password?: unknown }[]): Promise<void> {
+async function signOutChangedVisitors(stateDir: string, current: { id: string; slug: string; password?: unknown; conversation?: string }[], restored: { id: string; slug: string; password?: unknown; conversation?: string }[]): Promise<void> {
   for (const agent of restored) {
     const before = current.find(item => item.id === agent.id);
     const moved = !before || before.slug !== agent.slug, repassworded = !before || JSON.stringify(before.password) !== JSON.stringify(agent.password);
-    if (!moved && !repassworded) continue;
+    const regrouped = !before || before.conversation !== agent.conversation;
+    if (!moved && !repassworded && !regrouped) continue;
     const path = join(stateDir, 'public-agents', `${agent.id}.json`);
     const data = await readOptional(path);
     if (!record(data) || !Array.isArray(data.visitors)) continue;
-    const visitors = moved ? [] : data.visitors.map(visitor => record(visitor) ? { ...visitor, authorized: false } : visitor);
+    // Another way of sharing conversations starts each visitor's anew, as it does on the page.
+    const visitors = moved ? [] : data.visitors.map(visitor => {
+      if (!record(visitor)) return visitor;
+      const { conversationId: _conversation, ...rest } = visitor;
+      return { ...(regrouped ? rest : visitor), ...(repassworded ? { authorized: false } : {}) };
+    });
     await writePrivateJson(path, JSON.stringify({ ...data, visitors }));
   }
 }

@@ -562,7 +562,12 @@ export class SkillService {
     return this.exclusive(async () => {
       const stored = await this.files.managed();
       const bundle = await this.exportBundle({ dirs: stored.map(skill => skill.dir) });
-      return { bundle, guidance: (await this.guidance()).owner, settings: { ...this.state.get().settings } };
+      // Missing is no guidance; one that cannot be read fails the backup rather than record it as empty (a restore would clear it).
+      const guidance = await readFile(this.guidanceFile(), 'utf8').catch(error => {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
+        throw new SkillError(`지침 파일을 읽지 못해 백업하지 않았습니다: ${error instanceof Error ? error.message : String(error)}`, 500);
+      });
+      return { bundle, guidance, settings: { ...this.state.get().settings } };
     });
   }
 

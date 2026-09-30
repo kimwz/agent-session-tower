@@ -84,3 +84,16 @@ test('on another computer, skills of a project that is not there are left out an
   assert.match(result.skipped.find(item => item.name === 'scoped')!.reason, /1개가 이 컴퓨터에 없어/);
   assert.equal(await exists(join(b.agentsHome, 'skills', 'everywhere')), true);
 });
+
+test('a guidance file that cannot be read stops the backup instead of recording it as empty', async t => {
+  const f = await computer(t);
+  const skills = await service(f, []);
+  const guidance = (await skills.overview()).guidance!;
+  await skills.mutate('guidance', { owner: 'Answer in Korean.', revision: guidance.revision });
+  const { OWNER_GUIDANCE_FILE } = await import('../../../server/agent-guidance/install.js');
+  const { chmod } = await import('node:fs/promises');
+  await chmod(join(f.state, OWNER_GUIDANCE_FILE), 0o000);
+  t.after(() => chmod(join(f.state, OWNER_GUIDANCE_FILE), 0o600).catch(() => {}));
+  if (process.getuid?.() === 0) { t.skip('root reads any file'); return; }
+  await assert.rejects(skills.backup(), /지침 파일을 읽지 못해/);
+});

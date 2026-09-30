@@ -205,12 +205,16 @@ export class BackupService {
       const client = this.client(settings);
       const own = this.ownPrefix(settings);
       const at = this.now();
+      const attempted = this.saved.status.lastAttemptAt;
       await this.change(() => { this.saved = { ...this.saved, status: { ...this.saved.status, lastAttemptAt: new Date(at).toISOString() } }; }).catch(() => {});
+      const undoAttempt = () => this.change(() => { const { lastAttemptAt: _at, ...status } = this.saved.status; this.saved = { ...this.saved, status: { ...status, ...(attempted ? { lastAttemptAt: attempted } : {}) } }; }).catch(() => {});
       const key = `${settings.remote.prefix}${this.fileName(at)}`;
       try {
         const text = await encryptBackup(await this.payload(), settings.passphrase, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
         await client.put(key, Buffer.from(text), 'application/octet-stream');
       } catch (error) {
+        // Stopped because Tower is shutting down: not a failure, and the next start tries again when due.
+        if (this.closing.signal.aborted) { await undoAttempt(); throw error; }
         const message = error instanceof Error ? error.message : String(error);
         await this.change(() => { this.saved = { ...this.saved, status: { ...this.saved.status, lastError: message } }; }).catch(() => {});
         throw error;
@@ -269,7 +273,7 @@ export class BackupService {
     this.checked.clear();
     const id = randomUUID();
     this.checked.set(id, { payload: parsed, header, passphrase: secret, at: now });
-    return { id, createdAt: header.createdAt, from: header.from, towerVersion: header.towerVersion, parts: payloadParts(parsed), skills: parsed.worker.skills?.bundle.skills.length ?? 0 };
+    return { id, createdAt: header.createdAt, from: header.from, towerVersion: header.towerVersion, parts: payloadParts(parsed), skills: parsed.worker.skills?.bundle.skills.length ?? 0, otherComputer: header.from !== hostname() };
   }
 
   /**
