@@ -6,6 +6,7 @@ import type { ProviderHealth, Session, SystemStatus } from '../../../shared/type
 import type { NodeStatus } from '../../../shared/link';
 import { localPart } from '../remote/scope';
 import { SessionContextIcon } from '../sessions/SessionContextIcon';
+import { TowerVersionsBadge, type TowerVersions } from './TowerVersions';
 import { outcomeLabels } from '../sessions/SessionOutcomeBadge';
 import { cleanPreview, providerLabels, relativeTime, sessionActivityAt, sessionState, sessionTitle } from '../common/lib';
 import { ProjectGroupHeader, type ProjectGroupHeaderData } from '../project-groups/ProjectGroupHeader';
@@ -23,8 +24,8 @@ export type HostLink = { status: NodeStatus; live: boolean; version?: string;
 export type HostData = { name: string; active: number; providers: ProviderHealth[]; disabled: boolean; onAutoPrompt: (cwd?: string) => void; link?: HostLink;
   /** This computer's Tower version; a joined computer's is in `link`. */
   version?: string;
-  /** This computer's execution worker version, shown on hover. */
-  runnerVersion?: string;
+  /** Every Tower process's version, shown on hover. */
+  versions?: TowerVersions;
   /** CPU, memory and disk, while the computer's state is arriving. */
   system?: SystemStatus };
 
@@ -65,8 +66,9 @@ export const HostNode = memo(function HostNode({ data }: NodeProps<Node<HostData
   const link = data.link;
   const offline = link && !(link.status === 'connected' && link.live);
   return <div className={`host-with-usage${link ? ' is-remote' : ''}${offline ? ' is-stale' : ''}`}><div className="host-node has-auto-prompt"><span className="host-icon"><Monitor size={20} /></span><div className="host-copy"><strong title={data.name}>{data.name || t("이 Mac")}</strong>
-    {link && <span className={`host-link ${link.status}${link.live ? ' live' : ''}${link.updating ? ' updating' : ''}`} role="status"><i />{linkLabel(link)}{link.version && link.live ? ` · v${link.version}` : ''}</span>}
-    {!link && data.version && <span className="host-link local" title={data.runnerVersion ? t("화면 v{0} · 실행 워커 v{1}", { 0: data.version, 1: data.runnerVersion }) : undefined}><i />{t("이 컴퓨터")} · v{data.version}</span>}
+    {link && <span className={`host-link ${link.status}${link.live ? ' live' : ''}${link.updating ? ' updating' : ''}`} role="status"><i />{linkLabel(link)}{link.version && link.live && !data.versions ? ` · v${link.version}` : ''}
+      {link.version && link.live && data.versions && <> · <TowerVersionsBadge versions={data.versions} /></>}</span>}
+    {!link && data.version && <span className="host-link local"><i />{t("이 컴퓨터")} · {data.versions ? <TowerVersionsBadge versions={data.versions} /> : `v${data.version}`}</span>}
     {data.system && !offline && <SystemRings status={data.system} />}
     <span><i className={data.active && !offline ? 'live-pip' : ''} /><span>{offline ? link?.known === false ? t("아직 상태를 받지 못했습니다") : t("마지막으로 본 상태입니다") : data.active ? t("{0}개 에이전트 작업 중", { 0: data.active }) : t("다음 작업을 기다리는 중")}</span></span></div><button type="button" className="auto-prompt-trigger nodrag nopan" aria-label={link ? t("{0}에서 Auto Prompt 열기", { 0: data.name }) : t("이 기기에서 Auto Prompt 열기")} title="Auto Prompt" disabled={data.disabled} onClick={() => data.onAutoPrompt()}><Sparkles size={32} aria-hidden="true" /></button></div><ProviderUsage providers={data.providers} /><Handle type="source" position={Position.Bottom} /></div>;
 });

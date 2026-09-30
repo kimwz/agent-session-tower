@@ -60,7 +60,7 @@ import { LatestReleases } from './updates/latest.js';
 import { TowerAutoUpdate } from './updates/tower.js';
 import { autoUpdateEnabled, publicToolUpdates, readToolUpdates, unlessUpdating } from './updates/tools.js';
 import type { AutoUpdateStatus } from '../shared/link.js';
-import type { Snapshot, ProviderHealth, Run } from '../shared/types.js';
+import type { ComponentVersions, Snapshot, ProviderHealth, Run } from '../shared/types.js';
 import { defaultStateDir } from './state-dir.js';
 import { PublicListener } from './public-agents/listener.js';
 import { NotificationService } from './notifications/service.js';
@@ -244,6 +244,7 @@ async function main() {
   const history = nativeHistory(runs);
   const listeners = new Set<() => void>();
   const changed = () => { for (const listener of listeners) listener(); };
+  let componentVersions: ComponentVersions | undefined;
   // CPU, memory and disk of this computer, for the rings on its host node.
   const system = new SystemMonitor(systemSources(stateDir), changed);
   // The Codex probe starts the CLI, so it never runs while this account's Codex is being updated.
@@ -302,6 +303,7 @@ async function main() {
       runs: dismissedRuns.visible(managed), autoPrompts: runs.autoPromptList(), scanning: history.indexing, hostname: hostname(), version: APP_VERSION,
       ...(runs.triggerOverview() ? { triggers: runs.triggerOverview() } : {}),
       ...(runs.runnerVersion() ? { runnerVersion: runs.runnerVersion() } : {}),
+      ...(componentVersions ? { componentVersions } : {}),
       // Only an older worker is waiting to be replaced; a newer one left by an update that was undone stays as it is.
       ...(runs.runnerVersion() && (runs.runnerVersion() === 'legacy' || newerVersion(APP_VERSION, runs.runnerVersion()!)) ? { runnerUpdate: runs.supports('handoff') ? 'automatic' as const : 'manual' as const } : {}),
       ...(runs.runnerVersion() && runs.runnerVersion() !== 'legacy' && newerVersion(APP_VERSION, runs.runnerVersion()!) && runs.supports('forceUpdate') ? { runnerForceUpdate: true } : {}),
@@ -482,6 +484,16 @@ async function main() {
   let webCredentials: WebCredentials | undefined;
   const masterCallerSecret = randomBytes(32).toString('hex');
   const master = new MasterClient({ stateDir, credentials: () => webCredentials });
+  // The terminal and master hosts keep their own code until they restart; what they run is asked every half minute,
+  // never starting one, so the page can show every version Tower runs here.
+  const askComponents = async () => {
+    const [terminalHost, masterHost] = await Promise.all([workspaceTerminals.hostVersion().catch(() => undefined), master.hostVersion().catch(() => undefined)]);
+    const next: ComponentVersions = { terminalHost: terminalHost ?? null, master: masterHost ?? null };
+    if (JSON.stringify(next) !== JSON.stringify(componentVersions)) { componentVersions = next; changed(); }
+  };
+  void askComponents();
+  const componentTimer = setInterval(() => void askComponents(), 30_000);
+  componentTimer.unref();
   // A message this page sends to a joined computer's conversation is judged here, as one sent to a conversation on
   // this computer would be, and inserted there into the turn it was judged against.
   const insertRemote = (nodeId: string, run: Run) => {

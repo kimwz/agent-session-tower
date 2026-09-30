@@ -108,10 +108,21 @@ test('this computer’s host node shows its own Tower version', () => {
   const local = host({ version: '1.55.1' });
   assert.match(local, /class="host-link local"><i><\/i>이 컴퓨터 · v1\.55\.1<\/span>/);
   assert.doesNotMatch(local, /is-remote/);
-  assert.match(host({ version: '1.56.0', runnerVersion: '1.53.2' }), /class="host-link local" title="화면 v1\.56\.0 · 실행 워커 v1\.53\.2">/, 'hovering it shows the execution worker version');
+  const versions = host({ version: '1.56.0', versions: { web: '1.56.0', worker: '1.53.2', terminalHost: null, master: '1.56.0' } });
+  assert.match(versions, /aria-label="Tower 버전: 화면 서버 v1\.56\.0, 실행 워커 v1\.53\.2, 터미널 호스트 실행 중 아님, 마스터 호스트 v1\.56\.0"/, 'every process is named for hover, focus and screen readers');
+  assert.match(versions, /class="tower-versions-trigger behind"[^>]*>v1\.56\.0<i/, 'an older worker is marked on the version');
+  assert.doesNotMatch(host({ version: '1.56.0', versions: { web: '1.56.0', worker: '1.56.0' } }), /behind/);
   assert.doesNotMatch(host({ version: '1.55.1', link: { status: 'connected', live: true, version: '1.23.0' } }), /이 컴퓨터/, 'a joined computer shows its own version only');
 });
 
 test('cards of an unreachable computer are marked as its last known state', () => {
   assert.match(agent({}, { stale: true }), /class="agent-card claude working [^"]*is-stale"/);
+});
+
+test('a process counts as behind only when it runs an older release than the web server', async () => {
+  const { versionsBehind } = await import('../../../client/src/graph/TowerVersions.js');
+  assert.equal(versionsBehind({ web: '1.87.0', worker: '1.86.0' }), true);
+  assert.equal(versionsBehind({ web: '1.87.0', worker: 'legacy' }), true);
+  assert.equal(versionsBehind({ web: '1.87.0', worker: '1.87.0', terminalHost: null, master: '1.87.0' }), false);
+  assert.equal(versionsBehind({ web: '1.87.0', worker: '1.88.0' }), false, 'a newer one left by an undone update is not waiting');
 });
