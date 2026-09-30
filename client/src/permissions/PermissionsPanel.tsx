@@ -3,13 +3,11 @@ import { FolderChip } from '../settings/FolderChip';
 import { SettingsFrameContext, SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
 import { Bot, Check, LoaderCircle, Pencil, Plus, Trash2, TriangleAlert } from 'lucide-react';
 import type { PermissionAutoReview, PermissionOverview, PermissionProvider, PermissionRequest, PermissionRule, PermissionRuleInput } from '../../../shared/permissions';
-import { AUTO_REVIEW_MODELS, claudeRule, codexRule, dangerousContinuations, ruleIsBroad, ruleProblem } from '../../../shared/permissions';
+import { AUTO_REVIEW_MODELS, waitingForOwner as waiting, claudeRule, codexRule, dangerousContinuations, ruleIsBroad, ruleProblem } from '../../../shared/permissions';
 import { authPost } from '../auth/AuthGate';
 import { locale, translateMessage, useI18n } from '../i18n/i18n';
 
 export const permissionOperation = <T,>(token: string, name: string, input: unknown = {}) => authPost<{ result: T }>(`/api/v1/permissions.${name}`, token, input).then(response => response.result);
-/** Pending and not with Tower's reviewer right now: the owner is the one asked. */
-const waiting = (request: PermissionRequest) => request.status === 'pending' && request.review?.status !== 'queued' && request.review?.status !== 'running';
 const folderName = (path: string) => path.split('/').filter(Boolean).at(-1) || path;
 const date = (value: string) => { const time = new Date(value); return Number.isNaN(time.getTime()) ? '' : time.toLocaleString(locale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }); };
 
@@ -149,7 +147,7 @@ function AutoReviewSettings({ settings, busy, onSave }: { settings: PermissionAu
   };
   return <div className="permission-auto-review">
     <label className="skill-pinned"><input type="checkbox" checked={settings.enabled} disabled={busy} onChange={event => change({ enabled: event.target.checked })} />{t('자동 검토')}
-      <small>{t('에이전트가 권한을 요청하면 별도 모델이 이 작업에 대한 소유자의 지시(Tower에서 직접 입력한 요청, 확인한 스킬과 지침)와 작업 내역을 보고, 작업에 필요하고 위험하지 않으면 그 프로젝트에만 허용합니다. 범위가 넓으면 더 좁게 다시 요청하게 하고, 그 밖에는 이유를 남겨 소유자에게 넘깁니다. 옵션이 든 규칙, 넓은 규칙, 삭제·비밀·외부 전송 명령, 소유자 규칙과 겹치는 규칙, 공개 에이전트의 요청, Tower 밖이나 이전 버전에서 시작한 대화의 요청은 항상 소유자가 정합니다.')}</small></label>
+      <small>{t('에이전트가 권한을 요청하면 별도 모델이 이 작업에 대한 소유자의 지시(Tower에서 직접 입력한 요청, 확인한 스킬과 지침)와 작업 내역을 보고, 작업에 필요하고 위험하지 않으면 그 프로젝트에만 허용합니다. 범위가 넓으면 더 좁게 다시 요청하게 하고, 그 밖에는 이유를 남겨 소유자에게 넘깁니다. 옵션이 든 명령 규칙, 넓은 규칙, 삭제·비밀·네트워크 명령, 소유자 규칙과 겹치는 규칙, 공개 에이전트의 요청, Tower 밖이나 이전 버전에서 시작한 대화의 요청은 항상 소유자가 정합니다.')}</small></label>
     {settings.enabled && <div className="permission-auto-review-options">
       <label>{t('검토 모델')}<select value={`${settings.provider}:${settings.model}`} disabled={busy} onChange={event => { const [provider, model] = event.target.value.split(':') as [PermissionProvider, string]; change({ provider, model }); }}>
         {(['claude', 'codex'] as const).flatMap(provider => AUTO_REVIEW_MODELS[provider].map(model => <option key={`${provider}:${model}`} value={`${provider}:${model}`}>{provider === 'claude' ? 'Claude' : 'Codex'} · {model}</option>))}

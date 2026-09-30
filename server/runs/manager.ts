@@ -276,7 +276,10 @@ export class RunManager extends EventEmitter {
   setFirstTurnNotes(notes: NonNullable<RunnerOptions['firstTurnNotes']>): void { this.options.firstTurnNotes = notes; }
   setTurnNotes(notes: NonNullable<RunnerOptions['turnNotes']>): void { this.options.turnNotes = notes; }
   setOwnerPrompts(store: NonNullable<RunnerOptions['ownerPrompts']>): void { this.options.ownerPrompts = store; }
-  /** Records a conversation's start or the owner's words in it; a failed record only leaves the reviewer to the owner. */
+  /**
+   * Records a conversation's start or the owner's words in it. A record that cannot be saved refuses the work, like a
+   * run that cannot be saved: otherwise a restriction the owner just typed could be missing after a restart.
+   */
   private async recordOwner(sessionId: string, run: Run, created: boolean, notice = false): Promise<void> {
     const store = this.options.ownerPrompts;
     if (!store) return;
@@ -284,7 +287,10 @@ export class RunManager extends EventEmitter {
       // Owner work that is not what the owner typed here may carry the owner's words all the same.
       const input = { ...(created ? { begin: true } : {}), ...(run.authored ? { text: run.prompt } : run.origin?.kind === 'owner' && !notice ? { taint: true } : {}) };
       if (Object.keys(input).length) await store.record(sessionId, run.createdAt, input);
-    } catch (error) { console.error(`Owner prompt record failed: ${error instanceof Error ? error.message : String(error)}`); }
+    } catch (error) {
+      console.error(`Owner prompt record failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new RunError('소유자 지시 기록을 저장하지 못했습니다. 디스크 공간과 권한을 확인한 뒤 다시 보내세요.', 503);
+    }
   }
   setClaudeSettings(settings: NonNullable<RunnerOptions['claudeSettings']>): void { this.options.claudeSettings = settings; }
   setRunToolResolver(resolver: NonNullable<RunnerOptions['resolveRunTools']>): void {
@@ -640,8 +646,7 @@ export class RunManager extends EventEmitter {
     this.runs.set(run.id, run);
     this.prune();
     this.changed();
-    await this.recordOwner(sessionId, run, false, internal.notice === true);
-    try { await this.flush(); } // An accepted instruction is durable before launching the provider.
+    try { await this.recordOwner(sessionId, run, false, internal.notice === true); await this.flush(); } // An accepted instruction is durable before launching the provider.
     catch (error) { this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error; }
     finally { this.admissions.delete(run.id); }
     // An accepted instruction replaces the continuation the agent planned; its next turn can schedule again.
@@ -786,6 +791,8 @@ export class RunManager extends EventEmitter {
     else {
       await owned!.claude!.respond(approvalId, decision);
     }
+    // Answers the owner wrote reach the agent outside the prompts Tower keeps: the record is not whole from here.
+    if (typeof decision === 'object' && this.options.ownerPrompts) await this.options.ownerPrompts.record(run.sessionId, new Date().toISOString(), { taint: true }).catch(() => {});
     return this.list().find(item => item.id === runId)!;
   }
 

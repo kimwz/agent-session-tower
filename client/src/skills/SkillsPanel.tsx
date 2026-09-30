@@ -101,6 +101,9 @@ export function SkillsPanel({ token, cwd, projects, onClearFolder, onChanged, on
       }} />
       : !overview ? !error && <LoaderCircle className="spin" aria-label={t('불러오는 중')} /> : <>
       {secondary[view] && <div className="skills-subhead"><button type="button" className="skills-back" onClick={() => setView('mine')}><ArrowLeft size={14} />{t('내 스킬')}</button><h3>{secondary[view]}</h3></div>}
+      {view === 'mine' && overview.review && overview.gone?.map(item => <div key={item.dir} className="permission-warning"><ShieldCheck size={15} /><div>
+        <p>{t('확인했던 {0} 스킬이 Tower 밖에서 지워졌습니다. 그 스킬이 적용되던 프로젝트의 권한 요청은 자동 검토하지 않고 소유자에게 넘깁니다.', { 0: item.name })}</p>
+        <button type="button" className="secondary-button" disabled={busy} onClick={() => void mutate('forget', { dir: item.dir }, t('{0} 스킬의 확인 기록을 지웠습니다.', { 0: item.name }))}>{t('확인 기록 지우기')}</button></div></div>)}
       {view === 'mine' && <TowerSkills overview={overview} cwd={cwd} busy={busy} proposals={ready.length} onNew={create} onEdit={skill => void edit(skill)} onProposals={() => setView('proposals')} onAll={() => setView('all')}
         onToggle={(skill, on) => { const targets = skill.targets!;
           void mutate('assign', { dir: skill.dir, targets: targetsBody(toggleTargets(targets, cwd!, on)), targetsRevision: targetsRevision(targets) },

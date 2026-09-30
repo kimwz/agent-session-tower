@@ -6,6 +6,8 @@ import type { PermissionReviewResult, PermissionService } from './service.js';
 const REVIEW_TIMEOUT_MS = 3 * 60 * 1000;
 /** After Tower could not record a review (a full disk, say), it waits this long before trying again. */
 const RETRY_MS = 60 * 1000;
+/** Reviews started again because the owner's material changed meanwhile, before the owner decides instead. */
+const MAX_REQUEUE = 3;
 
 export interface PermissionReviewerOptions {
   service: PermissionService;
@@ -32,6 +34,7 @@ export class PermissionReviewer {
   private controller?: AbortController;
   private aborted = false;
   private retry?: ReturnType<typeof setTimeout>;
+  private readonly requeued = new Map<string, number>();
 
   constructor(private readonly options: PermissionReviewerOptions) {}
 
@@ -77,8 +80,10 @@ export class PermissionReviewer {
       result = parse(answer, request, settings.model);
       // The owner said more, or confirmed or changed something, while the model answered: review again with that.
       if (JSON.stringify(JSON.parse(await reviewInput(request, this.options.sources)).authority) !== before) {
-        await service.requeueReview(request.id);
-        return;
+        const again = (this.requeued.get(request.id) ?? 0) + 1;
+        this.requeued.set(request.id, again);
+        if (again <= MAX_REQUEUE) { await service.requeueReview(request.id); return; }
+        throw new ReviewSkip('검토하는 동안 소유자의 지시가 계속 바뀌어 소유자에게 넘깁니다.');
       }
       // Sending the agent back only works when it hears about it; otherwise the owner decides.
       if (result.verdict === 'narrow' && (!settings.resume || !this.options.reachable(request))) {
@@ -90,7 +95,8 @@ export class PermissionReviewer {
       return;
     } finally { clearTimeout(timer); this.controller = undefined; }
     const outcome = await service.applyReview(request.id, result);
-    if (outcome?.message && settings.resume) await this.options.notify(outcome.request, outcome.message).catch(async error => {
+    // The owner may have turned the notice off meanwhile.
+    if (outcome?.message && service.autoReview().resume) await this.options.notify(outcome.request, outcome.message).catch(async error => {
       console.error(`Permission review could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`);
       // An agent never told to ask again would wait for good: the owner decides instead.
       if (outcome.request.status === 'withdrawn') await service.reopenForOwner(outcome.request.id, '에이전트에게 전하지 못해 소유자에게 넘깁니다');

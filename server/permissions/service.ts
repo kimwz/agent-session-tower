@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  AUTO_REVIEW_MODELS, DEFAULT_AUTO_REVIEW, autoReviewBlock, claudeRule, codexRule, normalizeCommand, ruleGuards, ruleIsNarrower, rulesOverlap, ruleProblem, sameRule,
+  AUTO_REVIEW_MODELS, DEFAULT_AUTO_REVIEW, autoReviewBlock, waitingForOwner, claudeRule, codexRule, normalizeCommand, ruleGuards, ruleIsNarrower, rulesOverlap, ruleProblem, sameRule,
   type PermissionAutoReview, type PermissionOverview, type PermissionProvider, type PermissionRequest, type PermissionReview, type PermissionReviewVerdict,
   type PermissionRule, type PermissionRuleInput, type PermissionTarget,
 } from '../../shared/permissions.js';
@@ -130,7 +130,7 @@ export class PermissionService {
       await this.commit(state => {
         state.autoReview = settings;
         if (!settings.enabled) for (const request of state.requests) {
-          if (request.status === 'pending' && request.review && (request.review.status === 'queued')) request.review = { status: 'skipped', reason: '자동 검토가 꺼졌습니다.', at: this.now() };
+          if (request.status === 'pending' && request.review?.status === 'queued') request.review = { status: 'skipped', reason: '자동 검토가 꺼졌습니다.', at: this.now() };
         }
       });
       this.options.onAutoReviewChange?.(settings);
@@ -321,7 +321,7 @@ export class PermissionService {
     return this.serial(async () => {
       const rule = await this.checked(clean(input));
       let replaced: string[] = [];
-      await this.commit(state => { const made = upsert(state, rule, input.id, 'owner', undefined, this.now()); replaced = dropOverlappingAuto(state, made); });
+      await this.commit(state => { const made = upsert(state, rule, input.id, 'owner', undefined, this.now()); if (made.source !== 'auto') replaced = dropOverlappingAuto(state, made); });
       await this.apply();
       return { ...this.overview(), ...(replaced.length ? { replaced } : {}) };
     });
@@ -341,6 +341,7 @@ export class PermissionService {
    * requesting conversation as the owner's next message, so the agent goes on (after the turn under way, if any).
    */
   async decide(id: string, approve: boolean, edited?: PermissionRuleInput, resume = false): Promise<PermissionOverview> {
+    let replaced: string[] = [];
     const { request, rule } = await this.serial(async () => {
       const request = this.state.requests.find(item => item.id === id);
       if (!request) throw failure('요청을 찾지 못했습니다.', 404);
@@ -353,17 +354,18 @@ export class PermissionService {
       const rule = await this.checked(clean(edited ?? request.rule));
       await this.commit(state => {
         const made = upsert(state, rule, undefined, 'request', id, at);
-        dropOverlappingAuto(state, made);
+        replaced = dropOverlappingAuto(state, made);
         const item = state.requests.find(entry => entry.id === id)!;
         item.status = 'approved'; item.decidedAt = at; item.ruleId = made.id; item.decidedBy = 'owner';
       });
       await this.apply();
       return { request, rule };
     });
-    if (!resume || !this.options.resume) return this.overview();
+    const extra = replaced.length ? { replaced } : {};
+    if (!resume || !this.options.resume) return { ...this.overview(), ...extra };
     // The decision stands whether or not the conversation can take a message now.
     const note = await this.options.resume(request.sessionId, decisionMessage(request.rule, rule)).then(() => undefined, error => error instanceof Error ? error.message : String(error));
-    return { ...this.overview(), resumed: note ? { error: note } : { sent: true } };
+    return { ...this.overview(), ...extra, resumed: note ? { error: note } : { sent: true } };
   }
 
   /** A rule this computer can keep: a Codex rule for a project whose rules file would be the one for every project cannot. */
@@ -464,8 +466,6 @@ const REVIEW_NOTE = 'Tower\'s permission reviewer checks this request against th
 
 const WAIT_NOTE = 'The owner decides this in Tower. Do not look for another way around the refusal. An allowed rule applies from your next turn: say in your reply what waits on this permission and end your turn, or go on with other work first. The owner can send the decision to this conversation; permissions_list also shows it.';
 
-/** A request the owner is asked about: pending and not with the reviewer right now. */
-const waitingForOwner = (request: PermissionRequest) => request.status === 'pending' && request.review?.status !== 'queued' && request.review?.status !== 'running';
 
 /** A folder that is the project or inside it. */
 const within = (cwd: string, project: string) => cwd === project || cwd.startsWith(project.endsWith('/') ? project : `${project}/`);

@@ -309,6 +309,13 @@ export class SkillService {
     return skill;
   }
 
+  /** Skills the owner confirmed whose folder is gone outside Tower: the reviewer leaves their projects to the owner until forgotten. */
+  private gone(): { dir: string; name: string }[] {
+    const state = this.state.get();
+    const known = new Set(state.targets.map(item => item.dir));
+    return Object.keys(state.confirmedTargets).filter(dir => !known.has(dir) && state.confirmed[dir]).map(dir => ({ dir, name: basename(dir) }));
+  }
+
   /** A Tower skill's targets in this state, copied. */
   private recordIn(state: { targets: SkillTargetRecord[] }, dir: string): { all: boolean; projects: string[] } | undefined {
     const item = state.targets.find(entry => entry.dir === dir);
@@ -336,8 +343,9 @@ export class SkillService {
     // Confirmed once and changed or gone since: what the owner confirmed may have limited the work.
     const changed: string[] = [];
     for (const item of state.targets) {
-      if (!targetsCover(item, folder)) continue;
       const owned = state.confirmedTargets[item.dir];
+      // Applied here when the owner confirmed it, and no longer: taken off without the owner saying so.
+      if (!targetsCover(item, folder)) { if (owned && state.confirmed[item.dir] && targetsCover(owned, folder)) changed.push(basename(item.dir)); continue; }
       // Name, description and body come from the one read whose revision is checked.
       const read = await readSkillSnapshot(item.dir);
       if (!read) { if (state.confirmed[item.dir]) changed.push(basename(item.dir)); continue; }
@@ -363,7 +371,7 @@ export class SkillService {
     const pinned = await this.pinned();
     const stored = (await this.files.managed()).map(skill => this.withTargets({ ...skill, pinned: folders(skill).some(dir => pinned.has(dir)) }));
     return { skills: (await this.withPins(await this.files.list(cwd))).map(skill => this.withTargets(skill)), stored, proposals, notes, settings: state.settings, advisor: this.advisor.status(),
-      guidance: await this.guidance(), ...(cwd ? { cwd } : {}), review: this.options.review?.() === true };
+      guidance: await this.guidance(), ...(cwd ? { cwd } : {}), review: this.options.review?.() === true, gone: this.gone() };
   }
 
   summary(): SkillSummary {
@@ -442,6 +450,14 @@ export class SkillService {
         await this.state.update(state => { state.confirmed[skill.dir] = skill.revision; const targets = this.recordIn(state, skill.dir); if (targets) state.confirmedTargets[skill.dir] = targets; });
         break;
       }
+      case 'forget': {
+        // A confirmed skill whose folder is gone: the owner lets the reviewer stop waiting for it.
+        if (!typed) throw new SkillError('소유자 페이지에서만 할 수 있습니다.', 403);
+        const dir = text(body.dir);
+        if (this.state.get().targets.some(item => item.dir === dir)) throw new SkillError('아직 있는 스킬입니다. 삭제는 스킬에서 하세요.', 409);
+        await this.state.update(state => { delete state.confirmed[dir]; delete state.confirmedTargets[dir]; });
+        break;
+      }
       case 'confirmGuidance': {
         if (!typed) throw new SkillError('지침 확인은 소유자 페이지에서만 할 수 있습니다.', 403);
         const current = await this.guidance();
@@ -513,8 +529,9 @@ export class SkillService {
         catch (error) { if (before) await this.apply(skill.dir, { all: before.all, projects: before.projects }, false).catch(() => {}); throw error; }
         await this.pin(skill, false);
         if (skill.managed) await this.state.update(state => { state.targets = state.targets.filter(item => item.dir !== skill.dir);
-          // Deleted by the owner in Tower: nothing of it is the owner's word any more.
-          delete state.confirmed[skill.dir]; delete state.confirmedTargets[skill.dir]; });
+          // Deleted by the owner in Tower: nothing of it is the owner's word any more. Deleted any other way, it still
+          // counts as changed, so what it limited is not silently lifted.
+          if (typed) { delete state.confirmed[skill.dir]; delete state.confirmedTargets[skill.dir]; } });
         break;
       }
       case 'dismiss': {

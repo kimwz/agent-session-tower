@@ -105,3 +105,17 @@ test('a confirmed skill removed outside Tower keeps counting as changed, even af
   t.after(async () => { restarted.close(); await restarted.flush().catch(() => {}); });
   assert.deepEqual((await restarted.authority(f.shop)).changed, ['no-push']);
 });
+
+test('a confirmed skill taken off a project by anyone but the owner counts as changed there', async t => {
+  const f = await fixture(t);
+  const saved = await f.service.mutate('save', { name: 'no-push', description: 'Limits.', body: 'Never push to main.', targets: { all: false, projects: [f.shop, f.blog] }, pinned: true }, { typed: true });
+  const skill = saved.stored!.find(item => item.name === 'no-push')!;
+  const detail = await f.service.detail({ dir: skill.dir });
+  await f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.shop] }, targetsRevision: targetsRevision(detail.targets) });
+  assert.deepEqual((await f.service.authority(f.blog)).changed, ['no-push']);
+  // Deleted by anyone but the owner: still changed, not silently gone.
+  await f.service.mutate('delete', { dir: skill.dir });
+  assert.deepEqual((await f.service.authority(f.shop)).changed, ['no-push']);
+  await f.service.mutate('forget', { dir: skill.dir }, { typed: true });
+  assert.deepEqual((await f.service.authority(f.shop)).changed, []);
+});

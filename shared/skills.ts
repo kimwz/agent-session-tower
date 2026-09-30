@@ -133,6 +133,8 @@ export interface SkillOverview {
   cwd?: string;
   /** Tower's permission reviewer is on, so what the owner confirmed matters. Absent from older workers. */
   review?: boolean;
+  /** Confirmed skills whose folder was removed outside Tower; the reviewer leaves their projects to the owner until forgotten. */
+  gone?: { dir: string; name: string }[];
 }
 export interface SkillSummary {
   proposals: number;

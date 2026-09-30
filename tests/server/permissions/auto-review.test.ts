@@ -43,6 +43,13 @@ test('hard limits: never-allowed commands, broad rules, Bash as a Claude rule an
   assert.ok(autoReviewBlock({ kind: 'claude', value: 'WebFetch' }, cwd));
   assert.equal(autoReviewBlock({ kind: 'claude', value: 'Edit(//work/shop/src/**)' }, cwd), undefined);
   assert.equal(autoReviewBlock({ kind: 'claude', value: 'mcp__github__merge_pull_request' }, cwd), undefined, 'one MCP tool by its full name');
+  for (const value of ['mcp__slack__slack_send_message', 'mcp__supabase__execute_sql', 'mcp__vercel__delete_project']) assert.ok(autoReviewBlock({ kind: 'claude', value }, cwd), value);
+  for (const guard of ['Bash(git fetch * --upload-pack*)', 'Bash(git log * --output*)', 'Bash(git grep * -O*)']) {
+    const [, rest] = /^Bash\(git (\w+) /.exec(guard)!;
+    assert.ok(ruleGuards({ kind: 'command', value: `git ${rest}` }).claude.includes(guard), guard);
+  }
+  assert.ok(ruleGuards({ kind: 'command', value: 'git switch' }).claude.includes('Bash(git switch * --discard-changes*)'));
+  assert.ok(autoReviewBlock({ kind: 'claude', value: 'Read(//.ssh/id_rsa)' }, '/'), 'hidden folders even when the project is /');
   assert.equal(autoReviewBlock({ kind: 'claude', value: 'WebFetch(domain:docs.example.com)' }, cwd), undefined);
 });
 
@@ -487,4 +494,29 @@ test('when the owner says more while the model answers, the request is reviewed 
   assert.equal(calls, 2);
   const item = f.service.overview().requests.find(entry => entry.id === request.id)!;
   assert.deepEqual([item.status, item.review!.verdict, f.service.overview().rules.length], ['pending', 'owner', 0]);
+});
+
+test('a trigger’s instructions the owner did not write, and words typed outside Tower, leave the request to the owner', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  let asked = 0;
+  const model = async () => { asked += 1; return { verdict: 'approve', rule: null, suggestion: null, reason: 'ok' }; };
+  const triggered = [run('a', 'Deploy on schedule', { origin: { kind: 'trigger', triggerId: 't1' } })];
+  const byAgent = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {}, model,
+    sources: sources(f, triggered, { trigger: () => ({ name: 'deploy', instructions: 'Deploy.', ownerSet: false }) }) });
+  const first = await f.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'merge' }, agent('claude:one'));
+  byAgent.wake();
+  await byAgent.flush();
+  const typed = [run('a', 'Ship it.', { authored: true })];
+  const outside = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {}, model,
+    sources: sources(f, typed, { history: async () => [{ id: '1', role: 'user', text: 'Ship it.', timestamp: '' }, { id: '2', role: 'user', text: 'Actually, never push to main.', timestamp: '' }] }) });
+  const second = await f.service.request({ kind: 'command', value: 'gh release create', scope: 'project', reason: 'release' }, agent('claude:one', 'r2'));
+  outside.wake();
+  await outside.flush();
+  assert.equal(asked, 0);
+  for (const [id, pattern] of [[first.request.id, /트리거/], [second.request.id, /Tower 밖/]] as const) {
+    const item = f.service.overview().requests.find(entry => entry.id === id)!;
+    assert.deepEqual([item.status, item.review!.status], ['pending', 'skipped']);
+    assert.match(item.review!.reason!, pattern);
+  }
 });

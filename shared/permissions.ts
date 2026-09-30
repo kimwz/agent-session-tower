@@ -188,10 +188,13 @@ export const NEVER_AUTO: readonly string[] = [
  * A token ending in `*` stands for any word starting with what comes before it (`+*`: a forced refspec).
  */
 export const DANGEROUS_EXTENSIONS: Readonly<Record<string, readonly string[]>> = {
+  // Any git command: options that run a program or write a file wherever they are pointed.
+  'git': ['--upload-pack', '--receive-pack', '--exec', '--output', '--open-files-in-pager', '-O', '--ext-diff', '--textconv'],
+  'git switch': ['-f', '--force', '--discard-changes', '-C'],
   'git push': ['--force', '-f', '--force-with-lease', '--force-if-includes', '--delete', '-d', '--mirror', '--prune', '+*', ':*'],
   'git branch': ['-D', '-d', '--delete', '-M', '-m', '--move', '-f', '--force'],
   'git tag': ['-d', '--delete', '-f', '--force'],
-  'git checkout': ['-f', '--force', '.', './', ':/', '--'],
+  'git checkout': ['-f', '--force', '-B', '.', './', ':/', '--'],
   'git rebase': ['-x', '--exec'],
   'git difftool': ['-x', '--extcmd'],
   'git mergetool': ['-t', '--tool'],
@@ -216,20 +219,20 @@ const isOption = (token: string) => /^[-+:.]/.test(token);
  * Every family a command belongs to, with its destructive continuations: `DANGEROUS_EXTENSIONS`, and the last word of
  * each never-allowed command (`git reset` + `--hard`, `git reflog` + `expire`).
  */
-function families(): [string[], string[]][] {
+const FAMILIES = ((): [string[], string[]][] => {
   const found = Object.entries(DANGEROUS_EXTENSIONS).map(([family, tokens]) => [words(family), [...tokens]] as [string[], string[]]);
   for (const item of NEVER_AUTO) {
     const parts = words(item);
     if (parts.length >= 2) found.push([parts.slice(0, -1), [parts.at(-1)!]]);
   }
   return found;
-}
+})();
 
 /** The destructive continuations of a command rule, from every family it belongs to. */
 export function dangerousContinuations(value: string): string[] {
   const rule = lower(value);
   const found: string[] = [];
-  for (const [prefix, tokens] of families()) {
+  for (const [prefix, tokens] of FAMILIES) {
     if (!startsWith(rule, prefix)) continue;
     // Options and refspecs can follow anywhere; a subcommand only right after the family (`gh pr` + `close`, not `gh pr merge` + `close`).
     found.push(...tokens.filter(token => !rule.slice(prefix.length).includes(token) && (isOption(token) || rule.length === prefix.length)));
@@ -250,7 +253,6 @@ export function ruleGuards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>): {
     // Options match by their start (`--force` also covers `--force=…` and `--force-with-lease=…`, `-f` also `-fu`), as do
     // refspecs (`+*`, `:*`); subcommands and bare `--` or `.` match as whole words. Combined short options (`-vf`) are not covered.
     const option = /^-[^-]|^--./.test(token);
-    // Options match by their start: `--force*` also covers `--force=…` and `--force-with-lease`, `-f*` also `-fu`.
     const start = token.endsWith('*') ? token : option ? `${token}*` : undefined;
     // git also takes any unambiguous start of a long option (`--del` for `--delete`): those spellings are denied as whole
     // words, so other options that merely share a start (`--follow-tags`, `--format`) stay allowed.
@@ -298,6 +300,7 @@ const RUN_ANYWHERE = new Set(['rm', 'rmdir', 'sudo', 'doas', 'chmod', 'chown', '
 
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Glob', 'Grep', 'LS']);
 const MCP_TOOL = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/;
+const MCP_DANGER = /(send|post|publish|deploy|delete|remove|drop|destroy|purge|truncate|exec|execute|sql|transfer|pay|charge|upload|invite)/i;
 const inside = (path: string, folder: string) => path === folder || path.startsWith(folder.endsWith('/') ? folder : `${folder}/`);
 
 /**
@@ -318,7 +321,7 @@ export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'
     const never = NEVER_AUTO.find(item => startsWith(rulewords, words(item))) ?? rulewords.find(word => RUN_ANYWHERE.has(word));
     if (never) return `\`${never}\`가 들어 있는 명령은 자동으로 허용하지 않습니다.`;
     // A rule whose own words already make it destructive (`git push origin +main`, `git reset HEAD --hard`).
-    for (const [prefix, tokens] of families()) {
+    for (const [prefix, tokens] of FAMILIES) {
       if (!startsWith(rulewords, prefix)) continue;
       const found = rulewords.slice(prefix.length).find(word => tokens.includes(word));
       if (found) return `\`${prefix.join(' ')}\`에 \`${found}\`가 붙은 규칙은 소유자가 정합니다.`;
@@ -326,7 +329,11 @@ export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'
     return undefined;
   }
   const value = rule.value.trim();
-  if (MCP_TOOL.test(value)) return undefined;
+  if (MCP_TOOL.test(value)) {
+    // A tool that sends, deletes, runs or pays is the owner's to allow, like its command counterparts.
+    if (MCP_DANGER.test(value)) return '보내기·삭제·실행·배포 같은 일을 하는 MCP 도구는 소유자가 정합니다.';
+    return undefined;
+  }
   if (ruleIsBroad(rule)) return '도구 전체를 허용하는 넓은 규칙은 소유자가 정합니다.';
   const tool = value.slice(0, value.indexOf('('));
   const content = value.slice(value.indexOf('(') + 1, -1);
@@ -339,7 +346,7 @@ export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'
     // The whole project (with its .git and agent settings) or a pattern are the owner's to allow; one folder or file in it is not.
     if (path === folder || /[*?[\]{}]/.test(path)) return '프로젝트 전체나 패턴으로 된 파일 규칙은 소유자가 정합니다.';
     // Hidden folders hold hooks, agent settings and keys (`.git/hooks`, `.claude`, `.ssh`): never decided automatically.
-    if (/\/\./.test(path.slice(folder.length))) return '숨김 폴더(.git, .claude, .ssh 같은)의 파일 규칙은 소유자가 정합니다.';
+    if (/\/\./.test(`/${path.slice(folder.length).replace(/^\/+/, '')}`)) return '숨김 폴더(.git, .claude, .ssh 같은)의 파일 규칙은 소유자가 정합니다.';
   }
   return undefined;
 }
@@ -366,3 +373,6 @@ export const PermissionAutoReviewSchema = z.object({
   model: z.string().min(1).max(64),
   resume: z.boolean(),
 }).strict();
+
+/** A request the owner is asked about: pending and not with Tower's reviewer right now. */
+export const waitingForOwner = (request: Pick<PermissionRequest, 'status' | 'review'>) => request.status === 'pending' && request.review?.status !== 'queued' && request.review?.status !== 'running';

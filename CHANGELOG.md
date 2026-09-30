@@ -27,11 +27,12 @@ format, and saved browser preferences are the compatibility surface.
 - With **검토 결과를 요청한 대화에 알리기** on, the conversation hears the decision and continues. The notice runs with that conversation's own origin and approvals, never as yours.
 - The reviewer does not decide, and the request waits for you, when:
   - the conversation started outside Tower or before this release, is too long to keep your words whole, or got owner messages you did not type in Tower there (the master relaying, another computer, an Auto Prompt through the API);
-  - a skill or your guidance changed, or a confirmed skill was removed, since you confirmed it.
+  - words in the conversation that Tower did not send (typed after resuming it in the native CLI), or a trigger whose instructions you did not write as they stand now;
+  - a skill or your guidance changed, or a confirmed skill was removed or taken off the project, since you confirmed it. Skills removed outside Tower are listed in 스킬 with **확인 기록 지우기**.
 
   If you say more in the conversation, or confirm or change something, while the model is answering, the request is reviewed again.
 - Some requests always wait for you, whatever the model says:
-  - rules for a whole program or tool, `Bash(…)` written as a Claude rule;
+  - rules for a whole program or tool, `Bash(…)` written as a Claude rule, and MCP tools that send, delete, run, deploy or pay;
   - file rules outside the project, for the whole project, as a pattern, or in hidden folders (`.git`, `.claude`, `.ssh`);
   - command rules that contain options or special characters (the reviewer allows commands such as `git push origin main` or `gh pr merge`, never `git push --force-with-lease`);
   - programs called by path or in upper case, and wrappers or code runners (`xargs`, `timeout`, `env`, `npx`, `node`, `python3`, `go`);
@@ -39,7 +40,7 @@ format, and saved browser preferences are the compatibility surface.
   - deleting, network and privilege programs anywhere in it (`rm`, `curl`, `ssh`, `sudo`, …);
   - rules that overlap a rule you made yourself;
   - public agents' requests.
-- An allowed rule also gets deny rules for the destructive options of its command (and the dangerous ends of shorter never-allowed commands, such as `git reset` + `--hard`). For example, an allowed `git push` also denies:
+- An allowed rule also gets deny rules for the destructive options of its command (and, for any git command, the options that run a program or write a file: `--upload-pack`, `--receive-pack`, `--exec`, `--output`, `--open-files-in-pager`, `-O`) (and the dangerous ends of shorter never-allowed commands, such as `git reset` + `--hard`). For example, an allowed `git push` also denies:
   - for Claude Code, `--force` (with `--force-with-lease` and `--force=…`), `-f`, `--delete`, `--mirror` and `+refspec` anywhere after it, and every shorter spelling git accepts (`--d`, `--del`, …) as a whole word, so options that only share a start (`--follow-tags`) stay allowed;
   - for Codex, the same options and their spellings right after the prefix.
 
@@ -52,6 +53,7 @@ format, and saved browser preferences are the compatibility surface.
 ### Changed
 - The waiting-requests count and badge leave out requests the reviewer is still checking; the open permissions panel follows a review until it ends.
 - A review under way when the worker hands over finishes first; waiting reviews continue in the new worker.
+- Tower keeps what you type in each conversation in `owner-prompts.json` in its state folder (owner-only file). If it cannot be saved, the message is refused like one whose run cannot be saved.
 - Changing what a rule the reviewer made allows makes it yours, without its deny rules; changing only its note or agents keeps them. Saving or allowing a rule of your own that overlaps one the reviewer made (`git push --force-with-lease` beside `git push`) removes the reviewer's, so its deny rules never block yours.
 - Going back to 1.87 reads requests the reviewer withdrew as waiting and its rules as yours, without their deny rules. Delete the 자동 검토로 허용 rules before downgrading.
 

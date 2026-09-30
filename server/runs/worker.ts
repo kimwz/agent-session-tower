@@ -589,7 +589,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       reachable: request => Boolean(request.runId && runs.list().find(item => item.id === request.runId)?.origin),
       notify: async (request, message) => {
         const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
-        if (!run?.origin) return;
+        // Gone since: the reviewer hands the request back to the owner.
+        if (!run?.origin) throw new Error('The requesting conversation can no longer be reached.');
         await runs.enqueue(request.sessionId, `${TOWER_NOTICE} ${message}`, {}, { origin: run.origin, notice: true, ...(run.unattended ? { unattended: true } : {}) });
       } });
 
