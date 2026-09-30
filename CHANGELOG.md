@@ -30,7 +30,7 @@ format, and saved browser preferences are the compatibility surface.
   - words in the conversation that Tower did not send (typed after resuming it in the native CLI), or a trigger whose instructions you did not write as they stand now;
   - a skill or your guidance changed, or a confirmed skill was removed or taken off the project, since you confirmed it. Skills removed outside Tower are listed in 스킬 with **확인 기록 지우기**.
 
-  If you say more in the conversation, or confirm or change something, while the model is answering, the request is reviewed again.
+  If you say more in the conversation, or confirm or change something, while the model is answering, the request is reviewed again (after three times, it waits for you). A narrower-rule answer the agent cannot be told (the notice is off, or the conversation cannot be reached) waits for you too.
 - Some requests always wait for you, whatever the model says:
   - rules for a whole program or tool, `Bash(…)` written as a Claude rule, and MCP tools that send, delete, run, deploy or pay;
   - file rules outside the project, for the whole project, as a pattern, or in hidden folders (`.git`, `.claude`, `.ssh`);
@@ -40,7 +40,12 @@ format, and saved browser preferences are the compatibility surface.
   - deleting, network and privilege programs anywhere in it (`rm`, `curl`, `ssh`, `sudo`, …);
   - rules that overlap a rule you made yourself;
   - public agents' requests.
-- An allowed rule also gets deny rules for the destructive options of its command (and, for any git command, the options that run a program or write a file: `--upload-pack`, `--receive-pack`, `--exec`, `--output`, `--open-files-in-pager`, `-O`) (and the dangerous ends of shorter never-allowed commands, such as `git reset` + `--hard`). For example, an allowed `git push` also denies:
+- An allowed rule also gets deny rules:
+  - for the destructive options of its command (`git switch --discard-changes`, `git checkout -B`, …);
+  - for the dangerous ends of shorter never-allowed commands, such as `git reset` + `--hard`;
+  - for any git command, the options that run a program or write a file: `--upload-pack`, `--receive-pack`, `--exec`, `--output`, `--open-files-in-pager`, `-O`, `--ext-diff`, `--textconv`.
+
+  For example, an allowed `git push` also denies:
   - for Claude Code, `--force` (with `--force-with-lease` and `--force=…`), `-f`, `--delete`, `--mirror` and `+refspec` anywhere after it, and every shorter spelling git accepts (`--d`, `--del`, …) as a whole word, so options that only share a start (`--follow-tags`) stay allowed;
   - for Codex, the same options and their spellings right after the prefix.
 

@@ -44,7 +44,10 @@ test('hard limits: never-allowed commands, broad rules, Bash as a Claude rule an
   assert.equal(autoReviewBlock({ kind: 'claude', value: 'Edit(//work/shop/src/**)' }, cwd), undefined);
   assert.equal(autoReviewBlock({ kind: 'claude', value: 'mcp__github__merge_pull_request' }, cwd), undefined, 'one MCP tool by its full name');
   for (const value of ['mcp__slack__slack_send_message', 'mcp__supabase__execute_sql', 'mcp__vercel__delete_project']) assert.ok(autoReviewBlock({ kind: 'claude', value }, cwd), value);
-  for (const guard of ['Bash(git fetch * --upload-pack*)', 'Bash(git log * --output*)', 'Bash(git grep * -O*)']) {
+  for (const value of ['mcp__postgres__list_tables', 'mcp__stripe__list_payments', 'mcp__vercel__list_deployments']) assert.equal(autoReviewBlock({ kind: 'claude', value }, cwd), undefined, value);
+  const diff = ruleGuards({ kind: 'command', value: 'git diff' }).claude;
+  assert.ok(diff.includes('Bash(git diff * --output=*)') && !diff.some(pattern => pattern.includes('--output*') || pattern.includes(' -O')), 'git diff --output-indicator-new and -O<orderfile> stay allowed');
+  for (const guard of ['Bash(git fetch * --upload-pack*)', 'Bash(git log * --output=*)', 'Bash(git grep * -O*)']) {
     const [, rest] = /^Bash\(git (\w+) /.exec(guard)!;
     assert.ok(ruleGuards({ kind: 'command', value: `git ${rest}` }).claude.includes(guard), guard);
   }
@@ -414,7 +417,7 @@ test('the owner’s words are kept per conversation from its start in Tower, who
   await store.record('claude:b', '3', { text: 'A conversation Tower did not see start' });
   const again = new OwnerPromptStore(root);
   await again.start();
-  assert.deepEqual(again.list('claude:a'), { prompts: [{ at: '2', text: 'Ship it, but ask before pushing.' }], complete: true });
+  assert.deepEqual(again.list('claude:a'), { prompts: [{ at: '2', text: 'Ship it, but ask before pushing.' }], complete: true, sent: [] });
   assert.equal(again.list('claude:b').complete, false);
   assert.equal(again.list('claude:unknown').complete, false);
   await again.record('claude:c', '4', { begin: true });
@@ -456,7 +459,7 @@ test('an unreadable owner-prompt record starts over: old conversations are not w
   assert.equal(store.list('claude:old').complete, false);
   await store.record('claude:new', '1', { begin: true });
   await store.record('claude:new', '2', { text: 'Ship it.' });
-  assert.deepEqual(store.list('claude:new'), { prompts: [{ at: '2', text: 'Ship it.' }], complete: true });
+  assert.deepEqual(store.list('claude:new'), { prompts: [{ at: '2', text: 'Ship it.' }], complete: true, sent: [] });
 });
 
 test('owner work that is not typed here makes the record not whole; a record that cannot be saved is not whole either', async t => {
@@ -519,4 +522,24 @@ test('a trigger’s instructions the owner did not write, and words typed outsid
     assert.deepEqual([item.status, item.review!.status], ['pending', 'skipped']);
     assert.match(item.review!.reason!, pattern);
   }
+});
+
+test('messages Tower sent long ago, a compacted summary or attachments alone are not taken for words typed elsewhere', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  let asked = 0;
+  const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true, notify: async () => {},
+    model: async () => { asked += 1; return { verdict: 'owner', rule: null, suggestion: null, reason: '확인' }; },
+    sources: sources(f, [], {
+      ownerPrompts: () => ({ prompts: [{ at: '1', text: 'Ship it.' }], complete: true, sent: ['[Tower] New message in Slack from the team channel, pruned from runs long ago'] }),
+      history: async () => [
+        { id: '1', role: 'user', text: '[Tower] New message in Slack from the team channel, pruned from runs long ago\nmore', timestamp: '' },
+        { id: '2', role: 'user', text: 'This session is being continued from a previous conversation that ran out of context.', timestamp: '' },
+        { id: '3', role: 'user', text: '[Image attachment]\n첨부한 파일을 확인하고 내용을 설명해 주세요.\n\n첨부 파일 (…)', timestamp: '' },
+        { id: '4', role: 'user', text: 'Ship it.', timestamp: '' },
+      ] }) });
+  await f.service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', reason: 'merge' }, agent('claude:one'));
+  reviewer.wake();
+  await reviewer.flush();
+  assert.equal(asked, 1, 'reviewed, not skipped');
 });

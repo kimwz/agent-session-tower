@@ -189,7 +189,8 @@ export const NEVER_AUTO: readonly string[] = [
  */
 export const DANGEROUS_EXTENSIONS: Readonly<Record<string, readonly string[]>> = {
   // Any git command: options that run a program or write a file wherever they are pointed.
-  'git': ['--upload-pack', '--receive-pack', '--exec', '--output', '--open-files-in-pager', '-O', '--ext-diff', '--textconv'],
+  'git': ['--upload-pack', '--receive-pack', '--exec', '--output', '--open-files-in-pager', '--ext-diff', '--textconv'],
+  'git grep': ['-O'],
   'git switch': ['-f', '--force', '--discard-changes', '-C'],
   'git push': ['--force', '-f', '--force-with-lease', '--force-if-includes', '--delete', '-d', '--mirror', '--prune', '+*', ':*'],
   'git branch': ['-D', '-d', '--delete', '-M', '-m', '--move', '-f', '--force'],
@@ -253,7 +254,8 @@ export function ruleGuards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>): {
     // Options match by their start (`--force` also covers `--force=…` and `--force-with-lease=…`, `-f` also `-fu`), as do
     // refspecs (`+*`, `:*`); subcommands and bare `--` or `.` match as whole words. Combined short options (`-vf`) are not covered.
     const option = /^-[^-]|^--./.test(token);
-    const start = token.endsWith('*') ? token : option ? `${token}*` : undefined;
+    // An exact option (`--output`, not `--output-indicator-new`) matches itself and its `=value` form only.
+    const start = token.endsWith('*') ? token : option && !EXACT_OPTIONS.has(token) ? `${token}*` : undefined;
     // git also takes any unambiguous start of a long option (`--del` for `--delete`): those spellings are denied as whole
     // words, so other options that merely share a start (`--follow-tags`, `--format`) stay allowed.
     for (const spelling of abbreviations(token)) claude.push(`Bash(${value} ${spelling})`, `Bash(${value} ${spelling} *)`, `Bash(${value} * ${spelling})`, `Bash(${value} * ${spelling} *)`);
@@ -261,13 +263,19 @@ export function ruleGuards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>): {
     // denied when more follows it; a trailing `:ref` is not blocked for Claude.
     if (start?.endsWith(':*')) claude.push(`Bash(${value} ${start} *)`, `Bash(${value} * ${start} *)`);
     else if (start) claude.push(`Bash(${value} ${start})`, `Bash(${value} * ${start})`);
-    else claude.push(`Bash(${value} ${token})`, `Bash(${value} ${token} *)`, `Bash(${value} * ${token})`, `Bash(${value} * ${token} *)`);
+    else {
+      claude.push(`Bash(${value} ${token})`, `Bash(${value} ${token} *)`, `Bash(${value} * ${token})`, `Bash(${value} * ${token} *)`);
+      if (option) claude.push(`Bash(${value} ${token}=*)`, `Bash(${value} * ${token}=*)`);
+    }
     if (token.endsWith('*')) continue;
     // Codex matches whole words: the option and every abbreviation git would take are named.
     for (const spelling of [...abbreviations(token), token]) codex.push(`prefix_rule(pattern=[${[...words(value), spelling].map(word => JSON.stringify(word)).join(', ')}], decision="forbidden")`);
   }
   return { claude, codex };
 }
+
+/** Options whose longer relatives are harmless, so they are denied as themselves rather than by their start. */
+const EXACT_OPTIONS = new Set(['--output']);
 
 /** The shorter spellings git accepts for a long option: any unambiguous start, down to one letter (`--d` for `--delete`). */
 function abbreviations(token: string): string[] {
@@ -300,7 +308,7 @@ const RUN_ANYWHERE = new Set(['rm', 'rmdir', 'sudo', 'doas', 'chmod', 'chown', '
 
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Glob', 'Grep', 'LS']);
 const MCP_TOOL = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/;
-const MCP_DANGER = /(send|post|publish|deploy|delete|remove|drop|destroy|purge|truncate|exec|execute|sql|transfer|pay|charge|upload|invite)/i;
+const MCP_DANGER = new Set(['send', 'post', 'publish', 'deploy', 'delete', 'remove', 'drop', 'destroy', 'purge', 'truncate', 'exec', 'execute', 'sql', 'transfer', 'pay', 'charge', 'upload', 'invite']);
 const inside = (path: string, folder: string) => path === folder || path.startsWith(folder.endsWith('/') ? folder : `${folder}/`);
 
 /**
@@ -330,8 +338,10 @@ export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'
   }
   const value = rule.value.trim();
   if (MCP_TOOL.test(value)) {
-    // A tool that sends, deletes, runs or pays is the owner's to allow, like its command counterparts.
-    if (MCP_DANGER.test(value)) return '보내기·삭제·실행·배포 같은 일을 하는 MCP 도구는 소유자가 정합니다.';
+    // A tool that sends, deletes, runs or pays is the owner's to allow, like its command counterparts. Only the tool's own
+    // words count (not the server's name), and only whole ones (`list_deployments` only reads).
+    const words = value.split('__').slice(2).join('_').toLowerCase().split(/[_-]+/);
+    if (words.some(word => MCP_DANGER.has(word))) return '보내기·삭제·실행·배포 같은 일을 하는 MCP 도구는 소유자가 정합니다.';
     return undefined;
   }
   if (ruleIsBroad(rule)) return '도구 전체를 허용하는 넓은 규칙은 소유자가 정합니다.';

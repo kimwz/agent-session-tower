@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { claudeRule, codexRule, type PermissionRequest, type PermissionRule } from '../../shared/permissions.js';
 import type { ChatMessage, Run } from '../../shared/types.js';
+import { ATTACHMENT_ONLY_PROMPT } from '../stores/attachments.js';
 
 const run = promisify(execFile);
 
@@ -9,7 +10,7 @@ const run = promisify(execFile);
 export interface ReviewSources {
   runs(): Run[];
   /** What the owner typed in the conversation, and whether the record is whole. */
-  ownerPrompts(sessionId: string): { prompts: { at: string; text: string }[]; complete: boolean };
+  ownerPrompts(sessionId: string): { prompts: { at: string; text: string }[]; complete: boolean; sent?: string[] };
   /** A trigger's own instructions, and whether the owner (in a page) made its last change. */
   trigger(id: string): { name: string; instructions: string; ownerSet: boolean } | undefined;
   /** Tower skills and owner guidance at the revision the owner saved or confirmed. */
@@ -58,9 +59,14 @@ export async function reviewInput(request: PermissionRequest, sources: ReviewSou
   if (!record.complete) throw new ReviewSkip('이 대화에서 소유자가 한 말을 Tower가 다 알지 못해 소유자에게 넘깁니다(Tower 밖이나 이전 버전에서 시작, 마스터·다른 컴퓨터·질문 답변으로 전한 말, 너무 긴 기록 등).');
   const prompts = record.prompts.map((item, index) => ({ at: item.at, ...(index === 0 ? { task: true } : {}), text: item.text }));
   // Words in the conversation that Tower never sent (typed in the native CLI after resuming it there) are the owner's too.
-  const sent = [...record.prompts.map(item => item.text), ...runs.map(item => item.prompt)].map(text => text.trim()).filter(Boolean);
-  const foreign = recent.filter(message => message.role === 'user' && message.text.trim() && !message.text.trim().startsWith('[Agent Session Tower]')
-    && !sent.some(text => message.text.trim().startsWith(text.slice(0, 2000))));
+  const sent = [...record.prompts.map(item => item.text), ...record.sent ?? [], ...runs.map(item => item.prompt), ATTACHMENT_ONLY_PROMPT].map(text => text.trim()).filter(Boolean);
+  // How native history shows a message Tower sent: image notes before it, Tower's own notices, a compacted summary.
+  const shown = (text: string) => text.replace(/^(\[Image attachment\]\s*)+/, '').trim();
+  const towers = (text: string) => !text || text.startsWith('[Agent Session Tower]') || text.startsWith('This session is being continued from a previous conversation');
+  // A short prompt must match whole: "ok" is not the start of everything that begins with it.
+  // Tower appends the list of attached files after the prompt.
+  const matches = (text: string, prompt: string) => prompt.length < 40 ? text === prompt || text.startsWith(`${prompt}\n\n첨부 파일 (`) : text.startsWith(prompt.slice(0, 300));
+  const foreign = recent.filter(message => message.role === 'user' && !towers(shown(message.text)) && !sent.some(prompt => matches(shown(message.text), shown(prompt))));
   if (foreign.length) throw new ReviewSkip('이 대화에 Tower 밖에서 입력한 말이 있어 소유자에게 넘깁니다.');
   const history = recent.map(message => ({
     role: message.role, ...(message.toolName ? { tool: message.toolName } : {}), text: cut(message.text, message.role === 'tool' ? MAX_TOOL_CHARS : MAX_MESSAGE_CHARS),
@@ -94,7 +100,6 @@ export async function reviewInput(request: PermissionRequest, sources: ReviewSou
         agentReason: request.reason,
         agentProvider: request.provider,
       },
-      ...(trigger && !trigger.ownerSet ? { triggerNotSetByOwner: { name: trigger.name, instructions: cut(trigger.instructions, MAX_PROMPT_CHARS) } } : {}),
       ...(owned.unconfirmed.length ? { skillsNotConfirmedByOwner: owned.unconfirmed } : {}),
       // Local refs are the agent's to move (`git update-ref`), so even the upstream branch's copy is not the owner's word.
       ...(project.length ? { projectInstructions: project } : {}),

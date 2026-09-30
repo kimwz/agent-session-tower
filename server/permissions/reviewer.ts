@@ -90,12 +90,15 @@ export class PermissionReviewer {
         result = { ...result, verdict: 'owner', reason: `${result.reason} (더 좁게 요청하라고 전할 수 없어 소유자에게 넘깁니다${result.suggestion ? `. 제안: ${result.suggestion}` : ''})` };
       }
     } catch (error) {
+      this.requeued.delete(request.id);
       if (error instanceof ReviewSkip) { await service.failReview(request.id, error.message, 'skipped'); return; }
       await service.failReview(request.id, this.aborted ? '자동 검토가 꺼졌습니다.' : controller.signal.aborted ? '자동 검토가 시간 안에 끝나지 않았습니다.' : (error instanceof Error ? error.message : String(error)).replace(/^Auto Prompt: /, ''));
       return;
     } finally { clearTimeout(timer); this.controller = undefined; }
     const outcome = await service.applyReview(request.id, result);
-    // The owner may have turned the notice off meanwhile.
+    this.requeued.delete(request.id);
+    // The owner may have turned the notice off meanwhile: a request sent back that nobody tells returns to the owner.
+    if (outcome?.request.status === 'withdrawn' && !service.autoReview().resume) { await service.reopenForOwner(outcome.request.id, '에이전트에게 전하지 않도록 설정돼 소유자에게 넘깁니다'); return; }
     if (outcome?.message && service.autoReview().resume) await this.options.notify(outcome.request, outcome.message).catch(async error => {
       console.error(`Permission review could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`);
       // An agent never told to ask again would wait for good: the owner decides instead.

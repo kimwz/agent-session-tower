@@ -6,7 +6,10 @@ const MAX_SESSION_CHARS = 400_000;
 const MAX_SESSIONS = 400;
 const MAX_BYTES = 40_000_000;
 
-interface Entry { prompts: { at: string; text: string }[]; complete: boolean; updatedAt: string }
+/** `sent`: the start of every message Tower sent in the conversation, whoever asked, to tell them from words typed elsewhere. */
+interface Entry { prompts: { at: string; text: string }[]; complete: boolean; updatedAt: string; sent?: string[] }
+const MAX_SENT = 400;
+const SENT_CHARS = 300;
 interface State { version: 1; sessions: Record<string, Entry> }
 
 /**
@@ -29,7 +32,7 @@ export class OwnerPromptStore {
       for (const [id, entry] of Object.entries(saved?.sessions ?? {})) {
         if (!entry || !Array.isArray(entry.prompts)) continue;
         sessions[id] = { prompts: entry.prompts.filter(item => item && typeof item.text === 'string' && typeof item.at === 'string'), complete: entry.complete !== false,
-          updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : '' };
+          updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : '', sent: Array.isArray(entry.sent) ? entry.sent.filter((item): item is string => typeof item === 'string') : [] };
       }
       this.state = { version: 1, sessions };
     } catch (error) {
@@ -39,21 +42,22 @@ export class OwnerPromptStore {
   }
 
   /** The owner's prompts in a conversation, oldest first, and whether that is all of them. */
-  list(sessionId: string): { prompts: { at: string; text: string }[]; complete: boolean } {
+  list(sessionId: string): { prompts: { at: string; text: string }[]; complete: boolean; sent: string[] } {
     const entry = this.state.sessions[sessionId];
-    return entry ? { prompts: entry.prompts.map(item => ({ ...item })), complete: entry.complete } : { prompts: [], complete: false };
+    return entry ? { prompts: entry.prompts.map(item => ({ ...item })), complete: entry.complete, sent: [...entry.sent ?? []] } : { prompts: [], complete: false, sent: [] };
   }
 
   /**
    * The owner's words for one run, at once: the conversation's start (Tower created it), what the owner typed, or that
    * owner work arrived which was not typed here. A record that could not be saved is not whole from then on.
    */
-  record(sessionId: string, at: string, input: { begin?: boolean; text?: string; taint?: boolean }): Promise<void> {
+  record(sessionId: string, at: string, input: { begin?: boolean; text?: string; taint?: boolean; sent?: string }): Promise<void> {
     return this.change(state => {
       if (input.begin && !state.sessions[sessionId]) state.sessions[sessionId] = { prompts: [], complete: true, updatedAt: at };
       const entry = state.sessions[sessionId] ?? { prompts: [], complete: false, updatedAt: at };
       if (input.text !== undefined) entry.prompts.push({ at, text: input.text });
       if (input.taint) entry.complete = false;
+      if (input.sent?.trim()) entry.sent = [...(entry.sent ?? []), input.sent.trim().slice(0, SENT_CHARS)].slice(-MAX_SENT);
       entry.updatedAt = at;
       while (entry.prompts.reduce((sum, item) => sum + item.text.length, 0) > MAX_SESSION_CHARS && entry.prompts.length > 1) { entry.prompts.splice(1, 1); entry.complete = false; }
       state.sessions[sessionId] = entry;

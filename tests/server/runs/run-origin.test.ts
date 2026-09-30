@@ -344,5 +344,6 @@ test('only what the owner typed is marked authored; owner-origin work Tower queu
   await manager.enqueue(`codex:${OTHER}`, 'Relayed by the master', {}, { origin: { kind: 'owner' } });
   await manager.enqueue(`codex:${OTHER}`, 'Tower notice', {}, { origin: { kind: 'owner' }, notice: true });
   await manager.enqueue(`codex:${OTHER}`, 'Slack', {}, { origin: { kind: 'slack' } });
-  assert.deepEqual(kept, [`${next.session.id} {"begin":true,"text":"Deploy after review"}`, `codex:${OTHER} {"taint":true}`]);
+  assert.deepEqual(kept, [`${next.session.id} {"begin":true,"text":"Deploy after review","sent":"Deploy after review"}`, `codex:${OTHER} {"taint":true,"sent":"Relayed by the master"}`,
+    `codex:${OTHER} {"sent":"Tower notice"}`, `codex:${OTHER} {"sent":"Slack"}`]);
 });

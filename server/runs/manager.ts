@@ -64,7 +64,7 @@ interface RunnerOptions {
   /** Notes for every turn, such as the owner's pinned skills; asked and limited like `firstTurnNotes`. */
   turnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
   /** Keeps what the owner typed per conversation, from the start of the conversations Tower creates. */
-  ownerPrompts?: { record(sessionId: string, at: string, input: { begin?: boolean; text?: string; taint?: boolean }): Promise<void> };
+  ownerPrompts?: { record(sessionId: string, at: string, input: { begin?: boolean; text?: string; taint?: boolean; sent?: string }): Promise<void> };
   /** Settings for every Claude Code turn Tower starts: the owner's allow rules for its folder. */
   claudeSettings?: (cwd: string) => string | undefined;
   /** Pre-accepts the native folder trust prompt for a newly created session. */
@@ -285,8 +285,9 @@ export class RunManager extends EventEmitter {
     if (!store) return;
     try {
       // Owner work that is not what the owner typed here may carry the owner's words all the same.
-      const input = { ...(created ? { begin: true } : {}), ...(run.authored ? { text: run.prompt } : run.origin?.kind === 'owner' && !notice ? { taint: true } : {}) };
-      if (Object.keys(input).length) await store.record(sessionId, run.createdAt, input);
+      // Every message Tower sends is remembered by its start, so the reviewer can tell words typed elsewhere.
+      await store.record(sessionId, run.createdAt, { ...(created ? { begin: true } : {}), ...(run.authored ? { text: run.prompt } : run.origin?.kind === 'owner' && !notice ? { taint: true } : {}),
+        sent: run.prompt });
     } catch (error) {
       console.error(`Owner prompt record failed: ${error instanceof Error ? error.message : String(error)}`);
       throw new RunError('소유자 지시 기록을 저장하지 못했습니다. 디스크 공간과 권한을 확인한 뒤 다시 보내세요.', 503);
@@ -787,12 +788,16 @@ export class RunManager extends EventEmitter {
     if (this.stopping || run.status !== 'running' || (!owned?.claude && !stdio) || !run.approvals?.some(approval => approval.id === approvalId)) {
       throw new RunError('This permission request is no longer pending. Refresh the conversation.', 409);
     }
+    // Answers the owner writes reach the agent outside the prompts Tower keeps: the record is not whole from here,
+    // noted before the answer goes, and an answer that cannot be noted is refused like a message.
+    if (typeof decision === 'object' && this.options.ownerPrompts) {
+      await this.options.ownerPrompts.record(run.sessionId, new Date().toISOString(), { taint: true })
+        .catch(() => { throw new RunError('소유자 지시 기록을 저장하지 못했습니다. 디스크 공간과 권한을 확인한 뒤 다시 보내세요.', 503); });
+    }
     if (stdio) await stdio.respondToApproval(approvalId, decision);
     else {
       await owned!.claude!.respond(approvalId, decision);
     }
-    // Answers the owner wrote reach the agent outside the prompts Tower keeps: the record is not whole from here.
-    if (typeof decision === 'object' && this.options.ownerPrompts) await this.options.ownerPrompts.record(run.sessionId, new Date().toISOString(), { taint: true }).catch(() => {});
     return this.list().find(item => item.id === runId)!;
   }
 
