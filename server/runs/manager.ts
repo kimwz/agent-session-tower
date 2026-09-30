@@ -1485,7 +1485,8 @@ export class RunManager extends EventEmitter {
    */
   beginUpdateDrain(deadline: number, delegated: (run: Run) => boolean): void {
     if (this.updating || this.stopping) return;
-    // Turns from an earlier forced update that gave up are still followed until they end.
+    // Turns from an earlier forced update that gave up are still followed until they end; its deadline is asked again.
+    for (const target of this.drain?.targets.values() ?? []) target.stopping = false;
     this.drain = { startedAt: Date.now(), deadline, delegated, active: true, targets: this.drain?.targets ?? new Map(), stoppingBridges: new Set(), wrapUps: this.drain?.wrapUps ?? new Set() };
     this.changed();
   }
@@ -1545,7 +1546,15 @@ export class RunManager extends EventEmitter {
     void this.steer(wrapUp.id, { targetRunId: target.id }).catch(() => {}).finally(() => {
       state.sending = false;
       // Put back in the queue means it was never handed over; it must not start later as a turn of its own.
-      if (wrapUp.status === 'queued' && !wrapUp.steering && this.runs.get(wrapUp.id) === wrapUp) { this.runs.delete(wrapUp.id); this.changed(); }
+      if (wrapUp.status !== 'queued' || wrapUp.steering || this.runs.get(wrapUp.id) !== wrapUp) return;
+      this.runs.delete(wrapUp.id);
+      state.reached = false;
+      // The turn ended meanwhile, counted as asked to wrap up: it was not, so it is not carried on.
+      const turn = this.runs.get(target.id);
+      if (turn?.status === 'completed') {
+        for (const run of [...this.runs.values()]) if (run.status === 'queued' && run.scheduled?.resume === 'update' && run.scheduled.afterRunId === turn.id) this.runs.delete(run.id);
+      }
+      this.changed();
     });
   }
 
@@ -1585,7 +1594,8 @@ export class RunManager extends EventEmitter {
    */
   private settleUpdateTarget(run: Run, target: UpdateTarget): void {
     if (target.delegated || this.ownerStopped.has(run.id)) return;
-    if (!(target.stopping ? run.status !== 'completed' || target.reached : run.status === 'completed' && target.reached)) return;
+    // A stop the deadline asked for counts only once confirmed ('cancelled'): an unconfirmed one may still be running there.
+    if (!((target.stopping && run.status === 'cancelled') || (run.status === 'completed' && target.reached))) return;
     for (const other of [...this.runs.values()]) {
       if (other.status === 'queued' && other.scheduled?.afterRunId === run.id && other.scheduled.resume !== 'update') this.runs.delete(other.id);
     }
