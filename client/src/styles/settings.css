@@ -20,8 +20,8 @@
 .canvas-only .app-header .header-actions > :not(.settings-entry) { display:none; }
 .canvas-only .settings-entry { pointer-events:auto; }
 .canvas-only .settings-button { background:#142030ed; }
-/* The canvas tools line up just left of it, measured, since its width follows the language and its marks. */
-.canvas-only .canvas-quick-controls { top:calc(var(--settings-middle, 28px) - 16px); right:calc(var(--settings-right, 126px) + 8px); }
+/* The canvas tools line up just left of it, measured, since its width follows the language and its marks; a banner above the canvas keeps them inside it. */
+.canvas-only .canvas-quick-controls { top:max(12px, calc(var(--settings-middle, 28px) - 16px)); right:calc(var(--settings-right, 126px) + 8px); }
 .canvas-only .canvas-zoom-controls { height:32px; padding:2px; }
 .canvas-only .canvas-zoom-controls>button { width:26px; height:26px; }
 /* A canvas too narrow for both drops the tools below the header, as elsewhere. */
