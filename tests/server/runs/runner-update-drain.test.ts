@@ -219,6 +219,30 @@ test('history keeps the runs that finished last, not the ones created last', asy
   assert.equal(manager.list().length, 100);
 });
 
+test('after the switch the interrupted turn resumes before a message queued behind it', async t => {
+  const f = await fixture();
+  const behind = await f.manager.enqueue(f.session.id, 'deploy what the turn builds', {}, { origin: owner });
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.manager.driveUpdateDrain(Date.now() + 61_000);
+  await until(() => f.run(f.first.id)?.status === 'cancelled');
+  await f.manager.flushState();
+  // A provider that starts and keeps running, so only the first run to launch is running.
+  const child = new EventEmitter() as ChildProcessWithoutNullStreams;
+  const stop = () => { if (child.exitCode !== null) return; Object.assign(child, { exitCode: 1 }); child.emit('close', 1, null); };
+  Object.assign(child, { stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, pid: undefined,
+    stdin: new Writable({ write(_chunk, _encoding, done) { done(); } }), kill: () => { stop(); return true; } });
+  const next = new RunManager({ stateDir: f.directory, getSession: id => id === f.session.id ? f.session : undefined,
+    refreshSessions: async () => {}, findExecutable: async () => '/fixture/claude', pollMs: 10, holdUntilReady: true,
+    spawnProcess: () => child });
+  t.after(async () => { await next.close(); await f.cleanup(); });
+  await next.start();
+  next.markReady();
+  await until(() => next.list().some(run => run.status === 'running'));
+  const running = next.list().find(run => run.status === 'running')!;
+  assert.equal(running.scheduled?.resume, 'update', 'the continuation goes first');
+  assert.equal(next.list().find(run => run.id === behind.id)?.status, 'queued');
+});
+
 test('watchers follow a turn into the continuation that carries it on', () => {
   const now = new Date().toISOString();
   const first: Run = { id: 'a', sessionId: 's', prompt: '', output: '', createdAt: now, status: 'cancelled' };
@@ -229,4 +253,6 @@ test('watchers follow a turn into the continuation that carries it on', () => {
   assert.equal(continuedRun([first, wakeup], first)?.id, 'a');
   assert.equal(continuedRun([], undefined), undefined);
   assert.equal(continuedRunById([second, third], 'a')?.id, 'c', 'found even after the first run left the history');
+  const steered: Run = { id: 's', sessionId: 's', prompt: '', output: '', createdAt: now, status: 'cancelled', steering: { targetRunId: 'a', state: 'delivered', requestedAt: now, deliveredAt: now } };
+  assert.equal(continuedRun([first, second, third, steered], steered)?.id, 'c', 'an instruction delivered into the turn follows the turn');
 });

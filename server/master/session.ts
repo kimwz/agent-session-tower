@@ -341,7 +341,10 @@ export class MasterSession {
     for (const item of this.file.followed.filter(entry => entry.state === 'running')) {
       if (this.closed) return;
       const where = item.node ? this.options.live.node(item.node) ?? await this.nodeSnapshot(item.node) : snapshot;
+      const current = item.currentRunId;
       if (where && await this.check(item, where)) changed = true;
+      // Saved as soon as it moves, so the chain is still found after a restart.
+      if (item.currentRunId !== current) changed = true;
     }
     if (await this.reconcile(snapshot, binding)) changed = true;
     if (await this.sendReports(binding)) changed = true;

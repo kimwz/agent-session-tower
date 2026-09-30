@@ -827,7 +827,9 @@ export class RunManager extends EventEmitter {
       await this.options.refreshSessions();
       // While Tower switches workers an owner message does not extend a turn that is being wrapped up.
       if (!this.drain) this.insertIntoWaitingTurns();
-      for (const run of this.runs.values()) {
+      // Tower's continuation after an update resumes the interrupted turn before any message queued behind that turn.
+      const ordered = [...this.runs.values()].sort((a, b) => Number(b.scheduled?.resume === 'update') - Number(a.scheduled?.resume === 'update'));
+      for (const run of ordered) {
         if (this.stopping) break;
         // Independent conversations can run immediately. Only callers that
         // explicitly configure a worker limit impose a global queue.
@@ -1496,7 +1498,8 @@ export class RunManager extends EventEmitter {
     // update stopped keep their continuation.
     for (const [id, target] of drain.targets) {
       const run = this.runs.get(id);
-      if (run?.status === 'cancelled' || run?.status === 'error' || target.mayHaveWrapUp && run?.status === 'completed') continue;
+      // Kept for turns the update stopped or is stopping, and for those it asked to wrap up.
+      if (run?.status === 'cancelled' || run?.status === 'error' || target.stopping || (target.mayHaveWrapUp && (run?.status === 'completed' || run?.status === 'running'))) continue;
       this.dropUpdateContinuation(id);
     }
     this.drain = undefined;
