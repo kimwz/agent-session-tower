@@ -44,9 +44,9 @@ test('a computer restarting into a new version is shown as updating, not offline
   assert.match(hostProblem(view.hosts[1])!, /새 버전으로 다시 시작하는 중입니다/);
 });
 
-test('this computer carries its execution worker version for the canvas', () => {
-  const view = combinedView({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'here', version: '1.56.0', runnerVersion: '1.53.2', updatedAt: at }, new Map());
-  assert.equal(view.hosts[0].runnerVersion, '1.53.2');
+test('this computer carries every Tower process version for the canvas', () => {
+  const view = combinedView({ sessions: [], runs: [], providers: [], scanning: false, hostname: 'here', version: '1.56.0', runnerVersion: '1.53.2', componentVersions: { terminalHost: null, master: '1.56.0' }, updatedAt: at }, new Map());
+  assert.deepEqual(view.hosts[0].versions, { web: '1.56.0', worker: '1.53.2', terminalHost: null, master: '1.56.0' });
 });
 
 test('computer status reaches the canvas for this computer and for joined ones only while they stream', () => {

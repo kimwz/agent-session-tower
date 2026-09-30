@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.88.0] - 2026-09-30
+## [1.89.0] - 2026-09-30
 
 ### Added
 - **권한 자동 검토.** When an agent asks for a permission with `permissions_request`, Tower's reviewer can decide it instead of waiting for you. Turn it on in 권한 → 요청 and pick the model (Claude opus/sonnet or Codex sol/terra, default reasoning). It applies in every project.
@@ -60,7 +60,13 @@ format, and saved browser preferences are the compatibility surface.
 - A review under way when the worker hands over finishes first; waiting reviews continue in the new worker.
 - Tower keeps what you type in each conversation in `owner-prompts.json` in its state folder (owner-only file). If it cannot be saved, the message is refused like one whose run cannot be saved.
 - Changing what a rule the reviewer made allows makes it yours, without its deny rules; changing only its note or agents keeps them. Saving or allowing a rule of your own that overlaps one the reviewer made (`git push --force-with-lease` beside `git push`) removes the reviewer's, so its deny rules never block yours.
-- Going back to 1.87 reads requests the reviewer withdrew as waiting and its rules as yours, without their deny rules. Delete the 자동 검토로 허용 rules before downgrading.
+- Going back to 1.88 or earlier reads requests the reviewer withdrew as waiting and its rules as yours, without their deny rules. Delete the 자동 검토로 허용 rules before downgrading.
+
+## [1.88.0] - 2026-09-30
+
+### Added
+- **Every Tower version on the canvas.** The version on a computer's card now opens a panel on hover, focus or tap. It lists the version of each of Tower's processes: the web server, the execution worker, the terminal host and the master host. A process that is not running shows as such. One that still runs an older release is marked, with when it moves: the worker when no work runs, the terminal host once every terminal is closed, the master host when it restarts. A dot on the version says something is still waiting to move. The panel is drawn above the canvas, so it stays readable when the canvas is zoomed out. Joined computers show the versions their own state reports.
+- The web server looks at the terminal and master hosts every half minute. It never starts them and never keeps them from stopping when idle: the terminal host is asked once per run.
 
 ## [1.87.0] - 2026-09-30
 

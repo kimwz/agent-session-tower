@@ -1,3 +1,4 @@
+import { newerVersion } from '../graph/TowerVersions';
 import { useCallback, useContext, useEffect, useRef, useState, type FormEvent } from 'react';
 import { SettingsFrameContext, SettingsPane } from '../settings/SettingsPane';
 import { Check, Copy, FolderX, LoaderCircle, Monitor, Plus, Radio, RefreshCw, Trash2 } from 'lucide-react';
@@ -112,13 +113,6 @@ function Nodes({ token, overview, busy, run, invite, known, onInvite }: { token:
   </section>;
 }
 
-/** Whether released version `a` is newer than `b`. */
-function newer(a: string | undefined, b: string | undefined): boolean {
-  const [x, y] = [a, b].map(value => /^\d+\.\d+\.\d+$/.test(value ?? '') ? value!.split('.').map(Number) : undefined);
-  if (!x || !y) return false;
-  for (let index = 0; index < 3; index++) if (x[index] !== y[index]) return x[index] > y[index];
-  return false;
-}
 
 /** Where a joined computer's version stands against this Tower's, and what its update is doing or why it failed. */
 export function UpdateLine({ token, node, version, busy, run }: { token: string; node: NodeSummary; version: string; busy: boolean; run: Run }) {
@@ -130,7 +124,7 @@ export function UpdateLine({ token, node, version, busy, run }: { token: string;
     interrupted: t('업데이트가 중간에 멈췄습니다. 그 컴퓨터가 다시 시작됐을 수 있습니다.'), 'rollback-failed': t('이전 버전으로도 돌아가지 못했습니다.') };
   const ask = (label: string) => <button type="button" className="secondary-button" disabled={busy || node.status !== 'connected'} onClick={() => { void run(() => post(token, `/api/link/nodes/${node.id}/update`, {})); }}><RefreshCw size={13} />{label}</button>;
   if (update && stages[update.stage]) return <p className="remote-update" role="status"><LoaderCircle size={13} className="spin" aria-hidden="true" />{t('v{0}(으)로 업데이트: {1}', { 0: update.version, 1: stages[update.stage]! })}</p>;
-  if (update?.stage === 'failed' && newer(update.version, node.version)) {
+  if (update?.stage === 'failed' && newerVersion(update.version, node.version)) {
     // Running the previous version again, it came back whatever the helper saw.
     const back = update.code !== 'rollback-failed' || (node.status === 'connected' && node.version === update.previous);
     const reason = update.code === 'rollback-failed' && back ? t('새 버전으로 옮기지 못했습니다.') : update.code ? failures[update.code] : '';
@@ -139,8 +133,8 @@ export function UpdateLine({ token, node, version, busy, run }: { token: string;
       ? t('v{0}(으)로 업데이트하지 못해 v{1}(으)로 계속 실행 중입니다. {2}', { 0: update.version, 1: update.previous, 2: reason })
       : t('v{0}(으)로 업데이트하지 못했고, {1} 그 컴퓨터에서 Tower를 확인하세요(기록: logs/update.log).', { 0: update.version, 1: reason })}{again}</p>{back && ask(t('지금 다시 시도'))}</div>;
   }
-  if (newer(node.version, version)) return <p className="remote-update">{t('이 Tower보다 새 버전입니다. 이 컴퓨터의 Tower를 업데이트하세요.')}</p>;
-  if (!newer(version, node.version) || node.status !== 'connected') return null;
+  if (newerVersion(node.version, version)) return <p className="remote-update">{t('이 Tower보다 새 버전입니다. 이 컴퓨터의 Tower를 업데이트하세요.')}</p>;
+  if (!newerVersion(version, node.version) || node.status !== 'connected') return null;
   if (!node.features.includes('status')) return <p className="remote-update">{t('이 Tower보다 이전 버전입니다. 그 컴퓨터에서 Tower를 한 번 직접 업데이트하세요. 백그라운드 서비스로 실행 중이면 그다음부터는 이 Tower를 따라 자동으로 업데이트됩니다.')}</p>;
   if (!node.features.includes('update')) return <p className="remote-update">{t('이 Tower보다 이전 버전입니다. 그 컴퓨터는 Tower를 백그라운드 서비스로 실행하지 않아 자동으로 업데이트되지 않습니다. 그 컴퓨터에서 직접 업데이트하세요.')}</p>;
   return <div className="remote-update"><p>{t('이 Tower(v{0})보다 이전 버전입니다.', { 0: version })}</p>{ask(t('지금 업데이트'))}</div>;
@@ -155,9 +149,9 @@ function NodeRow({ token, node, version, busy, run }: { token: string; node: Nod
   const save = (event: FormEvent) => { event.preventDefault(); void run(() => post(token, `/api/link/nodes/${node.id}`, { label })).then(ok => { if (ok) setEditing(false); }); };
   const reported = node.report?.versions;
   // The worker takes the new version once no work is running; until then it differs, and that is expected.
-  const worker = reported?.worker && newer(reported.web, reported.worker) ? reported.worker : undefined;
+  const worker = reported?.worker && newerVersion(reported.web, reported.worker) ? reported.worker : undefined;
   // So does a terminal host that keeps open terminals; it moves once they are all closed.
-  const terminalHost = reported?.terminalHost && newer(reported.web, reported.terminalHost) ? reported.terminalHost : undefined;
+  const terminalHost = reported?.terminalHost && newerVersion(reported.web, reported.terminalHost) ? reported.terminalHost : undefined;
   const free = node.report?.diskFree;
   const lowDisk = free !== undefined && free < 2 * 1024 ** 3 ? (free / 1024 ** 3).toFixed(1) : undefined;
   return <li className="slack-rule-row remote-row">

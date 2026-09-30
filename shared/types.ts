@@ -347,6 +347,9 @@ export interface SystemStatus {
   disk?: { total: number; free: number };
   sampledAt: string;
 }
+/** The versions of Tower's own processes besides the web server and the worker. */
+export interface ComponentVersions { terminalHost?: string | null; master?: string | null }
+
 export interface Snapshot {
   sessions: Session[];
   /** Branch sync state of recently used project folders that are git repositories. */
@@ -359,6 +362,8 @@ export interface Snapshot {
   version: string;
   /** Version of the execution worker that runs requests; 'legacy' for workers too old to report it. */
   runnerVersion?: string;
+  /** Tower's other processes on this computer, as last asked: null when one is not running. */
+  componentVersions?: ComponentVersions;
   groups?: ProjectGroup[];
   autoPrompts?: AutoPromptJob[];
   /** Absent while the execution worker predates triggers. */
