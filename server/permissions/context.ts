@@ -41,10 +41,6 @@ const cut = (value: string, max: number) => value.length > max ? `${value.slice(
  */
 export async function reviewInput(request: PermissionRequest, sources: ReviewSources): Promise<string> {
   const runs = sources.runs().filter(item => item.sessionId === request.sessionId).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  // The owner's words are never cut, and never partly missing: a restriction matters as much as the task.
-  const record = sources.ownerPrompts(request.sessionId);
-  if (!record.complete) throw new ReviewSkip('이 대화에서 소유자가 한 말을 Tower가 다 알지 못해 소유자에게 넘깁니다(Tower 밖이나 이전 버전에서 시작, 마스터·다른 컴퓨터·질문 답변으로 전한 말, 너무 긴 기록 등).');
-  const prompts = record.prompts.map((item, index) => ({ at: item.at, ...(index === 0 ? { task: true } : {}), text: item.text }));
   const triggerId = runs.find(item => item.origin?.kind === 'trigger' && item.origin.triggerId)?.origin?.triggerId;
   const trigger = triggerId ? sources.trigger(triggerId) : undefined;
   // A trigger's instructions the owner did not write as they stand now (changed by an agent, or gone) may have lost a restriction.
@@ -56,6 +52,11 @@ export async function reviewInput(request: PermissionRequest, sources: ReviewSou
   const rules = sources.rules(request.cwd).filter(rule => rule.source === 'owner' || rule.source === 'request')
     .map(rule => ({ rule: rule.value, kind: rule.kind, scope: rule.scope, providers: rule.providers }));
   const recent = await sources.history(request.sessionId, HISTORY).catch(() => undefined) ?? [];
+  // Read last, after every wait, so words the owner typed meanwhile are in. They are never cut, and never partly
+  // missing: a restriction matters as much as the task.
+  const record = sources.ownerPrompts(request.sessionId);
+  if (!record.complete) throw new ReviewSkip('이 대화에서 소유자가 한 말을 Tower가 다 알지 못해 소유자에게 넘깁니다(Tower 밖이나 이전 버전에서 시작, 마스터·다른 컴퓨터·질문 답변으로 전한 말, 너무 긴 기록 등).');
+  const prompts = record.prompts.map((item, index) => ({ at: item.at, ...(index === 0 ? { task: true } : {}), text: item.text }));
   // Words in the conversation that Tower never sent (typed in the native CLI after resuming it there) are the owner's too.
   const sent = [...record.prompts.map(item => item.text), ...runs.map(item => item.prompt)].map(text => text.trim()).filter(Boolean);
   const foreign = recent.filter(message => message.role === 'user' && message.text.trim() && !message.text.trim().startsWith('[Agent Session Tower]')
