@@ -573,22 +573,22 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         return undefined;
       },
       onReviewQueued: () => reviewer?.wake(),
-      startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? MAX_RUN_SECONDS),
+      startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? MAX_RUN_SECONDS, request.sessionId),
       onRunFinished: runFinished,
       runOutput: id => runner.output(id),
       forgetRun: id => runner.forget(id),
       onAutoReviewChange: settings => { if (!settings.enabled) reviewer?.abort(); } });
     await permissions.start().catch(error => console.error(`Permission rules did not start: ${error instanceof Error ? error.message : String(error)}`));
     // Runs a previous worker left: allowed ones start now; ones it left running are stopped only when provably its own.
-    void (async () => {
-      const left = permissions.unfinishedRuns();
-      for (const request of left.running) await permissions.updateRun(request.id, await runner.recover(request.run!)).catch(() => {});
-      for (const request of left.start) runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? MAX_RUN_SECONDS);
-    })().catch(error => console.error(`Permission runs did not recover: ${error instanceof Error ? error.message : String(error)}`));
+    // Nothing new runs, and the worker is not handed off, until that is done.
+    const left = permissions.unfinishedRuns();
+    runner.hold(Promise.all(left.running.map(async request => { await permissions.updateRun(request.id, await runner.recover(request.run!)); }))
+      .catch(error => console.error(`Permission runs did not recover: ${error instanceof Error ? error.message : String(error)}`)));
+    for (const request of left.start) runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? MAX_RUN_SECONDS, request.sessionId);
     // Rules for one conversation go when it is closed or gone, or after their time.
     const expireRules = async () => { const saved = new ClosedSessionStore(stateDir); await saved.start(); await permissions.expire(saved.closedIds()); };
     void expireRules().catch(() => {});
-    const expiryTimer = setInterval(() => { void expireRules().catch(() => {}); }, 60 * 60 * 1000);
+    const expiryTimer = setInterval(() => { void expireRules().catch(() => {}); }, 10 * 60 * 1000);
     expiryTimer.unref();
     reviewer = new PermissionReviewer({ service: permissions,
       model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }),

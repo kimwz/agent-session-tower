@@ -10,6 +10,8 @@ const exec = promisify(execFile);
 const KEEP_BYTES = 64 * 1024;
 const PREVIEW_CHARS = 2_000;
 const KILL_GRACE_MS = 5_000;
+/** Runs at once on this computer; one conversation's run one after another. */
+const MAX_RUNNING = 4;
 
 /** What the OS reports as a process's start time; undefined when there is no such process. */
 export async function processStart(pid: number): Promise<string | undefined> {
@@ -65,20 +67,48 @@ export interface RunnerOptions {
  */
 export class PermissionRunner {
   private readonly running = new Map<string, Promise<void>>();
+  private readonly queue: { id: string; command: string; cwd: string; timeoutSeconds: number; group: string }[] = [];
+  private readonly groups = new Map<string, string>();
+  private gate: Promise<void> | undefined;
   private readonly dir: string;
 
   private now(): string { return (this.options.now?.() ?? new Date()).toISOString(); }
 
   constructor(private readonly options: RunnerOptions) { this.dir = join(options.stateDir, 'permission-runs'); }
 
-  inFlight(): boolean { return this.running.size > 0; }
-  async flush(): Promise<void> { await Promise.all([...this.running.values()]); }
+  inFlight(): boolean { return this.running.size > 0 || this.queue.length > 0 || this.gate !== undefined; }
+  async flush(): Promise<void> {
+    while (this.inFlight()) await Promise.all([...this.running.values(), this.gate, new Promise(resolve => setTimeout(resolve, 50))]);
+  }
   isRunning(id: string): boolean { return this.running.has(id); }
 
-  start(id: string, command: string, cwd: string, timeoutSeconds: number): void {
-    if (this.running.has(id)) return;
-    const work = this.execute(id, command, cwd, timeoutSeconds).finally(() => { this.running.delete(id); this.options.finished?.(id); });
-    this.running.set(id, work);
+  /** Nothing starts until `work` (the recovery of what an earlier worker left) is done. */
+  hold(work: Promise<unknown>): void {
+    const gate: Promise<void> = work.then(() => {}, () => {}).finally(() => { if (this.gate === gate) this.gate = undefined; this.pump(); });
+    this.gate = gate;
+  }
+
+  /** Queues a run; it starts once its conversation has no other run and fewer than `MAX_RUNNING` run. */
+  start(id: string, command: string, cwd: string, timeoutSeconds: number, group = id): void {
+    if (this.running.has(id) || this.queue.some(item => item.id === id)) return;
+    this.queue.push({ id, command, cwd, timeoutSeconds, group });
+    this.pump();
+  }
+
+  private pump(): void {
+    if (this.gate) return;
+    const busy = new Set(this.groups.values());
+    for (let index = 0; index < this.queue.length && this.running.size < MAX_RUNNING;) {
+      const item = this.queue[index]!;
+      if (busy.has(item.group)) { index += 1; continue; }
+      this.queue.splice(index, 1);
+      busy.add(item.group);
+      this.groups.set(item.id, item.group);
+      const work = this.execute(item.id, item.command, item.cwd, item.timeoutSeconds)
+        .catch(error => console.error(`A permission run failed: ${error instanceof Error ? error.message : String(error)}`))
+        .finally(() => { this.running.delete(item.id); this.groups.delete(item.id); this.options.finished?.(item.id); this.pump(); });
+      this.running.set(item.id, work);
+    }
   }
 
   async output(id: string): Promise<PermissionRunOutput | undefined> {
@@ -90,6 +120,9 @@ export class PermissionRunner {
 
   private async execute(id: string, command: string, cwd: string, timeoutSeconds: number): Promise<void> {
     const startedAt = this.now();
+    // Saved before the command starts: a worker that stops from here on leaves a run whose result is unknown, never
+    // one that would start again.
+    await this.options.update(id, { status: 'running', startedAt });
     const stdout = new Kept();
     const stderr = new Kept();
     let child;
@@ -139,7 +172,7 @@ export class PermissionRunner {
 
   /**
    * A run a previous worker left `running`: stopped only with proof it is ours (its leader alive with the recorded start
-   * time). Otherwise nothing is signalled; the result is unknown.
+   * time). Otherwise nothing is signalled; the result is unknown. One stopped before its process was recorded is unknown too.
    */
   async recover(run: PermissionRun): Promise<PermissionRun> {
     const finishedAt = this.now();

@@ -377,6 +377,8 @@ async function main() {
       const updated = await closedSessions.set(session, closed);
       // Closing a conversation also stops what its agent planned to do in it later.
       if (closed) for (const run of runs.list()) if (run.sessionId === session.id && run.status === 'queued' && run.scheduled) await runs.cancel(run.id).catch(() => {});
+      // Its rules for this conversation go now; the worker's sweep catches what this misses (a worker older than 1.92).
+      if (closed) await runs.api('permissions.forgetConversation', { sessionId: session.id }).catch(() => {});
       changed();
       return titles.apply(updated);
     },

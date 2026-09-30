@@ -27,7 +27,7 @@ async function fixture(t: TestContext) {
   let service!: PermissionService;
   const runner = new PermissionRunner({ stateDir, update: (id, run) => service.updateRun(id, run), killGraceMs: 300, now: () => clock });
   const make = () => new PermissionService({ stateDir, env: { CODEX_HOME: join(root, 'codex-home') }, session: id => sessions.get(id), now: () => clock,
-    startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600),
+    startRun: request => runner.start(request.id, request.rule.value, request.cwd, request.timeoutSeconds ?? 600, request.sessionId),
     onRunFinished: request => finished.push(request.id), runOutput: id => runner.output(id), forgetRun: id => runner.forget(id) });
   service = make();
   await service.start();
@@ -199,4 +199,44 @@ test('the reviewer can keep a wide rule to one conversation, and never widens on
   assert.ok(await f.service.startReview(narrow.request.id!));
   await f.service.applyReview(narrow.request.id!, { verdict: 'approve', reason: 'ok', scope: 'project' });
   assert.equal(f.service.overview().rules.find(rule => rule.value === 'gh release create')!.scope, 'conversation');
+});
+
+test('one conversation’s runs go one after another, and nothing starts while an earlier worker’s runs are recovered', async t => {
+  const f = await fixture(t);
+  let release!: () => void;
+  f.runner.hold(new Promise<void>(resolve => { release = resolve; }));
+  const first = await f.service.requestRun({ command: 'sleep 0.5; perl -MTime::HiRes=time -e "printf q(%.6f), time" > first', reason: 'r' }, agent('claude:one'));
+  const second = await f.service.requestRun({ command: 'perl -MTime::HiRes=time -e "printf q(%.6f), time" > second', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(first.request.id!, true);
+  await f.service.decide(second.request.id!, true);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.equal(f.service.overview().requests.find(item => item.id === first.request.id!)!.run!.status, 'waiting', 'held until recovery is done');
+  assert.ok(f.runner.inFlight());
+  release();
+  await f.service.runResult({ id: second.request.id!, waitSeconds: 10 }, agent('claude:one'));
+  const [a, b] = await Promise.all(['first', 'second'].map(file => readFile(join(f.project, file), 'utf8')));
+  assert.ok(Number(a) < Number(b), 'the second started after the first ended');
+});
+
+test('a run saved as started but with no process recorded is never started again', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.requestRun({ command: 'echo x', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(asked.request.id!, true);
+  await f.service.runResult({ id: asked.request.id!, waitSeconds: 10 }, agent('claude:one'));
+  await f.service.updateRun(asked.request.id!, { status: 'running', startedAt: '2026-09-30T00:00:00.000Z' });
+  const left = f.service.unfinishedRuns();
+  assert.deepEqual(left.start, []);
+  assert.equal(left.running.length, 1);
+  const recovered = await f.runner.recover(left.running[0]!.run!);
+  assert.equal(recovered.status, 'failed');
+  assert.match(recovered.error!, /unknown/);
+});
+
+test('closing a conversation removes its rules at once', async t => {
+  const f = await fixture(t);
+  const asked = await f.service.request({ kind: 'command', value: 'kill', scope: 'conversation', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(asked.request.id!, true);
+  await f.service.save({ kind: 'command', value: 'npm test', providers: ['claude'], scope: 'global' });
+  await f.service.forgetConversation('claude:one');
+  assert.deepEqual(f.service.overview().rules.map(rule => rule.value), ['npm test']);
 });

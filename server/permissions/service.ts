@@ -420,7 +420,7 @@ export class PermissionService {
   /** Allowed runs a previous worker never started, and runs it left running (for the runner to recover). */
   unfinishedRuns(): { start: PermissionRequest[]; running: PermissionRequest[] } {
     const runs = this.state.requests.filter(request => request.rule.kind === 'run' && request.status === 'approved' && request.run && !finishedRun(request.run));
-    return { start: runs.filter(request => request.run!.status === 'waiting' && !request.run!.pid), running: runs.filter(request => request.run!.status === 'running' || request.run!.pid !== undefined) };
+    return { start: runs.filter(request => request.run!.status === 'waiting'), running: runs.filter(request => request.run!.status === 'running') };
   }
 
   /** Conversation rules whose time is up, or whose conversation is closed or gone, go. */
@@ -430,6 +430,16 @@ export class PermissionService {
       const gone = (rule: PermissionRule) => rule.scope === 'conversation' && (expired(rule, now) || closed.has(rule.sessionId!) || !this.options.session(rule.sessionId!));
       if (!this.state.rules.some(gone)) return;
       await this.commit(state => { state.rules = state.rules.filter(rule => !gone(rule)); });
+    });
+  }
+
+  /** The owner closed a conversation: its rules go at once, so reopening it does not bring them back. */
+  forgetConversation(sessionId: string): Promise<PermissionOverview> {
+    return this.serial(async () => {
+      if (this.state.rules.some(rule => rule.scope === 'conversation' && rule.sessionId === sessionId)) {
+        await this.commit(state => { state.rules = state.rules.filter(rule => !(rule.scope === 'conversation' && rule.sessionId === sessionId)); });
+      }
+      return this.overview();
     });
   }
 
