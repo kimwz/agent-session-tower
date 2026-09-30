@@ -337,4 +337,10 @@ test('only what the owner typed is marked authored; owner-origin work Tower queu
   assert.equal(agent.authored, undefined);
   const outside = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Issue text' }, { origin: { kind: 'owner' }, authored: true, untrustedInput: true });
   assert.equal(outside.run.authored, undefined);
+  // Kept apart from run history for the permission reviewer: a conversation Tower created starts whole.
+  const kept: string[] = [];
+  manager.setOwnerPrompts({ begin: async id => { kept.push(`begin ${id}`); }, add: async (id, _at, text) => { kept.push(`${id} ${text}`); } });
+  const next = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Deploy after review' }, { origin: { kind: 'owner' }, authored: true });
+  await manager.enqueue(`codex:${OTHER}`, 'Continue (wakeup)', {}, { origin: { kind: 'owner' } });
+  assert.deepEqual(kept, [`begin ${next.session.id}`, `${next.session.id} Deploy after review`]);
 });

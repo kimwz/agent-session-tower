@@ -267,7 +267,7 @@ function SkillEditor({ draft: initial, cwd, projects, busy, onCancel, onSave, on
     {draft.separate && <p className="auth-hint">{t('이 스킬은 에이전트마다 따로 복사본이 있습니다. 저장하면 {0}가 쓰는 복사본만 바뀝니다.', { 0: draft.separate })}</p>}
     {draft.external && <p className="auth-hint">{t('skills 명령으로 설치한 스킬입니다. 다시 설치하면 여기서 고친 내용이 바뀝니다.')}</p>}
     {onConfirm && <div className="permission-warning"><ShieldCheck size={15} /><div><p>{t('이 내용은 Tower에서 저장하거나 확인한 뒤 바뀌었습니다(또는 아직 확인하지 않았습니다). 권한 자동 검토는 확인한 내용만 소유자의 지시로 봅니다. 아래 내용을 읽고 맞으면 확인하세요.')}</p>
-      <button type="button" className="secondary-button" disabled={busy || initial.body !== draft.body || initial.description !== draft.description} onClick={onConfirm}>{t('이 내용 확인')}</button></div></div>}
+      <button type="button" className="secondary-button" disabled={busy || initial.body !== draft.body || initial.description !== draft.description || targetsRevision(initial.targets) !== targetsRevision(draft.targets)} onClick={onConfirm}>{t('이 내용 확인')}</button></div></div>}
     <label>{t('이름')}<input value={draft.name} disabled={editing || busy} required maxLength={64} placeholder="cross-verified-delivery" spellCheck={false} onChange={event => set({ name: event.target.value.toLowerCase().replace(/\s+/g, '-') })} />
       {nameError ? <small className="auth-error">{nameError}</small> : <small>{t('폴더 이름이 됩니다. 영어 소문자, 숫자, 하이픈.')}</small>}</label>
     <label>{t('언제 쓰는 스킬인가요?')}<textarea rows={3} value={draft.description} required maxLength={MAX_SKILL_DESCRIPTION} disabled={busy} placeholder={t('예: 새 기능을 구현하거나 설계를 바꾸는 요청을 받았을 때. 설계 → 교차 검증 → 구현 → 교차 검증 순서로 진행한다.')} onChange={event => set({ description: event.target.value })} />

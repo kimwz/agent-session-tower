@@ -43,7 +43,9 @@ import { installAgentGuidance } from '../agent-guidance/install.js';
 import { PermissionService } from '../permissions/service.js';
 import { PermissionReviewer } from '../permissions/reviewer.js';
 import { ownerWroteTrigger } from '../permissions/context.js';
+import { OwnerPromptStore } from '../permissions/owner-prompts.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
+import { ruleGuards } from '../../shared/permissions.js';
 import { skillHomes } from '../skills/files.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
 import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
@@ -542,6 +544,10 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       ...(resolve(stateDir) === resolve(defaultStateDir()) ? { installGuidance: async () => { await installAgentGuidance({ stateDir, claudeHome: process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), codexHome: process.env.CODEX_HOME || join(homedir(), '.codex') }); } } : {}) });
     // Skills never keep the worker from starting.
     await skills.start().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
+    // What the owner typed, per conversation, kept apart from run history (which keeps only the latest runs).
+    const ownerPrompts = new OwnerPromptStore(stateDir);
+    await ownerPrompts.start();
+    runs.setOwnerPrompts(ownerPrompts);
     // Made just below; the permission service only calls it once requests arrive.
     let reviewer!: PermissionReviewer;
     const permissions = new PermissionService({ stateDir, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
@@ -561,6 +567,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }),
       sources: {
         runs: () => runs.list(),
+        ownerPrompts: sessionId => ownerPrompts.list(sessionId),
         trigger: id => {
           // A trigger deleted since (or a public agent's, which is no trigger here) has no instructions to read.
           let kept: ReturnType<TriggerService['get']> | undefined;
@@ -574,7 +581,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         authority: cwd => skills.authority(cwd),
         history: async (sessionId, limit) => runs.getSession(sessionId) ? (await sessions.detail(runs.nativeSessionId(sessionId), undefined, limit))?.messages : undefined,
         rules: cwd => permissions.overview(cwd).rules,
-        guards: (rule, cwd) => ({ claude: permissions.guards(rule, cwd, 'claude').claude, codex: permissions.guards(rule, cwd, 'codex').codex }),
+        guards: rule => ruleGuards(rule),
         requests: sessionId => permissions.overview().requests.filter(item => item.sessionId === sessionId).reverse(),
       },
       // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals,

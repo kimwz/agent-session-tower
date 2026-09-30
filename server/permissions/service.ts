@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  AUTO_REVIEW_MODELS, DEFAULT_AUTO_REVIEW, autoReviewBlock, claudeRule, codexRule, normalizeCommand, ruleGuards, ruleIsNarrower, ruleProblem, sameRule,
+  AUTO_REVIEW_MODELS, DEFAULT_AUTO_REVIEW, autoReviewBlock, claudeRule, codexRule, normalizeCommand, ruleGuards, ruleIsNarrower, rulesOverlap, ruleProblem, sameRule,
   type PermissionAutoReview, type PermissionOverview, type PermissionProvider, type PermissionRequest, type PermissionReview, type PermissionReviewVerdict,
   type PermissionRule, type PermissionRuleInput, type PermissionTarget,
 } from '../../shared/permissions.js';
@@ -116,18 +116,8 @@ export class PermissionService {
     const rules = this.state.rules.filter(rule => rule.providers.includes('claude') && (rule.scope === 'global' || within(cwd, rule.cwd!)));
     const allow = [...new Set(rules.map(claudeRule))];
     // A rule the reviewer allowed never covers its family's destructive variants: deny comes before allow.
-    const deny = [...new Set(rules.filter(rule => rule.source === 'auto').flatMap(rule => this.guards(rule, cwd).claude))];
+    const deny = [...new Set(rules.filter(rule => rule.source === 'auto').flatMap(rule => ruleGuards(rule).claude))];
     return allow.length ? JSON.stringify({ permissions: { allow, ...(deny.length ? { deny } : {}) } }) : undefined;
-  }
-
-  /**
-   * The deny rules an allowed rule gets for work in `cwd`: what the owner's own rules there (every project's, and
-   * those of the project the folder is in) allow stays allowed.
-   */
-  guards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>, cwd: string, provider: PermissionProvider = 'claude'): { claude: string[]; codex: string[] } {
-    const owned = this.state.rules.filter(item => item.source !== 'auto' && item.kind === 'command' && item.providers.includes(provider)
-      && (item.scope === 'global' || within(cwd, item.cwd!))).map(item => item.value);
-    return ruleGuards(rule, owned);
   }
 
   autoReview(): PermissionAutoReview { return { ...(this.state.autoReview ?? DEFAULT_AUTO_REVIEW) }; }
@@ -206,8 +196,13 @@ export class PermissionService {
         } catch (error) { return owner(error instanceof Error ? error.message : String(error)); }
         const block = autoReviewBlock(given, request.cwd);
         if (block) return owner(block);
-        // A rule the owner made is never widened by the reviewer: it would lose the deny rules an allowed rule gets.
-        if (this.state.rules.some(item => item.source !== 'auto' && sameRule(item, given))) return owner('같은 규칙이 소유자 규칙으로 이미 있습니다');
+        // Where the owner has a rule of their own that overlaps (`git push --force-with-lease` beside `git push`), the
+        // deny rules of an allowed one would override theirs, and theirs could widen it: the owner decides.
+        if (this.state.rules.some(item => item.source !== 'auto' && item.kind === given.kind
+          && (item.scope === 'global' || within(request.cwd, item.cwd!) || within(item.cwd!, request.cwd))
+          && (given.kind === 'command' ? rulesOverlap(item.value, given.value) : sameRule({ ...item, scope: 'global' }, { ...given, scope: 'global' })))) {
+          return owner('겹치는 소유자 규칙이 이미 있습니다');
+        }
         if (!ruleIsNarrower({ ...asked, ...(asked.scope === 'global' ? { scope: 'project', cwd: request.cwd } : {}) }, given)) return owner('검토기가 요청보다 넓은 규칙을 냈습니다');
         try {
           await this.commit(state => {
@@ -235,6 +230,18 @@ export class PermissionService {
         return { request: item, message: reviewMessage(item) };
       }
       return owner();
+    });
+  }
+
+  /** A request sent back for a narrower rule whose agent could not be told: it waits for the owner instead. */
+  reopenForOwner(id: string, why: string): Promise<void> {
+    return this.serial(async () => {
+      await this.commit(state => {
+        const item = state.requests.find(entry => entry.id === id);
+        if (!item || item.status !== 'withdrawn' || item.decidedBy !== 'auto') return;
+        item.status = 'pending'; delete item.decidedAt; delete item.decidedBy;
+        item.review = { ...(item.review ?? { status: 'done' }), status: 'done', verdict: 'owner', reason: `${item.review?.reason ?? ''} (${why})`.trim() };
+      });
     });
   }
 
@@ -385,7 +392,7 @@ export class PermissionService {
       if (rule.scope === 'global' && this.options.globalCodex === false) continue;
       const path = codexRulesPath(rule.scope, rule.cwd, this.options.env);
       const file = files.get(path) ?? { scope: rule.scope, ...(rule.cwd ? { cwd: rule.cwd } : {}), lines: [] };
-      for (const line of [codexRule(rule), ...(rule.source === 'auto' ? this.guards(rule, rule.cwd ?? '/', 'codex').codex : [])]) if (!file.lines.includes(line)) file.lines.push(line);
+      for (const line of [codexRule(rule), ...(rule.source === 'auto' ? ruleGuards(rule).codex : [])]) if (!file.lines.includes(line)) file.lines.push(line);
       files.set(path, file);
     }
     return files;
@@ -469,8 +476,8 @@ function upsert(state: PermissionState, rule: PermissionRuleInput, id: string | 
     if (index < 0) throw failure('규칙을 찾지 못했습니다.', 404);
     if (state.rules.some(item => item.id !== id && sameRule(item, rule))) throw failure('같은 규칙이 이미 있습니다.', 409);
     state.rules[index] = { ...state.rules[index], ...rule, ...(rule.note ? {} : { note: undefined }), ...(rule.cwd ? {} : { cwd: undefined }), updatedAt: at,
-      // A rule the owner edits is the owner's, even one the reviewer made.
-      ...(state.rules[index]!.source === 'auto' && source !== 'auto' ? { source } : {}) };
+      // A rule the reviewer made becomes the owner's once the owner changes what it allows; a note or its agents alone keep its deny rules.
+      ...(state.rules[index]!.source === 'auto' && source !== 'auto' && !sameRule(state.rules[index]!, rule) ? { source } : {}) };
     state.rules[index] = JSON.parse(JSON.stringify(state.rules[index]));
     return state.rules[index];
   }

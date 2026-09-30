@@ -83,8 +83,10 @@ export class PermissionReviewer {
       return;
     } finally { clearTimeout(timer); this.controller = undefined; }
     const outcome = await service.applyReview(request.id, result);
-    if (outcome?.message && settings.resume) await this.options.notify(outcome.request, outcome.message).catch(error => {
+    if (outcome?.message && settings.resume) await this.options.notify(outcome.request, outcome.message).catch(async error => {
       console.error(`Permission review could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`);
+      // An agent never told to ask again would wait for good: the owner decides instead.
+      if (outcome.request.status === 'withdrawn') await service.reopenForOwner(outcome.request.id, '에이전트에게 전하지 못해 소유자에게 넘깁니다');
     });
   }
 }

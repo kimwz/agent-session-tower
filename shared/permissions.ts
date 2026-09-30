@@ -172,7 +172,7 @@ export const NEVER_AUTO: readonly string[] = [
   'gh auth', 'gh secret', 'gh ssh-key', 'gh gpg-key', 'gh repo delete', 'gh api', 'gh release delete', 'gh variable',
   'npm unpublish', 'npm deprecate', 'npm owner', 'npm token', 'npm login', 'npm adduser', 'kubectl delete', 'docker rm', 'docker rmi', 'docker system prune',
   'terraform destroy', 'terraform apply', 'npm exec', 'pnpm dlx', 'pnpm exec', 'yarn dlx', 'git config', 'git update-index', 'git worktree remove',
-  'gh run delete', 'gh extension', 'truncate', 'shred', 'unlink',
+  'gh run delete', 'gh extension', 'gh alias', 'npm x', 'cargo run', 'git submodule foreach', 'git bisect run', 'truncate', 'shred', 'unlink',
 ];
 
 /**
@@ -185,6 +185,9 @@ export const DANGEROUS_EXTENSIONS: Readonly<Record<string, readonly string[]>> =
   'git branch': ['-D', '-d', '--delete', '-M', '-m', '--move', '-f', '--force'],
   'git tag': ['-d', '--delete', '-f', '--force'],
   'git checkout': ['-f', '--force', '.', './', ':/', '--'],
+  'git rebase': ['-x', '--exec'],
+  'git difftool': ['-x', '--extcmd'],
+  'git mergetool': ['-t', '--tool'],
   'git restore': ['.', './', ':/'],
   'git stash': ['drop', 'clear'],
   'gh pr': ['close'],
@@ -230,39 +233,35 @@ export function dangerousContinuations(value: string): string[] {
 /**
  * The deny rules a rule Tower's reviewer allowed is paired with: Claude Code patterns (deny comes before allow, and
  * `*` matches any text anywhere) and Codex `prefix_rule` lines (which can only name what follows the prefix directly).
- * `allowed` are the owner's command rules there: what they allow stays allowed, and nothing more.
  */
-export function ruleGuards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>, allowed: readonly string[] = []): { claude: string[]; codex: string[] } {
+export function ruleGuards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>): { claude: string[]; codex: string[] } {
   if (rule.kind !== 'command') return { claude: [], codex: [] };
   const value = normalizeCommand(rule.value);
-  const base = words(value);
   const claude: string[] = [];
   const codex: string[] = [];
-  const owned = allowed.map(words).filter(item => item.length > 0 && (startsWith(base, item) || startsWith(item, base)));
-  // An owner rule this one lies within allows all of it already: nothing to guard.
-  if (owned.some(item => item.length <= base.length)) return { claude, codex };
-  const extra = owned.flatMap(item => item.slice(base.length));
   for (const token of dangerousContinuations(value)) {
-    // The owner allowed exactly this word here: it stays allowed.
-    if (extra.includes(token)) continue;
-    // The owner allowed a longer form (`--force-with-lease` for `--force`): deny the word itself, not every word starting with it.
-    const longer = extra.some(word => word !== token && isToken(word, token));
-    const option = /^-[^-]|^--./.test(token);
     // Options match by their start (`--force` also covers `--force=…` and `--force-with-lease=…`, `-f` also `-fu`), as do
     // refspecs (`+*`, `:*`); subcommands and bare `--` or `.` match as whole words. Combined short options (`-vf`) are not covered.
-    const start = token.endsWith('*') ? token : option && !longer ? `${token}*` : undefined;
+    const option = /^-[^-]|^--./.test(token);
+    // git takes any unambiguous start of a long option (`--del` for `--delete`): deny from its first two letters on.
+    const start = token.endsWith('*') ? token : option ? `${token.startsWith('--') ? token.slice(0, 4) : token}*` : undefined;
     // Claude Code reads a rule ending in `:*` as its older prefix syntax, never as a wildcard, so a `:ref` can only be
     // denied when more follows it; a trailing `:ref` is not blocked for Claude.
     if (start?.endsWith(':*')) claude.push(`Bash(${value} ${start} *)`, `Bash(${value} * ${start} *)`);
     else if (start) claude.push(`Bash(${value} ${start})`, `Bash(${value} * ${start})`);
-    else {
-      claude.push(`Bash(${value} ${token})`, `Bash(${value} ${token} *)`, `Bash(${value} * ${token})`, `Bash(${value} * ${token} *)`);
-      if (option && token.startsWith('--')) claude.push(`Bash(${value} ${token}=*)`, `Bash(${value} * ${token}=*)`);
-    }
+    else claude.push(`Bash(${value} ${token})`, `Bash(${value} ${token} *)`, `Bash(${value} * ${token})`, `Bash(${value} * ${token} *)`);
     if (token.endsWith('*')) continue;
-    codex.push(`prefix_rule(pattern=[${[...base, token].map(word => JSON.stringify(word)).join(', ')}], decision="forbidden")`);
+    // Codex matches whole words: every abbreviation git would take is named.
+    const spellings = token.startsWith('--') ? Array.from({ length: token.length - 3 }, (_, index) => token.slice(0, index + 4)) : [token];
+    for (const spelling of spellings) codex.push(`prefix_rule(pattern=[${[...words(value), spelling].map(word => JSON.stringify(word)).join(', ')}], decision="forbidden")`);
   }
   return { claude, codex };
+}
+
+/** Whether two command rules overlap: one is the other or starts with it. */
+export function rulesOverlap(a: string, b: string): boolean {
+  const left = lower(a), right = lower(b);
+  return startsWith(left, right) || startsWith(right, left);
 }
 
 /** Whether `given` allows no more than `asked`: the same kind of rule, the same or a longer prefix, no wider scope, no more agents. */
@@ -278,7 +277,7 @@ export function ruleIsNarrower(asked: PermissionRuleInput, given: PermissionRule
 const WRAPPERS = new Set(['env', 'sudo', 'doas', 'xargs', 'exec', 'eval', 'command', 'nohup', 'timeout', 'time', 'nice', 'ionice', 'caffeinate', 'watch',
   'bash', 'sh', 'zsh', 'fish', 'dash', 'ksh', 'ssh', 'script', 'unbuffer', 'stdbuf', 'find',
   // Code runners: what they run is whatever they are given.
-  'npx', 'bunx', 'uvx', 'pipx', 'node', 'python', 'python3', 'perl', 'ruby', 'php', 'lua', 'deno', 'bun', 'osascript', 'awk', 'sed']);
+  'npx', 'pnpx', 'bunx', 'uvx', 'uv', 'pipx', 'node', 'tsx', 'ts-node', 'python', 'python3', 'perl', 'ruby', 'php', 'lua', 'deno', 'bun', 'go', 'osascript', 'awk', 'sed']);
 /** Never-allowed programs that are dangerous wherever they appear in a rule (`xargs rm`, `docker container rm`). */
 const RUN_ANYWHERE = new Set(['rm', 'rmdir', 'sudo', 'doas', 'chmod', 'chown', 'mkfs', 'kill', 'killall', 'pkill', 'curl', 'wget', 'ssh', 'scp', 'sftp', 'rsync', 'prune']);
 /** Programs whose options before the subcommand (`git -C dir push`) hide what the rule is for. */
@@ -307,8 +306,10 @@ export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'
     if (ruleIsBroad(rule)) return '프로그램 하나 전체를 허용하는 넓은 규칙은 소유자가 정합니다.';
     // Only a program named by itself, in lower case, is classified: a path, a wrapper or options before the subcommand hide it.
     if (!/^[a-z0-9][a-z0-9._+-]*$/.test(program)) return '경로나 대문자로 부른 프로그램의 규칙은 소유자가 정합니다.';
-    if (WRAPPERS.has(program)) return `\`${program}\`처럼 다른 명령이나 코드를 실행하는 프로그램의 규칙은 소유자가 정합니다.`;
-    if (SUBCOMMAND_PROGRAMS.has(program) && rulewords[1]?.startsWith('-')) return '하위 명령 앞에 옵션이 있는 규칙은 소유자가 정합니다.';
+    if (WRAPPERS.has(program) || WRAPPERS.has(program.replace(/\d+(\.\d+)*$/, ''))) return `\`${program}\`처럼 다른 명령이나 코드를 실행하는 프로그램의 규칙은 소유자가 정합니다.`;
+    // Options in the rule itself (any spelling git accepts: `--del`, `-vf`, `--force-with-lease=…`) are the owner's to allow;
+    // the reviewer allows commands, and deny rules keep the dangerous options after them out.
+    if (rulewords.slice(1).some(word => /^[-+:]/.test(word) || /[*?[\]{}~]/.test(word))) return '옵션이나 특수 기호가 들어 있는 규칙은 소유자가 정합니다.';
     const never = NEVER_AUTO.find(item => startsWith(rulewords, words(item))) ?? rulewords.find(word => RUN_ANYWHERE.has(word));
     if (never) return `\`${never}\`가 들어 있는 명령은 자동으로 허용하지 않습니다.`;
     // A rule whose own words already make it destructive (`git push origin +main`, `git reset HEAD --hard`).
@@ -330,6 +331,8 @@ export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'
     const path = content.slice(1).replace(/\/\*\*?$/, '');
     const folder = cwd.replace(/\/+$/, '') || '/';
     if (!inside(path, folder)) return '프로젝트 밖의 파일 규칙은 소유자가 정합니다.';
+    // The whole project (with its .git and agent settings) or a pattern are the owner's to allow; one folder or file in it is not.
+    if (path === folder || /[*?[\]{}]/.test(path)) return '프로젝트 전체나 패턴으로 된 파일 규칙은 소유자가 정합니다.';
     // Hidden folders hold hooks, agent settings and keys (`.git/hooks`, `.claude`, `.ssh`): never decided automatically.
     if (/\/\./.test(path.slice(folder.length))) return '숨김 폴더(.git, .claude, .ssh 같은)의 파일 규칙은 소유자가 정합니다.';
   }

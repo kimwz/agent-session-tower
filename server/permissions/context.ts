@@ -8,14 +8,16 @@ const run = promisify(execFile);
 /** Where the reviewer's material comes from; the worker supplies it. */
 export interface ReviewSources {
   runs(): Run[];
+  /** What the owner typed in the conversation, and whether the record is whole. */
+  ownerPrompts(sessionId: string): { prompts: { at: string; text: string }[]; complete: boolean };
   /** A trigger's own instructions, and whether the owner (in a page) made its last change. */
   trigger(id: string): { name: string; instructions: string; ownerSet: boolean } | undefined;
   /** Tower skills and owner guidance at the revision the owner saved or confirmed. */
-  authority(cwd: string): Promise<{ skills: { name: string; description: string; body: string }[]; guidance?: string; unconfirmed: string[] }>;
+  authority(cwd: string): Promise<{ skills: { name: string; description: string; body: string }[]; guidance?: string; unconfirmed: string[]; changed: string[] }>;
   history(sessionId: string, limit: number): Promise<ChatMessage[] | undefined>;
   rules(cwd: string): PermissionRule[];
-  /** The deny rules the asked rule would get there, per agent (the permission service's own). */
-  guards(rule: PermissionRequest['rule'], cwd: string): { claude: string[]; codex: string[] };
+  /** The deny rules the asked rule would get, per agent. */
+  guards(rule: PermissionRequest['rule']): { claude: string[]; codex: string[] };
   requests(sessionId: string): PermissionRequest[];
 }
 
@@ -36,12 +38,15 @@ const cut = (value: string, max: number) => value.length > max ? `${value.slice(
  */
 export async function reviewInput(request: PermissionRequest, sources: ReviewSources): Promise<string> {
   const runs = sources.runs().filter(item => item.sessionId === request.sessionId).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-  const typed = runs.filter(item => item.authored === true && item.origin?.kind === 'owner');
-  // The owner's words are never cut: a restriction late in a prompt matters as much as the task at its start.
-  const prompts = typed.map((item, index) => ({ at: item.createdAt, ...(index === 0 ? { task: true } : {}), text: item.prompt }));
+  // The owner's words are never cut, and never partly missing: a restriction matters as much as the task.
+  const record = sources.ownerPrompts(request.sessionId);
+  if (!record.complete) throw new Error('이 대화에서 소유자가 한 말을 처음부터 다 알 수 없어(Tower 밖에서 시작했거나 기록이 넘침) 소유자에게 넘깁니다.');
+  const prompts = record.prompts.map((item, index) => ({ at: item.at, ...(index === 0 ? { task: true } : {}), text: item.text }));
   const triggerId = runs.find(item => item.origin?.kind === 'trigger' && item.origin.triggerId)?.origin?.triggerId;
   const trigger = triggerId ? sources.trigger(triggerId) : undefined;
   const owned = await sources.authority(request.cwd);
+  // A skill or the guidance the owner confirmed and someone changed since may have held a restriction.
+  if (owned.changed.length) throw new Error(`소유자가 확인한 뒤 바뀐 지시가 있어(${owned.changed.join(', ')}) 소유자에게 넘깁니다.`);
   const project = await projectInstructions(request.cwd);
   const rules = sources.rules(request.cwd).filter(rule => rule.source === 'owner' || rule.source === 'request')
     .map(rule => ({ rule: rule.value, kind: rule.kind, scope: rule.scope, providers: rule.providers }));
@@ -51,7 +56,7 @@ export async function reviewInput(request: PermissionRequest, sources: ReviewSou
   const earlier = sources.requests(request.sessionId).filter(item => item.id !== request.id).slice(-10)
     .map(item => ({ rule: item.rule.value, status: item.status, ...(item.review?.verdict ? { review: item.review.verdict } : {}), reason: cut(item.reason, 300) }));
   const rule = request.rule;
-  const guards = sources.guards(rule, request.cwd);
+  const guards = sources.guards(rule);
   const input = {
     authority: {
       ownerPrompts: prompts,

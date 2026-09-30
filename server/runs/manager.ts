@@ -63,6 +63,8 @@ interface RunnerOptions {
   firstTurnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
   /** Notes for every turn, such as the owner's pinned skills; asked and limited like `firstTurnNotes`. */
   turnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
+  /** Keeps what the owner typed per conversation, from the start of the conversations Tower creates. */
+  ownerPrompts?: { begin(sessionId: string, at: string): Promise<void>; add(sessionId: string, at: string, text: string): Promise<void> };
   /** Settings for every Claude Code turn Tower starts: the owner's allow rules for its folder. */
   claudeSettings?: (cwd: string) => string | undefined;
   /** Pre-accepts the native folder trust prompt for a newly created session. */
@@ -271,6 +273,16 @@ export class RunManager extends EventEmitter {
 
   setFirstTurnNotes(notes: NonNullable<RunnerOptions['firstTurnNotes']>): void { this.options.firstTurnNotes = notes; }
   setTurnNotes(notes: NonNullable<RunnerOptions['turnNotes']>): void { this.options.turnNotes = notes; }
+  setOwnerPrompts(store: NonNullable<RunnerOptions['ownerPrompts']>): void { this.options.ownerPrompts = store; }
+  /** Records a conversation's start or the owner's words in it; a failed record only leaves the reviewer to the owner. */
+  private async recordOwner(sessionId: string, run: Run, created: boolean): Promise<void> {
+    const store = this.options.ownerPrompts;
+    if (!store) return;
+    try {
+      if (created) await store.begin(sessionId, run.createdAt);
+      if (run.authored) await store.add(sessionId, run.createdAt, run.prompt);
+    } catch (error) { console.error(`Owner prompt record failed: ${error instanceof Error ? error.message : String(error)}`); }
+  }
   setClaudeSettings(settings: NonNullable<RunnerOptions['claudeSettings']>): void { this.options.claudeSettings = settings; }
   setRunToolResolver(resolver: NonNullable<RunnerOptions['resolveRunTools']>): void {
     this.options.resolveRunTools = resolver;
@@ -554,6 +566,7 @@ export class RunManager extends EventEmitter {
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
     // Provenance commits with the session identity, before any provider starts.
     this.createdSessions.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}), origin: sessionOriginOf(origin, internal.untrustedInput === true) });
+    await this.recordOwner(id, run, true);
     this.runs.set(run.id, run);
     this.admissions.add(run.id);
     this.prune();
@@ -624,6 +637,7 @@ export class RunManager extends EventEmitter {
     this.runs.set(run.id, run);
     this.prune();
     this.changed();
+    await this.recordOwner(sessionId, run, false);
     try { await this.flush(); } // An accepted instruction is durable before launching the provider.
     catch (error) { this.runs.delete(run.id); this.changed(); await this.attachments.rollback(prepared.createdIds); throw error; }
     finally { this.admissions.delete(run.id); }

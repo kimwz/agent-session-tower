@@ -327,23 +327,27 @@ export class SkillService {
    * What the owner set down for work in `cwd`, for Tower's permission reviewer: the Tower skills that apply there and
    * the owner guidance, each only at the revision the owner saved or confirmed in Tower. Others are named in `unconfirmed`.
    */
-  async authority(cwd: string): Promise<{ skills: { name: string; description: string; body: string }[]; guidance?: string; unconfirmed: string[] }> {
+  async authority(cwd: string): Promise<{ skills: { name: string; description: string; body: string }[]; guidance?: string; unconfirmed: string[]; changed: string[] }> {
     await this.ready();
     const state = this.state.get();
     const folder = resolve(cwd);
     const skills: { name: string; description: string; body: string }[] = [];
     const unconfirmed: string[] = [];
+    // Confirmed once and changed or gone since: what the owner confirmed may have limited the work.
+    const changed: string[] = [];
     for (const item of state.targets) {
       if (!targetsCover(item, folder)) continue;
       const owned = state.confirmedTargets[item.dir];
       // Name, description and body come from the one read whose revision is checked.
       const read = await readSkillSnapshot(item.dir);
-      if (!read) continue;
+      if (!read) { if (state.confirmed[item.dir]) changed.push(basename(item.dir)); continue; }
+      if (state.confirmed[item.dir] && state.confirmed[item.dir] !== read.revision) changed.push(read.name);
       if (state.confirmed[item.dir] === read.revision && owned && targetsCover(owned, folder)) skills.push({ name: read.name, description: read.description, body: read.body });
       else unconfirmed.push(read.name);
     }
     const guidance = await this.guidance();
-    return { skills, ...(guidance.confirmed && guidance.owner.trim() ? { guidance: guidance.owner } : {}), unconfirmed };
+    if (state.guidanceConfirmed && !guidance.confirmed) changed.push('guidance');
+    return { skills, ...(guidance.confirmed && guidance.owner.trim() ? { guidance: guidance.owner } : {}), unconfirmed, changed };
   }
 
   async overview(input: { cwd?: unknown } = {}): Promise<SkillOverview> {
