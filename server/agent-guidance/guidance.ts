@@ -29,6 +29,7 @@ When Claude Code or Codex refuses an action the task needs (a permission rule, t
 
 - Ask the owner for the narrowest rule: a command prefix such as \`gh pr merge\`, for this project unless it is needed everywhere, and say why.
 - Tower's permission reviewer may decide the request first, against the owner's instructions for your task: in \`reason\`, name the step of that task that needs it. When the reviewer asks for a narrower rule, send a new request for that rule.
+- For a one-off action (stopping one process, one cleanup command), ask \`permissions_run\` to run that exact command once instead of asking for a rule, and read its result with \`permissions_runResult\`.
 - Do not try another way around the refusal. An allowed rule applies from your next turn: say what waits on the permission and end your turn, or go on with other work first. The owner's decision can arrive as a message in this conversation; \`permissions_list\` also shows it.
 
 ## Start helper agents so Tower can tell them apart

@@ -64,7 +64,7 @@ interface RunnerOptions {
   /** Notes for every turn, such as the owner's pinned skills; asked and limited like `firstTurnNotes`. */
   turnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
   /** Settings for every Claude Code turn Tower starts: the owner's allow rules for its folder. */
-  claudeSettings?: (cwd: string) => string | undefined;
+  claudeSettings?: (cwd: string, sessionId: string) => string | undefined;
   /** Pre-accepts the native folder trust prompt for a newly created session. */
   trustWorkspace?: (provider: Provider, cwd: string, env: NodeJS.ProcessEnv) => Promise<void>;
   /** Streamed output alone is saved at most this often; state changes are saved at once. */
@@ -245,6 +245,19 @@ export class RunManager extends EventEmitter {
     if (!launch) return;
     env.PATH = [launch.shims, ...(env.PATH ?? '').split(delimiter).filter(dir => dir && dir !== launch.shims)].join(delimiter);
     env[LAUNCH_MARKS_ENV] = launch.marks;
+  }
+
+  /**
+   * The environment a command run for a conversation gets, so a `claude`/`codex` it starts is recorded as that
+   * conversation's own run, as if its agent had started it: the launch shims first on PATH, and the conversation's id.
+   */
+  launchEnv(sessionId: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const next = { ...env };
+    this.markLaunches(next);
+    const session = this.getSession(sessionId);
+    // The id the provider itself sets for its own tools: the bare native id, as the shims expect it.
+    if (session?.nativeId) next[session.provider === 'codex' ? 'CODEX_THREAD_ID' : 'CLAUDE_CODE_SESSION_ID'] = session.nativeId;
+    return next;
   }
 
   private async prepareLaunch(run: Run): Promise<void> {
@@ -1120,7 +1133,7 @@ export class RunManager extends EventEmitter {
     if (automaticApprovals(run)) args.push('--permission-mode', 'auto');
     // The owner's allow rules go to every turn Tower starts, as Codex reads them in every run: the owner also set up the
     // triggers, Slack and GitHub watches and public agents that start work here, and chose what that work may do.
-    const settings = this.options.claudeSettings?.(session.cwd);
+    const settings = this.options.claudeSettings?.(session.cwd, session.id);
     if (settings) args.push('--settings', settings);
     for (const directory of new Set(attachments.map(item => dirname(item.path)))) args.push('--add-dir', directory);
     const prompt = attachmentPrompt(run.prompt, attachments);

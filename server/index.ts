@@ -241,6 +241,15 @@ async function main() {
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await exclusions.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
   /** Local browser requests are the owner's; a remote controller's carry its own origin and request ID. */
   // `authored` only keeps a 1.89/1.90 worker's permission reviewer working while an update waits for its handoff; newer workers ignore it.
+  const forgetConversation = async (sessionId: string) => {
+    const closedAt = new Date().toISOString();
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      try { await runs.api('permissions.forgetConversation', { sessionId, closedAt }); return; } catch (error) {
+        if (error instanceof Error && /Unknown Tower operation/.test(error.message)) return;
+        await new Promise(resolve => setTimeout(resolve, 15_000).unref());
+      }
+    }
+  };
   const admit = (context?: RequestContext) => ({ origin: context?.origin ?? OWNER, ...(context?.requestId ? { requestId: context.requestId } : {}), ...(context?.origin ? {} : { authored: true }) });
   // The worker has indexed native sessions before it answers, so the session list is complete here.
   const history = nativeHistory(runs);
@@ -378,6 +387,9 @@ async function main() {
       const updated = await closedSessions.set(session, closed);
       // Closing a conversation also stops what its agent planned to do in it later.
       if (closed) for (const run of runs.list()) if (run.sessionId === session.id && run.status === 'queued' && run.scheduled) await runs.cancel(run.id).catch(() => {});
+      // Its rules for this conversation go now. A worker busy handing off is asked again for a few minutes; one older
+      // than 1.92 refuses at once, and its sweep catches the rest.
+      if (closed) void forgetConversation(session.id);
       changed();
       return titles.apply(updated);
     },

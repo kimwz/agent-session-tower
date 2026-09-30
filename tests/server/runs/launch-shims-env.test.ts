@@ -33,3 +33,23 @@ test('every Claude and Codex turn finds the launch shims first in its PATH and k
     assert.equal(env.CLAUDE_CODE_SESSION_ID, undefined, 'a turn never claims to be started by whatever started Tower');
   }
 });
+
+test('a command Tower runs for a conversation gets the shims and the conversation’s bare native id', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-shim-env-'));
+  const stateDir = join(directory, 'state');
+  await mkdir(stateDir, { recursive: true });
+  const launchMarks = { shims: join(stateDir, 'runtime', 'launch-shims'), marks: join(stateDir, 'launch-marks') };
+  const manager = new RunManager({ stateDir, getSession: () => undefined, refreshSessions: async () => {}, pollMs: 60_000, launchMarks,
+    findExecutable: async provider => `/fixture/${provider}`,
+    spawnProcess: (() => { throw new Error('Fixtures never start providers.'); }) as never,
+    openCodexStdio: async () => { throw new Error('Fixtures never start providers.'); } });
+  await manager.start();
+  t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
+  const created = await manager.create({ provider: 'claude', cwd: directory, prompt: 'x' }, { origin: { kind: 'owner' } });
+  const session = manager.getSession(created.run.sessionId)!;
+  const env = manager.launchEnv(session.id, { PATH: '/usr/bin' });
+  assert.equal(env.PATH!.split(delimiter)[0], launchMarks.shims);
+  assert.equal(env.TOWER_LAUNCH_MARKS, launchMarks.marks);
+  assert.equal(env.CLAUDE_CODE_SESSION_ID, session.nativeId);
+  assert.ok(!env.CLAUDE_CODE_SESSION_ID!.includes(':'), 'bare, as the provider itself sets it');
+});
