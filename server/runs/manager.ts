@@ -247,6 +247,18 @@ export class RunManager extends EventEmitter {
     env[LAUNCH_MARKS_ENV] = launch.marks;
   }
 
+  /**
+   * The environment a command run for a conversation gets, so a `claude`/`codex` it starts is recorded as that
+   * conversation's own run, as if its agent had started it: the launch shims first on PATH, and the conversation's id.
+   */
+  launchEnv(sessionId: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const next = { ...env };
+    this.markLaunches(next);
+    const session = this.getSession(sessionId);
+    if (session) next[session.provider === 'codex' ? 'CODEX_THREAD_ID' : 'CLAUDE_CODE_SESSION_ID'] = this.nativeSessionId(sessionId);
+    return next;
+  }
+
   private async prepareLaunch(run: Run): Promise<void> {
     // A look that fails leaves the gate with what it knows; a folder it cannot tell about counts as private.
     if (run.status === 'queued') await this.launchPrepare?.(run).catch(() => {});

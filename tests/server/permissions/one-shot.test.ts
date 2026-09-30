@@ -460,3 +460,29 @@ test('a command runs with the search path an agent’s turn has', async t => {
   const { providerDirectories } = await import('../../../server/providers/discovery.js');
   assert.equal(result.output!.stdout.trim(), providerDirectories(process.env).join(':'));
 });
+
+test('a run gets its conversation’s launch environment', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'tower-one-shot-env-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runs = new Map<string, PermissionRun>();
+  const runner = new PermissionRunner({ stateDir: root, update: async (id, run) => { runs.set(id, run); },
+    env: (group, env) => ({ ...env, CLAUDE_CODE_SESSION_ID: `native-${group}` }) });
+  runner.start('r1', 'echo "$CLAUDE_CODE_SESSION_ID"', root, 10, 'claude:one');
+  await runner.flush();
+  assert.equal((await runner.output('r1'))!.stdout, 'native-claude:one\n');
+});
+
+test('a conversation rule allowed again after a reopen survives the late clean-up', async t => {
+  const f = await fixture(t);
+  const first = await f.service.request({ kind: 'command', value: 'kill', scope: 'conversation', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(first.request.id!, true);
+  const closedAt = new Date(Date.parse('2026-09-30T00:00:00.000Z') + 1000).toISOString();
+  // Expired but not yet swept; the conversation, reopened, asks for it again and it is allowed again.
+  f.tick(25 * 60 * 60 * 1000);
+  const second = await f.service.request({ kind: 'command', value: 'kill', scope: 'conversation', reason: 'r' }, agent('claude:one'));
+  assert.equal(second.request.status, 'pending');
+  await f.service.decide(second.request.id!, true);
+  assert.equal(f.service.overview().rules[0]!.requestId, second.request.id);
+  await f.service.forgetConversation('claude:one', closedAt);
+  assert.equal(f.service.overview().rules.length, 1, 'the new approval stays');
+});

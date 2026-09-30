@@ -547,7 +547,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // Made just below; the permission service only calls it once requests arrive.
     let reviewer!: PermissionReviewer;
     // One-shot runs: the command runs in this worker; the conversation hears its end unless it already read the result.
-    const runner: PermissionRunner = new PermissionRunner({ stateDir, update: (id, run): Promise<void> => permissions.updateRun(id, run) });
+    // A claude or codex a run starts counts as the requesting conversation's own run, never as one the owner started.
+    const runner: PermissionRunner = new PermissionRunner({ stateDir, update: (id, run): Promise<void> => permissions.updateRun(id, run), env: (sessionId, env) => runs.launchEnv(sessionId, env) });
     let stopping = false;
     let paused = false;
     // Read from the web's saved file each time: the owner may close a conversation at any moment.

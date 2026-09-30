@@ -57,6 +57,8 @@ export interface RunnerOptions {
   update(id: string, run: PermissionRun): Promise<void>;
   killGraceMs?: number;
   now?: () => Date;
+  /** Adds to a run's environment for its conversation (how the commands it starts are known as that conversation's). */
+  env?(group: string, env: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
 }
 
 /**
@@ -103,7 +105,7 @@ export class PermissionRunner {
       this.queue.splice(index, 1);
       busy.add(item.group);
       this.groups.set(item.id, item.group);
-      const work = this.execute(item.id, item.command, item.cwd, item.timeoutSeconds)
+      const work = this.execute(item.id, item.command, item.cwd, item.timeoutSeconds, item.group)
         .catch(error => console.error(`A permission run failed: ${error instanceof Error ? error.message : String(error)}`))
         .finally(() => { this.running.delete(item.id); this.groups.delete(item.id); this.pump(); });
       this.running.set(item.id, work);
@@ -117,7 +119,7 @@ export class PermissionRunner {
 
   async forget(id: string): Promise<void> { await rm(join(this.dir, `${id}.json`), { force: true }); }
 
-  private async execute(id: string, command: string, cwd: string, timeoutSeconds: number): Promise<void> {
+  private async execute(id: string, command: string, cwd: string, timeoutSeconds: number, group: string): Promise<void> {
     const startedAt = this.now();
     // Saved before the command starts: a worker that stops from here on leaves a run whose result is unknown, never
     // one that would start again.
@@ -131,8 +133,9 @@ export class PermissionRunner {
     let child;
     try {
       // The same search path an agent's turn has, so a command it could name (gh, npm, …) is found here too.
-      const env: NodeJS.ProcessEnv = { ...process.env, PATH: providerDirectories(process.env).join(delimiter) };
+      let env: NodeJS.ProcessEnv = { ...process.env, PATH: providerDirectories(process.env).join(delimiter) };
       delete env.CLAUDECODE; delete env.CLAUDE_CODE_SESSION_ID; delete env.CODEX_THREAD_ID;
+      env = this.options.env?.(group, env) ?? env;
       child = spawn('/bin/sh', ['-c', command], { cwd, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (error) {
       await this.options.update(id, { status: 'failed', startedAt, finishedAt: this.now(), error: error instanceof Error ? error.message : String(error) });

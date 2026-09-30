@@ -722,8 +722,9 @@ function upsert(state: PermissionState, rule: PermissionRuleInput, id: string | 
     if (same.source === 'auto' && source !== 'auto') { same.source = source; delete same.requestId; if (requestId) same.requestId = requestId; }
     same.providers = (['claude', 'codex'] as const).filter(item => same.providers.includes(item) || rule.providers.includes(item));
     same.updatedAt = at;
-    // Allowed again: a rule for one conversation lasts from now.
+    // Allowed again: a rule for one conversation lasts from now, and belongs to the request that asked last.
     if (rule.expiresAt && (!same.expiresAt || same.expiresAt < rule.expiresAt)) same.expiresAt = rule.expiresAt;
+    if (same.scope === 'conversation' && requestId) same.requestId = requestId;
     return same;
   }
   if (state.rules.length >= MAX_RULES) throw failure('규칙은 200개까지 저장할 수 있습니다.', 409);
