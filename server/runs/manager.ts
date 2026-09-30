@@ -93,6 +93,8 @@ export interface RunAdmission {
   origin?: RunOrigin;
   /** The prompt carries Slack, GitHub or HTTP content. Only a session Tower creates for it may receive it. */
   untrustedInput?: boolean;
+  /** The owner typed the prompt in Tower; recorded as `Run.authored`. Only owner-origin work can be. */
+  authored?: boolean;
   /** No one is watching: Claude runs in its automatic permission mode (Codex uses its auto review reviewer). */
   unattended?: boolean;
   /** Triggers never create a missing folder. */
@@ -353,6 +355,7 @@ export class RunManager extends EventEmitter {
           ...(value.attachments ? { attachments: value.attachments.map(item => attachmentMetadata(item)!) } : {}) };
         // A malformed origin never reads back as owner work.
         if (value.origin !== undefined) run.origin = parseRunOrigin(value.origin) ?? { kind: 'unknown' };
+        if (run.authored !== undefined && (run.authored !== true || run.origin?.kind !== 'owner')) delete run.authored;
         // A permission request belongs to a live process, never a restored run.
         delete run.approvals;
         delete run.instructions;
@@ -546,6 +549,7 @@ export class RunManager extends EventEmitter {
     const origin = internal.origin ?? { kind: 'unknown' as const };
     const run: Run = { id: randomUUID(), sessionId: id, origin, prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
+      ...(authoredBy(internal) ? { authored: true as const } : {}),
       ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
     // Provenance commits with the session identity, before any provider starts.
@@ -612,6 +616,7 @@ export class RunManager extends EventEmitter {
     }
     const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
       ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
+      ...(authoredBy(internal) ? { authored: true as const } : {}),
       ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}) };
@@ -1780,6 +1785,8 @@ async function privateMcpConfig(mcpServers: NonNullable<RunTools['servers']>): P
 }
 function automated(run: Run): boolean { return automatedOrigin(run.origin); }
 /** The owner's own turns always run in the provider's automatic approval mode; triggers and Slack follow their setting. */
+/** Only owner work from a controlling computer's owner or this one's, without outside content, counts as the owner's own words. */
+function authoredBy(internal: RunAdmission): boolean { return internal.authored === true && internal.origin?.kind === 'owner' && !internal.untrustedInput; }
 function automaticApprovals(run: Run): boolean { return run.unattended === true || ownerOrigin(run.origin); }
 /** Modes at least as careful as asking the owner. Anything else is not what an unattended run asked for. */
 const OWNER_APPROVAL_MODES = new Set(['default', 'manual', 'plan', 'dontAsk']);

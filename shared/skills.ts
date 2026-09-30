@@ -33,6 +33,11 @@ export interface Skill {
   copiesDiffer?: boolean;
   /** For a skill kept in Tower: the projects it applies to. Absent from older workers and for other skills. */
   targets?: SkillTargets;
+  /**
+   * For a skill kept in Tower: its SKILL.md is the one the owner saved or confirmed in Tower, so Tower's permission
+   * reviewer may take it as the owner's word. Absent from older workers.
+   */
+  confirmed?: boolean;
 }
 /** Where a Tower skill applies: linked for the agents there, and named at the start of Tower's turns there when pinned. */
 export interface SkillTargets { all: boolean; projects: string[] }
@@ -81,7 +86,9 @@ export interface SkillAdvisorStatus {
 }
 
 /** The owner's own guidance, kept in Tower and given to every agent beside Tower's own text. */
-export interface GuidanceOverview { owner: string; revision: string; tower: string; installed: boolean }
+export interface GuidanceOverview { owner: string; revision: string; tower: string; installed: boolean;
+  /** The owner guidance is the text the owner saved or confirmed in Tower (see `Skill.confirmed`). Absent from older workers. */
+  confirmed?: boolean }
 
 /** A backup of chosen skills and guidance, made by one Tower and read by another. */
 export const SKILL_BUNDLE_FORMAT = 'agent-session-tower.skills';

@@ -309,7 +309,28 @@ export class SkillService {
 
   private withTargets(skill: Skill): Skill {
     const item = skill.managed ? this.record(skill.dir) : undefined;
-    return item ? { ...skill, targets: { all: item.all, projects: item.projects } } : skill;
+    return item ? { ...skill, targets: { all: item.all, projects: item.projects }, confirmed: this.state.get().confirmed[skill.dir] === skill.revision } : skill;
+  }
+
+  /**
+   * What the owner set down for work in `cwd`, for Tower's permission reviewer: the Tower skills that apply there and
+   * the owner guidance, each only at the revision the owner saved or confirmed in Tower. Others are named in `unconfirmed`.
+   */
+  async authority(cwd: string): Promise<{ skills: { name: string; description: string; body: string }[]; guidance?: string; unconfirmed: string[] }> {
+    await this.ready();
+    const state = this.state.get();
+    const folder = resolve(cwd);
+    const skills: { name: string; description: string; body: string }[] = [];
+    const unconfirmed: string[] = [];
+    for (const item of state.targets) {
+      if (!targetsCover(item, folder)) continue;
+      const detail = await this.files.detail(item.dir).catch(() => undefined);
+      if (!detail) continue;
+      if (state.confirmed[item.dir] === detail.revision) skills.push({ name: detail.name, description: detail.description, body: detail.body });
+      else unconfirmed.push(detail.name);
+    }
+    const guidance = await this.guidance();
+    return { skills, ...(guidance.confirmed && guidance.owner.trim() ? { guidance: guidance.owner } : {}), unconfirmed };
   }
 
   async overview(input: { cwd?: unknown } = {}): Promise<SkillOverview> {
@@ -384,7 +405,22 @@ export class SkillService {
         await this.state.update(state => {
           const proposal = proposalId && state.proposals.find(item => item.id === proposalId && item.status === 'open');
           if (proposal) { proposal.status = 'accepted'; proposal.skillDir = skill.dir; proposal.updatedAt = new Date().toISOString(); }
+          // What the owner just saved is what they confirmed.
+          state.confirmed[skill.dir] = skill.revision;
         });
+        break;
+      }
+      case 'confirm': {
+        // The owner confirms the text they were shown: its revision must still be the file's.
+        const skill = await this.files.detail(text(body.dir), cwd);
+        if (!text(body.revision) || text(body.revision) !== skill.revision) throw new SkillError('다른 곳에서 이 스킬이 바뀌었습니다. 다시 열어 최신 내용을 확인하세요.', 409);
+        await this.state.update(state => { state.confirmed[skill.dir] = skill.revision; });
+        break;
+      }
+      case 'confirmGuidance': {
+        const current = await this.guidance();
+        if (text(body.revision) !== current.revision) throw new SkillError('다른 곳에서 지침이 바뀌었습니다. 다시 열어 최신 내용을 확인하세요.', 409);
+        await this.state.update(state => { state.guidanceConfirmed = current.revision; });
         break;
       }
       case 'pin': {
@@ -432,6 +468,8 @@ export class SkillService {
           if (text(body.revision) !== current.revision) throw new SkillError('다른 곳에서 지침이 바뀌었습니다. 다시 열어 최신 내용으로 고치세요.', 409);
           return owner;
         });
+        const saved = await this.guidance();
+        await this.state.update(state => { state.guidanceConfirmed = saved.revision; });
         break;
       }
       case 'import': {
@@ -507,7 +545,8 @@ export class SkillService {
   /** The owner's own guidance and Tower's fixed text, as every agent receives them. */
   async guidance(): Promise<GuidanceOverview> {
     const owner = await readFile(this.guidanceFile(), 'utf8').catch(() => '');
-    return { owner, revision: revisionOf(owner), tower: AGENT_GUIDANCE, installed: Boolean(this.options.installGuidance) };
+    const revision = revisionOf(owner);
+    return { owner, revision, tower: AGENT_GUIDANCE, installed: Boolean(this.options.installGuidance), confirmed: this.state.get().guidanceConfirmed === revision };
   }
 
   private guidanceQueue: Promise<unknown> = Promise.resolve();

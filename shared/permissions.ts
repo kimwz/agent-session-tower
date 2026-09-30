@@ -20,13 +20,39 @@ export interface PermissionRuleInput {
 
 export interface PermissionRule extends PermissionRuleInput {
   id: string;
-  source: 'owner' | 'request';
+  /** `auto`: Tower's reviewer allowed it for a request; such a rule also gets deny rules for its destructive variants (`ruleGuards`). */
+  source: 'owner' | 'request' | 'auto';
   requestId?: string;
   createdAt: string;
   updatedAt: string;
 }
 
-export type PermissionRequestStatus = 'pending' | 'approved' | 'denied';
+/** `withdrawn`: the reviewer asked the agent for a narrower request instead. */
+export type PermissionRequestStatus = 'pending' | 'approved' | 'denied' | 'withdrawn';
+
+export type PermissionReviewVerdict = 'approve' | 'narrow' | 'owner';
+/** What Tower's reviewer made of a request. */
+export interface PermissionReview {
+  /** `skipped`: not a request the reviewer may decide (`reason` says why); `failed`: the review did not finish. */
+  status: 'queued' | 'running' | 'done' | 'skipped' | 'failed';
+  verdict?: PermissionReviewVerdict;
+  reason?: string;
+  /** For `narrow`: what to ask for instead. */
+  suggestion?: string;
+  model?: string;
+  at?: string;
+}
+
+/** The owner's setting for reviewing agents' requests automatically, in every project. */
+export interface PermissionAutoReview {
+  enabled: boolean;
+  provider: PermissionProvider;
+  model: string;
+  /** Send the reviewer's decision to the requesting conversation. */
+  resume: boolean;
+}
+export const AUTO_REVIEW_MODELS: Record<PermissionProvider, readonly string[]> = { claude: ['opus', 'sonnet'], codex: ['gpt-5.6-sol', 'gpt-5.6-terra'] };
+export const DEFAULT_AUTO_REVIEW: PermissionAutoReview = { enabled: false, provider: 'claude', model: 'opus', resume: true };
 
 export interface PermissionRequest {
   id: string;
@@ -42,6 +68,9 @@ export interface PermissionRequest {
   decidedAt?: string;
   /** The rule an approval made, which may differ from what was asked. */
   ruleId?: string;
+  /** Who decided it: the owner, or Tower's reviewer. */
+  decidedBy?: 'owner' | 'auto';
+  review?: PermissionReview;
 }
 
 /** A file Tower writes rules into, and whether the last write worked. */
@@ -63,6 +92,8 @@ export interface PermissionOverview {
   lost?: string;
   /** After a decision sent to the requesting conversation: whether it was sent. */
   resumed?: { sent: true } | { error: string };
+  /** Absent from older workers. */
+  autoReview?: PermissionAutoReview;
 }
 
 export const MAX_COMMAND_TOKENS = 12;
@@ -129,6 +160,115 @@ export const sameRule = (a: Pick<PermissionRuleInput, 'kind' | 'value' | 'scope'
   a.kind === b.kind && a.scope === b.scope && (a.scope === 'global' || a.cwd === b.cwd)
   && (a.kind === 'command' ? normalizeCommand(a.value) === normalizeCommand(b.value) : a.value.trim() === b.value.trim());
 
+/**
+ * Command prefixes Tower's reviewer never allows, whatever the task: they delete, change the machine, reach secrets or
+ * send data out. They always wait for the owner.
+ */
+export const NEVER_AUTO: readonly string[] = [
+  'rm', 'rmdir', 'sudo', 'doas', 'su', 'chmod', 'chown', 'chflags', 'dd', 'mkfs', 'diskutil', 'launchctl', 'systemctl', 'security', 'defaults',
+  'kill', 'killall', 'pkill', 'shutdown', 'reboot', 'curl', 'wget', 'ssh', 'scp', 'sftp', 'rsync', 'nc', 'ncat', 'aws', 'gcloud', 'az',
+  'crontab', 'git reset --hard', 'git clean', 'git filter-branch', 'git filter-repo', 'git push --force', 'git push -f', 'git push --mirror',
+  'git push --delete', 'git update-ref', 'git reflog expire', 'git gc', 'git stash drop', 'git stash clear', 'git branch -D',
+  'gh auth', 'gh secret', 'gh ssh-key', 'gh gpg-key', 'gh repo delete', 'gh api', 'gh release delete', 'gh variable',
+  'npm unpublish', 'npm deprecate', 'npm owner', 'npm token', 'npm login', 'npm adduser', 'kubectl delete', 'docker rm', 'docker rmi', 'docker system prune',
+  'terraform destroy', 'terraform apply',
+];
+
+/**
+ * Continuations that turn an otherwise ordinary command family destructive. A rule allows every command that starts
+ * with its prefix, so a rule the reviewer allowed in one of these families is paired with deny rules for them.
+ * A token ending in `*` stands for any word starting with what comes before it (`+*`: a forced refspec).
+ */
+export const DANGEROUS_EXTENSIONS: Readonly<Record<string, readonly string[]>> = {
+  'git push': ['--force', '-f', '--force-with-lease', '--force-if-includes', '--delete', '-d', '--mirror', '--prune', '+*', ':*'],
+  'git branch': ['-D', '-d', '--delete', '-M', '-m', '--move', '-f', '--force'],
+  'git tag': ['-d', '--delete', '-f', '--force'],
+  'git checkout': ['-f', '--force', '.', '--'],
+  'git restore': ['.'],
+  'git stash': ['drop', 'clear'],
+  'gh pr': ['close'],
+  'gh release': ['delete', 'delete-asset'],
+  'gh repo': ['delete', 'archive', 'edit', 'rename'],
+  'gh issue': ['delete', 'transfer'],
+  'npm publish': ['--force'],
+  'docker': ['rm', 'rmi', 'system', 'volume', 'network'],
+  'kubectl': ['delete'],
+};
+
+const words = (value: string) => normalizeCommand(value).split(' ').filter(Boolean);
+const startsWith = (whole: readonly string[], part: readonly string[]) => part.length <= whole.length && part.every((word, index) => whole[index] === word);
+
+/** The destructive continuations of a command rule, from every family it belongs to. */
+export function dangerousContinuations(value: string): string[] {
+  const rule = words(value);
+  const found: string[] = [];
+  for (const [family, tokens] of Object.entries(DANGEROUS_EXTENSIONS)) {
+    const prefix = words(family);
+    if (!startsWith(rule, prefix)) continue;
+    // Options and refspecs can follow anywhere; a subcommand only right after the family (`gh pr` + `close`, not `gh pr merge` + `close`).
+    found.push(...tokens.filter(token => !rule.slice(prefix.length).includes(token) && (/^[-+:.]/.test(token) || rule.length === prefix.length)));
+  }
+  return [...new Set(found)];
+}
+
+/**
+ * The deny rules a rule Tower's reviewer allowed is paired with: Claude Code patterns (deny comes before allow, and
+ * `*` matches any text anywhere) and Codex `prefix_rule` lines (which can only name what follows the prefix directly).
+ */
+export function ruleGuards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>): { claude: string[]; codex: string[] } {
+  if (rule.kind !== 'command') return { claude: [], codex: [] };
+  const value = normalizeCommand(rule.value);
+  const claude: string[] = [];
+  const codex: string[] = [];
+  for (const token of dangerousContinuations(value)) {
+    if (token.endsWith('*')) claude.push(`Bash(${value} ${token})`, `Bash(${value} * ${token})`);
+    else {
+      claude.push(`Bash(${value} ${token})`, `Bash(${value} ${token} *)`, `Bash(${value} * ${token})`, `Bash(${value} * ${token} *)`);
+      codex.push(`prefix_rule(pattern=[${[...words(value), token].map(word => JSON.stringify(word)).join(', ')}], decision="forbidden")`);
+    }
+  }
+  return { claude, codex };
+}
+
+/** Whether `given` allows no more than `asked`: the same kind of rule, the same or a longer prefix, no wider scope, no more agents. */
+export function ruleIsNarrower(asked: PermissionRuleInput, given: PermissionRuleInput): boolean {
+  if (asked.kind !== given.kind) return false;
+  if (!given.providers.every(provider => asked.providers.includes(provider))) return false;
+  if (asked.scope === 'project' && (given.scope !== 'project' || given.cwd !== asked.cwd)) return false;
+  if (asked.kind === 'command') return startsWith(words(given.value), words(asked.value));
+  return given.value.trim() === asked.value.trim();
+}
+
+const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
+const MCP_TOOL = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/;
+const inside = (path: string, folder: string) => path === folder || path.startsWith(folder.endsWith('/') ? folder : `${folder}/`);
+
+/**
+ * Why Tower's reviewer may not decide this rule for work in `cwd`, or undefined when it may. Broad rules, Bash rules
+ * written as Claude rules, file rules outside the project and the never-allowed commands always wait for the owner.
+ */
+export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'>, cwd: string): string | undefined {
+  if (rule.kind === 'command') {
+    const rulewords = words(rule.value);
+    if (ruleIsBroad(rule)) return '프로그램 하나 전체를 허용하는 넓은 규칙은 소유자가 정합니다.';
+    const never = NEVER_AUTO.find(item => startsWith(rulewords, words(item)));
+    if (never) return `\`${never}\`로 시작하는 명령은 자동으로 허용하지 않습니다.`;
+    return undefined;
+  }
+  const value = rule.value.trim();
+  if (MCP_TOOL.test(value)) return undefined;
+  if (ruleIsBroad(rule)) return '도구 전체를 허용하는 넓은 규칙은 소유자가 정합니다.';
+  const tool = value.slice(0, value.indexOf('('));
+  const content = value.slice(value.indexOf('(') + 1, -1);
+  if (tool === 'Bash' || tool === 'PowerShell') return '명령 규칙은 command 종류로 요청해야 자동 검토할 수 있습니다.';
+  if (FILE_TOOLS.has(tool)) {
+    if (!content.startsWith('//') || content.includes('..')) return '파일 규칙은 프로젝트 안의 절대 경로(//…)일 때만 자동 검토합니다.';
+    const path = content.slice(1).replace(/\/\*\*?$/, '');
+    if (!inside(path, cwd.replace(/\/+$/, '') || '/')) return '프로젝트 밖의 파일 규칙은 소유자가 정합니다.';
+  }
+  return undefined;
+}
+
 const provider = z.enum(['claude', 'codex']);
 export const PermissionRuleInputSchema = z.object({
   kind: z.enum(['command', 'claude']),
@@ -144,4 +284,10 @@ export const PermissionRequestInputSchema = z.object({
   providers: z.array(provider).min(1).max(2).optional(),
   scope: z.enum(['project', 'global']),
   reason: z.string().trim().min(1).max(500),
+}).strict();
+export const PermissionAutoReviewSchema = z.object({
+  enabled: z.boolean(),
+  provider,
+  model: z.string().min(1).max(64),
+  resume: z.boolean(),
 }).strict();

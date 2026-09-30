@@ -321,3 +321,20 @@ test('a waiting run is judged by a look taken for it, not by an old one', async 
     assert.equal(spawned, 1, 'it went on to start');
   } finally { await manager.close(); }
 });
+
+test('only what the owner typed is marked authored; owner-origin work Tower queues itself and restored forgeries are not', async t => {
+  const runId = randomUUID();
+  const f = await fixture(t, { runs: [savedRun(runId, `codex:${NATIVE}`, { origin: { kind: 'agent' }, authored: true })] });
+  const manager = await f.open();
+  assert.equal(manager.list().find(run => run.id === runId)?.authored, undefined, 'a saved agent run never reads back as typed by the owner');
+  const typed = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Ship it' }, { origin: { kind: 'owner' }, authored: true });
+  assert.equal(typed.run.authored, true);
+  const queued = await manager.enqueue(`codex:${OTHER}`, 'Tower notice', {}, { origin: { kind: 'owner' } });
+  assert.equal(queued.authored, undefined, 'owner origin alone is not the owner’s words');
+  const typedNext = await manager.enqueue(`codex:${OTHER}`, 'Owner follow-up', {}, { origin: { kind: 'owner' }, authored: true });
+  assert.equal(typedNext.authored, true);
+  const agent = await manager.enqueue(`codex:${OTHER}`, 'Agent', {}, { origin: { kind: 'agent' }, authored: true });
+  assert.equal(agent.authored, undefined);
+  const outside = await manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Issue text' }, { origin: { kind: 'owner' }, authored: true, untrustedInput: true });
+  assert.equal(outside.run.authored, undefined);
+});

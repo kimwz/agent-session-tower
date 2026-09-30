@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rename } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  claudeRule, codexRule, normalizeCommand, ruleProblem, sameRule,
-  type PermissionOverview, type PermissionProvider, type PermissionRequest, type PermissionRule, type PermissionRuleInput, type PermissionTarget,
+  AUTO_REVIEW_MODELS, DEFAULT_AUTO_REVIEW, autoReviewBlock, claudeRule, codexRule, normalizeCommand, ruleGuards, ruleIsNarrower, ruleProblem, sameRule,
+  type PermissionAutoReview, type PermissionOverview, type PermissionProvider, type PermissionRequest, type PermissionReview, type PermissionReviewVerdict,
+  type PermissionRule, type PermissionRuleInput, type PermissionTarget,
 } from '../../shared/permissions.js';
 import type { Provider } from '../../shared/types.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -18,6 +19,7 @@ export interface PermissionState {
   codex: CodexFile[];
   /** Set when an earlier record could not be read: Codex rules files Tower wrote before may still be in place. */
   lost?: string;
+  autoReview?: PermissionAutoReview;
 }
 
 interface CodexFile { path: string; scope: PermissionRule['scope']; cwd?: string }
@@ -31,6 +33,20 @@ const MAX_BYTES = 4_000_000;
 
 const failure = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const empty = (): PermissionState => ({ version: 1, rules: [], requests: [], codex: [] });
+/** A conversation the reviewer sent back for a narrower request this often in a day hears from the owner next. */
+const MAX_NARROW = 2;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** The reviewer's answer, as Tower's reviewer hands it over. */
+export interface PermissionReviewResult {
+  verdict: PermissionReviewVerdict;
+  rule?: { kind: PermissionRuleInput['kind']; value: string; providers?: PermissionProvider[] } | null;
+  suggestion?: string | null;
+  reason: string;
+  model?: string;
+}
+/** What the requesting conversation is told after a review, when anything. */
+export interface PermissionReviewOutcome { request: PermissionRequest; message?: string }
 
 export interface PermissionCaller { kind: string; sessionId?: string; runId?: string; controllerId?: string }
 export interface PermissionServiceOptions {
@@ -45,6 +61,12 @@ export interface PermissionServiceOptions {
   globalCodex?: boolean;
   /** Sends the owner's decision to the requesting conversation as the owner's next message. */
   resume?(sessionId: string, prompt: string): Promise<void>;
+  /** Why the reviewer may not decide requests from this conversation (a public agent's, for one); undefined when it may. */
+  autoReviewSkip?(request: PermissionRequest): string | undefined;
+  /** A request is waiting for Tower's reviewer. */
+  onReviewQueued?(): void;
+  /** The owner changed the reviewer's setting. */
+  onAutoReviewChange?(settings: PermissionAutoReview): void;
   now?: () => Date;
 }
 
@@ -91,8 +113,118 @@ export class PermissionService {
    * folder is in (the folder itself or one inside it). Undefined when no rule applies.
    */
   claudeSettings(cwd: string): string | undefined {
-    const allow = [...new Set(this.state.rules.filter(rule => rule.providers.includes('claude') && (rule.scope === 'global' || within(cwd, rule.cwd!))).map(claudeRule))];
-    return allow.length ? JSON.stringify({ permissions: { allow } }) : undefined;
+    const rules = this.state.rules.filter(rule => rule.providers.includes('claude') && (rule.scope === 'global' || within(cwd, rule.cwd!)));
+    const allow = [...new Set(rules.map(claudeRule))];
+    // A rule the reviewer allowed never covers its family's destructive variants: deny comes before allow.
+    const deny = [...new Set(rules.filter(rule => rule.source === 'auto').flatMap(rule => ruleGuards(rule).claude))];
+    return allow.length ? JSON.stringify({ permissions: { allow, ...(deny.length ? { deny } : {}) } }) : undefined;
+  }
+
+  autoReview(): PermissionAutoReview { return { ...(this.state.autoReview ?? DEFAULT_AUTO_REVIEW) }; }
+
+  /** The owner turns the reviewer on or off, or picks its model. Turning it off leaves waiting requests to the owner. */
+  saveAutoReview(input: PermissionAutoReview): Promise<PermissionOverview> {
+    return this.serial(async () => {
+      if (!AUTO_REVIEW_MODELS[input.provider]?.includes(input.model)) throw failure('자동 검토에 쓸 수 없는 모델입니다.');
+      const settings: PermissionAutoReview = { enabled: input.enabled, provider: input.provider, model: input.model, resume: input.resume };
+      await this.commit(state => {
+        state.autoReview = settings;
+        if (!settings.enabled) for (const request of state.requests) {
+          if (request.status === 'pending' && request.review && (request.review.status === 'queued')) request.review = { status: 'skipped', reason: '자동 검토가 꺼졌습니다.', at: this.now() };
+        }
+      });
+      this.options.onAutoReviewChange?.(settings);
+      return this.overview();
+    });
+  }
+
+  /** The oldest request waiting for the reviewer. */
+  nextReview(): PermissionRequest | undefined {
+    return this.state.requests.find(request => request.status === 'pending' && request.review?.status === 'queued');
+  }
+
+  /** A request the reviewer starts on. False when it is no longer waiting for one. */
+  startReview(id: string): Promise<boolean> {
+    return this.serial(async () => {
+      const request = this.state.requests.find(item => item.id === id);
+      if (!request || request.status !== 'pending' || request.review?.status !== 'queued') return false;
+      if (!this.autoReview().enabled) { await this.setReview(id, { status: 'skipped', reason: '자동 검토가 꺼졌습니다.', at: this.now() }); return false; }
+      await this.setReview(id, { status: 'running', model: this.autoReview().model, at: this.now() });
+      return true;
+    });
+  }
+
+  /** A review that did not finish: the request waits for the owner. */
+  failReview(id: string, error: string): Promise<void> {
+    return this.serial(async () => {
+      const request = this.state.requests.find(item => item.id === id);
+      if (!request || request.review?.status !== 'running') return;
+      await this.setReview(id, { ...request.review, status: 'failed', reason: error.slice(0, 500), at: this.now() });
+    });
+  }
+
+  /**
+   * Applies the reviewer's verdict. Hard limits hold whatever the model said: an allowed rule is the asked one or
+   * narrower, always for the project, and still one the reviewer may decide; anything else waits for the owner. A
+   * request the owner decided meanwhile keeps the owner's decision.
+   */
+  applyReview(id: string, result: PermissionReviewResult): Promise<PermissionReviewOutcome | undefined> {
+    return this.serial(async () => {
+      const request = this.state.requests.find(item => item.id === id);
+      if (!request || request.review?.status !== 'running') return undefined;
+      const at = this.now();
+      const reason = result.reason.trim().slice(0, 1000) || '이유 없음';
+      const review = (extra: Partial<PermissionReview>): PermissionReview => ({ status: 'done', reason, ...(result.model ? { model: result.model } : {}), at, ...extra });
+      if (request.status !== 'pending') {
+        await this.setReview(id, review({ verdict: result.verdict }));
+        return undefined;
+      }
+      const owner = async (why?: string) => {
+        await this.setReview(id, review({ verdict: 'owner', ...(why ? { reason: `${reason} (${why})` } : {}) }));
+        return { request: this.state.requests.find(item => item.id === id)! };
+      };
+      if (result.verdict === 'approve') {
+        const asked = request.rule;
+        let given: PermissionRuleInput;
+        try {
+          given = clean({ kind: result.rule?.kind ?? asked.kind, value: result.rule?.value ?? asked.value, providers: result.rule?.providers?.length ? result.rule.providers : asked.providers,
+            scope: 'project', cwd: request.cwd, note: `자동 승인: ${reason}`.slice(0, 500) });
+          given = await this.checked(given);
+        } catch (error) { return owner(error instanceof Error ? error.message : String(error)); }
+        const block = autoReviewBlock(given, request.cwd);
+        if (block) return owner(block);
+        if (!ruleIsNarrower({ ...asked, ...(asked.scope === 'global' ? { scope: 'project', cwd: request.cwd } : {}) }, given)) return owner('검토기가 요청보다 넓은 규칙을 냈습니다');
+        try {
+          await this.commit(state => {
+            const made = upsert(state, given, undefined, 'auto', id, at);
+            const item = state.requests.find(entry => entry.id === id)!;
+            item.status = 'approved'; item.decidedAt = at; item.ruleId = made.id; item.decidedBy = 'auto';
+            item.review = review({ verdict: 'approve' });
+          });
+        } catch (error) { return owner(error instanceof Error ? error.message : String(error)); }
+        await this.apply();
+        const item = this.state.requests.find(entry => entry.id === id)!;
+        return { request: item, message: reviewMessage(item, given) };
+      }
+      if (result.verdict === 'narrow') {
+        const since = Date.parse(at) - DAY_MS;
+        const narrowed = this.state.requests.filter(item => item.sessionId === request.sessionId && item.review?.verdict === 'narrow' && Date.parse(item.review.at ?? item.createdAt) >= since).length;
+        if (narrowed >= MAX_NARROW) return owner('이 대화는 오늘 이미 범위를 줄여 다시 요청했습니다');
+        const suggestion = result.suggestion?.trim().slice(0, 500);
+        await this.commit(state => {
+          const item = state.requests.find(entry => entry.id === id)!;
+          item.status = 'withdrawn'; item.decidedAt = at; item.decidedBy = 'auto';
+          item.review = review({ verdict: 'narrow', ...(suggestion ? { suggestion } : {}) });
+        });
+        const item = this.state.requests.find(entry => entry.id === id)!;
+        return { request: item, message: reviewMessage(item) };
+      }
+      return owner();
+    });
+  }
+
+  private async setReview(id: string, review: PermissionReview): Promise<void> {
+    await this.commit(state => { const item = state.requests.find(entry => entry.id === id); if (item) item.review = review; });
   }
 
   pending(): number { return this.state.requests.filter(request => request.status === 'pending').length; }
@@ -101,7 +233,8 @@ export class PermissionService {
   overview(cwd?: string): PermissionOverview {
     const rules = this.state.rules.filter(rule => !cwd || rule.scope === 'global' || rule.cwd === cwd);
     const requests = this.state.requests.filter(request => !cwd || request.cwd === cwd).slice().reverse();
-    return { rules, requests, targets: this.targets(cwd), pending: requests.filter(request => request.status === 'pending').length, ...(this.state.lost ? { lost: this.state.lost } : {}) };
+    return { rules, requests, targets: this.targets(cwd), pending: requests.filter(waitingForOwner).length, ...(this.state.lost ? { lost: this.state.lost } : {}),
+      autoReview: this.autoReview() };
   }
 
   /** What an agent sees: the rules that apply to its folder, and the requests its own conversation sent. */
@@ -111,7 +244,10 @@ export class PermissionService {
     return {
       rules: this.state.rules.filter(rule => rule.scope === 'global' || rule.cwd === folder).map(rule => ({ id: rule.id, kind: rule.kind, value: rule.value, providers: rule.providers, scope: rule.scope, ...(rule.cwd ? { cwd: rule.cwd } : {}) })),
       requests: this.state.requests.filter(request => caller.sessionId && request.sessionId === caller.sessionId).slice(-20).reverse()
-        .map(request => ({ id: request.id, status: request.status, rule: request.rule, createdAt: request.createdAt, ...(request.decidedAt ? { decidedAt: request.decidedAt } : {}) })),
+        .map(request => ({ id: request.id, status: request.status, rule: request.rule, createdAt: request.createdAt, ...(request.decidedAt ? { decidedAt: request.decidedAt } : {}),
+          ...(request.decidedBy ? { decidedBy: request.decidedBy } : {}),
+          ...(request.review ? { review: { status: request.review.status, ...(request.review.verdict ? { verdict: request.review.verdict } : {}), ...(request.review.reason ? { reason: request.review.reason } : {}),
+            ...(request.review.suggestion ? { suggestion: request.review.suggestion } : {}) } } : {}) })),
     };
   }
 
@@ -134,8 +270,13 @@ export class PermissionService {
       if (this.pending() >= MAX_PENDING) throw failure('기다리는 권한 요청이 너무 많습니다. 소유자가 Tower에서 먼저 정리해야 합니다.', 429);
       const request: PermissionRequest = { id: randomUUID(), status: 'pending', rule, reason: input.reason.trim(), sessionId: caller.sessionId, ...(caller.runId ? { runId: caller.runId } : {}),
         cwd: session.cwd, provider, createdAt: this.now() };
+      if (this.autoReview().enabled) {
+        const skip = autoReviewBlock(rule, session.cwd) ?? this.options.autoReviewSkip?.(request);
+        request.review = skip ? { status: 'skipped', reason: skip, at: this.now() } : { status: 'queued', at: this.now() };
+      }
       await this.commit(state => { state.requests.push(request); });
-      return { request: { id: request.id, status: request.status }, note: WAIT_NOTE };
+      if (request.review?.status === 'queued') this.options.onReviewQueued?.();
+      return { request: { id: request.id, status: request.status }, note: request.review?.status === 'queued' ? REVIEW_NOTE : WAIT_NOTE };
     });
   }
 
@@ -174,14 +315,14 @@ export class PermissionService {
       if (request.status !== 'pending') throw failure('이미 처리한 요청입니다.', 409);
       const at = this.now();
       if (!approve) {
-        await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.status = 'denied'; item.decidedAt = at; });
+        await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.status = 'denied'; item.decidedAt = at; item.decidedBy = 'owner'; });
         return { request, rule: undefined };
       }
       const rule = await this.checked(clean(edited ?? request.rule));
       await this.commit(state => {
         const made = upsert(state, rule, undefined, 'request', id, at);
         const item = state.requests.find(entry => entry.id === id)!;
-        item.status = 'approved'; item.decidedAt = at; item.ruleId = made.id;
+        item.status = 'approved'; item.decidedAt = at; item.ruleId = made.id; item.decidedBy = 'owner';
       });
       await this.apply();
       return { request, rule };
@@ -229,8 +370,7 @@ export class PermissionService {
       if (rule.scope === 'global' && this.options.globalCodex === false) continue;
       const path = codexRulesPath(rule.scope, rule.cwd, this.options.env);
       const file = files.get(path) ?? { scope: rule.scope, ...(rule.cwd ? { cwd: rule.cwd } : {}), lines: [] };
-      const line = codexRule(rule);
-      if (!file.lines.includes(line)) file.lines.push(line);
+      for (const line of [codexRule(rule), ...(rule.source === 'auto' ? ruleGuards(rule).codex : [])]) if (!file.lines.includes(line)) file.lines.push(line);
       files.set(path, file);
     }
     return files;
@@ -275,7 +415,24 @@ function decisionMessage(asked: PermissionRuleInput, allowed: PermissionRuleInpu
     + `${changed ? ` (you asked for \`${asked.value}\` in ${where(asked)})` : ''}. It applies from this turn. Continue the task where it waited on this permission.`;
 }
 
+/** What the requesting agent is told after Tower's reviewer allowed its request or sent it back. */
+function reviewMessage(request: PermissionRequest, allowed?: PermissionRuleInput): string {
+  const why = request.review?.reason ? ` Reason: ${request.review.reason}` : '';
+  if (allowed) {
+    const changed = allowed.value !== request.rule.value || request.rule.scope !== 'project';
+    return `Tower's permission reviewer allowed \`${allowed.value}\` for ${allowed.providers.map(provider => provider === 'claude' ? 'Claude Code' : 'Codex').join(' and ')} in this project`
+      + `${changed ? ` (you asked for \`${request.rule.value}\`${request.rule.scope === 'global' ? ' in every project' : ''})` : ''}.${why} It applies from this turn. Continue the task where it waited on this permission.`;
+  }
+  const instead = request.review?.suggestion ? ` Ask for this instead: ${request.review.suggestion}` : ' Ask for a narrower rule that covers only what the task needs.';
+  return `Tower's permission reviewer did not allow \`${request.rule.value}\` as asked, and withdrew the request.${why}${instead} If the task still needs it, send a new permissions_request; do not look for another way around the refusal.`;
+}
+
+const REVIEW_NOTE = 'Tower\'s permission reviewer checks this request against the owner\'s instructions for this task first; the owner can also decide it. Do not look for another way around the refusal. An allowed rule applies from your next turn: say in your reply what waits on this permission and end your turn, or go on with other work first. The decision is sent to this conversation; permissions_list also shows it.';
+
 const WAIT_NOTE = 'The owner decides this in Tower. Do not look for another way around the refusal. An allowed rule applies from your next turn: say in your reply what waits on this permission and end your turn, or go on with other work first. The owner can send the decision to this conversation; permissions_list also shows it.';
+
+/** A request the owner is asked about: pending and not with the reviewer right now. */
+const waitingForOwner = (request: PermissionRequest) => request.status === 'pending' && request.review?.status !== 'queued' && request.review?.status !== 'running';
 
 /** A folder that is the project or inside it. */
 const within = (cwd: string, project: string) => cwd === project || cwd.startsWith(project.endsWith('/') ? project : `${project}/`);
@@ -335,19 +492,35 @@ function normalize(value: unknown): PermissionState {
   };
   if (Array.isArray(input.rules)) for (const item of input.rules as any[]) {
     const rule = ruleInput(item);
-    if (rule && typeof item.id === 'string') state.rules.push({ ...rule, id: item.id, source: item.source === 'request' ? 'request' : 'owner', ...(typeof item.requestId === 'string' ? { requestId: item.requestId } : {}),
+    if (rule && typeof item.id === 'string') state.rules.push({ ...rule, id: item.id, source: item.source === 'request' || item.source === 'auto' ? item.source : 'owner', ...(typeof item.requestId === 'string' ? { requestId: item.requestId } : {}),
       createdAt: text(item.createdAt, 40), updatedAt: text(item.updatedAt, 40) });
   }
   if (Array.isArray(input.requests)) for (const item of input.requests as any[]) {
     const rule = ruleInput(item?.rule);
     if (!rule || typeof item.id !== 'string' || typeof item.sessionId !== 'string' || typeof item.cwd !== 'string') continue;
-    state.requests.push({ id: item.id, status: item.status === 'approved' || item.status === 'denied' ? item.status : 'pending', rule, reason: text(item.reason, 500), sessionId: item.sessionId,
+    state.requests.push({ id: item.id, status: item.status === 'approved' || item.status === 'denied' || item.status === 'withdrawn' ? item.status : 'pending', rule, reason: text(item.reason, 500), sessionId: item.sessionId,
       ...(typeof item.runId === 'string' ? { runId: item.runId } : {}), cwd: item.cwd, ...(item.provider === 'claude' || item.provider === 'codex' ? { provider: item.provider } : {}),
-      createdAt: text(item.createdAt, 40), ...(typeof item.decidedAt === 'string' ? { decidedAt: item.decidedAt } : {}), ...(typeof item.ruleId === 'string' ? { ruleId: item.ruleId } : {}) });
+      createdAt: text(item.createdAt, 40), ...(typeof item.decidedAt === 'string' ? { decidedAt: item.decidedAt } : {}), ...(typeof item.ruleId === 'string' ? { ruleId: item.ruleId } : {}),
+      ...(item.decidedBy === 'owner' || item.decidedBy === 'auto' ? { decidedBy: item.decidedBy } : {}), ...(reviewOf(item.review, item.status === 'pending' || item.status === undefined) ?? {}) });
   }
   if (typeof input.lost === 'string') state.lost = input.lost;
+  const review = input.autoReview as Partial<PermissionAutoReview> | undefined;
+  if (review && typeof review === 'object') {
+    const provider: PermissionProvider = review.provider === 'codex' ? 'codex' : 'claude';
+    state.autoReview = { enabled: review.enabled === true, provider, model: typeof review.model === 'string' && AUTO_REVIEW_MODELS[provider].includes(review.model) ? review.model : AUTO_REVIEW_MODELS[provider][0]!,
+      resume: review.resume !== false };
+  }
   // A project file that lost its folder could no longer be checked before removal, so it is forgotten instead.
   if (Array.isArray(input.codex)) state.codex = (input.codex as any[]).filter(item => item && typeof item.path === 'string' && (item.scope !== 'project' || typeof item.cwd === 'string'))
     .map(item => item.scope === 'project' ? { path: item.path, scope: 'project' as const, cwd: item.cwd as string } : { path: item.path, scope: 'global' as const });
   return state;
+}
+
+/** A saved review; one that was running when the worker stopped is queued again, since its verdict was never applied. */
+function reviewOf(value: any, pending: boolean): { review: PermissionReview } | undefined {
+  if (!value || typeof value !== 'object' || !['queued', 'running', 'done', 'skipped', 'failed'].includes(value.status)) return undefined;
+  const status: PermissionReview['status'] = value.status === 'running' ? (pending ? 'queued' : 'failed') : value.status;
+  return { review: { status, ...(['approve', 'narrow', 'owner'].includes(value.verdict) ? { verdict: value.verdict } : {}), ...(typeof value.reason === 'string' ? { reason: text(value.reason, 1000) } : {}),
+    ...(typeof value.suggestion === 'string' ? { suggestion: text(value.suggestion, 500) } : {}), ...(typeof value.model === 'string' ? { model: text(value.model, 64) } : {}),
+    ...(typeof value.at === 'string' ? { at: text(value.at, 40) } : {}) } };
 }

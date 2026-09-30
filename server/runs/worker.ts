@@ -41,6 +41,8 @@ import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger
 import { SkillService } from '../skills/service.js';
 import { installAgentGuidance } from '../agent-guidance/install.js';
 import { PermissionService } from '../permissions/service.js';
+import { PermissionReviewer } from '../permissions/reviewer.js';
+import { TOWER_NOTICE } from '../../shared/task-notification.js';
 import { skillHomes } from '../skills/files.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
 import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
@@ -211,7 +213,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         const admitted = admission(args[1]);
         const autoPrompts = options.autoPrompts;
         const request = args[0] as AutoPromptRequest;
-        return remote(admitted, 'autoPrompt', request, undefined, async () => { await context?.refresh(); return autoPrompts.submit(request, { origin: admitted.origin }); },
+        return remote(admitted, 'autoPrompt', request, undefined, async () => { await context?.refresh(); return autoPrompts.submit(request, { origin: admitted.origin, ...(admitted.authored ? { authored: true } : {}) }); },
           value => ({ kind: 'autoPrompt', jobId: value.id }), result => result.kind === 'autoPrompt' ? autoPrompts.get(result.jobId) : undefined);
       } break;
       case 'cancelAutoPrompt': if (options.autoPrompts) return options.autoPrompts.cancel(args[0] as string); break;
@@ -427,7 +429,9 @@ function admission(value: unknown): RunAdmission {
   const origin = input.origin === undefined ? { kind: 'owner' as const } : parseRunOrigin(input.origin);
   if (!origin || (origin.kind !== 'owner' && origin.kind !== 'agent')) throw Object.assign(new Error('The web connection can only admit owner or agent work.'), { statusCode: 400 });
   if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-f\d-]{36}$/i.test(input.requestId))) throw Object.assign(new Error('Invalid request ID.'), { statusCode: 400 });
-  return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin, ...(typeof input.requestId === 'string' ? { requestId: input.requestId.toLowerCase() } : {}) };
+  // Owner work the page sends is what the owner typed; an agent's is not.
+  return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin, ...(origin.kind === 'owner' ? { authored: true } : {}),
+    ...(typeof input.requestId === 'string' ? { requestId: input.requestId.toLowerCase() } : {}) };
 }
 
 
@@ -535,9 +539,38 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       ...(resolve(stateDir) === resolve(defaultStateDir()) ? { installGuidance: async () => { await installAgentGuidance({ stateDir, claudeHome: process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), codexHome: process.env.CODEX_HOME || join(homedir(), '.codex') }); } } : {}) });
     // Skills never keep the worker from starting.
     await skills.start().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
+    // Made just below; the permission service only calls it once requests arrive.
+    let reviewer!: PermissionReviewer;
     const permissions = new PermissionService({ stateDir, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
-      resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' } }); } });
+      resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' } }); },
+      // A public agent's requests always wait for the owner: its conversations carry outsiders' words.
+      autoReviewSkip: request => {
+        const origin = runs.sessionOrigin(request.sessionId);
+        const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
+        if ([origin?.triggerId, run?.origin?.triggerId].some(id => id?.startsWith(PUBLIC_TRIGGER_PREFIX))) return '공개 에이전트의 요청은 소유자가 정합니다.';
+        return undefined;
+      },
+      onReviewQueued: () => reviewer?.wake(),
+      onAutoReviewChange: settings => { if (!settings.enabled) reviewer?.abort(); } });
     await permissions.start().catch(error => console.error(`Permission rules did not start: ${error instanceof Error ? error.message : String(error)}`));
+    reviewer = new PermissionReviewer({ service: permissions,
+      model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }),
+      sources: {
+        runs: () => runs.list(),
+        trigger: id => { const trigger = triggerEngine?.list().find(item => item.id === id); return trigger ? { name: trigger.name, instructions: trigger.handler.kind === 'task' ? trigger.handler.instructions : trigger.handler.rules.map(rule => `${rule.name}: ${rule.condition}\n${rule.instructions}`).join('\n\n'), ownerSet: trigger.updatedBy.kind === 'owner' && trigger.updatedBy.via === 'ui' } : undefined; },
+        authority: cwd => skills.authority(cwd),
+        history: async (sessionId, limit) => runs.getSession(sessionId) ? (await sessions.detail(runs.nativeSessionId(sessionId), undefined, limit))?.messages : undefined,
+        rules: cwd => permissions.overview(cwd).rules,
+        requests: sessionId => permissions.overview().requests.filter(item => item.sessionId === sessionId).reverse(),
+      },
+      // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals,
+      // never the owner's, and never as something the owner typed.
+      notify: async (request, message) => {
+        const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
+        if (!run?.origin) return;
+        await runs.enqueue(request.sessionId, `${TOWER_NOTICE} ${message}`, {}, { origin: run.origin, ...(run.unattended ? { unattended: true } : {}) });
+      } });
+
     runs.setClaudeSettings(cwd => permissions.claudeSettings(cwd));
     runs.setTurnNotes((_run, session) => skills.turnNotes(session));
     runs.on('change', () => skills.recordRuns());
@@ -567,6 +600,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     } });
     triggerEngine = triggers;
     await triggers.start();
+    // Reviews waiting from before this worker started (or queued while the last one handed over) go on, once the
+    // triggers whose instructions they read are in place.
+    reviewer.wake();
     await github.start();
     // Slack and triggers share one limit on provider turns running at once.
     runs.setAutomationLimit(triggers.settings().maxConcurrentRuns);
@@ -599,17 +635,17 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         search: async (id, query) => runs.getSession(id) ? (await sessions.search(runs.nativeSessionId(id), query)) ?? { count: 0, matches: [], bytes: 0 } : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
     await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
-      onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); worktrees.close(); await worktrees.flush(); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || Boolean(tools?.busy()),
-      transient: () => slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || Boolean(tools?.busy()),
+      onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || Boolean(tools?.busy()),
+      transient: () => slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || Boolean(tools?.busy()),
       // Work a Slack or GitHub coordinator delegated: its coordinator hears how it ended and decides what follows.
       delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
-      releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); worktrees.resume(); },
-      holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); worktrees.pause(); },
-      quiesce: async () => { tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); worktrees.pause(); permissions.pause(); await Promise.all([worktrees.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
-      resume: () => { tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); worktrees.resume(); permissions.resume(); sessions.resume(); },
+      releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); worktrees.resume(); reviewer.release(); },
+      holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); worktrees.pause(); reviewer.hold(); },
+      quiesce: async () => { tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([worktrees.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
+      resume: () => { tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); worktrees.close(); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); worktrees.close(); reviewer.close(); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     runs.markReady();
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});

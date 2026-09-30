@@ -319,7 +319,7 @@ export class TowerApi {
         const from = actor.controllerId ? { controllerId: actor.controllerId } : {};
         const origin: RunOrigin = actor.kind === 'agent' ? { kind: 'agent', ...(actor.runId ? { runId: actor.runId } : {}), ...from } : { kind: 'owner', ...from };
         return { job: await autoPrompts.submit({ requestId: value.requestId, provider: value.provider, prompt: value.prompt, ...(value.cwd ? { cwd: value.cwd } : {}),
-          ...(value.model ? { model: value.model } : {}), ...(value.effort ? { effort: value.effort } : {}) }, { origin }) };
+          ...(value.model ? { model: value.model } : {}), ...(value.effort ? { effort: value.effort } : {}) }, { origin, ...(actor.kind === 'owner' ? { authored: true } : {}) }) };
       }
       case 'permissions.request': return this.permissions().request(value as Parameters<PermissionService['request']>[0], actor);
       case 'permissions.list': return this.permissions().forAgent(actor, value.cwd);
@@ -328,6 +328,7 @@ export class TowerApi {
       case 'permissions.delete': return this.permissions().remove(value.id);
       case 'permissions.decide': return this.permissions().decide(value.id, value.approve, value.rule, value.resume === true);
       case 'permissions.acknowledge': return this.permissions().acknowledge();
+      case 'permissions.saveAutoReview': return this.permissions().saveAutoReview(value.settings);
       case 'autoPrompt.get': {
         const job = autoPrompts?.get(value.requestId);
         if (!job) throw failure('Auto Prompt request not found.', 404);
