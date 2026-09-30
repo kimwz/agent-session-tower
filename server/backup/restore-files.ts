@@ -1,4 +1,4 @@
-import { cp, mkdir, readdir, rename, rm, unlink } from 'node:fs/promises';
+import { cp, mkdir, readdir, rename, rm, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BackupPart, RestoreReport } from '../../shared/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -9,21 +9,49 @@ export const restoreDir = (stateDir: string) => join(stateDir, 'restore');
 const pendingPath = (stateDir: string) => join(restoreDir(stateDir), 'pending-worker.json');
 /** A worker's part a worker has taken: renamed first, so a restore applied meanwhile is a separate file it never touches. */
 const takenPath = (stateDir: string) => join(restoreDir(stateDir), 'applying-worker.json');
-const reportPath = (stateDir: string) => join(restoreDir(stateDir), 'last.json');
+/**
+ * A restore's report is written by the web only (`report-<id>.json`, and `latest.json` naming the newest restore); how
+ * the worker's part went is written by the worker only (`outcome-<id>.json`). Neither ever rewrites the other's file.
+ */
+const latestPath = (stateDir: string) => join(restoreDir(stateDir), 'latest.json');
+const reportPath = (stateDir: string, id: string) => join(restoreDir(stateDir), `report-${id}.json`);
+const outcomePath = (stateDir: string, id: string) => join(restoreDir(stateDir), `outcome-${id}.json`);
+const validId = (id: unknown): id is string => typeof id === 'string' && /^[0-9a-f-]{36}$/.test(id);
+const REPORTS_KEPT = 5;
 const BEFORE_KEPT = 3;
 
 async function readOptional(path: string): Promise<unknown> {
   try { return await readPrivateJson(path, 60_000_000); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error; }
 }
+interface Outcome { parts: BackupPart[]; errors: string[]; skills?: RestoreReport['skills']; at: string }
 
+/** The newest restore as it stands: the web's report, with the worker's outcome once it has one. */
 export async function readReport(stateDir: string): Promise<RestoreReport | undefined> {
-  const value = await readOptional(reportPath(stateDir)).catch(() => undefined) as RestoreReport | undefined;
-  return value && typeof value === 'object' && typeof value.status === 'string' ? value : undefined;
+  const latest = await readOptional(latestPath(stateDir)).catch(() => undefined) as { id?: unknown } | undefined;
+  if (!validId(latest?.id)) return undefined;
+  const report = await readOptional(reportPath(stateDir, latest.id)).catch(() => undefined) as RestoreReport | undefined;
+  if (!report || typeof report !== 'object' || typeof report.status !== 'string') return undefined;
+  const outcome = await readOptional(outcomePath(stateDir, latest.id)).catch(() => undefined) as Outcome | undefined;
+  if (!outcome || report.status === 'cancelled') return report;
+  return { ...report, status: 'applied', appliedAt: outcome.at, worker: outcome.parts, errors: [...report.errors, ...outcome.errors], ...(outcome.skills ? { skills: outcome.skills } : {}) };
 }
+
+/** The web's report of a restore; it becomes the newest one. Reports of older restores beyond a few are removed. */
 export async function writeReport(stateDir: string, report: RestoreReport): Promise<void> {
-  await mkdir(restoreDir(stateDir), { recursive: true, mode: 0o700 });
-  await writePrivateJson(reportPath(stateDir), JSON.stringify(report));
+  const root = restoreDir(stateDir);
+  await mkdir(root, { recursive: true, mode: 0o700 });
+  await writePrivateJson(reportPath(stateDir, report.id), JSON.stringify(report));
+  await writePrivateJson(latestPath(stateDir), JSON.stringify({ id: report.id }));
+  const reports = (await readdir(root)).filter(name => /^report-[0-9a-f-]{36}\.json$/.test(name));
+  if (reports.length <= REPORTS_KEPT) return;
+  const dated = await Promise.all(reports.map(async name => ({ name, at: (await stat(join(root, name)).catch(() => undefined))?.mtimeMs ?? 0 })));
+  for (const { name } of dated.sort((a, b) => a.at - b.at).slice(0, dated.length - REPORTS_KEPT)) {
+    const id = name.slice('report-'.length, -'.json'.length);
+    if (id === report.id) continue;
+    await rm(join(root, name), { force: true });
+    await rm(outcomePath(stateDir, id), { force: true });
+  }
 }
 
 export async function writePendingWorker(stateDir: string, restore: WorkerRestore): Promise<void> {
@@ -88,11 +116,10 @@ export async function takeWorkerRestore(stateDir: string): Promise<{ restore: Wo
   };
 }
 
-/** Records how the worker's part went, on the report of that restore only: a newer restore keeps its own. */
+/** Records how the worker's part of one restore went, in that restore's own outcome file. */
 async function finishReport(stateDir: string, id: string | undefined, result: { parts: BackupPart[]; errors: string[]; skills?: RestoreReport['skills'] }): Promise<void> {
-  const report = await readReport(stateDir);
-  if (report && id !== undefined && report.id !== id) return;
-  const now = new Date().toISOString();
-  await writeReport(stateDir, { ...(report ?? { id: id ?? '', requestedAt: now, from: '', createdAt: '', applied: [], worker: [] }), status: 'applied', appliedAt: now,
-    worker: result.parts, errors: [...(report?.errors ?? []), ...result.errors], ...(result.skills ? { skills: result.skills } : {}) });
+  if (!validId(id)) { if (result.errors.length) console.error(`Restore: ${result.errors.join(' ')}`); return; }
+  await mkdir(restoreDir(stateDir), { recursive: true, mode: 0o700 });
+  const outcome: Outcome = { parts: result.parts, errors: result.errors, ...(result.skills ? { skills: result.skills } : {}), at: new Date().toISOString() };
+  await writePrivateJson(outcomePath(stateDir, id), JSON.stringify(outcome));
 }

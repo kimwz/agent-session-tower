@@ -304,8 +304,8 @@ export class BackupService {
     const asked = await this.options.restartWorker().catch(error => { errors.push(error instanceof Error ? error.message : String(error)); return false; });
     if (!asked) {
       report.errors = [...errors, '실행 워커에 교대를 요청하지 못했습니다. Tower를 다시 시작하면 워커가 시작할 때 적용됩니다.'];
-      // Written only while the worker's part still waits, so a worker that already took it is never reported as waiting.
-      if (await readReport(stateDir).then(current => current?.id === report.id && current.status === 'waiting-worker')) await writeReport(stateDir, report);
+      // The web's own report; a worker that took the part meanwhile records its outcome beside it.
+      await writeReport(stateDir, report);
     }
     return (await readReport(stateDir)) ?? report;
   }
