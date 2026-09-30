@@ -116,9 +116,18 @@ export class PermissionService {
     const rules = this.state.rules.filter(rule => rule.providers.includes('claude') && (rule.scope === 'global' || within(cwd, rule.cwd!)));
     const allow = [...new Set(rules.map(claudeRule))];
     // A rule the reviewer allowed never covers its family's destructive variants: deny comes before allow.
-    const owned = rules.filter(rule => rule.source !== 'auto' && rule.kind === 'command').map(rule => rule.value);
-    const deny = [...new Set(rules.filter(rule => rule.source === 'auto').flatMap(rule => ruleGuards(rule, owned).claude))];
+    const deny = [...new Set(rules.filter(rule => rule.source === 'auto').flatMap(rule => this.guards(rule, cwd).claude))];
     return allow.length ? JSON.stringify({ permissions: { allow, ...(deny.length ? { deny } : {}) } }) : undefined;
+  }
+
+  /**
+   * The deny rules an allowed rule gets for work in `cwd`: what the owner's own rules there (every project's, and
+   * those of the project the folder is in) allow stays allowed.
+   */
+  guards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>, cwd: string, provider: PermissionProvider = 'claude'): { claude: string[]; codex: string[] } {
+    const owned = this.state.rules.filter(item => item.source !== 'auto' && item.kind === 'command' && item.providers.includes(provider)
+      && (item.scope === 'global' || within(cwd, item.cwd!))).map(item => item.value);
+    return ruleGuards(rule, owned);
   }
 
   autoReview(): PermissionAutoReview { return { ...(this.state.autoReview ?? DEFAULT_AUTO_REVIEW) }; }
@@ -141,14 +150,15 @@ export class PermissionService {
 
   /** The oldest request waiting for the reviewer. */
   nextReview(): PermissionRequest | undefined {
-    return this.state.requests.find(request => request.status === 'pending' && request.review?.status === 'queued');
+    // One the reviewer started but could not record the end of (a full disk) is taken again, as after a restart.
+    return this.state.requests.find(request => request.status === 'pending' && (request.review?.status === 'queued' || request.review?.status === 'running'));
   }
 
   /** A request the reviewer starts on. False when it is no longer waiting for one. */
   startReview(id: string): Promise<boolean> {
     return this.serial(async () => {
       const request = this.state.requests.find(item => item.id === id);
-      if (!request || request.status !== 'pending' || request.review?.status !== 'queued') return false;
+      if (!request || request.status !== 'pending' || (request.review?.status !== 'queued' && request.review?.status !== 'running')) return false;
       if (!this.autoReview().enabled) { await this.setReview(id, { status: 'skipped', reason: '자동 검토가 꺼졌습니다.', at: this.now() }); return false; }
       await this.setReview(id, { status: 'running', model: this.autoReview().model, at: this.now() });
       return true;
@@ -375,10 +385,7 @@ export class PermissionService {
       if (rule.scope === 'global' && this.options.globalCodex === false) continue;
       const path = codexRulesPath(rule.scope, rule.cwd, this.options.env);
       const file = files.get(path) ?? { scope: rule.scope, ...(rule.cwd ? { cwd: rule.cwd } : {}), lines: [] };
-      // Guards leave alone what the owner's own Codex rules for the same place allow.
-      const owned = this.state.rules.filter(item => item.source !== 'auto' && item.kind === 'command' && item.providers.includes('codex')
-        && (item.scope === 'global' || (rule.scope === 'project' && item.cwd === rule.cwd))).map(item => item.value);
-      for (const line of [codexRule(rule), ...(rule.source === 'auto' ? ruleGuards(rule, owned).codex : [])]) if (!file.lines.includes(line)) file.lines.push(line);
+      for (const line of [codexRule(rule), ...(rule.source === 'auto' ? this.guards(rule, rule.cwd ?? '/', 'codex').codex : [])]) if (!file.lines.includes(line)) file.lines.push(line);
       files.set(path, file);
     }
     return files;
@@ -461,12 +468,16 @@ function upsert(state: PermissionState, rule: PermissionRuleInput, id: string | 
     const index = state.rules.findIndex(item => item.id === id);
     if (index < 0) throw failure('규칙을 찾지 못했습니다.', 404);
     if (state.rules.some(item => item.id !== id && sameRule(item, rule))) throw failure('같은 규칙이 이미 있습니다.', 409);
-    state.rules[index] = { ...state.rules[index], ...rule, ...(rule.note ? {} : { note: undefined }), ...(rule.cwd ? {} : { cwd: undefined }), updatedAt: at };
+    state.rules[index] = { ...state.rules[index], ...rule, ...(rule.note ? {} : { note: undefined }), ...(rule.cwd ? {} : { cwd: undefined }), updatedAt: at,
+      // A rule the owner edits is the owner's, even one the reviewer made.
+      ...(state.rules[index]!.source === 'auto' && source !== 'auto' ? { source } : {}) };
     state.rules[index] = JSON.parse(JSON.stringify(state.rules[index]));
     return state.rules[index];
   }
   const same = state.rules.find(item => sameRule(item, rule));
   if (same) {
+    // The owner making or allowing a rule the reviewer made makes it the owner's: it keeps no guards of its own.
+    if (same.source === 'auto' && source !== 'auto') { same.source = source; delete same.requestId; if (requestId) same.requestId = requestId; }
     same.providers = (['claude', 'codex'] as const).filter(item => same.providers.includes(item) || rule.providers.includes(item));
     same.updatedAt = at;
     return same;

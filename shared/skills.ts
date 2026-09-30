@@ -131,6 +131,8 @@ export interface SkillOverview {
   advisor: SkillAdvisorStatus;
   /** The project the listing is for; its skills come with the global ones. */
   cwd?: string;
+  /** Tower's permission reviewer is on, so what the owner confirmed matters. Absent from older workers. */
+  review?: boolean;
 }
 export interface SkillSummary {
   proposals: number;

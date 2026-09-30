@@ -531,7 +531,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     const publicAgents = new PublicAgentService({ stateDir, runs });
     await publicAgents.start();
     // Skill files live in the account's home; only the Tower on its own state folder proposes new ones.
-    const skills = new SkillService({ stateDir, homes: skillHomes(stateDir), sessions: () => visible.allSessions(), runs: () => runs.list(), origin: id => runs.sessionOrigin(id),
+    // Set once the permission rules are loaded, below.
+    let reviewOn = () => false;
+    const skills = new SkillService({ stateDir, review: () => reviewOn(), homes: skillHomes(stateDir), sessions: () => visible.allSessions(), runs: () => runs.list(), origin: id => runs.sessionOrigin(id),
       projects: () => (visible.snapshot().groups ?? []).map(group => group.cwd),
       history: async (session, limit) => (await sessions.detail(runs.nativeSessionId(session.id), undefined, limit))?.messages,
       model: (request, options) => runAutoPromptModel(request, { stateDir, ...(options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {}) }),
@@ -554,6 +556,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       onReviewQueued: () => reviewer?.wake(),
       onAutoReviewChange: settings => { if (!settings.enabled) reviewer?.abort(); } });
     await permissions.start().catch(error => console.error(`Permission rules did not start: ${error instanceof Error ? error.message : String(error)}`));
+    reviewOn = () => permissions.autoReview().enabled;
     reviewer = new PermissionReviewer({ service: permissions,
       model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }),
       sources: {
@@ -571,6 +574,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         authority: cwd => skills.authority(cwd),
         history: async (sessionId, limit) => runs.getSession(sessionId) ? (await sessions.detail(runs.nativeSessionId(sessionId), undefined, limit))?.messages : undefined,
         rules: cwd => permissions.overview(cwd).rules,
+        guards: (rule, cwd) => ({ claude: permissions.guards(rule, cwd, 'claude').claude, codex: permissions.guards(rule, cwd, 'codex').codex }),
         requests: sessionId => permissions.overview().requests.filter(item => item.sessionId === sessionId).reverse(),
       },
       // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals,

@@ -53,9 +53,15 @@ test('the permission reviewer takes a Tower skill as the owner’s word only at 
 
   // Confirming needs the revision the owner was shown.
   await assert.rejects(f.service.mutate('confirm', { dir: skill.dir, revision: skill.revision }, { typed: true }), { statusCode: 409 });
-  await assert.rejects(f.service.mutate('confirm', { dir: skill.dir, revision: detail.revision }), { statusCode: 403 }, 'only the owner’s page confirms');
-  await f.service.mutate('confirm', { dir: skill.dir, revision: detail.revision }, { typed: true });
+  await assert.rejects(f.service.mutate('confirm', { dir: skill.dir, revision: detail.revision, targetsRevision: targetsRevision(detail.targets) }), { statusCode: 403 }, 'only the owner’s page confirms');
+  // The owner opened it before it was applied to blog: confirming what they saw is refused, since where it applies changed.
+  await assert.rejects(f.service.mutate('confirm', { dir: skill.dir, revision: detail.revision, targetsRevision: targetsRevision(detail.targets) }, { typed: true }), { statusCode: 409 });
+  await assert.rejects(f.service.mutate('confirm', { dir: skill.dir, revision: detail.revision }, { typed: true }), { statusCode: 409 }, 'the targets shown are required');
+  const reopened = await f.service.detail({ dir: skill.dir });
+  await f.service.mutate('confirm', { dir: skill.dir, revision: reopened.revision, targetsRevision: targetsRevision(reopened.targets) }, { typed: true });
   assert.match((await f.service.authority(f.shop)).skills[0]!.body, /publish anything/);
+  assert.equal((await f.service.authority(f.blog)).skills.length, 1, 'confirmed with the projects the owner saw');
+  assert.equal((await f.service.detail({ dir: skill.dir })).confirmed, true);
 });
 
 test('owner guidance counts for the reviewer once saved or confirmed in Tower, and not after it changed outside', async t => {

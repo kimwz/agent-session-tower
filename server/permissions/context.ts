@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { claudeRule, codexRule, ruleGuards, type PermissionRequest, type PermissionRule } from '../../shared/permissions.js';
+import { claudeRule, codexRule, type PermissionRequest, type PermissionRule } from '../../shared/permissions.js';
 import type { ChatMessage, Run } from '../../shared/types.js';
 
 const run = promisify(execFile);
@@ -14,13 +14,13 @@ export interface ReviewSources {
   authority(cwd: string): Promise<{ skills: { name: string; description: string; body: string }[]; guidance?: string; unconfirmed: string[] }>;
   history(sessionId: string, limit: number): Promise<ChatMessage[] | undefined>;
   rules(cwd: string): PermissionRule[];
+  /** The deny rules the asked rule would get there, per agent (the permission service's own). */
+  guards(rule: PermissionRequest['rule'], cwd: string): { claude: string[]; codex: string[] };
   requests(sessionId: string): PermissionRequest[];
 }
 
-const MAX_PROMPTS = 12;
 const MAX_PROMPT_CHARS = 8_000;
 const MAX_FILE_CHARS = 20_000;
-const MAX_SKILL_CHARS = 16_000;
 const HISTORY = 40;
 const MAX_MESSAGE_CHARS = 2_000;
 const MAX_TOOL_CHARS = 1_000;
@@ -37,7 +37,8 @@ const cut = (value: string, max: number) => value.length > max ? `${value.slice(
 export async function reviewInput(request: PermissionRequest, sources: ReviewSources): Promise<string> {
   const runs = sources.runs().filter(item => item.sessionId === request.sessionId).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const typed = runs.filter(item => item.authored === true && item.origin?.kind === 'owner');
-  const prompts = [...typed.slice(0, 1), ...typed.slice(1).slice(-(MAX_PROMPTS - 1))].map((item, index) => ({ at: item.createdAt, ...(index === 0 ? { task: true } : {}), text: cut(item.prompt, MAX_PROMPT_CHARS) }));
+  // The owner's words are never cut: a restriction late in a prompt matters as much as the task at its start.
+  const prompts = typed.map((item, index) => ({ at: item.createdAt, ...(index === 0 ? { task: true } : {}), text: item.prompt }));
   const triggerId = runs.find(item => item.origin?.kind === 'trigger' && item.origin.triggerId)?.origin?.triggerId;
   const trigger = triggerId ? sources.trigger(triggerId) : undefined;
   const owned = await sources.authority(request.cwd);
@@ -50,13 +51,13 @@ export async function reviewInput(request: PermissionRequest, sources: ReviewSou
   const earlier = sources.requests(request.sessionId).filter(item => item.id !== request.id).slice(-10)
     .map(item => ({ rule: item.rule.value, status: item.status, ...(item.review?.verdict ? { review: item.review.verdict } : {}), reason: cut(item.reason, 300) }));
   const rule = request.rule;
-  const guards = ruleGuards(rule);
+  const guards = sources.guards(rule, request.cwd);
   const input = {
     authority: {
       ownerPrompts: prompts,
-      ...(trigger?.ownerSet ? { trigger: { name: trigger.name, instructions: cut(trigger.instructions, MAX_PROMPT_CHARS) } } : {}),
-      ownerSkills: owned.skills.map(skill => ({ name: skill.name, description: skill.description, body: cut(skill.body, MAX_SKILL_CHARS) })),
-      ...(owned.guidance ? { ownerGuidance: cut(owned.guidance, MAX_FILE_CHARS) } : {}),
+      ...(trigger?.ownerSet ? { trigger: { name: trigger.name, instructions: trigger.instructions } } : {}),
+      ownerSkills: owned.skills.map(skill => ({ name: skill.name, description: skill.description, body: skill.body })),
+      ...(owned.guidance ? { ownerGuidance: owned.guidance } : {}),
       existingRules: rules,
     },
     context: {

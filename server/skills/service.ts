@@ -36,6 +36,8 @@ export interface SkillServiceOptions {
   installGuidance?: () => Promise<void>;
   /** Whether Tower makes its default skills; only the Tower on the account's own state folder links into the account. */
   seed?: boolean;
+  /** Whether Tower's permission reviewer is on; the pages ask the owner to confirm skills only then. */
+  review?: () => boolean;
 }
 
 const MAX_TURN_NOTES = 6_000;
@@ -315,7 +317,10 @@ export class SkillService {
 
   private withTargets(skill: Skill): Skill {
     const item = skill.managed ? this.record(skill.dir) : undefined;
-    return item ? { ...skill, targets: { all: item.all, projects: item.projects }, confirmed: this.state.get().confirmed[skill.dir] === skill.revision } : skill;
+    const state = this.state.get();
+    // Confirmed: the text and where it applies are as the owner last saved or confirmed them in Tower.
+    return item ? { ...skill, targets: { all: item.all, projects: item.projects },
+      confirmed: state.confirmed[skill.dir] === skill.revision && targetsRevision(state.confirmedTargets[skill.dir]) === targetsRevision(item) } : skill;
   }
 
   /**
@@ -351,7 +356,7 @@ export class SkillService {
     const pinned = await this.pinned();
     const stored = (await this.files.managed()).map(skill => this.withTargets({ ...skill, pinned: folders(skill).some(dir => pinned.has(dir)) }));
     return { skills: (await this.withPins(await this.files.list(cwd))).map(skill => this.withTargets(skill)), stored, proposals, notes, settings: state.settings, advisor: this.advisor.status(),
-      guidance: await this.guidance(), ...(cwd ? { cwd } : {}) };
+      guidance: await this.guidance(), ...(cwd ? { cwd } : {}), review: this.options.review?.() === true };
   }
 
   summary(): SkillSummary {
@@ -424,6 +429,9 @@ export class SkillService {
         // The owner confirms the text they were shown: its revision must still be the file's.
         const skill = await this.files.detail(text(body.dir), cwd);
         if (!text(body.revision) || text(body.revision) !== skill.revision) throw new SkillError('다른 곳에서 이 스킬이 바뀌었습니다. 다시 열어 최신 내용을 확인하세요.', 409);
+        // The projects it applies to are confirmed as the owner saw them too.
+        if (typeof body.targetsRevision !== 'string') throw new SkillError('적용 프로젝트를 함께 확인해야 합니다. 스킬을 다시 여세요.', 409);
+        this.checkRevision(skill.dir, body);
         await this.state.update(state => { state.confirmed[skill.dir] = skill.revision; const targets = this.recordIn(state, skill.dir); if (targets) state.confirmedTargets[skill.dir] = targets; });
         break;
       }

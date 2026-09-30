@@ -18,14 +18,15 @@ format, and saved browser preferences are the compatibility surface.
   - rules for a whole program or tool, `Bash(…)` written as a Claude rule, and file rules outside the project;
   - commands that delete, change the machine, reach secrets or send data out, wherever they appear in the rule (`rm`, `sudo`, `curl`, `ssh`, `gh api`, `gh secret`, `git reset --hard`, …);
   - rules that already carry a destructive option (`git push --force-with-lease`, `git push origin +main`, `git branch -d`);
-  - programs called by path, through a wrapper (`xargs`, `timeout`, `env`) or with options before their subcommand (`git -C dir push`);
+  - programs called by path or in upper case, through a wrapper or code runner (`xargs`, `timeout`, `env`, `npx`, `node`, `python3`), or with options before their subcommand (`git -C dir push`);
+  - file rules for hidden folders (`.git`, `.claude`, `.ssh`);
   - public agents' requests.
 
-  A rule equal to one you made is never widened by the reviewer.
-- A rule the reviewer allows in a family with destructive options also gets deny rules, except for what your own rules allow there. For example, `git push` also denies `--force`, `-f`, `--force-with-lease`, `--delete`, `--mirror` and `+refspec` anywhere after it for Claude Code, and the same options right after the prefix for Codex. Some variants stay open:
+  A rule equal to one you made is never widened by the reviewer. When you save or edit a rule the reviewer made, it becomes yours and loses its deny rules.
+- A rule the reviewer allows in a family with destructive options also gets deny rules, except for what your own rules allow there. A shorter never-allowed command such as `git reset` gets `--hard` denied the same way. For example, `git push` also denies `--force`, `-f`, `--force-with-lease`, `--delete`, `--mirror` and `+refspec` anywhere after it for Claude Code, and the same options right after the prefix for Codex. Some variants stay open:
   - Codex rules cannot name options that come after other arguments, so Codex does not block `git push origin main --force` under an allowed `git push`.
   - Claude Code does not block combined short options such as `-vf`, or a trailing `:ref` that deletes a remote branch (`git push origin :main`).
-- Skills and guidance show **확인 필요** when their text changed since you saved or confirmed it in Tower. Open one and press **이 내용 확인** to let the reviewer rely on it. Skills saved before this release need that once. A skill counts only in the projects you applied it to in Tower. The master's or another computer's changes do not count.
+- While auto-review is on, skills and guidance show **확인 필요** when their text or the projects a skill applies to changed since you saved or confirmed them in Tower. Open one and press **이 내용 확인** to let the reviewer rely on it. Skills saved before this release need that once. A skill counts only in the projects you applied it to in Tower. The master's or another computer's changes do not count.
 - Agents see the reviewer's verdict and reason in `permissions_list`, and the Tower guidance asks them to name the step of your task that needs a permission.
 
 ### Changed
