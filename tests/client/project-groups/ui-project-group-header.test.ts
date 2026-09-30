@@ -112,3 +112,21 @@ test('a folder on this computer opens its skills and permissions from its menu; 
   assert.match(menu(), /이 폴더의 스킬.*이 폴더의 권한/s);
   assert.doesNotMatch(menu({ machine: 'node-1' } as Partial<ProjectGroupHeaderData>), /이 폴더의 권한/);
 });
+
+test('a repository folder shows an issue button on its header and in its menu; other folders do not', async () => {
+  const opened: string[] = [];
+  const onIssue = (cwd: string) => { opened.push(cwd); };
+  const markup = header({ repository: repository(), onIssue });
+  assert.match(markup, /aria-label="monitor 저장소에 이슈 등록" title="이 저장소에 이슈 등록"/);
+  assert.match(menu({ repository: repository(), onIssue }), /<\/svg>이 저장소에 이슈 등록<\/button>/);
+  assert.doesNotMatch(header({ onIssue }) + menu({ onIssue }), /이슈 등록/, 'not a git repository');
+  assert.doesNotMatch(header({ repository: repository() }), /이슈 등록/, 'no page to open it');
+  assert.match(header({ repository: repository(), onIssue, disabled: true }), /disabled=""[^>]*><svg[^>]*lucide-circle-dot/);
+  const { issueSessionBody, issueSessionTitle } = await import('../../../client/src/project-groups/IssueDialog.js');
+  assert.equal(issueSessionTitle('  모바일 로그인 버튼이 눌리지 않는 문제를 고쳐야 한다 그리고 추가로 로그 확인\n자세한 내용'), '이슈 등록: 모바일 로그인 버튼이 눌리지 않는 문제를 고쳐야 한다 그리고 추가로 로그…');
+  const body = JSON.parse(issueSessionBody('codex', `@${'a'.repeat(32)}//srv/app`, '버그'));
+  assert.equal(body.provider, 'codex');
+  assert.equal(body.cwd, '/srv/app', 'the folder as its own computer knows it');
+  assert.equal(body.title, '이슈 등록: 버그');
+  assert.match(body.prompt, /register-issue skill[\s\S]*Issue:\n버그$/);
+});

@@ -1,5 +1,14 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  "이슈 등록": "Register an issue",
+  "이슈 등록: {0}": "Issue: {0}",
+  "이슈 등록 창 닫기": "Close issue form",
+  "이슈 내용": "Issue",
+  "이슈 등록 세션을 시작하고 있습니다.": "Starting the session that registers the issue.",
+  "간단히 적으면 에이전트가 코드를 살펴 정리한 뒤 이 폴더의 저장소에 이슈로 등록합니다.": "Describe it briefly. An agent reads the code, writes it up, and registers it as an issue in this folder's repository.",
+  "버그, 기능, 작업을 간단히 적어 주세요.": "Briefly describe a bug, feature or task.",
+  "이 저장소에 이슈 등록": "Register an issue in this repository",
+  "{0} 저장소에 이슈 등록": "Register an issue in the {0} repository",
   "상위 폴더에 적용돼 있습니다. 바꾸려면 스킬을 여세요.": "Applies through a parent folder. Open the skill to change that.",
   "Tower가 아는 프로젝트가 아직 없습니다.": "Tower knows no projects yet.",
   "{0} 빼기": "Remove {0}",

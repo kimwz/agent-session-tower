@@ -20,6 +20,8 @@ export interface SkillState {
   /** Requests before this were never read one by one; the 7-day analysis covers them. */
   startedAt: string;
   calls: { day: string; count: number };
+  /** Default skills Tower made once (or found already there); never made again, even after the owner removed them. */
+  seeded: string[];
 }
 
 /**
@@ -35,7 +37,7 @@ const MAX_BYTES = 12_000_000;
 const MAX_REFLECTED = 2_000;
 
 export function emptySkillState(now = new Date()): SkillState {
-  return { version: 1, pinned: [], targets: [], settings: { enabled: true, provider: 'claude' }, proposals: [], notes: [], excluded: [], reflected: {}, startedAt: now.toISOString(), calls: { day: '', count: 0 } };
+  return { version: 1, pinned: [], targets: [], settings: { enabled: true, provider: 'claude' }, proposals: [], notes: [], excluded: [], reflected: {}, startedAt: now.toISOString(), calls: { day: '', count: 0 }, seeded: [] };
 }
 
 export class SkillStateStore {
@@ -121,6 +123,7 @@ function normalize(value: unknown): SkillState {
   if (Array.isArray(input.excluded)) state.excluded = input.excluded.filter((id): id is string => typeof id === 'string');
   if (input.reflected && typeof input.reflected === 'object') state.reflected = Object.fromEntries(Object.entries(input.reflected).filter(([, at]) => typeof at === 'string'));
   if (input.calls && typeof input.calls.day === 'string' && Number.isSafeInteger(input.calls.count)) state.calls = { day: input.calls.day, count: input.calls.count };
+  if (Array.isArray(input.seeded)) state.seeded = [...new Set(input.seeded.filter((name): name is string => typeof name === 'string'))];
   trim(state);
   return state;
 }

@@ -1,7 +1,7 @@
 import { translate as t, translateMessage, useI18n } from '../i18n/i18n';
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { CodeXml, Eye, EyeOff, Folder, LoaderCircle, Pencil, Pin, Plus, Settings, ShieldCheck, Sparkles, Terminal, X } from 'lucide-react';
+import { CircleDot, CodeXml, Eye, EyeOff, Folder, LoaderCircle, Pencil, Pin, Plus, Settings, ShieldCheck, Sparkles, Terminal, X } from 'lucide-react';
 import { openSkills, useSkillSummary } from '../skills/skills-open';
 import { openPermissions } from '../permissions/permissions-open';
 import type { ProjectGroupPatch } from '../../../shared/types';
@@ -32,6 +32,8 @@ export type ProjectGroupHeaderData = {
   repository?: RepositoryStatus;
   /** Resolves to an error message when the action failed. */
   onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>;
+  /** Opens the short form that registers an issue in the folder's repository. */
+  onIssue?: (cwd: string) => void;
   /** Pinning and hiding are kept by this Tower; they stay available while another computer is away. */
   viewDisabled?: boolean;
   /** Files and terminals need only a connection, not a computer ready for new work. */
@@ -104,6 +106,7 @@ export function ProjectGroupMenu({ data, onEditTitle, onDone }: { data: ProjectG
   const proposed = Boolean(skillSummary.projects?.includes(localPart(data.path)));
   return <>
     <button type="button" disabled={data.disabled || !actionable} onClick={act(() => data.onCreate(data.path))}><Plus size={15} />{t("이 폴더에 새 세션")}</button>
+    {data.repository && data.onIssue && <button type="button" disabled={data.disabled || !actionable} onClick={act(() => data.onIssue!(data.path))}><CircleDot size={15} />{t("이 저장소에 이슈 등록")}</button>}
     <button type="button" disabled={workspaceUnavailable} onClick={act(() => openWorkspace?.(data.path, 'editor', data.machine))}><CodeXml size={15} />{t("브라우저 코드 에디터 열기")}</button>
     <button type="button" disabled={workspaceUnavailable} onClick={act(() => openWorkspace?.(data.path, 'terminal', data.machine))}><Terminal size={15} />{t("브라우저 터미널 열기")}</button>
     {workspaceNote && <p className="project-group-menu-note">{workspaceNote}</p>}
@@ -179,6 +182,7 @@ export function ProjectGroupHeader({ data }: { data: ProjectGroupHeaderData }) {
       <div className="project-group-title"><Folder size={16} aria-hidden="true" /><strong title={data.name}><bdi dir="ltr">{projectGroupDisplayTitle(data.name)}</bdi></strong></div>
       <div className="project-group-location"><div className="project-group-path folder-tail" title={folder.id}><bdi dir="ltr">{folder.id}</bdi></div>{data.repository && data.onRepositoryAction && <RepositorySync status={data.repository} busy={data.active > 0} disabled={data.disabled} onAction={data.onRepositoryAction} onDelegate={draft => data.onCreate(data.path, draft)} />}</div>
       <div className="project-group-bottom"><span>{data.count}{t("개 세션")}{data.active > 0 && t(" · {0}개 작업 중", { 0: data.active })}</span><div className="project-group-actions nodrag nopan">
+        {data.repository && data.onIssue && <button type="button" className="project-group-action" aria-label={t("{0} 저장소에 이슈 등록", { 0: data.name })} title={t("이 저장소에 이슈 등록")} disabled={data.disabled || !actionable} onClick={() => data.onIssue!(data.path)}><CircleDot size={14} /></button>}
         <button className={`project-group-action ${data.pinned ? 'pinned' : ''}`} aria-label={t("{0} 그룹 {1}", { 0: data.name, 1: data.pinned ? t("고정 해제") : t("고정") })} aria-pressed={data.pinned} title={data.pinned ? t("그룹 고정 해제") : t("세션이 없어도 그룹 유지")} disabled={viewDisabled} onClick={() => { void data.onUpdate({ cwd: data.path, pinned: !data.pinned }); }}>{data.saving && !editing ? <LoaderCircle size={14} className="spin" /> : <Pin size={14} />}</button>
         <ProjectGroupSettings data={data} onEditTitle={() => setEditing(true)} />
       </div></div>
