@@ -49,7 +49,9 @@ test('a backup made on one computer restores on another: web settings now, the w
   await assert.rejects(b.service.check(file.text, 'wrong passphrase'), /암호가 맞지 않거나/);
   const preview = await b.service.check(file.text, PASS);
   assert.deepEqual(preview.parts, ['triggers', 'permissions', 'slack', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'master', 'backup']);
-  assert.equal(preview.otherComputer, false, 'made on this same computer');
+  assert.equal(preview.otherComputer, true, 'another Tower made it, whatever the host name');
+  const again = await a.service.check(file.text, PASS);
+  assert.equal(again.otherComputer, false, 'its own backup, back on the Tower that made it');
   const report = await b.service.apply(preview.id);
   await assert.rejects(b.service.apply(preview.id), /만료/, 'a checked backup is applied once');
   assert.equal(report.status, 'waiting-worker');
@@ -324,4 +326,37 @@ test('a backup from another computer is flagged, only adds to the folders kept f
   await b.service.apply(preview.id);
   assert.deepEqual(b.exclusions.list().sort(), ['/a/private', '/b/private']);
   assert.deepEqual(b.master, [], 'the master host is not started or changed');
+});
+
+test('a worker that stops after applying files and triggers leaves only the skills for the next one', async t => {
+  const a = await computer(t);
+  await write(a.stateDir, 'trigger-engine.json', { version: 1, triggers: [], settings: {}, trustedFolders: [], secretGrants: {}, fired: {}, cursors: {} });
+  await write(a.stateDir, 'permissions.json', { version: 1, rules: [{ id: 'backed-up' }], requests: [], codex: [] });
+  const text = (await a.service.export(PASS)).text;
+  const b = await computer(t);
+  await b.service.apply((await b.service.check(text, PASS)).id);
+  const first = await takeWorkerRestore(b.stateDir);
+  assert.ok(first?.restore.triggers);
+  await first.applied({ parts: ['triggers'], errors: ['trigger note'] });
+  // The owner changes a permission rule; then the worker stops before its skills were done.
+  await write(b.stateDir, 'permissions.json', { version: 1, rules: [{ id: 'changed-since' }], requests: [], codex: [] });
+  const second = await takeWorkerRestore(b.stateDir);
+  assert.equal(second?.restore.triggers, undefined, 'triggers are not applied again');
+  assert.deepEqual(second?.restore.files, {});
+  assert.ok(second?.restore.skills, 'the skills are still to do');
+  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'permissions.json'), 'utf8')).rules, [{ id: 'changed-since' }], 'what changed since is kept');
+  await second!.finish({ parts: ['skills'], errors: [] });
+  const report = await readReport(b.stateDir);
+  assert.equal(report?.status, 'applied');
+  assert.deepEqual(report?.worker.sort(), ['permissions', 'skills', 'triggers']);
+  assert.ok(report?.errors.includes('trigger note'));
+});
+
+test("a computer keeps its mark across restarts, so its own backups are its own even under another name", async t => {
+  const a = await computer(t);
+  const text = (await a.service.export(PASS)).text;
+  const restarted = new BackupService({ stateDir: a.stateDir, version: '1.91.0', skills: async () => structuredClone(skills), restartWorker: async () => true,
+    stores: { groups: a.groups, exclusions: a.exclusions, decisions: a.decisions }, host: 'renamed' });
+  await restarted.start();
+  assert.equal((await restarted.check(text, PASS)).otherComputer, false);
 });

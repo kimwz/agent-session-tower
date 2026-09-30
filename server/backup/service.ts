@@ -100,7 +100,9 @@ export class BackupService {
           settings: { ...settings, enabled: value.settings.enabled === true }, status: record(value.status) ? value.status as SavedFile['status'] : {} };
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`Backup settings could not be read: ${error instanceof Error ? error.message : String(error)}`);
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { console.error(`Backup settings could not be read: ${error instanceof Error ? error.message : String(error)}`); return; }
+      // The first start keeps this computer's mark, so its own backups are recognized after a restart.
+      await this.change(() => {}).catch(error => console.error(`Backup settings could not be saved: ${error instanceof Error ? error.message : String(error)}`));
     }
   }
 
@@ -155,6 +157,7 @@ export class BackupService {
     const { passphrase: _passphrase, ...settings } = this.saved.settings;
     return {
       version: 1,
+      machine: this.saved.machine,
       worker: { files: await collectWorkerFiles(stateDir), ...(triggers ? { triggers } : {}), skills },
       web: { projectGroups: this.options.stores.groups.backupValue(), remoteExclusions: this.options.stores.exclusions.backupValue(), decisions: this.options.stores.decisions.backupValue(), backup: settings },
       // Only a computer that set the master up has anything to bring back.
@@ -276,7 +279,7 @@ export class BackupService {
     this.checked.clear();
     const id = randomUUID();
     this.checked.set(id, { payload: parsed, header, passphrase: secret, at: now });
-    return { id, createdAt: header.createdAt, from: header.from, towerVersion: header.towerVersion, parts: payloadParts(parsed), skills: parsed.worker.skills?.bundle.skills.length ?? 0, otherComputer: header.from !== hostname() };
+    return { id, createdAt: header.createdAt, from: header.from, towerVersion: header.towerVersion, parts: payloadParts(parsed), skills: parsed.worker.skills?.bundle.skills.length ?? 0, otherComputer: this.otherComputer(parsed, header) };
   }
 
   /**
@@ -313,7 +316,7 @@ export class BackupService {
     const { web, master } = payload;
     if (web.projectGroups !== undefined) await step('projectGroups', () => this.options.stores.groups.restore(web.projectGroups));
     // Folders kept from sharing are this computer's own paths: another computer's backup only adds to them.
-    const exclusions = header.from !== hostname() && record(web.remoteExclusions) && Array.isArray(web.remoteExclusions.folders)
+    const exclusions = this.otherComputer(payload, header) && record(web.remoteExclusions) && Array.isArray(web.remoteExclusions.folders)
       ? { folders: [...new Set([...(this.options.stores.exclusions.backupValue() as { folders: string[] }).folders, ...web.remoteExclusions.folders as string[]])] } : web.remoteExclusions;
     if (web.remoteExclusions !== undefined) await step('remoteExclusions', () => this.options.stores.exclusions.restore(exclusions));
     if (web.decisions !== undefined) await step('decisions', () => this.options.stores.decisions.restore(web.decisions));
@@ -348,6 +351,11 @@ export class BackupService {
       await writeReport(stateDir, report);
     }
     return (await readReport(stateDir)) ?? report;
+  }
+
+  /** Made by another Tower, by its mark (two computers may share a host name). Without a mark it counts as another. */
+  private otherComputer(payload: BackupPayload, _header: BackupHeader): boolean {
+    return payload.machine !== this.saved.machine;
   }
 
   /** Stops a restore whose worker part has not been taken yet. What the web and the master applied stays. */

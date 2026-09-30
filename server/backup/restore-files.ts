@@ -91,7 +91,7 @@ export async function keepBefore(stateDir: string, files: string[], now = new Da
  * was taken. A worker that stops before `finish` leaves it for the next one, unless a newer restore arrived meanwhile;
  * every step can be done again.
  */
-export async function takeWorkerRestore(stateDir: string): Promise<{ restore: WorkerRestore; finish(result: { parts: BackupPart[]; errors: string[]; skills?: RestoreReport['skills'] }): Promise<void> } | undefined> {
+export async function takeWorkerRestore(stateDir: string): Promise<{ restore: WorkerRestore; applied(result: { parts: BackupPart[]; errors: string[] }): Promise<void>; finish(result: { parts: BackupPart[]; errors: string[]; skills?: RestoreReport['skills'] }): Promise<void> } | undefined> {
   const taken = takenPath(stateDir);
   try { await rename(pendingPath(stateDir), taken); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -106,12 +106,24 @@ export async function takeWorkerRestore(stateDir: string): Promise<{ restore: Wo
   }
   if (!restore || typeof restore !== 'object' || !restore.files || typeof restore.files !== 'object') { if (restore !== undefined) await unlink(taken).catch(() => {}); return undefined; }
   const id = restore.id;
-  const written = await applyWorkerFiles(stateDir, restore.files);
+  const ours = async () => (await readOptional(taken).catch(() => undefined) as WorkerRestore | undefined)?.id === id;
+  const earlier = restore.done ?? { parts: [], errors: [] };
+  // Files and triggers are applied once: after a worker recorded them, a later one only does the skills left.
+  const written = restore.done ? { parts: [], errors: [] } : await applyWorkerFiles(stateDir, restore.files);
+  let done = { parts: [...earlier.parts, ...written.parts], errors: [...earlier.errors, ...written.errors] };
+  const taking: WorkerRestore = restore.done ? { ...restore, files: {}, triggers: undefined } : restore;
   return {
-    restore,
+    restore: taking,
+    applied: async result => {
+      done = { parts: [...new Set([...done.parts, ...result.parts])], errors: [...done.errors, ...result.errors] };
+      if (!await ours()) return;
+      const { triggers: _triggers, ...rest } = restore;
+      await writePrivateJson(taken, JSON.stringify({ ...rest, files: {}, done }));
+    },
     finish: async result => {
-      await finishReport(stateDir, id, { parts: [...new Set([...written.parts, ...result.parts])], errors: [...written.errors, ...result.errors], ...(result.skills ? { skills: result.skills } : {}) });
-      await unlink(taken).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
+      await finishReport(stateDir, id, { parts: [...new Set([...done.parts, ...result.parts])], errors: [...done.errors, ...result.errors], ...(result.skills ? { skills: result.skills } : {}) });
+      // A newer restore a later worker took in the meantime is its own.
+      if (await ours()) await unlink(taken).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; });
     },
   };
 }

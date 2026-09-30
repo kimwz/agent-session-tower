@@ -639,6 +639,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     } });
     triggerEngine = triggers;
     const restoredTriggers = await triggers.start(restoring?.restore.triggers ? { restore: restoring.restore.triggers } : {});
+    await restoring?.applied({ parts: restoring.restore.triggers ? ['triggers'] : [], errors: restoredTriggers.errors })
+      .catch(error => console.error(`The restore's progress was not recorded: ${error instanceof Error ? error.message : String(error)}`));
     // Reviews waiting from before this worker started (or queued while the last one handed over) go on, once the
     // triggers whose instructions they read are in place.
     reviewer.wake();
@@ -673,10 +675,12 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         read: async (id, limit, before) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), before, limit)) ?? { messages: [], hasMore: false } : undefined,
         search: async (id, query) => runs.getSession(id) ? (await sessions.search(runs.nativeSessionId(id), query)) ?? { count: 0, matches: [], bytes: 0 } : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
+    // A restore's skills are still being written (below): the worker hands over only after them.
+    let restoringSkills = Boolean(restoring);
     await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
       onIdle: async () => { await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || Boolean(tools?.busy()),
-      transient: () => slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || Boolean(tools?.busy()),
+      inFlight: () => restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || Boolean(tools?.busy()),
+      transient: () => restoringSkills || slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || Boolean(tools?.busy()),
       // Work a Slack or GitHub coordinator delegated: its coordinator hears how it ended and decides what follows.
       delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
       releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); worktrees.resume(); reviewer.release(); },
@@ -690,9 +694,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // keeps it from starting. The restore is recorded as done after them; a worker that stops first leaves it to the next.
     if (restoring) void (async () => {
       const restoredSkills = restoring.restore.skills ? await skills.restore(restoring.restore.skills).catch(error => ({ restored: [], skipped: [{ name: '스킬', reason: error instanceof Error ? error.message : String(error) }] })) : undefined;
-      await restoring.finish({ parts: [...(restoring.restore.triggers ? ['triggers' as const] : []), ...(restoredSkills ? ['skills' as const] : [])], errors: restoredTriggers.errors,
-        ...(restoredSkills ? { skills: restoredSkills } : {}) });
-    })().catch(error => console.error(`The restore's outcome was not recorded: ${error instanceof Error ? error.message : String(error)}`));
+      await restoring.finish({ parts: restoredSkills ? ['skills'] : [], errors: [], ...(restoredSkills ? { skills: restoredSkills } : {}) });
+    })().catch(error => console.error(`The restore's outcome was not recorded: ${error instanceof Error ? error.message : String(error)}`)).finally(() => { restoringSkills = false; });
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});

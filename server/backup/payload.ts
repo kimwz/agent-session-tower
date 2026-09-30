@@ -43,6 +43,8 @@ export type WorkerFile = keyof typeof WORKER_FILES;
 export interface WorkerRestore {
   /** The restore it belongs to (`RestoreReport.id`). */
   id?: string;
+  /** Parts a worker already applied (files and triggers), so a later worker only does what is left. */
+  done?: { parts: BackupPart[]; errors: string[] };
   files: Partial<Record<WorkerFile, unknown>>;
   triggers?: TriggerBackup;
   skills?: SkillBackup;
@@ -50,6 +52,8 @@ export interface WorkerRestore {
 
 export interface BackupPayload {
   version: 1;
+  /** The mark of the Tower that made it (see BackupService), telling this computer's backups from another's. */
+  machine?: string;
   worker: WorkerRestore;
   web: { projectGroups?: unknown; remoteExclusions?: unknown; decisions?: unknown; backup?: unknown };
   master?: { settings?: Record<string, unknown>; voiceKey?: string };
@@ -221,7 +225,7 @@ export function parsePayload(value: unknown): BackupPayload {
   const master = value.master;
   if (master !== undefined && !(record(master) && (master.settings === undefined || record(master.settings)) && (master.voiceKey === undefined || typeof master.voiceKey === 'string'))) throw new Error('백업의 마스터 설정이 올바르지 않습니다.');
   const web = value.web;
-  return { version: 1, worker: { files, ...(triggers ? { triggers: triggers as unknown as TriggerBackup } : {}), ...(skills ? { skills: skills as unknown as SkillBackup } : {}) },
+  return { version: 1, ...(typeof value.machine === 'string' ? { machine: value.machine } : {}), worker: { files, ...(triggers ? { triggers: triggers as unknown as TriggerBackup } : {}), ...(skills ? { skills: skills as unknown as SkillBackup } : {}) },
     web: { ...(web.projectGroups !== undefined ? { projectGroups: web.projectGroups } : {}), ...(web.remoteExclusions !== undefined ? { remoteExclusions: web.remoteExclusions } : {}),
       ...(web.decisions !== undefined ? { decisions: web.decisions } : {}), ...(web.backup !== undefined ? { backup: web.backup } : {}) },
     ...(master ? { master: master as BackupPayload['master'] } : {}) };
