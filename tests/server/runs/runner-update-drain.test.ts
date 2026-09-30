@@ -163,7 +163,7 @@ test('restore keeps every unfinished run and runs an automation still has to rep
   const at = (index: number) => new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString();
   const id = (index: number) => `30000000-0000-4000-8000-${String(index).padStart(12, '0')}`;
   const base = (index: number): Run => ({ id: id(index), sessionId: `claude:${nativeId}`, prompt: `p${index}`, output: '', createdAt: at(index), status: 'completed' });
-  const runs: Record<string, unknown>[] = [];
+  const runs: object[] = [];
   runs.push({ ...base(0), retain: true });
   for (let index = 1; index <= 150; index++) runs.push(base(index));
   for (let index = 151; index <= 260; index++) runs.push({ ...base(index), status: 'queued', keepQueued: true });
