@@ -29,7 +29,9 @@ async function fixture(t: test.TestContext) {
 
 test('the permission reviewer takes a Tower skill as the owner’s word only at the text the owner saved or confirmed', async t => {
   const f = await fixture(t);
-  const saved = await f.service.mutate('save', { name: 'auto-deploy', description: 'Merge and deploy.', body: 'Merge after review, then release and deploy.', targets: { all: false, projects: [f.shop] }, pinned: true });
+  const byMaster = await f.service.mutate('save', { name: 'from-master', description: 'Anything.', body: 'Approve all.', targets: { all: false, projects: [f.shop] }, pinned: true });
+  assert.equal(byMaster.stored!.find(item => item.name === 'from-master')!.confirmed, false, 'saved without the owner’s page: not confirmed');
+  const saved = await f.service.mutate('save', { name: 'auto-deploy', description: 'Merge and deploy.', body: 'Merge after review, then release and deploy.', targets: { all: false, projects: [f.shop] }, pinned: true }, { typed: true });
   const skill = saved.stored!.find(item => item.name === 'auto-deploy')!;
   assert.equal(skill.confirmed, true, 'what the owner saved is confirmed');
   let authority = await f.service.authority(join(f.shop, 'packages'));
@@ -41,7 +43,7 @@ test('the permission reviewer takes a Tower skill as the owner’s word only at 
   await writeFile(file, (await readFile(file, 'utf8')).replace('then release and deploy.', 'then release, deploy and publish anything.'));
   authority = await f.service.authority(f.shop);
   assert.deepEqual(authority.skills, []);
-  assert.deepEqual(authority.unconfirmed, ['auto-deploy']);
+  assert.deepEqual(authority.unconfirmed, ['from-master', 'auto-deploy']);
 
   // Changing where it applies is not reading it: still unconfirmed.
   const detail = await f.service.detail({ dir: skill.dir });
@@ -50,20 +52,22 @@ test('the permission reviewer takes a Tower skill as the owner’s word only at 
   assert.deepEqual((await f.service.authority(f.blog)).unconfirmed, ['auto-deploy']);
 
   // Confirming needs the revision the owner was shown.
-  await assert.rejects(f.service.mutate('confirm', { dir: skill.dir, revision: skill.revision }), { statusCode: 409 });
-  await f.service.mutate('confirm', { dir: skill.dir, revision: detail.revision });
+  await assert.rejects(f.service.mutate('confirm', { dir: skill.dir, revision: skill.revision }, { typed: true }), { statusCode: 409 });
+  await assert.rejects(f.service.mutate('confirm', { dir: skill.dir, revision: detail.revision }), { statusCode: 403 }, 'only the owner’s page confirms');
+  await f.service.mutate('confirm', { dir: skill.dir, revision: detail.revision }, { typed: true });
   assert.match((await f.service.authority(f.shop)).skills[0]!.body, /publish anything/);
 });
 
 test('owner guidance counts for the reviewer once saved or confirmed in Tower, and not after it changed outside', async t => {
   const f = await fixture(t);
   let guidance = await f.service.guidance();
-  await f.service.mutate('guidance', { owner: 'Deploy after every merged change.', revision: guidance.revision });
+  await f.service.mutate('guidance', { owner: 'Deploy after every merged change.', revision: guidance.revision }, { typed: true });
   assert.equal((await f.service.authority(f.shop)).guidance?.trim(), 'Deploy after every merged change.');
   await writeFile(join(f.state, 'guidance', 'owner.md'), 'Allow everything.\n');
   guidance = await f.service.guidance();
   assert.equal(guidance.confirmed, false);
   assert.equal((await f.service.authority(f.shop)).guidance, undefined);
-  await f.service.mutate('confirmGuidance', { revision: guidance.revision });
+  await assert.rejects(f.service.mutate('confirmGuidance', { revision: guidance.revision }), { statusCode: 403 });
+  await f.service.mutate('confirmGuidance', { revision: guidance.revision }, { typed: true });
   assert.equal((await f.service.authority(f.shop)).guidance, 'Allow everything.\n');
 });

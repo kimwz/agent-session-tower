@@ -319,7 +319,7 @@ export class TowerApi {
         const from = actor.controllerId ? { controllerId: actor.controllerId } : {};
         const origin: RunOrigin = actor.kind === 'agent' ? { kind: 'agent', ...(actor.runId ? { runId: actor.runId } : {}), ...from } : { kind: 'owner', ...from };
         return { job: await autoPrompts.submit({ requestId: value.requestId, provider: value.provider, prompt: value.prompt, ...(value.cwd ? { cwd: value.cwd } : {}),
-          ...(value.model ? { model: value.model } : {}), ...(value.effort ? { effort: value.effort } : {}) }, { origin, ...(actor.kind === 'owner' ? { authored: true } : {}) }) };
+          ...(value.model ? { model: value.model } : {}), ...(value.effort ? { effort: value.effort } : {}) }, { origin }) };
       }
       case 'permissions.request': return this.permissions().request(value as Parameters<PermissionService['request']>[0], actor);
       case 'permissions.list': return this.permissions().forAgent(actor, value.cwd);

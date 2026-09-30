@@ -221,11 +221,14 @@ export function ruleGuards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>): {
   const claude: string[] = [];
   const codex: string[] = [];
   for (const token of dangerousContinuations(value)) {
-    if (token.endsWith('*')) claude.push(`Bash(${value} ${token})`, `Bash(${value} * ${token})`);
-    else {
-      claude.push(`Bash(${value} ${token})`, `Bash(${value} ${token} *)`, `Bash(${value} * ${token})`, `Bash(${value} * ${token} *)`);
-      codex.push(`prefix_rule(pattern=[${[...words(value), token].map(word => JSON.stringify(word)).join(', ')}], decision="forbidden")`);
-    }
+    // Options match by their start (`--force` also covers `--force=…` and `--force-with-lease=…`, `-f` also `-fu`), as do
+    // refspecs (`+*`, `:*`); subcommands and bare `--` or `.` match as whole words. Combined short options (`-vf`) are not covered.
+    const option = /^-[^-]|^--./.test(token);
+    const start = token.endsWith('*') ? token : option ? `${token}*` : undefined;
+    if (start) claude.push(`Bash(${value} ${start})`, `Bash(${value} * ${start})`);
+    else claude.push(`Bash(${value} ${token})`, `Bash(${value} ${token} *)`, `Bash(${value} * ${token})`, `Bash(${value} * ${token} *)`);
+    if (token.endsWith('*')) continue;
+    codex.push(`prefix_rule(pattern=[${[...words(value), token].map(word => JSON.stringify(word)).join(', ')}], decision="forbidden")`);
   }
   return { claude, codex };
 }

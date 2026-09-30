@@ -7,4 +7,9 @@ import type { RunOrigin } from '../../shared/types.js';
 export interface RequestContext {
   origin?: RunOrigin;
   requestId?: string;
+  /**
+   * The owner's own page sent it: what it carries is what the owner typed or confirmed. Never set for the master
+   * agent's calls (its own words, reports and relayed agent output) or for a controlling computer's.
+   */
+  typed?: boolean;
 }

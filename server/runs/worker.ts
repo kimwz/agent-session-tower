@@ -42,6 +42,7 @@ import { SkillService } from '../skills/service.js';
 import { installAgentGuidance } from '../agent-guidance/install.js';
 import { PermissionService } from '../permissions/service.js';
 import { PermissionReviewer } from '../permissions/reviewer.js';
+import { ownerWroteTrigger } from '../permissions/context.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
 import { skillHomes } from '../skills/files.js';
 import { runAutoPromptModel } from '../auto-prompt/native.js';
@@ -236,7 +237,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'skillsOverview': if (options.skills) return options.skills.overview(record(args[0])); break;
       case 'skillsDetail': if (options.skills) return options.skills.detail(record(args[0])); break;
       case 'skillsSummary': if (options.skills) return options.skills.summary(); break;
-      case 'skillsMutate': if (options.skills) return options.skills.mutate(String(args[0]), record(args[1])); break;
+      case 'skillsMutate': if (options.skills) return options.skills.mutate(String(args[0]), record(args[1]), { typed: args[2] === true }); break;
       case 'skillsExport': if (options.skills) return options.skills.exportBundle(record(args[0])); break;
       case 'skillsImportPlan': if (options.skills) return options.skills.importPlan(args[0]); break;
       case 'publicAgentsOverview': if (options.publicAgents) return options.publicAgents.overview(); break;
@@ -425,12 +426,12 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
  * turn's agent asked for. Trigger and Slack origins are assigned inside the worker, never over RPC.
  */
 function admission(value: unknown): RunAdmission {
-  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown } : {};
+  const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown; authored?: unknown } : {};
   const origin = input.origin === undefined ? { kind: 'owner' as const } : parseRunOrigin(input.origin);
   if (!origin || (origin.kind !== 'owner' && origin.kind !== 'agent')) throw Object.assign(new Error('The web connection can only admit owner or agent work.'), { statusCode: 400 });
   if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-f\d-]{36}$/i.test(input.requestId))) throw Object.assign(new Error('Invalid request ID.'), { statusCode: 400 });
-  // Owner work the page sends is what the owner typed; an agent's is not.
-  return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin, ...(origin.kind === 'owner' ? { authored: true } : {}),
+  // The web says when the owner's own page typed it (never for the master's calls); an agent's work never is.
+  return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin, ...(origin.kind === 'owner' && input.authored === true ? { authored: true } : {}),
     ...(typeof input.requestId === 'string' ? { requestId: input.requestId.toLowerCase() } : {}) };
 }
 
@@ -557,7 +558,16 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }),
       sources: {
         runs: () => runs.list(),
-        trigger: id => { const trigger = triggerEngine?.list().find(item => item.id === id); return trigger ? { name: trigger.name, instructions: trigger.handler.kind === 'task' ? trigger.handler.instructions : trigger.handler.rules.map(rule => `${rule.name}: ${rule.condition}\n${rule.instructions}`).join('\n\n'), ownerSet: trigger.updatedBy.kind === 'owner' && trigger.updatedBy.via === 'ui' } : undefined; },
+        trigger: id => {
+          // A trigger deleted since (or a public agent's, which is no trigger here) has no instructions to read.
+          let kept: ReturnType<TriggerService['get']> | undefined;
+          try { kept = triggerEngine?.get(id); } catch { return undefined; }
+          if (!kept?.trigger) return undefined;
+          const trigger = kept.trigger;
+          return { name: trigger.name, instructions: trigger.handler.kind === 'task' ? trigger.handler.instructions : trigger.handler.rules.map(rule => `${rule.name}: ${rule.condition}\n${rule.instructions}`).join('\n\n'),
+            // Oldest first, as the audit is kept.
+            ownerSet: ownerWroteTrigger(id, [...triggerEngine!.audit({ limit: 1000 })].reverse()) };
+        },
         authority: cwd => skills.authority(cwd),
         history: async (sessionId, limit) => runs.getSession(sessionId) ? (await sessions.detail(runs.nativeSessionId(sessionId), undefined, limit))?.messages : undefined,
         rules: cwd => permissions.overview(cwd).rules,

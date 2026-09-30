@@ -173,6 +173,8 @@ export class PermissionService {
       const request = this.state.requests.find(item => item.id === id);
       if (!request || request.review?.status !== 'running') return undefined;
       const at = this.now();
+      // Turned off while the model answered: its answer is not used.
+      if (!this.autoReview().enabled) { await this.setReview(id, { status: 'skipped', reason: '자동 검토가 꺼졌습니다.', at }); return undefined; }
       const reason = result.reason.trim().slice(0, 1000) || '이유 없음';
       const review = (extra: Partial<PermissionReview>): PermissionReview => ({ status: 'done', reason, ...(result.model ? { model: result.model } : {}), at, ...extra });
       if (request.status !== 'pending') {
@@ -193,6 +195,8 @@ export class PermissionService {
         } catch (error) { return owner(error instanceof Error ? error.message : String(error)); }
         const block = autoReviewBlock(given, request.cwd);
         if (block) return owner(block);
+        // A rule the owner made is never widened by the reviewer: it would lose the deny rules an allowed rule gets.
+        if (this.state.rules.some(item => item.source !== 'auto' && sameRule(item, given))) return owner('같은 규칙이 소유자 규칙으로 이미 있습니다');
         if (!ruleIsNarrower({ ...asked, ...(asked.scope === 'global' ? { scope: 'project', cwd: request.cwd } : {}) }, given)) return owner('검토기가 요청보다 넓은 규칙을 냈습니다');
         try {
           await this.commit(state => {

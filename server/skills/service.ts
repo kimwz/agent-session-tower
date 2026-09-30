@@ -366,15 +366,16 @@ export class SkillService {
     return next;
   }
 
-  async mutate(action: string, body: Record<string, unknown>): Promise<SkillOverview> {
+  /** `typed`: the owner's own page sent it, so what it saves or confirms is the owner's word (see `Skill.confirmed`). */
+  async mutate(action: string, body: Record<string, unknown>, options: { typed?: boolean } = {}): Promise<SkillOverview> {
     await this.ready();
     const cwd = await this.project(body.cwd);
-    await this.exclusive(() => this.change(action, body, cwd));
+    await this.exclusive(() => this.change(action, body, cwd, options.typed === true));
     this.options.onChange?.();
     return this.overview({ cwd });
   }
 
-  private async change(action: string, body: Record<string, unknown>, cwd: string | undefined): Promise<void> {
+  private async change(action: string, body: Record<string, unknown>, cwd: string | undefined, typed = false): Promise<void> {
     switch (action) {
       case 'save': {
         const editing = typeof body.dir === 'string' && body.dir ? body.dir : undefined;
@@ -405,12 +406,13 @@ export class SkillService {
         await this.state.update(state => {
           const proposal = proposalId && state.proposals.find(item => item.id === proposalId && item.status === 'open');
           if (proposal) { proposal.status = 'accepted'; proposal.skillDir = skill.dir; proposal.updatedAt = new Date().toISOString(); }
-          // What the owner just saved is what they confirmed.
-          state.confirmed[skill.dir] = skill.revision;
+          // What the owner just saved (the text written, whatever the file holds by now) is what they confirmed.
+          if (typed) state.confirmed[skill.dir] = skill.revision;
         });
         break;
       }
       case 'confirm': {
+        if (!typed) throw new SkillError('스킬 내용 확인은 소유자 페이지에서만 할 수 있습니다.', 403);
         // The owner confirms the text they were shown: its revision must still be the file's.
         const skill = await this.files.detail(text(body.dir), cwd);
         if (!text(body.revision) || text(body.revision) !== skill.revision) throw new SkillError('다른 곳에서 이 스킬이 바뀌었습니다. 다시 열어 최신 내용을 확인하세요.', 409);
@@ -418,6 +420,7 @@ export class SkillService {
         break;
       }
       case 'confirmGuidance': {
+        if (!typed) throw new SkillError('지침 확인은 소유자 페이지에서만 할 수 있습니다.', 403);
         const current = await this.guidance();
         if (text(body.revision) !== current.revision) throw new SkillError('다른 곳에서 지침이 바뀌었습니다. 다시 열어 최신 내용을 확인하세요.', 409);
         await this.state.update(state => { state.guidanceConfirmed = current.revision; });
@@ -464,12 +467,11 @@ export class SkillService {
       case 'guidance': {
         const owner = text(body.owner).replace(/\r\n/g, '\n');
         if (Buffer.byteLength(owner) > 256 * 1024) throw new SkillError('지침이 너무 깁니다.', 413);
-        await this.guidanceChange(async current => {
+        const written = await this.guidanceChange(async current => {
           if (text(body.revision) !== current.revision) throw new SkillError('다른 곳에서 지침이 바뀌었습니다. 다시 열어 최신 내용으로 고치세요.', 409);
           return owner;
         });
-        const saved = await this.guidance();
-        await this.state.update(state => { state.guidanceConfirmed = saved.revision; });
+        if (typed) await this.state.update(state => { state.guidanceConfirmed = written; });
         break;
       }
       case 'import': {
@@ -551,12 +553,15 @@ export class SkillService {
 
   private guidanceQueue: Promise<unknown> = Promise.resolve();
   /** Reads, checks and writes the owner's guidance one change at a time, then gives it to the agents. */
-  private guidanceChange(change: (current: GuidanceOverview) => Promise<string>): Promise<void> {
+  /** Resolves with the revision of the text written. */
+  private guidanceChange(change: (current: GuidanceOverview) => Promise<string>): Promise<string> {
     const next = this.guidanceQueue.catch(() => {}).then(async () => {
       const owner = withoutTowerMarkers(await change(await this.guidance()));
+      const content = owner.trim() ? `${owner.trimEnd()}\n` : '';
       await mkdir(dirname(this.guidanceFile()), { recursive: true, mode: 0o700 });
-      await writePrivateFile(this.guidanceFile(), owner.trim() ? `${owner.trimEnd()}\n` : '');
+      await writePrivateFile(this.guidanceFile(), content);
       await this.options.installGuidance?.();
+      return revisionOf(content);
     });
     this.guidanceQueue = next;
     return next;
