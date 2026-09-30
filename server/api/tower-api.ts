@@ -327,6 +327,9 @@ export class TowerApi {
           ...(value.model ? { model: value.model } : {}), ...(value.effort ? { effort: value.effort } : {}) }, { origin }) };
       }
       case 'permissions.request': return this.permissions().request(value as Parameters<PermissionService['request']>[0], actor);
+      case 'permissions.run': return this.permissions().requestRun(value as Parameters<PermissionService['requestRun']>[0], actor);
+      case 'permissions.runResult': return this.permissions().runResult(value as Parameters<PermissionService['runResult']>[0], actor);
+      case 'permissions.forgetConversation': return this.permissions().forgetConversation(value.sessionId, value.closedAt);
       case 'permissions.list': return this.permissions().forAgent(actor, value.cwd);
       case 'permissions.overview': return this.permissions().overview(value.cwd);
       case 'permissions.save': return this.permissions().save({ ...value.rule, ...(value.id ? { id: value.id } : {}) });

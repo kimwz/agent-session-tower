@@ -111,7 +111,9 @@ export class PermissionReviewer {
 function parse(answer: unknown, request: PermissionRequest, model: string): PermissionReviewResult {
   if (!record(answer) || !['approve', 'narrow', 'owner'].includes(String(answer.verdict)) || typeof answer.reason !== 'string') throw new Error('검토 모델이 올바른 판단을 돌려주지 않았습니다.');
   const verdict = answer.verdict as PermissionReviewResult['verdict'];
-  const value = typeof answer.rule === 'string' && answer.rule.trim() ? answer.rule.trim() : undefined;
-  return { verdict, reason: answer.reason, model, ...(value ? { rule: { kind: request.rule.kind, value } } : {}),
+  // A run is judged as asked: it is never rewritten.
+  const value = request.rule.kind !== 'run' && typeof answer.rule === 'string' && answer.rule.trim() ? answer.rule.trim() : undefined;
+  const scope = request.rule.kind !== 'run' && (answer.scope === 'conversation' || answer.scope === 'project') ? answer.scope : undefined;
+  return { verdict, reason: answer.reason, model, ...(value ? { rule: { kind: request.rule.kind, value } } : {}), ...(scope ? { scope } : {}),
     ...(typeof answer.suggestion === 'string' && answer.suggestion.trim() ? { suggestion: answer.suggestion.trim() } : {}) };
 }

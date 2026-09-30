@@ -43,7 +43,13 @@ test('a saved change reaches the next call; one bad entry never breaks the other
   assert.deepEqual(await resolveModel(directory, 'slack.match', { provider: 'codex' }), { provider: 'codex', model: 'gpt-6.1-sol', effort: 'medium' });
   assert.deepEqual(await resolveModel(directory, 'slack.match', { provider: 'claude' }), { provider: 'claude', model: 'sonnet', effort: 'low' });
   // A rule's own model wins for its reply-intent judgment, as before.
-  assert.deepEqual(await resolveModel(directory, 'slack.replyIntent', { provider: 'codex', override: { model: 'gpt-5.5' } }), { provider: 'codex', model: 'gpt-5.5' });
+  assert.deepEqual(await resolveModel(directory, 'slack.replyIntent', { provider: 'codex', override: { provider: 'codex', model: 'gpt-5.5' } }), { provider: 'codex', model: 'gpt-5.5' });
+  // A Claude rule's model never goes to Codex: with the role on Codex, the role's model is used.
+  const codexIntent = structuredClone(next);
+  codexIntent.roles['slack.replyIntent'] = { provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol' } };
+  await saveModelSettings(directory, codexIntent);
+  assert.deepEqual(await resolveModel(directory, 'slack.replyIntent', { provider: 'claude', override: { provider: 'claude', model: 'opus' } }), { provider: 'codex', model: 'gpt-6.1-sol' });
+  await saveModelSettings(directory, next);
   await assert.rejects(saveModelSettings(directory, { ...next, custom: [{ id: 'x', provider: 'codex', claude: {}, codex: {} }] }), { statusCode: 400 });
   // Written by hand or by another process: read again, and an invalid role falls back to its initial value.
   const saved = JSON.parse(await readFile(join(directory, 'models.json'), 'utf8'));

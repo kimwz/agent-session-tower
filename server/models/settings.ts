@@ -71,10 +71,12 @@ async function save(stateDir: string, settings: ModelSettings, onlyIfMissing: bo
 
 /**
  * What a role runs on now. `provider` is the provider of the work a following role judges. `override` is an item's
- * own model choice where one wins over the role (a Slack or GitHub rule's model for its reply-intent judgment).
+ * own model choice where one wins over the role (a Slack or GitHub rule's model for its reply-intent judgment), when the
+ * role runs on the item's provider.
  */
-export async function resolveModel(stateDir: string, role: string, context: { provider?: ModelProvider; override?: { model?: string; effort?: string } } = {}): Promise<ResolvedModel> {
+export async function resolveModel(stateDir: string, role: string, context: { provider?: ModelProvider; override?: { provider: ModelProvider; model?: string; effort?: string } } = {}): Promise<ResolvedModel> {
   const resolved = resolveRole(await readModelSettings(stateDir), role, context);
-  if (!context.override?.model) return resolved;
+  // An item's model belongs to its own provider: it wins only while the role runs on that provider.
+  if (!context.override?.model || context.override.provider !== resolved.provider) return resolved;
   return { provider: resolved.provider, model: context.override.model, ...(context.override.effort ? { effort: context.override.effort } : {}) };
 }

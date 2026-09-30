@@ -166,7 +166,7 @@ export class GitHubCoordinator extends EventEmitter {
       match: async () => { throw new Error('Not used by conversation coordinators.'); },
       composeReply: async () => { throw new Error('Not used by conversation coordinators.'); },
       classifyOwnerReply: async (message, workflow) => {
-        const model = await resolveModel(options.stateDir, 'github.replyIntent', { provider: workflow.rules[0]?.provider ?? 'codex', override: { model: workflow.rules[0]?.model } });
+        const model = await resolveModel(options.stateDir, 'github.replyIntent', { provider: workflow.rules[0]?.provider ?? 'codex', override: { provider: workflow.rules[0]?.provider ?? 'codex', model: workflow.rules[0]?.model } });
         return (options.model ?? runAutoPromptModel)({ ...model,
           systemPrompt: OWNER_REPLY_INTENT_PROMPT.replace(' or permission to act on GitHub', '').replace(/Slack/g, 'GitHub').replace(/슬랙/g, '깃허브'),
           prompt: JSON.stringify({ ownerMessage: message, tasks: (workflow.delegatedTasks ?? []).map(task => ({ requestId: task.requestId, status: options.autoPrompts.get(task.requestId)?.status, notified: !!task.notifiedRunId })) }),

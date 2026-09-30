@@ -21,3 +21,6 @@
 .permission-auto-review-options select { max-width:100%; min-width:150px; padding:6px 8px; border:1px solid #334962; border-radius:7px; background:#132235; color:#c5d6ed; font:inherit; font-size:12.5px; }
 .permission-review-reason { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:6px 0 0; color:#9fb3cc; font-size:12px; line-height:1.5; overflow-wrap:anywhere; flex-basis:100%; }
 .permission-review-reason svg { flex:none; }
+.permission-run { flex-basis:100%; }
+.permission-run summary { cursor:pointer; color:#9fb3cc; font-size:12px; margin-top:4px; }
+.permission-run pre { margin:6px 0 0; padding:8px; max-height:240px; overflow:auto; background:rgba(0,0,0,.25); border-radius:6px; font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; }

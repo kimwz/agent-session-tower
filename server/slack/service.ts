@@ -82,7 +82,7 @@ export class SlackService extends EventEmitter {
         }, { stateDir: options.stateDir });
       },
       classifyOwnerReply: async (message, workflow) => {
-        const model = await resolveModel(options.stateDir, 'slack.replyIntent', { provider: workflow.rules[0]?.provider ?? 'codex', override: { model: workflow.rules[0]?.model } });
+        const model = await resolveModel(options.stateDir, 'slack.replyIntent', { provider: workflow.rules[0]?.provider ?? 'codex', override: { provider: workflow.rules[0]?.provider ?? 'codex', model: workflow.rules[0]?.model } });
         return (dependencies.model ?? runAutoPromptModel)({ ...model,
           systemPrompt: OWNER_REPLY_INTENT_PROMPT,
           prompt: JSON.stringify({ ownerMessage: message, tasks: (workflow.delegatedTasks ?? []).map(task => ({ requestId: task.requestId, status: options.autoPrompts.get(task.requestId)?.status, notified: !!task.notifiedRunId })) }),
