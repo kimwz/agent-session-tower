@@ -39,7 +39,7 @@ test('a backup made on one computer restores on another: web settings now, the w
   await a.exclusions.add('/work/private');
   await a.decisions.update({ apiKey: 'jev-key-1234' });
   const file = await a.service.export(PASS);
-  assert.match(file.name, /^tower-backup-studio-\d{8}T\d{6}Z\.towerbackup$/);
+  assert.match(file.name, /^tower-backup-studio-[0-9a-f]{6}-\d{8}T\d{6}Z\.towerbackup$/);
   assert.doesNotMatch(file.text, /xoxp-1|jev-key|eleven-key/);
 
   const b = await computer(t);
@@ -112,17 +112,23 @@ test('automatic backups go to the bucket when due, keep only the newest of this 
   assert.equal(JSON.stringify(overview).includes(PASS), false);
   assert.equal(overview.settings.remote.secretSet, true);
   await a.service.test();
-  bucket.objects.set('tower/tower-backup-other-20260101T000000Z.towerbackup', { body: Buffer.from('x'), at: '2026-01-01T00:00:00Z' });
+  // Another computer, one whose name starts the same, and one with the same name: none of theirs is removed.
+  const others = ['tower/tower-backup-other-abcdef-20260101T000000Z.towerbackup', 'tower/tower-backup-studio-pro-abcdef-20260101T000000Z.towerbackup', 'tower/tower-backup-studio-000000-20260101T000000Z.towerbackup'];
+  for (const key of others) bucket.objects.set(key, { body: Buffer.from('x'), at: '2026-01-01T00:00:00Z' });
   for (let day = 0; day < 3; day++) { await a.service.upload(); clock.now += 24 * 60 * 60 * 1000; }
-  assert.deepEqual([...bucket.objects.keys()].sort(), ['tower/tower-backup-other-20260101T000000Z.towerbackup', 'tower/tower-backup-studio-20261001T000000Z.towerbackup', 'tower/tower-backup-studio-20261002T000000Z.towerbackup'],
-    "only this computer's own old backups are removed");
+  const own = [...bucket.objects.keys()].filter(key => !others.includes(key)).sort();
+  assert.deepEqual(others.filter(key => bucket.objects.has(key)), others);
+  assert.equal(own.length, 2, 'only the newest two of its own are kept');
+  assert.match(own[0]!, /^tower\/tower-backup-studio-[0-9a-f]{6}-20261001T000000Z\.towerbackup$/);
+  assert.match(own[1]!, /-20261002T000000Z\.towerbackup$/);
   const status = (await a.service.overview()).status;
   assert.equal(status.lastSuccessAt, '2026-10-02T00:00:00.000Z');
+  assert.equal(status.lastKey, own[1]);
   // What was uploaded restores with the saved passphrase.
-  const downloaded = await a.service.download('tower/tower-backup-studio-20261002T000000Z.towerbackup');
+  const downloaded = await a.service.download(own[1]);
   assert.ok((await a.service.check(downloaded.text, PASS)).parts.includes('backup'));
   await assert.rejects(a.service.download('elsewhere/x.towerbackup'), /찾을 수 없습니다/);
-  assert.equal((await a.service.remote())[0]!.key, 'tower/tower-backup-studio-20261002T000000Z.towerbackup');
+  assert.equal((await a.service.remote()).length, 5);
   // A failure is recorded and does not clear the last success.
   await a.service.saveSettings({ ...settings, remote: { ...settings.remote, accessKeyId: 'WRONG', secretAccessKey: '' } });
   await assert.rejects(a.service.upload(), /403/);
@@ -169,4 +175,25 @@ test('a restore of fast-judgment settings is never overwritten by a change that 
   await again.start();
   assert.equal(again.overview().keyHint, '…9999');
   await assert.rejects(a.decisions.restore({ provider: 'nobody' }), /올바르지 않습니다/);
+});
+
+test('a restore applied while a worker is still applying an earlier one is kept for the next worker, never lost', async t => {
+  const a = await computer(t);
+  const text = (await a.service.export(PASS)).text;
+  const b = await computer(t);
+  const first = await b.service.apply((await b.service.check(text, PASS)).id);
+  const taken = await takeWorkerRestore(b.stateDir);
+  assert.equal(taken?.restore.id, first.id);
+  await assert.rejects(b.service.cancel(), /이미 복원을 적용하고/, 'a part being applied cannot be cancelled');
+  // The owner restores again while that worker is still busy with the first one.
+  const second = await b.service.apply((await b.service.check(text, PASS)).id);
+  await taken!.finish({ parts: [], errors: [] });
+  const report = await readReport(b.stateDir);
+  assert.equal(report?.id, second.id);
+  assert.equal(report?.status, 'waiting-worker', 'the first worker never marks the second restore done');
+  assert.equal((await readPendingWorker(b.stateDir))?.id, second.id);
+  const next = await takeWorkerRestore(b.stateDir);
+  assert.equal(next?.restore.id, second.id);
+  await next!.finish({ parts: [], errors: [] });
+  assert.equal((await readReport(b.stateDir))?.status, 'applied');
 });

@@ -20,6 +20,7 @@ export interface BackupPreview {
 
 /** Where the last restore is: waiting for the execution worker to take its part, or done. */
 export interface RestoreReport {
+  id: string;
   status: 'waiting-worker' | 'applied' | 'cancelled';
   requestedAt: string;
   from: string;

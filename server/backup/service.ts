@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +10,8 @@ import { keepBefore, readReport, removePendingWorker, writePendingWorker, writeR
 import { S3Client, endpointUrl } from './s3.js';
 
 interface SavedSettings extends BackupSettingsInput { remote: BackupSettingsInput['remote'] & { secretAccessKey?: string } }
-interface SavedFile { version: 1; settings: SavedSettings; status: Omit<BackupStatus, 'running'> }
+/** `machine`: this computer's own mark in backup names, so two computers with one name never remove each other's; never restored. */
+interface SavedFile { version: 1; machine: string; settings: SavedSettings; status: Omit<BackupStatus, 'running'> }
 
 /** What the backup needs from the rest of the web process. */
 export interface BackupServiceOptions {
@@ -69,7 +70,7 @@ function parseSettings(value: unknown, current: SavedSettings): SavedSettings {
  * restored through the processes that hold them (see `apply`).
  */
 export class BackupService {
-  private saved: SavedFile = { version: 1, settings: structuredClone(DEFAULT_BACKUP_SETTINGS), status: {} };
+  private saved: SavedFile = { version: 1, machine: randomBytes(3).toString('hex'), settings: structuredClone(DEFAULT_BACKUP_SETTINGS), status: {} };
   private writes: Promise<unknown> = Promise.resolve();
   private running?: Promise<string>;
   private timer?: NodeJS.Timeout;
@@ -90,7 +91,8 @@ export class BackupService {
       const value = await readPrivateJson(this.path) as Partial<SavedFile>;
       if (record(value) && record(value.settings)) {
         const settings = parseSettings({ ...value.settings, enabled: false }, value.settings as SavedSettings);
-        this.saved = { version: 1, settings: { ...settings, enabled: value.settings.enabled === true }, status: record(value.status) ? value.status as SavedFile['status'] : {} };
+        this.saved = { version: 1, machine: typeof value.machine === 'string' && /^[0-9a-f]{6}$/.test(value.machine) ? value.machine : this.saved.machine,
+          settings: { ...settings, enabled: value.settings.enabled === true }, status: record(value.status) ? value.status as SavedFile['status'] : {} };
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') console.error(`Backup settings could not be read: ${error instanceof Error ? error.message : String(error)}`);
@@ -147,7 +149,7 @@ export class BackupService {
     };
   }
 
-  private fileName(at: number): string { return `tower-backup-${this.host}-${new Date(at).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}${BACKUP_EXTENSION}`; }
+  private fileName(at: number): string { return `tower-backup-${this.host}-${this.saved.machine}-${new Date(at).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '')}${BACKUP_EXTENSION}`; }
 
   /** An encrypted backup to download. */
   async export(passphrase: unknown): Promise<{ name: string; text: string }> {
@@ -164,7 +166,9 @@ export class BackupService {
     if (!remote.secretAccessKey) throw new BackupError('비밀 액세스 키를 입력하세요.');
     return new S3Client({ endpoint: remote.endpoint, bucket: remote.bucket, region: remote.region || 'auto', accessKeyId: remote.accessKeyId, secretAccessKey: remote.secretAccessKey }, this.options.fetcher);
   }
-  private get ownPrefix(): string { return `${this.saved.settings.remote.prefix}tower-backup-${this.host}-`; }
+  private get ownPrefix(): string { return `${this.saved.settings.remote.prefix}tower-backup-${this.host}-${this.saved.machine}-`; }
+  /** Exactly this computer's automatic backups: its own name and mark, then a time and nothing else. */
+  private own(key: string): boolean { return key.startsWith(this.ownPrefix) && /^\d{8}T\d{6}Z\.towerbackup$/.test(key.slice(this.ownPrefix.length)); }
 
   /** Makes an automatic backup when one is due: never made, older than the interval, or retried a while after a failure. */
   async runIfDue(): Promise<void> {
@@ -192,7 +196,7 @@ export class BackupService {
         const key = `${settings.remote.prefix}${this.fileName(at)}`;
         await client.put(key, Buffer.from(text), 'application/octet-stream');
         // Only this computer's own backups count toward what it keeps.
-        const own = (await client.list(this.ownPrefix)).filter(item => item.key.endsWith(BACKUP_EXTENSION)).sort((a, b) => a.key.localeCompare(b.key));
+        const own = (await client.list(this.ownPrefix)).filter(item => this.own(item.key)).sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
         for (const item of own.slice(0, Math.max(0, own.length - settings.keep))) await client.delete(item.key).catch(() => {});
         await this.change(() => { const { lastError: _error, ...status } = this.saved.status; this.saved = { ...this.saved, status: { ...status, lastSuccessAt: new Date(at).toISOString(), lastKey: key } }; });
         return key;
@@ -277,11 +281,11 @@ export class BackupService {
     }));
     if (master && this.options.master) await step('master', () => this.options.master!({ ...(master.settings?.voice !== undefined ? { voice: master.settings.voice } : {}), voiceKey: master.voiceKey ?? null }));
     const requestedAt = new Date(this.now()).toISOString();
-    const report: RestoreReport = { status: worker.length ? 'waiting-worker' : 'applied', requestedAt, from: header.from, createdAt: header.createdAt, applied, worker, errors, before,
+    const report: RestoreReport = { id: randomUUID(), status: worker.length ? 'waiting-worker' : 'applied', requestedAt, from: header.from, createdAt: header.createdAt, applied, worker, errors, before,
       ...(worker.length ? {} : { appliedAt: requestedAt }) };
     await writeReport(stateDir, report);
     if (!worker.length) return report;
-    try { await writePendingWorker(stateDir, payload.worker); }
+    try { await writePendingWorker(stateDir, { ...payload.worker, id: report.id }); }
     catch (error) {
       const failed: RestoreReport = { ...report, status: 'cancelled', errors: [...errors, `실행 워커의 설정을 복원 대기열에 쓰지 못했습니다: ${error instanceof Error ? error.message : String(error)}`] };
       await writeReport(stateDir, failed);
@@ -291,7 +295,7 @@ export class BackupService {
     if (!asked) {
       report.errors = [...errors, '실행 워커에 교대를 요청하지 못했습니다. Tower를 다시 시작하면 워커가 시작할 때 적용됩니다.'];
       // Written only while the worker's part still waits, so a worker that already took it is never reported as waiting.
-      if (await readReport(stateDir).then(current => current?.status === 'waiting-worker')) await writeReport(stateDir, report);
+      if (await readReport(stateDir).then(current => current?.id === report.id && current.status === 'waiting-worker')) await writeReport(stateDir, report);
     }
     return (await readReport(stateDir)) ?? report;
   }
@@ -299,7 +303,9 @@ export class BackupService {
   /** Stops a restore whose worker part has not been taken yet. What the web and the master applied stays. */
   async cancel(): Promise<RestoreReport | undefined> {
     const report = await readReport(this.options.stateDir);
-    if (!await removePendingWorker(this.options.stateDir) || report?.status !== 'waiting-worker') throw new BackupError('기다리는 복원이 없습니다.', 409);
+    if (report?.status !== 'waiting-worker') throw new BackupError('기다리는 복원이 없습니다.', 409);
+    // Once a worker has taken it, it is being applied and can no longer be stopped.
+    if (!await removePendingWorker(this.options.stateDir)) throw new BackupError('실행 워커가 이미 복원을 적용하고 있습니다.', 409);
     const next: RestoreReport = { ...report, status: 'cancelled' };
     await writeReport(this.options.stateDir, next);
     return next;

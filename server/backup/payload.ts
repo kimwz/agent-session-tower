@@ -41,6 +41,8 @@ export type WorkerFile = keyof typeof WORKER_FILES;
 
 /** What the execution worker restores when it starts. */
 export interface WorkerRestore {
+  /** The restore it belongs to (`RestoreReport.id`). */
+  id?: string;
   files: Partial<Record<WorkerFile, unknown>>;
   triggers?: TriggerBackup;
   skills?: SkillBackup;
