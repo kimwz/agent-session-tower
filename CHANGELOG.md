@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.89.0] - 2026-09-30
+
+### Changed
+- **Slack conversations reply without waiting for you** (#17). A Slack coordinator can now post in its thread on its own, as it could already add reactions: an acknowledgement, a clarifying question, or a verified result. It follows your rules, including one that asks to review replies first; a reply you did not ask for carries the "Sent by …'s agent" note, as autoReply reports do. Retrying the same reply never posts it twice, and a send whose result is uncertain is never repeated.
+- Telling Tower not to send (for example "슬랙에 보내지 마세요") holds every reply in that conversation, including a rule's automatic report, until you allow sending again or approve a proposal. Proposals, approvals and autoReply reports work as before. GitHub issue comments still need your permission.
+
 ## [1.88.0] - 2026-09-30
 
 ### Added
