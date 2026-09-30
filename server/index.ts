@@ -239,9 +239,7 @@ async function main() {
   // Load persisted history before shutdown or an HTTP request can touch the runner.
   try { await titles.start(); await dismissedRuns.start(); await closedSessions.start(); await groups.start(); await exclusions.start(); await runs.start(); } catch (error) { auth.close(); await releaseLock(); throw error; }
   /** Local browser requests are the owner's; a remote controller's carry its own origin and request ID. */
-  // Only the owner's own page, with no other origin, marks work as typed by the owner.
-  const admit = (context?: RequestContext) => ({ origin: context?.origin ?? OWNER, ...(context?.requestId ? { requestId: context.requestId } : {}),
-    ...(context?.typed && !context.origin ? { authored: true } : {}) });
+  const admit = (context?: RequestContext) => ({ origin: context?.origin ?? OWNER, ...(context?.requestId ? { requestId: context.requestId } : {}) });
   // The worker has indexed native sessions before it answers, so the session list is complete here.
   const history = nativeHistory(runs);
   const listeners = new Set<() => void>();
@@ -407,7 +405,7 @@ async function main() {
       overview: input => runs.skills('skillsOverview', [input]) as Promise<SkillOverview>,
       detail: input => runs.skills('skillsDetail', [input]) as Promise<SkillDetail>,
       summary: () => runs.skills('skillsSummary', []) as Promise<SkillSummary>,
-      mutate: (action, body, context) => runs.skills('skillsMutate', [action, body, context?.typed === true && !context.origin]) as Promise<SkillOverview>,
+      mutate: (action, body) => runs.skills('skillsMutate', [action, body]) as Promise<SkillOverview>,
       exportBundle: body => runs.skills('skillsExport', [body]) as Promise<SkillBundle>,
       importPlan: bundle => runs.skills('skillsImportPlan', [bundle]) as Promise<SkillImportPlan>,
     },

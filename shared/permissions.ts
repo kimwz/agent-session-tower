@@ -308,6 +308,25 @@ const WRAPPERS = new Set(['env', 'sudo', 'doas', 'xargs', 'exec', 'eval', 'comma
 const RUN_ANYWHERE = new Set(['rm', 'rmdir', 'sudo', 'doas', 'chmod', 'chown', 'mkfs', 'kill', 'killall', 'pkill', 'curl', 'wget', 'ssh', 'scp', 'sftp', 'rsync', 'prune']);
 
 
+/** Programs whose options before the subcommand (`git -C dir push`) hide what the rule is for. */
+const SUBCOMMAND_PROGRAMS = new Set(['git', 'gh', 'docker', 'kubectl', 'npm', 'pnpm', 'yarn', 'cargo', 'terraform', 'helm']);
+
+/**
+ * Whether a word of a rule is a family's dangerous token in any spelling the program accepts: an option with its
+ * `=value`, a longer form (`--force-with-lease` of `--force`), an abbreviation (`--del`), a short option among others
+ * (`-vf`), or a refspec (`+main`, `:main`). Harmless options (`--squash`, `--follow-tags`) are not.
+ */
+function dangerousWord(word: string, token: string): boolean {
+  if (token.endsWith('*')) return word.length >= token.length && word.startsWith(token.slice(0, -1));
+  if (/^--./.test(token)) {
+    const name = word.split('=')[0]!;
+    if (name === token || (!EXACT_OPTIONS.has(token) && name.startsWith(token))) return true;
+    return name.startsWith('--') && name.length >= 3 && token.startsWith(name) && !REAL_OPTIONS.has(name);
+  }
+  if (/^-[^-]$/.test(token)) return /^-[^-]/.test(word) && word.slice(1).split('=')[0]!.includes(token[1]!);
+  return word === token;
+}
+
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'Glob', 'Grep', 'LS']);
 const MCP_TOOL = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/;
 const MCP_DANGER = new Set(['send', 'post', 'publish', 'deploy', 'delete', 'remove', 'drop', 'destroy', 'purge', 'truncate', 'exec', 'execute', 'sql', 'transfer', 'pay', 'charge', 'upload', 'invite']);
@@ -325,15 +344,16 @@ export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'
     // Only a program named by itself, in lower case, is classified: a path, a wrapper or options before the subcommand hide it.
     if (!/^[a-z0-9][a-z0-9._+-]*$/.test(program)) return '경로나 대문자로 부른 프로그램의 규칙은 소유자가 정합니다.';
     if (WRAPPERS.has(program) || WRAPPERS.has(program.replace(/\d+(\.\d+)*$/, ''))) return `\`${program}\`처럼 다른 명령이나 코드를 실행하는 프로그램의 규칙은 소유자가 정합니다.`;
-    // Options in the rule itself (any spelling git accepts: `--del`, `-vf`, `--force-with-lease=…`) are the owner's to allow;
-    // the reviewer allows commands, and deny rules keep the dangerous options after them out.
-    if (rulewords.slice(1).some(word => /^[-+:]/.test(word) || /[*?[\]{}~]/.test(word))) return '옵션이나 특수 기호가 들어 있는 규칙은 소유자가 정합니다.';
+    if (rulewords.slice(1).some(word => /[*?[\]{}~]/.test(word))) return '특수 기호가 들어 있는 규칙은 소유자가 정합니다.';
+    // Options before the subcommand (`git -C dir push`) hide what the rule is for.
+    if (SUBCOMMAND_PROGRAMS.has(program) && rulewords[1]?.startsWith('-')) return '하위 명령 앞에 옵션이 있는 규칙은 소유자가 정합니다.';
     const never = NEVER_AUTO.find(item => startsWith(rulewords, words(item))) ?? rulewords.find(word => RUN_ANYWHERE.has(word));
     if (never) return `\`${never}\`가 들어 있는 명령은 자동으로 허용하지 않습니다.`;
     // A rule whose own words already make it destructive (`git push origin +main`, `git reset HEAD --hard`).
     for (const [prefix, tokens] of FAMILIES) {
       if (!startsWith(rulewords, prefix)) continue;
-      const found = rulewords.slice(prefix.length).find(word => tokens.includes(word));
+      // Options keep their case (`-B` is not `-b`); the program and subcommands are matched in lower case.
+      const found = words(rule.value).slice(prefix.length).find(word => tokens.some(token => dangerousWord(word, token) || dangerousWord(word.toLowerCase(), token)));
       if (found) return `\`${prefix.join(' ')}\`에 \`${found}\`가 붙은 규칙은 소유자가 정합니다.`;
     }
     return undefined;

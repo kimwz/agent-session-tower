@@ -224,6 +224,7 @@ export class SessionService extends EventEmitter {
     let fragments: Buffer[] = [];
     let pendingBytes = 0;
     let droppingOversizedLine = false;
+    let skipped = 0;
     let bytesScanned = 0;
     let nextBefore = position;
     const historyStart = state.historyStartOffset ?? 0;
@@ -234,13 +235,14 @@ export class SessionService extends EventEmitter {
       else fragments.push(fragment);
     };
     const finishLine = (start: number): void => {
+      if (droppingOversizedLine) skipped += 1;
       if (!droppingOversizedLine && pendingBytes) {
         try {
           const line = Buffer.concat(fragments.reverse(), pendingBytes).toString('utf8');
           const row = JSON.parse(line);
           const messages = ownHistory(state, row, start) ? parseMessages(state.session.provider, row, start, state.session.createdAt) : [];
           if (messages.length) { collected.push(messages); messageCount += messages.length; }
-        } catch { /* Ignore malformed or oversized lines. */ }
+        } catch { skipped += 1; /* Malformed or oversized lines are left out, and counted. */ }
       }
       fragments = []; pendingBytes = 0; droppingOversizedLine = false;
       nextBefore = start;
@@ -272,7 +274,8 @@ export class SessionService extends EventEmitter {
       if (droppingOversizedLine && messageCount < count) nextBefore = position;
       const hasMore = nextBefore > historyStart;
       const previousUser = hasMore ? await this.previousUser(file, state, nextBefore, historyStart) : undefined;
-      return { session: { ...state.session }, messages: collected.reverse().flat(), hasMore, nextBefore: hasMore ? nextBefore : undefined, ...(previousUser ? { previousUser } : {}) };
+      return { session: { ...state.session }, messages: collected.reverse().flat(), hasMore, nextBefore: hasMore ? nextBefore : undefined, ...(previousUser ? { previousUser } : {}),
+        ...(skipped ? { skipped } : {}) };
     } finally { await file.close(); }
   }
 

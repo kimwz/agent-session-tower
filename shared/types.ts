@@ -80,6 +80,8 @@ export interface SessionDetail {
   nextBefore?: number;
   /** Your last message before this page, which the page's first messages answer; only when there is earlier history. */
   previousUser?: ChatMessage;
+  /** Records on this page that could not be read (too large or malformed) and are left out. */
+  skipped?: number;
   /** Worktrees this conversation made that Tower removed, or kept and why, after its work was over. */
   worktrees?: WorktreeCleanup[];
 }
@@ -162,12 +164,6 @@ export interface Run {
    * mode; this marks the automated work that does too.
    */
   unattended?: boolean;
-  /**
-   * The prompt is what the owner typed in Tower (a page or the owner's Auto Prompt), not something Tower or an agent
-   * queued with an owner origin (continuations, notices, resumed decisions). Tower's permission reviewer takes only
-   * these as the owner's word.
-   */
-  authored?: true;
   /** For a turn the owner started: whether Tower's tools reached it, and if not, why. */
   towerTools?: 'attached' | 'desktop-app' | 'external-input' | 'not-owner-session' | 'remote';
   prompt: string;
@@ -298,8 +294,6 @@ export interface AutoPromptJob {
   unattended?: boolean;
   /** The request carries external content, so it may only start a new session. */
   untrustedInput?: boolean;
-  /** The owner typed the prompt (see `Run.authored`). */
-  authored?: true;
   sessionMode?: 'new';
   targetSessionId?: string;
   routingContext?: string;
