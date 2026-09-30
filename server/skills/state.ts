@@ -27,6 +27,8 @@ export interface SkillState {
    * projects, so agents can change them; Tower's permission reviewer takes a skill as the owner's word only at this revision.
    */
   confirmed: Record<string, string>;
+  /** Per skill folder, where the owner last set (in Tower) that it applies; the reviewer relies on a skill only there. */
+  confirmedTargets: Record<string, { all: boolean; projects: string[] }>;
   /** The owner guidance revision the owner saved or confirmed in Tower. */
   guidanceConfirmed?: string;
 }
@@ -44,7 +46,7 @@ const MAX_BYTES = 12_000_000;
 const MAX_REFLECTED = 2_000;
 
 export function emptySkillState(now = new Date()): SkillState {
-  return { version: 1, pinned: [], targets: [], settings: { enabled: true, provider: 'claude' }, proposals: [], notes: [], excluded: [], reflected: {}, startedAt: now.toISOString(), calls: { day: '', count: 0 }, seeded: [], confirmed: {} };
+  return { version: 1, pinned: [], targets: [], settings: { enabled: true, provider: 'claude' }, proposals: [], notes: [], excluded: [], reflected: {}, startedAt: now.toISOString(), calls: { day: '', count: 0 }, seeded: [], confirmed: {}, confirmedTargets: {} };
 }
 
 export class SkillStateStore {
@@ -132,6 +134,12 @@ function normalize(value: unknown): SkillState {
   if (input.calls && typeof input.calls.day === 'string' && Number.isSafeInteger(input.calls.count)) state.calls = { day: input.calls.day, count: input.calls.count };
   if (input.confirmed && typeof input.confirmed === 'object') state.confirmed = Object.fromEntries(Object.entries(input.confirmed).filter(([, revision]) => typeof revision === 'string'));
   if (typeof input.guidanceConfirmed === 'string') state.guidanceConfirmed = input.guidanceConfirmed;
+  if (input.confirmedTargets && typeof input.confirmedTargets === 'object') {
+    for (const [dir, value] of Object.entries(input.confirmedTargets)) {
+      if (value && typeof value === 'object' && Array.isArray((value as { projects?: unknown }).projects)) state.confirmedTargets[dir] = { all: (value as { all?: unknown }).all === true,
+        projects: ((value as { projects: unknown[] }).projects).filter((item): item is string => typeof item === 'string') };
+    }
+  }
   if (Array.isArray(input.seeded)) state.seeded = [...new Set(input.seeded.filter((name): name is string => typeof name === 'string'))];
   trim(state);
   return state;

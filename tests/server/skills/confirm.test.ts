@@ -71,3 +71,18 @@ test('owner guidance counts for the reviewer once saved or confirmed in Tower, a
   await f.service.mutate('confirmGuidance', { revision: guidance.revision }, { typed: true });
   assert.equal((await f.service.authority(f.shop)).guidance, 'Allow everything.\n');
 });
+
+test('a confirmed skill counts for the reviewer only where the owner applied it in Tower', async t => {
+  const f = await fixture(t);
+  const saved = await f.service.mutate('save', { name: 'auto-deploy', description: 'Merge and deploy.', body: 'Deploy.', targets: { all: false, projects: [f.shop] }, pinned: true }, { typed: true });
+  const skill = saved.stored!.find(item => item.name === 'auto-deploy')!;
+  const detail = await f.service.detail({ dir: skill.dir });
+  // The master (or anything but the owner's page) applies it to another project: the reviewer does not follow.
+  await f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.shop, f.blog] }, targetsRevision: targetsRevision(detail.targets) });
+  assert.deepEqual((await f.service.authority(f.blog)).skills, []);
+  assert.deepEqual((await f.service.authority(f.blog)).unconfirmed, ['auto-deploy']);
+  assert.equal((await f.service.authority(f.shop)).skills.length, 1);
+  const again = await f.service.detail({ dir: skill.dir });
+  await f.service.mutate('assign', { dir: skill.dir, targets: { all: false, projects: [f.shop, f.blog] }, targetsRevision: targetsRevision(again.targets) }, { typed: true });
+  assert.equal((await f.service.authority(f.blog)).skills.length, 1, 'the owner applied it there');
+});

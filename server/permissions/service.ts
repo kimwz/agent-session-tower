@@ -116,7 +116,8 @@ export class PermissionService {
     const rules = this.state.rules.filter(rule => rule.providers.includes('claude') && (rule.scope === 'global' || within(cwd, rule.cwd!)));
     const allow = [...new Set(rules.map(claudeRule))];
     // A rule the reviewer allowed never covers its family's destructive variants: deny comes before allow.
-    const deny = [...new Set(rules.filter(rule => rule.source === 'auto').flatMap(rule => ruleGuards(rule).claude))];
+    const owned = rules.filter(rule => rule.source !== 'auto' && rule.kind === 'command').map(rule => rule.value);
+    const deny = [...new Set(rules.filter(rule => rule.source === 'auto').flatMap(rule => ruleGuards(rule, owned).claude))];
     return allow.length ? JSON.stringify({ permissions: { allow, ...(deny.length ? { deny } : {}) } }) : undefined;
   }
 
@@ -374,7 +375,10 @@ export class PermissionService {
       if (rule.scope === 'global' && this.options.globalCodex === false) continue;
       const path = codexRulesPath(rule.scope, rule.cwd, this.options.env);
       const file = files.get(path) ?? { scope: rule.scope, ...(rule.cwd ? { cwd: rule.cwd } : {}), lines: [] };
-      for (const line of [codexRule(rule), ...(rule.source === 'auto' ? ruleGuards(rule).codex : [])]) if (!file.lines.includes(line)) file.lines.push(line);
+      // Guards leave alone what the owner's own Codex rules for the same place allow.
+      const owned = this.state.rules.filter(item => item.source !== 'auto' && item.kind === 'command' && item.providers.includes('codex')
+        && (item.scope === 'global' || (rule.scope === 'project' && item.cwd === rule.cwd))).map(item => item.value);
+      for (const line of [codexRule(rule), ...(rule.source === 'auto' ? ruleGuards(rule, owned).codex : [])]) if (!file.lines.includes(line)) file.lines.push(line);
       files.set(path, file);
     }
     return files;

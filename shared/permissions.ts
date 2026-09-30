@@ -215,17 +215,23 @@ export function dangerousContinuations(value: string): string[] {
  * The deny rules a rule Tower's reviewer allowed is paired with: Claude Code patterns (deny comes before allow, and
  * `*` matches any text anywhere) and Codex `prefix_rule` lines (which can only name what follows the prefix directly).
  */
-export function ruleGuards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>): { claude: string[]; codex: string[] } {
+export function ruleGuards(rule: Pick<PermissionRuleInput, 'kind' | 'value'>, allowed: readonly string[] = []): { claude: string[]; codex: string[] } {
   if (rule.kind !== 'command') return { claude: [], codex: [] };
   const value = normalizeCommand(rule.value);
   const claude: string[] = [];
   const codex: string[] = [];
-  for (const token of dangerousContinuations(value)) {
+  // A continuation a rule the owner allowed (`git push --force-with-lease`) already covers stays allowed: deny would beat it.
+  const owned = allowed.map(words).filter(item => item.length > 0 && startsWith(item, words(value)) || startsWith(words(value), item));
+  const exempt = (token: string) => owned.some(item => item.length <= words(value).length || item.slice(words(value).length).some(word => isToken(word, token)));
+  for (const token of dangerousContinuations(value).filter(token => !exempt(token))) {
     // Options match by their start (`--force` also covers `--force=…` and `--force-with-lease=…`, `-f` also `-fu`), as do
     // refspecs (`+*`, `:*`); subcommands and bare `--` or `.` match as whole words. Combined short options (`-vf`) are not covered.
     const option = /^-[^-]|^--./.test(token);
     const start = token.endsWith('*') ? token : option ? `${token}*` : undefined;
-    if (start) claude.push(`Bash(${value} ${start})`, `Bash(${value} * ${start})`);
+    // Claude Code reads a rule ending in `:*` as its older prefix syntax, never as a wildcard, so a `:ref` can only be
+    // denied when more follows it; a trailing `:ref` is not blocked for Claude.
+    if (start?.endsWith(':*')) claude.push(`Bash(${value} ${start} *)`, `Bash(${value} * ${start} *)`);
+    else if (start) claude.push(`Bash(${value} ${start})`, `Bash(${value} * ${start})`);
     else claude.push(`Bash(${value} ${token})`, `Bash(${value} ${token} *)`, `Bash(${value} * ${token})`, `Bash(${value} * ${token} *)`);
     if (token.endsWith('*')) continue;
     codex.push(`prefix_rule(pattern=[${[...words(value), token].map(word => JSON.stringify(word)).join(', ')}], decision="forbidden")`);
@@ -242,6 +248,22 @@ export function ruleIsNarrower(asked: PermissionRuleInput, given: PermissionRule
   return given.value.trim() === asked.value.trim();
 }
 
+/** Programs that run the command after them: a rule starting with one is really a rule for whatever follows. */
+const WRAPPERS = new Set(['env', 'sudo', 'doas', 'xargs', 'exec', 'eval', 'command', 'nohup', 'timeout', 'time', 'nice', 'ionice', 'caffeinate', 'watch',
+  'bash', 'sh', 'zsh', 'fish', 'dash', 'ksh', 'ssh', 'script', 'unbuffer', 'stdbuf']);
+/** Never-allowed programs that are dangerous wherever they appear in a rule (`xargs rm`, `docker container rm`). */
+const RUN_ANYWHERE = new Set(['rm', 'rmdir', 'sudo', 'doas', 'chmod', 'chown', 'mkfs', 'kill', 'killall', 'pkill', 'curl', 'wget', 'ssh', 'scp', 'sftp', 'rsync', 'prune']);
+/** Programs whose options before the subcommand (`git -C dir push`) hide what the rule is for. */
+const SUBCOMMAND_PROGRAMS = new Set(['git', 'gh', 'docker', 'kubectl', 'npm', 'pnpm', 'yarn', 'cargo', 'terraform', 'helm']);
+
+/** Whether a word of a command is a family's dangerous token: options also in their `=value` and combined short forms. */
+function isToken(word: string, token: string): boolean {
+  if (token.endsWith('*')) return word.length >= token.length && word.startsWith(token.slice(0, -1));
+  if (/^--./.test(token)) return word === token || word.startsWith(`${token}=`) || word.startsWith(`${token}-`);
+  if (/^-[^-]$/.test(token)) return /^-[^-]+$/.test(word) && word.includes(token[1]!);
+  return word === token;
+}
+
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'MultiEdit', 'NotebookEdit']);
 const MCP_TOOL = /^mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_-]+$/;
 const inside = (path: string, folder: string) => path === folder || path.startsWith(folder.endsWith('/') ? folder : `${folder}/`);
@@ -253,9 +275,21 @@ const inside = (path: string, folder: string) => path === folder || path.startsW
 export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'>, cwd: string): string | undefined {
   if (rule.kind === 'command') {
     const rulewords = words(rule.value);
+    const program = rulewords[0] ?? '';
     if (ruleIsBroad(rule)) return '프로그램 하나 전체를 허용하는 넓은 규칙은 소유자가 정합니다.';
-    const never = NEVER_AUTO.find(item => startsWith(rulewords, words(item)));
-    if (never) return `\`${never}\`로 시작하는 명령은 자동으로 허용하지 않습니다.`;
+    // Only a program named by itself is classified: a path, a wrapper or options before the subcommand hide it.
+    if (program.includes('/')) return '경로로 부른 프로그램의 규칙은 소유자가 정합니다.';
+    if (WRAPPERS.has(program.toLowerCase())) return `\`${program}\`처럼 다른 명령을 실행하는 프로그램의 규칙은 소유자가 정합니다.`;
+    if (SUBCOMMAND_PROGRAMS.has(program) && rulewords[1]?.startsWith('-')) return '하위 명령 앞에 옵션이 있는 규칙은 소유자가 정합니다.';
+    const never = NEVER_AUTO.find(item => startsWith(rulewords, words(item))) ?? rulewords.find(word => RUN_ANYWHERE.has(word));
+    if (never) return `\`${never}\`가 들어 있는 명령은 자동으로 허용하지 않습니다.`;
+    // A rule whose own words already make it destructive (`git push origin +main`, `git push --force-with-lease`).
+    for (const [family, tokens] of Object.entries(DANGEROUS_EXTENSIONS)) {
+      const prefix = words(family);
+      if (!startsWith(rulewords, prefix)) continue;
+      const found = rulewords.slice(prefix.length).find(word => tokens.some(token => isToken(word, token)));
+      if (found) return `\`${family}\`에 \`${found}\`가 붙은 규칙은 소유자가 정합니다.`;
+    }
     return undefined;
   }
   const value = rule.value.trim();

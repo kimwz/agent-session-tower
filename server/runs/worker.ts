@@ -575,6 +575,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       },
       // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals,
       // never the owner's, and never as something the owner typed.
+      reachable: request => Boolean(request.runId && runs.list().find(item => item.id === request.runId)?.origin),
       notify: async (request, message) => {
         const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
         if (!run?.origin) return;

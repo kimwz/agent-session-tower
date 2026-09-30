@@ -3,7 +3,7 @@ import { FolderChip } from '../settings/FolderChip';
 import { SettingsFrameContext, SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
 import { Bot, Check, LoaderCircle, Pencil, Plus, Trash2, TriangleAlert } from 'lucide-react';
 import type { PermissionAutoReview, PermissionOverview, PermissionProvider, PermissionRequest, PermissionRule, PermissionRuleInput } from '../../../shared/permissions';
-import { AUTO_REVIEW_MODELS, DEFAULT_AUTO_REVIEW, claudeRule, codexRule, dangerousContinuations, ruleIsBroad, ruleProblem } from '../../../shared/permissions';
+import { AUTO_REVIEW_MODELS, claudeRule, codexRule, dangerousContinuations, ruleIsBroad, ruleProblem } from '../../../shared/permissions';
 import { authPost } from '../auth/AuthGate';
 import { locale, translateMessage, useI18n } from '../i18n/i18n';
 
@@ -39,6 +39,13 @@ export function PermissionsPanel({ token, cwd, projects, pending: waitingCount, 
     if (!active) return;
     void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(value => { if (!opened.current && value.pending) setTab('requests'); opened.current = true; setOverview(value); }).catch(error => setError(error instanceof Error ? error.message : String(error)));
   }, [token, cwd, active, waitingCount]);
+  // While the reviewer works on a request, the panel follows it: the waiting count does not change until it is done.
+  const reviewing = Boolean(overview?.requests.some(request => request.status === 'pending' && (request.review?.status === 'queued' || request.review?.status === 'running')));
+  useEffect(() => {
+    if (!active || !reviewing) return;
+    const timer = setInterval(() => { void permissionOperation<PermissionOverview>(token, 'overview', cwd ? { cwd } : {}).then(setOverview).catch(() => {}); }, 4000);
+    return () => clearInterval(timer);
+  }, [token, cwd, active, reviewing]);
   useSettingsGuard({
     escape: () => { if (!draft) return false; setDraft(null); return true; },
     leave: () => !draft || window.confirm(t('저장하지 않은 변경 사항을 버릴까요?')),
@@ -78,7 +85,7 @@ export function PermissionsPanel({ token, cwd, projects, pending: waitingCount, 
     {draft ? <RuleEditor draft={draft} cwd={cwd} projects={projects} busy={busy} onCancel={() => setDraft(null)} onSave={next => void save(next)} />
       : !overview ? !error && <LoaderCircle className="spin" aria-label={t('불러오는 중')} /> : <>
       {tab === 'requests' && <section className="permission-requests">
-        <AutoReviewSettings settings={overview.autoReview ?? DEFAULT_AUTO_REVIEW} busy={busy} onSave={settings => void act('saveAutoReview', { settings }, settings.enabled ? t('자동 검토 설정을 저장했습니다.') : t('자동 검토를 껐습니다.'))} />
+        {overview.autoReview && <AutoReviewSettings settings={overview.autoReview} busy={busy} onSave={settings => void act('saveAutoReview', { settings }, settings.enabled ? t('자동 검토 설정을 저장했습니다.') : t('자동 검토를 껐습니다.'))} />}
         {pending.length > 0 && <label className="skill-pinned permission-resume"><input type="checkbox" checked={resume} disabled={busy} onChange={event => setResume(event.target.checked)} />{t('결정을 요청한 대화에 보내 이어서 진행')}
           <small>{t('허용하거나 거절하면 그 대화에 내 메시지로 결과를 보냅니다. 에이전트가 일하는 중이면 그 턴이 끝난 뒤에 보냅니다. 허용한 규칙은 다음 턴부터 적용됩니다.')}</small></label>}
         {pending.length ? pending.map(request => <RequestCard key={request.id} request={request} busy={busy} onOpenSession={onOpenSession}

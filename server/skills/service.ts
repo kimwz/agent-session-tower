@@ -307,6 +307,12 @@ export class SkillService {
     return skill;
   }
 
+  /** A Tower skill's targets in this state, copied. */
+  private recordIn(state: { targets: SkillTargetRecord[] }, dir: string): { all: boolean; projects: string[] } | undefined {
+    const item = state.targets.find(entry => entry.dir === dir);
+    return item ? { all: item.all, projects: [...item.projects] } : undefined;
+  }
+
   private withTargets(skill: Skill): Skill {
     const item = skill.managed ? this.record(skill.dir) : undefined;
     return item ? { ...skill, targets: { all: item.all, projects: item.projects }, confirmed: this.state.get().confirmed[skill.dir] === skill.revision } : skill;
@@ -324,10 +330,11 @@ export class SkillService {
     const unconfirmed: string[] = [];
     for (const item of state.targets) {
       if (!targetsCover(item, folder)) continue;
+      const owned = state.confirmedTargets[item.dir];
       // Name, description and body come from the one read whose revision is checked.
       const read = await readSkillSnapshot(item.dir);
       if (!read) continue;
-      if (state.confirmed[item.dir] === read.revision) skills.push({ name: read.name, description: read.description, body: read.body });
+      if (state.confirmed[item.dir] === read.revision && owned && targetsCover(owned, folder)) skills.push({ name: read.name, description: read.description, body: read.body });
       else unconfirmed.push(read.name);
     }
     const guidance = await this.guidance();
@@ -407,8 +414,8 @@ export class SkillService {
         await this.state.update(state => {
           const proposal = proposalId && state.proposals.find(item => item.id === proposalId && item.status === 'open');
           if (proposal) { proposal.status = 'accepted'; proposal.skillDir = skill.dir; proposal.updatedAt = new Date().toISOString(); }
-          // What the owner just saved (the text written, whatever the file holds by now) is what they confirmed.
-          if (typed) state.confirmed[skill.dir] = skill.revision;
+          // What the owner just saved (the text written, whatever the file holds by now) is what they confirmed, where it applies now.
+          if (typed) { state.confirmed[skill.dir] = skill.revision; const targets = this.recordIn(state, skill.dir); if (targets) state.confirmedTargets[skill.dir] = targets; }
         });
         break;
       }
@@ -417,7 +424,7 @@ export class SkillService {
         // The owner confirms the text they were shown: its revision must still be the file's.
         const skill = await this.files.detail(text(body.dir), cwd);
         if (!text(body.revision) || text(body.revision) !== skill.revision) throw new SkillError('다른 곳에서 이 스킬이 바뀌었습니다. 다시 열어 최신 내용을 확인하세요.', 409);
-        await this.state.update(state => { state.confirmed[skill.dir] = skill.revision; });
+        await this.state.update(state => { state.confirmed[skill.dir] = skill.revision; const targets = this.recordIn(state, skill.dir); if (targets) state.confirmedTargets[skill.dir] = targets; });
         break;
       }
       case 'confirmGuidance': {
@@ -439,6 +446,8 @@ export class SkillService {
         if (!targets) throw new SkillError('적용 프로젝트를 고르세요.');
         this.checkRevision(skill.dir, body);
         await this.apply(skill.dir, targets);
+        // Where the owner applies a skill in Tower is where the reviewer may rely on it; elsewhere it does not follow.
+        if (typed) await this.state.update(state => { state.confirmedTargets[skill.dir] = { all: targets.all, projects: [...targets.projects] }; });
         break;
       }
       case 'link': {

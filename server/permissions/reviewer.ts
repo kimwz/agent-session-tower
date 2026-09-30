@@ -4,6 +4,8 @@ import { REVIEW_SCHEMA, REVIEW_SYSTEM, reviewInput, type ReviewSources } from '.
 import type { PermissionReviewResult, PermissionService } from './service.js';
 
 export const REVIEW_TIMEOUT_MS = 3 * 60 * 1000;
+/** After Tower could not record a review (a full disk, say), it waits this long before trying again. */
+const RETRY_MS = 60 * 1000;
 
 export interface PermissionReviewerOptions {
   service: PermissionService;
@@ -11,6 +13,8 @@ export interface PermissionReviewerOptions {
   model(request: AutoPromptModelRequest, options: { timeoutMs: number }): Promise<unknown>;
   /** Tells the requesting conversation what the reviewer decided, as the work it already was (never as the owner). */
   notify(request: PermissionRequest, message: string): Promise<void>;
+  /** Whether a message can reach the requesting conversation; a request sent back to an agent nobody can tell waits for the owner. */
+  reachable(request: PermissionRequest): boolean;
   timeoutMs?: number;
 }
 
@@ -27,16 +31,23 @@ export class PermissionReviewer {
   private closed = false;
   private controller?: AbortController;
   private aborted = false;
+  private retry?: ReturnType<typeof setTimeout>;
 
   constructor(private readonly options: PermissionReviewerOptions) {}
 
   /** Starts the next waiting review unless one is under way or reviews are on hold. */
   wake(): void {
-    if (this.running || this.held || this.closed) return;
+    if (this.running || this.held || this.closed || this.retry) return;
     const next = this.options.service.nextReview();
     if (!next) return;
-    this.running = this.review(next).catch(error => console.error(`Permission review failed: ${error instanceof Error ? error.message : String(error)}`))
-      .finally(() => { this.running = undefined; this.wake(); });
+    let failed = false;
+    this.running = this.review(next).catch(error => { failed = true; console.error(`Permission review failed: ${error instanceof Error ? error.message : String(error)}`); })
+      .finally(() => {
+        this.running = undefined;
+        // A review Tower could not record stays queued: try again later, never in a tight loop.
+        if (failed) { this.retry = setTimeout(() => { this.retry = undefined; this.wake(); }, RETRY_MS); this.retry.unref?.(); }
+        else this.wake();
+      });
   }
 
   inFlight(): boolean { return Boolean(this.running); }
@@ -45,7 +56,7 @@ export class PermissionReviewer {
   /** Waits for the review under way. */
   async flush(): Promise<void> { await this.running; }
   /** Nothing new starts; a review still running is left to finish (the worker only closes when nothing is in flight). */
-  close(): void { this.closed = true; this.held = true; }
+  close(): void { this.closed = true; this.held = true; if (this.retry) clearTimeout(this.retry); this.retry = undefined; }
   /** Owner turned reviews off: stop the model run under way; its request waits for the owner. */
   abort(): void { this.aborted = true; this.controller?.abort(); }
 
@@ -63,6 +74,10 @@ export class PermissionReviewer {
       const answer = await this.options.model({ provider: settings.provider, model: settings.model, systemPrompt: REVIEW_SYSTEM, prompt,
         schema: REVIEW_SCHEMA as unknown as Record<string, unknown>, signal: controller.signal }, { timeoutMs: this.options.timeoutMs ?? REVIEW_TIMEOUT_MS });
       result = parse(answer, request, settings.model);
+      // Sending the agent back only works when it hears about it; otherwise the owner decides.
+      if (result.verdict === 'narrow' && (!settings.resume || !this.options.reachable(request))) {
+        result = { ...result, verdict: 'owner', reason: `${result.reason} (더 좁게 요청하라고 전할 수 없어 소유자에게 넘깁니다${result.suggestion ? `. 제안: ${result.suggestion}` : ''})` };
+      }
     } catch (error) {
       await service.failReview(request.id, this.aborted ? '자동 검토가 꺼졌습니다.' : controller.signal.aborted ? '자동 검토가 시간 안에 끝나지 않았습니다.' : (error instanceof Error ? error.message : String(error)).replace(/^Auto Prompt: /, ''));
       return;
