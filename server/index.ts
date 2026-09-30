@@ -247,7 +247,7 @@ async function main() {
   // CPU, memory and disk of this computer, for the rings on its host node.
   const system = new SystemMonitor(systemSources(stateDir), changed);
   // The Codex probe starts the CLI, so it never runs while this account's Codex is being updated.
-  const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed, unlessUpdating: (provider, read) => unlessUpdating(stateDir, provider, read) });
+  const capabilities = new ProviderCapabilities(providers, { health: getProviderHealth, onChange: changed, stateDir, unlessUpdating: (provider, read) => unlessUpdating(stateDir, provider, read) });
   // This Tower keeps itself current when it runs as the service; its worker keeps Claude Code and Codex current.
   let pairedControllers = (): number => 0;
   const latestReleases = new LatestReleases();

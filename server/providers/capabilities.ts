@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import type { EffortOption, ModelOption, Provider, ProviderHealth, ProviderUsage, UsageWindow } from '../../shared/types.js';
 import { CLAUDE_EFFORT_LEVELS, validEffort, validModelId } from './models.js';
 import { APP_TITLE, APP_VERSION, LEGACY_APP_NAME } from '../../shared/app-identity.js';
+import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 const execute = promisify(execFile);
 const MAX_JSON = 2 * 1024 * 1024;
@@ -277,6 +278,33 @@ export async function readCodexCapabilities(executable: string, env: NodeJS.Proc
   }
 }
 
+// Anthropic's usage endpoint answers 429 readily, and Claude Code and other Towers share its limit.
+const CLAUDE_USAGE_INTERVAL = 3 * 60_000;
+const CLAUDE_RATE_LIMIT_BACKOFF = [5 * 60_000, 10 * 60_000, 15 * 60_000];
+const USAGE_FILE = 'provider-usage.json';
+const PROVIDERS: readonly Provider[] = ['claude', 'codex'];
+
+/** Last successful quota windows, whitelisted, with no account data; only readings whose reset is still ahead. */
+export function parseSavedUsage(value: unknown, now = Date.now()): Partial<Record<Provider, ProviderUsage>> {
+  const saved = object(object(value)?.providers);
+  const result: Partial<Record<Provider, ProviderUsage>> = {};
+  for (const provider of PROVIDERS) {
+    const entry = object(saved?.[provider]);
+    const updatedAt = timestamp(entry?.updatedAt);
+    if (!updatedAt || !Array.isArray(entry?.windows)) continue;
+    const windows: UsageWindow[] = [];
+    for (const item of entry.windows.slice(0, 8)) {
+      const window = object(item);
+      const resetsAt = timestamp(window?.resetsAt);
+      if (!window || typeof window.id !== 'string' || !/^[a-z0-9_]{1,40}$/.test(window.id) || !percentage(window.usedPercent) || !resetsAt || Date.parse(resetsAt) <= now) continue;
+      const minutes = window.windowMinutes;
+      windows.push({ id: window.id, usedPercent: window.usedPercent, ...(typeof minutes === 'number' && Number.isFinite(minutes) && minutes > 0 ? { windowMinutes: minutes } : {}), resetsAt });
+    }
+    if (windows.length) result[provider] = { status: 'loading', windows, updatedAt, stale: true };
+  }
+  return result;
+}
+
 type CapabilityOptions = {
   health: () => Promise<ProviderHealth[]>;
   onChange: () => void;
@@ -286,6 +314,10 @@ type CapabilityOptions = {
   read?: (provider: ProviderHealth, signal: AbortSignal) => Promise<Capabilities>;
   /** Runs a probe that starts the CLI unless its update is under way; undefined then, and the last reading stays. */
   unlessUpdating?: <T>(provider: Provider, read: () => Promise<T>) => Promise<T | undefined>;
+  /** Keeps the last successful quota readings here, so a restart shows them until a new reading arrives. */
+  stateDir?: string;
+  claudeUsage?: (signal: AbortSignal) => Promise<ProviderUsage>;
+  now?: () => number;
 };
 
 /** In-memory cache with one bounded read per provider, including on initial load. */
@@ -296,8 +328,59 @@ export class ProviderCapabilities {
   private timer?: ReturnType<typeof setTimeout>;
   private controller?: AbortController;
   private failures = 0;
+  private claudeUsageAfter = 0;
+  private claudeRateLimits = 0;
+  private lastClaudeUsage?: ProviderUsage;
+  private readonly loaded?: Promise<void>;
+  private saving: Promise<void> = Promise.resolve();
+  private saved = '';
   constructor(initial: ProviderHealth[], private readonly options: CapabilityOptions) {
     this.providers = initial.map(provider => ({ ...provider, usage: { status: 'loading', windows: [] } }));
+    if (options.stateDir) this.loaded = this.load(join(options.stateDir, USAGE_FILE)).catch(() => {});
+  }
+  private async load(path: string): Promise<void> {
+    let saved: Partial<Record<Provider, ProviderUsage>>;
+    try { saved = parseSavedUsage(await readPrivateJson(path, 64_000), this.now()); }
+    catch { return; }
+    if (this.stopped) return;
+    this.providers = this.providers.map(provider => {
+      const usage = saved[provider.provider];
+      return usage && !provider.usage?.windows.length ? { ...provider, usage } : provider;
+    });
+    if (Object.keys(saved).length) this.options.onChange();
+  }
+  private save(): void {
+    if (!this.options.stateDir) return;
+    const providers: Record<string, { windows: UsageWindow[]; updatedAt: string }> = {};
+    for (const provider of this.providers) {
+      const usage = provider.usage;
+      if (usage?.windows.length && usage.updatedAt) providers[provider.provider] = { windows: usage.windows, updatedAt: usage.updatedAt };
+    }
+    const data = JSON.stringify({ version: 1, providers });
+    if (data === this.saved) return;
+    this.saved = data;
+    const path = join(this.options.stateDir, USAGE_FILE);
+    this.saving = this.saving.then(() => writePrivateJson(path, data)).catch(() => { this.saved = ''; });
+  }
+  private now(): number { return this.options.now ? this.options.now() : Date.now(); }
+  /** Claude usage reads paced on their own: at most one per interval, and longer after 429s. */
+  private async readClaudeUsagePaced(signal: AbortSignal): Promise<ProviderUsage> {
+    const now = this.now();
+    const last = this.lastClaudeUsage;
+    // A window that has reset needs a new reading; a clock set back never stretches the wait.
+    const waiting = now < this.claudeUsageAfter && this.claudeUsageAfter - now <= CLAUDE_RATE_LIMIT_BACKOFF.at(-1)!;
+    if (last && waiting && !last.windows.some(window => window.resetsAt && Date.parse(window.resetsAt) <= now)) return last;
+    const usage = await (this.options.claudeUsage || (signal => readClaudeUsage({ env: this.options.env, signal })))(signal);
+    if (signal.aborted) return usage;
+    if (usage.reason === 'rate_limited') {
+      this.claudeUsageAfter = now + CLAUDE_RATE_LIMIT_BACKOFF[Math.min(this.claudeRateLimits, CLAUDE_RATE_LIMIT_BACKOFF.length - 1)];
+      this.claudeRateLimits++;
+    } else if (usage.status === 'available') {
+      this.claudeRateLimits = 0;
+      this.claudeUsageAfter = now + CLAUDE_USAGE_INTERVAL;
+    } else this.claudeUsageAfter = 0;
+    this.lastClaudeUsage = usage;
+    return usage;
   }
   list(): ProviderHealth[] {
     const now = Date.now();
@@ -326,8 +409,11 @@ export class ProviderCapabilities {
     if (this.timer) clearTimeout(this.timer);
     this.controller?.abort();
     await this.refreshing;
+    await this.saving;
   }
   private async read(): Promise<void> {
+    await this.loaded;
+    if (this.stopped) return;
     this.controller = new AbortController();
     const timeout = setTimeout(() => this.controller?.abort(), this.options.timeoutMs || 12_000); timeout.unref();
     const signal = this.controller.signal;
@@ -344,12 +430,15 @@ export class ProviderCapabilities {
             capabilities = await (this.options.unlessUpdating ? this.options.unlessUpdating('codex', read) : read()) ?? { usage: previous?.usage ?? { status: 'loading', windows: [] } };
           }
           else {
-            const [usage, defaultEffort] = await Promise.all([readClaudeUsage({ env: this.options.env, signal }), readClaudeDefaultEffort(this.options.env || process.env)]);
+            const [usage, defaultEffort] = await Promise.all([this.readClaudeUsagePaced(signal), readClaudeDefaultEffort(this.options.env || process.env)]);
             capabilities = { usage, models: CLAUDE_MODELS.map(copyModel), efforts: CLAUDE_EFFORTS.map(effort => ({ ...effort })), ...(defaultEffort ? { defaultEffort } : {}) };
           }
         } catch { capabilities = { usage: unavailable('unreachable') }; }
         const previous = this.providers.find(item => item.provider === provider.provider);
-        if (capabilities.usage?.status !== 'available' && !capabilities.usage?.windows.length && previous?.usage?.windows.length) {
+        // Usage this sign-in cannot show (an API key, another provider) must not keep an earlier account's quota;
+        // a CLI missing for a moment (while it updates) says nothing about the account.
+        const unsupported = capabilities.usage?.reason === 'not_supported' && provider.available && !!provider.executable;
+        if (capabilities.usage?.status !== 'available' && !unsupported && !capabilities.usage?.windows.length && previous?.usage?.windows.length) {
           capabilities.usage = { ...capabilities.usage!, windows: previous.usage.windows, updatedAt: previous.usage.updatedAt, stale: true };
         }
         return { ...provider, ...(previous?.models ? { models: previous.models, defaultModel: previous.defaultModel, ...(previous.efforts ? { efforts: previous.efforts } : {}),
@@ -358,7 +447,9 @@ export class ProviderCapabilities {
       }));
       if (!this.stopped) {
         this.providers = results;
-        this.failures = results.some(provider => provider.usage?.status === 'error') ? this.failures + 1 : 0;
+        // A rate-limited Claude read has its own backoff and must not slow the other providers.
+        this.failures = results.some(provider => provider.usage?.status === 'error' && !(provider.provider === 'claude' && provider.usage.reason === 'rate_limited')) ? this.failures + 1 : 0;
+        this.save();
         this.options.onChange();
       }
     } catch {

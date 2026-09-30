@@ -61,6 +61,9 @@ test('providers are summarized: counts follow what is visible, and local paths a
   assert.equal(provider.error, undefined);
   assert.equal(provider.usage?.reason, undefined);
   assert.deepEqual(provider.usage?.windows, [{ id: 'week', usedPercent: 12 }]);
+  const snapshot = base();
+  snapshot.providers[0].usage!.reason = 'rate_limited';
+  assert.equal(remoteSnapshot(snapshot, scope(), 'controller-a1b2c3d4e5f6').providers[0].usage?.reason, 'rate_limited');
 });
 
 test('repository status for an excluded folder is dropped, and raw git errors never leave the machine', () => {

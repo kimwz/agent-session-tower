@@ -1031,6 +1031,7 @@ export const english: Record<string, string> = {
   '기간 {0} 경과': '{0} of period elapsed',
   ' · 기간 {0} 경과': ' · {0} of period elapsed',
   '이전 정보 · 새 사용량을 불러오지 못했습니다.': 'Stale data · could not refresh usage.',
+  '이전 정보 · 새 사용량 확인 중': 'Stale data · checking usage now',
   '확인: {0}': 'Checked: {0}',
   '계정 사용량 · 모든 기기': 'Account usage · all machines',
   'Agent Session Tower에서 작업 중': 'Working in Agent Session Tower',

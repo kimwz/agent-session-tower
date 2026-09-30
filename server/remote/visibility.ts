@@ -85,10 +85,13 @@ export function remoteJob(job: AutoPromptJob, controllerId: string | undefined, 
   } as AutoPromptJob;
 }
 function remoteGroup(group: ProjectGroup): ProjectGroup { return { cwd: group.cwd, title: group.title, pinned: group.pinned }; }
+// Only the known reasons, so a controller can say why usage is missing without any raw text.
+const USAGE_REASONS = new Set(['not_signed_in', 'not_supported', 'credentials_unavailable', 'rate_limited', 'unreachable', 'no_data']);
 function remoteProvider(provider: ProviderHealth, sessionCount: number): ProviderHealth {
   return { provider: provider.provider, available: provider.available, sessionCount,
     ...(provider.usage ? { usage: { status: provider.usage.status, windows: provider.usage.windows.map(window => pick(window, ['id', 'usedPercent', 'windowMinutes', 'resetsAt'] as const)),
-      ...(provider.usage.updatedAt ? { updatedAt: provider.usage.updatedAt } : {}), ...(provider.usage.stale ? { stale: true } : {}) } } : {}),
+      ...(provider.usage.updatedAt ? { updatedAt: provider.usage.updatedAt } : {}), ...(provider.usage.stale ? { stale: true } : {}),
+      ...(provider.usage.reason && USAGE_REASONS.has(provider.usage.reason) ? { reason: provider.usage.reason } : {}) } } : {}),
     ...(provider.models ? { models: structuredClone(provider.models) } : {}), ...(provider.defaultModel ? { defaultModel: provider.defaultModel } : {}),
     ...(provider.efforts ? { efforts: structuredClone(provider.efforts) } : {}), ...(provider.defaultEffort ? { defaultEffort: provider.defaultEffort } : {}) };
 }
