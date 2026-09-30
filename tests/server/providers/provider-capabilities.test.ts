@@ -3,8 +3,8 @@ import test from 'node:test';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseClaudeUsage, parseCodexUsage, parseCodexModels, parseCodexConfig, readClaudeDefaultEffort, claudeStorage, readClaudeCredential, readClaudeUsage, readCodexCapabilities, ProviderCapabilities } from '../../../server/providers/capabilities.js';
-import type { ProviderHealth } from '../../../shared/types.js';
+import { parseClaudeUsage, parseCodexUsage, parseCodexModels, parseCodexConfig, readClaudeDefaultEffort, claudeStorage, readClaudeCredential, readClaudeUsage, readCodexCapabilities, ProviderCapabilities, parseSavedUsage } from '../../../server/providers/capabilities.js';
+import type { ProviderHealth, ProviderUsage } from '../../../shared/types.js';
 
 const now = Date.parse('2026-09-15T00:00:00Z');
 const reset = '2026-09-16T00:00:00.000Z';
@@ -192,4 +192,67 @@ test('stopping the capability cache aborts a pending provider read and prevents 
   } });
   cache.start(); await new Promise(resolve => setImmediate(resolve)); await cache.stop();
   assert.equal(aborted, true); assert.equal(updates, 0);
+});
+
+test('saved quota keeps only whitelisted windows whose reset is still ahead', () => {
+  const saved = parseSavedUsage({ providers: {
+    claude: { updatedAt: '2026-09-14T23:00:00Z', windows: [{ id: 'five_hour', usedPercent: 30, windowMinutes: 300, resetsAt: reset, email: 'x' }, { id: 'seven_day', usedPercent: 60, resetsAt: '2026-09-14T00:00:00Z' }] },
+    codex: { updatedAt: '2026-09-14T23:00:00Z', windows: [{ id: 'primary', usedPercent: 10, resetsAt: '2026-09-14T00:00:00Z' }] },
+    other: { updatedAt: '2026-09-14T23:00:00Z', windows: [{ id: 'x', usedPercent: 1, resetsAt: reset }] },
+  } }, now);
+  assert.deepEqual(saved, { claude: { status: 'loading', stale: true, updatedAt: '2026-09-14T23:00:00.000Z', windows: [{ id: 'five_hour', usedPercent: 30, windowMinutes: 300, resetsAt: reset }] } });
+  assert.deepEqual(parseSavedUsage('garbage', now), {});
+});
+
+test('a restarted cache shows the last saved quota as stale until a new reading arrives, and saves new readings', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-usage-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const initial: ProviderHealth[] = [{ provider: 'claude', available: true, executable: '/fixture/claude', sessionCount: 0 }];
+  const future = new Date(Date.now() + 3600_000).toISOString();
+  const available = (usedPercent: number): ProviderUsage => ({ status: 'available', windows: [{ id: 'five_hour', usedPercent, windowMinutes: 300, resetsAt: future }], updatedAt: new Date().toISOString() });
+  let answer: ProviderUsage = available(42);
+  const options = { health: async () => initial, onChange: () => {}, stateDir: directory, env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' }, claudeUsage: async () => answer };
+  const first = new ProviderCapabilities(initial, options);
+  await first.refresh(); await first.stop();
+  const file = JSON.parse(await readFile(join(directory, 'provider-usage.json'), 'utf8'));
+  assert.equal(file.providers.claude.windows[0].usedPercent, 42);
+  assert.doesNotMatch(JSON.stringify(file), /token|email/);
+
+  answer = { status: 'error', windows: [], reason: 'rate_limited' };
+  let changes = 0;
+  const second = new ProviderCapabilities(initial, { ...options, onChange: () => { changes++; } });
+  t.after(() => second.stop());
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.equal(second.list()[0].usage?.stale, true); assert.equal(second.list()[0].usage?.windows[0].usedPercent, 42); assert.equal(changes, 1);
+  await second.refresh();
+  const usage = second.list()[0].usage!;
+  assert.equal(usage.reason, 'rate_limited'); assert.equal(usage.stale, true); assert.equal(usage.windows[0].usedPercent, 42);
+  await second.stop();
+  assert.equal(JSON.parse(await readFile(join(directory, 'provider-usage.json'), 'utf8')).providers.claude.windows[0].usedPercent, 42);
+});
+
+test('Claude usage is read at most every three minutes and backs off after 429s', async t => {
+  const initial: ProviderHealth[] = [{ provider: 'claude', available: true, executable: '/fixture/claude', sessionCount: 0 }];
+  let clock = now;
+  const calls: number[] = [];
+  const answers: ProviderUsage[] = [];
+  const cache = new ProviderCapabilities(initial, { health: async () => initial, onChange: () => {}, env: { CLAUDE_CODE_EFFORT_LEVEL: 'high' }, now: () => clock,
+    claudeUsage: async () => { calls.push(clock); return answers.shift() || { status: 'error', windows: [], reason: 'rate_limited' }; } });
+  t.after(() => cache.stop());
+  const minutes = async (value: number) => { clock += value * 60_000; await cache.refresh(); };
+  answers.push({ status: 'available', windows: [{ id: 'five_hour', usedPercent: 5 }], updatedAt: new Date(clock).toISOString() });
+  await cache.refresh();
+  await minutes(1); await minutes(1);
+  assert.equal(calls.length, 1); assert.equal(cache.list()[0].usage?.status, 'available');
+  await minutes(1); // 3 minutes after the reading: read again, and 429
+  assert.equal(calls.length, 2); assert.equal(cache.list()[0].usage?.reason, 'rate_limited'); assert.equal(cache.list()[0].usage?.windows[0].usedPercent, 5);
+  await minutes(4); assert.equal(calls.length, 2);
+  await minutes(1); assert.equal(calls.length, 3); // 5 minutes after the first 429
+  await minutes(9); assert.equal(calls.length, 3);
+  await minutes(1); assert.equal(calls.length, 4); // 10 minutes after the second
+  await minutes(15); assert.equal(calls.length, 5); // capped at 15
+  await minutes(15); assert.equal(calls.length, 6);
+  answers.push({ status: 'error', windows: [], reason: 'unreachable' });
+  await minutes(15); assert.equal(calls.length, 7);
+  await minutes(1); assert.equal(calls.length, 8); // other failures keep the normal cadence
 });
