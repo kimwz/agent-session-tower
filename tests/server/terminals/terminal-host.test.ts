@@ -126,3 +126,17 @@ test('the worker credential cannot reach shells and the terminal credential cann
   assert.equal(await status(terminal.socket, runnerToken), 403);
   assert.equal(await status(runner.socket, terminalToken), 403);
 });
+
+test('the version shown on the page asks a terminal host once, so looking never keeps it alive', async t => {
+  const f = await fixture(t);
+  const asked: string[] = [];
+  const exchange = (f.client as unknown as { exchange: (method: string, args?: unknown[]) => Promise<unknown> }).exchange.bind(f.client);
+  (f.client as unknown as { exchange: typeof exchange }).exchange = (method, args) => { asked.push(method); return exchange(method, args); };
+  const version = await f.client.displayVersion();
+  assert.match(version ?? '', /^\d+\.\d+\.\d+/);
+  for (let index = 0; index < 3; index++) assert.equal(await f.client.displayVersion(), version);
+  assert.deepEqual(asked, ['ping'], 'one request, then what its reply said');
+  await f.host.close();
+  assert.equal(await f.client.displayVersion(), null, 'a host that left shows as not running, without asking');
+  assert.deepEqual(asked, ['ping']);
+});

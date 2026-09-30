@@ -484,10 +484,11 @@ async function main() {
   let webCredentials: WebCredentials | undefined;
   const masterCallerSecret = randomBytes(32).toString('hex');
   const master = new MasterClient({ stateDir, credentials: () => webCredentials });
-  // The terminal and master hosts keep their own code until they restart; what they run is asked every half minute,
-  // never starting one, so the page can show every version Tower runs here.
+  // The terminal and master hosts keep their own code until they restart; what they run is looked at every half
+  // minute, never starting one and never keeping one alive (the master host does not count pings as use; the terminal
+  // host is asked once per run of it), so the page can show every version Tower runs here.
   const askComponents = async () => {
-    const [terminalHost, masterHost] = await Promise.all([workspaceTerminals.hostVersion().catch(() => undefined), master.hostVersion().catch(() => undefined)]);
+    const [terminalHost, masterHost] = await Promise.all([workspaceTerminals.displayVersion().catch(() => undefined), master.hostVersion().catch(() => undefined)]);
     const next: ComponentVersions = { terminalHost: terminalHost ?? null, master: masterHost ?? null };
     if (JSON.stringify(next) !== JSON.stringify(componentVersions)) { componentVersions = next; changed(); }
   };

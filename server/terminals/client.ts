@@ -110,6 +110,21 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
     } finally { await file.close(); }
   }
 
+  /** The version of the host each credential belongs to, as its replies said. */
+  private seen?: { token: string; version: string };
+
+  /**
+   * The running host's version for display, without keeping it alive: its credential file says whether one runs, and
+   * a host is asked at most once (its replies are remembered), since every request it answers resets its idle time.
+   */
+  async displayVersion(): Promise<string | null> {
+    let token: string;
+    try { token = await this.credential(); }
+    catch (error) { if ((error as { hostAbsent?: boolean }).hostAbsent) { this.seen = undefined; return null; } throw error; }
+    if (this.seen?.token === token) return this.seen.version;
+    return this.hostVersion();
+  }
+
   /** The running host's version, without starting one: null when none runs; a failure to ask is an error. */
   async hostVersion(): Promise<string | null> {
     try { return (await this.exchange('ping')).version; }
@@ -137,6 +152,7 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
       req.end(body);
     });
     if (reply.protocol !== RUNNER_PROTOCOL || reply.stateDir !== paths.stateDir) throw failure('The terminal host is incompatible.', 503);
+    if (typeof reply.version === 'string') this.seen = { token, version: reply.version };
     if (reply.error) throw failure(reply.error.message, reply.error.statusCode);
     return reply;
   }
