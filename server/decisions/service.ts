@@ -111,6 +111,23 @@ export class DecisionService {
     return this.overview();
   }
 
+  /** The saved settings as a backup keeps them, key included. */
+  backupValue(): { provider: DecisionProviderId; apiKey?: string; features: DecisionFeatures } { return structuredClone(this.saved); }
+
+  /** Replaces the settings with a backup's, in turn with the owner's changes, so none of them lands after it with older values. */
+  restore(value: unknown): Promise<DecisionOverview> {
+    const change = this.changes.then(async () => {
+      const input = value as Partial<Saved> | undefined;
+      if (!input || typeof input !== 'object' || !provider(input.provider) || (input.apiKey !== undefined && !validKey(input.apiKey))) throw httpError(400, '백업의 빠른 판단 설정이 올바르지 않습니다.');
+      const next: Saved = { provider: input.provider, features: parseFeatures(input.features ?? {}, DEFAULT_DECISION_FEATURES), ...(input.apiKey ? { apiKey: input.apiKey } : {}) };
+      await this.save(next);
+      this.saved = next;
+      return this.overview();
+    });
+    this.changes = change.catch(() => {});
+    return change;
+  }
+
   async close(): Promise<void> { await this.changes; await this.writes; }
 
   private save(next: Saved): Promise<void> {

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { SlackActivity, SlackRules } from '../../../client/src/slack/SlackPanel.js';
+import { SlackActivity, SlackRuleActions, SlackRules } from '../../../client/src/slack/SlackPanel.js';
 import type { SlackWorkflow } from '../../../shared/slack.js';
 
 test('Slack activity treats incoming text as text and builds links only on Slack origin', () => {
@@ -57,4 +57,12 @@ test('activity lists newest first and pages long histories', () => {
   assert.ok(html.indexOf('reason-24') < html.indexOf('reason-23'));
   assert.doesNotMatch(html, /reason-4</);
   assert.match(html, /더 보기/);
+});
+
+test('the Verse8 example is offered only while there are no rules', () => {
+  const empty = renderToStaticMarkup(createElement(SlackRuleActions, { rules: [], onAdd() {} }));
+  assert.match(empty, /Verse8 PR/);
+  const some = renderToStaticMarkup(createElement(SlackRuleActions, { rules: [{ id: 'r', name: 'Mine', enabled: true, condition: 'c', instructions: 'i', replyInstructions: 'r', provider: 'codex' }], onAdd() {} }));
+  assert.doesNotMatch(some, /Verse8 PR/);
+  assert.equal(some.match(/<button/g)?.length, 1);
 });

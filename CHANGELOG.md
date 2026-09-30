@@ -4,11 +4,38 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.93.0] - 2026-09-30
+
+### Added
+- **Agents can ask Tower to run one command once** (`permissions_run`). For a one-off action such as stopping one process (`kill 13229`), an agent no longer needs a lasting rule that allows a whole family of commands. Tower's permission reviewer (or you, in **권한**) judges the exact command. Once it is allowed, Tower runs it in the conversation's folder with no input, stops it after at most 10 minutes, and keeps the first and last 64 KiB of its output. The agent reads the result with `permissions_runResult`; if it ended its turn first and you (or the reviewer's setting) asked for the conversation to hear decisions, the result arrives as a message once the conversation is idle. A `claude` or `codex` the command starts counts as that conversation's own run. Asking again with the same command returns the same request, so nothing runs twice. `sudo`, disk tools, and downloads piped into a shell always wait for you. After a restart, a command left running is stopped only when Tower can prove it is still the same process; otherwise its result is marked unknown.
+- **Rules for one conversation.** The reviewer can allow a wide rule for one conversation only (`scope: "conversation"`). It reaches only that conversation's Claude Code turns and is removed when the conversation closes or 24 hours after it was allowed. Where you allowed a command that overlaps a rule the reviewer allowed, your rule decides in the turns it reaches. Codex cannot take rules for one conversation, so Codex agents are pointed to `permissions_run` instead. The rules are listed under **대화 한정** with their expiry.
+
+## [1.92.1] - 2026-09-30
+
+### Fixed
+- Alignment fixes (#25):
+  - with the sidebar closed, the canvas zoom tools sit on the settings button's line, at its height and just left of it, in every language and width;
+  - checkboxes in the trigger editor (assign, close, include pull requests and teams) sit beside their text from the left instead of centered above it;
+  - the trigger panel's computer picker keeps its label on one line.
+- **Slack automation** offers the Verse8 PR example only while there are no rules yet.
+
 ## [1.92.0] - 2026-09-30
 
 ### Added
-- **Agents can ask Tower to run one command once** (`permissions_run`). For a one-off action such as stopping one process (`kill 13229`), an agent no longer needs a lasting rule that allows a whole family of commands. Tower's permission reviewer (or you, in **권한**) judges the exact command. Once it is allowed, Tower runs it in the conversation's folder with no input, stops it after at most 10 minutes, and keeps the first and last 64 KiB of its output. The agent reads the result with `permissions_runResult`; if it ended its turn first, the result arrives as a message. Asking again with the same command returns the same request, so nothing runs twice. `sudo`, disk tools, and downloads piped into a shell always wait for you. After a restart, a command left running is stopped only when Tower can prove it is still the same process; otherwise its result is marked unknown.
-- **Rules for one conversation.** The reviewer can allow a wide rule for one conversation only (`scope: "conversation"`). It reaches only that conversation's Claude Code turns and is removed when the conversation closes or after 24 hours. Codex cannot take rules for one conversation, so Codex agents are pointed to `permissions_run` instead. The rules are listed under **대화 한정** with their expiry.
+- **Backup and restore of Tower's settings** (#19). **Settings → Backup** exports everything Tower is set up with on this computer as one file:
+  - triggers (with their header secrets and what GitHub watches already took), permission rules and automatic review;
+  - Slack (connection, rules, tone) and GitHub automation rules;
+  - public agents, fast judgment, folder groups and hiding, and the folders kept from remote sharing;
+  - Tower's skills with where they apply, their pins and your guidance;
+  - the master's voice settings.
+
+  Sessions, conversations, remote computer links, notification devices and the remote login account stay on each computer. The file holds tokens and API keys, so it is always encrypted with a passphrase of at least 8 characters (scrypt and AES-256-GCM).
+- Restoring checks the file first and shows what it holds. Nothing changes until you confirm. Files it replaces are copied to `restore/before-*` in the state folder, and running turns and shells are never interrupted:
+  - folder, sharing, fast judgment, backup and master settings apply at once;
+  - the execution worker hands over at its next quiet moment to a new worker, which applies triggers, permissions, Slack, public agents and skills before it starts them.
+
+  Triggers are restored the way your own edits would be: an unchanged trigger keeps its schedule, and a changed or new one counts from now. An issue or review request either computer's GitHub watch already took is not taken again. A trigger whose folder or conversation this computer lacks comes in turned off. Skills get back exactly the projects they applied to and their pins; a project folder missing on this computer is left out. Settings a service here would refuse are not written. Everything left out is reported. A backup made by a newer Tower is refused until this one is updated. A backup from another computer comes with a reminder to stop the Tower there first, since both would otherwise run the same automation.
+- **Automatic backups** to S3-compatible storage such as Cloudflare R2: set the endpoint, bucket, access key and a passphrase, and Tower uploads an encrypted backup every 24 hours (1–168). It keeps the newest 14 of this computer's backups (1–100); a key that may only write still backs up and shows a warning. **연결 테스트**, **지금 백업**, and the list of stored backups with download are on the same page. The secret key and passphrase are never shown again.
 
 ## [1.91.0] - 2026-09-30
 

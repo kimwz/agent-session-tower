@@ -28,6 +28,8 @@ import type { PublicAgentOverview, PublicConversationView } from '../../shared/p
 import { OPERATIONS, isOperationName } from '../../shared/api/operations.js';
 import type { RepositoryAction, RepositoryStatus } from '../../shared/repositories.js';
 import type { NotificationOverview } from '../../shared/notifications.js';
+import type { BackupOverview, BackupPreview, RemoteBackup, RestoreReport } from '../../shared/backup.js';
+import { MAX_BACKUP_FILE_BYTES } from '../../shared/backup.js';
 import type { AutoPromptSuggestionRequest, AutoPromptSuggestionResponse, DecisionOverview } from '../../shared/decisions.js';
 
 export interface Backend {
@@ -98,6 +100,19 @@ export interface HttpOptions {
   towerUpdate?: (version?: string) => Promise<{ status: number; body: unknown }>;
   /** The owner's "update now": running turns wrap up, the rest stop at a deadline, and the worker switches. */
   forceRunnerUpdate?: () => Promise<{ status: number; body: unknown }>;
+  /** Full backups of this Tower's settings; made and restored only from this Tower's own pages, by the owner. */
+  backup?: {
+    overview(): Promise<BackupOverview>;
+    saveSettings(body: unknown): Promise<BackupOverview>;
+    export(passphrase: unknown): Promise<{ name: string; text: string }>;
+    upload(): Promise<string>;
+    test(): Promise<void>;
+    remote(): Promise<RemoteBackup[]>;
+    download(key: unknown): Promise<{ name: string; text: string }>;
+    check(file: unknown, passphrase: unknown): Promise<BackupPreview>;
+    apply(id: unknown): Promise<RestoreReport>;
+    cancel(id: unknown): Promise<RestoreReport>;
+  };
   /** Push notifications to the owner's browsers; managed only from this Tower's own pages. */
   notifications?: {
     overview(): NotificationOverview;
@@ -140,7 +155,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, forceRunnerUpdate, service, notifications, decisions, master }: HttpOptions) {
+export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, forceRunnerUpdate, service, notifications, decisions, master, backup }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -327,6 +342,29 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (publicAction && req.method === 'POST') {
         if (!backend.publicAgents) return json(res, 503, { error: '공개 에이전트를 사용할 수 없습니다.' });
         return json(res, 200, await backend.publicAgents.mutate(publicAction[1], await readJson(req, 100_000)));
+      }
+      if (path === '/api/backup' || path.startsWith('/api/backup/')) {
+        if (!backup) return json(res, 503, { error: '백업을 사용할 수 없습니다.' });
+        // The master agent never makes or applies a backup: it holds every secret Tower keeps.
+        if (masterCall) return json(res, 403, { error: '백업은 소유자만 할 수 있습니다.' });
+        if (path === '/api/backup' && req.method === 'GET') return json(res, 200, await backup.overview());
+        if (req.method === 'POST') {
+          const sendFile = (file: { name: string; text: string }) => {
+            res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': Buffer.byteLength(file.text), 'Content-Disposition': `attachment; filename="${file.name.replace(/[^A-Za-z0-9._-]/g, '_')}"`, 'Cache-Control': 'no-store' });
+            res.end(file.text);
+          };
+          switch (path) {
+            case '/api/backup/settings': return json(res, 200, await backup.saveSettings(await readJson(req, 16 * 1024)));
+            case '/api/backup/export': return sendFile(await backup.export((await readJson(req, 4 * 1024)).passphrase));
+            case '/api/backup/run': { await readJson(req, 1024); return json(res, 200, { key: await backup.upload() }); }
+            case '/api/backup/test': { await readJson(req, 1024); await backup.test(); return json(res, 200, { ok: true }); }
+            case '/api/backup/remote': { await readJson(req, 1024); return json(res, 200, { backups: await backup.remote() }); }
+            case '/api/backup/remote/download': return sendFile(await backup.download((await readJson(req, 4 * 1024)).key));
+            case '/api/backup/restore/check': { const body = await readJson(req, MAX_BACKUP_FILE_BYTES + 64 * 1024); return json(res, 200, await backup.check(body.file, body.passphrase)); }
+            case '/api/backup/restore/apply': return json(res, 200, await backup.apply((await readJson(req, 1024)).id));
+            case '/api/backup/restore/cancel': return json(res, 200, await backup.cancel((await readJson(req, 1024)).id));
+          }
+        }
       }
       if (path === '/api/notifications' && req.method === 'GET') {
         if (!notifications) return json(res, 503, { error: '알림을 사용할 수 없습니다.' });

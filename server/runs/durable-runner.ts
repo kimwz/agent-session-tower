@@ -16,6 +16,7 @@ import { readHandoff } from './handoff.js';
 import type { TriggerOverview } from '../../shared/triggers.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { newerVersion } from '../link/service.js';
+import type { SkillBackup } from '../backup/payload.js';
 
 interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number; version?: string;
   /** How long a handed-off worker's successor may stay silent before this web starts a worker itself. */
@@ -111,12 +112,25 @@ export class DurableRunManager extends EventEmitter {
    * Asks an outdated worker to start this build's worker at its next quiet moment. Running turns,
    * approvals and shells are never interrupted; the worker waits for them to finish on its own.
    */
-  async requestHandoff(force = false): Promise<boolean> {
+  async requestHandoff(force = false, options: { patient?: boolean } = {}): Promise<boolean> {
     const own = this.options.version ?? APP_VERSION;
     // A worker newer than this build (left by an update that was then undone) is never handed back to it.
     if (!this.snapshot || !this.supports('handoff') || (!force && (this.snapshot.version === own || newerVersion(this.snapshot.version ?? '', own)))) return false;
-    await this.call('requestHandoff', [this.workerCommand()]);
+    await this.call('requestHandoff', [this.workerCommand(), ...(options.patient ? [{ patient: true }] : [])]);
     return true;
+  }
+
+  /**
+   * Asks the worker to hand over to a new worker of this build at its next quiet moment, whatever version it runs, so
+   * the new worker reads again what it keeps in memory (a restore). Running turns, approvals and shells are never
+   * interrupted. False when the worker cannot hand over.
+   */
+  async restartWorker(): Promise<boolean> {
+    if (await this.options.handoffHeld?.().catch(() => false)) throw Object.assign(new Error('Tower is still verifying an update. Try again in a few minutes.'), { statusCode: 409 });
+    // A worker newer than this build (left by an update that was undone) is never handed back to it.
+    if (this.snapshot?.version && newerVersion(this.snapshot.version, this.options.version ?? APP_VERSION)) return false;
+    // Only a worker of this same build waits patiently; an older one is replaced by the ordinary update handoff anyway.
+    return this.requestHandoff(true, { patient: this.snapshot?.version === (this.options.version ?? APP_VERSION) });
   }
 
   /**
@@ -248,6 +262,11 @@ export class DurableRunManager extends EventEmitter {
   async skills(operation: 'skillsOverview' | 'skillsDetail' | 'skillsSummary' | 'skillsMutate' | 'skillsExport' | 'skillsImportPlan', args: unknown[]): Promise<unknown> {
     if (!this.supports(skillsCapability(operation, args))) throw Object.assign(new Error('실행 워커가 아직 새 버전으로 바뀌지 않았습니다. 진행 중인 작업이 끝나 워커가 바뀌면 스킬을 쓸 수 있습니다.'), { statusCode: 503 });
     return this.call(operation, args);
+  }
+  /** A full backup's share of the worker: every skill kept in Tower with the owner's guidance. */
+  async skillsBackup(): Promise<SkillBackup> {
+    if (!this.supports('backup')) throw Object.assign(new Error('실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 다시 시도하세요.'), { statusCode: 503 });
+    return this.call('skillsBackup', []) as Promise<SkillBackup>;
   }
   async publicVisit(action: string, slug: string, input: { token?: string; ip: string; password?: unknown; text?: unknown }): Promise<{ state: PublicVisitorState; token?: string }> {
     if (!this.supports('publicAgents')) throw Object.assign(new Error('not_found'), { statusCode: 404 });

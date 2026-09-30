@@ -22,6 +22,7 @@ import { runMasterHost } from './master/host.js';
 import { startMasterMcp } from './master/mcp.js';
 import { runMasterQuery } from './master/query-process.js';
 import { MasterClient } from './master/client.js';
+import { BackupService } from './backup/service.js';
 import { masterRoutes } from './master/routes.js';
 import { VoiceTurnEnd } from './master/voice-turn-end.js';
 import type { WebCredentials } from './master/tower-client.js';
@@ -498,6 +499,11 @@ async function main() {
   let webCredentials: WebCredentials | undefined;
   const masterCallerSecret = randomBytes(32).toString('hex');
   const master = new MasterClient({ stateDir, credentials: () => webCredentials });
+  // Full backups: the worker gives its skills; restores go through each process's own stores (see BackupService.apply).
+  const backups = new BackupService({ stateDir, version: APP_VERSION, skills: () => runs.skillsBackup(), restartWorker: () => runs.restartWorker(),
+    unavailable: () => runs.supports('backup') ? undefined : '실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 쓸 수 있습니다.',
+    stores: { groups, exclusions, decisions }, master: body => master.call('settings', { body }), onChange: () => changed() });
+  await backups.start();
   // The terminal and master hosts keep their own code until they restart; what they run is looked at every half
   // minute, never starting one and never keeping one alive (the master host does not count pings as use; the terminal
   // host is asked once per run of it), so the page can show every version Tower runs here.
@@ -539,7 +545,7 @@ async function main() {
       known: async session => await master.call('voiceKnown', { session }) === true, record: entry => decisions.record(entry) }) }) },
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })) } : { error: linkError },
-    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications,
+    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups,
     decisions: {
       overview: () => decisions.overview(),
       // Turning the key or the canvas outcomes on or off shows or hides them at once.
@@ -599,6 +605,7 @@ async function main() {
     setInterval(() => { void readTools().catch(() => {}); }, 30_000)];
   for (const timer of pruning) timer.unref();
   void readTools().catch(() => {});
+  backups.schedule();
   void towerUpdates.start().catch(error => console.error(`Automatic updates are unavailable: ${error instanceof Error ? error.message : String(error)}`));
   capabilities.start();
   repositories.start();
@@ -615,6 +622,7 @@ async function main() {
     for (const timer of pruning) clearTimeout(timer);
     system.close();
     towerUpdates.stop();
+    backups.close();
     remoteNodes?.close();
     const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => { remoteRouter.dispose(); return nodeViews.flush(); });
     const stoppingCapabilities = capabilities.stop();
@@ -627,7 +635,7 @@ async function main() {
     dispose();
     server.closeAllConnections();
     server.close();
-    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingPublic, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), notifications.close(), outcomes.close(), decisions.close(), runs.close()]); } finally { await releaseLock(); }
+    try { await finishCleanup([auth.flush(), stoppingLinks, stoppingPublic, stoppingCapabilities, stoppingRepositories, titles.flush(), dismissedRuns.flush(), closedSessions.flush(), groups.flush(), exclusions.flush(), remoteChanges.flush(), backups.flush(), notifications.close(), outcomes.close(), decisions.close(), runs.close()]); } finally { await releaseLock(); }
   };
   const onSignal = () => { void shutdown().catch(error => { console.error(`Agent Session Tower shutdown: ${error instanceof Error ? error.message : String(error)}`); process.exitCode = 1; }); };
   process.once('SIGINT', onSignal);

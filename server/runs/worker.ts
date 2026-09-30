@@ -8,6 +8,7 @@ import type { AutoPromptRequest, ChatMessage, CreateSessionRequest, MessageAttac
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { AutoPromptManager } from '../auto-prompt/manager.js';
 import { SlackService } from '../slack/service.js';
+import { takeWorkerRestore } from '../backup/restore-files.js';
 import { acquireStateLock, lockedPorts, MonitorAlreadyRunning } from '../instance/state-lock.js';
 import { getProviderHealth } from '../providers/discovery.js';
 import { trustWorkspace } from '../providers/workspace-trust.js';
@@ -50,7 +51,7 @@ import { runAutoPromptModel } from '../auto-prompt/native.js';
 import { keepEndpoint } from './endpoint-keeper.js';
 import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
-const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan']);
+const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup']);
 
 export interface RunnerHostOptions {
   stateDir: string;
@@ -118,7 +119,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   let lastRequest = Date.now();
   let pending = 0;
   let closing = false;
-  let handoff: { successor: SuccessorCommand; requestedAt: number; held?: boolean; retryAt?: number } | undefined;
+  /** `patient`: only asked so a new worker reads its settings again (a restore); it never holds new work back to force a quiet moment. */
+  let handoff: { successor: SuccessorCommand; requestedAt: number; held?: boolean; retryAt?: number; patient?: boolean } | undefined;
   let draining = false;
   /** The owner asked to switch now: running turns wrap up until this time, then stop. */
   let forced: { deadline: number } | undefined;
@@ -153,7 +155,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'snapshot': return undefined;
       case 'requestHandoff': {
         // The latest web build wins; the worker leaves only at a moment when nothing is running.
-        handoff = { successor: parseSuccessor(args[0], paths.stateDir), requestedAt: handoff?.requestedAt ?? Date.now(), held: handoff?.held, retryAt: handoff?.retryAt };
+        const patient = record(args[1]).patient === true && (!handoff || handoff.patient === true);
+        // An ordinary handoff waits its own long hold from when it is asked, not from an earlier patient one.
+        const since = handoff && !handoff.patient ? handoff.requestedAt : Date.now();
+        handoff = { successor: parseSuccessor(args[0], paths.stateDir), requestedAt: patient && handoff ? handoff.requestedAt : since, held: handoff?.held, retryAt: handoff?.retryAt, ...(patient ? { patient } : {}) };
         return { accepted: true };
       }
       case 'forceHandoff': {
@@ -242,6 +247,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'skillsMutate': if (options.skills) return options.skills.mutate(String(args[0]), record(args[1])); break;
       case 'skillsExport': if (options.skills) return options.skills.exportBundle(record(args[0])); break;
       case 'skillsImportPlan': if (options.skills) return options.skills.importPlan(args[0]); break;
+      case 'skillsBackup': if (options.skills) return options.skills.backup(); break;
       case 'publicAgentsOverview': if (options.publicAgents) return options.publicAgents.overview(); break;
       case 'publicAgentsConversation': if (options.publicAgents) return options.publicAgents.conversation(args[0] as string, args[1] as string); break;
       case 'publicAgentsMutate': if (options.publicAgents) return options.publicAgents.mutate(args[0] as string, args[1] as Record<string, unknown>); break;
@@ -344,7 +350,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       }
     }
     if (!handoff || closing || draining || (handoff.retryAt && Date.now() < handoff.retryAt)) return;
-    if (!handoff.held && Date.now() - handoff.requestedAt >= (options.handoffHoldMs ?? 6 * 60 * 60 * 1000)) { handoff.held = true; options.holdIntake?.(); }
+    if (!handoff.held && !handoff.patient && Date.now() - handoff.requestedAt >= (options.handoffHoldMs ?? 6 * 60 * 60 * 1000)) { handoff.held = true; options.holdIntake?.(); }
     if (!quiet()) return;
     // Refuse new admissions first, then confirm nothing slipped in before this synchronous point.
     draining = true;
@@ -473,6 +479,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   let release: () => Promise<void>;
   try { release = await acquireStateLock(paths.runtime, 0); }
   catch (error) { if (error instanceof MonitorAlreadyRunning) return; throw error; }
+  // A restore's worker part: its files are written before any service below reads them.
+  const restoring = await takeWorkerRestore(stateDir).catch(error => { console.error(`A waiting restore was not applied: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
   const sessions = new SessionService({ launchProofs: join(stateDir, 'agent-launches.json'), launchMarks: launchMarksDir(stateDir) });
   // Without the shims a helper's launcher is proven only while the process tree shows it; the worker still starts.
   const shims = await installLaunchShims(stateDir).catch(error => { console.error(`Launch shims were not installed: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
@@ -702,7 +710,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       coordination: id => github.coordination(id),
     } });
     triggerEngine = triggers;
-    await triggers.start();
+    const restoredTriggers = await triggers.start(restoring?.restore.triggers ? { restore: restoring.restore.triggers } : {});
+    await restoring?.applied({ parts: restoring.restore.triggers ? ['triggers'] : [], errors: restoredTriggers.errors })
+      .catch(error => console.error(`The restore's progress was not recorded: ${error instanceof Error ? error.message : String(error)}`));
     // Reviews waiting from before this worker started (or queued while the last one handed over) go on, once the
     // triggers whose instructions they read are in place.
     reviewer.wake();
@@ -737,10 +747,12 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         read: async (id, limit, before) => runs.getSession(id) ? (await sessions.detail(runs.nativeSessionId(id), before, limit)) ?? { messages: [], hasMore: false } : undefined,
         search: async (id, query) => runs.getSession(id) ? (await sessions.search(runs.nativeSessionId(id), query)) ?? { count: 0, matches: [], bytes: 0 } : undefined },
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
+    // A restore's skills are still being written (below): the worker hands over only after them.
+    let restoringSkills = Boolean(restoring);
     await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
       onIdle: async () => { stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
-      transient: () => slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
+      inFlight: () => restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
+      transient: () => restoringSkills || slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // Work a Slack or GitHub coordinator delegated: its coordinator hears how it ended and decides what follows.
       delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
       releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); worktrees.resume(); reviewer.release(); },
@@ -750,6 +762,12 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
       onHandedOff: () => { stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     runs.markReady();
+    // A restore's skills are written once the worker serves: linking into project folders (on a slow volume, say) never
+    // keeps it from starting. The restore is recorded as done after them; a worker that stops first leaves it to the next.
+    if (restoring) void (async () => {
+      const restoredSkills = restoring.restore.skills ? await skills.restore(restoring.restore.skills).catch(error => ({ restored: [], skipped: [{ name: '스킬', reason: error instanceof Error ? error.message : String(error) }] })) : undefined;
+      await restoring.finish({ parts: restoredSkills ? ['skills'] : [], errors: [], ...(restoredSkills ? { skills: restoredSkills } : {}) });
+    })().catch(error => console.error(`The restore's outcome was not recorded: ${error instanceof Error ? error.message : String(error)}`)).finally(() => { restoringSkills = false; });
     // A parent terminal or Tower shutdown must not interrupt provider work.
     process.on('SIGINT', () => {});
     process.on('SIGTERM', () => {});

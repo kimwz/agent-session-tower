@@ -27,6 +27,19 @@ export function normalizeProjectGroupPatch(value: unknown): ProjectGroupPatch {
   };
 }
 
+function parseGroups(saved: unknown): Map<string, ProjectGroup> {
+  if (!Array.isArray(saved)) throw new Error('Saved project groups are invalid.');
+  const groups = new Map<string, ProjectGroup>();
+  for (const value of saved) {
+    const patch = normalizeProjectGroupPatch(value);
+    if (patch.title === undefined || patch.pinned === undefined || groups.has(patch.cwd)) throw new Error('Saved project groups are invalid.');
+    if (patch.title || patch.pinned || patch.hidden) groups.set(patch.cwd, {
+      cwd: patch.cwd, title: patch.title, pinned: patch.pinned, ...(patch.hidden ? { hidden: true } : {}),
+    });
+  }
+  return groups;
+}
+
 /** Folder display metadata only; cwd remains the native identity, even without sessions. */
 export class ProjectGroupStore {
   private readonly path: string;
@@ -43,19 +56,24 @@ export class ProjectGroupStore {
     try {
       const info = await file.stat();
       if (!info.isFile() || info.size > 12_000_000) throw new Error('Saved project groups are invalid or too large.');
-      const saved: unknown = JSON.parse(await file.readFile('utf8'));
-      if (!Array.isArray(saved)) throw new Error('Saved project groups are invalid.');
-      const groups = new Map<string, ProjectGroup>();
-      for (const value of saved) {
-        const patch = normalizeProjectGroupPatch(value);
-        if (patch.title === undefined || patch.pinned === undefined || groups.has(patch.cwd)) throw new Error('Saved project groups are invalid.');
-        if (patch.title || patch.pinned || patch.hidden) groups.set(patch.cwd, {
-          cwd: patch.cwd, title: patch.title, pinned: patch.pinned, ...(patch.hidden ? { hidden: true } : {}),
-        });
-      }
+      const groups = parseGroups(JSON.parse(await file.readFile('utf8')));
       await file.chmod(0o600);
       this.groups = groups;
     } finally { await file.close(); }
+  }
+
+  /** The saved list as a backup keeps it. */
+  backupValue(): ProjectGroup[] { return this.list(); }
+
+  /** Replaces every folder's title, pin and hiding with a backup's, after the changes already under way. */
+  restore(value: unknown): Promise<void> {
+    const groups = parseGroups(value);
+    const write = this.writes.then(async () => {
+      await this.save(groups);
+      this.groups = groups;
+    });
+    this.writes = write.then(() => {}, () => {});
+    return write;
   }
 
   list(): ProjectGroup[] { return [...this.groups.values()].map(group => ({ ...group })); }
@@ -71,21 +89,25 @@ export class ProjectGroupStore {
       const next = new Map(this.groups);
       if (group.title || group.pinned || group.hidden) next.set(group.cwd, group);
       else next.delete(group.cwd);
-      const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
-      try {
-        const file = await open(temporary, 'wx', 0o600);
-        try { await file.writeFile(`${JSON.stringify([...next.values()])}\n`); await file.sync(); }
-        finally { await file.close(); }
-        await rename(temporary, this.path);
-      } catch (error) {
-        await unlink(temporary).catch(() => {});
-        throw Object.assign(new Error(`폴더 그룹을 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`), { statusCode: 503 });
-      }
+      await this.save(next);
       this.groups = next;
       return { ...group };
     });
     this.writes = write.then(() => {}, () => {});
     return write;
+  }
+
+  private async save(groups: Map<string, ProjectGroup>): Promise<void> {
+    const temporary = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      const file = await open(temporary, 'wx', 0o600);
+      try { await file.writeFile(`${JSON.stringify([...groups.values()])}\n`); await file.sync(); }
+      finally { await file.close(); }
+      await rename(temporary, this.path);
+    } catch (error) {
+      await unlink(temporary).catch(() => {});
+      throw Object.assign(new Error(`폴더 그룹을 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`), { statusCode: 503 });
+    }
   }
 
   async flush(): Promise<void> { await this.writes; }
