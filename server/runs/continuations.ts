@@ -15,3 +15,9 @@ export function continuedRun(runs: readonly Run[], run: Run | undefined): Run | 
   }
   return run;
 }
+
+/** Like `continuedRun`, from a run ID whose own record may already be pruned. */
+export function continuedRunById(runs: readonly Run[], id: string | undefined): Run | undefined {
+  if (!id) return undefined;
+  return continuedRun(runs, runs.find(item => item.id === id) ?? runs.find(item => item.scheduled?.resume === 'update' && item.scheduled.afterRunId === id));
+}

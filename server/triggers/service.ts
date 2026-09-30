@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { continuedRun } from '../runs/continuations.js';
+import { continuedRun, continuedRunById } from '../runs/continuations.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, rename, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -1159,7 +1159,7 @@ export class TriggerService extends EventEmitter {
       }
       const job = event.input.target.mode === 'auto' ? this.options.executor.getAutoPrompt(event.requestId) : undefined;
       // A turn a forced worker update ended goes on in Tower's continuation; the event follows it.
-      const run = continuedRun(runs, runs.find(item => item.id === (event.dispatch?.runId ?? job?.runId)) ?? runs.find(item => item.autoPromptId === event.requestId));
+      const run = continuedRunById(runs, event.dispatch?.runId ?? job?.runId) ?? continuedRun(runs, runs.find(item => item.autoPromptId === event.requestId));
       const patch: Partial<TriggerEvent> = {};
       if (run && event.dispatch?.runId !== run.id) patch.dispatch = { ...event.dispatch, runId: run.id, sessionId: run.sessionId };
       if (job?.decision?.action === 'create' && job.sessionId && !event.dispatch?.createdSessionId) patch.dispatch = { ...event.dispatch, ...patch.dispatch, createdSessionId: job.sessionId };

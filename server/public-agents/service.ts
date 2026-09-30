@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { continuedRun } from '../runs/continuations.js';
+import { continuedRun, continuedRunById } from '../runs/continuations.js';
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from 'node:crypto';
 import { mkdir, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -561,7 +561,9 @@ export class PublicAgentService extends EventEmitter {
 
   private track(agent: StoredAgent, data: AgentData, request: StoredRequest, runs: Run[]): void {
     // A turn a forced worker update ended goes on in Tower's continuation; the request follows it.
-    const run = continuedRun(runs, runs.find(item => item.id === request.runId) ?? runs.find(item => item.autoPromptId === request.id));
+    const run = continuedRunById(runs, request.runId) ?? continuedRun(runs, runs.find(item => item.autoPromptId === request.id));
+    // The request remembers the run carrying it on, so it still finds it once the earlier one leaves the history.
+    if (run && request.runId !== run.id) { request.runId = run.id; void this.saveData(agent.id); }
     if (!run) { this.finish(data, request, { status: 'failed', error: 'The run record is no longer available.', result: 'The outcome of this request could not be confirmed.' }); void this.saveData(agent.id); return; }
     if (!FINISHED.has(run.status)) return;
     const output = run.output ?? '';

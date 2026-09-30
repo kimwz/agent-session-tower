@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { RunManager } from '../../../server/runs/manager.js';
-import { continuedRun } from '../../../server/runs/continuations.js';
+import { continuedRun, continuedRunById } from '../../../server/runs/continuations.js';
 import type { Run, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
 
@@ -176,6 +176,9 @@ test('restore keeps every unfinished run and runs an automation still has to rep
   assert.equal(list.filter(run => run.status === 'queued').length, 110);
   assert.equal(list.filter(run => run.status === 'completed' && run.id !== id(0)).length, 100);
   assert.ok(list.some(run => run.id === id(150)) && !list.some(run => run.id === id(1)), 'the newest finished runs are kept');
+  await manager.flushState();
+  const saved = JSON.parse(await readFile(join(directory, 'runs.json'), 'utf8')) as Array<Record<string, unknown>>;
+  assert.equal(saved.find(run => run.id === id(0))?.retain, true, 'still retained until the automations are loaded');
 });
 
 test('watchers follow a turn into the continuation that carries it on', () => {
@@ -187,4 +190,5 @@ test('watchers follow a turn into the continuation that carries it on', () => {
   assert.equal(continuedRun([first, second, third, wakeup], first)?.id, 'c');
   assert.equal(continuedRun([first, wakeup], first)?.id, 'a');
   assert.equal(continuedRun([], undefined), undefined);
+  assert.equal(continuedRunById([second, third], 'a')?.id, 'c', 'found even after the first run left the history');
 });

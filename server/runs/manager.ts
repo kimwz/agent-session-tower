@@ -179,6 +179,8 @@ export class RunManager extends EventEmitter {
   /** Queued runs accepted while Tower switched workers; a restart keeps them queued (see KEEP_QUEUED). */
   private readonly carried = new Set<string>();
   private retained: () => Iterable<string> = () => [];
+  /** Runs saved as retained: kept until the automations that know which runs they need are loaded (`markReady`). */
+  private readonly restoredRetained = new Set<string>();
   private drain?: UpdateDrain;
   private ready: boolean;
   private readonly instructionsFile: string;
@@ -329,6 +331,7 @@ export class RunManager extends EventEmitter {
         delete run.instructions;
         let needsInstructions = marked(value, NEEDS_INSTRUCTIONS);
         const keepQueued = marked(value, KEEP_QUEUED);
+        if (marked(value, RETAIN)) this.restoredRetained.add(run.id);
         for (const key of [NEEDS_INSTRUCTIONS, KEEP_QUEUED, RETAIN]) delete (run as unknown as Record<string, unknown>)[key];
         const instructions = needsInstructions && !FINISHED.has(run.status) ? kept.get(run.id) : undefined;
         if (instructions) { run.instructions = instructions; needsInstructions = false; }
@@ -363,6 +366,8 @@ export class RunManager extends EventEmitter {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
     this.started = true;
+    // Without a worker to load the automations later, the retained runs are whatever they report from now on.
+    if (this.ready) this.restoredRetained.clear();
     this.persist();
     await this.flush();
     this.pollTimer = setInterval(() => { void this.pump(); }, this.options.pollMs ?? 1500);
@@ -387,13 +392,13 @@ export class RunManager extends EventEmitter {
   }
 
   /** Starts queued runs once everything a launch asks for is in place (see `holdUntilReady`). */
-  markReady(): void { if (this.ready) return; this.ready = true; void this.pump(); }
+  markReady(): void { if (this.ready) return; this.ready = true; this.restoredRetained.clear(); void this.pump(); }
 
   /** Runs an automation still has to report: kept through pruning and restarts. */
   setRetained(retained: () => Iterable<string>): void { this.retained = retained; }
 
   private retainedIds(): Set<string> {
-    const ids = [...new Set(this.retained())].map(id => this.runs.get(id)).filter((run): run is Run => !!run)
+    const ids = [...new Set([...this.restoredRetained, ...this.retained()])].map(id => this.runs.get(id)).filter((run): run is Run => !!run)
       .sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, MAX_RETAINED).map(run => run.id);
     return new Set(ids);
   }
