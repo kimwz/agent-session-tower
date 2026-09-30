@@ -644,7 +644,10 @@ test('an uncertain open reply is never resent', async t => {
   f.options.sendReply = async () => { throw new Error('socket hang up'); };
   await assert.rejects(f.manager.tool(id, 'slack_send', { text: 'Done', requestKey: 'done' }), /socket hang up/);
   let sent = 0; f.options.sendReply = async () => { sent++; return { ts: '2.0' }; };
-  assert.equal((await f.manager.tool(id, 'slack_send', { text: 'Done', requestKey: 'done' }) as { status: string }).status, 'uncertain');
+  const retry = await f.manager.tool(id, 'slack_send', { text: 'Done', requestKey: 'done' }) as { status: string; note: string };
+  assert.equal(retry.status, 'uncertain'); assert.match(retry.note, /may have been posted/);
+  await assert.rejects(f.manager.tool(id, 'slack_send', { text: 'Done', requestKey: 'done-again' }), /uncertain result/);
+  assert.equal(f.manager.list()[0].replies?.length, 1, 'no new record');
   assert.equal(sent, 0);
 });
 
