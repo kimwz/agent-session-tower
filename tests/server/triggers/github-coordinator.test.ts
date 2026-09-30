@@ -138,6 +138,11 @@ test('a comment is posted only after the owner approves it, once, and an uncerta
   await f.coordinator.tool(workflowId, 'github_reply', { requestKey: 'proposal-1', text: 'Fixed in #3. Thanks for the report!' });
   assert.equal(f.posts.length, 0, 'a proposal is not a comment');
   await assert.rejects(f.coordinator.tool(workflowId, 'github_send', { text: 'Sneaky' }), /No immediate owner send authorization/);
+  // Only Slack replies are open: GitHub keeps the gate, its tool has no requestKey, and "don't send" records no hold.
+  assert.deepEqual(GITHUB_SESSION_TOOLS.find(tool => tool.name === 'github_send')!.inputSchema.required, ['text']);
+  assert.ok(!('requestKey' in (GITHUB_SESSION_TOOLS.find(tool => tool.name === 'github_send')!.inputSchema.properties as object)));
+  await f.coordinator.ownerChat(f.runs[0].sessionId, '깃허브에 댓글 달지 마세요');
+  assert.equal(f.coordinator.workflow(f.runs[0].sessionId)?.repliesHeld, undefined);
   await f.coordinator.approveReply(workflowId, 'proposal-1', 'Fixed in #3. Thanks for the report!');
   await f.coordinator.approveReply(workflowId, 'proposal-1', 'Fixed in #3. Thanks for the report!');
   assert.deepEqual(f.posts, [{ path: '/repos/octo/app/issues/2/comments', body: { body: 'Fixed in #3. Thanks for the report!' } }]);

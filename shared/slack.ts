@@ -10,7 +10,7 @@ export interface SlackRule {
   provider: Provider;
   model?: string;
   cwd?: string;
-  /** Owner pre-authorization: delegating with this rule permits one truthful result reply. Reactions need no authorization. */
+  /** Owner pre-authorization: delegating with this rule permits one truthful result reply. Slack replies and reactions need no authorization; this binds the report to the task. */
   autoReply?: boolean;
 }
 export interface SlackMessage { user: string; text: string; ts: string }
@@ -55,6 +55,12 @@ export interface SlackWorkflow {
   replies?: Array<{ requestKey: string; text: string; status: 'proposed' | 'sending' | 'sent' | 'uncertain'; approvedAt?: string; ts?: string }>;
   ownerConditionalReply?: { mode?: 'composed'; ruleId?: string; requestIds?: string[]; instruction?: string; requestId: string; requestKey: string; text: string; status: 'pending' | 'sent' | 'blocked' | 'cancelled' | 'uncertain'; authorizedAt: string; evidence?: string };
   ownerReplySelection?: { requestKey: string; text: string };
+  /**
+   * Slack conversations only. The owner told Tower not to send (`true`), or an owner message could not be understood
+   * (`unclear`, until one is): no reply goes out, nor does a rule's automatic report, until the owner gives a send
+   * permission or approves a reply.
+   */
+  repliesHeld?: true | 'unclear';
   /** `ts` names a later thread message the reaction went on; the request message otherwise. */
   reactions?: Array<{ name: string; action: 'add' | 'remove'; at: string; ts?: string }>;
   /**
