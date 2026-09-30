@@ -623,6 +623,26 @@ test('a handoff that waits too long only holds new automatic work; running turns
   await until(() => handedOff);
 });
 
+test('a handoff asked only so a new worker reads settings again (a restore) never holds new work, however long it waits', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  let holds = 0;
+  let handedOff = false;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, handoffHoldMs: 0,
+    holdIntake: () => { holds++; }, quiesce: async () => {}, startSuccessor: () => { handedOff = true; } });
+  t.after(() => host.close());
+  const client = await f.connect();
+  await client.enqueue(f.session.id, 'Long turn');
+  await until(() => f.starts() === 1);
+  assert.equal(await client.restartWorker(), true);
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.equal(holds, 0);
+  assert.equal(f.runs.list()[0].status, 'running');
+  f.finish();
+  await until(() => handedOff);
+  assert.equal(f.cancels(), 0);
+});
+
 test('a turn that is still closing its provider keeps the old worker, whatever its status says', async t => {
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();

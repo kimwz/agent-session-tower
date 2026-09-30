@@ -23,6 +23,12 @@ type Account = { teamId: string; userId: string; teamName?: string; userName?: s
 type Settings = { enabled: boolean; allowSelfMentions?: boolean; language?: 'ko' | 'en'; workingReaction?: string; appToken?: string; userToken?: string; account?: Account };
 /** An emoji name as Slack's reactions use it, without colons. */
 const EMOJI_NAME = /^[a-z0-9_+'-]{1,100}$/;
+
+/** Saved Slack connection settings this build can read (a restore checks them before writing them). */
+export function validSlackConnection(value: unknown): value is Settings {
+  const saved = value as Settings;
+  return !!saved && typeof saved === 'object' && !Array.isArray(saved) && !((saved.language !== undefined && saved.language !== 'ko' && saved.language !== 'en') || (saved.allowSelfMentions !== undefined && typeof saved.allowSelfMentions !== 'boolean') || (saved.workingReaction !== undefined && !(typeof saved.workingReaction === 'string' && EMOJI_NAME.test(saved.workingReaction))) || typeof saved.enabled !== 'boolean' || (saved.userToken && typeof saved.userToken !== 'string') || (saved.appToken && typeof saved.appToken !== 'string'));
+}
 interface Dependencies {
   client?: (token: string) => Pick<SlackClient, 'auth' | 'thread' | 'reply'> & Partial<Pick<SlackClient, 'searchOwnMessages' | 'react'>>;
   socket?: (options: SlackSocketOptions) => Pick<SlackSocket, 'start' | 'stop'>;
@@ -118,8 +124,8 @@ export class SlackService extends EventEmitter {
   async start() {
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
     try {
-      const saved = await readPrivateJson(this.path) as Settings;
-      if ((saved.language !== undefined && saved.language !== 'ko' && saved.language !== 'en') || (saved.allowSelfMentions !== undefined && typeof saved.allowSelfMentions !== 'boolean') || (saved.workingReaction !== undefined && !(typeof saved.workingReaction === 'string' && EMOJI_NAME.test(saved.workingReaction))) || typeof saved.enabled !== 'boolean' || (saved.userToken && typeof saved.userToken !== 'string') || (saved.appToken && typeof saved.appToken !== 'string')) throw new Error('Invalid Slack connection settings.');
+      const saved = await readPrivateJson(this.path);
+      if (!validSlackConnection(saved)) throw new Error('Invalid Slack connection settings.');
       this.settings = saved;
     } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     await this.tone.load(this.settings.account ? `${this.settings.account.teamId}:${this.settings.account.userId}` : '');

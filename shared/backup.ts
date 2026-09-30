@@ -61,6 +61,8 @@ export interface BackupStatus {
   lastSuccessAt?: string;
   lastKey?: string;
   lastError?: string;
+  /** The last backup went up, but removing older ones failed. */
+  lastWarning?: string;
   running: boolean;
 }
 

@@ -118,7 +118,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   let lastRequest = Date.now();
   let pending = 0;
   let closing = false;
-  let handoff: { successor: SuccessorCommand; requestedAt: number; held?: boolean; retryAt?: number } | undefined;
+  /** `patient`: only asked so a new worker reads its settings again (a restore); it never holds new work back to force a quiet moment. */
+  let handoff: { successor: SuccessorCommand; requestedAt: number; held?: boolean; retryAt?: number; patient?: boolean } | undefined;
   let draining = false;
   /** The owner asked to switch now: running turns wrap up until this time, then stop. */
   let forced: { deadline: number } | undefined;
@@ -153,7 +154,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'snapshot': return undefined;
       case 'requestHandoff': {
         // The latest web build wins; the worker leaves only at a moment when nothing is running.
-        handoff = { successor: parseSuccessor(args[0], paths.stateDir), requestedAt: handoff?.requestedAt ?? Date.now(), held: handoff?.held, retryAt: handoff?.retryAt };
+        const patient = record(args[1]).patient === true && (!handoff || handoff.patient === true);
+        handoff = { successor: parseSuccessor(args[0], paths.stateDir), requestedAt: handoff?.requestedAt ?? Date.now(), held: handoff?.held, retryAt: handoff?.retryAt, ...(patient ? { patient } : {}) };
         return { accepted: true };
       }
       case 'forceHandoff': {
@@ -345,7 +347,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       }
     }
     if (!handoff || closing || draining || (handoff.retryAt && Date.now() < handoff.retryAt)) return;
-    if (!handoff.held && Date.now() - handoff.requestedAt >= (options.handoffHoldMs ?? 6 * 60 * 60 * 1000)) { handoff.held = true; options.holdIntake?.(); }
+    if (!handoff.held && !handoff.patient && Date.now() - handoff.requestedAt >= (options.handoffHoldMs ?? 6 * 60 * 60 * 1000)) { handoff.held = true; options.holdIntake?.(); }
     if (!quiet()) return;
     // Refuse new admissions first, then confirm nothing slipped in before this synchronous point.
     draining = true;

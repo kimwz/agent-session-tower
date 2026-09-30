@@ -7,7 +7,8 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { BackupError, checkPassphrase, decryptBackup, encryptBackup, readBackupHeader, type BackupHeader } from './crypto.js';
 import { collectTriggers, collectWorkerFiles, parsePayload, payloadParts, WORKER_FILES, type BackupPayload, type SkillBackup } from './payload.js';
 import { keepBefore, readReport, removePendingWorker, writePendingWorker, writeReport } from './restore-files.js';
-import { S3Client, endpointUrl } from './s3.js';
+import { S3Client, endpointUrl, unsafeKey } from './s3.js';
+import { newerVersion } from '../link/service.js';
 
 interface SavedSettings extends BackupSettingsInput { remote: BackupSettingsInput['remote'] & { secretAccessKey?: string } }
 /** `machine`: this computer's own mark in backup names, so two computers with one name never remove each other's; never restored. */
@@ -30,6 +31,8 @@ export interface BackupServiceOptions {
   };
   /** The master host's settings call. */
   master?: (body: Record<string, unknown>) => Promise<unknown>;
+  /** The page's snapshot shows what a restore changed (folder titles and the like). */
+  onChange?: () => void;
   fetcher?: typeof fetch;
   now?: () => number;
   host?: string;
@@ -52,7 +55,7 @@ function parseSettings(value: unknown, current: SavedSettings): SavedSettings {
   const endpoint = text(remote.endpoint, 500) ?? '', bucket = text(remote.bucket, 63) ?? '', prefix = text(remote.prefix, 200) ?? '', region = text(remote.region, 50) || 'auto', accessKeyId = text(remote.accessKeyId, 200) ?? '';
   if (endpoint) endpointUrl(endpoint);
   if (bucket && !/^[a-z0-9][a-z0-9.-]{1,62}$/.test(bucket)) throw new BackupError('버킷 이름이 올바르지 않습니다.');
-  if (prefix.startsWith('/') || /[\0\\]/.test(prefix)) throw new BackupError('경로 접두어가 올바르지 않습니다.');
+  if (prefix.startsWith('/') || /[\0\\]/.test(prefix) || unsafeKey(prefix)) throw new BackupError('경로 접두어가 올바르지 않습니다.');
   const secret = typeof remote.secretAccessKey === 'string' && remote.secretAccessKey ? remote.secretAccessKey.trim() : current.remote.secretAccessKey;
   if (secret !== undefined && (secret.length > 500 || !secret)) throw new BackupError('비밀 액세스 키가 올바르지 않습니다.');
   const passphrase = typeof value.passphrase === 'string' && value.passphrase ? checkPassphrase(value.passphrase) : current.passphrase;
@@ -161,14 +164,14 @@ export class BackupService {
 
   // ---- Automatic backups -------------------------------------------------------------------------
 
-  private client(): S3Client {
-    const { remote } = this.saved.settings;
+  private client(settings: SavedSettings = this.saved.settings): S3Client {
+    const { remote } = settings;
     if (!remote.secretAccessKey) throw new BackupError('비밀 액세스 키를 입력하세요.');
     return new S3Client({ endpoint: remote.endpoint, bucket: remote.bucket, region: remote.region || 'auto', accessKeyId: remote.accessKeyId, secretAccessKey: remote.secretAccessKey }, this.options.fetcher);
   }
-  private get ownPrefix(): string { return `${this.saved.settings.remote.prefix}tower-backup-${this.host}-${this.saved.machine}-`; }
+  private ownPrefix(settings: SavedSettings): string { return `${settings.remote.prefix}tower-backup-${this.host}-${this.saved.machine}-`; }
   /** Exactly this computer's automatic backups: its own name and mark, then a time and nothing else. */
-  private own(key: string): boolean { return key.startsWith(this.ownPrefix) && /^\d{8}T\d{6}Z\.towerbackup$/.test(key.slice(this.ownPrefix.length)); }
+  private own(key: string, prefix: string): boolean { return key.startsWith(prefix) && /^\d{8}T\d{6}Z\.towerbackup$/.test(key.slice(prefix.length)); }
 
   /** Makes an automatic backup when one is due: never made, older than the interval, or retried a while after a failure. */
   async runIfDue(): Promise<void> {
@@ -182,29 +185,39 @@ export class BackupService {
     await this.upload().catch(() => {});
   }
 
-  /** Makes a backup now and uploads it; answers its key. One at a time. */
+  /**
+   * Makes a backup now and uploads it; answers its key. One at a time. The upload is what counts: removing this
+   * computer's oldest backups afterwards may fail (a key allowed only to write) without making it upload again.
+   */
   upload(): Promise<string> {
     if (this.running) return this.running;
     const work = (async () => {
-      const { settings } = this.saved;
+      // One set of settings for the whole backup, even if they are changed meanwhile.
+      const settings = structuredClone(this.saved.settings);
       if (!settings.passphrase) throw new BackupError('자동 백업 암호를 먼저 저장하세요.');
-      const client = this.client();
+      const client = this.client(settings);
+      const own = this.ownPrefix(settings);
       const at = this.now();
       await this.change(() => { this.saved = { ...this.saved, status: { ...this.saved.status, lastAttemptAt: new Date(at).toISOString() } }; }).catch(() => {});
+      const key = `${settings.remote.prefix}${this.fileName(at)}`;
       try {
         const text = await encryptBackup(await this.payload(), settings.passphrase, { towerVersion: this.options.version, from: hostname(), createdAt: new Date(at).toISOString() });
-        const key = `${settings.remote.prefix}${this.fileName(at)}`;
         await client.put(key, Buffer.from(text), 'application/octet-stream');
-        // Only this computer's own backups count toward what it keeps.
-        const own = (await client.list(this.ownPrefix)).filter(item => this.own(item.key)).sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
-        for (const item of own.slice(0, Math.max(0, own.length - settings.keep))) await client.delete(item.key).catch(() => {});
-        await this.change(() => { const { lastError: _error, ...status } = this.saved.status; this.saved = { ...this.saved, status: { ...status, lastSuccessAt: new Date(at).toISOString(), lastKey: key } }; });
-        return key;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         await this.change(() => { this.saved = { ...this.saved, status: { ...this.saved.status, lastError: message } }; }).catch(() => {});
         throw error;
       }
+      let warning: string | undefined;
+      try {
+        const mine = (await client.list(own)).filter(item => this.own(item.key, own)).sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+        for (const item of mine.slice(0, Math.max(0, mine.length - settings.keep))) await client.delete(item.key);
+      } catch (error) { warning = `오래된 백업을 정리하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`; }
+      await this.change(() => {
+        const { lastError: _error, lastWarning: _warning, ...status } = this.saved.status;
+        this.saved = { ...this.saved, status: { ...status, lastSuccessAt: new Date(at).toISOString(), lastKey: key, ...(warning ? { lastWarning: warning } : {}) } };
+      }).catch(() => {});
+      return key;
     })().finally(() => { this.running = undefined; });
     this.running = work;
     return work;
@@ -216,6 +229,8 @@ export class BackupService {
     const key = `${this.saved.settings.remote.prefix}.tower-backup-test-${randomUUID()}`;
     await client.put(key, Buffer.from('ok'), 'text/plain');
     await client.delete(key);
+    // Keeping only the newest backups needs to list them too.
+    await client.list(this.ownPrefix(this.saved.settings), 1);
   }
 
   async remote(): Promise<RemoteBackup[]> {
@@ -224,7 +239,7 @@ export class BackupService {
 
   async download(key: unknown): Promise<{ name: string; text: string }> {
     const prefix = this.saved.settings.remote.prefix;
-    if (typeof key !== 'string' || !key.startsWith(prefix) || !key.endsWith(BACKUP_EXTENSION) || key.length > 1024) throw new BackupError('백업을 찾을 수 없습니다.', 404);
+    if (typeof key !== 'string' || !key.startsWith(prefix) || !key.endsWith(BACKUP_EXTENSION) || key.length > 1024 || unsafeKey(key)) throw new BackupError('백업을 찾을 수 없습니다.', 404);
     const text = (await this.client().get(key, MAX_BACKUP_FILE_BYTES)).toString('utf8');
     readBackupHeader(text);
     return { name: key.slice(key.lastIndexOf('/') + 1), text };
@@ -237,6 +252,8 @@ export class BackupService {
     if (typeof file !== 'string') throw new BackupError('백업 파일을 고르세요.');
     const secret = checkPassphrase(passphrase);
     const { header, payload } = await decryptBackup(file, secret);
+    // A newer Tower may save settings this build cannot read; they could keep its worker from starting.
+    if (newerVersion(header.towerVersion, this.options.version)) throw new BackupError(`Tower ${header.towerVersion}에서 만든 백업입니다. 이 Tower(${this.options.version})를 업데이트한 뒤 복원하세요.`, 409);
     let parsed: BackupPayload;
     try { parsed = parsePayload(payload); } catch (error) { throw new BackupError(error instanceof Error ? error.message : String(error)); }
     const now = this.now();
@@ -290,6 +307,7 @@ export class BackupService {
       this.saved = { ...this.saved, settings: { ...settings, enabled: incoming.enabled === true && complete } };
     }));
     if (master && this.options.master) await step('master', () => this.options.master!({ ...(master.settings?.voice !== undefined ? { voice: master.settings.voice } : {}), voiceKey: master.voiceKey ?? null }));
+    if (applied.length) this.options.onChange?.();
     const requestedAt = new Date(this.now()).toISOString();
     const report: RestoreReport = { id: randomUUID(), status: worker.length ? 'waiting-worker' : 'applied', requestedAt, from: header.from, createdAt: header.createdAt, applied, worker, errors, before,
       ...(worker.length ? {} : { appliedAt: requestedAt }) };

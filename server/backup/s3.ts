@@ -7,6 +7,9 @@ export interface S3Target { endpoint: string; bucket: string; region: string; ac
 
 const sha256 = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 const hmac = (key: string | Buffer, value: string) => createHmac('sha256', key).update(value).digest();
+/** A key or prefix whose path would change on the way (`.` or `..` segments, empty segments inside). */
+export function unsafeKey(value: string): boolean { return value.split('/').some((segment, index, all) => segment === '.' || segment === '..' || (segment === '' && index > 0 && index < all.length - 1)); }
+
 /** RFC 3986 encoding, as SigV4 requires: everything but unreserved characters. */
 const encode = (value: string) => encodeURIComponent(value).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
 
@@ -56,7 +59,8 @@ export class S3Client {
     const url = new URL(this.base.href);
     const base = url.pathname.replace(/\/+$/, '');
     url.pathname = `${base}/${encode(this.target.bucket)}${key !== undefined ? `/${key.split('/').map(encode).join('/')}` : ''}`;
-    for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
+    // Sent exactly as signed (RFC 3986), not as URLSearchParams would write it ("+" for a space).
+    url.search = Object.entries(query).map(([name, value]) => `${encode(name)}=${encode(value)}`).join('&');
     return url;
   }
 
@@ -95,7 +99,8 @@ export class S3Client {
   async list(prefix: string, limit = 5000): Promise<RemoteBackup[]> {
     const found: RemoteBackup[] = [];
     let token: string | undefined;
-    do {
+    // A store that keeps saying there is more without giving any is not followed forever.
+    for (let page = 0; page < 100; page++) {
       const response = await this.request('GET', this.url(undefined, { 'list-type': '2', prefix, ...(token ? { 'continuation-token': token } : {}) }));
       const xml = await response.text();
       for (const match of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {
@@ -103,7 +108,8 @@ export class S3Client {
         if (key !== undefined) found.push({ key, size: Number(tag(match[1]!, 'Size') ?? 0), modifiedAt: tag(match[1]!, 'LastModified') ?? '' });
       }
       token = tag(xml, 'IsTruncated') === 'true' ? tag(xml, 'NextContinuationToken') : undefined;
-    } while (token && found.length < limit);
+      if (!token || found.length >= limit) break;
+    }
     return found;
   }
 }

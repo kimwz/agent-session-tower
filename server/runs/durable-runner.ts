@@ -112,11 +112,11 @@ export class DurableRunManager extends EventEmitter {
    * Asks an outdated worker to start this build's worker at its next quiet moment. Running turns,
    * approvals and shells are never interrupted; the worker waits for them to finish on its own.
    */
-  async requestHandoff(force = false): Promise<boolean> {
+  async requestHandoff(force = false, options: { patient?: boolean } = {}): Promise<boolean> {
     const own = this.options.version ?? APP_VERSION;
     // A worker newer than this build (left by an update that was then undone) is never handed back to it.
     if (!this.snapshot || !this.supports('handoff') || (!force && (this.snapshot.version === own || newerVersion(this.snapshot.version ?? '', own)))) return false;
-    await this.call('requestHandoff', [this.workerCommand()]);
+    await this.call('requestHandoff', [this.workerCommand(), ...(options.patient ? [{ patient: true }] : [])]);
     return true;
   }
 
@@ -129,7 +129,8 @@ export class DurableRunManager extends EventEmitter {
     if (await this.options.handoffHeld?.().catch(() => false)) throw Object.assign(new Error('Tower is still verifying an update. Try again in a few minutes.'), { statusCode: 409 });
     // A worker newer than this build (left by an update that was undone) is never handed back to it.
     if (this.snapshot?.version && newerVersion(this.snapshot.version, this.options.version ?? APP_VERSION)) return false;
-    return this.requestHandoff(true);
+    // Only a worker of this same build waits patiently; an older one is replaced by the ordinary update handoff anyway.
+    return this.requestHandoff(true, { patient: this.snapshot?.version === (this.options.version ?? APP_VERSION) });
   }
 
   /**

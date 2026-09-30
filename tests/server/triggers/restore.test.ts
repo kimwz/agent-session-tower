@@ -111,9 +111,44 @@ test('broken entries and secrets that do not exist here are left out and reporte
   const { service, errors } = await f.open(backupOf([{ id: 'x', revision: 1, name: 'Broken' } as unknown as Trigger, { ...good, id: randomUUID(), revision: 2, createdAt: '', updatedAt: '', createdBy: OWNER, updatedBy: OWNER } as Trigger],
     { settings: { maxConcurrentRuns: 'many' }, secretGrants: { 'missing-secret': ['x'] }, trustedFolders: [f.project] }));
   assert.equal(errors.length, 2);
-  assert.match(errors[0]!, /Broken/);
+  assert.ok(errors.some(error => /Broken/.test(error)));
   assert.deepEqual(service.list().map(item => item.name), ['Good']);
   const saved = await collectTriggers(f.directory);
   assert.deepEqual(saved?.secretGrants, {});
   assert.deepEqual(saved?.trustedFolders, [f.project]);
+});
+
+test('a restored trigger never runs a time missed before the restore, and one this computer cannot run comes in turned off', async t => {
+  const f = await fixture(t);
+  let { service } = await f.open();
+  const edited = await service.create(hourly(f.project, { name: 'Edited' }), OWNER);
+  const kept = await service.create(hourly(f.project, { name: 'Kept' }), OWNER);
+  const saved = (await collectTriggers(f.directory))!;
+  const elsewhere = { ...(saved.triggers[0] as Trigger), id: randomUUID(), name: 'Elsewhere', handler: { ...(saved.triggers[0] as Trigger).handler, target: { node: 'local', mode: 'folder', cwd: join(f.directory, 'missing') } } } as Trigger;
+  const backup = { ...saved, triggers: [
+    { ...(saved.triggers[0] as Trigger), handler: { ...(saved.triggers[0] as Trigger).handler, instructions: 'Changed instructions' } },
+    // A definition this build cannot read, for a trigger that exists here: it stays as it is.
+    { id: kept.id, revision: 9, name: 'Kept', source: { kind: 'unknown' } },
+    elsewhere,
+  ] };
+  // Tower was off over 01:00; the restore happens at 01:10.
+  service.close(); await service.settle();
+  f.clock.now = Date.parse('2026-09-24T01:10:00.000Z');
+  let errors: string[];
+  ({ service, errors } = await f.open(backup));
+  await service.tick();
+  assert.equal(f.runs.filter(run => run.prompt.includes('Changed instructions')).length, 0, 'the 01:00 time is not caught up with the restored definition');
+  const before = f.runs.length;
+  for (const run of f.runs) run.status = 'completed';
+  await service.tick();
+  assert.equal(service.list().find(item => item.id === edited.id)?.revision, edited.revision + 1);
+  assert.equal(service.list().find(item => item.id === kept.id)?.revision, kept.revision, 'kept as it was, not deleted');
+  const restored = service.list().find(item => item.name === 'Elsewhere');
+  assert.equal(restored?.enabled, false);
+  assert.ok(errors.some(error => /Elsewhere.*꺼서 복원/.test(error) && /does not exist/.test(error)));
+  assert.ok(errors.some(error => /Kept.*올바르지 않아/.test(error)));
+  f.clock.now = Date.parse('2026-09-24T02:00:05.000Z');
+  await service.tick();
+  assert.equal(f.runs.length - before, 2, 'from the next time on, both run');
+  assert.ok(f.runs.some(run => run.prompt.includes('Changed instructions')));
 });

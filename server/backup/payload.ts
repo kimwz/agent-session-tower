@@ -3,6 +3,9 @@ import type { BackupPart } from '../../shared/backup.js';
 import type { SkillBundle, SkillAdvisorSettings } from '../../shared/skills.js';
 import type { GitHubCursor } from '../triggers/github.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { validateSlackRules } from '../slack/automation.js';
+import { validSlackConnection } from '../slack/service.js';
+import { parsePublicAgents } from '../public-agents/service.js';
 
 /** Trigger settings as a backup keeps them; the trigger service merges them with what it holds (`TriggerService.start`). */
 export interface TriggerBackup {
@@ -106,7 +109,9 @@ const accountOf = (value: unknown) => record(value) && record(value.account) ? `
  */
 export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['files']): Promise<{ parts: BackupPart[]; errors: string[] }> {
   const parts = new Set<BackupPart>(), errors: string[] = [];
-  const current = async (name: WorkerFile) => readOptional(join(stateDir, name)).catch(() => undefined);
+  // A file here that cannot be read is left alone: merging into it would drop the records it holds.
+  const unreadable = new Set<WorkerFile>();
+  const current = async (name: WorkerFile) => readOptional(join(stateDir, name)).catch(() => { unreadable.add(name); return undefined; });
   // A different Slack account is not switched in while the current one still has work under way.
   let slackBlocked = false;
   if (files['slack-connection.json'] !== undefined && accountOf(files['slack-connection.json']) !== accountOf(await current('slack-connection.json'))) {
@@ -121,6 +126,7 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
     if (incoming === undefined || (slackBlocked && (name === 'slack-connection.json' || name === 'slack-tone.json'))) continue;
     try {
       const existing = await current(name);
+      if (unreadable.has(name)) throw new Error('이 컴퓨터의 파일을 읽지 못해 건너뛰었습니다.');
       let next: unknown;
       switch (name) {
         case 'permissions.json': {
@@ -133,10 +139,14 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
         case 'slack-automation.json':
         case 'github-automation.json': {
           if (!record(incoming) || !Array.isArray(incoming.rules)) throw new Error('invalid');
+          try { validateSlackRules(incoming.rules); } catch { throw new Error('invalid'); }
           next = { rules: incoming.rules, workflows: record(existing) && Array.isArray(existing.workflows) ? existing.workflows : [] };
           break;
         }
         case 'trigger-secrets.json': if (!Array.isArray(incoming)) throw new Error('invalid'); next = incoming; break;
+        // What the worker's services refuse at start is never written: one would keep the worker from starting.
+        case 'slack-connection.json': if (!validSlackConnection(incoming)) throw new Error('invalid'); next = incoming; break;
+        case 'public-agents.json': if (!parsePublicAgents(incoming)) throw new Error('invalid'); next = incoming; break;
         default: if (!record(incoming)) throw new Error('invalid'); next = incoming;
       }
       await writePrivateJson(join(stateDir, name), JSON.stringify(next));

@@ -25,6 +25,7 @@ test('a changed header or body is refused, and so are files that are not backups
   await assert.rejects(decryptBackup(JSON.stringify({ ...envelope, data: data.toString('base64') }), 'correct horse'), /암호가 맞지 않거나/);
   await assert.rejects(decryptBackup(JSON.stringify({ ...envelope, kdf: { ...envelope.kdf, N: 2 ** 24 } }), 'correct horse'), /손상/);
   await assert.rejects(decryptBackup(JSON.stringify({ ...envelope, version: 2 }), 'correct horse'), /새 버전/);
+  await assert.rejects(decryptBackup(JSON.stringify({ ...envelope, kdf: { ...envelope.kdf, N: 2 ** 20, r: 16 } }), 'correct horse'), /손상/, 'more memory than allowed is a damaged file, not a crash');
   await assert.rejects(decryptBackup('{"format":"other"}', 'correct horse'), /백업 파일이 아닙니다/);
   await assert.rejects(decryptBackup('not json', 'correct horse'), /백업 파일이 아닙니다/);
   await assert.rejects(encryptBackup({}, 'short', meta), /8자 이상/);

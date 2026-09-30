@@ -16,6 +16,7 @@ export interface BackupHeader {
 interface BackupEnvelope extends BackupHeader { tag: string; data: string }
 
 const KDF = { N: 65_536, r: 8, p: 1 };
+const KDF_MEMORY = 256 * 1024 * 1024;
 /** The payload may be many times smaller than what it expands to; this bounds a hostile file. */
 const MAX_PLAIN_BYTES = 200 * 1024 * 1024;
 
@@ -29,8 +30,11 @@ export function checkPassphrase(value: unknown): string {
 }
 
 function deriveKey(passphrase: string, salt: Buffer, params: { N: number; r: number; p: number }): Promise<Buffer> {
-  const options: ScryptOptions = { ...params, maxmem: 256 * 1024 * 1024 };
-  return new Promise((resolve, reject) => scryptCallback(passphrase, salt, 32, options, (error, key) => error ? reject(error) : resolve(key)));
+  const options: ScryptOptions = { ...params, maxmem: KDF_MEMORY };
+  return new Promise((resolve, reject) => {
+    try { scryptCallback(passphrase, salt, 32, options, (error, key) => error ? reject(new BackupError('백업 파일이 손상되었습니다.')) : resolve(key)); }
+    catch { reject(new BackupError('백업 파일이 손상되었습니다.')); }
+  });
 }
 
 /** The header in a fixed order, as the cipher authenticates it. */
@@ -66,6 +70,7 @@ export function readBackupHeader(text: string): BackupEnvelope {
   const kdf = value.kdf;
   // Bounded, so a crafted file cannot make the key derivation take minutes or gigabytes.
   if (!kdf || kdf.name !== 'scrypt' || !whole(kdf.N, 16_384, 1_048_576) || (kdf.N & (kdf.N - 1)) !== 0 || !whole(kdf.r, 1, 16) || !whole(kdf.p, 1, 4) || !base64(kdf.salt, 16)
+    || 128 * kdf.N * kdf.r + 128 * kdf.r * kdf.p >= KDF_MEMORY
     || value.cipher !== 'aes-256-gcm' || !base64(value.iv, 12) || !base64(value.tag, 16) || !base64(value.data)
     || typeof value.createdAt !== 'string' || typeof value.towerVersion !== 'string' || typeof value.from !== 'string') throw new BackupError('백업 파일이 손상되었습니다.');
   return value as BackupEnvelope;

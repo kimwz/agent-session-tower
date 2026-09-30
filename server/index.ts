@@ -490,7 +490,7 @@ async function main() {
   // Full backups: the worker gives its skills; restores go through each process's own stores (see BackupService.apply).
   const backups = new BackupService({ stateDir, version: APP_VERSION, skills: () => runs.skillsBackup(), restartWorker: () => runs.restartWorker(),
     unavailable: () => runs.supports('backup') ? undefined : '실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 쓸 수 있습니다.',
-    stores: { groups, exclusions, decisions }, master: body => master.call('settings', { body }) });
+    stores: { groups, exclusions, decisions }, master: body => master.call('settings', { body }), onChange: () => changed() });
   await backups.start();
   // The terminal and master hosts keep their own code until they restart; what they run is looked at every half
   // minute, never starting one and never keeping one alive (the master host does not count pings as use; the terminal

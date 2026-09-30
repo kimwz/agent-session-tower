@@ -237,16 +237,26 @@ export class TriggerService extends EventEmitter {
     const record = (item: unknown): item is Record<string, any> => !!item && typeof item === 'object' && !Array.isArray(item);
     const upgraded = upgradeState({ ...empty(), triggers: (Array.isArray(backup.triggers) ? backup.triggers : []) as Trigger[] }, this.now()).triggers as unknown[];
     const incoming: Trigger[] = [];
-    for (const value of upgraded) {
-      const input = record(value) ? TriggerInputSchema.safeParse({ name: value.name, enabled: value.enabled, source: value.source, handler: value.handler, policy: value.policy }) : undefined;
-      if (!record(value) || !input?.success || typeof value.id !== 'string' || !Number.isInteger(value.revision) || incoming.some(item => item.id === value.id)) {
-        errors.push(`트리거 "${record(value) && typeof value.name === 'string' ? value.name : '?'}": 백업의 정의가 올바르지 않아 건너뛰었습니다.`);
-        continue;
-      }
-      incoming.push({ ...(value as unknown as Trigger), ...input.data });
-    }
+    // Every id the backup names: one it names but cannot restore keeps its definition here rather than being removed.
+    const named = new Set<string>();
     const settings = TriggerSettingsSchema.safeParse(backup.settings ?? {});
     if (!settings.success) errors.push('트리거 설정이 올바르지 않아 지금 설정을 유지했습니다.');
+    const limit = (settings.success ? settings.data : this.state.settings).maxTriggers;
+    for (const value of upgraded) {
+      if (record(value) && typeof value.id === 'string') named.add(value.id);
+      const input = record(value) ? TriggerInputSchema.safeParse({ name: value.name, enabled: value.enabled, source: value.source, handler: value.handler, policy: value.policy }) : undefined;
+      const name = record(value) && typeof value.name === 'string' ? value.name : '?';
+      if (!record(value) || !input?.success || typeof value.id !== 'string' || !Number.isInteger(value.revision) || incoming.some(item => item.id === value.id)) {
+        errors.push(`트리거 "${name}": 백업의 정의가 올바르지 않아 건너뛰었습니다.`);
+        continue;
+      }
+      if (incoming.length >= limit) { errors.push(`트리거 "${name}": 트리거는 ${limit}개까지라 건너뛰었습니다.`); continue; }
+      const trigger: Trigger = { ...(value as unknown as Trigger), ...input.data };
+      // What this computer lacks (a folder, a conversation) keeps it from running here: it comes in turned off.
+      const problem = await this.validate({ name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy }).then(() => undefined, error => error instanceof Error ? error.message : String(error));
+      if (problem && trigger.enabled) { trigger.enabled = false; errors.push(`트리거 "${name}": 꺼서 복원했습니다. ${problem}`); }
+      incoming.push(trigger);
+    }
     const same = (a: Trigger, b: Trigger) => (['name', 'enabled', 'source', 'handler', 'policy'] as const).every(key => JSON.stringify(a[key]) === JSON.stringify(b[key]));
     await this.commit(state => {
       const now = new Date(this.now()).toISOString();
@@ -255,7 +265,7 @@ export class TriggerService extends EventEmitter {
       // Grants of secrets that exist here; the restored triggers below add any they need.
       state.secretGrants = Object.fromEntries(Object.entries(record(backup.secretGrants) ? backup.secretGrants : {})
         .filter(([id, ids]) => this.secrets.get(id) && Array.isArray(ids)).map(([id, ids]) => [id, ids.filter(item => typeof item === 'string')]));
-      const wanted = new Set(incoming.map(item => item.id));
+      const wanted = new Set([...named, ...incoming.map(item => item.id)]);
       for (const current of [...state.triggers]) {
         if (wanted.has(current.id)) continue;
         state.triggers = state.triggers.filter(item => item.id !== current.id);
@@ -271,6 +281,8 @@ export class TriggerService extends EventEmitter {
         try {
           if (current) {
             const next = this.replace(draft, current, { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy }, actor);
+            // A restored definition counts from now: times missed before the restore never run with it.
+            if (next.enabled) { const github = draft.cursors[next.id]?.github; this.schedule(draft, next); if (github) draft.cursors[next.id]!.github = github; }
             this.log(draft, actor, 'restore', next, current.revision, next.revision, `Restored from a backup: ${this.changes(current, next)}`);
           } else {
             const earlier = [...draft.tombstones, ...(draft.revisions[trigger.id] ?? [])].filter(item => item.id === trigger.id).reduce((max, item) => Math.max(max, item.revision), 0);

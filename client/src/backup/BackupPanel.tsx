@@ -80,7 +80,9 @@ export function BackupPanel({ token }: { token: string }) {
     const report = await post<RestoreReport>('/api/backup/restore/apply', token, { id: preview.id });
     setPreview(null); setFile(null); setRestorePass('');
     setOverview(current => current && { ...current, restore: report });
-    await load();
+    // The restore may have brought other automatic backup settings: the form and the list start over from them.
+    const next = await api<BackupOverview>('/api/backup');
+    setOverview(next); setForm(formOf(next)); setRemote(null);
   });
   const saveRemote = (event: FormEvent) => {
     event.preventDefault();
@@ -147,6 +149,7 @@ export function BackupPanel({ token }: { token: string }) {
         </form>
         <p className="auth-hint">
           {overview.status.running ? t('백업하는 중입니다.') : overview.status.lastSuccessAt ? t('마지막 백업 {0}', { 0: date(overview.status.lastSuccessAt) }) : t('아직 올린 백업이 없습니다.')}
+          {overview.status.lastWarning ? <span className="auth-error"> {translateMessage(overview.status.lastWarning)}</span> : null}
           {overview.status.lastError && overview.status.lastAttemptAt && (!overview.status.lastSuccessAt || overview.status.lastAttemptAt > overview.status.lastSuccessAt) ? <span className="auth-error"> {t('마지막 시도 실패: {0}', { 0: translateMessage(overview.status.lastError) })}</span> : null}
         </p>
         <h3>{t('저장된 백업')}<button className="icon-button decision-refresh" title={t('새로고침')} aria-label={t('새로고침')} disabled={Boolean(busy) || !overview.settings.remote.secretSet} onClick={() => void listRemote()}><RefreshCw size={14} /></button></h3>

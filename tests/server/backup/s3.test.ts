@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { S3Client, endpointUrl, signV4 } from '../../../server/backup/s3.js';
+import { S3Client, endpointUrl, signV4, unsafeKey } from '../../../server/backup/s3.js';
 import { fakeBucket } from '../../helpers/s3.js';
 
 test('requests are signed as AWS Signature Version 4 describes (the S3 GET object example)', () => {
@@ -29,4 +29,16 @@ test('objects are written, listed by prefix, read and removed', async t => {
   assert.deepEqual(await client.list('tower/'), []);
   const refused = new S3Client({ endpoint: bucket.endpoint, bucket: 'bucket', region: 'auto', accessKeyId: 'OTHER', secretAccessKey: 'secret' });
   await assert.rejects(refused.put('x', Buffer.from('')), /403 AccessDenied: bad key/);
+});
+
+test('a query is sent exactly as it was signed, and keys that a URL would rewrite are refused', async t => {
+  const bucket = await fakeBucket(t);
+  const client = new S3Client({ endpoint: bucket.endpoint, bucket: 'bucket', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret' });
+  await client.list('my backups/~x');
+  assert.ok(bucket.seen.includes('GET /bucket?list-type=2&prefix=my%20backups%2F~x'), bucket.seen.join(' '));
+  assert.equal(unsafeKey('tower/../x'), true);
+  assert.equal(unsafeKey('./x'), true);
+  assert.equal(unsafeKey('a//b'), true);
+  assert.equal(unsafeKey('tower/'), false);
+  assert.equal(unsafeKey(''), false);
 });

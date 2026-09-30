@@ -25,12 +25,13 @@ async function computer(t: TestContext, options: { now?: () => number; host?: st
   await service.start();
   return { stateDir, groups, exclusions, decisions, service, handoffs, master };
 }
+const RULE = { id: 'rule', name: 'Rule', enabled: true, condition: 'Asked', instructions: 'Answer', replyInstructions: 'Reply', provider: 'codex' };
 const write = (dir: string, name: string, value: unknown) => mkdir(join(dir, name, '..'), { recursive: true }).then(() => writeFile(join(dir, name), JSON.stringify(value), { mode: 0o600 }));
 
 test('a backup made on one computer restores on another: web settings now, the worker part at its next start', async t => {
   const a = await computer(t);
   await write(a.stateDir, 'permissions.json', { version: 1, rules: [{ id: 'r1' }], requests: [{ id: 'a-request' }], codex: [], autoReview: { enabled: true } });
-  await write(a.stateDir, 'slack-automation.json', { rules: [{ id: 'rule' }], workflows: [{ id: 'a-work' }] });
+  await write(a.stateDir, 'slack-automation.json', { rules: [RULE], workflows: [{ id: 'a-work' }] });
   await write(a.stateDir, 'slack-connection.json', { enabled: true, userToken: 'xoxp-1', appToken: 'xapp-1', account: { teamId: 'T', userId: 'U' } });
   await write(a.stateDir, 'trigger-engine.json', { version: 1, triggers: [], settings: {}, trustedFolders: ['/work'], secretGrants: {}, fired: {}, cursors: {}, events: [{ id: 'history' }] });
   await write(a.stateDir, 'master/settings.json', { voice: { voiceId: 'abcdefghij' }, session: { sessionId: 'x', provider: 'claude', startedAt: '' } });
@@ -71,7 +72,7 @@ test('a backup made on one computer restores on another: web settings now, the w
   assert.deepEqual(taken.restore.skills?.guidance, 'Be brief.');
   const permissions = JSON.parse(await readFile(join(b.stateDir, 'permissions.json'), 'utf8'));
   assert.deepEqual(permissions, { version: 1, requests: [{ id: 'b-request' }], codex: [{ path: '/b/rules' }], rules: [{ id: 'r1' }], autoReview: { enabled: true } });
-  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'slack-automation.json'), 'utf8')), { rules: [{ id: 'rule' }], workflows: [] }, 'work under way stays on its computer');
+  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'slack-automation.json'), 'utf8')), { rules: [RULE], workflows: [] }, 'work under way stays on its computer');
   assert.equal(JSON.parse(await readFile(join(b.stateDir, 'slack-connection.json'), 'utf8')).userToken, 'xoxp-1');
   await taken.finish({ parts: ['triggers', 'skills'], errors: [], skills: { restored: [], skipped: [] } });
   assert.equal(await readPendingWorker(b.stateDir), undefined);
@@ -200,4 +201,47 @@ test('a restore applied while a worker is still applying an earlier one is kept 
   assert.equal(next?.restore.id, second.id);
   await next!.finish({ parts: [], errors: [] });
   assert.equal((await readReport(b.stateDir))?.status, 'applied');
+});
+
+test('a key that may only write still counts as backed up; removing old ones is a warning, not a new upload', async t => {
+  const bucket = await fakeBucket(t, { denyList: true });
+  const clock = { now: Date.parse('2026-09-30T00:00:00Z') };
+  const a = await computer(t, { now: () => clock.now });
+  const settings = { enabled: true, intervalHours: 24, keep: 1, passphrase: PASS, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: 'tower/', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' } };
+  await assert.rejects(a.service.saveSettings({ ...settings, remote: { ...settings.remote, prefix: 'tower/../' } }), /접두어/);
+  await a.service.saveSettings(settings);
+  await assert.rejects(a.service.test(), /list not allowed/, 'the connection test asks for listing too');
+  await a.service.runIfDue();
+  const status = (await a.service.overview()).status;
+  assert.equal(status.lastSuccessAt, '2026-09-30T00:00:00.000Z');
+  assert.match(status.lastWarning!, /정리하지 못했습니다/);
+  clock.now += 60 * 60 * 1000;
+  await a.service.runIfDue();
+  assert.equal(bucket.objects.size, 1, 'not uploaded again before the interval');
+});
+
+test('a backup from a newer Tower is refused, and worker settings a service would refuse are never written', async t => {
+  const a = await computer(t);
+  const newer = new BackupService({ stateDir: a.stateDir, version: '9.0.0', skills: async () => structuredClone(skills), restartWorker: async () => true,
+    stores: { groups: a.groups, exclusions: a.exclusions, decisions: a.decisions }, host: 'studio' });
+  await newer.start();
+  const b = await computer(t);
+  await assert.rejects(b.service.check((await newer.export(PASS)).text, PASS), /9\.0\.0에서 만든 백업/);
+
+  await write(b.stateDir, 'slack-connection.json', { enabled: false, language: 'ko' });
+  await write(b.stateDir, 'slack-automation.json', { rules: [], workflows: [] });
+  await write(b.stateDir, 'public-agents.json', { version: 1, agents: [] });
+  await writeFile(join(b.stateDir, 'permissions.json'), '{ not json', { mode: 0o600 });
+  const { applyWorkerFiles } = await import('../../../server/backup/payload.js');
+  const result = await applyWorkerFiles(b.stateDir, {
+    'slack-connection.json': { enabled: 'yes' },
+    'slack-automation.json': { rules: [{ bogus: true }] },
+    'public-agents.json': { version: 1, agents: [{ id: '../decisions', slug: 'x', name: 'n' }] },
+    'permissions.json': { rules: [] },
+  });
+  assert.deepEqual(result.parts, []);
+  assert.equal(result.errors.length, 4);
+  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'slack-connection.json'), 'utf8')), { enabled: false, language: 'ko' });
+  assert.deepEqual(JSON.parse(await readFile(join(b.stateDir, 'public-agents.json'), 'utf8')), { version: 1, agents: [] });
+  assert.equal(await readFile(join(b.stateDir, 'permissions.json'), 'utf8'), '{ not json', 'a file here that cannot be read is left alone');
 });

@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
 /** A bucket in memory that checks each request is signed by the expected key. */
-export async function fakeBucket(t: { after(fn: () => unknown): void }) {
+export async function fakeBucket(t: { after(fn: () => unknown): void }, options: { denyList?: boolean } = {}) {
   const objects = new Map<string, { body: Buffer; at: string }>();
   const seen: string[] = [];
   const read = async (req: IncomingMessage) => { const parts: Buffer[] = []; for await (const part of req) parts.push(part as Buffer); return Buffer.concat(parts); };
@@ -10,6 +10,7 @@ export async function fakeBucket(t: { after(fn: () => unknown): void }) {
     const url = new URL(req.url!, 'http://local');
     seen.push(`${req.method} ${url.pathname}${url.search}`);
     if (!String(req.headers.authorization).startsWith('AWS4-HMAC-SHA256 Credential=AKID/')) { res.writeHead(403); res.end('<Error><Code>AccessDenied</Code><Message>bad key</Message></Error>'); return; }
+    if (options.denyList && req.method === 'GET' && url.searchParams.has('list-type')) { res.writeHead(403); res.end('<Error><Code>AccessDenied</Code><Message>list not allowed</Message></Error>'); return; }
     const [, bucket, ...rest] = url.pathname.split('/');
     const key = rest.map(decodeURIComponent).join('/');
     if (bucket !== 'bucket') { res.writeHead(404); res.end('<Error><Code>NoSuchBucket</Code></Error>'); return; }
