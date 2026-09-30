@@ -69,9 +69,10 @@
 
 .tower-versions { position: relative; display: inline-flex; }
 .tower-versions-trigger { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: none; color: inherit; font: inherit; cursor: help; text-decoration: underline dotted #6f86a3; text-underline-offset: 2px; }
-.tower-versions-trigger:focus-visible { outline: 1px solid #7fb0ff; outline-offset: 2px; border-radius: 3px; }
-.tower-versions-trigger i { width: 6px; height: 6px; border-radius: 50%; background: #e9ba78; }
-.tower-versions-tooltip { position: fixed; z-index: 1000; width: 260px; border: 1px solid #4b6687; border-radius: 10px; padding: 12px 14px; background: #152335; color: #d8e5f5; box-shadow: 0 12px 40px #0009; font-size: 11px; white-space: normal; text-align: left; cursor: default; }
+.tower-versions { overflow: visible !important; }
+.tower-versions-trigger:focus-visible { outline: 1px solid #7fb0ff; outline-offset: 0; border-radius: 3px; background: #7fb0ff22; }
+.host-node .host-link .tower-versions-trigger i { width: 6px; height: 6px; margin: 0; border-radius: 50%; background: #e9ba78; box-shadow: none; animation: none; }
+.tower-versions-tooltip { position: fixed; z-index: 1000; max-height: calc(100vh - 16px); overflow: auto; border: 1px solid #4b6687; border-radius: 10px; padding: 12px 14px; background: #152335; color: #d8e5f5; box-shadow: 0 12px 40px #0009; font-size: 11px; white-space: normal; text-align: left; cursor: default; }
 .tower-versions-tooltip > strong { display: block; max-width: none; font-size: 12px; color: #d8e5f5; }
 .tower-versions-tooltip dl { margin: 8px 0 0; }
 .tower-versions-tooltip dl > div { display: grid; grid-template-columns: 78px 1fr; gap: 8px; border-top: 1px solid #30465f; padding: 7px 0; }

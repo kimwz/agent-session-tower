@@ -340,7 +340,7 @@ export interface SystemStatus {
   sampledAt: string;
 }
 /** The versions of Tower's own processes besides the web server and the worker. */
-export interface ComponentVersions { terminalHost: string | null; master: string | null }
+export interface ComponentVersions { terminalHost?: string | null; master?: string | null }
 
 export interface Snapshot {
   sessions: Session[];

@@ -92,27 +92,30 @@ test('the host disables Auto Prompt while the connection cannot start a run', ()
 });
 
 test('a joined computer’s host node says whether it is connected, out of date or needs an update', () => {
-  const live = host({ name: 'studio', link: { status: 'connected', live: true, version: '1.23.0' } });
+  const live = host({ name: 'studio', link: { status: 'connected', live: true, version: '1.23.0' }, versions: { web: '1.23.0' } });
   assert.match(live, /class="host-with-usage is-remote"/);
-  assert.match(live, /class="host-link connected live" role="status"><i><\/i>연결됨 · v1\.23\.0/);
+  assert.match(live, /class="host-link connected live"><i><\/i><span role="status">연결됨<\/span> · <span class="tower-versions[^>]*><button[^>]*>v1\.23\.0<\/button>/);
   assert.match(live, /aria-label="studio에서 Auto Prompt 열기"/);
   const away = host({ name: 'studio', link: { status: 'offline', live: false } });
   assert.match(away, /class="host-with-usage is-remote is-stale"/);
-  assert.match(away, /<i><\/i>오프라인<\/span>/, 'the version is left out while it is away');
+  assert.match(away, /<span role="status">오프라인<\/span><\/span>/, 'the version is left out while it is away');
   assert.match(away, /마지막으로 본 상태입니다/);
   assert.match(host({ link: { status: 'update-required', live: false } }), /업데이트 필요/);
   assert.doesNotMatch(host(), /host-link/, 'without a version this computer’s host node shows no line for it');
 });
 
 test('this computer’s host node shows its own Tower version', () => {
-  const local = host({ version: '1.55.1' });
-  assert.match(local, /class="host-link local"><i><\/i>이 컴퓨터 · v1\.55\.1<\/span>/);
+  const local = host({ versions: { web: '1.55.1' } });
+  assert.match(local, /class="host-link local"><i><\/i>이 컴퓨터 · <span class="tower-versions[^"]*">/);
+  assert.match(local, />v1\.55\.1<\/button>/);
   assert.doesNotMatch(local, /is-remote/);
-  const versions = host({ version: '1.56.0', versions: { web: '1.56.0', worker: '1.53.2', terminalHost: null, master: '1.56.0' } });
+  const versions = host({ versions: { web: '1.56.0', worker: '1.53.2', terminalHost: null, master: '1.56.0' } });
   assert.match(versions, /aria-label="Tower 버전: 화면 서버 v1\.56\.0, 실행 워커 v1\.53\.2, 터미널 호스트 실행 중 아님, 마스터 호스트 v1\.56\.0"/, 'every process is named for hover, focus and screen readers');
   assert.match(versions, /class="tower-versions-trigger behind"[^>]*>v1\.56\.0<i/, 'an older worker is marked on the version');
-  assert.doesNotMatch(host({ version: '1.56.0', versions: { web: '1.56.0', worker: '1.56.0' } }), /behind/);
-  assert.doesNotMatch(host({ version: '1.55.1', link: { status: 'connected', live: true, version: '1.23.0' } }), /이 컴퓨터/, 'a joined computer shows its own version only');
+  assert.doesNotMatch(host({ versions: { web: '1.56.0', worker: '1.56.0' } }), /behind/);
+  const joined = host({ versions: { web: '1.23.0', worker: '1.23.0' }, link: { status: 'connected', live: true, version: '1.23.0' } });
+  assert.doesNotMatch(joined, /이 컴퓨터/, 'a joined computer shows its own version only');
+  assert.match(joined, /<span role="status">연결됨<\/span> · <span class="tower-versions/, 'only the connection state is announced, the version button sits beside it');
 });
 
 test('cards of an unreachable computer are marked as its last known state', () => {

@@ -487,10 +487,16 @@ async function main() {
   // The terminal and master hosts keep their own code until they restart; what they run is looked at every half
   // minute, never starting one and never keeping one alive (the master host does not count pings as use; the terminal
   // host is asked once per run of it), so the page can show every version Tower runs here.
+  // A process that could not be asked is left out (unknown), never shown as not running; one look at a time.
+  let asking = false;
   const askComponents = async () => {
-    const [terminalHost, masterHost] = await Promise.all([workspaceTerminals.displayVersion().catch(() => undefined), master.hostVersion().catch(() => undefined)]);
-    const next: ComponentVersions = { terminalHost: terminalHost ?? null, master: masterHost ?? null };
-    if (JSON.stringify(next) !== JSON.stringify(componentVersions)) { componentVersions = next; changed(); }
+    if (asking) return;
+    asking = true;
+    try {
+      const [terminalHost, masterHost] = await Promise.all([workspaceTerminals.displayVersion().catch(() => undefined), master.hostVersion().catch(() => undefined)]);
+      const next: ComponentVersions = { ...(terminalHost !== undefined ? { terminalHost } : {}), ...(masterHost !== undefined ? { master: masterHost } : {}) };
+      if (JSON.stringify(next) !== JSON.stringify(componentVersions)) { componentVersions = next; changed(); }
+    } finally { asking = false; }
   };
   void askComponents();
   const componentTimer = setInterval(() => void askComponents(), 30_000);

@@ -32,7 +32,7 @@ const base = (): Snapshot => ({
     { cwd: '/work/secret', root: '/work/secret', ahead: 0, behind: 0, changes: 2, checkedAt: now },
     { cwd: '/work/nested', root: '/work/secret/deep', ahead: 0, behind: 0, changes: 0, checkedAt: now },
   ],
-  scanning: false, hostname: 'machine-b', version: '1.22.0', runnerVersion: '1.22.0', updatedAt: now,
+  scanning: false, hostname: 'machine-b', version: '1.22.0', runnerVersion: '1.22.0', componentVersions: { terminalHost: null, master: '1.22.0' }, updatedAt: now,
   triggers: { triggers: [], recent: [], limits: {} } as unknown as Snapshot['triggers'],
 });
 
@@ -48,7 +48,8 @@ test('a remote controller never sees an excluded folder, its sessions, their sub
 test('only listed fields leave the machine, so a field added to the snapshot later stays home', () => {
   const snapshot = { ...base(), futureSecret: 'never sent', nodes: [{ id: 'other-machine' }] } as unknown as Snapshot;
   const view = remoteSnapshot(snapshot, scope(), 'controller-a1b2c3d4e5f6');
-  assert.deepEqual(Object.keys(view).sort(), ['autoPrompts', 'groups', 'hostname', 'providers', 'repositories', 'runnerVersion', 'runs', 'scanning', 'sessions', 'updatedAt', 'version']);
+  assert.deepEqual(Object.keys(view).sort(), ['autoPrompts', 'componentVersions', 'groups', 'hostname', 'providers', 'repositories', 'runnerVersion', 'runs', 'scanning', 'sessions', 'updatedAt', 'version']);
+  assert.deepEqual(view.componentVersions, { terminalHost: null, master: '1.22.0' });
   assert.equal('filePath' in view.sessions.find(item => item.id === 'codex:file')!, false);
   assert.deepEqual(view.groups, [{ cwd: '/work/open', title: 'Open', pinned: true }], 'screen hiding is the viewer’s own setting and is not shared');
   assert.deepEqual(view.runs[0].origin, { kind: 'trigger' }, 'only the kind of origin is shared');

@@ -30,7 +30,7 @@ test('sizes read in GB, with a decimal only below 100 GB', () => {
 });
 
 const host = (patch: Partial<HostData>) => renderToStaticMarkup(createElement(ReactFlowProvider, null,
-  createElement(HostNode as unknown as FunctionComponent<{ id: string; data: HostData }>, { id: 'host', data: { name: 'studio', active: 0, providers: [], disabled: false, onAutoPrompt() {}, version: '1.79.0', ...patch } })));
+  createElement(HostNode as unknown as FunctionComponent<{ id: string; data: HostData }>, { id: 'host', data: { name: 'studio', active: 0, providers: [], disabled: false, onAutoPrompt() {}, versions: { web: '1.79.0' }, ...patch } })));
 
 test('the tooltip leaves out load averages a computer does not report', () => {
   assert.doesNotMatch(host({ system: status({ load: [0, 0, 0] }) }), /부하/);

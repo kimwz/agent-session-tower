@@ -25,8 +25,6 @@ export interface Host {
   /** Some state of it is known to this page, even if out of date. */
   known: boolean;
   version?: string;
-  /** This computer's execution worker, which keeps its own code until it is idle. */
-  runnerVersion?: string;
   /** Every Tower process's version on it, as far as its state says. */
   versions?: TowerVersions;
   providers: ProviderHealth[];
@@ -90,7 +88,7 @@ const named = (node: string, snapshot: Snapshot) => {
 export function combinedView(local: Snapshot | null, nodes: ReadonlyMap<string, Snapshot>): { view: Snapshot | null; hosts: Host[]; complete: boolean } {
   if (!local) return { view: null, hosts: [], complete: false };
   const complete = local.nodes !== undefined;
-  const here: Host = { name: local.hostname, status: 'local', live: true, canWork: true, workspace: true, known: true, version: local.version, ...(local.runnerVersion ? { runnerVersion: local.runnerVersion } : {}), versions: versionsOf(local.version, local), providers: local.providers, ...(local.system ? { system: local.system } : {}) };
+  const here: Host = { name: local.hostname, status: 'local', live: true, canWork: true, workspace: true, known: true, version: local.version, versions: versionsOf(local.version, local), providers: local.providers, ...(local.system ? { system: local.system } : {}) };
   const listed = local.nodes ?? [];
   for (const node of scoped.keys()) if (!listed.some(item => item.id === node)) scoped.delete(node);
   if (!listed.length) return { view: local, hosts: [here], complete };

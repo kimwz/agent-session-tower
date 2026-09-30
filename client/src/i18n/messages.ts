@@ -1780,7 +1780,7 @@ export const english: Record<string, string> = {
   "열린 터미널을 모두 닫으면 v{0}(으)로 바뀝니다.": "Moves to v{0} once every terminal is closed.",
   "다시 시작할 때 v{0}(으)로 바뀝니다.": "Moves to v{0} when it restarts.",
   "실행 중 아님": "Not running",
-  "이전 버전": "Earlier version",
+  "이전 버전": "Older version",
   "Tower 버전": "Tower versions",
   "Tower 버전: {0}": "Tower versions: {0}",
   "이 컴퓨터": "This computer",
