@@ -562,7 +562,9 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // Nobody left to tell, or the owner closed the conversation: nothing is sent, and it is not tried again.
       if (!origin || !runs.getSession(request.sessionId) || await closedNow(request.sessionId)) { await permissions.markTold(request.id); return 'done'; }
       // Sent only once the conversation has nothing running or waiting, so a close meanwhile is seen before it starts a turn.
-      if (runs.list().some(item => item.sessionId === request.sessionId && (item.status === 'queued' || item.status === 'running'))) return 'later';
+      // A wakeup scheduled for later does not count: it would hold the result back until then.
+      if (runs.list().some(item => item.sessionId === request.sessionId && (item.status === 'running'
+        || (item.status === 'queued' && (!item.scheduled || Date.parse(item.scheduled.at) <= Date.now() + 60_000))))) return 'later';
       const result = now.run.status === 'failed' ? `실패: ${now.run.error ?? '알 수 없는 이유'}` : now.run.timedOut ? '시간 제한으로 중단됨' : `종료 코드 ${now.run.exitCode ?? now.run.signal ?? '?'}${now.run.error ? `, ${now.run.error}` : ''}`;
       await runs.enqueue(request.sessionId, `${TOWER_NOTICE} 한 번 실행을 요청한 명령이 끝났습니다 (${result}). permissions_runResult에 id "${request.id}"를 주면 출력을 받습니다.`, {},
         { origin, ...(run?.unattended ? { unattended: true } : {}) });
@@ -572,15 +574,22 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // Only an attempt under way counts as work for a handoff; one waiting to try again is picked up by the next worker.
     const runNotices = new Set<ReturnType<typeof setTimeout>>();
     const runWaits = new Set<ReturnType<typeof setTimeout>>();
-    const runFinished = (request: PermissionRequest, delay = 5_000) => {
+    // Tried for about an hour; a conversation that cannot take it by then reads the result with permissions_runResult.
+    const MAX_TELLS = 120;
+    const runFinished = (request: PermissionRequest, delay = 5_000, attempt = 0) => {
       const timer = setTimeout(() => {
         runWaits.delete(timer);
         // A worker handing off or pausing sends nothing more; the next one tells what is left.
         if (stopping) return;
-        if (paused) { runFinished(request, 30_000); return; }
+        if (paused) { runFinished(request, 30_000, attempt); return; }
         runNotices.add(timer);
         void tellRun(request).catch(error => { console.error(`A run's result could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`); return 'later' as const; })
-          .then(next => { runNotices.delete(timer); if (next === 'later' && !stopping) runFinished(request, 30_000); });
+          .then(async next => {
+            runNotices.delete(timer);
+            if (next !== 'later' || stopping) return;
+            if (attempt + 1 >= MAX_TELLS) { await permissions.markTold(request.id).catch(() => {}); return; }
+            runFinished(request, 30_000, attempt + 1);
+          });
       }, delay);
       timer.unref();
       runWaits.add(timer);
