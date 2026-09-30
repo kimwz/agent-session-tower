@@ -1514,6 +1514,8 @@ export class RunManager extends EventEmitter {
       run.output = 'Tower will resume unfinished background work after an unexpected provider exit.';
       this.append(after, `\n[Tower] Scheduled background recovery ${backgroundRecoveryAttempt}/3.\n`);
     }
+    // Remembered as Tower's own message, so the permission reviewer never takes it for words typed elsewhere.
+    void this.options.ownerPrompts?.record(run.sessionId, run.createdAt, { sent: run.prompt }).catch(() => {});
     this.runs.set(run.id, run);
     this.prune();
     this.changed();

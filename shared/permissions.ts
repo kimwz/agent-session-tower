@@ -342,7 +342,7 @@ export function autoReviewBlock(rule: Pick<PermissionRuleInput, 'kind' | 'value'
   if (MCP_TOOL.test(value)) {
     // A tool that sends, deletes, runs or pays is the owner's to allow, like its command counterparts. Only the tool's own
     // words count (not the server's name), and only whole ones (`list_deployments` only reads).
-    const words = value.split('__').slice(2).join('_').toLowerCase().split(/[_-]+/);
+    const words = value.split('__').slice(2).join('_').replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().split(/[_-]+/);
     if (words.some(word => MCP_DANGER.has(word))) return '보내기·삭제·실행·배포 같은 일을 하는 MCP 도구는 소유자가 정합니다.';
     return undefined;
   }

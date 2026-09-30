@@ -44,6 +44,7 @@ test('hard limits: never-allowed commands, broad rules, Bash as a Claude rule an
   assert.equal(autoReviewBlock({ kind: 'claude', value: 'Edit(//work/shop/src/**)' }, cwd), undefined);
   assert.equal(autoReviewBlock({ kind: 'claude', value: 'mcp__github__merge_pull_request' }, cwd), undefined, 'one MCP tool by its full name');
   for (const value of ['mcp__slack__slack_send_message', 'mcp__supabase__execute_sql', 'mcp__vercel__delete_project']) assert.ok(autoReviewBlock({ kind: 'claude', value }, cwd), value);
+  for (const value of ['mcp__gmail__sendEmail', 'mcp__vercel__deleteProject', 'mcp__supabase__executeSql']) assert.ok(autoReviewBlock({ kind: 'claude', value }, cwd), value);
   for (const value of ['mcp__postgres__list_tables', 'mcp__stripe__list_payments', 'mcp__vercel__list_deployments']) assert.equal(autoReviewBlock({ kind: 'claude', value }, cwd), undefined, value);
   const diff = ruleGuards({ kind: 'command', value: 'git diff' }).claude;
   assert.ok(diff.includes('Bash(git diff * --output=*)') && !diff.some(pattern => pattern.includes('--output*') || pattern.includes(' -O')), 'git diff --output-indicator-new and -O<orderfile> stay allowed');
