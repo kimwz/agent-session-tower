@@ -21,7 +21,7 @@ test('files older than an hour are touched so /tmp cleaners keep them', async t 
   await utimes(f.token, old, old);
   await utimes(f.socket, old, old);
   const stop = keepEndpoint(f, 10);
-  t.after(stop);
+  t.after(() => stop());
   await pause(100);
   for (const path of [f.token, f.socket]) {
     const info = await stat(path);
@@ -35,8 +35,30 @@ test('an existing credential is never replaced, and nothing is written once stop
   const stop = keepEndpoint(f, 10);
   await pause(60);
   assert.equal(await readFile(f.token, 'utf8'), 'b'.repeat(64));
-  stop();
+  await stop();
   await rm(f.token);
   await pause(60);
   await assert.rejects(stat(f.token), { code: 'ENOENT' });
+});
+
+test('stopping waits for a credential being written, so it never lands after the host removed its files', async t => {
+  const f = await files(t);
+  let finish!: () => void;
+  const writing = new Promise<void>(resolve => { finish = resolve; });
+  let started = false;
+  let written = false;
+  const missing = () => Promise.reject(Object.assign(new Error('gone'), { code: 'ENOENT' }));
+  const stop = keepEndpoint(f, 5, {
+    lstat: missing as never,
+    utimes: (() => Promise.resolve()) as never,
+    writeFile: (async () => { started = true; await writing; written = true; }) as never,
+  });
+  while (!started) await pause(5);
+  let stopped = false;
+  const stopping = stop().then(() => { stopped = true; });
+  await pause(30);
+  assert.equal(stopped, false, 'stop waits for the write underway');
+  finish();
+  await stopping;
+  assert.equal(written, true);
 });

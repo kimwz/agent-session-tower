@@ -197,11 +197,12 @@ export async function startMasterHost(options: MasterHostOptions) {
   }
 
   let idleTimer: ReturnType<typeof setInterval> | undefined;
-  let stopKeeping: (() => void) | undefined;
+  let stopKeeping: (() => Promise<void>) | undefined;
   const close = async (idle = false) => {
     if (closing) return;
     closing = true;
-    stopKeeping?.();
+    // A credential being written again must land before this host removes its files and lock.
+    await stopKeeping?.();
     if (idleTimer) clearInterval(idleTimer);
     for (const stream of streams) stream.end();
     server.closeAllConnections();

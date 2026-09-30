@@ -91,11 +91,12 @@ export async function startTerminalHost(options: TerminalHostOptions) {
   });
   server.requestTimeout = 0;
   let idleTimer: ReturnType<typeof setInterval> | undefined;
-  let stopKeeping: (() => void) | undefined;
+  let stopKeeping: (() => Promise<void>) | undefined;
   const close = async (idle = false) => {
     if (closing) return;
     closing = true;
-    stopKeeping?.();
+    // A credential being written again must land before this host removes its files and lock.
+    await stopKeeping?.();
     if (idleTimer) clearInterval(idleTimer);
     server.closeAllConnections();
     await new Promise<void>(resolve => server.close(() => resolve()));

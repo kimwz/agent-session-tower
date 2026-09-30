@@ -322,7 +322,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   options.publicAgents?.on('change', changed);
   let idleTimer: ReturnType<typeof setInterval> | undefined;
   let handoffTimer: ReturnType<typeof setInterval> | undefined;
-  let stopKeeping: (() => void) | undefined;
+  let stopKeeping: (() => Promise<void>) | undefined;
   // Status alone is not enough: a cancelled turn may still be closing its provider process.
   const quiet = () => !pending && !options.runs.busy() && !options.autoPrompts?.busy()
     && !options.autoPrompts?.list().some(job => !['completed', 'error', 'cancelled'].includes(job.status))
@@ -378,7 +378,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   const close = async (idle = false) => {
     if (closing) return;
     closing = true;
-    stopKeeping?.();
+    // A credential being written again must land before this host removes its files and lock.
+    await stopKeeping?.();
     if (idleTimer) clearInterval(idleTimer);
     if (handoffTimer) clearInterval(handoffTimer);
     options.runs.off('change', changed); options.sessions.off('change', changed); options.autoPrompts?.off('change', changed); options.triggers?.off('change', changed); options.publicAgents?.off('change', changed);
