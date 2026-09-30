@@ -1,7 +1,7 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { FolderChip } from '../settings/FolderChip';
 import { SettingsFrameContext, SettingsPane, useSettingsGuard } from '../settings/SettingsPane';
-import { Archive, ArrowLeft, Check, ChevronRight, Download, Eye, FolderInput, FolderOpen, Globe, Layers, Link2, LoaderCircle, Merge, MoreHorizontal, Pencil, Pin, PinOff, Plus, RefreshCw, ScrollText, Settings2, ShieldCheck, Sparkles, Trash2, Upload, X } from 'lucide-react';
+import { Archive, ArrowLeft, Check, ChevronRight, Download, Eye, FolderInput, FolderOpen, Globe, Layers, Link2, LoaderCircle, Merge, MoreHorizontal, Pencil, Pin, PinOff, Plus, RefreshCw, ScrollText, Settings2, Sparkles, Trash2, Upload, X } from 'lucide-react';
 import type { Skill, SkillBundle, SkillDetail, SkillImportChoice, SkillImportPlan, SkillOverview, SkillProposal, SkillScope, SkillTargets } from '../../../shared/skills';
 import { MAX_SKILL_DESCRIPTION, proposalReady, SKILL_NAME, targetsCover, targetsRevision } from '../../../shared/skills';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
@@ -15,9 +15,7 @@ const folderName = (path: string) => path.split('/').filter(Boolean).at(-1) || p
 
 type Draft = { dir?: string; revision?: string; name: string; description: string; body: string; scope: SkillScope; projectCwd?: string; pinned: boolean; proposalId?: string; external?: boolean; separate?: string;
   /** A skill kept in Tower: where it applies, and the value it was opened with. */
-  targets?: SkillTargets; targetsRevision?: string;
-  /** A Tower skill whose text the owner has not saved or confirmed in Tower since it last changed. */
-  unconfirmed?: boolean };
+  targets?: SkillTargets; targetsRevision?: string };
 type View = 'mine' | 'proposals' | 'all' | 'guidance' | 'backup' | 'settings';
 
 /** Where a new skill or a proposal starts applying: the project it came from, or everywhere for a global one. */
@@ -67,7 +65,7 @@ export function SkillsPanel({ token, cwd, projects, onClearFolder, onChanged, on
       const detail = await api<SkillDetail>(`/api/skills/detail${query(cwd, { dir: skill.dir })}`);
       const kept = detail.copies?.find(copy => copy.dir === detail.dir)?.providers;
       setDraft({ dir: detail.dir, revision: detail.revision, name: detail.name, description: detail.description, body: detail.body, scope: detail.scope, projectCwd: detail.cwd, pinned: detail.pinned, external: detail.external,
-        ...(detail.managed && detail.targets ? { targets: detail.targets, targetsRevision: targetsRevision(detail.targets) } : {}), ...(detail.confirmed === false ? { unconfirmed: true } : {}),
+        ...(detail.managed && detail.targets ? { targets: detail.targets, targetsRevision: targetsRevision(detail.targets) } : {}),
         ...(detail.copies && kept ? { separate: kept.map(provider => provider === 'claude' ? 'Claude Code' : 'Codex').join('·') } : {}) });
     } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
   }
@@ -92,7 +90,6 @@ export function SkillsPanel({ token, cwd, projects, onClearFolder, onChanged, on
     {error && <p className="auth-error" role="alert">{translateMessage(error)}</p>}
     {notice && <p className="notification-notice" role="status">{notice}</p>}
     {draft ? <SkillEditor draft={draft} cwd={cwd} projects={projects} busy={busy} onCancel={() => setDraft(null)}
-      onConfirm={draft.dir && draft.unconfirmed && overview?.review ? () => void mutate('confirm', { dir: draft.dir, revision: draft.revision, targetsRevision: draft.targetsRevision ?? '' }, t('{0} 스킬 내용을 확인했습니다.', { 0: draft.name })).then(done => { if (done) setDraft(null); }) : undefined}
       onDelete={draft.dir ? () => void remove({ dir: draft.dir!, name: draft.name }).then(done => { if (done) setDraft(null); }) : undefined}
       onSave={async next => {
         const { targets, targetsRevision: opened, ...rest } = next;
@@ -101,9 +98,6 @@ export function SkillsPanel({ token, cwd, projects, onClearFolder, onChanged, on
       }} />
       : !overview ? !error && <LoaderCircle className="spin" aria-label={t('불러오는 중')} /> : <>
       {secondary[view] && <div className="skills-subhead"><button type="button" className="skills-back" onClick={() => setView('mine')}><ArrowLeft size={14} />{t('내 스킬')}</button><h3>{secondary[view]}</h3></div>}
-      {view === 'mine' && overview.review && overview.gone?.map(item => <div key={item.dir} className="permission-warning"><ShieldCheck size={15} /><div>
-        <p>{t('확인했던 {0} 스킬이 Tower 밖에서 지워졌습니다. 그 스킬이 적용되던 프로젝트의 권한 요청은 자동 검토하지 않고 소유자에게 넘깁니다.', { 0: item.name })}</p>
-        <button type="button" className="secondary-button" disabled={busy} onClick={() => void mutate('forget', { dir: item.dir }, t('{0} 스킬의 확인 기록을 지웠습니다.', { 0: item.name }))}>{t('확인 기록 지우기')}</button></div></div>)}
       {view === 'mine' && <TowerSkills overview={overview} cwd={cwd} busy={busy} proposals={ready.length} onNew={create} onEdit={skill => void edit(skill)} onProposals={() => setView('proposals')} onAll={() => setView('all')}
         onToggle={(skill, on) => { const targets = skill.targets!;
           void mutate('assign', { dir: skill.dir, targets: targetsBody(toggleTargets(targets, cwd!, on)), targetsRevision: targetsRevision(targets) },
@@ -127,7 +121,7 @@ export function SkillsPanel({ token, cwd, projects, onClearFolder, onChanged, on
           {overview.notes.map(note => <li key={`${note.at}-${note.sessionId}`}><button type="button" className="link-button" onClick={() => onOpenSession(note.sessionId)}>{note.title}</button><small>{date(note.at)} · {folderName(note.cwd)}</small><p>{note.note}</p></li>)}
         </ul></details>}
       </section>}
-      {view === 'guidance' && <GuidanceEditor overview={overview} busy={busy} onConfirm={revision => void mutate('confirmGuidance', { revision }, t('지침 내용을 확인했습니다.'))} onSave={(owner, revision) => void mutate('guidance', { owner, revision }, t('지침을 저장했습니다. 새로 시작하는 대화부터 적용됩니다.'))
+      {view === 'guidance' && <GuidanceEditor overview={overview} busy={busy} onSave={(owner, revision) => void mutate('guidance', { owner, revision }, t('지침을 저장했습니다. 새로 시작하는 대화부터 적용됩니다.'))
         // After a save refused because the guidance changed elsewhere, the latest version is fetched; the draft stays in the editor.
         .then(saved => { if (!saved) void load().catch(() => {}); })} />}
       {view === 'backup' && <Backup overview={overview} token={token} projects={projects} busy={busy} onImport={body => mutate('import', body, t('백업을 가져왔습니다.'))} onError={setError} />}
@@ -165,7 +159,6 @@ const targetsLabel = (targets: SkillTargets) => targets.all ? t('모든 프로�
 /** The skills kept in Tower, one quiet row each: what it is, where it applies; a click opens it. */
 export function TowerSkills({ overview, cwd, busy, proposals, onNew, onEdit, onToggle, onProposals, onAll }: { overview: SkillOverview; cwd?: string; busy: boolean; proposals: number; onNew: () => void; onEdit: (skill: Skill) => void; onToggle: (skill: Skill, on: boolean) => void; onProposals: () => void; onAll: () => void }) {
   const { t } = useI18n();
-  const review = overview.review === true;
   const [filter, setFilter] = useState('');
   const stored = overview.stored ?? [];
   const needle = filter.trim().toLowerCase();
@@ -188,8 +181,7 @@ export function TowerSkills({ overview, cwd, busy, proposals, onNew, onEdit, onT
         const inherited = Boolean(here && targets && !targets.all && targets.projects.some(project => project !== cwd && targetsCover({ all: false, projects: [project] }, cwd!)));
         return <li key={skill.dir} className={`tower-skill ${cwd && !here ? 'elsewhere' : ''}`}>
           <button type="button" className="tower-skill-open" onClick={() => onEdit(skill)} aria-label={t('{0} 열기', { 0: skill.name })}>
-            <span className="tower-skill-name"><strong>{skill.name}</strong>{!skill.pinned && <span className="skill-badge quiet" title={t('턴 시작 때 알리지 않습니다. 에이전트가 설명을 보고 스스로 고를 때만 씁니다.')}>{t('알림 끔')}</span>}
-              {review && skill.confirmed === false && <span className="skill-badge unlinked" title={t('Tower에서 저장하거나 확인한 뒤 내용이 바뀌었습니다. 권한 자동 검토의 근거로 쓰려면 열어서 확인하세요.')}>{t('확인 필요')}</span>}</span>
+            <span className="tower-skill-name"><strong>{skill.name}</strong>{!skill.pinned && <span className="skill-badge quiet" title={t('턴 시작 때 알리지 않습니다. 에이전트가 설명을 보고 스스로 고를 때만 씁니다.')}>{t('알림 끔')}</span>}</span>
             <span className="tower-skill-description">{skill.description || t('설명 없음')}</span>
           </button>
           {targets && <span className={`skill-target-chip ${targets.all ? 'all' : !targets.projects.length ? 'none' : ''}`} title={targets.all ? t('모든 프로젝트') : targets.projects.join('\n') || t('어느 프로젝트에도 적용하지 않습니다')}>{targets.all ? <Globe size={12} /> : <FolderOpen size={12} />}{targetsLabel(targets)}</span>}
@@ -259,7 +251,7 @@ function SkillList({ overview, cwd, busy, onNew, onEdit, onPin, onLink, onMerge,
   </section>;
 }
 
-function SkillEditor({ draft: initial, cwd, projects, busy, onCancel, onSave, onDelete, onConfirm }: { draft: Draft; cwd?: string; projects: string[]; busy: boolean; onCancel: () => void; onSave: (draft: Draft) => void; onDelete?: () => void; onConfirm?: () => void }) {
+function SkillEditor({ draft: initial, cwd, projects, busy, onCancel, onSave, onDelete }: { draft: Draft; cwd?: string; projects: string[]; busy: boolean; onCancel: () => void; onSave: (draft: Draft) => void; onDelete?: () => void }) {
   const { t } = useI18n();
   const [draft, setDraft] = useState(initial);
   const editing = Boolean(draft.dir);
@@ -269,8 +261,6 @@ function SkillEditor({ draft: initial, cwd, projects, busy, onCancel, onSave, on
     <h3>{editing ? t('{0} 편집', { 0: draft.name }) : draft.proposalId ? t('추천 검토 후 등록') : t('새 스킬')}</h3>
     {draft.separate && <p className="auth-hint">{t('이 스킬은 에이전트마다 따로 복사본이 있습니다. 저장하면 {0}가 쓰는 복사본만 바뀝니다.', { 0: draft.separate })}</p>}
     {draft.external && <p className="auth-hint">{t('skills 명령으로 설치한 스킬입니다. 다시 설치하면 여기서 고친 내용이 바뀝니다.')}</p>}
-    {onConfirm && <div className="permission-warning"><ShieldCheck size={15} /><div><p>{t('이 내용은 Tower에서 저장하거나 확인한 뒤 바뀌었습니다(또는 아직 확인하지 않았습니다). 권한 자동 검토는 확인한 내용만 소유자의 지시로 봅니다. 아래 내용을 읽고 맞으면 확인하세요.')}</p>
-      <button type="button" className="secondary-button" disabled={busy || initial.body !== draft.body || initial.description !== draft.description || targetsRevision(initial.targets) !== targetsRevision(draft.targets)} onClick={onConfirm}>{t('이 내용 확인')}</button></div></div>}
     <label>{t('이름')}<input value={draft.name} disabled={editing || busy} required maxLength={64} placeholder="cross-verified-delivery" spellCheck={false} onChange={event => set({ name: event.target.value.toLowerCase().replace(/\s+/g, '-') })} />
       {nameError ? <small className="auth-error">{nameError}</small> : <small>{t('폴더 이름이 됩니다. 영어 소문자, 숫자, 하이픈.')}</small>}</label>
     <label>{t('언제 쓰는 스킬인가요?')}<textarea rows={3} value={draft.description} required maxLength={MAX_SKILL_DESCRIPTION} disabled={busy} placeholder={t('예: 새 기능을 구현하거나 설계를 바꾸는 요청을 받았을 때. 설계 → 교차 검증 → 구현 → 교차 검증 순서로 진행한다.')} onChange={event => set({ description: event.target.value })} />
@@ -322,7 +312,7 @@ function AdvisorSettings({ overview, busy, onChange, onBackfill, onRefresh }: { 
 }
 
 /** The owner's own guidance, kept in Tower and given to every agent with Tower's text. */
-function GuidanceEditor({ overview, busy, onSave, onConfirm }: { overview: SkillOverview; busy: boolean; onSave: (owner: string, revision: string) => void; onConfirm: (revision: string) => void }) {
+function GuidanceEditor({ overview, busy, onSave }: { overview: SkillOverview; busy: boolean; onSave: (owner: string, revision: string) => void }) {
   const { t } = useI18n();
   const guidance = overview.guidance;
   const [owner, setOwner] = useState(guidance?.owner ?? '');
@@ -334,10 +324,7 @@ function GuidanceEditor({ overview, busy, onSave, onConfirm }: { overview: Skill
     <p className="auth-hint">{t('모든 Claude Code와 Codex 대화가 받는 내 지침입니다. 타워 폴더(guidance/owner.md)에 있어 백업하고 옮길 수 있습니다. 요청과 프로젝트 지침이 먼저입니다.')}</p>
     {!guidance.installed && <p className="auth-hint">{t('이 타워는 기본 상태 폴더가 아니어서 에이전트 지침에 넣지 않고 저장만 합니다.')}</p>}
     <textarea className="skill-body" rows={14} value={owner} disabled={busy} spellCheck={false} aria-label={t('내 지침')} placeholder={t('예: 답은 항상 한국어로 합니다. 배포 전에는 반드시 테스트를 돌립니다.')} onChange={event => setOwner(event.target.value)} />
-    {overview.review && guidance.confirmed === false && guidance.owner.trim() && <p className="auth-hint">{t('지침이 Tower에서 저장하거나 확인한 뒤 바뀌었습니다. 권한 자동 검토는 확인한 지침만 소유자의 지시로 봅니다.')}</p>}
-    <div className="skills-toolbar"><span />
-      {overview.review && guidance.confirmed === false && guidance.owner.trim() && owner === guidance.owner && <button className="secondary-button" disabled={busy} onClick={() => onConfirm(guidance.revision)}><ShieldCheck size={14} />{t('이 내용 확인')}</button>}
-      <button className="primary-button" disabled={busy || owner === guidance.owner} onClick={() => onSave(owner, guidance.revision)}><Check size={14} />{t('저장')}</button></div>
+    <div className="skills-toolbar"><span /><button className="primary-button" disabled={busy || owner === guidance.owner} onClick={() => onSave(owner, guidance.revision)}><Check size={14} />{t('저장')}</button></div>
     <details><summary>{t('타워가 넣는 기본 지침 보기')}</summary><pre className="skill-preview">{guidance.tower}</pre></details>
   </section>;
 }

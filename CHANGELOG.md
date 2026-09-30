@@ -4,6 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.91.0] - 2026-09-30
+
+### Changed
+- **The permission reviewer trusts your agents and reads more of what you said.** Tower's agents do your work on your own computer, so the reviewer no longer guards against an agent forging your instructions, and skips far less often:
+  - Your words are the whole conversation, read from its start: every message you sent, and your answers to the agent's questions, including ones not in its history yet. It works in conversations started before 1.89, outside Tower, or through the master too. It still leaves a request to you when the history cannot be read to its start, or when what you said is too long to pass on whole.
+  - The Tower skills that apply to the project and your guidance count as they are now; there is nothing to confirm. The **확인 필요** badges, **이 내용 확인** and **확인 기록 지우기** are gone.
+  - The project's `AGENTS.md` and `CLAUDE.md` count as your instructions, as they are in the project's folder.
+  - A trigger's instructions count whoever changed them last.
+- Command rules may carry options. `gh pr merge --squash`, `git push -u origin main` or `git commit -m wip` are reviewed; dangerous options in any spelling git accepts (`--force-with-lease`, `--del`, `-vf`, `+main`, `git checkout -B`, `git log --output=…`) and options before a subcommand (`git -C dir push`) still leave the rule to you.
+- `owner-prompts.json` from 1.89/1.90 is no longer used and can be deleted.
+
 ## [1.90.0] - 2026-09-30
 
 ### Changed
