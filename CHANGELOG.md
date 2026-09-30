@@ -4,6 +4,25 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.87.0] - 2026-09-30
+
+### Changed
+- **GitHub issue triggers are one kind with options.** 새 이슈, 열린 이슈 차례로 and 나에게 할당 are now a single **이슈** watch; PR review requests stay separate. You choose:
+  - **담당자**: anyone, only issues assigned to you (with no repositories, from every repository you can see), or only unassigned ones.
+  - **포함 라벨** (any of them) and **제외 라벨** (any of them skips the issue, for example `draft` or `hold`), plus authors and author range under advanced settings.
+  - **시작점**: only issues that appear or come to match from now on (the default for a new trigger), or also the issues already open.
+  - **순서** (oldest or newest first) and **동시에 처리할 이슈 수** (1 to 5).
+  - Whether to assign the issue to the connected account when its run starts, and whether to close it when the run completes. Both are off for a new trigger.
+- Each issue is worked on once while it stays open; it is remembered even if it is unassigned or a label changes, and taken again only after it is closed and reopened (it used to run again when it was assigned again). Editing what a trigger covers keeps what it took and what was waiting for its turn; with **시작점** set to from now, issues that newly match but were opened before the last check are left alone.
+- Saved triggers move to the new kind by themselves and take nothing they had already seen: new-issue triggers start from now (as many at once as their overlapping runs used to), open-issue queues keep going, and assigned-to-me triggers keep the issues already assigned.
+- The overlap setting is no longer shown for issue triggers; how many issues run at once is the concurrency option. At the hourly maximum an issue trigger waits instead of pausing.
+
+### Added
+- **처리 순서 미리보기** in the issue trigger editor lists the open issues the chosen options would work on, in order, marking each as up next (numbered), in progress, done before, or skipped because it was already there. It reads GitHub only; nothing is recorded or run. Agents can ask for the same list (`triggers_previewIssues`).
+
+### Fixed
+- Checkboxes in the trigger editor sit beside their text again instead of above it.
+
 ## [1.86.0] - 2026-09-30
 
 ### Added
