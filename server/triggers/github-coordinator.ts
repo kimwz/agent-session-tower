@@ -32,7 +32,7 @@ export const GITHUB_SESSION_TOOLS = SLACK_SESSION_TOOLS.map(tool => {
   if (name === 'github_send') {
     // GitHub comments still need the owner's authorization; only Slack replies are open.
     const { requestKey: _requestKey, ...properties } = tool.inputSchema.properties as Record<string, unknown>;
-    return { ...tool, name, inputSchema: { ...tool.inputSchema, properties },
+    return { ...tool, name, inputSchema: { ...tool.inputSchema, properties, required: ['text'] },
       description: 'Send one comment only when Tower has recorded immediate owner chat authorization. No button click or exact proposal is required. Cannot grant permission or consume task-bound permission; use tower_task_complete after verifying work for that. Never retry uncertain delivery.' };
   }
   const description = name === 'github_react'
