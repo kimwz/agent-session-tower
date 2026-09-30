@@ -58,6 +58,8 @@
 .trigger-test-result p { margin: 0; }
 .trigger-test-result pre { margin: 0; max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--line); border-radius: 6px; white-space: pre-wrap; word-break: break-all; }
 .trigger-checkbox { display: flex; align-items: center; gap: 8px; }
+/* The panel's labels stack their text over the field; a checkbox sits beside its text. */
+.trigger-scope label.trigger-checkbox { flex-direction: row; align-items: center; gap: 8px; color: var(--text); }
 .trigger-panel .slack-rule-editor, .trigger-section .slack-rule-editor { padding-left: 16px; }
 .trigger-advanced { border: 1px solid var(--line); border-radius: 10px; }
 .trigger-advanced summary { display: flex; align-items: baseline; gap: 10px; padding: 12px 14px; cursor: pointer; }
@@ -114,3 +116,20 @@
 .public-agent-messages li { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
 .public-agent-messages li.visitor { border-color: #5278a9; }
 .public-agent-messages p { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+.trigger-issue-preview { display: grid; gap: 8px; justify-items: start; }
+.trigger-issue-list { display: grid; gap: 0; width: 100%; max-height: 320px; overflow: auto; margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: 8px; }
+.trigger-issue-list li { display: grid; grid-template-columns: 28px auto minmax(0, 1fr) auto; align-items: baseline; column-gap: 8px; row-gap: 2px; padding: 7px 10px; border-bottom: 1px solid var(--line); font-size: 12px; }
+.trigger-issue-list li:last-child { border-bottom: 0; }
+.trigger-issue-list li > span:nth-of-type(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+.trigger-issue-list li > small { grid-column: 3 / 4; color: var(--muted); }
+.trigger-issue-list li > em { grid-row: 1; grid-column: 4; font-style: normal; color: var(--muted); white-space: nowrap; }
+.trigger-issue-list li.next > em { color: var(--bright); }
+.trigger-issue-list li.working > em { color: #7cc4ff; }
+.trigger-issue-list li:not(.next) { opacity: 0.72; }
+.trigger-issue-order { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+@media (max-width: 640px) {
+  .trigger-issue-list li { grid-template-columns: 24px minmax(0, 1fr) auto; }
+  .trigger-issue-list li > span:nth-of-type(2) { grid-column: 2 / -1; white-space: normal; }
+  .trigger-issue-list li > small { grid-column: 2 / -1; }
+  .trigger-issue-list li > em { grid-row: 1; grid-column: 3; }
+}

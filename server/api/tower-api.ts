@@ -165,6 +165,15 @@ export class TowerApi {
       return read;
     }
     if (name === 'triggers.preview' || name === 'triggers.settings') return this.performLocal(name, value, actor);
+    if (name === 'triggers.previewIssues') {
+      // It reads only GitHub; a saved trigger it names must be one this computer shows.
+      if (value.id) {
+        const view = await this.view(this.held());
+        const saved = this.held().kept.triggers.find(item => item.id === value.id);
+        if (!saved || !view.handler(saved.handler)) throw failure('Trigger not found.', 404);
+      }
+      return this.performLocal(name, value, actor);
+    }
     // Everything an answer shows is read here, before the look that judges it.
     const held = this.held();
     const find = (id: string | undefined) => { try { return id ? triggers.event(id) : undefined; } catch { return undefined; } };
@@ -342,6 +351,7 @@ export class TowerApi {
       case 'triggers.updateSettings': return { settings: await triggers.updateSettings(value.settings, actor) };
       case 'triggers.testHttp': return { result: await triggers.testHttp(value.request, value.condition, actor) };
       case 'triggers.checkGitHub': return { result: await triggers.checkGitHub(value.auth, actor) };
+      case 'triggers.previewIssues': return { preview: await triggers.previewIssues(value.source, value.id, actor, scope) };
       case 'secrets.list': return { secrets: triggers.secretList() };
       case 'github.conversation': {
         const workflow = this.services.github?.workflow(value.sessionId);

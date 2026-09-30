@@ -112,7 +112,7 @@ test('a controlling computer cannot aim a trigger at what it cannot see, and its
   assert.deepEqual(await f.call('triggers.delete', { id: created.id, expectedRevision: 2 }), { deleted: true, trigger: { id: created.id, name: 'Digest' } });
   const restored = (await f.call<{ trigger: { remoteEdited?: unknown } }>('triggers.restore', { id: created.id }, owner)).trigger;
   assert.equal(restored.remoteEdited, undefined, 'restored here, it is this computer’s');
-  const coordinator = { name: 'Issues', source: { kind: 'github', account: 'octo', auth: { type: 'gh' }, watch: { type: 'assigned-to-me' }, schedule: { type: 'interval', everySeconds: 300 } },
+  const coordinator = { name: 'Issues', source: { kind: 'github', account: 'octo', auth: { type: 'gh' }, watch: { type: 'issues', assignee: 'me' }, schedule: { type: 'interval', everySeconds: 300 } },
     handler: { kind: 'coordinator', rules: [{ id: 'r', name: 'r', enabled: true, condition: 'c', instructions: 'i', replyInstructions: 'r', provider: 'codex' }] } };
   await assert.rejects(f.call('triggers.create', { trigger: coordinator }), { statusCode: 403, message: /on that computer itself/ });
   const issues = (await f.call<{ trigger: { id: string; revision: number } }>('triggers.create', { trigger: coordinator }, owner)).trigger;

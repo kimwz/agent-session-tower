@@ -7,7 +7,7 @@ export const KIND_ICONS: Record<SourceKind | 'slack' | 'public', LucideIcon> = {
 
 const KINDS: Array<{ kind: SourceKind | 'slack' | 'public'; title: string; description: string }> = [
   { kind: 'schedule', title: '예약 실행', description: '정한 시간이나 간격마다 지시를 실행합니다.' },
-  { kind: 'github', title: 'GitHub 이슈', description: '저장소에 새 이슈가 열리거나 나에게 할당되면 실행합니다.' },
+  { kind: 'github', title: 'GitHub 이슈', description: '조건에 맞는 열린 이슈를 정한 순서대로 처리합니다.' },
   { kind: 'http', title: 'HTTP 응답', description: 'URL을 주기적으로 확인해 응답이 바뀌거나 조건에 맞으면 실행합니다.' },
   { kind: 'slack', title: 'Slack 멘션', description: 'Slack에서 나를 멘션하면 지침에 따라 처리합니다.' },
   { kind: 'public', title: '공개 에이전트', description: '외부 사용자가 정해 둔 범위 안에서 작업을 요청하고 결과를 받는 공개 페이지를 만듭니다.' },

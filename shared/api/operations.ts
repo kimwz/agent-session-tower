@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { PermissionRequestInputSchema, PermissionRuleInputSchema } from '../permissions.js';
-import { GitHubAuthSchema, HttpConditionSchema, HttpRequestSchema, ScheduleSchema, SecretInputSchema, TriggerInputSchema, TriggerSettingsSchema } from '../triggers.js';
+import { GitHubAuthSchema, GitHubSourceSchema, HttpConditionSchema, HttpRequestSchema, ScheduleSchema, SecretInputSchema, TriggerInputSchema, TriggerSettingsSchema } from '../triggers.js';
 
 const id = z.string().min(1).max(200);
 const uuid = z.string().regex(/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i, 'A UUID is required.');
@@ -54,6 +54,8 @@ export const OPERATIONS = {
     summary: 'Send an HTTP trigger’s request once and show the response, without recording or running anything.' },
   'triggers.checkGitHub': { input: z.object({ auth: GitHubAuthSchema }).strict(), write: false, ownerOnly: true,
     summary: 'Check a GitHub connection and show the account it acts as.' },
+  'triggers.previewIssues': { input: z.object({ source: GitHubSourceSchema, id: id.optional() }).strict(), write: false, agent: true,
+    summary: 'List the open issues a GitHub issue watch would work on, in its order, with where each stands; nothing is recorded or run.' },
   'github.conversation': { input: z.object({ sessionId: id }).strict(), write: false, ownerOnly: true,
     summary: 'Read the reply proposals and status of a GitHub coordinator conversation.' },
   'github.approveReply': { input: z.object({ workflowId: uuid, requestKey: z.string().min(1).max(200), text: z.string().min(1).max(4000) }).strict(), write: true, ownerOnly: true,
@@ -79,5 +81,5 @@ export type OperationName = keyof typeof OPERATIONS;
  * The worker answers them with only what this computer shares.
  */
 export const REMOTE_PAGE_OPERATIONS: ReadonlySet<string> = new Set(['triggers.list', 'triggers.get', 'triggers.events', 'triggers.event', 'triggers.audit', 'triggers.deleted',
-  'triggers.preview', 'triggers.settings', 'triggers.create', 'triggers.update', 'triggers.setEnabled', 'triggers.delete', 'triggers.restore', 'triggers.revert', 'triggers.run', 'secrets.list']);
+  'triggers.preview', 'triggers.previewIssues', 'triggers.settings', 'triggers.create', 'triggers.update', 'triggers.setEnabled', 'triggers.delete', 'triggers.restore', 'triggers.revert', 'triggers.run', 'secrets.list']);
 export const isOperationName = (value: unknown): value is OperationName => typeof value === 'string' && Object.hasOwn(OPERATIONS, value);
