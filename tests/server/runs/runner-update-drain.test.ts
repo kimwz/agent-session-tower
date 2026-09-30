@@ -137,6 +137,26 @@ test('a forced update that cannot hand off lets queued turns start again', async
   assert.notEqual(f.run(later.id)?.status, 'cancelled');
 });
 
+test('after a forced update gave up, a turn the owner stops is still not brought back', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.manager.driveUpdateDrain();
+  await until(() => f.received.some(frame => frame.uuid && /about to restart/.test(JSON.stringify(frame))));
+  f.manager.endUpdateDrain();
+  assert.ok(f.continuation(), 'a turn asked to wrap up keeps its continuation');
+  await f.manager.cancel(f.first.id);
+  assert.equal(f.continuation(), undefined);
+});
+
+test('a turn that fails on its own during the update is not resumed', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  assert.ok(f.continuation());
+  f.exit(1);
+  await until(() => f.run(f.first.id)?.status === 'error');
+  assert.equal(f.continuation(), undefined);
+});
+
 test('delegated work is neither wrapped up nor resumed, and says why it stopped', async t => {
   const f = await fixture(); t.after(f.cleanup);
   f.manager.beginUpdateDrain(Date.now() + 60_000, run => run.id === f.first.id);
@@ -255,4 +275,5 @@ test('watchers follow a turn into the continuation that carries it on', () => {
   assert.equal(continuedRunById([second, third], 'a')?.id, 'c', 'found even after the first run left the history');
   const steered: Run = { id: 's', sessionId: 's', prompt: '', output: '', createdAt: now, status: 'cancelled', steering: { targetRunId: 'a', state: 'delivered', requestedAt: now, deliveredAt: now } };
   assert.equal(continuedRun([first, second, third, steered], steered)?.id, 'c', 'an instruction delivered into the turn follows the turn');
+  assert.equal(continuedRun([second, third, steered], steered)?.id, 'c', 'also once the turn itself left the history');
 });

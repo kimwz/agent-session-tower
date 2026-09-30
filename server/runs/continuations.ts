@@ -6,11 +6,12 @@ import type { Run } from '../../shared/types.js';
  */
 export function continuedRun(runs: readonly Run[], run: Run | undefined): Run | undefined {
   const seen = new Set<string>();
-  // An instruction delivered into a turn is answered by that turn, and so by whatever carries the turn on.
+  // An instruction delivered into a turn is answered by that turn, and so by whatever carries the turn on; the turn's
+  // own record may already have left the history.
   if (run?.steering?.state === 'delivered') {
-    const target = runs.find(item => item.id === run!.steering!.targetRunId);
-    const carried = target && continuedRun(runs, target);
-    if (carried && carried !== target) return carried;
+    const targetId = run.steering.targetRunId;
+    const next = runs.find(item => item.scheduled?.resume === 'update' && item.scheduled.afterRunId === targetId);
+    if (next) run = next;
   }
   while (run && !seen.has(run.id)) {
     seen.add(run.id);

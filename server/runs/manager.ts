@@ -1499,7 +1499,7 @@ export class RunManager extends EventEmitter {
     for (const [id, target] of drain.targets) {
       const run = this.runs.get(id);
       // Kept for turns the update stopped or is stopping, and for those it asked to wrap up.
-      if (run?.status === 'cancelled' || run?.status === 'error' || target.stopping || (target.mayHaveWrapUp && (run?.status === 'completed' || run?.status === 'running'))) continue;
+      if (target.stopping || (target.mayHaveWrapUp && (run?.status === 'completed' || run?.status === 'running'))) continue;
       this.dropUpdateContinuation(id);
     }
     this.drain = undefined;
@@ -1558,7 +1558,9 @@ export class RunManager extends EventEmitter {
       // The turn finished on its own meanwhile: it needs no continuation, and the agent's own plan goes ahead.
       const current = this.runs.get(target.id);
       if (current?.status === 'completed') {
-        this.withdrawUpdateContinuation(current);
+        // Also after a forced update gave up: the drain may be gone, the continuation is found by its turn.
+        delete state.continuation;
+        this.removeUpdateContinuations(current.id);
         const deferred = state.deferredWakeup;
         delete state.deferredWakeup;
         if (deferred) this.scheduleContinuation(current, deferred.wakeup, deferred.attempt);
@@ -1584,7 +1586,11 @@ export class RunManager extends EventEmitter {
       const run = this.runs.get(id);
       if (target.settled || !run || !FINISHED.has(run.status)) continue;
       target.settled = true;
+      // The continuation carries on only work the update itself interrupted: a turn it stopped, or one that wrapped up at
+      // its request. A turn stopped elsewhere (the Codex app's Stop), one that failed, or one that finished on its own
+      // before any wrap-up reached it does not come back.
       if (run.status === 'completed') this.withdrawUpdateContinuation(run);
+      else if (!target.stopping) { delete target.continuation; delete target.deferredWakeup; this.removeUpdateContinuations(run.id); }
     }
   }
 
@@ -1612,14 +1618,18 @@ export class RunManager extends EventEmitter {
     return true;
   }
 
-  /** The owner stopped this turn during a forced update: its update continuation goes too. */
+  /** The owner stopped this turn: its update continuation goes too, during a forced update or after one gave up. */
   private dropUpdateContinuation(runId: string): void {
     const target = this.drain?.targets.get(runId);
-    if (!target?.continuation) return;
-    const continuation = this.runs.get(target.continuation);
-    if (continuation?.status === 'queued') this.runs.delete(continuation.id);
-    delete target.continuation;
-    delete target.deferredWakeup;
+    if (target) { delete target.continuation; delete target.deferredWakeup; }
+    this.removeUpdateContinuations(runId);
+  }
+
+  /** Removes the not yet started update continuations of `runId`, looked up by the run itself, with or without a drain. */
+  private removeUpdateContinuations(runId: string): void {
+    for (const run of [...this.runs.values()]) {
+      if (run.status === 'queued' && run.scheduled?.resume === 'update' && run.scheduled.afterRunId === runId) this.runs.delete(run.id);
+    }
   }
 
   private supersede(run: Run, reason: string): void {
