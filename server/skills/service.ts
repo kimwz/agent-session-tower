@@ -16,6 +16,7 @@ import { DEFAULT_SKILLS } from './defaults.js';
 import { SkillError, SkillFiles, type SkillHomes } from './files.js';
 import { SkillStateStore, type SkillTargetRecord } from './state.js';
 import { ClosedSessionStore } from '../stores/closed-sessions.js';
+import type { SkillBackup } from '../backup/payload.js';
 
 export interface SkillServiceOptions {
   stateDir: string;
@@ -624,6 +625,75 @@ export class SkillService {
     const bundle: SkillBundle = { format: SKILL_BUNDLE_FORMAT, version: 1, exportedAt: new Date().toISOString(), from: hostname(), ...(owner ? { guidance: owner } : {}), skills };
     if (Buffer.byteLength(JSON.stringify(bundle)) > MAX_SKILL_BUNDLE_BYTES) throw new SkillError('백업이 20MB를 넘습니다. 스킬을 나눠서 내보내세요.', 413);
     return bundle;
+  }
+
+  /** Every skill kept in Tower, the owner's guidance and what the owner confirmed of them, for a full backup of Tower. */
+  async backup(): Promise<SkillBackup> {
+    await this.ready();
+    return this.exclusive(async () => {
+      const stored = await this.files.managed();
+      const bundle = await this.exportBundle({ dirs: stored.map(skill => skill.dir) });
+      const state = this.state.get();
+      const guidance = await this.guidance();
+      return { bundle, guidance: guidance.owner, guidanceConfirmed: guidance.confirmed === true, settings: { ...state.settings },
+        confirmed: stored.flatMap((skill, index) => state.confirmed[skill.dir] === skill.revision ? [index] : []) };
+    });
+  }
+
+  /**
+   * Writes a full backup's skills back as they were: each skill replaces Tower's skill of that name and applies, is
+   * pinned and is confirmed exactly as in the backup; the guidance is set as it was, empty included. A skill in the
+   * way that Tower does not keep, or a project folder missing here, is left out and reported. Skills kept here that
+   * the backup does not have stay.
+   */
+  async restore(backup: SkillBackup): Promise<{ restored: string[]; skipped: { name: string; reason: string }[] }> {
+    await this.ready();
+    const bundle = parseBundle(backup.bundle);
+    const restored: string[] = [], skipped: { name: string; reason: string }[] = [];
+    const folder = async (cwd: unknown) => typeof cwd === 'string' && isAbsolute(cwd) && (await stat(cwd).catch(() => undefined))?.isDirectory() ? resolve(cwd) : undefined;
+    await this.exclusive(async () => {
+      for (const [index, item] of bundle.skills.entries()) {
+        const label = item.project ? `${item.name} (${basename(item.project.cwd)})` : item.name;
+        try {
+          const cwd = item.scope === 'project' ? await folder(item.project?.cwd) : undefined;
+          if (item.scope === 'project' && !cwd) { skipped.push({ name: label, reason: '프로젝트 폴더가 이 컴퓨터에 없습니다.' }); continue; }
+          if (await this.files.conflict(item.name, item.scope, cwd) === 'external') { skipped.push({ name: label, reason: 'Tower가 관리하지 않는 같은 이름의 스킬이 있습니다.' }); continue; }
+          const projects: string[] = [];
+          for (const target of item.targets?.projects ?? []) { const found = await folder(target.cwd); if (found && !projects.includes(found)) projects.push(found); }
+          const targets: SkillTargets = item.targets ? (item.targets.all ? { all: true, projects: [] } : { all: false, projects })
+            : item.scope === 'global' ? { all: true, projects: [] } : { all: false, projects: [cwd!] };
+          const missing = (item.targets && !item.targets.all ? item.targets.projects.length : 0) - (targets.all ? 0 : targets.projects.length);
+          const dir = await this.files.installDir(item, cwd);
+          await this.files.checkTargets(dir, targets);
+          const existing = this.record(dir);
+          // A new skill's record comes before its folder, so a crash never leaves it applying everywhere.
+          if (!existing) await this.writeRecord({ dir, all: targets.all, projects: targets.projects, linked: targets.projects, globalLinked: targets.all });
+          let skill: Skill;
+          try { skill = await this.files.install(item, cwd, true, false); }
+          catch (error) {
+            if (!existing && !await stat(dir).catch(() => undefined)) await this.state.update(state => { state.targets = state.targets.filter(entry => entry.dir !== dir); });
+            throw error;
+          }
+          await this.apply(dir, targets, false);
+          await this.pin(skill, item.pinned === true);
+          const confirmed = backup.confirmed.includes(index);
+          await this.state.update(state => {
+            if (confirmed) { state.confirmed[skill.dir] = skill.revision; state.confirmedTargets[skill.dir] = { all: targets.all, projects: [...targets.projects] }; }
+            else { delete state.confirmed[skill.dir]; delete state.confirmedTargets[skill.dir]; }
+          });
+          restored.push(label);
+          if (missing > 0) skipped.push({ name: label, reason: `적용 프로젝트 ${missing}개가 이 컴퓨터에 없어 빼고 적용했습니다.` });
+        } catch (error) { skipped.push({ name: label, reason: error instanceof Error ? error.message : String(error) }); }
+      }
+      const revision = await this.guidanceChange(async () => backup.guidance);
+      await this.state.update(state => {
+        if (backup.guidanceConfirmed) state.guidanceConfirmed = revision; else delete state.guidanceConfirmed;
+        if (typeof backup.settings?.enabled === 'boolean') state.settings.enabled = backup.settings.enabled;
+        if (backup.settings?.provider === 'claude' || backup.settings?.provider === 'codex') state.settings.provider = backup.settings.provider;
+      });
+    });
+    this.options.onChange?.();
+    return { restored, skipped };
   }
 
   /** What importing a backup would do here, item by item, before anything is written. */
