@@ -429,3 +429,15 @@ test('a rule the reviewer means for one conversation but cannot keep there goes 
   assert.equal(f.service.overview().rules.length, 0);
   assert.equal(f.service.overview().requests[0]!.status, 'pending');
 });
+
+test('a late close clean-up leaves rules given after the close', async t => {
+  const f = await fixture(t);
+  const old = await f.service.request({ kind: 'command', value: 'kill', scope: 'conversation', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(old.request.id!, true);
+  const closedAt = new Date(Date.parse('2026-09-30T00:00:00.000Z') + 1000).toISOString();
+  f.tick(60_000);
+  const fresh = await f.service.request({ kind: 'command', value: 'npm run e2e', scope: 'conversation', reason: 'r' }, agent('claude:one'));
+  await f.service.decide(fresh.request.id!, true);
+  await f.service.forgetConversation('claude:one', closedAt);
+  assert.deepEqual(f.service.overview().rules.map(rule => rule.value), ['npm run e2e']);
+});
