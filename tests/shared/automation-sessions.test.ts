@@ -40,3 +40,9 @@ test('a session a trigger created leaves the canvas once its work is done, not w
   assert.deepEqual([...finishedAutomationSessionIds([], sessions, [])], ['scheduled']);
   assert.equal(finishedAutomationSessionIds([], sessions, [{ id: 'r', sessionId: 'scheduled', prompt: '', status: 'running', createdAt: '', output: '' }]).size, 0);
 });
+
+test('a page that was not sent a busy family member still keeps its trigger session on the canvas', () => {
+  const trigger = { kind: 'trigger', triggerId: 't' } as const;
+  assert.deepEqual([...finishedAutomationSessionIds([], [session('t', { launchedBy: trigger })], [])], ['t']);
+  assert.equal(finishedAutomationSessionIds([], [session('t', { launchedBy: trigger, familyActive: true })], []).size, 0);
+});

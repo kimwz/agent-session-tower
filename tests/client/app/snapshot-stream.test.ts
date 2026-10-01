@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { connectSnapshotStream, MAX_RETRY_MS, NodeSnapshotStore, RECONCILE_MS, RESYNC_MS, STALE_MS, SnapshotStore, WAKE_STALE_MS, type SnapshotEventSource } from '../../../client/src/app/snapshot-stream.js';
+import { connectSnapshotStream, MAX_RETRY_MS, NodeSnapshotStore, RECONCILE_MS, RESCOPE_MS, RESYNC_MS, STALE_MS, SnapshotStore, WAKE_STALE_MS, type SnapshotEventSource } from '../../../client/src/app/snapshot-stream.js';
+import type { SessionScope } from '../../../shared/session-scope.js';
 import type { SnapshotPatch } from '../../../shared/snapshot-patch.js';
 import type { Session, Snapshot } from '../../../shared/types.js';
 
@@ -128,11 +129,11 @@ class FakeSource implements SnapshotEventSource {
   closed = false;
   private listeners = new Map<string, (event: MessageEvent<string>) => void>();
   constructor(readonly url: string) { FakeSource.opened.push(this); }
-  addEventListener(type: 'snapshot' | 'patch' | 'node' | 'heartbeat', listener: (event: MessageEvent<string>) => void) { this.listeners.set(type, listener); }
+  addEventListener(type: 'snapshot' | 'patch' | 'node' | 'heartbeat' | 'stream', listener: (event: MessageEvent<string>) => void) { this.listeners.set(type, listener); }
   close() { this.closed = true; this.readyState = 2; }
   /** The browser stopped trying: a proxy answered in Tower's place, or Tower refused the stream. */
   giveUp() { this.readyState = 2; this.onerror?.(new Event('error')); }
-  emit(type: 'snapshot' | 'patch' | 'node' | 'heartbeat', id: number, data: unknown) {
+  emit(type: 'snapshot' | 'patch' | 'node' | 'heartbeat' | 'stream', id: number, data: unknown) {
     this.listeners.get(type)!({ data: typeof data === 'string' ? data : JSON.stringify(data), lastEventId: String(id) } as MessageEvent<string>);
   }
 }
@@ -265,4 +266,92 @@ test('coming back to the page reconnects at once only when the connection may ha
   connection.wake();
   clock.advance(0);
   assert.equal(FakeSource.opened.length, 3);
+});
+
+/** A page whose stream holds only some sessions: the scope it needs and the scope changes it sent. */
+function scopedPage(initial: SessionScope) {
+  FakeSource.opened = [];
+  const clock = new Clock();
+  const view = displayed();
+  const store = new SnapshotStore(view.show, clock);
+  let scope = initial;
+  const sent: Array<{ id: string; scope: SessionScope }> = [];
+  let answer: boolean | Error = true;
+  const connection = connectSnapshotStream(store, { onFrame: () => {}, onOpen: () => {}, onError: () => {}, onUnreadable: () => {} }, url => new FakeSource(url), clock, undefined, {
+    current: () => scope,
+    send: async (id, next) => { sent.push({ id, scope: next }); if (answer instanceof Error) throw answer; return answer; },
+  });
+  return { clock, store, view, connection, sent, set: (next: SessionScope) => { scope = next; connection.rescope(); }, answer: (value: boolean | Error) => { answer = value; } };
+}
+const settle = () => new Promise(resolve => setImmediate(resolve));
+
+test('a scoped page asks for its scope when it connects and tells the open stream when the scope changes', async () => {
+  const page = scopedPage({ days: 1, closed: false });
+  const first = FakeSource.opened[0];
+  assert.equal(first.url, '/api/events?patch=1&scoped=1&days=1');
+  first.onopen?.(new Event('open'));
+  first.emit('stream', 0, { id: 'stream-1' });
+  first.emit('snapshot', 1, snapshot('One'));
+  assert.deepEqual(page.sent, [], 'the scope in the URL is already the one the page needs');
+  page.set({ days: 7, closed: false });
+  page.set({ days: 7, closed: false, focus: 's1' });
+  assert.deepEqual(page.sent, [], 'changes wait for a short pause');
+  page.clock.advance(RESCOPE_MS);
+  assert.deepEqual(page.sent, [{ id: 'stream-1', scope: { days: 7, closed: false, focus: 's1' } }]);
+  await settle();
+  assert.equal(FakeSource.opened.length, 1);
+  page.connection();
+});
+
+test('a scope changed while the stream was opening is sent once the stream names itself', () => {
+  const page = scopedPage({ closed: false });
+  const first = FakeSource.opened[0];
+  page.set({ closed: true });
+  page.clock.advance(RESCOPE_MS);
+  assert.deepEqual(page.sent, [], 'no stream id yet');
+  first.emit('stream', 0, { id: 'stream-1' });
+  assert.deepEqual(page.sent, [{ id: 'stream-1', scope: { closed: true } }]);
+  page.connection();
+});
+
+test('a scope change the server does not take reconnects with the new scope in the URL', async () => {
+  for (const refusal of [false, new Error('network')]) {
+    const page = scopedPage({ days: 1, closed: false });
+    const first = FakeSource.opened[0];
+    first.emit('stream', 0, { id: 'gone' });
+    page.answer(refusal);
+    page.set({ days: 30, closed: false });
+    page.clock.advance(RESCOPE_MS);
+    await settle();
+    page.clock.advance(0);
+    assert.equal(first.closed, true);
+    assert.equal(FakeSource.opened.at(-1)!.url, '/api/events?patch=1&scoped=1&days=30');
+    page.connection();
+  }
+});
+
+test('a scoped stream that errors is reopened by the page with its current scope, never by the browser with the old URL', () => {
+  const page = scopedPage({ days: 1, closed: false });
+  const first = FakeSource.opened[0];
+  first.emit('stream', 0, { id: 'stream-1' });
+  page.set({ closed: false });
+  // The browser is still retrying on its own (CONNECTING); it would reopen the first URL.
+  first.readyState = 0;
+  first.onerror?.(new Event('error'));
+  assert.equal(first.closed, true);
+  page.clock.advance(MAX_RETRY_MS);
+  assert.equal(FakeSource.opened.at(-1)!.url, '/api/events?patch=1&scoped=1');
+  page.connection();
+});
+
+test('an HTTP snapshot asked for before the scope changed is not shown', () => {
+  const page = scopedPage({ days: 1, closed: false });
+  const request = page.store.beginRequest();
+  page.set({ days: 30, closed: false });
+  page.store.response(request, snapshot('Old scope'));
+  assert.equal(page.view.get(), null);
+  const fresh = page.store.beginRequest();
+  page.store.response(fresh, snapshot('New scope'));
+  assert.equal(title(page.view.get()), 'New scope');
+  page.connection();
 });

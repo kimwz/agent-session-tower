@@ -14,7 +14,7 @@ import { auditActionLabel, eventStatusLabel, issueActionsLabel, kindLabel, sched
 export { blankGitHubSource, blankHttpSource, blankTrigger, eventStatusLabel, scheduleLabel, towerOperation } from './trigger-helpers';
 
 type Tab = 'triggers' | 'history' | 'connections' | 'limits';
-interface Context { token: string; providers: ProviderHealth[]; projects: [string, string][]; sessions: Session[] }
+interface Context { token: string; providers: ProviderHealth[]; projects: [string, string][] }
 /** A joined computer; `ready` when its triggers can be managed from here now (connected, with a Tower that can). */
 export interface TriggerComputer { node: string; name: string; providers: ProviderHealth[]; ready: boolean; connected: boolean;
   /** Its model settings can be read and changed from here. */
@@ -24,7 +24,7 @@ export type TriggerTargets = (node: string) => { projects: [string, string][]; s
 /** What the triggers tab shows: the list, the kind picker for a new trigger, or the editor. */
 type View = { page: 'list' } | { page: 'pick' } | { page: 'edit'; kind: SourceKind; trigger?: Trigger };
 
-export function TriggerPanel({ token, overview: ownOverview, providers: ownProviders, projects: ownProjects, sessions: ownSessions, computers = [], targets, onOpenSlack, onOpenPublic }: Context & { overview?: TriggerOverview; computers?: TriggerComputer[]; targets?: TriggerTargets; onOpenSlack: () => void; onOpenPublic?: () => void }) {
+export function TriggerPanel({ token, overview: ownOverview, providers: ownProviders, projects: ownProjects, computers = [], targets, onOpenSlack, onOpenPublic }: Context & { overview?: TriggerOverview; computers?: TriggerComputer[]; targets?: TriggerTargets; onOpenSlack: () => void; onOpenPublic?: () => void }) {
   const { t } = useI18n();
   const [tab, setTab] = useState<Tab>('triggers');
   const [triggers, setTriggers] = useState<Trigger[] | null>(null);
@@ -39,7 +39,7 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
   const [remoteOverview, setRemoteOverview] = useState<TriggerOverview>();
   const overview = node ? remoteOverview : ownOverview;
   const providers = node ? computer?.providers ?? [] : ownProviders;
-  const { projects, sessions } = node && targets ? targets(node) : { projects: ownProjects, sessions: ownSessions };
+  const { projects, sessions } = node && targets ? targets(node) : { projects: ownProjects, sessions: undefined };
   const available = node ? !away : Boolean(ownOverview);
   const target = node || undefined;
   // New triggers and rules start from that computer's Settings › Models.

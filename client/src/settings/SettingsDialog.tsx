@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { ArchiveRestore, Bell, BrainCircuit, ChevronRight, Cpu, Network, ShieldCheck, SlidersHorizontal, Sparkles, UserRoundCog, X, Zap, type LucideIcon } from 'lucide-react';
-import type { ProviderHealth, Session } from '../../../shared/types';
+import type { ProviderHealth } from '../../../shared/types';
 import type { TriggerOverview } from '../../../shared/triggers';
 import { useI18n } from '../i18n/i18n';
 import { useMediaQuery } from '../common/use-media-query';
@@ -28,7 +28,6 @@ export interface SettingsContext {
   providers: ProviderHealth[];
   /** Folders of this computer, with their names. */
   projects: [string, string][];
-  sessions: Session[];
   computers: TriggerComputer[];
   targets: TriggerTargets;
   controlledBy: string[];
@@ -108,7 +107,7 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
     switch (section) {
       case 'general': return <GeneralSettings canvas={canvas} showHidden={context.showHidden} onShowHiddenChange={context.onShowHiddenChange} />;
       case 'models': return <ModelsPanel token={context.token} providers={context.providers} computers={context.computers} />;
-      case 'triggers': return <TriggerPanel token={context.token} overview={context.triggers} providers={context.providers} projects={context.projects} sessions={context.sessions}
+      case 'triggers': return <TriggerPanel token={context.token} overview={context.triggers} providers={context.providers} projects={context.projects}
         computers={context.computers} targets={context.targets} onOpenSlack={() => setSlack(true)} onOpenPublic={() => setPublicAgents(true)} />;
       case 'skills': return <SkillsPanel token={context.token} cwd={cwd} projects={context.projects.map(([key]) => key)} onClearFolder={clearFolder} onChanged={onChanged} onOpenSession={openSession} />;
       case 'permissions': return <PermissionsPanel token={context.token} cwd={cwd} projects={context.projects.map(([key]) => key)} pending={attention.permissions} onClearFolder={clearFolder} onChanged={onChanged} onOpenSession={openSession} />;

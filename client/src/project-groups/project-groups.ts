@@ -1,21 +1,26 @@
 import { translate as t } from '../i18n/i18n';
 import type { ProjectGroup, Session } from '../../../shared/types';
 import { localPart } from '../remote/scope';
+import { temporaryFolder } from '../../../shared/session-scope';
+
+/** A folder sessions ran in and its project label, whether or not this page holds those sessions. */
+export type ProjectFolder = Pick<Session, 'cwd' | 'project'>;
 
 /** Temporary worktrees stay in session history but do not occupy the canvas, on any computer. */
 function temporaryCanvasProject(cwd: string): boolean {
-  return /^\/(?:private\/)?tmp(?:\/|$)/.test(localPart(cwd));
+  return temporaryFolder(localPart(cwd));
 }
 
 export function projectGroupLabel(cwd: string, title?: string, fallback?: string): string {
   return title?.trim() || fallback || localPart(cwd).split('/').filter(Boolean).at(-1) || t("프로젝트 없음");
 }
 
-export function projectGroupChoices(sessions: Session[], groups: ProjectGroup[]): [string, string][] {
+/** `folders`: every folder a main session ran in (the page's session summary), with its project label. */
+export function projectGroupChoices(folders: readonly ProjectFolder[], groups: ProjectGroup[]): [string, string][] {
   const titles = new Map(groups.map(group => [group.cwd, group.title]));
   const choices = new Map<string, string>();
-  for (const session of sessions) {
-    if (session.cwd) choices.set(session.cwd, projectGroupLabel(session.cwd, titles.get(session.cwd), session.project));
+  for (const folder of folders) {
+    if (folder.cwd) choices.set(folder.cwd, projectGroupLabel(folder.cwd, titles.get(folder.cwd), folder.project));
   }
   for (const group of groups) {
     if ((group.pinned || group.hidden) && !choices.has(group.cwd)) choices.set(group.cwd, projectGroupLabel(group.cwd, group.title));
@@ -24,9 +29,9 @@ export function projectGroupChoices(sessions: Session[], groups: ProjectGroup[])
 }
 
 /** Persisted frames respect folder/search filters. Revealed hidden frames remain restorable beyond the card limit. */
-export function visiblePinnedProjectGroups(groups: ProjectGroup[], sessions: Session[], project: string, query: string, showHidden = false, matchingSessions: Session[] = []): ProjectGroup[] {
+export function visiblePinnedProjectGroups(groups: ProjectGroup[], folders: readonly ProjectFolder[], project: string, query: string, showHidden = false, matchingSessions: Session[] = []): ProjectGroup[] {
   const term = query.trim().toLocaleLowerCase();
-  const labels = new Map(sessions.filter(session => session.cwd).map(session => [session.cwd, session.project]));
+  const labels = new Map(folders.filter(folder => folder.cwd).map(folder => [folder.cwd, folder.project]));
   const matchingFolders = new Set(matchingSessions.map(session => session.cwd));
   return groups.filter(group => !temporaryCanvasProject(group.cwd) && (group.pinned || (showHidden && group.hidden)) && (showHidden || !group.hidden)
     && (project === 'all' || group.cwd === project)

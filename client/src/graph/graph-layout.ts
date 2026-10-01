@@ -2,7 +2,7 @@ import type { Session } from '../../../shared/types';
 import { sessionStaysShown, sortSessions } from '../common/lib';
 import { scopedId } from '../remote/scope';
 
-export function graphProjectKey(session: Session): string {
+export function graphProjectKey(session: Pick<Session, 'cwd' | 'node' | 'project'>): string {
   return session.cwd || scopedId(session.node, session.project || 'unknown');
 }
 

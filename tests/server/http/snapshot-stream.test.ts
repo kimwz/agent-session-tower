@@ -5,6 +5,7 @@ import { SseClient } from '../../../server/http/sse-client.js';
 import { SnapshotStream } from '../../../server/http/snapshot-stream.js';
 import { applySnapshotPatch, type SnapshotPatch } from '../../../shared/snapshot-patch.js';
 import type { Session, Snapshot } from '../../../shared/types.js';
+import type { SessionScope } from '../../../shared/session-scope.js';
 
 class Response extends EventEmitter {
   frames: string[] = [];
@@ -140,4 +141,74 @@ test('pages without patch support receive the current snapshot again after a qui
   assert.deepEqual(events(fullPage).map(event => [event.event, event.id]), [['snapshot', 1], ['snapshot', 1]], 'the resent snapshot keeps its sequence');
   now = 90_000; stream.resendToCompletePages(60_000);
   assert.equal(fullPage.frames.length, 2, 'the minute restarts after each frame');
+});
+
+/** A stream whose scoped pages hold only the sessions named in their focus list (`focus` is a comma-separated id list here). */
+function scopedFixture() {
+  let state: Snapshot = { sessions: [session('s1'), session('s2'), session('s3')], runs: [], providers: [], scanning: false, hostname: 'host', version: 'test', updatedAt: at };
+  let views = 0;
+  const stream = new SnapshotStream(() => ({ ...state }), Date.now, undefined, snapshot => {
+    views++;
+    return scope => ({ ...snapshot, sessions: snapshot.sessions.filter(item => (scope.focus ?? '').split(',').includes(item.id)), sessionScope: scope });
+  });
+  const connect = (scope?: SessionScope) => {
+    const response = new Response();
+    const client = new SseClient(response, () => stream.detach(client));
+    stream.attach(client, true, '', scope);
+    return { response, client };
+  };
+  return { stream, connect, set: (next: Partial<Snapshot>) => { state = { ...state, ...next }; }, views: () => views };
+}
+
+test('pages with different scopes each hold their own view, and pages without a scope still get every session', () => {
+  const f = scopedFixture();
+  const one = f.connect({ closed: false, focus: 's1' });
+  const two = f.connect({ closed: false, focus: 's2,s3' });
+  const all = f.connect();
+  assert.deepEqual(replay(one.response).sessions.map(item => item.id), ['s1']);
+  assert.deepEqual(replay(two.response).sessions.map(item => item.id), ['s2', 's3']);
+  assert.deepEqual(replay(all.response).sessions.map(item => item.id), ['s1', 's2', 's3']);
+  const before = f.views();
+  f.set({ sessions: [session('s1'), session('s2', 'changed'), session('s3')] });
+  f.stream.publish();
+  // One view builder per publish serves every scoped page.
+  assert.equal(f.views(), before + 1);
+  assert.equal(one.response.frames.length, 1, 'a change outside its scope sends that page nothing');
+  assert.deepEqual((events(two.response).at(-1)!.data as SnapshotPatch).sessions, { upsert: [session('s2', 'changed')] });
+  assert.equal(replay(all.response).sessions[1].lastMessage, 'changed');
+});
+
+test('changing a page scope sends it the difference from what it holds, and later patches continue from there', () => {
+  const f = scopedFixture();
+  const page = f.connect({ closed: false, focus: 's1' });
+  const other = f.connect({ closed: false, focus: 's1' });
+  assert.equal(f.stream.setScope(page.client, { closed: false, focus: 's1,s3' }), true);
+  const widened = events(page.response).at(-1)!;
+  assert.equal(widened.event, 'patch');
+  assert.deepEqual((widened.data as SnapshotPatch).sessions, { upsert: [session('s3')], order: ['s1', 's3'] });
+  assert.deepEqual(replay(page.response).sessions.map(item => item.id), ['s1', 's3']);
+  assert.equal(other.response.frames.length, 1, 'another page keeps its own scope');
+  f.stream.setScope(page.client, { closed: false, focus: 's3' });
+  f.set({ sessions: [session('s1'), session('s2'), session('s3', 'reply')] });
+  f.stream.publish();
+  assert.deepEqual(replay(page.response).sessions, [session('s3', 'reply')]);
+  // The same scope again changes nothing.
+  const frames = page.response.frames.length;
+  f.stream.setScope(page.client, { closed: false, focus: 's3' });
+  assert.equal(page.response.frames.length, frames);
+  const all = f.connect();
+  assert.equal(f.stream.setScope(all.client, { closed: false }), false, 'a page without a scope cannot be given one');
+});
+
+test('a scoped page whose socket was blocked receives its newest complete view', () => {
+  const f = scopedFixture();
+  const page = f.connect({ closed: false, focus: 's1' });
+  page.response.accepting = false;
+  f.set({ sessions: [session('s1', 'first'), session('s2'), session('s3')] }); f.stream.publish();
+  f.stream.setScope(page.client, { closed: false, focus: 's1,s2' });
+  f.set({ sessions: [session('s1', 'second'), session('s2'), session('s3')] }); f.stream.publish();
+  page.response.accepting = true;
+  page.response.emit('drain');
+  assert.equal(events(page.response).at(-1)!.event, 'snapshot');
+  assert.deepEqual(replay(page.response).sessions, [session('s1', 'second'), session('s2')]);
 });
