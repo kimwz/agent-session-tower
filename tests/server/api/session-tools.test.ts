@@ -15,7 +15,7 @@ const claudeRow = (sessionId: string, role: 'user' | 'assistant', content: unkno
   ({ type: role, sessionId, cwd: '/work/app', uuid, timestamp, message: { role, content } });
 
 /** Claude conversations in a private home, read through the same TowerApi agents call. */
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, overlay: (session: Session) => Session = session => session) {
   const root = await mkdtemp(join(tmpdir(), 'tower-session-tools-'));
   const claudeHome = join(root, 'claude');
   const codexHome = join(root, 'codex');
@@ -25,7 +25,7 @@ async function fixture(t: TestContext) {
     create: async () => { throw new Error('unused'); }, enqueue: async () => { throw new Error('unused'); }, runs: () => [], session: () => undefined } });
   await triggers.start();
   const api = new TowerApi({ stateDir: root, triggers, sessions: {
-    list: () => sessions.list(),
+    list: () => sessions.list().map(overlay),
     read: (session, limit, before) => sessions.detail(session, before, limit),
     search: (session, query) => sessions.search(session, query),
   } });
@@ -50,6 +50,24 @@ test('agents list sessions a page at a time, most recently active first', async 
   const period = await f.call<Page>('sessions.list', { since: '2026-09-02T00:00:00Z', until: '2026-09-04T00:00:00Z' });
   assert.deepEqual(period.sessions.map(item => item.id), [`claude:${id(3)}`, `claude:${id(2)}`]);
   await assert.rejects(f.call('sessions.list', { cursor: 'nonsense' }), { statusCode: 400 });
+});
+
+test('listed sessions carry the task they work on now and every task, and a query finds a task title', async t => {
+  const tasks = [{ id: 't1', title: 'Voice playback fix', stage: '배포됨', startedAt: '2026-09-01T10:00:00.000Z', updatedAt: '2026-09-01T11:00:00.000Z' },
+    { id: 't2', title: 'Snapshot compression', stage: 'PR 리뷰중', startedAt: '2026-09-01T12:00:00.000Z', updatedAt: '2026-09-01T13:00:00.000Z' }];
+  const f = await fixture(t, session => session.id === `claude:${id(1)}` ? { ...session, tasks } : session);
+  await f.write(1, [claudeRow(id(1), 'user', 'Task 1', '2026-09-01T10:00:00.000Z', 'u1')]);
+  await f.write(2, [claudeRow(id(2), 'user', 'Task 2', '2026-09-02T10:00:00.000Z', 'u2')]);
+  await f.sessions.refresh();
+  type Page = { sessions: Array<{ id: string; task?: { title: string; stage: string; updatedAt: string }; tasks?: Array<{ title: string; stage: string }> }> };
+  const page = await f.call<Page>('sessions.list', {});
+  const withTasks = page.sessions.find(item => item.id === `claude:${id(1)}`)!;
+  assert.deepEqual(withTasks.task, { title: 'Snapshot compression', stage: 'PR 리뷰중', updatedAt: '2026-09-01T13:00:00.000Z' });
+  assert.deepEqual(withTasks.tasks, [{ title: 'Voice playback fix', stage: '배포됨' }, { title: 'Snapshot compression', stage: 'PR 리뷰중' }]);
+  const without = page.sessions.find(item => item.id === `claude:${id(2)}`)!;
+  assert.equal('task' in without, false, 'a session not summarized yet has no task fields');
+  const found = await f.call<Page>('sessions.list', { query: 'voice playback' });
+  assert.deepEqual(found.sessions.map(item => item.id), [`claude:${id(1)}`]);
 });
 
 test('agents read a conversation backwards page by page, without tool calls unless asked', async t => {

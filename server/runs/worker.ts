@@ -40,6 +40,7 @@ import { RemoteExclusionStore } from '../remote/exclusions.js';
 import { remoteTriggerLaunch } from '../remote/visibility.js';
 import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
 import { SkillService } from '../skills/service.js';
+import { SessionTasks } from '../sessions/tasks.js';
 import { installAgentGuidance } from '../agent-guidance/install.js';
 import { PermissionService } from '../permissions/service.js';
 import { PermissionReviewer } from '../permissions/reviewer.js';
@@ -67,6 +68,8 @@ export interface RunnerHostOptions {
   publicAgents?: PublicAgentService;
   /** The owner's skills and the advisor that proposes new ones. */
   skills?: SkillService;
+  /** Task summaries put on the listed sessions; a new summary is a new snapshot. */
+  sessionTasks?: SessionTasks;
   api?: TowerApi;
   terminals?: WorkspaceTerminals;
   idleMs?: number;
@@ -326,6 +329,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
   options.autoPrompts?.on('change', changed);
   options.triggers?.on('change', changed);
   options.publicAgents?.on('change', changed);
+  options.sessionTasks?.on('change', changed);
   let idleTimer: ReturnType<typeof setInterval> | undefined;
   let handoffTimer: ReturnType<typeof setInterval> | undefined;
   let stopKeeping: (() => Promise<void>) | undefined;
@@ -553,6 +557,15 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       ...(resolve(stateDir) === resolve(defaultStateDir()) ? { installGuidance: async () => { await installAgentGuidance({ stateDir, claudeHome: process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), codexHome: process.env.CODEX_HOME || join(homedir(), '.codex') }); } } : {}) });
     // Skills never keep the worker from starting.
     await skills.start().catch(error => console.error(`Skills did not start: ${error instanceof Error ? error.message : String(error)}`));
+    // What each conversation works on, summarized after its turns.
+    const tasks = new SessionTasks({ stateDir, sessions: () => visible.allSessions(),
+      history: (session, limit, before) => sessions.detail(runs.nativeSessionId(session.id), before, limit),
+      model: (request, options) => runAutoPromptModel(request, { stateDir, timeoutMs: options.timeoutMs }) });
+    await tasks.start().catch(error => console.error(`Session tasks did not start: ${error instanceof Error ? error.message : String(error)}`));
+    runs.setSessionOverlay(session => tasks.apply(session));
+    runs.on('change', () => tasks.changed());
+    sessions.on('change', () => tasks.changed());
+    tasks.changed();
     // Made just below; the permission service only calls it once requests arrive.
     let reviewer!: PermissionReviewer;
     // One-shot runs: the command runs in this worker; the conversation hears its end unless it already read the result.
@@ -753,18 +766,18 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
     // A restore's skills are still being written (below): the worker hands over only after them.
     let restoringSkills = Boolean(restoring);
-    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
-      onIdle: async () => { stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
-      transient: () => restoringSkills || slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
+    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
+      onIdle: async () => { stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      inFlight: () => restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
+      transient: () => restoringSkills || slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // Work a Slack or GitHub coordinator delegated: its coordinator hears how it ended and decides what follows.
       delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
-      releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); worktrees.resume(); reviewer.release(); },
-      holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); worktrees.pause(); reviewer.hold(); },
-      quiesce: async () => { paused = true; tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([worktrees.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
-      resume: () => { paused = false; tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
+      releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); tasks.resume(); worktrees.resume(); reviewer.release(); },
+      holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); },
+      quiesce: async () => { paused = true; tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([worktrees.flush(), tasks.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
+      resume: () => { paused = false; tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); void tasks.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     runs.markReady();
     // A restore's skills are written once the worker serves: linking into project folders (on a slow volume, say) never
     // keeps it from starting. The restore is recorded as done after them; a worker that stops first leaves it to the next.

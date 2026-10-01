@@ -50,6 +50,7 @@ export const BUILTIN_ROLES = [
   { id: 'slack.toneGuide', kind: 'auto', label: 'Slack 말투 가이드', description: '소유자의 메시지로 말투 가이드를 만듭니다.', follow: true, initial: follow() },
   { id: 'github.replyIntent', kind: 'auto', label: 'GitHub 답장 의도', description: '코디네이터에서 소유자 답장이 무엇을 원하는지 판단합니다. 규칙에 모델이 있으면 그 모델을 씁니다.', follow: true, initial: follow() },
   { id: 'publicAgents.judge', kind: 'auto', label: '공개 에이전트 판단', description: '방문자 대화 접수, 요약, 요청·결과 검토를 합니다.', follow: true, initial: follow() },
+  { id: 'sessions.summarizer', kind: 'auto', label: '세션 작업 요약', description: '턴이 끝날 때마다 세션의 작업 제목과 단계를 요약합니다.', initial: { provider: 'claude', claude: { model: 'haiku', effort: EFFORT_OFF }, codex: { model: 'gpt-5.6-terra' } } },
   { id: 'voice.firstReply', kind: 'auto', label: '음성 첫 답변', description: '음성으로 말하면 바로 짧게 답합니다.', providers: ['claude'], initial: { provider: 'claude', claude: { model: 'haiku', effort: EFFORT_OFF }, codex: {} } },
   { id: 'master.session', kind: 'start', label: '마스터 에이전트', description: '마스터 에이전트를 시작할 때 씁니다.', initial: cliDefault('claude') },
   { id: 'issues.register', kind: 'start', label: '이슈 등록', description: '폴더의 이슈 버튼으로 이슈를 등록할 때 씁니다.', initial: cliDefault('claude') },

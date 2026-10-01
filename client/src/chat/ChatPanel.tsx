@@ -13,6 +13,7 @@ import { absoluteTime, api, copyText, providerLabels, statusLabels } from '../co
 import { mergeLatestPage, prependOlderPage, type ChatHistory } from './chat-history';
 import { ChatTranscript } from './ChatTranscript';
 import { PinnedPrompt } from './PinnedPrompt';
+import { SessionTasks } from './SessionTasks';
 import { WorktreeCleanupNote } from './WorktreeCleanupNote';
 import { RunControl } from './RunControl';
 import { DraftAttachments } from './ChatAttachments';
@@ -243,6 +244,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
         {current?.cwd && <WorkspaceActions key={current.cwd} cwd={current.cwd} token={token} disabled={!connected || (host ? !host.workspace : false)} note={host?.workspaceNote} machine={host?.name} />}
         <SessionFamilyNav sessions={allSessions} selectedId={sessionId} onNavigate={onNavigate} />
       </div>
+      {current && <SessionTasks key={current.id} tasks={current.tasks} />}
       {showMetadata && current && <dl className="session-metadata">{host && <div><dt>{t("컴퓨터")}</dt><dd>{host.name}</dd></div>}<div><dt>{t("작업 폴더")}</dt><dd>{(current.cwd && localPart(current.cwd)) || t("정보 없음")}</dd></div>{current.model && <div><dt>{t("모델")}</dt><dd>{current.model}</dd></div>}<div><dt>{t("세션 ID")}</dt><dd>{current.nativeId}<button className="icon-button" title={t("세션 ID 복사")} aria-label={t("세션 ID 복사")} onClick={() => { void copyText(current.nativeId).then(success => { setCopied(success); window.setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button></dd></div>{resumeCommand(current) && !host && <div><dt>{t("터미널")}</dt><dd><code className="resume-command">{resumeCommand(current)}</code><ResumeCommandButton session={current} size={12} /></dd></div>}<div><dt>{t("상태 판단")}</dt><dd>{translateMessage(current.statusReason)}</dd></div><div><dt>{t("시작")}</dt><dd>{absoluteTime(current.createdAt)}</dd></div></dl>}
       {contextBanner}
     </header>

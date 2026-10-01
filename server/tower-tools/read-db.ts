@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline';
 import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import type { Snapshot } from '../../shared/types.js';
+import { currentTask } from '../../shared/session-tasks.js';
 
 export interface Table { name: string; columns: string[]; rows: Array<Array<string | number | null>> }
 export interface QueryResult { columns: string[]; rows: Array<Record<string, unknown>>; truncated: boolean }
@@ -145,11 +146,14 @@ function rawTables(local: Snapshot | undefined, nodes: ReadonlyMap<string, Snaps
       ['', local?.hostname ?? 'this computer', 'this computer', local?.version ?? null, null, 1],
       ...(local?.nodes ?? []).map(node => [node.id, node.label || node.name, node.status, node.version ?? null, node.lastSeenAt ?? null, flag(node.streaming)]),
     ] },
-    { name: 'sessions', columns: ['node', 'computer', 'id', 'provider', 'project', 'cwd', 'title', 'status', 'outcome', 'closed', 'is_subagent', 'launched_by', 'created_at', 'updated_at', 'last_request_at', 'last_completed_at', 'message_count', 'last_message'],
+    { name: 'sessions', columns: ['node', 'computer', 'id', 'provider', 'project', 'cwd', 'title', 'status', 'outcome', 'closed', 'is_subagent', 'launched_by', 'created_at', 'updated_at', 'last_request_at', 'last_completed_at', 'message_count', 'last_message', 'task_title', 'task_stage'],
       rows: all.flatMap(([node, snapshot]) => snapshot.sessions.map(session => [node, node ? names.get(node) ?? node : snapshot.hostname, session.id, session.provider, session.project, session.cwd,
         text(session.customTitle || session.title, 200), session.status, session.outcome ?? null, flag(session.closed), flag(session.isSubagent),
         session.launchedByAgent ? 'agent' : session.launchedBy?.kind ?? null, session.createdAt, session.updatedAt, session.lastRequestAt ?? null, session.lastCompletedAt ?? null,
-        session.messageCount, text(session.lastMessage, 300)])) },
+        session.messageCount, text(session.lastMessage, 300), text(currentTask(session.tasks)?.title, 200), currentTask(session.tasks)?.stage ?? null])) },
+    { name: 'session_tasks', columns: ['node', 'session_id', 'title', 'stage', 'current', 'started_at', 'updated_at'],
+      rows: all.flatMap(([node, snapshot]) => snapshot.sessions.flatMap(session => (session.tasks ?? []).map(task => [node, session.id, text(task.title, 200), task.stage,
+        flag(task === currentTask(session.tasks)), task.startedAt, task.updatedAt]))) },
     { name: 'runs', columns: ['node', 'id', 'session_id', 'status', 'origin', 'model', 'prompt', 'created_at', 'started_at', 'finished_at', 'error'],
       rows: all.flatMap(([node, snapshot]) => snapshot.runs.map(run => [node, run.id, run.sessionId, run.status, run.origin?.kind ?? null, run.model ?? null,
         text(run.prompt, 300), run.createdAt, run.startedAt ?? null, run.finishedAt ?? null, text(run.error, 300)])) },
@@ -173,7 +177,8 @@ function rawTables(local: Snapshot | undefined, nodes: ReadonlyMap<string, Snaps
 /** Described to the model once, so it can write queries without looking. */
 export const READ_SCHEMA = `Tables (read-only SQLite; node '' is this computer, otherwise a joined computer's id):
 - computers(node, name, status, version, last_seen_at, streaming)
-- sessions(node, computer, id, provider, project, cwd, title, status['working'|'idle'|'completed'|'error'], outcome['done'|'needsOwner'|'blocked'|'progress'|null], closed, is_subagent, launched_by['agent'|'trigger'|null], created_at, updated_at, last_request_at, last_completed_at, message_count, last_message)
+- sessions(node, computer, id, provider, project, cwd, title, status['working'|'idle'|'completed'|'error'], outcome['done'|'needsOwner'|'blocked'|'progress'|null], closed, is_subagent, launched_by['agent'|'trigger'|null], created_at, updated_at, last_request_at, last_completed_at, message_count, last_message, task_title, task_stage) — task_*: the task the session works on now and its stage
+- session_tasks(node, session_id, title, stage, current, started_at, updated_at) — every task a session worked on, summarized after its turns
 - runs(node, id, session_id, status['queued'|'running'|'completed'|'error'|'cancelled'], origin, model, prompt, created_at, started_at, finished_at, error)
 - auto_prompts(node, id, status, cwd, session_id, run_id, created_at, updated_at, prompt, error)
 - folders(node, cwd, title, pinned, hidden)

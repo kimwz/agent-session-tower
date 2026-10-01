@@ -10,6 +10,7 @@ import type { SessionSearch, SessionSearchResult } from '../sessions/service.js'
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { readModelSettings, resolveModel, saveModelSettings } from '../models/settings.js';
 import { modelArgs } from '../../shared/models.js';
+import { currentTask } from '../../shared/session-tasks.js';
 import type { TriggerScope, TriggerService } from '../triggers/service.js';
 import { remoteRequestTime } from '../remote/request-ledger.js';
 import { remoteJob, remoteJobVisible, type RemoteScope } from '../remote/visibility.js';
@@ -498,7 +499,13 @@ function sessionSummary(session: Session) {
   return { id: session.id, title: session.customTitle || session.title, provider: session.provider, cwd: session.cwd, status: session.status,
     createdAt: session.createdAt, updatedAt: session.updatedAt, ...(session.launchedBy ? { launchedBy: session.launchedBy } : {}), ...(session.closed ? { closed: true } : {}),
     // Lookups still find the master's conversations (they are not listed on any page), and say which they are.
-    ...(session.master ? { master: true } : {}) };
+    ...(session.master ? { master: true } : {}), ...sessionTaskFields(session) };
+}
+/** The task a session works on now and the tasks it worked on, oldest first, as summarized after its turns. */
+function sessionTaskFields(session: Session) {
+  const current = currentTask(session.tasks);
+  if (!current) return {};
+  return { task: { title: current.title, stage: current.stage, updatedAt: current.updatedAt }, tasks: session.tasks!.map(task => ({ title: task.title, stage: task.stage })) };
 }
 function shownMessage(message: ChatMessage, max: number) {
   return { role: message.role, text: message.text.length > max ? `${message.text.slice(0, max)}…` : message.text, timestamp: message.timestamp, ...(message.toolName ? { toolName: message.toolName } : {}) };
@@ -520,7 +527,7 @@ function sessionList(sessions: Session[], value: Record<string, any>) {
   const until = value.until ? boundary(value.until, true) : undefined;
   const limit = value.limit ?? 20;
   const matching = ordered(sessions.filter(session => !session.isSubagent && !session.launchedByAgent && (!value.provider || session.provider === value.provider) && (!value.cwd || session.cwd === value.cwd)
-    && (!query || `${session.customTitle ?? ''}\n${session.title}\n${session.cwd}`.toLowerCase().includes(query))
+    && (!query || `${session.customTitle ?? ''}\n${session.title}\n${session.cwd}\n${(session.tasks ?? []).map(task => task.title).join('\n')}`.toLowerCase().includes(query))
     && (since === undefined || !(Date.parse(session.updatedAt) < since)) && (until === undefined || Date.parse(session.updatedAt) < until)), value.cursor === undefined ? undefined : decodeCursor(value.cursor));
   const page = matching.slice(0, limit);
   return { sessions: page.map(session => ({ ...sessionSummary(session), lastMessage: session.lastMessage.slice(0, 300) })),
