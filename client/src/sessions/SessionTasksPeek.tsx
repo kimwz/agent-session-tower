@@ -52,7 +52,7 @@ export function useSessionTasksPeek(tasks: readonly SessionTask[] | undefined, v
   const [place, setPlace] = useState<{ left: number; top: number }>();
   const has = !!tasks?.length;
   const leave = useCallback(() => { clearTimeout(timer.current); timer.current = undefined; setOpen(false); }, []);
-  const enter = (event: ReactPointerEvent) => { clearTimeout(timer.current); if (has && event.pointerType === 'mouse') timer.current = setTimeout(() => setOpen(true), PEEK_DELAY_MS); };
+  const enter = (event: ReactPointerEvent) => { clearTimeout(timer.current); if (has && event.pointerType === 'mouse' && event.buttons === 0) timer.current = setTimeout(() => setOpen(true), PEEK_DELAY_MS); };
   useEffect(() => () => clearTimeout(timer.current), []);
   useEffect(() => { if (!has) leave(); }, [has, leave]);
   useEffect(leave, [viewport.x, viewport.y, viewport.zoom, leave]);
