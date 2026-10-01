@@ -127,7 +127,8 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   const voice: VoiceControls = {
     ...(unavailable ? { unavailable } : {}), view: voiceView, ended: voiceEnded, ...(room.voice ? { status: room.voice } : {}),
     start: startVoice, stop: () => voiceRef.current?.stop(), listen: () => { void voiceRef.current?.listen(); }, mute: () => voiceRef.current?.mute(),
-    skip: () => voiceRef.current?.skip(), replay: () => voiceRef.current?.replay(), dismiss: () => setVoiceEnded(null),
+    skip: () => voiceRef.current?.skip(), dismiss: () => setVoiceEnded(null),
+    replayMissed: entry => voiceRef.current?.replayMissed(entry), dismissMissed: entry => voiceRef.current?.dismissMissed(entry),
     finish: () => voiceRef.current?.finish(), discard: () => voiceRef.current?.discard(),
   };
 

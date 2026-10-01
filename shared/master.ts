@@ -75,7 +75,19 @@ export interface MasterVoiceStatus {
   limitDollars: number;
   /** Today's limit is reached: nothing more is written down or read aloud today. */
   limited: boolean;
+  /** The latest answer or report not (fully) read aloud for a reason the owner should know, until heard again or dismissed. */
+  missed?: MasterMissed;
 }
+/**
+ * Why an answer or a report ended not read aloud (or not to its end): the page could not play it or its sound was cut
+ * (`failed`), the page never told how it went (`timeout`), it waited on the page too long (`expired`), the browser
+ * refused to play (`blocked`), its speech could not be made (`audio`), nothing in it could be read (`empty`), the daily
+ * limit (`limit`), too much waiting or too old (`queue`), the voice page was gone or voice moved (`away`), the owner
+ * stopped it or turned voice off (`stopped`), or the host restarted while it was read (`restart`).
+ */
+export type MasterUnspoken = 'failed' | 'timeout' | 'expired' | 'blocked' | 'audio' | 'empty' | 'limit' | 'queue' | 'away' | 'stopped' | 'restart';
+/** An answer or a report not read aloud, as the voice bar tells of it: `heard` when part of it was. */
+export interface MasterMissed { entry: string; reason: MasterUnspoken; heard?: true; text: string }
 /**
  * How an answer or a report is getting read aloud. `sent`, `delivered` and `undelivered` are left from GPT-Live calls
  * (1.52–1.55) in conversations kept since.
@@ -85,6 +97,15 @@ export interface MasterSpeak {
   tries?: number;
   /** Digest of the voice session a spoken request came from, when this answers one. */
   session?: string;
+  /** Why it ended `unspoken`, and whether part of it was heard first. */
+  reason?: MasterUnspoken;
+  heard?: true;
+  /** The key of its timing record (the spoken request's, or the report's). */
+  timing?: string;
+  /** Its text was cut before it was kept: reading it ends saying the rest is on the screen. */
+  cut?: true;
+  /** When the owner asked to hear it again: it is not too old to read from then. */
+  again?: string;
 }
 /** Something the page of the voice session plays: a short reply, an answer, a report, or a notice before a change. */
 export interface MasterSay {

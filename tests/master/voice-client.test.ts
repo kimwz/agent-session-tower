@@ -313,59 +313,41 @@ test('notices cancelled one after another are each settled once, and never decid
   } finally { page.end(); }
 });
 
-test('what the browser will not play by itself can be played with a click, told to the master once', async () => {
+test('what the browser will not play by itself is told to the master as blocked; a click asks to hear it again and lets sound play', async () => {
   const page = await harness();
   try {
     FakeAudio.refuse = true;
     page.voice.say(page.say('r1', 'report'));
     await flush();
-    assert.deepEqual(page.results(), ['r1:failed']);
-    assert.deepEqual(page.view().blocked, { text: 'report r1' });
+    assert.deepEqual(page.results(), ['r1:blocked']);
+    assert.equal(page.view().error, '브라우저가 소리 재생을 막았습니다.');
     FakeAudio.refuse = false;
     mock.timers.tick(400);
-    page.voice.replay();
-    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/r1');
-    assert.equal(page.view().blocked, undefined);
-    page.audio.onended!();
-    assert.deepEqual(page.results(), ['r1:failed'], 'the replay is not reported again');
-
-    // Clicked while the owner speaks: the click lets sound play, and the reading waits its turn.
-    FakeAudio.refuse = true;
-    mock.timers.tick(400);
-    page.voice.say(page.say('r2', 'report'));
-    await flush();
-    FakeAudio.refuse = false;
-    mock.timers.tick(400);
-    await page.hear(0.002, 200);
-    await page.hear(0.1, 400);
-    const socket = FakeSocket.all.at(-1)!;
-    socket.open();
     const before = page.audio.played.length;
-    page.voice.replay();
-    assert.deepEqual(page.audio.played.slice(before), ['/master-silence.wav']);
-    // Nothing written down: the page's own rule ends it a little after the pause.
-    await page.hear(0.002, 2_500);
-    socket.message({ message_type: 'committed_transcript', text: '' });
+    page.voice.replayMissed('entry-1');
     await flush();
-    socket.closed();
+    assert.deepEqual(page.audio.played.slice(before), ['/master-silence.wav'], 'the click unlocks sound');
+    assert.deepEqual(posts.filter(post => post.path.endsWith('/missed')).map(post => [post.body.entry, post.body.action]), [['entry-1', 'replay']]);
+    assert.equal(page.view().error, undefined);
+    // The master reads it again: it comes as a new thing to play.
+    page.voice.say(page.say('r1-again', 'report'));
     await flush();
-    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/r2');
-    assert.deepEqual(page.results(), ['r1:failed', 'r2:failed']);
+    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/r1-again');
     page.audio.onended!();
-    mock.timers.tick(400);
+    assert.deepEqual(page.results(), ['r1:blocked', 'r1-again:played']);
+    page.voice.dismissMissed('entry-2');
+    await flush();
+    assert.deepEqual(posts.filter(post => post.path.endsWith('/missed')).map(post => post.body.action), ['replay', 'dismiss']);
 
     // The unlocking silence finishes only after the reading has started: it does not stop the reading.
-    FakeAudio.refuse = true;
-    page.voice.say(page.say('r3', 'report'));
-    await flush();
-    FakeAudio.refuse = false;
-    FakeAudio.slow = true;
     mock.timers.tick(400);
+    FakeAudio.slow = true;
     await page.hear(0.002, 200);
     await page.hear(0.1, 400);
     const third = FakeSocket.all.at(-1)!;
     third.open();
-    page.voice.replay();
+    page.voice.replayMissed('entry-3');
+    page.voice.say(page.say('r3', 'report'));
     await page.hear(0.002, 2_500);
     third.message({ message_type: 'committed_transcript', text: '' });
     await flush();
@@ -376,6 +358,25 @@ test('what the browser will not play by itself can be played with a click, told 
     FakeAudio.slowSilence!();
     await flush();
     assert.equal(page.audio.paused.length, paused, 'the reading plays on');
+  } finally { page.end(); }
+});
+
+test('a thing that waited past its life is told to the master as expired, with how long it waited', async () => {
+  const page = await harness();
+  try {
+    await page.hear(0.002, 200);
+    await page.hear(0.1, 400);
+    const socket = FakeSocket.all.at(-1)!;
+    socket.open();
+    page.voice.say({ ...page.say('late', 'answer'), expiresAt: Date.now() + 1_000 });
+    await page.hear(0.1, 2_000);
+    await page.hear(0.002, 2_500);
+    socket.message({ message_type: 'committed_transcript', text: '' });
+    await flush();
+    socket.closed();
+    await flush();
+    assert.deepEqual(page.results(), ['late:expired']);
+    assert.match(String(posts.find(post => post.path.endsWith('/played'))?.body.detail), /^waited-\d+s$/);
   } finally { page.end(); }
 });
 

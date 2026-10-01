@@ -132,7 +132,8 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'voiceRequest': return speech.voiceRequest({ session: args.session, clientMessageId: args.clientMessageId, text: args.text, local: args.local === true });
       case 'voiceActivity': return speech.voiceActivity({ session: args.session, speaking: args.speaking, sinceSpeechMs: args.sinceSpeechMs });
       case 'voiceKnown': return speech.voiceKnown({ session: args.session });
-      case 'voicePlayed': return speech.voicePlayed({ session: args.session, id: args.id, result: args.result, startedMs: args.startedMs });
+      case 'voicePlayed': return speech.voicePlayed({ session: args.session, id: args.id, result: args.result, startedMs: args.startedMs, detail: args.detail });
+      case 'voiceMissed': return speech.voiceMissed({ session: args.session, entry: args.entry, action: args.action });
       case 'voiceTimings': return speech.timings.list();
       case 'voiceVoices': return speech.voiceVoices();
       case 'voicePreview': return speech.voicePreview({ voiceId: args.voiceId });

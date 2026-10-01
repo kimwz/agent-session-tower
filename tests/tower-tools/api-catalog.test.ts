@@ -20,7 +20,7 @@ const NOT_FOR_AGENTS = new Map<string, string>([
   ['/api/master/presence', 'a page saying it shows the master'],
   ['/api/master/directives/{}', 'a page answering a screen command'],
   ['/api/master/voice/audio/{}', 'audio a page plays'],
-  ...['on', 'off', 'presence', 'token', 'usage', 'request', 'activity', 'finished', 'played'].map(action => [`/api/master/voice/${action}`, 'the page\'s microphone and speaker'] as [string, string]),
+  ...['on', 'off', 'presence', 'token', 'usage', 'request', 'activity', 'finished', 'played', 'missed'].map(action => [`/api/master/voice/${action}`, 'the page\'s microphone and speaker'] as [string, string]),
   ['/api/nodes/{}/{}', 'the joined-computer prefix; every route takes it through node'],
 ]);
 
