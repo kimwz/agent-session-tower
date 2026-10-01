@@ -205,26 +205,39 @@ export class SecretBroker {
       catch { resolve({ operationId: input.operationId, exitCode: null, stdout: '', stderr: '프로그램을 시작할 수 없습니다.' }); return; }
       const stdout: Buffer[] = [], stderr: Buffer[] = [];
       let size = 0, timedOut = false, exceeded = false, settled = false;
+      let timer: NodeJS.Timeout | undefined;
+      const finish = (exitCode: number | null, failed = false) => {
+        if (settled) return; settled = true; if (timer) clearTimeout(timer);
+        // A descendant can retain inherited pipes after the consumer exits. Limits do not wait for its close.
+        child.stdin!.destroy(); child.stdout!.destroy(); child.stderr!.destroy();
+        try {
+          if (timedOut) { resolve({ ...genericResult(input.operationId, '프로그램 실행 시간이 만료되었습니다. 출력은 폐기했습니다.'), timedOut: true }); return; }
+          if (exceeded) { resolve(genericResult(input.operationId, '출력 크기 제한에 도달했습니다. 출력은 폐기했습니다.')); return; }
+          if (failed) { resolve(genericResult(input.operationId, '프로그램을 시작하거나 입력을 전달하지 못했습니다.')); return; }
+          const maskedStdout = maskSecretOutput(Buffer.concat(stdout).toString('utf8'), values), maskedStderr = maskSecretOutput(Buffer.concat(stderr).toString('utf8'), values);
+          if (Buffer.byteLength(maskedStdout) + Buffer.byteLength(maskedStderr) > OUTPUT_BYTES) { resolve(genericResult(input.operationId, '마스킹된 출력 크기 제한에 도달했습니다. 출력은 폐기했습니다.')); return; }
+          resolve({ operationId: input.operationId, exitCode, stdout: maskedStdout, stderr: maskedStderr });
+        } finally { for (const chunk of [...stdout, ...stderr]) chunk.fill(0); stdout.length = 0; stderr.length = 0; }
+      };
+      const stopConsumer = (failed = false) => {
+        if (settled) return;
+        // This handle is solely the consumer this broker spawned, never a provider, shell or descendant.
+        child.kill('SIGKILL'); finish(null, failed);
+      };
       const collect = (target: Buffer[], chunk: Buffer) => {
+        if (settled) return;
         size += chunk.length;
-        if (size > OUTPUT_BYTES) { exceeded = true; child.kill('SIGKILL'); } else target.push(chunk);
+        if (size > OUTPUT_BYTES) { exceeded = true; stopConsumer(); } else target.push(chunk);
       };
       child.stdout!.on('data', (chunk: Buffer) => collect(stdout, chunk));
       child.stderr!.on('data', (chunk: Buffer) => collect(stderr, chunk));
+      child.stdout!.on('error', () => stopConsumer(true));
+      child.stderr!.on('error', () => stopConsumer(true));
       child.stdin!.on('error', (error: NodeJS.ErrnoException) => {
         // Consumers may exit without reading stdin; other input failures terminate this consumer only.
-        if (error.code !== 'EPIPE' && error.code !== 'ERR_STREAM_DESTROYED') { child.kill('SIGKILL'); finish(null, true); }
+        if (error.code !== 'EPIPE' && error.code !== 'ERR_STREAM_DESTROYED') stopConsumer(true);
       });
-      const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeoutMs);
-      const finish = (exitCode: number | null, failed = false) => {
-        if (settled) return; settled = true; clearTimeout(timer);
-        if (exceeded) { resolve(genericResult(input.operationId, '출력 크기 제한에 도달했습니다. 출력은 폐기했습니다.')); return; }
-        if (failed) { resolve(genericResult(input.operationId, '프로그램을 시작하거나 입력을 전달하지 못했습니다.')); return; }
-        const note = timedOut ? '\n프로그램 실행 시간이 만료되었습니다.' : '';
-        const maskedStdout = maskSecretOutput(Buffer.concat(stdout).toString('utf8'), values), maskedStderr = maskSecretOutput(Buffer.concat(stderr).toString('utf8') + note, values);
-        if (Buffer.byteLength(maskedStdout) + Buffer.byteLength(maskedStderr) > OUTPUT_BYTES) { resolve(genericResult(input.operationId, '마스킹된 출력 크기 제한에 도달했습니다. 출력은 폐기했습니다.')); return; }
-        resolve({ operationId: input.operationId, exitCode, stdout: maskedStdout, stderr: maskedStderr, ...(timedOut ? { timedOut } : {}) });
-      };
+      timer = setTimeout(() => { timedOut = true; stopConsumer(); }, timeoutMs);
       child.once('error', () => finish(null, true));
       child.once('close', code => finish(code));
       child.stdin!.end(stdin);

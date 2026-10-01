@@ -260,3 +260,56 @@ test('remote resolved metadata and bytes must match the requested device, ID, ve
     const tooLarge = await broker.run(f.context, command(`console.log('must-not-run')`, { stdin: ref })); assert.equal(tooLarge.exitCode, null); assert.equal(tooLarge.stdout, '');
   } finally { await f.cleanup(); }
 });
+
+async function cleanupFixtureOrphans(file: string): Promise<number[]> {
+  let ids: number[] = [];
+  try { ids = (await readFile(file, 'utf8')).trim().split('\n').filter(Boolean).map(Number); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  for (const id of ids) {
+    assert.ok(Number.isSafeInteger(id) && id > 0 && id !== process.pid);
+    try { process.kill(id, 'SIGKILL'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; }
+  }
+  return ids;
+}
+
+test('timeout settles without waiting for nested fixture descendants that inherited output pipes', { timeout: 5000 }, async () => {
+  const f = await fixture(), pids = join(f.root, 'fixture-orphan-pids');
+  const leaf = `setTimeout(()=>{},2000);`;
+  const middle = `const fs=require('fs'),cp=require('child_process');const leaf=cp.spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:['ignore',1,2]});fs.appendFileSync(${JSON.stringify(pids)},leaf.pid+'\\n');setTimeout(()=>{},2000);`;
+  const parent = `const fs=require('fs'),cp=require('child_process');const middle=cp.spawn(process.execPath,['-e',${JSON.stringify(middle)}],{stdio:['ignore',1,2]});fs.appendFileSync(${JSON.stringify(pids)},middle.pid+'\\n');setTimeout(()=>{},2000);`;
+  const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service });
+  try {
+    const started = performance.now();
+    const result = await broker.run(f.context, command(parent, { timeoutMs: 300 }));
+    assert.ok(performance.now() - started < 1200, 'consumer timeout must not await inherited descendant pipes');
+    assert.equal(result.timedOut, true); assert.equal(result.stdout, ''); assert.equal(result.exitCode, null); assert.match(result.stderr, /출력은 폐기/); assert.equal(broker.inFlight(), false);
+    const ids = (await readFile(pids, 'utf8')).trim().split('\n').map(Number); assert.equal(ids.length, 2);
+    for (const id of ids) assert.doesNotThrow(() => process.kill(id, 0), 'the broker does not terminate fixture descendants');
+    assert.equal(f.ledger.get([...f.ledger.keys()][0]!)?.state, 'done');
+  } finally { await cleanupFixtureOrphans(pids); await f.cleanup(); }
+});
+
+test('timeout discards incomplete canary prefixes from both streams and finishes private-file cleanup', async () => {
+  const f = await fixture();
+  try {
+    const ref = f.add(canary), file = f.add(canary, 'file');
+    const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service });
+    const result = await broker.run(f.context, command(`process.stdout.write(process.env.TOKEN.slice(0,12));process.stderr.write(process.env.TOKEN.slice(0,12));setTimeout(()=>{},2000);`, { env: { TOKEN: ref }, files: { KEY: file }, timeoutMs: 150 }));
+    assert.equal(result.timedOut, true); assert.equal(result.stdout, ''); assert.equal(result.stderr.includes(canary.slice(0,12)), false); assert.match(result.stderr, /출력은 폐기/);
+    assert.deepEqual(await readdir(join(f.stateDir, 'secrets', 'consumers')), []); assert.equal(broker.inFlight(), false);
+    assert.equal(JSON.stringify([...f.ledger.values()]).includes(canary.slice(0,12)), false);
+  } finally { await f.cleanup(); }
+});
+
+test('output limit settles immediately despite an inherited fixture output pipe', { timeout: 5000 }, async () => {
+  const f = await fixture(), pids = join(f.root, 'fixture-limit-orphan-pids');
+  const descendant = `setTimeout(()=>{},2000);`;
+  const parent = `const fs=require('fs'),cp=require('child_process');const child=cp.spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:['ignore',1,2]});fs.appendFileSync(${JSON.stringify(pids)},child.pid+'\\n');process.stdout.write('x'.repeat(700000));setTimeout(()=>{},2000);`;
+  const broker = new SecretBroker({ stateDir: f.stateDir, service: f.service });
+  try {
+    const started = performance.now(), result = await broker.run(f.context, command(parent, { timeoutMs: 3000 }));
+    assert.ok(performance.now() - started < 1200, 'output limit must not await inherited descendant pipes');
+    assert.equal(result.stdout, ''); assert.match(result.stderr, /출력 크기 제한/); assert.equal(result.timedOut, undefined); assert.equal(broker.inFlight(), false);
+    const ids = (await readFile(pids, 'utf8')).trim().split('\n').map(Number); assert.equal(ids.length, 1); assert.doesNotThrow(() => process.kill(ids[0]!, 0));
+  } finally { await cleanupFixtureOrphans(pids); await f.cleanup(); }
+});

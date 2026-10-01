@@ -61,6 +61,8 @@ Local use needs no Tower login, API key, database, or CLI hooks; the only provid
 
 ## Encrypted secrets
 
+Use secret management from localhost or an authenticated HTTPS endpoint. Remote HTTP cannot accept vault passwords or secret input.
+
 Open **Settings → Secrets** to create a Vault with a separate password of at least 12 characters, unlock or lock it, and change its password. Register a scalar value, a dotenv bundle, or a file. Global storage does not grant access to every project: choose a project, or explicitly enable **Allow all projects**. Project rules can connect automatically or require a manual connection. A discovery-only rule lists metadata without permitting use. Select the allowed computer, keys, dotenv fields and operations for each rule.
 
 The conversation's secret controls connect values to its current security task. This task survives turn completion, conversation summaries and web reconnects. End it explicitly, archive the session, or let its expiry revoke access. Revocation applies to later uses; it cannot take back plaintext already delivered to a consumer. A run bound to a closed task cannot switch to a new one.

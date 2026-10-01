@@ -367,6 +367,9 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       const secretAction = path.match(/^\/api\/secrets\/(overview|initialize|unlock|lock|password|create|update|remove|project|rule|attach|revoke|end-task|trust|untrust|preview|import)$/);
       if (secretAction && ((secretAction[1] === 'overview' && req.method === 'GET') || (secretAction[1] !== 'overview' && req.method === 'POST'))) {
         if (masterCall || localAgent) return json(res, 403, { error: '시크릿 보관함 관리는 소유자의 전용 화면에서만 가능합니다.' });
+        // Only an explicitly configured HTTPS origin proves a secure reverse-proxy endpoint.
+        // Forwarded protocol headers supplied by a caller cannot permit sensitive input.
+        if (!identity.local && !secureOrigin && !('encrypted' in req.socket && req.socket.encrypted)) return json(res, 403, { error: '원격 시크릿 관리는 인증된 HTTPS 접속에서만 가능합니다.' });
         if (!backend.secrets) return json(res, 503, { error: '시크릿 보관함을 사용할 수 없습니다.' });
         const input = req.method === 'GET' ? Object.fromEntries(url.searchParams) : await readJson(req, 3 * 1024 * 1024);
         if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { error: '시크릿 입력이 올바르지 않습니다.' });
