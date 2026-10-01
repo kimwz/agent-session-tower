@@ -14,6 +14,7 @@ import { proxyToNode } from '../link/proxy.js';
 import { normalizeProjectGroupPatch } from '../stores/project-groups.js';
 import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
+import { acceptedEncoding, compressedEventStream, sendBody, StaticCompression } from './compression.js';
 import { SseClient } from './sse-client.js';
 import { publicSnapshot } from './public-snapshot.js';
 import { SnapshotStream, type FrameFormat } from './snapshot-stream.js';
@@ -179,9 +180,11 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
   const suggestions = { count: 0, at: 0, running: 0 };
   let scheduled: ReturnType<typeof setTimeout> | undefined;
   const json = (res: ServerResponse, status: number, body: unknown) => {
-    res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
-    res.end(JSON.stringify(body));
+    res.statusCode = status;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    sendBody(res.req, res, JSON.stringify(body));
   };
+  const staticCompression = new StaticCompression();
   const snapshot = () => publicSnapshot(backend.snapshot());
   const stream = new SnapshotStream(snapshot);
   const clients = new Set<SseClient>();
@@ -618,8 +621,10 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       }
       if (req.method === 'GET' && path === '/api/events') {
         if (clients.size >= 40) return json(res, 503, { error: '열린 모니터 연결이 너무 많습니다.' });
-        res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no' });
-        const client = new SseClient(res, () => {
+        const encoding = acceptedEncoding(req.headers['accept-encoding']);
+        // no-transform keeps proxies such as Cloudflare from re-encoding or holding back frames.
+        res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no', 'Vary': 'Accept-Encoding', ...(encoding ? { 'Content-Encoding': encoding } : {}) });
+        const client = new SseClient(encoding ? compressedEventStream(res, encoding) : res, () => {
           clients.delete(client); stream.detach(client);
           nodeClients.delete(client);
           for (const feed of nodeStreams.values()) feed.detach(client);
@@ -718,9 +723,13 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       const asset = await readWebAsset(clientDir, path);
       if (!asset) return json(res, 404, { error: '파일을 찾을 수 없습니다.' });
       res.setHeader('Content-Type', contentTypes[asset.extension] || 'application/octet-stream');
-      if (!remote && path.startsWith('/assets/')) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      // Build-hashed files never change. private keeps shared caches out; signed-out pages load them too.
+      if (path.startsWith('/assets/')) res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+      res.setHeader('Vary', 'Accept-Encoding');
+      const { body, encoding } = await staticCompression.body(path, asset.content, acceptedEncoding(req.headers['accept-encoding']));
+      if (encoding) res.setHeader('Content-Encoding', encoding);
       res.statusCode = 200;
-      res.end(req.method === 'HEAD' ? undefined : asset.content);
+      res.end(req.method === 'HEAD' ? undefined : body);
     } catch (error) {
       const message = error instanceof Error ? error.message : '요청을 처리하지 못했습니다.';
       const disposition = errorDisposition(error);
