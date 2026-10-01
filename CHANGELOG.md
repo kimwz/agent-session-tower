@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.100.1] - 2026-10-02
+
+### Fixed
+- **Refreshing Tower no longer briefly shows sessions that should be hidden.** The session list and canvas wait for the information that hides Slack coordinator conversations and finished delegated work; an initial lookup that fails or times out offers a retry. Reconnecting keeps the last successful information, so those sessions do not briefly return.
+- **The initial session snapshot is fetched once.** A new page uses the first live-stream snapshot instead of also requesting the same session snapshot over HTTP. The refresh button and refreshes after edits still work.
+
 ## [1.100.0] - 2026-10-01
 
 ### Changed
