@@ -4,11 +4,11 @@ import { chmod, lstat, mkdir, mkdtemp, open, realpath, rm } from 'node:fs/promis
 import { constants } from 'node:fs';
 import { isAbsolute, join, relative, resolve as absolute, sep } from 'node:path';
 import { SECRET_OPERATIONS, type SecretContext, type SecretMetadata, type SecretOperation, type SecretRunInput, type SecretRunResult } from '../../shared/secrets.js';
-import type { SecretService } from './service.js';
+import type { ResolvedSecret, SecretDispatchUse, SecretService } from './service.js';
 import type { RemoteSecretBroker } from './remote.js';
 
 type SourceFailure = { sourceHostId: string; code: 'SECRET_SOURCE_UNAVAILABLE' };
-type Resolved = { metadata: SecretMetadata; bytes: Buffer; fields?: Record<string, string> };
+type Resolved = ResolvedSecret;
 const failure = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const OUTPUT_BYTES = 512 * 1024;
@@ -145,7 +145,7 @@ export class SecretBroker {
           if (!ENV_NAME.test(name) || /^(TOWER_|AGENT_MONITOR_|CODEX_HOME$|CLAUDE_CONFIG_DIR$)/.test(name) || value.includes('\0')) throw failure('이 환경변수 이름 또는 값은 사용할 수 없습니다.');
           env[name] = value; values.push(Buffer.from(value));
         };
-        const used: { ref: string; operation: SecretOperation; value: Resolved }[] = [];
+        const used: SecretDispatchUse[] = [];
         const get = async (ref: string, operation: SecretOperation) => {
           const value = await this.resolve(context, ref, operation);
           deliveredBytes += value.bytes.length;
@@ -185,8 +185,8 @@ export class SecretBroker {
           try { if (current.metadata.id !== item.value.metadata.id || current.metadata.version !== item.value.metadata.version || !current.bytes.equals(item.value.bytes) || JSON.stringify(current.fields) !== JSON.stringify(item.value.fields)) throw failure('시크릿 권한 또는 값이 변경되었습니다.', 403); }
           finally { current.bytes.fill(0); }
         }
-        if (this.options.service.status().locked) throw failure('Vault가 잠겨 있습니다.', 403);
-        result = await this.consume(input, args, cwd, env, stdin, timeoutMs, values);
+        const dispatched = await this.options.service.dispatch(context, used, () => this.consume(input, args, cwd, env, stdin, timeoutMs, values));
+        result = await dispatched.result;
       } catch { result = genericResult(input.operationId); }
       finally {
         try { if (temporary) await rm(temporary, { recursive: true, force: true }); }

@@ -50,6 +50,19 @@ test('backup carries only encrypted permanent vault and restore waits for explic
   await assert.rejects(importPendingSecret(targetDir, pendingId, 'wrong-password', recipient)); assert.deepEqual(await listPendingSecretImports(targetDir), [pendingId]); assert.deepEqual(recipient.device(), identity); assert.equal(recipient.legacyGet(legacy.id), undefined);
   await importPendingSecret(targetDir, pendingId, VAULT_PASSWORD, recipient); assert.deepEqual(recipient.device(), identity); assert.deepEqual(recipient.legacyGet(legacy.id), legacy); assert.deepEqual(await listPendingSecretImports(targetDir), []); assert.equal((await readReport(targetDir))?.status, 'applied'); await assert.rejects(readFile(join(targetDir, 'trigger-secrets.json')), { code: 'ENOENT' });
 });
+test('legacy-only restore before Vault initialization preserves the existing worker restoration path', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-backup-legacy-compatible-')); t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const service = await backup(stateDir);
+  const file = await encryptBackup({ version: 1, worker: { files: { 'trigger-secrets.json': [legacy] } }, web: {} }, BACKUP_PASSWORD, { towerVersion: '1.100.2', from: 'fixture' });
+  const report = await service.apply((await service.check(file, BACKUP_PASSWORD)).id);
+  assert.equal(report.status, 'waiting-worker'); assert.equal(report.pendingSecretImports, undefined);
+  assert.deepEqual(await listPendingSecretImports(stateDir), []);
+  const taken = await takeWorkerRestore(stateDir); assert.ok(taken);
+  const store = new SecretStore(stateDir); await store.load(); assert.deepEqual(store.get(legacy.id), legacy);
+  await taken.finish({ parts: ['triggers'], errors: [] });
+  assert.equal((await readReport(stateDir))?.status, 'applied'); assert.equal(await collectEncryptedVault(stateDir), undefined);
+});
+
 test('old plaintext backup restores as an encrypted pending import without plaintext state files', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-backup-legacy-pending-')); t.after(() => rm(stateDir, { recursive: true, force: true })); const target = await vault(stateDir); const service = await backup(stateDir);
   const file = await encryptBackup({ version: 1, worker: { files: { 'trigger-secrets.json': [legacy] } }, web: {} }, BACKUP_PASSWORD, { towerVersion: '1.100.2', from: 'fixture' });

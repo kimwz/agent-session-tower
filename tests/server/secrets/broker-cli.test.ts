@@ -29,6 +29,7 @@ async function fixture() {
       const resource = resources.get(ref); if (!resource) throw new Error('missing');
       return { ...resource, bytes: Buffer.from(resource.bytes), fields: resource.fields ? { ...resource.fields } : undefined };
     },
+    dispatch: async (_ctx: SecretContext, _uses: unknown, start: () => unknown) => ({ result: start() }),
     beginOperation: async (_ctx: SecretContext, id: string, fingerprint: string) => {
       if (locked || _ctx.taskId !== context.taskId || _ctx.runId !== context.runId) throw new Error('denied');
       const found = ledger.get(id); if (found) { if (found.fingerprint !== fingerprint) throw new Error('identity conflict'); return { ...found, fresh: false }; }
@@ -211,6 +212,82 @@ test('encrypted domain fixture denies forged task and revoked policy through the
     assert.equal((await readFile(join(f.stateDir, 'secrets', 'journal.json'), 'utf8')).includes(canary), false);
     await service.lock(); await assert.rejects(broker.run(context, command(`console.log('no')`, { env: { TOKEN: metadata.reference } })));
   } finally { await service.lock(); await f.cleanup(); }
+});
+
+test('final dispatch denies local changes completed while a later remote reference is reauthorized', { timeout: 20000 }, async () => {
+  const f = await fixture(); let now = Date.now(); const service = new SecretService({ stateDir: f.stateDir, now: () => now });
+  try {
+    await service.start(); await service.initialize('fixture-dispatch-password-42');
+    for (const mode of ['revoke', 'policy', 'expiry', 'rotation', 'fields'] as const) {
+      const target = await service.ensureTask(`dispatch-${mode}`, f.root), context = { ...target, runId: `run-${mode}` };
+      const local = await service.create({ name: `local-${mode}`, kind: mode === 'fields' ? 'env' : 'scalar', scope: 'task', target, connect: true,
+        value: mode === 'fields' ? `VISIBLE=${canary}\nPRIVATE=PRIVATE_DISPATCH_CANARY` : canary,
+        operations: ['discover', 'env'], ...(mode === 'expiry' ? { expiresAt: now + 100 } : {}) });
+      const ref = 'tower-secret://remote/second@1'; let requests = 0;
+      const remote = { request: async () => {
+        if (++requests === 2) {
+          if (mode === 'revoke') await service.revoke(target, [local.id]);
+          else if (mode === 'rotation') await service.update({ id: local.id, value: 'ROTATED_DISPATCH_CANARY' });
+          else if (mode === 'expiry') now += 101;
+          else {
+            const rule = service.overview(target).rules.find(item => item.secretIds.includes(local.id))!;
+            await service.setRule({ ...rule, ...(mode === 'fields' ? { fields: { [local.id]: ['VISIBLE'] } } : { operations: ['discover'] }) });
+            if (mode === 'fields') await service.attach(target, [local.id]);
+          }
+        }
+        return { metadata: { id: 'second', name: 'fixture', kind: 'scalar', groupId: 'remote-group', version: 1, reference: ref }, bytes: Buffer.from('REMOTE_DISPATCH_CANARY') };
+      } } as unknown as RemoteSecretBroker;
+      const marker = join(f.root, `spawn-${mode}`);
+      const input = command("require('fs').writeFileSync(process.argv[1],'spawned');console.log('must-not-run');", mode === 'fields'
+        ? { envBundle: local.reference, env: { REMOTE: ref } } : { env: { LOCAL: local.reference, REMOTE: ref } });
+      input.args!.push(marker);
+      const result = await new SecretBroker({ stateDir: f.stateDir, service, remote }).run(context, input);
+      assert.equal(requests, 2); assert.equal(result.exitCode, null, mode); assert.equal(result.stdout, '', mode);
+      await assert.rejects(readFile(marker), { code: 'ENOENT' }, `${mode} must prevent the consumer from spawning`);
+    }
+  } finally { await service.lock(); await f.cleanup(); }
+});
+
+test('final dispatch checks every remote reference recipient exclusion after the last remote await', async () => {
+  const f = await fixture(), service = new SecretService({ stateDir: f.stateDir });
+  try {
+    await service.start(); await service.initialize('fixture-recipient-dispatch-password');
+    const target = await service.ensureTask('recipient-dispatch', f.root), context = { ...target, runId: 'recipient-run' };
+    const first = 'tower-secret://remote/first@1', second = 'tower-secret://remote/second@1'; let secondRequests = 0;
+    const remote = { request: async (_host: string, _context: SecretContext, _operation: string, payload: { reference: string }) => {
+      if (payload.reference === second && ++secondRequests === 2) await service.revoke(target, ['first']);
+      return { metadata: { id: payload.reference === first ? 'first' : 'second', name: 'fixture', kind: 'scalar', groupId: 'remote-group', version: 1, reference: payload.reference }, bytes: Buffer.from('REMOTE_RECIPIENT_CANARY') };
+    } } as unknown as RemoteSecretBroker;
+    const marker = join(f.root, 'spawn-recipient');
+    const input = command("require('fs').writeFileSync(process.argv[1],'spawned');", { env: { FIRST: first, SECOND: second } }); input.args!.push(marker);
+    const result = await new SecretBroker({ stateDir: f.stateDir, service, remote }).run(context, input);
+    assert.equal(secondRequests, 2); assert.equal(result.exitCode, null); assert.equal(result.stdout, '');
+    await assert.rejects(readFile(marker), { code: 'ENOENT' });
+  } finally { await service.lock(); await f.cleanup(); }
+});
+
+test('owner revocation commits while a dispatched consumer is still running', async () => {
+  const f = await fixture(), service = new SecretService({ stateDir: f.stateDir });
+  let finish!: () => void; const consumer = new Promise<void>(resolve => { finish = resolve; });
+  let timer: NodeJS.Timeout | undefined;
+  let dispatch: ReturnType<SecretService['dispatch']> | undefined, revoke: Promise<void> | undefined;
+  try {
+    await service.start(); await service.initialize('fixture-dispatch-queue-password');
+    const target = await service.ensureTask('dispatch-queue', f.root), context = { ...target, runId: 'dispatch-queue-run' };
+    const secret = await service.create({ name: 'queue key', kind: 'scalar', scope: 'task', target, connect: true, value: canary, operations: ['env'] });
+    const value = await service.resolve(context, secret.reference, 'env');
+    let started = false;
+    dispatch = service.dispatch(context, [{ ref: secret.reference, operation: 'env', value }], () => { started = true; return consumer; });
+    revoke = service.revoke(target, [secret.id]);
+    const committed = await Promise.race([revoke.then(() => true), new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 1000); })]);
+    assert.equal(committed, true, 'consumer runtime cannot hold the policy commit queue'); assert.equal(started, true);
+    assert.equal((await dispatch).result, consumer);
+    await assert.rejects(service.dispatch(context, [{ ref: secret.reference, operation: 'env', value }], () => { throw new Error('revoked consumer started'); }), /access denied/i);
+    value.bytes.fill(0);
+  } finally {
+    if (timer) clearTimeout(timer); finish(); await Promise.allSettled([dispatch, revoke]);
+    await service.lock(); await f.cleanup();
+  }
 });
 
 test('consumer files never stage under a state directory inside the project', async () => {

@@ -272,6 +272,40 @@ test('a capability issued before termination but never used cannot bind the subs
   } finally { await f.cleanup(); }
 });
 
+test('session archival without a Vault is a no-op, with no deferred secret state', async () => {
+  const f = await fixture();
+  try {
+    await f.runtime.endSession(f.session.id);
+    assert.equal(f.service.status().initialized, false);
+    await assert.rejects(readFile(join(f.stateDir, 'secret-close-intents.json')), { code: 'ENOENT' });
+  } finally { await f.cleanup(); }
+});
+
+test('session archival cleans stored tasks without granting child or automation sessions secret access', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize();
+    const child = sessionRecord(f.projectRoot, { id: 'codex:archive-child', isSubagent: true });
+    const trigger = sessionRecord(f.projectRoot, { id: 'codex:archive-trigger', launchedBy: { kind: 'trigger', triggerId: 'fixture-trigger' } });
+    f.sessions.set(child.id, child); f.origins.set(child.id, { kind: 'owner', untrustedInput: false });
+    f.sessions.set(trigger.id, trigger); f.origins.set(trigger.id, { kind: 'trigger', triggerId: 'fixture-trigger', untrustedInput: false });
+    for (const session of [child, trigger]) {
+      await f.runtime.endSession(session.id);
+      await assert.rejects(f.runtime.target(session.id), { statusCode: 403 });
+    }
+    const run = f.addRun('active-archived-run');
+    const target = await f.runtime.target(f.session.id);
+    const secret = await f.service.create({ name: 'archived task key', kind: 'scalar', scope: 'task', value: canary, target });
+    f.session.closed = true;
+    await rm(f.projectRoot, { recursive: true, force: true });
+    await f.runtime.endSession(f.session.id);
+    assert.equal(f.service.overview(target).task?.status, 'closed');
+    assert.equal(f.service.overview().secrets.some(item => item.id === secret.id), false);
+    assert.equal(run.status, 'running');
+    await assert.rejects(readFile(join(f.stateDir, 'secret-close-intents.json')), { code: 'ENOENT' });
+  } finally { await f.cleanup(); }
+});
+
 test('locked session closure survives runtime restart and removes task-only secrets before owner unlock enables tools', async () => {
   const f = await fixture(); let restartedRuntime: SecretRuntime | undefined;
   try {

@@ -136,9 +136,11 @@ export class SecretRuntime {
   async endSession(sessionId: string): Promise<void> {
     const id = this.options.runs.getSession(sessionId)?.id;
     if (!id) throw fail('종료할 세션을 찾을 수 없습니다.', 404);
+    if (!this.options.service.status().initialized) return;
     await this.recordClosure(id);
     if (!this.options.service.status().locked) {
-      const target = await this.peekTarget(id);
+      // Archival only removes existing authority; it does not require eligibility for a new secret connection.
+      const target = this.options.service.currentTask(id);
       if (target) await this.endTask(target);
       await this.applyClosures();
     }

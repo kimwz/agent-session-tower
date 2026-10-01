@@ -311,7 +311,7 @@ export class BackupService {
     await removePendingWorker(stateDir);
     const restoreId = randomUUID(); const pendingSecretImports: string[] = [];
     if (payload.worker.encryptedVault) { pendingSecretImports.push(await stageVaultImport(stateDir, payload.worker.encryptedVault, restoreId)); delete payload.worker.encryptedVault; }
-    if (payload.worker.files['trigger-secrets.json'] !== undefined || (pendingSecretImports.length && payload.worker.triggers)) {
+    if ((targetHasVault || pendingSecretImports.length > 0) && (payload.worker.files['trigger-secrets.json'] !== undefined || payload.worker.triggers)) {
       pendingSecretImports.push(await stageLegacyImport(stateDir, payload.worker.files['trigger-secrets.json'] ?? [], passphrase, restoreId, payload.worker.triggers));
       delete payload.worker.files['trigger-secrets.json']; delete payload.worker.triggers;
     }
