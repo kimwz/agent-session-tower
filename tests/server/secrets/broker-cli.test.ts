@@ -322,6 +322,46 @@ test('compare and domain fingerprint disclose only their derived result', async 
   } finally { await f.cleanup(); }
 });
 
+test('comparison denies local authority changes committed while resolving its remote operand', { timeout: 20000 }, async () => {
+  const f = await fixture(); let now = Date.now(); const service = new SecretService({ stateDir: f.stateDir, now: () => now });
+  try {
+    await service.start(); await service.initialize('fixture-compare-authority-password');
+    for (const mode of ['revoke', 'policy', 'expiry', 'rotation', 'fields'] as const) {
+      const target = await service.ensureTask(`compare-${mode}`, f.root), context = { ...target, runId: `compare-run-${mode}` };
+      const local = await service.create({ name: `compare-${mode}`, kind: mode === 'fields' ? 'env' : 'scalar', scope: 'task', target, connect: true,
+        value: mode === 'fields' ? `VISIBLE=${canary}\nPRIVATE=PRIVATE_COMPARE_CANARY` : canary,
+        operations: ['compare'], ...(mode === 'expiry' ? { expiresAt: now + 100 } : {}) });
+      const ref = 'tower-secret://remote/right@1';
+      const remote = { request: async () => {
+        if (mode === 'revoke') await service.revoke(target, [local.id]);
+        else if (mode === 'rotation') await service.update({ id: local.id, value: 'ROTATED_COMPARE_CANARY' });
+        else if (mode === 'expiry') now += 101;
+        else {
+          const rule = service.overview(target).rules.find(item => item.secretIds.includes(local.id))!;
+          await service.setRule({ ...rule, ...(mode === 'fields' ? { fields: { [local.id]: ['VISIBLE'] } } : { operations: ['discover'] }) });
+          if (mode === 'fields') await service.attach(target, [local.id]);
+        }
+        return { metadata: { id: 'right', name: 'fixture', kind: 'scalar', groupId: 'remote-group', version: 1, reference: ref }, bytes: Buffer.from(canary) };
+      } } as unknown as RemoteSecretBroker;
+      await assert.rejects(new SecretBroker({ stateDir: f.stateDir, service, remote }).compare(context, local.reference, ref), mode);
+    }
+  } finally { await service.lock(); await f.cleanup(); }
+});
+
+test('comparison checks the earlier remote operand recipient exclusion after resolving the later operand', async () => {
+  const f = await fixture(), service = new SecretService({ stateDir: f.stateDir });
+  try {
+    await service.start(); await service.initialize('fixture-compare-recipient-password');
+    const target = await service.ensureTask('compare-recipient', f.root), context = { ...target, runId: 'compare-recipient-run' };
+    const first = 'tower-secret://remote/first@1', second = 'tower-secret://remote/second@1';
+    const remote = { request: async (_host: string, _context: SecretContext, _operation: string, payload: { reference: string }) => {
+      if (payload.reference === second) await service.revoke(target, ['first']);
+      return { metadata: { id: payload.reference === first ? 'first' : 'second', name: 'fixture', kind: 'scalar', groupId: 'remote-group', version: 1, reference: payload.reference }, bytes: Buffer.from(canary) };
+    } } as unknown as RemoteSecretBroker;
+    await assert.rejects(new SecretBroker({ stateDir: f.stateDir, service, remote }).compare(context, first, second));
+  } finally { await service.lock(); await f.cleanup(); }
+});
+
 test('remote resolved metadata and bytes must match the requested device, ID, version and reference', async () => {
   const f = await fixture();
   try {

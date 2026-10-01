@@ -245,15 +245,30 @@ export class SecretBroker {
   }
 
   async compare(context: SecretContext, left: string, right: string): Promise<{ equal: boolean }> {
-    const a = await this.resolve(context, left, 'compare');
-    const b = await this.resolve(context, right, 'compare');
-    return { equal: a.bytes.length === b.bytes.length && timingSafeEqual(a.bytes, b.bytes) };
+    this.active++;
+    const values: Buffer[] = [];
+    try {
+      const a = await this.resolve(context, left, 'compare'); values.push(a.bytes);
+      const b = await this.resolve(context, right, 'compare'); values.push(b.bytes);
+      return (await this.options.service.dispatch(context, [{ ref: left, operation: 'compare', value: a }, { ref: right, operation: 'compare', value: b }],
+        () => ({ equal: a.bytes.length === b.bytes.length && timingSafeEqual(a.bytes, b.bytes) }))).result;
+    } finally { for (const value of values) value.fill(0); this.active--; }
   }
 
   async fingerprint(context: SecretContext, reference: string, domain = 'object'): Promise<{ algorithm: 'HMAC-SHA256'; fingerprint: string }> {
     if (!/^[A-Za-z0-9._:-]{1,80}$/.test(domain)) throw failure('fingerprint domain이 올바르지 않습니다.');
-    const value = await this.resolve(context, reference, 'fingerprint');
-    const fingerprint = createHmac('sha256', this.options.service.fingerprintKey()).update(JSON.stringify(['tower-secret-fingerprint-v1', this.options.service.device().id, domain, value.metadata.id])).update(value.bytes).digest('hex');
-    return { algorithm: 'HMAC-SHA256', fingerprint };
+    this.active++;
+    try {
+      const value = await this.resolve(context, reference, 'fingerprint');
+      try {
+        return (await this.options.service.dispatch(context, [{ ref: reference, operation: 'fingerprint', value }], () => {
+          const key = this.options.service.fingerprintKey();
+          try {
+            const fingerprint = createHmac('sha256', key).update(JSON.stringify(['tower-secret-fingerprint-v1', this.options.service.device().id, domain, value.metadata.id])).update(value.bytes).digest('hex');
+            return { algorithm: 'HMAC-SHA256' as const, fingerprint };
+          } finally { key.fill(0); }
+        })).result;
+      } finally { value.bytes.fill(0); }
+    } finally { this.active--; }
   }
 }
