@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.99.0] - 2026-10-01
+
+### Changed
+- **A page receives only the sessions it shows.** Opening Tower used to bring every session this computer ever saw, agent and review runs included (thousands, several megabytes); now it brings the open sessions inside the list's time window, those at work, and those a turn or Auto Prompt is waiting on (with the default one-day window, tens instead of thousands). Widening the time window, opening the archived list, or opening a session brings what that needs at once on the open connection (an opened session's subagents and agent runs only when it is opened), and narrowing lets it go. Counts, folder choices, folder search and saved canvas places still cover every session. The trigger editor asks for the sessions it can continue when it opens. Tower's tools, links between computers and pages from an older version still receive every session.
+
 ## [1.98.1] - 2026-10-01
 
 ### Fixed
