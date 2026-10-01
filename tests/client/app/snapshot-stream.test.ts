@@ -355,3 +355,26 @@ test('an HTTP snapshot asked for before the scope changed is not shown', () => {
   assert.equal(title(page.view.get()), 'New scope');
   page.connection();
 });
+
+test('scope changes go to the stream one at a time, so the newest one is the one the server holds', async () => {
+  FakeSource.opened = [];
+  const clock = new Clock();
+  const store = new SnapshotStore(displayed().show, clock);
+  let scope: SessionScope = { days: 1, closed: false };
+  const pending: Array<{ scope: SessionScope; done: (taken: boolean) => void }> = [];
+  const connection = connectSnapshotStream(store, { onFrame: () => {}, onOpen: () => {}, onError: () => {}, onUnreadable: () => {} }, url => new FakeSource(url), clock, undefined, {
+    current: () => scope,
+    send: (_id, next) => new Promise<boolean>(done => pending.push({ scope: next, done })),
+  });
+  FakeSource.opened[0].emit('stream', 0, { id: 'stream-1' });
+  scope = { days: 7, closed: false }; connection.rescope(); clock.advance(RESCOPE_MS);
+  scope = { days: 30, closed: false }; connection.rescope(); clock.advance(RESCOPE_MS);
+  assert.deepEqual(pending.map(item => item.scope.days), [7], 'the second change waits for the first');
+  pending[0].done(true);
+  await settle();
+  assert.deepEqual(pending.map(item => item.scope.days), [7, 30]);
+  pending[1].done(true);
+  await settle();
+  assert.equal(pending.length, 2, 'nothing more once the server holds the newest scope');
+  connection();
+});

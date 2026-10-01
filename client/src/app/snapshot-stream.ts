@@ -194,8 +194,8 @@ export interface SnapshotConnection {
 export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotStreamHandlers,
   open: (url: string) => SnapshotEventSource = url => new EventSource(url), timers: Timers = realTimers, nodes?: NodeSnapshotStore, scoping?: StreamScoping): SnapshotConnection {
   let source: SnapshotEventSource | undefined;
-  /** The open stream's id for scope changes, and the scope the server was last told for it. */
-  let stream: { source: SnapshotEventSource; id: string; scope: SessionScope } | undefined;
+  /** The open stream's id for scope changes, the scope the server holds for it, and whether a change is on its way. */
+  let stream: { source: SnapshotEventSource; id: string; scope: SessionScope; sending: boolean } | undefined;
   /** The scope in the URL of the connection being opened. */
   let requested: SessionScope | undefined;
   let rescopeTimer: unknown;
@@ -213,7 +213,7 @@ export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotSt
     const current = source = open(`${nodes ? '/api/events?patch=1&nodes=1' : '/api/events?patch=1'}${requested ? `&${scopeParams(requested)}` : ''}`);
     current.addEventListener('stream', event => {
       if (current !== source || !requested) return;
-      try { stream = { source: current, id: (JSON.parse(event.data) as { id: string }).id, scope: requested }; } catch { return; }
+      try { stream = { source: current, id: (JSON.parse(event.data) as { id: string }).id, scope: requested, sending: false }; } catch { return; }
       // The scope may have changed while this connection was opening.
       sendScope();
     });
@@ -252,14 +252,23 @@ export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotSt
       if (retrying || scoping) restart(Math.min(MAX_RETRY_MS, 1000 * 2 ** failures++));
     };
   };
-  /** Tells the open stream the current scope; a stream the server no longer knows is replaced by one opened with it. */
+  /**
+   * Tells the open stream the current scope, one change at a time so the server never takes them out of order; a
+   * change made meanwhile follows. A stream the server no longer knows is replaced by one opened with the scope.
+   */
   const sendScope = () => {
     const open = stream;
-    if (!scoping || !open || open.source !== source) return;
+    if (!scoping || !open || open.source !== source || open.sending) return;
     const scope = scoping.current();
     if (sameScope(scope, open.scope)) return;
-    open.scope = scope;
-    void scoping.send(open.id, scope).catch(() => false).then(taken => { if (!taken && stream === open && source === open.source) restart(0); });
+    open.sending = true;
+    void scoping.send(open.id, scope).catch(() => false).then(taken => {
+      open.sending = false;
+      if (stream !== open || source !== open.source) return;
+      if (!taken) { restart(0); return; }
+      open.scope = scope;
+      sendScope();
+    });
   };
   // A new connection always begins with a complete snapshot.
   const restart = (wait: number) => {

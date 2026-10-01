@@ -22,5 +22,6 @@ export function useResumeCandidates(provider: Provider, include: string | undefi
     void api<{ sessions: Session[] }>(`/api/sessions/resume-candidates?${query}`).then(value => { if (live) setLoaded(value.sessions); }).catch(() => { if (live) setLoaded([]); });
     return () => { live = false; };
   }, [provider, include, sessions]);
-  return sessions ? resumeCandidates(sessions, provider) : loaded;
+  // Until the answer for a newly chosen provider arrives, the other provider's candidates are not offered.
+  return resumeCandidates(sessions ?? loaded, provider);
 }

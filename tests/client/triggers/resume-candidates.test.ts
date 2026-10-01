@@ -14,3 +14,7 @@ test('a joined computer\'s candidates are its resumable conversations of the pro
   assert.equal(candidates[0].id, 'a');
   assert.ok(candidates.every(item => item.provider === 'claude' && !item.isSubagent && !item.master && item.resumable));
 });
+
+test('candidates offered are always the chosen provider\'s, even before the answer for it arrives', () => {
+  assert.deepEqual(resumeCandidates([session('a'), session('b', { provider: 'codex' })], 'codex').map(item => item.id), ['b']);
+});
