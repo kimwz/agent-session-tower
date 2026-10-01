@@ -41,6 +41,13 @@ import { remoteTriggerLaunch } from '../remote/visibility.js';
 import { RemoteRequestLedger, type RemoteResult } from '../remote/request-ledger.js';
 import { SkillService } from '../skills/service.js';
 import { SessionTasks } from '../sessions/tasks.js';
+import { SecretService } from '../secrets/service.js';
+import { SecretRuntime, SECRET_TOOLS } from '../secrets/runtime.js';
+import { SecretStore } from '../triggers/secrets.js';
+import { listPendingSecretImports, importPendingSecret } from '../backup/secrets.js';
+import type { SecretTarget } from '../../shared/secrets.js';
+import type { Capability } from '../api/mcp.js';
+import type { RemoteSecretRequest, RemoteSecretResponse } from '../secrets/remote.js';
 import { installAgentGuidance } from '../agent-guidance/install.js';
 import { PermissionService } from '../permissions/service.js';
 import { PermissionReviewer } from '../permissions/reviewer.js';
@@ -53,7 +60,7 @@ import { modelRoleNotes } from '../models/notes.js';
 import { keepEndpoint } from './endpoint-keeper.js';
 import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 
-const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup']);
+const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup', 'secretCall']);
 
 export interface RunnerHostOptions {
   stateDir: string;
@@ -71,6 +78,7 @@ export interface RunnerHostOptions {
   /** Task summaries put on the listed sessions; a new summary is a new snapshot. */
   sessionTasks?: SessionTasks;
   api?: TowerApi;
+  secrets?: SecretRuntime;
   terminals?: WorkspaceTerminals;
   idleMs?: number;
   onIdle?: () => void | Promise<void>;
@@ -110,7 +118,7 @@ const READS_DURING_HANDOFF = new Set(['snapshot', 'sessionHistory', 'attachment'
 /** Hosts an already-started engine, including one adopted during an in-place upgrade. */
 export async function startRunnerHost(options: RunnerHostOptions) {
   const capabilities = options.capabilities ?? new CapabilityRegistry();
-  options.runs.setRunToolResolver(runToolResolver({ stateDir: options.stateDir, runs: options.runs, slack: options.slack, github: options.github, capabilities }));
+  options.runs.setRunToolResolver(runToolResolver({ stateDir: options.stateDir, runs: options.runs, slack: options.slack, github: options.github, capabilities, secrets: options.secrets }));
   const paths = await runnerPaths(options.stateDir);
   const release = options.releaseStateLock ?? await acquireStateLock(paths.runtime, 0);
   let context: Awaited<ReturnType<typeof runnerContext>> | undefined;
@@ -229,6 +237,25 @@ export async function startRunnerHost(options: RunnerHostOptions) {
           value => ({ kind: 'autoPrompt', jobId: value.id }), result => result.kind === 'autoPrompt' ? autoPrompts.get(result.jobId) : undefined);
       } break;
       case 'cancelAutoPrompt': if (options.autoPrompts) return options.autoPrompts.cancel(args[0] as string); break;
+      case 'secretCall': {
+        const secrets = options.secrets; if (!secrets) break;
+        const operation = args[0];
+        if (operation === 'control') return secrets.control(String(args[1]), record(args[2]), args[3] as SecretTarget | undefined);
+        if (operation === 'peers') return secrets.peers();
+        if (operation === 'device') return secrets.device();
+        if (operation === 'poll') return { requests: secrets.poll(String(args[1])) };
+        if (operation === 'answer') return secrets.answer(String(args[1]), args[2] as RemoteSecretRequest);
+        if (operation === 'deliver') { secrets.deliver(String(args[1]), args[2] as RemoteSecretResponse); return { delivered: true }; }
+        if (operation === 'target') {
+          const session = options.runs.getSession(String(args[1]));
+          if (!session || coordinator(session.id)) throw Object.assign(new Error('Not found.'), { statusCode: 404 });
+          await options.exclusions?.reload();
+          if (options.exclusions && await options.exclusions.excludesNow(session.cwd)) throw Object.assign(new Error('Not found.'), { statusCode: 404 });
+          return secrets.remoteTarget(session.id, args[2] !== false);
+        }
+        if (operation === 'close-session') { await secrets.endSession(String(args[1])); return { closed: true }; }
+        break;
+      }
       case 'slackOverview': if (options.slack) return options.slack.overview(); break;
       case 'slackMutate': if (options.slack) {
         // Read before the change so a disconnect is still recorded under the account it removed.
@@ -265,7 +292,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     }
     throw Object.assign(new Error('Unknown runner operation.'), { statusCode: 400 });
   };
-  const mcp = { api: options.api, capabilities, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
+  const mcp = { api: options.api, capabilities, secretTools: options.secrets ? SECRET_TOOLS : undefined, secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
     githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined,
     run: (runId: string) => options.runs.list().find(run => run.id === runId) };
   const server = createServer(async (req, res) => {
@@ -525,10 +552,18 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     coordinators = () => new Set([...slack.coordinatorSessionIds(), ...github.coordinatorSessionIds()]);
     // A delegated task's run stays until its coordinator has finished with it, across pruning and restarts.
     runs.setRetained(() => [...slack.automation.retainedRuns(), ...github.automation.retainedRuns()]);
-    const capabilities = new CapabilityRegistry(capability => capability.kind !== 'owner-run'
+    const capabilities = new CapabilityRegistry(capability => (capability.kind !== 'owner-run' && capability.kind !== 'secret-run')
       || runs.list().some(run => run.id === capability.runId && (run.status === 'running' || run.status === 'queued')));
     capabilities.grant(await sessionToolsKey(stateDir), { kind: 'session-reader' });
-    runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, github, capabilities }));
+    const secretService = new SecretService({ stateDir });
+    await secretService.start();
+    const secretStore = new SecretStore(stateDir, { vault: secretService });
+    const secrets = new SecretRuntime({ stateDir, service: secretService, runs,
+      isClosed: async id => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds().has(id); },
+      migrate: () => secretStore.migrate(), pendingImports: () => listPendingSecretImports(stateDir),
+      importPending: (id, password) => importPendingSecret(stateDir, id, password, secretService, { restoreTriggers: async backup => { if (!triggerEngine) throw new Error('Triggers are still starting.'); await triggerEngine.restoreBackup(backup); } }) });
+    runs.setRunToolResolver(runToolResolver({ stateDir, runs, slack, github, capabilities, secrets }));
+    const secretExpiry = setInterval(() => { void secrets.sweep().catch(() => { console.error('Secret expiry cleanup failed; the vault remains unavailable until unlocked.'); }); }, 60_000); secretExpiry.unref();
     const visible = await runnerContext({ stateDir, runs, sessions, slack, exclusions });
     autoPrompts.updateContext(visible);
     runs.setFirstTurnNotes(async (run, session) => {
@@ -714,7 +749,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
         const continued = sessionTargets(triggers).flatMap(id => { const cwd = runs.getSession(id)?.cwd; return cwd ? [cwd] : []; });
         return [...folderSettings(triggers), ...continued, ...groups.list().filter(group => group.pinned).map(group => group.cwd)]; } });
     await worktrees.start().catch(error => console.error(`Worktree cleanup did not start: ${error instanceof Error ? error.message : String(error)}`));
-    const triggers = new TriggerService({ stateDir, slack: () => slack.projection(), publicAgents: () => publicAgents.projection(), ownPorts,
+    const triggers = new TriggerService({ stateDir, secretStore, slack: () => slack.projection(), publicAgents: () => publicAgents.projection(), ownPorts,
       // A trigger set up from a controlling computer checks the sharing list as it is when it runs.
       sharing: { check: async path => { await exclusions.reload(); return exclusions.excludesNow(path); }, now: path => exclusions.matcher().excludes(path) }, executor: {
       submitAutoPrompt: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); },
@@ -766,18 +801,18 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       autoPrompts: { submit: async (request, internal) => { await context.refresh(); return autoPrompts.submit(request, internal); }, get: id => autoPrompts.get(id) } });
     // A restore's skills are still being written (below): the worker hands over only after them.
     let restoringSkills = Boolean(restoring);
-    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, api, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
-      onIdle: async () => { stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
-      inFlight: () => restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
-      transient: () => restoringSkills || slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
+    await startRunnerHost({ stateDir, sessions, runs, autoPrompts, terminals, slack, github, triggers, publicAgents, skills, sessionTasks: tasks, api, secrets, capabilities, ledger, exclusions, releaseStateLock: release, handoffNonce,
+      onIdle: async () => { clearInterval(secretExpiry); secrets.close(); stopTelling(); await tools?.stop(); triggers.close(); await triggers.settle(); github.close(); slack.close(); publicAgents.close(); await publicAgents.flush(); skills.close(); await skills.flush(); await tasks.close(); worktrees.close(); await worktrees.flush(); reviewer.close(); await reviewer.flush(); await runner.flush(); clearInterval(expiryTimer); permissions.close(); await permissions.flush(); await sessions.quiesce().catch(() => {}); sessions.stop(); terminals.dispose(); await autoPrompts.close(); await runs.close(); },
+      inFlight: () => secrets.inFlight() || restoringSkills || slack.hasInFlight() || triggers.inFlight() || github.inFlight() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
+      transient: () => secrets.inFlight() || restoringSkills || slack.hasTransient() || triggers.inFlight() || github.automation.transient() || publicAgents.inFlight() || skills.inFlight() || tasks.inFlight() || worktrees.inFlight() || reviewer.inFlight() || runner.inFlight() || runNotices.size > 0 || Boolean(tools?.busy()),
       // Work a Slack or GitHub coordinator delegated: its coordinator hears how it ended and decides what follows.
       delegated: run => Boolean(run.origin?.workflowId) && !coordinators().has(run.sessionId),
       releaseIntake: () => { slack.releaseNewWork(); triggers.release(); github.release(); publicAgents.release(); skills.resume(); tasks.resume(); worktrees.resume(); reviewer.release(); },
       holdIntake: () => { slack.holdNewWork(); triggers.hold(); github.hold(); publicAgents.hold(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); },
-      quiesce: async () => { paused = true; tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([worktrees.flush(), tasks.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
-      resume: () => { paused = false; tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
+      quiesce: async () => { paused = true; secrets.pause(); tools?.pause(); slack.pause(); triggers.pause(); github.pause(); publicAgents.pause(); skills.pause(); tasks.pause(); worktrees.pause(); reviewer.hold(); await reviewer.flush(); permissions.pause(); await Promise.all([secrets.flush(), worktrees.flush(), tasks.flush(), permissions.flush(), slack.flush(), triggers.flush(), github.flush(), publicAgents.flush(), skills.flush(), runs.flushState(), autoPrompts.flush(), ledger.flush(), sessions.quiesce()]); },
+      resume: () => { paused = false; secrets.resume(); tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
-      onHandedOff: () => { stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); void tasks.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+      onHandedOff: () => { clearInterval(secretExpiry); secrets.close(); stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); void tasks.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
     runs.markReady();
     // A restore's skills are written once the worker serves: linking into project folders (on a slow volume, say) never
     // keeps it from starting. The restore is recorded as done after them; a worker that stops first leaves it to the next.

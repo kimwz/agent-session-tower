@@ -4,6 +4,7 @@ import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { BACKUP_EXTENSION, MIN_BACKUP_PASSPHRASE, type BackupOverview, type BackupPart, type BackupPreview, type RemoteBackup, type RestoreReport } from '../../../shared/backup';
 import { api, ApiError } from '../common/lib';
 import { locale, translateMessage, useI18n } from '../i18n/i18n';
+import { openSettings } from '../settings/settings-open';
 import { SettingsFrameContext, SettingsPane } from '../settings/SettingsPane';
 
 const headers = (token: string) => ({ 'Content-Type': 'application/json', [REQUEST_TOKEN_HEADER]: token });
@@ -24,7 +25,7 @@ async function saveFile(path: string, token: string, body: unknown): Promise<voi
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
-const PART_LABELS: Record<BackupPart, string> = { triggers: '트리거', triggerSecrets: '트리거 비밀값', permissions: '권한 규칙', models: '모델 설정', slack: 'Slack 연결과 규칙', github: 'GitHub 자동화 규칙', publicAgents: '공개 에이전트',
+const PART_LABELS: Record<BackupPart, string> = { triggers: '트리거', secretVault: '암호화한 시크릿 보관함', triggerSecrets: '트리거 비밀값', permissions: '권한 규칙', models: '모델 설정', slack: 'Slack 연결과 규칙', github: 'GitHub 자동화 규칙', publicAgents: '공개 에이전트',
   skills: '스킬과 지침', decisions: '빠른 판단', projectGroups: '폴더 그룹·숨김', remoteExclusions: '원격 공유 제외 폴더', master: '마스터 음성 설정', backup: '자동 백업 설정' };
 
 interface RemoteForm { enabled: boolean; endpoint: string; bucket: string; prefix: string; region: string; accessKeyId: string; secretAccessKey: string; passphrase: string; intervalHours: string; keep: string }
@@ -52,7 +53,7 @@ export function BackupPanel({ token }: { token: string }) {
   const { active } = useContext(SettingsFrameContext);
   useEffect(() => { if (active) void load().catch(error => setError(error instanceof Error ? error.message : String(error))); }, [load, active]);
   // While the worker's part waits, the report is looked at again until it is applied.
-  const waiting = overview?.restore?.status === 'waiting-worker';
+  const waiting = overview?.restore?.status === 'waiting-worker' || overview?.restore?.status === 'waiting-secrets';
   useEffect(() => {
     if (!active || !waiting) return;
     const timer = setInterval(() => void load().catch(() => {}), 5000);
@@ -163,14 +164,15 @@ export function BackupPanel({ token }: { token: string }) {
   </SettingsPane>;
 }
 
-function RestoreStatus({ report, busy, onCancel }: { report: RestoreReport; busy: boolean; onCancel: () => void }) {
+export function RestoreStatus({ report, busy, onCancel }: { report: RestoreReport; busy: boolean; onCancel: () => void }) {
   const { t } = useI18n();
   const parts = (list: BackupPart[]) => list.map(part => t(PART_LABELS[part])).join(', ');
   return <div className={`backup-report ${report.status}`} role="status">
-    <strong>{report.status === 'waiting-worker' ? t('복원 적용 중: 실행 워커 교대를 기다립니다') : report.status === 'applied' ? t('복원을 적용했습니다') : t('복원을 취소했습니다')}</strong>
+    <strong>{report.status === 'waiting-worker' ? t('복원 적용 중: 실행 워커 교대를 기다립니다') : report.status === 'waiting-secrets' ? t('복원 적용 중: 시크릿 보관함 가져오기를 기다립니다') : report.status === 'applied' ? t('복원을 적용했습니다') : t('복원을 취소했습니다')}</strong>
     <small>{t('{0}의 백업', { 0: report.from || '?' })}</small>
     {report.applied.length > 0 && <small>{t('바로 적용: {0}', { 0: parts(report.applied) })}</small>}
     {report.worker.length > 0 && <small>{report.status === 'waiting-worker' ? t('워커가 적용할 것: {0}', { 0: parts(report.worker) }) : t('워커가 적용: {0}', { 0: parts(report.worker) })}</small>}
+    {report.status === 'waiting-secrets' && <><small>{t('시크릿 설정에서 원본 보관함 비밀번호를 입력하여 가져오기를 완료하세요.')}</small><button type="button" className="secondary-button" disabled={busy} onClick={() => openSettings({ section: 'secrets' })}>{t('시크릿 설정 열기')}</button></>}
     {report.status === 'waiting-worker' && <small>{t('실행 중인 작업이 모두 끝나는 순간 적용됩니다. 작업이 계속 이어지면 늦어질 수 있습니다.')}</small>}
     {report.skills?.skipped.length ? <ul>{report.skills.skipped.map(item => <li key={`${item.name}-${item.reason}`}>{item.name}: {translateMessage(item.reason)}</li>)}</ul> : null}
     {report.errors.map(item => <small key={item} className="auth-error">{translateMessage(item)}</small>)}

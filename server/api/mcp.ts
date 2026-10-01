@@ -9,6 +9,7 @@ import type { TowerApi } from './tower-api.js';
 
 /** What a capability lets its holder do. The holder never chooses; the worker decides when it issues one. */
 export type Capability = { kind: 'owner-run'; runId: string; sessionId: string } | { kind: 'slack-workflow'; workflowId: string } | { kind: 'github-workflow'; workflowId: string }
+  | { kind: 'secret-run'; runId: string; sessionId: string }
   /** The standing key of the session lookup tools every agent here gets (see session-tools.ts). */
   | { kind: 'session-reader' };
 const MAX_CAPABILITIES = 2000;
@@ -64,6 +65,8 @@ export interface McpContext {
   run(runId: string): Run | undefined;
   slackTool?(workflowId: string, name: string, args: Record<string, unknown>): Promise<unknown>;
   githubTool?(workflowId: string, name: string, args: Record<string, unknown>): Promise<unknown>;
+  secretTools?: unknown[];
+  secretTool?(capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
 /** Handles one request from a tool server process. Only the capability decides what it may do. */
@@ -94,6 +97,12 @@ export async function handleMcpRequest(context: McpContext, token: string, body:
   const run = context.run(capability.runId);
   if (!run || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || run.towerTools !== 'attached') {
     throw Object.assign(new Error('Tower tools work only during the turn you started from Tower that they were given to.'), { statusCode: 403 });
+  }
+  if (capability.kind === 'secret-run') {
+    if (!context.secretTool || !context.secretTools) throw Object.assign(new Error('시크릿 도구를 사용할 수 없습니다.'), { statusCode: 503 });
+    if (body.method === 'tools/list') return { tools: context.secretTools };
+    if (body.method !== 'tools/call' || typeof body.name !== 'string') throw Object.assign(new Error('알 수 없는 시크릿 도구입니다.'), { statusCode: 404 });
+    return context.secretTool(capability, body.name, body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments) ? body.arguments as Record<string, unknown> : {});
   }
   if (body.method === 'tools/list') return { tools: towerTools() };
   const operation = typeof body.name === 'string' ? operationOf(body.name) : undefined;

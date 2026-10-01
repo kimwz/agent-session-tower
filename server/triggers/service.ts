@@ -180,6 +180,7 @@ export class TriggerService extends EventEmitter {
   private readonly now: () => number;
 
   constructor(private readonly options: { stateDir: string; executor: TriggerExecutor; now?: () => number; slack?: () => SlackProjection | undefined; tickMs?: number;
+    secretStore?: SecretStore;
     /** Public agents appear among triggers; their settings and history stay in their own files. */
     publicAgents?: () => SlackProjection[];
     limits?: { acceptBytes?: number; maxBytes?: number; requestsPerMinute?: number };
@@ -197,7 +198,7 @@ export class TriggerService extends EventEmitter {
     resolve?: Parameters<typeof performHttp>[2] }) {
     super();
     this.path = join(options.stateDir, 'trigger-engine.json');
-    this.secrets = new SecretStore(options.stateDir);
+    this.secrets = options.secretStore ?? new SecretStore(options.stateDir);
     this.now = options.now ?? Date.now;
   }
 
@@ -231,6 +232,23 @@ export class TriggerService extends EventEmitter {
    * missing from the backup is deleted. What either computer's GitHub watch already took is kept, so it is not taken
    * again; history stays. Settings, trusted folders and secret grants come from the backup.
    */
+  async restoreBackup(backup: TriggerBackup): Promise<void> {
+    if (!this.started) throw failure('The trigger engine is not ready for an owner restore.', 503);
+    if (!backup || !Array.isArray(backup.triggers) || !backup.secretGrants || typeof backup.secretGrants !== 'object') throw failure('Invalid trigger backup.');
+    // A deferred restore must not remove current definitions until every referenced encrypted secret is ready.
+    for (const id of Object.keys(backup.secretGrants)) if (!this.secrets.get(id)) throw failure('Import the original secret Vault before restoring its trigger grants.');
+    const draft = structuredClone(this.state);
+    for (const value of backup.triggers) {
+      if (!value || typeof value !== 'object' || typeof (value as Trigger).id !== 'string') throw failure('Invalid restored trigger.');
+      const trigger = value as Trigger;
+      const parsed = TriggerInputSchema.safeParse({ name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy });
+      if (!parsed.success) throw failure('Invalid restored trigger.');
+      this.grantSecrets(draft, { ...trigger, ...parsed.data }, { kind: 'owner', via: 'ui' });
+    }
+    const errors = await this.restoreFrom(backup);
+    if (errors.length) throw failure(errors.join(' '));
+  }
+
   private async restoreFrom(backup: TriggerBackup): Promise<string[]> {
     const errors: string[] = [];
     const actor: TriggerActor = { kind: 'owner', via: 'ui' };

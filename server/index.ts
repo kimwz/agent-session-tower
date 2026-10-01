@@ -41,6 +41,12 @@ import { RepositoryMonitor, watchedRepositoryPaths } from './repositories/monito
 import { installAgentGuidance } from './agent-guidance/install.js';
 import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSummary } from '../shared/skills.js';
 import { startSessionsMcp } from './api/session-tools.js';
+import { startSecretsMcp } from './secrets/runtime.js';
+import { runSecretsCommand } from './secrets/cli.js';
+import { SecretRelay } from './secrets/relay.js';
+import { handleSecretLink, ownerRemoteTarget } from './secrets/link-routes.js';
+import type { SecretPeer } from '../shared/secrets.js';
+import type { RemoteSecretResponse } from './secrets/remote.js';
 import { overlapsRepository } from '../shared/repositories.js';
 import { RemoteExclusionStore } from './remote/exclusions.js';
 import { createRemoteRouter } from './remote/router.js';
@@ -120,6 +126,11 @@ async function main() {
     await startTowerMcp(resolve(args[1]));
     return;
   }
+  if (args[0] === '--secrets-mcp') {
+    if (args.length !== 2 || !args[1]) throw new Error('Secrets MCP requires a state directory.');
+    await startSecretsMcp(resolve(args[1])); return;
+  }
+  if (args[0] === 'secrets') { await runSecretsCommand(args.slice(1)); return; }
   if (args[0] === '--runner-worker') {
     if (args.length !== 2 || !args[1]) throw new Error('Runner worker requires a state directory.');
     await runRunnerWorker(resolve(args[1]));
@@ -298,6 +309,7 @@ async function main() {
   let controlledBy = (): string[] => [];
   let controllerJoined = (): { name: string; at: string } | undefined => undefined;
   let remoteNodes: RemoteNodes | undefined;
+  let secretRouteKnown = (_direction: string, _id: string) => false;
   // Fast multiple-choice judgments (Jev, or whatever replaces it) for the web's own features; off without an API key.
   const decisions = new DecisionService(stateDir);
   await decisions.start().catch(error => console.error(`Fast judgment settings were not loaded: ${error instanceof Error ? error.message : String(error)}`));
@@ -395,6 +407,7 @@ async function main() {
     setClosed: async (id, closed) => {
       const session = runs.getSession(id);
       if (!session) return undefined;
+      if (closed && runs.supports('secrets')) await runs.secretCall('close-session', [session.id]);
       const updated = await closedSessions.set(session, closed);
       // Closing a conversation also stops what its agent planned to do in it later.
       if (closed) for (const run of runs.list()) if (run.sessionId === session.id && run.status === 'queued' && run.scheduled) await runs.cancel(run.id).catch(() => {});
@@ -414,6 +427,13 @@ async function main() {
     startAutoPrompt: (input, context) => runs.submitAutoPrompt(input, admit(context)),
     getAutoPrompt: id => runs.getAutoPrompt(id),
     cancelAutoPrompt: id => runs.cancelAutoPrompt(id),
+    secrets: async (action, input) => {
+      if (action === 'trust' && (typeof input.direction !== 'string' || typeof input.routeId !== 'string' || !secretRouteKnown(input.direction, input.routeId))) throw Object.assign(new Error('연결 설정에서 먼저 승인한 컴퓨터를 선택하세요.'), { statusCode: 400 });
+      const target = typeof input.sessionId === 'string' && action !== 'lock' ? await ownerRemoteTarget(remoteNodes, runs, input, ['create','attach'].includes(action)) : undefined;
+      // target from the page is always stripped; only the verified private argument has authority.
+      const { target: _target, hostId: _host, taskId: _task, projectRoot: _root, ...safe } = input;
+      return runs.secretCall('control', [action, safe, target]);
+    },
     slackOverview: () => runs.slackOverview(),
     api: (operation, input, context) => runs.api(operation, input, context && admit(context)),
     slackMutate: (action, body) => runs.slackMutate(action, body),
@@ -473,8 +493,11 @@ async function main() {
   const nodeLinks = identity && new NodeLinks({ stateDir, identity, version: APP_VERSION, hostname,
     // What this computer can do for a controller depends on the worker it runs with right now; reporting on itself
     // and updating do not.
-    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
-    handle: (req, res, principal) => remoteRouter.handle(req, res, principal),
+    features: () => [...runs.coordinators() ? ['read', 'workspace', ...(runs.supports('remoteOrigins') ? ['work'] : []), ...(runs.supports('remoteTriggers') ? ['triggers'] : []), ...(runs.supports('models') ? ['models'] : []), ...(runs.supports('secrets') ? ['secrets'] : [])] : [], 'status', ...updates.managed ? ['update'] : []],
+    handle: async (req, res, principal) => {
+      if (await handleSecretLink(req, res, principal.controllerId, runs)) return;
+      return remoteRouter.handle(req, res, principal);
+    },
     update: {
       request: version => updates.request(version),
       report: async () => {
@@ -484,6 +507,7 @@ async function main() {
           ...(update ? { update } : {}), ...(free !== undefined ? { diskFree: free } : {}), autoUpdate: autoUpdate() };
       },
     } });
+  secretRouteKnown = (direction, id) => direction === 'node' ? Boolean(controllerLinks?.list().some(node => node.id === id)) : direction === 'controller' && Boolean(nodeLinks?.list().some(controller => controller.id === id && controller.state === 'paired'));
   if (nodeLinks) {
     nodeLinks.on('disconnected', (controllerId: string) => remoteRouter.disconnect(controllerId));
     controlledBy = () => nodeLinks.list().filter(item => item.status === 'connected').map(item => item.name);
@@ -500,6 +524,7 @@ async function main() {
       return joined && controller?.state === 'paired' ? { name: controller.name, at: joined.at } : undefined;
     };
   }
+  let secretRelay: SecretRelay | undefined;
   const nodeViews = new NodeViewStore(stateDir);
   await nodeViews.start().catch(error => console.error(`Remote folder views were not loaded: ${error instanceof Error ? error.message : String(error)}`));
   if (controllerLinks) {
@@ -619,6 +644,11 @@ async function main() {
   void readTools().catch(() => {});
   backups.schedule();
   void towerUpdates.start().catch(error => console.error(`Automatic updates are unavailable: ${error instanceof Error ? error.message : String(error)}`));
+  if (remoteNodes) {
+    secretRelay = new SecretRelay({ nodes: remoteNodes, peers: async () => runs.supports('secrets') ? await runs.secretCall('peers') as SecretPeer[] : [],
+      workerAnswer: (id, request) => runs.secretCall('answer', [id, request]) as Promise<RemoteSecretResponse> });
+    secretRelay.start();
+  }
   capabilities.start();
   repositories.start();
   system.start();
@@ -636,6 +666,7 @@ async function main() {
     towerUpdates.stop();
     backups.close();
     remoteNodes?.close();
+    secretRelay?.close();
     const stoppingLinks = Promise.all([nodeLinks?.close(), controllerLinks?.close()]).then(() => { remoteRouter.dispose(); return nodeViews.flush(); });
     const stoppingCapabilities = capabilities.stop();
     const stoppingRepositories = repositories.stop();

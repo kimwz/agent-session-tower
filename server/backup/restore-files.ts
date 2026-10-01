@@ -2,6 +2,7 @@ import { cp, mkdir, readdir, rename, rm, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { BackupPart, RestoreReport } from '../../shared/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { listPendingSecretImports, stageVaultImport } from './secrets.js';
 import { applyWorkerFiles, type WorkerRestore } from './payload.js';
 
 /** Where restores keep their state: the worker's part waiting for it, the last report, and copies of replaced files. */
@@ -32,9 +33,12 @@ export async function readReport(stateDir: string): Promise<RestoreReport | unde
   if (!validId(latest?.id)) return undefined;
   const report = await readOptional(reportPath(stateDir, latest.id)).catch(() => undefined) as RestoreReport | undefined;
   if (!report || typeof report !== 'object' || typeof report.status !== 'string') return undefined;
+  const pendingIds = new Set(await listPendingSecretImports(stateDir));
   const outcome = await readOptional(outcomePath(stateDir, latest.id)).catch(() => undefined) as Outcome | undefined;
-  if (!outcome || report.status === 'cancelled') return report;
-  return { ...report, status: 'applied', appliedAt: outcome.at, worker: outcome.parts, errors: [...report.errors, ...outcome.errors], ...(outcome.skills ? { skills: outcome.skills } : {}) };
+  if (report.status === 'cancelled') return report;
+  const pending = report.pendingSecretImports?.filter(id => pendingIds.has(id));
+  if (!outcome) return report.status === 'waiting-secrets' ? { ...report, status: pending?.length ? 'waiting-secrets' : 'applied', pendingSecretImports: pending, ...(pending?.length ? {} : { appliedAt: new Date().toISOString() }) } : report;
+  return { ...report, status: pending?.length ? 'waiting-secrets' : 'applied', pendingSecretImports: pending, appliedAt: pending?.length ? undefined : outcome.at, worker: outcome.parts, errors: [...report.errors, ...outcome.errors], ...(outcome.skills ? { skills: outcome.skills } : {}) };
 }
 
 /** The web's report of a restore; it becomes the newest one. Reports of older restores beyond a few are removed. */
@@ -106,6 +110,7 @@ export async function takeWorkerRestore(stateDir: string): Promise<{ restore: Wo
   }
   if (!restore || typeof restore !== 'object' || !restore.files || typeof restore.files !== 'object') { if (restore !== undefined) await unlink(taken).catch(() => {}); return undefined; }
   const id = restore.id;
+  if (restore.encryptedVault) { await stageVaultImport(stateDir, restore.encryptedVault, id); restore.encryptedVault = undefined; }
   const ours = async () => (await readOptional(taken).catch(() => undefined) as WorkerRestore | undefined)?.id === id;
   const earlier = restore.done ?? { parts: [], errors: [] };
   // Files and triggers are applied once: after a worker recorded them, a later one only does the skills left.

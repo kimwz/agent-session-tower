@@ -53,10 +53,27 @@ The integrated terminal runs an interactive shell in that folder on the Tower se
 - **Organize your workspace.** Rename sessions and project groups, pin projects, drag nodes, search, filter, and hide or reopen sessions.
 - **Catch new activity.** Unread indicators help you find replies and results you have not opened yet.
 - **Access it remotely.** Open the web UI from another device on your LAN or VPN, with password-protected access to the machine running your agents.
+- **Use encrypted secrets.** Register values, dotenv bundles and files in **Settings → Secrets**, then connect selected keys and fields to a project or the current task. Agents receive references and use tools with explicit permissions.
 - **Back up and move your setup.** **Settings → Backup** exports triggers, permission rules, Slack, public agents, skills and guidance, fast judgment and folder settings as one passphrase-encrypted file, and restores it on another computer without stopping running work. It can also upload encrypted backups on a schedule to S3-compatible storage such as Cloudflare R2. Sessions and remote computer links are not included.
 - **Stay up to date.** Installed as the background service (`agent-session-tower service install`), Tower keeps itself, Claude Code and Codex at their latest releases, and computers it controls follow it. Running agents and terminals are never interrupted. See [staying up to date](docs/usage.md#staying-up-to-date).
 
 Local use needs no Tower login, API key, database, or CLI hooks; the only provider files Tower writes are the guidance sections above. Remote use requires an account configured on the host. Your agents keep using their existing CLI accounts and model settings.
+
+## Encrypted secrets
+
+Open **Settings → Secrets** to create a Vault with a separate password of at least 12 characters, unlock or lock it, and change its password. Register a scalar value, a dotenv bundle, or a file. Global storage does not grant access to every project: choose a project, or explicitly enable **Allow all projects**. Project rules can connect automatically or require a manual connection. A discovery-only rule lists metadata without permitting use. Select the allowed computer, keys, dotenv fields and operations for each rule.
+
+The conversation's secret controls connect values to its current security task. This task survives turn completion, conversation summaries and web reconnects. End it explicitly, archive the session, or let its expiry revoke access. Revocation applies to later uses; it cannot take back plaintext already delivered to a consumer. A run bound to a closed task cannot switch to a new one.
+
+Agents use Tower's `secrets_list`, `secrets_run`, `secrets_compare`, `secrets_fingerprint` or `secrets_cli` tools. Lists contain names and references, never values. Programs receive secrets through environment variables, stdin or private files, with masked stdout/stderr returned to the agent. Selected dotenv fields can be supplied as an environment bundle; whole-file delivery requires all fields. Comparison and domain-scoped HMAC fingerprints require their own operation permission.
+
+The direct `agent-session-tower secrets` CLI requires the current run's `TOWER_SECRET_CAPABILITY` and `TOWER_SECRET_STATE_DIR`; an ordinary shell or a supplied session/project ID does not create authorization. `run` and `pipe` require a stable `--operation-id ID` that stays the same on retries. A response with uncertain execution state must not be retried as a new operation. There is no raw-value `read` or `export` command. See [the CLI and protection boundaries](docs/development.md#encrypted-secrets).
+
+For another computer, join it through Tower's existing link, create and unlock a separate Vault on each computer, and approve each other's secret public-key fingerprints. On source A, bind one logical project to A's and B's exact computer/root pairs and grant B its permitted operations and fields. B may use a different local project ID. Both Vaults must be unlocked; B gets sealed responses instead of a permanent replica. Remote tasks expire after eight hours, and a locked or offline source denies new access. To attach manually, choose B's session on A's secret page. B's remote listing cannot edit or delete A's values.
+
+The password protects a random Vault key using Argon2id (64 MiB, three passes, four lanes); AES-256-GCM encrypts both permanent storage and the separate runtime journal. Every new execution worker starts locked. This protects saved state, not against arbitrary code running as the same OS user or a trusted consumer that receives plaintext. Output masking does not stop every deliberate transformation or file/network disclosure.
+
+Backups include the encrypted permanent Vault, excluding temporary values, tasks and the journal. Existing trigger secrets migrate into encrypted storage at Vault initialization, preserving their IDs and grants and removing the old plaintext file after verification. Restore first waits for target unlock and an explicit import: the encrypted Vault needs its **original Vault password**, while older trigger secrets and a deferred trigger snapshot need the **backup passphrase**. These may appear as separate pending records. Trigger definitions and grants wait with their snapshot until the required secrets are available. Source device identity and peer trust are not copied, and imported sharing rules/bindings are not activated automatically.
 
 ## Remote access
 
