@@ -358,6 +358,10 @@ test('the daily limit holds while an answer is read: past it nothing more is ask
   await sleep(500);
   assert.ok(h.voice.status().today.dollars <= 0.0075 + 1e-9, `spent ${h.voice.status().today.dollars} from ${before}`);
   assert.ok(!h.spoken().some(text => text.includes('다'.repeat(50))));
+  // Cut short by the limit: not called heard to its end, and the owner is told why.
+  const done = await h.entry(/나{400}/);
+  await until(() => h.speakOf(done)?.state === 'unspoken' || undefined);
+  assert.deepEqual({ reason: h.speakOf(done)?.reason, heard: h.speakOf(done)?.heard }, { reason: 'limit', heard: true });
 });
 
 test('voice turned off while an answer is read stops it; nothing of that turn is read afterwards', async t => {
@@ -369,9 +373,11 @@ test('voice turned off while an answer is read stops it; nothing of that turn is
   h.voice.voiceOff({ session });
   h.write(run, 'm1:0', '이 뒤는 읽히지 않아요.', true);
   h.finish(run);
-  await h.entry(/이 뒤는/);
+  const done = await h.entry(/이 뒤는/);
   await sleep(100);
   assert.deepEqual(h.spoken(), ['설명을 시작할게요.']);
+  assert.equal(h.speakOf(done)?.reason, 'stopped', 'the owner turned it off');
+  assert.equal(h.voice.status().missed, undefined, 'nothing to tell the owner');
   assert.equal(h.voice.busy(), false);
 });
 

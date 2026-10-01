@@ -380,6 +380,17 @@ test('a thing that waited past its life is told to the master as expired, with h
   } finally { page.end(); }
 });
 
+test('a thing already past its life when it comes is told to the master as expired', async () => {
+  const page = await harness();
+  try {
+    page.voice.say({ ...page.say('stale', 'answer'), expiresAt: Date.now() - 1 });
+    await flush();
+    assert.deepEqual(page.results(), ['stale:expired']);
+    assert.equal(posts.find(post => post.path.endsWith('/played'))?.body.detail, 'arrived-late');
+    assert.equal(page.audio.played.filter(src => src.includes('stale')).length, 0);
+  } finally { page.end(); }
+});
+
 // ─── when the owner is done ────────────────────────────────────────────────────────────────────────────────────
 
 const commits = (socket: FakeSocket) => socket.sent.filter(message => JSON.parse(message).commit === true).length;

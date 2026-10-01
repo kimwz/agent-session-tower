@@ -183,6 +183,8 @@ interface Stream {
   read: number;
   /** Reading ended at the limit (`READ_CHARS`). */
   full: boolean;
+  /** Reading ended early at the daily limit: heard to there, it is not called heard to its end. */
+  limitHit?: true;
   lastChunkAt: number;
   state: 'starting' | 'streaming' | 'stopped' | 'finished';
   played: number;
@@ -294,6 +296,8 @@ export class MasterVoice {
   private readonly stoppedTurns = new Map<string, { reason: MasterUnspoken; heard: boolean }>();
   /** The latest answer or report not read aloud that the owner is told of (see `MasterVoiceStatus.missed`). */
   private missed?: MasterMissed & { order: number; at: number };
+  /** How each ended session ended, for what was still waiting on it. */
+  private readonly endings = new WeakMap<Session, 'stopped' | 'away' | 'restart'>();
   private pauseTimer?: ReturnType<typeof setInterval>;
   readonly timings: VoiceTimings;
 
@@ -594,13 +598,13 @@ export class MasterVoice {
     if (speak.cut && parts.length && !parts.at(-1)!.endsWith(VOICE_REST)) parts.push(voiced(VOICE_REST, model, kind));
     const chars = parts.reduce((sum, part) => sum + part.length, 0);
     // Judged and recorded together: nothing else can start making audio in between.
-    const refused: MasterUnspoken | undefined = !parts.length ? 'empty' : this.session !== session || !this.alive(session) ? 'away' : this.limited(Date.now(), chars * ttsDollarsPerChar(model)) ? 'limit' : undefined;
+    const refused: MasterUnspoken | undefined = !parts.length ? 'empty' : this.session !== session || !this.alive(session) ? this.gone(session) : this.limited(Date.now(), chars * ttsDollarsPerChar(model)) ? 'limit' : undefined;
     if (refused) { this.setSpeak(entry, unspoken(speak, refused)); return; }
     const request = entry.data.kind === 'master' ? entry.data.request : undefined;
     const key = speak.timing ?? request;
     this.timings.mark(key, 'text', Date.now(), { mode: 'turn-end' });
     const live = this.synthesize(parts, undefined, key);
-    if (!await this.firstChunk(live) || this.session !== session) { this.abandon(live); this.setSpeak(entry, unspoken(speak, this.session !== session ? 'away' : 'audio')); return; }
+    if (!await this.firstChunk(live) || this.session !== session) { this.abandon(live); this.setSpeak(entry, unspoken(speak, this.session !== session ? this.gone(session) : 'audio')); return; }
     this.setSpeak(entry, { ...speak, state: 'playing' });
     const { result, started } = await this.play(session, { kind: speak.session ? 'answer' : 'report', text, audio: live.id, ...(request ? { request } : {}), ...(key ? { timing: key } : {}) }, this.timing.playMs + chars * MS_PER_CHAR);
     // Not heard to the end (skipped, voice ended, or given up on): the parts not made yet are not asked for.
@@ -744,7 +748,11 @@ export class MasterVoice {
     const live = segment.live;
     if (live) {
       while (segment.fed < segment.parts.length) {
-        if (!this.feed(live, segment.parts[segment.fed])) { this.seal(live); stream.full = true; segment.fed = segment.parts.length; break; }
+        if (!this.feed(live, segment.parts[segment.fed])) {
+          // Refused while still open: the daily limit (not the end of its audio).
+          if (!live.sealed && !live.done) stream.limitHit = true;
+          this.seal(live); stream.full = true; segment.fed = segment.parts.length; break;
+        }
         segment.fed++;
       }
       if (segment.done && segment.fed >= segment.parts.length) this.seal(live);
@@ -759,7 +767,7 @@ export class MasterVoice {
   private async playSegment(stream: Stream, segment: Segment): Promise<void> {
     const session = stream.session;
     if (stream.state !== 'streaming') return;
-    if (this.session !== session || !this.alive(session)) { this.stopStream(stream, 'away'); return; }
+    if (this.session !== session || !this.alive(session)) { this.stopStream(stream, this.gone(session)); return; }
     const live = this.openLive(undefined, stream.key);
     live.held = true;
     segment.live = live;
@@ -767,7 +775,7 @@ export class MasterVoice {
     // Nothing could be paid for: the turn is not read further.
     if (!live.parts.length) { this.seal(live); live.held = false; this.stopStream(stream, 'limit'); return; }
     try {
-      if (!await this.firstChunk(live) || this.session !== session || stream.state !== 'streaming') { this.abandon(live); this.stopStream(stream, this.session !== session ? 'away' : 'audio'); return; }
+      if (!await this.firstChunk(live) || this.session !== session || stream.state !== 'streaming') { this.abandon(live); this.stopStream(stream, this.session !== session ? this.gone(session) : 'audio'); return; }
       const { result, started } = await this.play(session, { kind: stream.kind, text: segment.text, audio: live.id, streaming: true, timing: stream.key, ...(stream.request ? { request: stream.request } : {}) },
         this.timing.playMs + READ_CHARS * MS_PER_CHAR);
       if (started) segment.started = true;
@@ -787,7 +795,7 @@ export class MasterVoice {
     stream.state = 'finished';
     this.streams.delete(stream.turn);
     const entry = stream.finishing.data;
-    if (entry && (entry.kind === 'master' || entry.kind === 'event' || entry.kind === 'error')) this.options.room.add(withSpeak(entry, played(entry.speak)));
+    if (entry && (entry.kind === 'master' || entry.kind === 'event' || entry.kind === 'error')) this.options.room.add(withSpeak(entry, stream.limitHit ? unspoken(entry.speak, 'limit', true) : played(entry.speak)));
     void this.options.hooks.streamState?.(stream.turn, 'done').catch(() => {});
   }
 
@@ -1279,6 +1287,9 @@ export class MasterVoice {
     return typeof session === 'string' && this.session?.id === session ? this.session : undefined;
   }
 
+  /** Why `session` is no longer the one to read to: how it ended, or its page gone (or voice moved). */
+  private gone(session: Session): MasterUnspoken { return this.session === session ? 'away' : this.endings.get(session) ?? 'away'; }
+
   /** The voice page is still there (it tells so every few seconds). */
   private alive(session: Session): boolean { return Date.now() - session.seenAt < this.timing.presenceMs; }
 
@@ -1289,6 +1300,7 @@ export class MasterVoice {
   private endSession(session: Session | undefined, reason: 'stopped' | 'away' | 'restart'): void {
     if (!session || this.session !== session) return;
     this.session = undefined;
+    this.endings.set(session, reason);
     this.options.firstReply?.close();
     for (const stream of [...this.streams.values()]) if (stream.session === session) this.stopStream(stream, reason);
     for (const done of [...this.results.values()]) done(reason);
@@ -1312,6 +1324,8 @@ export class MasterVoice {
     for (const day of Object.keys(this.file.days)) if (day < oldest) delete this.file.days[day];
     const day = localDay(now);
     if (day !== this.shownDay) { this.shownDay = day; this.broadcast(); }
+    // Too old to be told of any more: pages stop showing it.
+    if (this.missed && now - this.missed.at >= STALE_MS) { this.missed = undefined; this.broadcast(); }
   }
 
   broadcast(): void { this.options.room.broadcast({ type: 'voice', seq: 0, voice: this.status() }); }

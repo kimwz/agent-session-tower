@@ -307,9 +307,11 @@ export class VoiceSession {
 
   /** Something to play: only this session's, once each, not once it is stale, and never more than a few waiting. */
   say(say: MasterSay): void {
-    if (this.over || say.session !== this.sessionDigest || this.seen.has(say.id) || say.expiresAt < Date.now()) return;
+    if (this.over || say.session !== this.sessionDigest || this.seen.has(say.id)) return;
     this.seen.add(say.id);
     if (this.seen.size > 500) this.seen.delete(this.seen.values().next().value!);
+    // Already past its life when it came (the connection was away): the master is told it was not read.
+    if (say.expiresAt < Date.now()) { this.report(say, 'expired', undefined, 'arrived-late'); return; }
     const order = this.order.admit(say, this.queue.map(item => item.say));
     for (const dropped of order.drop) { const index = this.queue.findIndex(item => item.say === dropped); if (index >= 0) this.queue.splice(index, 1); }
     if (!order.admit) return;
