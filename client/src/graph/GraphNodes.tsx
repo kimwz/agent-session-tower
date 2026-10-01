@@ -1,10 +1,11 @@
 import { translate as t, useI18n } from '../i18n/i18n';
 import { memo, useId } from 'react';
-import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
+import { Handle, Position, useViewport, type Node, type NodeProps } from '@xyflow/react';
 import { ArrowUpRight, Check, Clock, GitBranch, Monitor, Radio, Sparkles } from 'lucide-react';
 import type { ProviderHealth, Session, SystemStatus } from '../../../shared/types';
 import type { NodeStatus } from '../../../shared/link';
 import { localPart } from '../remote/scope';
+import { useSessionTasksPeek } from '../sessions/SessionTasksPeek';
 import { SessionContextIcon } from '../sessions/SessionContextIcon';
 import { TowerVersionsBadge, type TowerVersions } from './TowerVersions';
 import { outcomeLabels } from '../sessions/SessionOutcomeBadge';
@@ -39,11 +40,13 @@ export const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentD
   useI18n();
   const contextDescriptionId = useId();
   const session = data.session;
+  const viewport = useViewport();
+  const peek = useSessionTasksPeek(session.tasks, viewport);
   const activityAt = sessionActivityAt(session);
   const state = sessionState(session);
   const outcome = session.status !== 'working' ? session.outcome : undefined;
   return <>
-    <button className={`agent-card ${session.provider} ${session.status} ${data.selected ? 'selected' : ''} ${data.unread ? 'has-unread' : ''}${data.stale ? ' is-stale' : ''}`} onClick={() => data.onSelect(session.id)} aria-describedby={contextDescriptionId} aria-label={`${t("{0}: {1}, {2}{3}. 대화 열기", { 0: providerLabels[session.provider], 1: sessionTitle(session), 2: outcome ? `${state.label}, ${outcomeLabels[outcome]}` : state.label, 3: data.unread ? t(", 새 활동") : t(", 확인함") })}${data.stale ? ` ${t("(마지막으로 본 상태)")}` : ''}`}>
+    <button ref={peek.anchor} {...peek.rowProps} className={`agent-card ${session.provider} ${session.status} ${data.selected ? 'selected' : ''} ${data.unread ? 'has-unread' : ''}${data.stale ? ' is-stale' : ''}`} onClick={() => data.onSelect(session.id)} aria-describedby={contextDescriptionId} aria-label={`${t("{0}: {1}, {2}{3}. 대화 열기", { 0: providerLabels[session.provider], 1: sessionTitle(session), 2: outcome ? `${state.label}, ${outcomeLabels[outcome]}` : state.label, 3: data.unread ? t(", 새 활동") : t(", 확인함") })}${data.stale ? ` ${t("(마지막으로 본 상태)")}` : ''}`}>
       {session.status === 'working' && !data.stale && <span className="agent-activity-border" aria-hidden="true" />}
       {data.unread && <i className="unread-dot" title={t("새 활동")} aria-hidden="true" />}
       {outcome && <span className="agent-card-flags"><span className={`agent-outcome ${outcome}`}><i />{outcomeLabels[outcome]}</span></span>}
@@ -52,6 +55,7 @@ export const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentD
       <div className="agent-card-bottom"><span className="agent-provider">{providerLabels[session.provider]}</span><span className={`agent-state ${state.key}`}>{state.key === 'scheduled' ? <Clock size={11} /> : state.key === 'completed' ? <Check size={11} /> : state.key === 'working' ? <Radio size={11} /> : <i />}{state.label}</span></div>
       <p className="agent-card-preview">{cleanPreview(session.lastMessage) || t("대화 기록을 확인하세요")}</p><time className="agent-updated" dateTime={activityAt}>{relativeTime(activityAt)}<ArrowUpRight size={11} /></time>
     </button>
+    {peek.panel}
   </>;
 });
 
