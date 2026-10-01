@@ -63,7 +63,8 @@ export class SecretRuntime {
     };
     this.remote = new RemoteSecretBroker({ device: () => service.device(), deviceKeys: () => service.deviceKeys(), peers: () => service.status().locked ? [] : service.peers(),
       begin: async (context, id, digest) => { const trusted = await normalized(context); const claim = await service.beginOperation(trusted, id, digest); if (claim.fresh && id.startsWith('remote-id:')) accepted.set(id, trusted); return claim.fresh; },
-      finish: async (_context, id, digest, answer) => { const trusted = accepted.get(id); if (!trusted) throw fail('원격 요청 기록을 확인할 수 없습니다.'); try { await service.finishOperation(trusted, id, digest, answer); } finally { accepted.delete(id); } },
+      // Remote replay is refused even after completion; retain only its proof, not an unused response cache.
+      finish: async (_context, id, digest, _answer) => { const trusted = accepted.get(id); if (!trusted) throw fail('원격 요청 기록을 확인할 수 없습니다.'); try { await service.finishOperation(trusted, id, digest, { answered: true }); } finally { accepted.delete(id); } },
       handle: async (context, request) => {
         const trusted = await normalized(context);
         if (request.operation === 'list') return service.list(trusted);

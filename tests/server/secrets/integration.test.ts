@@ -130,14 +130,22 @@ test('two encrypted vaults deliver an exact 1MiB remote file through a bounded s
   const secret = await f.a.create({ name: 'maximum fixture file', kind: 'file', scope: 'project', projectId: f.logical.id, content: payload.toString('base64') });
   await assert.rejects(f.a.create({ name: 'oversized fixture file', kind: 'file', scope: 'project', projectId: f.logical.id, content: Buffer.alloc(MAX_SECRET_BYTES + 1).toString('base64') }));
   await f.a.setRule({ groupId: secret.groupId, secretIds: [secret.id], hostId: f.b.device().id, projectId: f.logical.id, activation: 'auto', operations: ['discover', 'file'], enabled: true });
-  const result = await f.relay(f.recipient.tool(f.capB, 'secrets_run', { operationId: 'maximum-remote-file', command: process.execPath,
-    args: ['-e', "const v=require('fs').readFileSync(process.argv[1]);console.log(v.length+':'+require('crypto').createHash('sha256').update(v).digest('hex'));", '{secret-file:MAXIMUM}'], files: { MAXIMUM: secret.reference } })) as SecretRunResult;
-  assert.equal(result.exitCode, 0); assert.equal(result.stdout.trim(), `${MAX_SECRET_BYTES}:${createHash('sha256').update(payload).digest('hex')}`);
+  for (let use = 0; use < 4; use++) {
+    const result = await f.relay(f.recipient.tool(f.capB, 'secrets_run', { operationId: `maximum-remote-file-${use}`, command: process.execPath,
+      args: ['-e', "const v=require('fs').readFileSync(process.argv[1]);console.log(v.length+':'+require('crypto').createHash('sha256').update(v).digest('hex'));", '{secret-file:MAXIMUM}'], files: { MAXIMUM: secret.reference } })) as SecretRunResult;
+    assert.equal(result.exitCode, 0); assert.equal(result.stdout.trim(), `${MAX_SECRET_BYTES}:${createHash('sha256').update(payload).digest('hex')}`);
+  }
   const { REMOTE_SECRET_MAX_RESPONSE_BYTES } = await import('../../../server/secrets/remote.js');
   const responses = f.wires.filter(wire => typeof wire === 'object' && wire !== null && 'ciphertext' in wire);
-  assert.equal(responses.length, 2);
+  assert.equal(responses.length, 8);
   for (const response of responses) assert.ok(Buffer.byteLength(JSON.stringify(response)) <= REMOTE_SECRET_MAX_RESPONSE_BYTES);
   assert.equal(JSON.stringify(f.wires).includes(payload.toString('base64')), false); assert.equal(f.b.overview().secrets.length, 0);
+  const journal = await f.a.vault.journal() as { operations: Record<string, { result?: unknown }> };
+  assert.ok(Buffer.byteLength(JSON.stringify(journal)) < 64 * 1024, 'remote proofs must not retain unused response ciphertext');
+  for (const claim of Object.values(journal.operations)) if (claim.result !== undefined) assert.deepEqual(claim.result, { answered: true });
+  assert.equal(f.a.status().locked, false);
+  await assert.rejects(f.source.remote.answer('node-b', f.wires[0]), /SECRET_REMOTE_DENIED/);
+  assert.deepEqual(await f.a.vault.journal(), journal, 'replayed requests cannot create a new claim or retain another response');
   assert.deepEqual(await readdir(join(f.stateB, 'secrets', 'consumers')), []); assert.deepEqual(f.errors, []);
 });
 
