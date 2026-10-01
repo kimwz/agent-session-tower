@@ -123,6 +123,16 @@ test('more than a page since the last summary is read back to it, page by page',
   assert.doesNotMatch(requests[1].prompt, /ALREADY summarized/);
 });
 
+test('an empty history page with older pages behind it is read past', async t => {
+  const { tasks, list, requests, settle } = await setup(t);
+  (tasks as unknown as { dependencies: { history: unknown } }).dependencies.history = async (_session: unknown, _limit: number, before?: number) =>
+    before === undefined ? { messages: [], hasMore: true, nextBefore: 9 } : { messages: [message('user', 'BEHIND an empty page')], hasMore: false };
+  await settle();
+  assert.equal(requests.length, 1);
+  assert.match(requests[0].prompt, /BEHIND an empty page/);
+  assert.ok(tasks.apply(list[0]).tasks);
+});
+
 test('a failed or unusable summary changes nothing and is tried once more later', async t => {
   const { tasks, list, requests, settle, setNow } = await setup(t, { answers: [new Error('model down'), u('new', '', '', ''), u('new', '', 'Late', '완료')] });
   await settle();

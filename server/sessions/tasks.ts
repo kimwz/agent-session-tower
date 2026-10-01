@@ -139,6 +139,8 @@ export class SessionTasks extends EventEmitter {
   private state: TaskState;
   private failed = new Map<string, { mark: string; at: number; count: number }>();
   private retry?: NodeJS.Timeout;
+  /** Set when the day's calls ran out: the rest waits for the next day. */
+  private nextDay?: NodeJS.Timeout;
   private seen = new Map<string, { mark: string; at: number }>();
   private timer?: NodeJS.Timeout;
   private running?: Promise<void>;
@@ -185,19 +187,22 @@ export class SessionTasks extends EventEmitter {
   }
 
   /** Starts no new summary; one already asked finishes by itself. */
-  pause(): void { this.paused = true; clearTimeout(this.timer); this.timer = undefined; clearTimeout(this.retry); this.retry = undefined; }
-  resume(): void { this.paused = false; this.changed(); }
+  pause(): void { this.paused = true; this.clearTimers(); }
+  resume(): void { this.paused = false; this.changed(); this.scheduleRetry(); }
   /** A summary is being asked this instant. */
   inFlight(): boolean { return this.calling; }
   flush(): Promise<void> { return this.writes; }
 
   async close(): Promise<void> {
     this.closed = true;
-    clearTimeout(this.timer);
-    clearTimeout(this.retry);
-    this.timer = undefined;
+    this.clearTimers();
     await this.running?.catch(() => {});
     await this.writes;
+  }
+
+  private clearTimers(): void {
+    clearTimeout(this.timer); clearTimeout(this.retry); clearTimeout(this.nextDay);
+    this.timer = this.retry = this.nextDay = undefined;
   }
 
   private run(): void {
@@ -236,7 +241,8 @@ export class SessionTasks extends EventEmitter {
   private async pass(): Promise<void> {
     const due = this.due();
     for (const session of due) {
-      if (this.closed || this.paused || !this.claimCall()) return;
+      if (this.closed || this.paused) return;
+      if (!this.claimCall()) { this.waitForNextDay(); return; }
       // The latest state: it may have started working again meanwhile.
       const latest = this.dependencies.sessions().find(item => item.id === session.id);
       if (!latest || !summarizable(latest) || outcomeMark(latest) !== outcomeMark(session)) continue;
@@ -289,6 +295,14 @@ export class SessionTasks extends EventEmitter {
     } finally { this.calling = false; }
   }
 
+  private waitForNextDay(): void {
+    if (this.nextDay || this.closed || this.paused) return;
+    const now = this.now();
+    const tomorrow = Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), new Date(now).getUTCDate() + 1);
+    this.nextDay = setTimeout(() => { this.nextDay = undefined; this.changed(); }, tomorrow - now + 1_000);
+    this.nextDay.unref?.();
+  }
+
   /** Tried once more after the wait, even if nothing else changes meanwhile: at the earliest failure's time. */
   private scheduleRetry(): void {
     if (this.closed || this.paused) return;
@@ -304,7 +318,8 @@ export class SessionTasks extends EventEmitter {
   private async messages(session: Session, upTo: string | undefined): Promise<ChatMessage[]> {
     let page = await this.dependencies.history(session, HISTORY);
     const messages = [...page?.messages ?? []];
-    for (let read = 1; upTo && page?.hasMore && page.nextBefore !== undefined && read < HISTORY_PAGES && (messages[0]?.timestamp ?? '') > upTo; read++) {
+    // A page can come back empty (too large to read at once) while older ones remain: those are read on.
+    for (let read = 1; page?.hasMore && page.nextBefore !== undefined && read < HISTORY_PAGES && (!messages.length || (upTo !== undefined && messages[0].timestamp > upTo)); read++) {
       page = await this.dependencies.history(session, HISTORY, page.nextBefore);
       messages.unshift(...page?.messages ?? []);
     }
