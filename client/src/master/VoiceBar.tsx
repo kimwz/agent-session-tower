@@ -1,6 +1,6 @@
 import { useLayoutEffect, useRef } from 'react';
 import { Mic, MicOff, Play, Send, Square, Volume2, X } from 'lucide-react';
-import type { MasterVoiceStatus } from '../../../shared/master';
+import type { MasterMissed, MasterVoiceStatus } from '../../../shared/master';
 import type { VoiceView } from './voice-client';
 import { useWords } from './strings';
 
@@ -17,8 +17,9 @@ export interface VoiceControls {
   listen(): void;
   mute(): void;
   skip(): void;
-  /** Plays what the browser would not play by itself. */
-  replay(): void;
+  /** Hears again an answer the master could not read aloud (`MasterVoiceStatus.missed`), or stops being told of it. */
+  replayMissed(entry: string): void;
+  dismissMissed(entry: string): void;
   /** Sends what is being said, or what waits unsent, now. */
   finish(): void;
   /** Drops what waits unsent. */
@@ -44,6 +45,25 @@ function endText(ended: { reason: string; error?: string }, words: (ko: string, 
     case 'host': return words('마스터가 다시 시작해 음성이 꺼졌습니다. 다시 켜 주세요.', 'The master restarted and voice turned off. Turn it on again.');
     default: return `${words('음성을 켜지 못했습니다', 'Voice could not start')}${ended.error ? `: ${ended.error}` : '.'}`;
   }
+}
+
+/** Why an answer was not read aloud, as the owner is told beside the voice. */
+export function missedText(missed: MasterMissed, words: (ko: string, en: string) => string): string {
+  if (missed.reason === 'empty') return words('읽을 내용이 없어 소리로 읽지 않았어요. 답은 화면에 있어요.', 'Nothing in the answer could be read aloud; it is on the screen.');
+  const why: Record<Exclude<MasterMissed['reason'], 'empty'>, [string, string]> = {
+    failed: ['재생이 끊겼어요', 'playback failed'],
+    timeout: ['페이지가 재생 결과를 알리지 않았어요', 'the page never told how it went'],
+    expired: ['재생 차례를 너무 오래 기다렸어요', 'it waited too long to play'],
+    blocked: ['브라우저가 소리 재생을 막았어요', 'the browser blocked sound'],
+    audio: ['음성을 만들지 못했어요', 'its speech could not be made'],
+    limit: ['오늘 음성 한도에 닿았어요', "today's voice limit was reached"],
+    queue: ['읽을 답이 너무 많이 밀렸어요', 'too much was waiting to be read'],
+    away: ['음성이 켜진 페이지가 없었어요', 'no page had voice on'],
+    stopped: ['멈췄어요', 'it was stopped'],
+    restart: ['마스터가 다시 시작했어요', 'the master restarted'],
+  };
+  const [ko, en] = why[missed.reason];
+  return missed.heard ? words(`답을 끝까지 읽지 못했어요 · ${ko}`, `The answer was not read to its end: ${en}`) : words(`답을 소리로 읽지 못했어요 · ${ko}`, `The answer was not read aloud: ${en}`);
 }
 
 /** How close to the end a scroller must be to keep following it (px). */
@@ -90,6 +110,7 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
   const follow = useFollowEnd(view ? `${view.heard ?? ''}|${view.draft ?? ''}|${view.playing?.text ?? ''}` : '', writing, long);
   if (view) {
     const playing = view.playing;
+    const missed = voice.status?.missed;
     const label = playing ? (playing.kind === 'notice' ? `${words('되돌릴 수 없는 작업', 'Irreversible change')}: ${playing.text}` : playing.text)
       : view.capturing ? `${view.waiting ? words('듣고 있어요 · 이어서 말씀하세요', 'Listening · go on') : words('듣고 있어요', 'Listening')}: ${view.heard || '…'}`
       : view.hearing ? `${words('듣고 있어요', 'Listening')}: ${view.draft ? `${view.draft} …` : '…'}`
@@ -105,10 +126,14 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
         <span className="master-voice-label" ref={follow.ref} onScroll={follow.onScroll}>{label}{writing && <span className="master-voice-caret" aria-hidden />}</span>
       </div>
       {view.error && <small className="master-voice-error">{view.error}</small>}
+      {!playing && missed && <div className="master-voice-missed" role="status">
+        <small title={missed.text}>{missedText(missed, words)}</small>
+        {missed.reason !== 'empty' && missed.reason !== 'limit' && <button className="master-voice-restart" onClick={() => voice.replayMissed(missed.entry)} title={missed.text}><Play size={12} />{words('답 다시 듣기', 'Hear again')}</button>}
+        <button className="icon-button" onClick={() => voice.dismissMissed(missed.entry)} aria-label={words('알림 닫기', 'Dismiss')}><X size={12} /></button>
+      </div>}
       <div className="master-voice-controls">
       {usage && <small className="master-voice-usage">{usage}</small>}
       <div className="master-voice-actions">
-        {!playing && view.blocked && <button className="master-voice-restart" onClick={voice.replay} title={view.blocked.text}><Play size={12} />{words('듣기', 'Play')}</button>}
         {!playing && (view.capturing || view.draft) && <button className="master-voice-restart" onClick={voice.finish} title={words('말이 끝났다고 보고 지금 보내기', 'Done speaking: send it now')}><Send size={12} />{words('보내기', 'Send')}</button>}
         {!playing && !view.capturing && view.draft && <button className="secondary-button" onClick={voice.discard}><X size={12} />{words('지우기', 'Discard')}</button>}
         {playing && <button className="master-voice-restart" onClick={voice.skip}><Square size={12} />{playing.kind === 'notice' ? words('취소', 'Cancel') : words('멈춤', 'Stop')}</button>}

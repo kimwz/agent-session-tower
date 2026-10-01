@@ -151,7 +151,7 @@ interface Page { answer?: (say: MasterSay) => string | undefined; delayMs?: numb
  * The master session and its voice, with a fake Tower whose master turns the test writes word by word (as the worker
  * passes them), a live state that tells of every change, a fake ElevenLabs, and a page that plays what it is given.
  */
-async function harness(t: test.TestContext, options: { settings?: Record<string, unknown>; page?: Page; followMs?: number; prepare?: (dir: string) => Promise<void> } = {}) {
+async function harness(t: test.TestContext, options: { settings?: Record<string, unknown>; page?: Page; followMs?: number; prepare?: (dir: string) => Promise<void>; playMs?: number } = {}) {
   const cleanup: Array<() => unknown> = [];
   const dir = await mkdtemp(join(tmpdir(), 'tower-voice-stream-'));
   t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(dir, { recursive: true, force: true }); });
@@ -202,7 +202,7 @@ async function harness(t: test.TestContext, options: { settings?: Record<string,
       return signal.aborted ? { skipped: 'failed' as const, warm: true } : { text: FIRST, warm: true };
     },
   };
-  const voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs, firstReply, timing: { firstChunkMs: 1_000, synthMs: 2_000, playMs: 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 },
+  const voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs, firstReply, timing: { firstChunkMs: 1_000, synthMs: 2_000, playMs: options.playMs ?? 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 },
     hooks: { hide: text => text, connectedSince: () => client.connectedSince(), send: input => session.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }),
       streamState: (turn, state) => session.voicedState(turn, state) } });
   session.setVoice(voice);
@@ -215,7 +215,8 @@ async function harness(t: test.TestContext, options: { settings?: Record<string,
     events.push(event);
     if (event.type !== 'say' || (event.say.kind !== 'answer' && event.say.kind !== 'report')) return;
     const result = page.answer ? page.answer(event.say) : 'played';
-    if (result) setTimeout(() => voice.voicePlayed({ session: current, id: event.say.id, result, startedMs: 5 }), page.delayMs ?? 30);
+    // Sound that never started (refused, or waited too long) has no start to tell of.
+    if (result) setTimeout(() => voice.voicePlayed({ session: current, id: event.say.id, result, ...(result === 'blocked' || result === 'expired' ? {} : { startedMs: 5 }) }), page.delayMs ?? 30);
   });
   let current = '';
   const on = () => (current = voice.voiceOn({ tabId: randomUUID(), local: true }).session);
@@ -237,7 +238,7 @@ async function harness(t: test.TestContext, options: { settings?: Record<string,
   const speakOf = (item: MasterEntry) => { const data = room.get(item.id)?.data; return data && (data.kind === 'master' || data.kind === 'event' || data.kind === 'error') ? data.speak : undefined; };
   const follow = async () => JSON.parse(await readFile(join(dir, 'follow.json'), 'utf8')) as { voiced?: Array<{ turn: string; state: string }> };
   const ask = async (text: string) => { const answer = await voice.voiceRequest({ session: current, clientMessageId: randomUUID(), text, local: true }); return { answer, run: await until(() => runs.at(-1)) }; };
-  return { dir, labs, room, session, voice, runs, emit, on, says, write, finish, spoken, entry, speakOf, follow, ask, settings, fresh, firsts, current: () => current };
+  return { dir, labs, room, session, voice, runs, emit, on, says, write, finish, spoken, entry, speakOf, follow, ask, settings, fresh, firsts, events, current: () => current };
 }
 
 test('an answer is read sentence by sentence while the master writes it; when the turn ends only the rest is read, nothing twice', async t => {
@@ -357,6 +358,10 @@ test('the daily limit holds while an answer is read: past it nothing more is ask
   await sleep(500);
   assert.ok(h.voice.status().today.dollars <= 0.0075 + 1e-9, `spent ${h.voice.status().today.dollars} from ${before}`);
   assert.ok(!h.spoken().some(text => text.includes('다'.repeat(50))));
+  // Cut short by the limit: not called heard to its end, and the owner is told why.
+  const done = await h.entry(/나{400}/);
+  await until(() => h.speakOf(done)?.state === 'unspoken' || undefined);
+  assert.deepEqual({ reason: h.speakOf(done)?.reason, heard: h.speakOf(done)?.heard }, { reason: 'limit', heard: true });
 });
 
 test('voice turned off while an answer is read stops it; nothing of that turn is read afterwards', async t => {
@@ -368,9 +373,11 @@ test('voice turned off while an answer is read stops it; nothing of that turn is
   h.voice.voiceOff({ session });
   h.write(run, 'm1:0', '이 뒤는 읽히지 않아요.', true);
   h.finish(run);
-  await h.entry(/이 뒤는/);
+  const done = await h.entry(/이 뒤는/);
   await sleep(100);
   assert.deepEqual(h.spoken(), ['설명을 시작할게요.']);
+  assert.equal(h.speakOf(done)?.reason, 'stopped', 'the owner turned it off');
+  assert.equal(h.voice.status().missed, undefined, 'nothing to tell the owner');
   assert.equal(h.voice.busy(), false);
 });
 
@@ -520,4 +527,153 @@ test('a turn that ended while its words still play keeps its entry, however ofte
   const done = await h.entry(/끝난 뒤에도 기록돼요/);
   await until(() => h.speakOf(done)?.state === 'played');
   assert.equal((done.data as { kind: string }).kind, 'master');
+});
+
+// ─── answers not read aloud are told of, and can be heard again (#43) ───────────────────────────────────────────────
+
+/** A turn as the master writes it: a short reply before a tool, then a final answer with a list and a table, in two pieces. */
+const FINAL = '확인이 필요한 작업이 여럿 있어요.\n\n**Tower 설계**\n- 개발 원칙을 점검하는 세션이에요. 승인이 필요해요.\n- **playbook 배너:** 배포해도 되냐는 문의예요.\n\n| 작업 | 상태 |\n|---|---|\n| 리뷰 | 대기 |\n| 배포 | 끝남 |\n\n이 세션이 끝나면 알려 드릴게요.';
+async function toolTurn(h: Awaited<ReturnType<typeof harness>>) {
+  const { run, answer } = await h.ask('지금 내가 확인해야 할 작업 뭐 있어?');
+  h.write(run, 'm1:0', '확인할 작업을 찾아볼게요.', true);
+  await until(() => h.says().find(say => say.kind === 'answer'));
+  h.write(run, 'm2:0', FINAL.slice(0, 60));
+  await sleep(30);
+  h.write(run, 'm2:0', FINAL.slice(60), true);
+  h.finish(run);
+  return { run, key: answer.ack!.request! };
+}
+const recordOf = (h: Awaited<ReturnType<typeof harness>>, key: string) => h.voice.timings.list().find(item => item.key === key);
+
+test('a turn of several replies with a list and a table is read to its end while written, and each thing said is recorded', async t => {
+  const h = await harness(t, { page: { delayMs: 5 } });
+  h.on();
+  const { key } = await toolTurn(h);
+  const done = await h.entry(/확인이 필요한 작업이 여럿/);
+  await until(() => h.speakOf(done)?.state === 'played' || h.speakOf(done)?.state === 'unspoken' || undefined);
+  assert.equal(h.speakOf(done)?.state, 'played');
+  assert.ok(h.spoken().join(' ').endsWith('이 세션이 끝나면 알려 드릴게요.'), 'read to its last sentence');
+  assert.equal(h.voice.status().missed, undefined);
+  const record = await until(() => recordOf(h, key)?.outcome);
+  assert.deepEqual(record, { at: record.at, state: 'played' });
+  assert.deepEqual(recordOf(h, key)!.says!.map(say => say.result), ['played', 'played'], 'each reply\'s audio, with the page\'s word on it');
+});
+
+test('a reply the page could not play ends the answer told of beside the voice, and it can be heard again whole', async t => {
+  let count = 0;
+  const h = await harness(t, { page: { delayMs: 5, answer: () => ++count === 2 ? 'failed' : 'played' } });
+  h.on();
+  const { key } = await toolTurn(h);
+  const done = await h.entry(/확인이 필요한 작업이 여럿/);
+  await until(() => h.speakOf(done)?.state === 'unspoken' || undefined);
+  assert.deepEqual({ reason: h.speakOf(done)?.reason, heard: h.speakOf(done)?.heard }, { reason: 'failed', heard: true }, 'its first reply was heard');
+  const missed = await until(() => h.voice.status().missed);
+  assert.deepEqual({ entry: missed.entry, reason: missed.reason, heard: missed.heard }, { entry: done.id, reason: 'failed', heard: true });
+  assert.match(missed.text, /^확인이 필요한 작업이 여럿/);
+  assert.ok(h.events.some(event => event.type === 'voice' && event.voice.missed?.entry === done.id), 'pages are told');
+  assert.deepEqual(recordOf(h, key)!.says!.map(say => say.result), ['played', 'failed']);
+  assert.deepEqual({ ...recordOf(h, key)!.outcome, at: 0 }, { at: 0, state: 'unspoken', reason: 'failed', heard: true });
+  // Heard again: read whole, once the owner asks.
+  const before = h.says().length;
+  assert.equal(h.voice.voiceMissed({ session: h.current(), entry: done.id, action: 'replay' }), true);
+  assert.equal(h.voice.status().missed, undefined, 'no longer told of once asked for');
+  await until(() => h.speakOf(done)?.state === 'played' || undefined);
+  const again = h.says().slice(before);
+  assert.equal(again.length, 1, 'one reading of the whole answer');
+  assert.equal(again[0].streaming, undefined);
+  assert.equal(h.speakOf(done)?.reason, undefined, 'played: no reason left');
+  assert.deepEqual(recordOf(h, key)!.says!.map(say => say.result), ['played', 'failed', 'played']);
+  assert.equal(recordOf(h, key)!.outcome!.state, 'played');
+});
+
+test('the browser refusing to play, a page gone or voice moved are told of; the owner\'s own stop is not', async t => {
+  const blocked = await harness(t, { page: { answer: () => 'blocked' } });
+  blocked.on();
+  const { run } = await blocked.ask('목록 알려줘');
+  blocked.write(run, 'm1:0', '목록을 알려 드릴게요. 둘이에요.', true);
+  blocked.finish(run);
+  const first = await blocked.entry(/목록을 알려/);
+  await until(() => blocked.speakOf(first)?.state === 'unspoken' || undefined);
+  assert.deepEqual({ reason: blocked.speakOf(first)?.reason, heard: blocked.speakOf(first)?.heard }, { reason: 'blocked', heard: undefined });
+  assert.equal((await until(() => blocked.voice.status().missed)).reason, 'blocked');
+  assert.equal(blocked.voice.voiceMissed({ session: blocked.current(), entry: first.id, action: 'dismiss' }), true);
+  assert.equal(blocked.voice.status().missed, undefined, 'dismissed');
+
+  const moved = await harness(t, { page: { answer: () => undefined } });
+  moved.on();
+  const second = await moved.ask('길게');
+  moved.write(second.run, 'm1:0', '이 답을 읽는 중에 음성이 다른 탭으로 옮겨 가요.', true);
+  await until(() => moved.says().find(say => say.kind === 'answer'));
+  moved.finish(second.run);
+  await sleep(50);
+  moved.on();
+  const away = await moved.entry(/다른 탭으로/);
+  await until(() => moved.speakOf(away)?.state === 'unspoken' || undefined);
+  assert.equal(moved.speakOf(away)?.reason, 'away');
+  assert.deepEqual(recordOf(moved, second.answer.ack!.request!)!.says!.map(say => say.result), ['away'], 'what was playing ended with voice moving');
+  assert.equal((await until(() => moved.voice.status().missed)).entry, away.id);
+
+  const skipped = await harness(t, { page: { answer: () => 'stopped' } });
+  skipped.on();
+  const third = await skipped.ask('멈출 답');
+  skipped.write(third.run, 'm1:0', '이 답은 주인이 멈춰요.', true);
+  skipped.finish(third.run);
+  const stopped = await skipped.entry(/주인이 멈춰요/);
+  await until(() => skipped.speakOf(stopped)?.state === 'unspoken' || undefined);
+  assert.equal(skipped.speakOf(stopped)?.reason, 'stopped');
+  await until(() => recordOf(skipped, third.answer.ack!.request!)?.outcome);
+  assert.equal(skipped.voice.status().missed, undefined, 'the owner stopped it: nothing to tell');
+});
+
+test('an answer with nothing to read is told of, and is not offered to hear again', async t => {
+  const h = await harness(t, { page: { delayMs: 5 } });
+  h.on();
+  const { run } = await h.ask('선 하나만');
+  h.write(run, 'm1:0', '---', true);
+  h.finish(run);
+  const done = await until(() => h.room.recent(200).find((item): item is MasterEntry => item.data.kind === 'master'));
+  await until(() => h.speakOf(done)?.state === 'unspoken' || undefined);
+  assert.equal(h.speakOf(done)?.reason, 'empty');
+  assert.equal((await until(() => h.voice.status().missed)).reason, 'empty');
+  assert.equal(h.voice.voiceMissed({ session: h.current(), entry: done.id, action: 'replay' }), false);
+});
+
+test('an answer kept shorter than it was ends, read aloud, saying the rest is on the screen', async t => {
+  const h = await harness(t, { page: { delayMs: 5 } });
+  h.on();
+  const session = h.voice.status().session!;
+  const entry = h.room.add({ kind: 'master', text: '앞부분만 남은 긴 답이에요.', turnId: 't', final: true, speak: { state: 'pending', session, cut: true } });
+  await until(() => h.speakOf(entry)?.state === 'played' || undefined);
+  await until(() => h.spoken().length >= 2 || undefined);
+  assert.deepEqual(h.spoken(), ['앞부분만 남은 긴 답이에요.', VOICE_REST]);
+});
+
+test('a page that never tells how it went, or kept it waiting too long, ends the answer told of; voice the owner turned off does not', async t => {
+  // MS_PER_CHAR (200 ms) a character is waited for on top of playMs: a short answer is given up on soon.
+  const silent = await harness(t, { playMs: 50, page: { answer: () => undefined } });
+  silent.on();
+  const session = silent.voice.status().session!;
+  const entry = silent.room.add({ kind: 'master', text: '네.', turnId: 't', final: true, speak: { state: 'pending', session } });
+  await until(() => silent.speakOf(entry)?.state === 'unspoken' || undefined, 5_000);
+  assert.equal(silent.speakOf(entry)?.reason, 'timeout');
+  assert.equal((await until(() => silent.voice.status().missed)).reason, 'timeout');
+
+  const late = await harness(t, { page: { answer: () => 'expired' } });
+  late.on();
+  const waited = late.room.add({ kind: 'master', text: '오래 기다린 답이에요.', turnId: 't', final: true, speak: { state: 'pending', session: late.voice.status().session! } });
+  await until(() => late.speakOf(waited)?.state === 'unspoken' || undefined);
+  assert.deepEqual({ reason: late.speakOf(waited)?.reason, heard: late.speakOf(waited)?.heard }, { reason: 'expired', heard: undefined });
+
+  // Voice turned off by the owner before the answer came: not read, and nothing to tell when voice is on again.
+  const off = await harness(t, { page: { delayMs: 5 } });
+  const current = off.on();
+  const { run } = await off.ask('끄기 전에 물은 것');
+  off.voice.voiceOff({ session: current });
+  off.write(run, 'm1:0', '음성이 꺼진 뒤에 온 답이에요.', true);
+  off.finish(run);
+  const quiet = await off.entry(/꺼진 뒤에 온 답/);
+  assert.deepEqual({ state: off.speakOf(quiet)?.state, reason: off.speakOf(quiet)?.reason }, { state: 'unspoken', reason: 'stopped' });
+  off.on();
+  await sleep(30);
+  assert.equal(off.voice.status().missed, undefined);
 });

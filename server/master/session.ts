@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { continuedRunById } from '../runs/continuations.js';
 import { join } from 'node:path';
-import { MASTER_FOLDER, type MasterBinding, type MasterTaskState } from '../../shared/master.js';
+import { MASTER_FOLDER, type MasterBinding, type MasterSpeak, type MasterTaskState, type MasterUnspoken } from '../../shared/master.js';
 import type { AutoPromptJob, ChatMessage, Provider, Run, RunReply, SessionDetail, Snapshot } from '../../shared/types.js';
 import type { MasterEntryData } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -12,6 +12,7 @@ import type { Table } from '../tower-tools/read-db.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
 import type { TowerClient } from '../tower-tools/tower-client.js';
+import { READ_CHARS } from './voice-text.js';
 
 const FOLLOW_MS = 5_000;
 /** Work Tower cannot find for this long is reported as unknown. */
@@ -66,6 +67,8 @@ export interface Followed {
   turn?: string;
   spoke?: true;
   answer?: string;
+  /** Its answer was longer than kept: reading it aloud ends saying the rest is on the screen. */
+  cut?: true;
   /** The voice session a spoken request (or a report while voice is on) belongs to. */
   voice?: string;
 }
@@ -83,6 +86,8 @@ interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; fol
 /** What the voice gets from the master session. */
 export interface VoiceSide {
   speaks(report: boolean): 'pending' | 'unspoken' | undefined;
+  /** Why an answer with no voice page to read it is not read (the owner turned voice off, or no page was there). */
+  quiet?(): MasterUnspoken;
   deliver(): void;
   /** The master's words for a turn so far, to read while they are written. */
   stream?(input: { turn: string; kind: 'answer' | 'report'; key: string; request?: string; voiceSession?: string; replies: readonly RunReply[] }): void;
@@ -409,7 +414,9 @@ export class MasterSession {
     const found = written ? { text: written } : item.sessionId && ended !== 'unknown' ? await this.finalAnswer(item, run, together).catch(() => undefined) : undefined;
     if (item.kind === 'spoken' || item.kind === 'report') this.voice?.timings?.mark(timingKey(item), 'end');
     item.state = ended;
-    if (found?.text) item.answer = truncate(found.text, 3000);
+    // An answer to read aloud is kept long enough to be read to the voice's limit (and to say the rest is on the screen).
+    const keep = item.kind === 'delegated' ? 3000 : READ_CHARS + 1_000;
+    if (found?.text) { item.answer = truncate(found.text, keep); if (found.text.length > keep) item.cut = true; }
     if (item.kind === 'delegated') {
       item.report = 'pending';
       if (!found && run?.error) item.answer = `Error: ${truncate(run.error, 500)}`;
@@ -426,7 +433,9 @@ export class MasterSession {
     if (turn && this.file.followed.some(other => other !== item && other.spoke && (other.turn ?? other.runId) === turn)) return;
     const report = item.kind === 'report';
     const state = voice.speaks(report);
-    const speak = state && { state, ...(item.voice && !report ? { session: item.voice } : {}) };
+    // Not read aloud because no voice page is there to read it: the owner is told when voice is on again.
+    const speak: MasterSpeak | undefined = state && { state, ...(state === 'unspoken' ? { reason: voice.quiet?.() ?? 'away' } : {}), ...(item.voice && !report ? { session: item.voice } : {}), timing: timingKey(item),
+      ...(item.cut && ended === 'completed' ? { cut: true as const } : {}) };
     const request = !report && item.key ? { request: item.key } : {};
     const data: MasterEntryData | undefined = !speak ? undefined : ended === 'completed' && item.answer
       ? report ? { kind: 'event', text: item.answer, speak } : { kind: 'master', text: item.answer, turnId: item.id, final: true, speak, ...request }

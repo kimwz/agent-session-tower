@@ -67,8 +67,6 @@ export interface VoiceView {
   /** What was said but not sent (a long pause before it seemed finished): speaking goes on with it, or a click sends it. */
   draft?: string;
   playing?: { kind: MasterSay['kind']; text: string };
-  /** What the browser would not play by itself, to be played with a click. */
-  blocked?: { text: string };
   error?: string;
   /** The owner muted the microphone: it stays off, even after a report is read, until they unmute it. */
   muted?: boolean;
@@ -103,7 +101,7 @@ interface Utterance {
  * microphone samples heard since it began (on the audio's clock), which it must reach as well.
  */
 interface Playing {
-  say: MasterSay; startedAt: number; replay?: boolean; failed?: boolean; cancelled?: boolean; spokeAt?: number; armedAt?: number; heard?: number; timers: Array<ReturnType<typeof setTimeout>>;
+  say: MasterSay; startedAt: number; failed?: boolean; cancelled?: boolean; spokeAt?: number; armedAt?: number; heard?: number; timers: Array<ReturnType<typeof setTimeout>>;
   /** When the page was told to play it, and when its sound started (for the host's timing records). */
   receivedAt?: number; playingAt?: number;
   /** Where in the audio the current source starts (seconds), and how often it was fetched again. */
@@ -156,12 +154,11 @@ export class VoiceSession {
   private lastPresenceAt = 0;
   private speechToTell = false;
   private reporting = false;
-  private readonly queue: Array<{ say: MasterSay; replay?: boolean; receivedAt?: number }> = [];
+  private readonly queue: Array<{ say: MasterSay; receivedAt?: number }> = [];
   /** The order of a spoken request's first response and its answer (shared/master/voice-order.ts). */
   private readonly order = new SayOrder();
   private readonly seen = new Set<string>();
   private current?: Playing;
-  private blocked?: MasterSay;
   private view: VoiceView = { listening: false, capturing: false };
   private timer?: ReturnType<typeof setInterval>;
   private over = false;
@@ -275,16 +272,23 @@ export class VoiceSession {
     this.show({ heard: undefined });
   }
 
-  /** Plays, from the owner's click, what the browser would not play by itself (not a notice: its moment is gone). */
-  replay(): void {
-    const say = this.blocked;
-    if (!say || this.over) return;
-    this.blocked = undefined;
-    this.queue.unshift({ say, replay: true });
+  /**
+   * Hears again, from the owner's click, an answer the master could not read aloud (`MasterVoiceStatus.missed`): the
+   * master reads it again whole, and the click lets its sound play when its turn comes.
+   */
+  replayMissed(entry: string): void {
+    if (this.over || !this.session) return;
     this.show({ error: undefined });
-    this.next();
     // It waits behind what is being said: the click lets sound play now, for when its turn comes.
     if (!this.current) this.unlock();
+    void post('/api/master/voice/missed', this.options.token(), { session: this.session, entry, action: 'replay' })
+      .then(done => { if (done === false) this.show({ error: '다시 들을 수 없습니다. 답은 화면에 있습니다.' }); }, (error: unknown) => this.show({ error: errorText(error) }));
+  }
+
+  /** The owner no longer wants to be told of an answer not read aloud. */
+  dismissMissed(entry: string): void {
+    if (this.over || !this.session) return;
+    void post('/api/master/voice/missed', this.options.token(), { session: this.session, entry, action: 'dismiss' }).catch(() => {});
   }
 
   /** Lets sound play later without another click; called straight from one. */
@@ -303,14 +307,16 @@ export class VoiceSession {
 
   /** Something to play: only this session's, once each, not once it is stale, and never more than a few waiting. */
   say(say: MasterSay): void {
-    if (this.over || say.session !== this.sessionDigest || this.seen.has(say.id) || say.expiresAt < Date.now()) return;
+    if (this.over || say.session !== this.sessionDigest || this.seen.has(say.id)) return;
     this.seen.add(say.id);
     if (this.seen.size > 500) this.seen.delete(this.seen.values().next().value!);
+    // Already past its life when it came (the connection was away): the master is told it was not read.
+    if (say.expiresAt < Date.now()) { this.report(say, 'expired', undefined, 'arrived-late'); return; }
     const order = this.order.admit(say, this.queue.map(item => item.say));
     for (const dropped of order.drop) { const index = this.queue.findIndex(item => item.say === dropped); if (index >= 0) this.queue.splice(index, 1); }
     if (!order.admit) return;
     this.queue.push({ say, receivedAt: Date.now() });
-    while (this.queue.length > QUEUE) { const dropped = this.queue.shift()!; if (!dropped.replay) this.report(dropped.say, 'failed'); }
+    while (this.queue.length > QUEUE) { const dropped = this.queue.shift()!; this.report(dropped.say, 'expired', undefined, 'queue-full'); }
     this.next();
   }
 
@@ -696,13 +702,14 @@ export class VoiceSession {
     const item = this.queue.shift();
     if (!item) { this.arm(); return; }
     const say = item.say;
-    if (!item.replay && say.expiresAt < Date.now()) { this.report(say, 'failed'); this.next(); return; }
+    // Waited too long to play (the owner kept speaking, or the page was busy): the master tells the owner it was not read.
+    if (say.expiresAt < Date.now()) { this.report(say, 'expired', undefined, `waited-${Math.round((Date.now() - (item.receivedAt ?? Date.now())) / 1000)}s`); this.next(); return; }
     this.disarm();
-    const current: Playing = { say, startedAt: Date.now(), ...(item.replay ? { replay: true } : {}), ...(item.receivedAt ? { receivedAt: item.receivedAt } : {}), timers: [], base: 0, resumes: 0, fetch: 0 };
+    const current: Playing = { say, startedAt: Date.now(), ...(item.receivedAt ? { receivedAt: item.receivedAt } : {}), timers: [], base: 0, resumes: 0, fetch: 0 };
     this.current = current;
     this.show({});
     // A player that never ends or fails is given up on after a while, so the queue goes on.
-    current.timers.push(setTimeout(() => { if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); } else this.finishPlay(current, 'failed'); },
+    current.timers.push(setTimeout(() => { if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); } else this.finishPlay(current, 'failed', current.playingAt === undefined ? 'never-started' : 'player-timeout'); },
       say.streaming ? STREAMING_PLAY_MS : Math.max(30_000, say.text.length * 200)));
     this.audio.onplaying = () => { if (this.current !== current) return; this.pace(); current.playingAt ??= Date.now(); current.sourcePlayed = true; };
     this.audio.onended = () => { if (this.current === current) say.kind === 'notice' ? this.noticeEnded(current) : this.finishPlay(current, 'played'); };
@@ -716,9 +723,10 @@ export class VoiceSession {
     this.audio.play().catch((error: unknown) => {
       if (this.current !== current) return;
       if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); return; }
-      this.finishPlay(current, 'failed');
-      // Autoplay refused: the owner can play it with a click (a click lets it play).
-      if (error instanceof DOMException && error.name === 'NotAllowedError') { this.blocked = say; this.show({ error: '브라우저가 소리 재생을 막았습니다.' }); }
+      // Autoplay refused: the master tells the owner, who can hear it again with a click (a click lets it play).
+      const blocked = error instanceof DOMException && error.name === 'NotAllowedError';
+      this.finishPlay(current, blocked ? 'blocked' : 'failed', blocked ? undefined : `play-${error instanceof Error ? error.name : 'error'}`);
+      if (blocked) this.show({ error: '브라우저가 소리 재생을 막았습니다.' });
     });
   }
 
@@ -729,7 +737,7 @@ export class VoiceSession {
   /** The current fetch of an answer failed: fetched again if it can be, otherwise the answer failed. Once per fetch. */
   private lost(current: Playing, fetch: number): void {
     if (this.current !== current || fetch !== current.fetch || current.retrying) return;
-    if (!this.resume(current)) this.finishPlay(current, 'failed');
+    if (!this.resume(current)) this.finishPlay(current, 'failed', current.resumes >= RESUMES ? 'resumes-used' : `media-error-${this.audio.error?.code ?? 0}`);
   }
 
   private resume(current: Playing): boolean {
@@ -764,13 +772,13 @@ export class VoiceSession {
     applyPlaybackRate(this.audio, this.options.settings().playbackRate);
   }
 
-  private finishPlay(current: Playing, result: 'played' | 'stopped' | 'failed'): void {
+  /** `detail`: what failed, for the master's timing records (a media error, the player given up on, …). */
+  private finishPlay(current: Playing, result: 'played' | 'stopped' | 'failed' | 'blocked', detail?: string): void {
     if (this.current !== current || current.say.kind === 'notice') return;
     for (const timer of current.timers) clearTimeout(timer);
     this.current = undefined;
     this.audio.pause();
-    if (!current.replay) this.report(current.say, result, current.playingAt !== undefined && current.receivedAt !== undefined ? current.playingAt - current.receivedAt : undefined);
-    else if (result === 'failed') this.show({ error: '다시 들을 수 없습니다. 답은 화면에 있습니다.' });
+    this.report(current.say, result, current.playingAt !== undefined && current.receivedAt !== undefined ? current.playingAt - current.receivedAt : undefined, detail);
     // A report read aloud turns listening back on, so the owner can answer it.
     if (current.say.kind === 'report' && result === 'played') { this.lastActivityAt = Date.now(); void this.listenAgain(); }
     this.show({});
@@ -814,9 +822,9 @@ export class VoiceSession {
    * Tells the host how something it gave to play went (and how long the sound took to start), tried again a few
    * times so a web restarting just then does not lose it.
    */
-  private report(say: MasterSay, result: string, startedMs?: number): void {
+  private report(say: MasterSay, result: string, startedMs?: number, detail?: string): void {
     if (say.kind === 'ack' || say.kind === 'working') return;
-    const send = (left: number) => void post('/api/master/voice/played', this.options.token(), { session: this.session, id: say.id, result, ...(startedMs !== undefined ? { startedMs } : {}) })
+    const send = (left: number) => void post('/api/master/voice/played', this.options.token(), { session: this.session, id: say.id, result, ...(startedMs !== undefined ? { startedMs } : {}), ...(detail ? { detail } : {}) })
       .catch(() => { if (left > 0 && !this.over) setTimeout(() => send(left - 1), 3_000); });
     send(3);
   }
@@ -860,7 +868,7 @@ export class VoiceSession {
     const waiting = Boolean(utterance && utterance.quietSince !== undefined && !utterance.ownRule && utterance.verdict && utterance.verdict.finished < VOICE_TURN_FINISHED);
     if (utterance || this.current || !this.armed) this.hearing = false;
     const hearing = this.hearing;
-    this.view = { ...this.view, ...change, listening: this.listening, muted: this.held || undefined, capturing: Boolean(utterance), hearing, waiting, draft: this.draft || undefined, playing: this.current ? { kind: this.current.say.kind, text: this.current.say.text } : undefined, blocked: this.blocked ? { text: this.blocked.text } : undefined };
+    this.view = { ...this.view, ...change, listening: this.listening, muted: this.held || undefined, capturing: Boolean(utterance), hearing, waiting, draft: this.draft || undefined, playing: this.current ? { kind: this.current.say.kind, text: this.current.say.text } : undefined };
     this.options.onView(this.view);
   }
 }
