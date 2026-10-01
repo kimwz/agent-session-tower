@@ -15,6 +15,8 @@ test('web asset paths serve SPA routes without allowing reads outside the UI roo
   await writeFile(join(client, 'app.js'), 'console.log(1)');
   assert.equal((await readWebAsset(client, '/'))?.content.toString(), 'application');
   assert.equal((await readWebAsset(client, '/sessions/example'))?.extension, '.html');
+  assert.equal((await readWebAsset(client, '/sessions/example'))?.name, 'index.html');
+  assert.equal((await readWebAsset(client, '//app.js'))?.name, 'app.js');
   assert.equal((await readWebAsset(client, '/app.js'))?.content.toString(), 'console.log(1)');
   assert.equal(await readWebAsset(client, '/../secret.txt'), undefined);
   assert.equal(await readWebAsset(client, '/..\\secret.txt'), undefined);

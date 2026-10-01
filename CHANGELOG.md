@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.98.1] - 2026-10-01
+
+### Fixed
+- **Pages load much faster, above all through the public address.** Tower compressed nothing it sent: every refresh moved the whole session list (several megabytes once agents have run many reviews) twice and the page's scripts again, since scripts were never cached once remote access was set up. The session list, its live updates and the page files are now compressed (brotli, or gzip), about five times smaller, and the build's script and style files stay cached in the browser.
+
 ## [1.98.0] - 2026-10-01
 
 ### Added
