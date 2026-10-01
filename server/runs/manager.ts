@@ -63,6 +63,8 @@ interface RunnerOptions {
   firstTurnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
   /** Notes for every turn, such as the owner's pinned skills; asked and limited like `firstTurnNotes`. */
   turnNotes?: (run: Run, session: Session) => Promise<string | undefined>;
+  /** What other parts of the worker add to every listed session, such as its task summaries. */
+  sessionOverlay?: (session: Session) => Session;
   /** Settings for every Claude Code turn Tower starts: the owner's allow rules for its folder. */
   claudeSettings?: (cwd: string, sessionId: string) => string | undefined;
   /** Pre-accepts the native folder trust prompt for a newly created session. */
@@ -289,6 +291,7 @@ export class RunManager extends EventEmitter {
 
   setFirstTurnNotes(notes: NonNullable<RunnerOptions['firstTurnNotes']>): void { this.options.firstTurnNotes = notes; }
   setTurnNotes(notes: NonNullable<RunnerOptions['turnNotes']>): void { this.options.turnNotes = notes; }
+  setSessionOverlay(overlay: NonNullable<RunnerOptions['sessionOverlay']>): void { this.options.sessionOverlay = overlay; }
   /**
    * What the owner answered the agent's questions in a conversation, kept from the moment it is sent: native history
    * may not have it yet when Tower's permission reviewer reads the owner's words.
@@ -526,8 +529,10 @@ export class RunManager extends EventEmitter {
       const session = this.getSession(id);
       if (session) sessions.set(id, session);
     }
-    return markMaster([...sessions.values()].map(session => this.sessionWithContext(session.parentId && aliases.has(session.parentId)
+    const listed = markMaster([...sessions.values()].map(session => this.sessionWithContext(session.parentId && aliases.has(session.parentId)
       ? { ...session, parentId: aliases.get(session.parentId) } : session)), this.options.stateDir ?? defaultStateDir());
+    const overlay = this.options.sessionOverlay;
+    return overlay ? listed.map(overlay) : listed;
   }
 
   async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {

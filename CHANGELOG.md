@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.98.0] - 2026-10-01
+
+### Added
+- **What each session is working on, at the top of its chat** (#46). After every turn, in Claude and Codex sessions alike (Tower's, your terminal's, triggers', the master's), a light model sums up the session's work as feature-level tasks: a title such as "Master agent voice does not play" and the stage it reached (investigating, designing, in review, PR opened, deployed …). The same work moves its task on; different work adds a task. The chat header shows the current task and its stage; tap it to see every task the session worked on, newest first. Summaries start with the first turn that ends after the update; nothing appears as a session or in Claude Code or Codex history, and a failed or slow summary never touches the turn.
+- **Settings › Models › Session task summaries** (`sessions.summarizer`, Haiku with thinking off by default) chooses the model.
+- `sessions_list` and `sessions_search` (MCP, `/api/v1`, the master) return each session's current `task` (title, stage) and its `tasks`; a list `query` also matches task titles. Quick lookups (`tower_query`) gain `sessions.task_title`, `sessions.task_stage` and a `session_tasks` table.
+
 ## [1.97.1] - 2026-10-01
 
 ### Fixed

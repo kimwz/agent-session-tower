@@ -20,7 +20,7 @@ const page = { before: z.string().max(40).optional(), limit: z.number().int().mi
 export const OPERATIONS = {
   'sessions.list': { input: z.object({ provider: z.enum(['claude', 'codex']).optional(), cwd: z.string().max(4096).optional(), query: z.string().max(200).optional(),
     since: time.optional(), until: time.optional(), cursor: cursor.optional(), limit: z.number().int().min(1).max(200).optional() }).strict(), write: false, agent: true,
-    summary: 'List Tower sessions, most recently active first (20 by default), with their folder, status and whether a trigger created them. query matches the title or folder; since/until bound the last activity. Pass nextCursor as cursor for the next page.' },
+    summary: 'List Tower sessions, most recently active first (20 by default), with their folder, status, whether a trigger created them, and the task each works on now and its stage (task, tasks: summarized after every turn). query matches the title, folder or a task title; since/until bound the last activity. Pass nextCursor as cursor for the next page.' },
   'sessions.read': { input: z.object({ id, cursor: cursor.optional(), limit: z.number().int().min(1).max(100).optional(), tools: z.boolean().optional() }).strict(), write: false, agent: true,
     summary: 'Read a Claude or Codex session’s messages (id as listed, or its bare session UUID), oldest to newest, ending with the latest (20 by default). Pass nextCursor as cursor for the page before, or a search match’s cursor to read up to that match. Tool calls are left out unless tools is true.' },
   'sessions.search': { input: z.object({ query: z.string().trim().min(1).max(200), since: time.optional(), until: time.optional(), provider: z.enum(['claude', 'codex']).optional(),
