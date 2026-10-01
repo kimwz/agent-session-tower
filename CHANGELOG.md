@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.97.0] - 2026-10-01
+
+### Fixed
+- **Master voice: an answer not read aloud is no longer dropped silently.** When the page could not play it or its sound was cut, the browser refused to play, it waited on the page too long, the page never answered, voice moved to another tab, or nothing in it could be read, the voice bar says so ("답을 끝까지 읽지 못했어요 · 재생이 끊겼어요"), with the conversation closed too. **답 다시 듣기** reads the whole answer again (the click also lets the browser play sound); × dismisses the notice. A blocked answer is heard again this way, instead of replaying audio the master had already given up on.
+- An answer read aloud after its turn ended, or heard again, keeps up to 6,000 characters (was 3,000); one kept shorter than it was ends saying the rest is on the screen.
+
+### Changed
+- `master/voice-timings.json` keeps everything given to the page for a request (`says`: when, how many characters, when its sound started, the page's word on it and what failed) and how its reading ended (`outcome`: played or not, why, whether part was heard). The host log gets one `Master voice outcome` line per reading.
+
 ## [1.96.1] - 2026-10-01
 
 ### Fixed
