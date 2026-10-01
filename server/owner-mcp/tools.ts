@@ -5,7 +5,7 @@ import { isOperationName, OPERATIONS } from '../../shared/api/operations.js';
 import { HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
 import { lockOwners } from '../instance/state-lock.js';
 import { inMasterFolder } from '../runs/subscription.js';
-import { serveToolBridge } from '../mcp/stdio.js';
+import { answerRpc, serveToolBridge, type ToolBridge } from '../mcp/stdio.js';
 import { apiCatalog, FILE_ROUTES, isFileRoute } from '../tower-tools/api-catalog.js';
 import { AGENT_REFUSED } from '../tower-tools/api-target.js';
 import { LiveState } from '../tower-tools/live-state.js';
@@ -152,13 +152,29 @@ export class OwnerTools {
   }
 }
 
+/** The tools as an MCP server; in the master's own folder it lists none, as the master has its own. */
+function ownerBridge(tools: OwnerTools, master = false): ToolBridge {
+  return { name: OWNER_TOOLS_SERVER, listTools: async () => master ? [] : OWNER_TOOLS,
+    callTool: async (name, args) => master ? { error: '마스터는 자기 tower_master 도구를 씁니다.' } : tools.call(name, args) };
+}
+
 /** `agent-session-tower mcp`: Tower's tools over stdio for an agent the owner runs on this computer. */
 export async function startOwnerMcp(stateDir: string, input: Readable = process.stdin, output: Writable = process.stdout, cwd = process.cwd()): Promise<void> {
   // Registered for every session, it reaches the master too, which has its own tools (they report the work it hands out).
-  const master = inMasterFolder(stateDir, cwd);
   const tools = new OwnerTools(stateDir);
-  try {
-    await serveToolBridge({ name: OWNER_TOOLS_SERVER, listTools: async () => master ? [] : OWNER_TOOLS,
-      callTool: async (name, args) => master ? { error: '마스터는 자기 tower_master 도구를 씁니다.' } : tools.call(name, args) }, input, output);
-  } finally { tools.close(); }
+  try { await serveToolBridge(ownerBridge(tools, inMasterFolder(stateDir, cwd)), input, output); }
+  finally { tools.close(); }
+}
+
+/**
+ * The same tools at `/mcp` on Tower's own web (MCP over HTTP, JSON answers, no sessions), for an agent that reaches this
+ * computer's localhost, as through an SSH tunnel. The web passes its own port; the tools call it like its page does.
+ */
+export function ownerMcpOverHttp(stateDir: string, port: () => number | undefined): { answer(body: unknown): Promise<unknown>; close(): void } {
+  const tools = new OwnerTools(stateDir, { ports: async () => { const known = port(); return known ? [known] : []; } });
+  const bridge = ownerBridge(tools);
+  return {
+    answer: body => answerRpc(bridge, body),
+    close: () => tools.close(),
+  };
 }

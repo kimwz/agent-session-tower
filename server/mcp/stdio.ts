@@ -8,6 +8,38 @@ export interface ToolBridge {
   callTool(name: string, args: Record<string, unknown>): Promise<unknown>;
 }
 
+type RpcReply = { jsonrpc: '2.0'; id: string | number | null; result?: unknown; error?: { code: number; message: string } };
+
+/**
+ * One JSON-RPC message to a tool server, answered the same over stdio and HTTP. Notifications and responses (no id)
+ * get no answer.
+ */
+export async function answerRpc(bridge: ToolBridge, frame: any): Promise<RpcReply | undefined> {
+  // A response to something the server asked (it asks nothing) is taken without an answer, like a notification.
+  if (frame && typeof frame === 'object' && frame.jsonrpc === '2.0' && frame.method === undefined && ('result' in frame || 'error' in frame)) return undefined;
+  if (!frame || typeof frame !== 'object' || frame.jsonrpc !== '2.0' || typeof frame.method !== 'string') return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid request' } };
+  if (frame.id === undefined) return undefined;
+  if (typeof frame.id !== 'string' && typeof frame.id !== 'number') return { jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid request ID' } };
+  const answer = (result: unknown): RpcReply => ({ jsonrpc: '2.0', id: frame.id, result });
+  if (frame.method === 'initialize') return answer({ protocolVersion: ['2024-11-05', '2025-03-26', '2025-06-18'].includes(frame.params?.protocolVersion) ? frame.params.protocolVersion : '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: bridge.name, version: '1.0.0' } });
+  if (frame.method === 'ping') return answer({});
+  if (frame.method === 'tools/list') {
+    try { return answer({ tools: await bridge.listTools() }); }
+    catch (error) { return { jsonrpc: '2.0', id: frame.id, error: { code: -32603, message: error instanceof Error ? error.message : 'Tools are unavailable.' } }; }
+  }
+  if (frame.method === 'tools/call') {
+    try {
+      const name = frame.params?.name;
+      if (typeof name !== 'string') throw new Error('A tool name is required.');
+      const args = frame.params?.arguments ?? {};
+      if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Tool arguments must be an object.');
+      const value = await bridge.callTool(name, args);
+      return answer({ content: [{ type: 'text', text: JSON.stringify(value) ?? 'null' }] });
+    } catch (error) { return answer({ isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : 'Tool failed.' }] }); }
+  }
+  return { jsonrpc: '2.0', id: frame.id, error: { code: -32601, message: 'Method not found' } };
+}
+
 /** Newline-delimited JSON-RPC over stdio, as Claude Code and Codex speak to local MCP servers. */
 export async function serveToolBridge(bridge: ToolBridge, input: Readable = process.stdin, output: Writable = process.stdout): Promise<void> {
   const respond = (value: unknown) => output.write(JSON.stringify(value) + '\n');
@@ -19,27 +51,10 @@ export async function serveToolBridge(bridge: ToolBridge, input: Readable = proc
     while ((end = buffer.indexOf('\n')) !== -1) {
       const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
       if (!line.trim()) continue;
-      let frame: any;
+      let frame: unknown;
       try { frame = JSON.parse(line); } catch { respond({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Invalid JSON' } }); continue; }
-      if (!frame || frame.jsonrpc !== '2.0' || typeof frame.method !== 'string') { respond({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid request' } }); continue; }
-      if (frame.id === undefined) continue;
-      if (typeof frame.id !== 'string' && typeof frame.id !== 'number') { respond({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid request ID' } }); continue; }
-      const answer = (result: unknown) => respond({ jsonrpc: '2.0', id: frame.id, result });
-      if (frame.method === 'initialize') answer({ protocolVersion: ['2024-11-05', '2025-03-26', '2025-06-18'].includes(frame.params?.protocolVersion) ? frame.params.protocolVersion : '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: bridge.name, version: '1.0.0' } });
-      else if (frame.method === 'ping') answer({});
-      else if (frame.method === 'tools/list') {
-        try { answer({ tools: await bridge.listTools() }); }
-        catch (error) { respond({ jsonrpc: '2.0', id: frame.id, error: { code: -32603, message: error instanceof Error ? error.message : 'Tools are unavailable.' } }); }
-      } else if (frame.method === 'tools/call') {
-        try {
-          const name = frame.params?.name;
-          if (typeof name !== 'string') throw new Error('A tool name is required.');
-          const args = frame.params?.arguments ?? {};
-          if (!args || typeof args !== 'object' || Array.isArray(args)) throw new Error('Tool arguments must be an object.');
-          const value = await bridge.callTool(name, args);
-          answer({ content: [{ type: 'text', text: JSON.stringify(value) ?? 'null' }] });
-        } catch (error) { answer({ isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : 'Tool failed.' }] }); }
-      } else respond({ jsonrpc: '2.0', id: frame.id, error: { code: -32601, message: 'Method not found' } });
+      const reply = await answerRpc(bridge, frame);
+      if (reply) respond(reply);
     }
   }
 }

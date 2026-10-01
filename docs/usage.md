@@ -138,7 +138,15 @@ claude mcp add tower-local -- agent-session-tower mcp
 codex mcp add tower-local -- agent-session-tower mcp
 ```
 
-It finds the Tower running for the state directory (`--state-dir` to pick another) and signs in like your localhost page; nothing is stored. Its tools are `tower_api` (every route the pages use), `tower_query` (one read-only SQL query over Tower's state), `session_read`, `terminal_read`, and `tower_guide`, which lists every route, every `/api/v1` operation's input, and how to send whole files (backups, skill bundles) with curl. Its changes have a budget of their own, so a busy agent never slows your pages. It works only for the user Tower runs as, on this computer.
+From another computer that reaches this one's localhost, for example through `ssh -L 8000:127.0.0.1:8000 <this computer>` (keep the same port number on both ends), nothing needs to be installed: give the agent the address instead.
+
+```sh
+claude mcp add --transport http tower-local http://localhost:8000/mcp
+```
+
+`/mcp` answers only callers at this computer's localhost, never a page signed in from elsewhere. Registered for every Claude Code session, the HTTP address also reaches the master agent; prefer the command form there, which stays out of the master's way.
+
+The command finds the Tower running for the state directory (`--state-dir` to pick another) and signs in like your localhost page; nothing is stored. Its tools are `tower_api` (every route the pages use), `tower_query` (one read-only SQL query over Tower's state), `session_read`, `terminal_read`, and `tower_guide`, which lists every route, every `/api/v1` operation's input, and how to send whole files (backups, skill bundles) with curl. Its changes have a budget of their own, so a busy agent never slows your pages. It works only for the user Tower runs as, on this computer.
 
 ## Account usage
 
