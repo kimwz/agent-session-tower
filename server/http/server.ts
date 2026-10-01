@@ -14,7 +14,7 @@ import { proxyToNode } from '../link/proxy.js';
 import { normalizeProjectGroupPatch } from '../stores/project-groups.js';
 import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
-import { acceptedEncoding, compressedEventStream, sendBody, StaticCompression } from './compression.js';
+import { acceptedEncoding, compressedEventStream, isBuildAsset, sendBody, StaticCompression } from './compression.js';
 import { SseClient } from './sse-client.js';
 import { publicSnapshot } from './public-snapshot.js';
 import { SnapshotStream, type FrameFormat } from './snapshot-stream.js';
@@ -724,9 +724,9 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (!asset) return json(res, 404, { error: '파일을 찾을 수 없습니다.' });
       res.setHeader('Content-Type', contentTypes[asset.extension] || 'application/octet-stream');
       // Build-hashed files never change. private keeps shared caches out; signed-out pages load them too.
-      if (path.startsWith('/assets/')) res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
+      if (isBuildAsset(asset.name)) res.setHeader('Cache-Control', 'private, max-age=31536000, immutable');
       res.setHeader('Vary', 'Accept-Encoding');
-      const { body, encoding } = await staticCompression.body(path, asset.content, acceptedEncoding(req.headers['accept-encoding']));
+      const { body, encoding } = await staticCompression.body(asset.name, asset.content, acceptedEncoding(req.headers['accept-encoding']));
       if (encoding) res.setHeader('Content-Encoding', encoding);
       res.statusCode = 200;
       res.end(req.method === 'HEAD' ? undefined : body);

@@ -45,18 +45,23 @@ export function sendBody(req: IncomingMessage, res: ServerResponse, body: string
 const brotliAsync = promisify(brotliCompress);
 const gzipAsync = promisify(gzip);
 
+/** Build-hashed files: their names change with their contents, so they may be cached and compressed once. */
+export function isBuildAsset(name: string): boolean {
+  return name.startsWith('assets/');
+}
+
 /**
- * Web files for one build. Build-hashed `/assets/` files are compressed once per process, off the event
- * loop, so the cache holds at most that build's files; anything else (the page itself) is small and
+ * Web files for one build. Build assets are compressed once per process, off the event loop, keyed by the
+ * file read, so the cache holds at most that build's files; anything else (the page itself) is small and
  * compressed per request.
  */
 export class StaticCompression {
   private readonly cache = new Map<string, Promise<Buffer>>();
 
-  async body(path: string, content: Buffer, encoding: Encoding | undefined): Promise<{ body: Buffer; encoding?: Encoding }> {
+  async body(name: string, content: Buffer, encoding: Encoding | undefined): Promise<{ body: Buffer; encoding?: Encoding }> {
     if (!encoding || content.length < MIN_BYTES) return { body: content };
-    if (!path.startsWith('/assets/')) return { body: compressSync(content, encoding), encoding };
-    const key = `${encoding}:${path}`;
+    if (!isBuildAsset(name)) return { body: compressSync(content, encoding), encoding };
+    const key = `${encoding}:${name}`;
     let compressed = this.cache.get(key);
     if (!compressed) {
       compressed = encoding === 'br' ? brotliAsync(content, brotliOptions(STATIC_BROTLI, content.length)) : gzipAsync(content, { level: 9 });

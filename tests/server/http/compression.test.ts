@@ -56,16 +56,16 @@ test('bodies are compressed only when accepted and large enough, and decode to t
 test('build-hashed assets are compressed once and other files every time', async () => {
   const compression = new StaticCompression();
   const content = Buffer.from('export const value = "asset";\n'.repeat(100));
-  const first = await compression.body('/assets/index-abc.js', content, 'br');
-  const second = await compression.body('/assets/index-abc.js', content, 'br');
+  const first = await compression.body('assets/index-abc.js', content, 'br');
+  const second = await compression.body('assets/index-abc.js', content, 'br');
   assert.equal(first.encoding, 'br');
   assert.equal(second.body, first.body);
   assert.equal(brotliDecompressSync(first.body).toString(), content.toString());
-  const page = await compression.body('/sessions/x', content, 'gzip');
+  const page = await compression.body('index.html', content, 'gzip');
   assert.equal(gunzipSync(page.body).toString(), content.toString());
-  assert.notEqual((await compression.body('/sessions/y', content, 'gzip')).body, page.body);
-  assert.deepEqual(await compression.body('/assets/index-abc.js', content, undefined), { body: content });
-  assert.deepEqual(await compression.body('/assets/tiny.js', Buffer.from('x'), 'br'), { body: Buffer.from('x') });
+  assert.notEqual((await compression.body('index.html', content, 'gzip')).body, page.body);
+  assert.deepEqual(await compression.body('assets/index-abc.js', content, undefined), { body: content });
+  assert.deepEqual(await compression.body('assets/tiny.js', Buffer.from('x'), 'br'), { body: Buffer.from('x') });
 });
 
 for (const encoding of ['br', 'gzip'] as const) {
@@ -99,31 +99,42 @@ for (const encoding of ['br', 'gzip'] as const) {
   });
 }
 
-test('a compressed event stream reports a blocked socket and keeps only the newest snapshot until it drains', async t => {
-  let stream: SseClient | undefined;
-  const server = createServer((_req, res) => {
-    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Content-Encoding': 'gzip' });
-    res.flushHeaders();
-    stream = new SseClient(compressedEventStream(res, 'gzip'), () => {});
+for (const encoding of ['br', 'gzip'] as const) {
+  test(`a ${encoding} event stream blocks behind a full socket and resumes with the newest snapshot`, async t => {
+    let stream: SseClient | undefined;
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Content-Encoding': encoding });
+      res.flushHeaders();
+      stream = new SseClient(compressedEventStream(res, encoding), () => {});
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => { server.closeAllConnections(); return new Promise<void>(resolve => server.close(() => resolve())); });
+    const response = await new Promise<IncomingMessage>((resolve, reject) => request(`http://127.0.0.1:${(server.address() as { port: number }).port}/`, resolve).on('error', reject).end());
+    response.pause();
+    const blocked = () => (stream as unknown as { blocked: boolean }).blocked;
+    // Small incompressible frames with time for the compressor to take each one (a flowing socket never blocks
+    // this way), so only the paused socket behind the compressor can stop them.
+    const deadline = Date.now() + 10_000;
+    while (!blocked()) {
+      assert.ok(Date.now() < deadline, 'the stream never reported the full socket');
+      stream!.snapshot(`data: ${randomBytes(3 << 10).toString('base64')}\n\n`);
+      await new Promise(resolve => setTimeout(resolve, 2));
+    }
+    stream!.update('event: patch\ndata: lost\n\n', () => 'event: snapshot\ndata: newest\n\n');
+    stream!.update('event: patch\ndata: lost\n\n', () => 'event: snapshot\ndata: newer\n\n');
+    const decoder = encoding === 'br' ? createBrotliDecompress() : createGunzip();
+    let tail = '';
+    decoder.on('data', chunk => { tail = (tail + chunk.toString()).slice(-200); });
+    response.pipe(decoder);
+    response.resume();
+    while (!tail.includes('data: newer')) {
+      assert.ok(Date.now() < deadline, 'the newest snapshot never arrived after the socket drained');
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.ok(!tail.includes('data: lost') && !tail.includes('data: newest\n'));
+    stream!.end();
   });
-  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
-  t.after(() => { server.closeAllConnections(); return new Promise<void>(resolve => server.close(() => resolve())); });
-  const response = await new Promise<IncomingMessage>((resolve, reject) => request(`http://127.0.0.1:${(server.address() as { port: number }).port}/`, resolve).on('error', reject).end());
-  response.pause();
-  // Incompressible frames fill the paused socket, the compressor behind it and finally the stream.
-  const noise = () => randomBytes(1 << 19).toString('base64');
-  for (let index = 0; index < 64 && !(stream as unknown as { blocked: boolean }).blocked; index += 1) stream!.snapshot(`data: ${noise()}\n\n`);
-  assert.equal((stream as unknown as { blocked: boolean }).blocked, true);
-  stream!.update('event: patch\ndata: lost\n\n', () => 'event: snapshot\ndata: newest\n\n');
-  const decoder = createGunzip();
-  let tail = '';
-  decoder.on('data', chunk => { tail = (tail + chunk.toString()).slice(-200); });
-  response.pipe(decoder);
-  response.resume();
-  while (!tail.includes('data: newest')) await new Promise(resolve => setTimeout(resolve, 10));
-  assert.ok(!tail.includes('data: lost'));
-  stream!.end();
-});
+}
 
 test('the web server compresses the snapshot, its event stream and caches build-hashed assets', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-compression-'));
@@ -157,6 +168,12 @@ test('the web server compresses the snapshot, its event stream and caches build-
   assert.equal(asset.response.headers['content-encoding'], 'br');
   assert.equal(asset.response.headers['cache-control'], 'private, max-age=31536000, immutable');
   assert.match(decode(asset.body, 'br'), /console\.log\("tower"\)/);
+  const alias = await get(`${base}/assets//index-abc.js`, headers);
+  assert.equal(alias.response.headers['cache-control'], 'private, max-age=31536000, immutable');
+  assert.deepEqual(alias.body, asset.body);
+  const fallback = await get(`${base}/assets/no-such-route`, headers);
+  assert.equal(fallback.response.headers['cache-control'], 'no-store');
+  assert.equal(decode(fallback.body, fallback.response.headers['content-encoding']), '<!doctype html><title>Tower</title>');
   assert.equal((await get(`${base}/`, headers)).response.headers['cache-control'], 'no-store');
 
   const events = await new Promise<IncomingMessage>((resolve, reject) => request(`${base}/api/events?patch=1`, { headers }, resolve).on('error', reject).end());
