@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.97.1] - 2026-10-01
+
+### Fixed
+- **A message that waits instead of going into the running turn says why.** The **지금 끼워넣기** (insert now) button disappeared without a word when the running turn was started elsewhere (a trigger, Slack or another computer, such as a trigger's issue run that the owner messages), when the message asked for another model or reasoning effort, or when it had to carry Tower's instructions. The waiting line now gives the reason, on joined computers too.
+- **The insert button appears as soon as Claude can take the message.** A message queued while Claude was still starting stayed without the button until Claude wrote something, which a long tool call could put minutes away. While a Codex turn takes one inserted message, the others show they wait for it instead of offering a button that would fail.
+
 ## [1.97.0] - 2026-10-01
 
 ### Fixed
