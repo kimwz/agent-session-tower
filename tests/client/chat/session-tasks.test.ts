@@ -27,7 +27,7 @@ test('a stage is shown in the color of its kind of work, in Korean or English', 
   assert.equal(stageTone('뭔가'), 'neutral');
 });
 
-test('the chat header shows the current task, and opened every task with the current one marked', () => {
+test('above the message box the current task shows, and opened every task with the current one marked', () => {
   const language = getLanguage();
   setLanguage('ko');
   try {
@@ -43,8 +43,35 @@ test('the chat header shows the current task, and opened every task with the cur
     const titles = [...open.matchAll(/session-task-title">([^<]+)</g)].map(match => match[1]);
     assert.deepEqual(titles, ['Snapshot compression', 'Task strip design', 'Voice playback fix']);
     assert.equal(open.match(/session-task [a-z]+ current/g)?.length, 1);
+    assert.ok(open.indexOf('session-tasks-list') < open.indexOf('session-tasks-line'), 'the list opens above the current line, toward the conversation');
     assert.match(open, /지금 작업/);
     const single = renderToStaticMarkup(createElement(SessionTasks, { tasks: [tasks[0]] }));
     assert.doesNotMatch(single, /session-tasks-count/, 'no count for a single task');
   } finally { setLanguage(language); }
+});
+
+test('resting on a session in the list shows its three latest tasks, newest first, and how many more there are', async () => {
+  const { SessionTasksCard, PEEK_TASKS } = await import('../../../client/src/sessions/SessionTasksPeek.js');
+  const language = getLanguage();
+  setLanguage('ko');
+  try {
+    const many = [...tasks, task('d', 'Older work', '완료', '2026-09-30T01:00:00Z')];
+    const html = renderToStaticMarkup(createElement(SessionTasksCard, { tasks: many }));
+    const titles = [...html.matchAll(/session-tasks-peek-title">([^<]+)</g)].map(match => match[1]);
+    assert.equal(PEEK_TASKS, 3);
+    assert.deepEqual(titles, ['Snapshot compression', 'Task strip design', 'Voice playback fix']);
+    assert.match(html, /<li class="current">/);
+    assert.match(html, /이전 작업 1개 더/);
+    assert.doesNotMatch(renderToStaticMarkup(createElement(SessionTasksCard, { tasks })), /이전 작업/, 'nothing more to say for three tasks');
+  } finally { setLanguage(language); }
+});
+
+test('the card sits right of its row inside the window, under it when there is no room, and nowhere for a hidden row', async () => {
+  const { peekPlacement } = await import('../../../client/src/sessions/SessionTasksPeek.js');
+  const row = (left: number, top: number, width = 260, height = 90) => ({ left, top, right: left + width, bottom: top + height, width, height });
+  const viewport = { width: 1440, height: 900 };
+  assert.deepEqual(peekPlacement(row(16, 400), 200, viewport), { left: 286, top: 400 });
+  assert.deepEqual(peekPlacement(row(16, 820), 200, viewport), { left: 286, top: 692 }, 'kept inside the bottom of the window');
+  assert.deepEqual(peekPlacement(row(16, 300, 360), 200, { width: 390, height: 844 }), { left: 16, top: 396 }, 'no room on the right: under the row');
+  assert.equal(peekPlacement(row(0, 0, 0, 0), 200, viewport), undefined, 'a list hidden after a tap shows no card');
 });

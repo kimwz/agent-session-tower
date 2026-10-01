@@ -244,7 +244,6 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
         {current?.cwd && <WorkspaceActions key={current.cwd} cwd={current.cwd} token={token} disabled={!connected || (host ? !host.workspace : false)} note={host?.workspaceNote} machine={host?.name} />}
         <SessionFamilyNav sessions={allSessions} selectedId={sessionId} onNavigate={onNavigate} />
       </div>
-      {current && <SessionTasks key={current.id} tasks={current.tasks} />}
       {showMetadata && current && <dl className="session-metadata">{host && <div><dt>{t("컴퓨터")}</dt><dd>{host.name}</dd></div>}<div><dt>{t("작업 폴더")}</dt><dd>{(current.cwd && localPart(current.cwd)) || t("정보 없음")}</dd></div>{current.model && <div><dt>{t("모델")}</dt><dd>{current.model}</dd></div>}<div><dt>{t("세션 ID")}</dt><dd>{current.nativeId}<button className="icon-button" title={t("세션 ID 복사")} aria-label={t("세션 ID 복사")} onClick={() => { void copyText(current.nativeId).then(success => { setCopied(success); window.setTimeout(() => setCopied(false), 1500); }); }}>{copied ? <Check size={12} /> : <Copy size={12} />}</button></dd></div>{resumeCommand(current) && !host && <div><dt>{t("터미널")}</dt><dd><code className="resume-command">{resumeCommand(current)}</code><ResumeCommandButton session={current} size={12} /></dd></div>}<div><dt>{t("상태 판단")}</dt><dd>{translateMessage(current.statusReason)}</dd></div><div><dt>{t("시작")}</dt><dd>{absoluteTime(current.createdAt)}</dd></div></dl>}
       {contextBanner}
     </header>
@@ -260,11 +259,13 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
         {detail && detail.messages.length === 0 && !loadError && <div className="empty-chat"><MessageSquare size={27} /><h3>{t("대화가 시작될 자리")}</h3><p>{t("이 세션에 첫 요청을 보내거나")}<br />{t("에이전트의 활동을 기다리세요.")}</p></div>}
       </>}
     </div>
-    {!following && <button className="jump-latest" onClick={scrollToBottom}><ArrowDown size={13} />{t("최신 대화")}</button>}
     <div className="composer-section">
+      {/* Floats just above the section, whatever it holds (task line, run controls, errors). */}
+      {!following && <button className="jump-latest" onClick={scrollToBottom}><ArrowDown size={13} />{t("최신 대화")}</button>}
       {current?.resumable === false && current.parentId && <button className="parent-session-link" onClick={() => onNavigate(current.parentId!)}><GitBranch size={14} /><span>{t("부모 세션에서 이어가기")}</span><ArrowUp size={13} /></button>}
       {sendError && <div className="inline-error" role="alert"><TriangleAlert size={15} /><span>{translateMessage(sendError)}</span><button aria-label={t("오류 메시지 닫기")} onClick={() => setSendError('')}><X size={13} /></button></div>}
       {controlRuns.length > 0 && <div ref={runControls} className={`run-controls${approvalKey ? ' has-approvals' : ''}`} aria-label={t("진행 중이거나 실패한 요청")}>{controlRuns.map(run => <RunControl key={run.id} run={run} onCancel={cancelRun} onRetry={retryPrompt} onDismiss={dismissRun} onSteer={steerRun} steering={steering === run.id} cancelling={cancelling === run.id} dismissing={dismissing === run.id} disabled={!reachable || !token || !!cancelling || !!dismissing || !!steering} retryDisabled={disabled || sending} showPrompt={!runProjection.matchedRunIds.has(run.id)} token={token} onSnapshotRefresh={onSnapshotRefresh} />)}</div>}
+      {current && <SessionTasks key={current.id} tasks={current.tasks} />}
       <form className={`composer ${disabled ? 'disabled' : ''} ${dragging ? 'composer-dragging' : ''}`} onSubmit={event => { event.preventDefault(); void sendPrompt(); }}
         onDragOver={event => { if (event.dataTransfer.types.includes('Files')) { event.preventDefault(); event.dataTransfer.dropEffect = disabled || sending ? 'none' : 'copy'; if (!disabled && !sending) setDragging(true); } }}
         onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
