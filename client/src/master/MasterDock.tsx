@@ -5,6 +5,7 @@ import { DEFAULT_MASTER_VOICE, type MasterDirective } from '../../../shared/mast
 import { splitScopedId } from '../remote/scope';
 import { post } from './api';
 import { dockLayout } from './dock-layout';
+import { OpenChatButton } from './OpenChatButton';
 import { followRoom, type RoomState } from './room-stream';
 import { runScreenCommand, type MasterControls } from './screen';
 import { useWords } from './strings';
@@ -34,7 +35,8 @@ function tabId(): string {
  * The master agent's floating button (bottom left). The master is a session: the button opens its conversation like
  * any other, or, before it has one, a panel to start it. While its conversation is open, the microphone and the
  * master's settings slide out beside the button; the microphone turns voice on, and then the button (a microphone
- * itself) turns it off, with the live voice bar beside it. Hidden when this Tower has no master. `sessionId` is the
+ * itself) turns it off, with the live voice bar beside it; with the conversation closed, the bar offers to open it
+ * again above the settings icon. Hidden when this Tower has no master. `sessionId` is the
  * open conversation.
  */
 export function MasterDock({ token, controls, sessionId }: { token: string; controls: MasterControls; sessionId: string | null }) {
@@ -155,7 +157,7 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
   if (absent) return null;
   const thinking = overview?.session?.status === 'working';
   const tasks = overview?.activeTasks ?? 0;
-  const layout = dockLayout({ conversationOpen: masterOpen, voiceOn: Boolean(voiceView), ended: Boolean(voiceEnded), panelOpen: open });
+  const layout = dockLayout({ conversationOpen: masterOpen, voiceOn: Boolean(voiceView), ended: Boolean(voiceEnded), panelOpen: open, hasSession: Boolean(masterId) });
   const ending = layout.button === 'end-voice';
   const fabLabel = ending ? words('음성 대화 끝내기', 'End voice') : words('마스터 에이전트', 'Master agent');
   const settingsButton = <button className="master-mic" onClick={() => setOpen(true)} title={words('마스터 설정', 'Master settings')} aria-label={words('마스터 설정', 'Master settings')}><Settings size={16} /></button>;
@@ -173,7 +175,10 @@ export function MasterDock({ token, controls, sessionId }: { token: string; cont
     </div>
     {(layout.side === 'voice' || layout.side === 'ended') && <div className="master-bar" style={barStyle(position)}>
       <VoiceBar voice={voice} />
-      <div className="master-bar-buttons">{settingsButton}</div>
+      <div className="master-bar-buttons">
+        {layout.reopen && masterId && <OpenChatButton onOpen={() => controlsRef.current.selectSession(masterId)} />}
+        {settingsButton}
+      </div>
     </div>}
     {open && <Suspense fallback={<div className="master-panel"><LoaderCircle className="spin" size={18} /></div>}>
       <MasterPanel token={token} overview={overview} voice={voice} top={position.panelTop} onClose={close} onStarted={id => { setOpen(false); controlsRef.current.selectSession(id); }} />
