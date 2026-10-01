@@ -908,6 +908,8 @@ export const english: Record<string, string> = {
   '개': '',
   '검색 및 필터 초기화': 'Clear search and filters',
   '세션을 찾고 있습니다': 'Finding sessions',
+  '세션 표시 정보를 불러오지 못했습니다': 'Could not load session visibility information',
+  '세션 표시 정보를 불러오는 시간이 초과되었습니다. 다시 시도해 주세요.': 'Loading session visibility information timed out. Please try again.',
   '세션 더 보기': 'Show more sessions',
   '종료한 세션이 없습니다': 'No closed sessions',
   '조건에 맞는 세션이 없습니다': 'No sessions match your filters',
