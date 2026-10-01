@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.96.1] - 2026-10-01
+
+### Fixed
+- **The master's conversation can be opened again while voice is on.** The floating button ends voice then, so a conversation closed during voice could only come back with Shift+M. While it is closed, the voice bar now shows an open-chat button above the master settings icon.
+
 ## [1.96.0] - 2026-10-01
 
 ### Added

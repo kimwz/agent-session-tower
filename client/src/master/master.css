@@ -109,10 +109,10 @@
 .master-tray.shown .master-mic:disabled { opacity:.45; }
 .master-tray.shown .master-mic + .master-mic { transition-delay:.04s; }
 
-/* While voice is on: the live voice bar and settings beside the button. */
+/* While voice is on: the live voice bar beside the button, and settings (with the conversation closed, opening it above). */
 .master-bar { position:fixed; z-index:39; display:flex; align-items:flex-end; gap:8px; max-width:min(460px, calc(100vw - 90px)); }
 .master-bar .master-voice { border:1px solid var(--line); border-radius:10px; background:var(--surface); box-shadow:0 6px 18px rgba(0,0,0,.35); min-width:0; flex:1; }
-.master-bar-buttons { display:flex; gap:6px; }
+.master-bar-buttons { display:flex; flex-direction:column; gap:6px; }
 .master-bar .master-mic { box-shadow:0 4px 12px rgba(0,0,0,.35); }
 
 @media (max-width:680px) {

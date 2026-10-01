@@ -4,10 +4,12 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { dockLayout } from '../../client/src/master/dock-layout.js';
 import { atEnd, VoiceBar, type VoiceControls } from '../../client/src/master/VoiceBar.js';
+import { OpenChatButton } from '../../client/src/master/OpenChatButton.js';
 import { setLanguage } from '../../client/src/i18n/i18n.js';
 import type { VoiceView } from '../../client/src/master/voice-client.js';
 
-const state = (change: Partial<Parameters<typeof dockLayout>[0]> = {}) => dockLayout({ conversationOpen: false, voiceOn: false, ended: false, panelOpen: false, ...change });
+const layout = (change: Partial<Parameters<typeof dockLayout>[0]> = {}) => dockLayout({ conversationOpen: false, voiceOn: false, ended: false, panelOpen: false, hasSession: true, ...change });
+const state = (change: Partial<Parameters<typeof dockLayout>[0]> = {}) => { const { button, side } = layout(change); return { button, side }; };
 
 test('by default only the button shows; opening the conversation slides out the microphone and settings, nothing else', () => {
   assert.deepEqual(state(), { button: 'toggle', side: null });
@@ -26,6 +28,27 @@ test('voice that ended by itself says why in place of the icons, and the master\
   assert.deepEqual(state({ ended: true, conversationOpen: true }), { button: 'toggle', side: 'ended' }, 'never the icons over the notice');
   assert.deepEqual(state({ panelOpen: true, conversationOpen: true }), { button: 'toggle', side: null });
   assert.deepEqual(state({ panelOpen: true, voiceOn: true }), { button: 'end-voice', side: null });
+});
+
+test('with voice on and the conversation closed, the voice bar offers to open it again; nowhere else', () => {
+  assert.equal(layout({ voiceOn: true }).reopen, true, 'the button ends voice then, so this is the way back');
+  assert.equal(layout({ voiceOn: true, conversationOpen: true }).reopen, false);
+  assert.equal(layout({ voiceOn: true, hasSession: false }).reopen, false, 'no conversation to open yet');
+  assert.equal(layout({ voiceOn: true, panelOpen: true }).reopen, false);
+  assert.equal(layout().reopen, false, 'without voice the button itself opens it');
+  assert.equal(layout({ ended: true }).reopen, false);
+  assert.equal(layout({ conversationOpen: true }).reopen, false);
+});
+
+test('the open-chat button is labelled and names its shortcut', () => {
+  setLanguage('ko');
+  const html = renderToStaticMarkup(createElement(OpenChatButton, { onOpen() {} }));
+  assert.match(html, /^<button[^>]*aria-label="마스터 채팅 열기"/);
+  assert.match(html, /title="마스터 채팅 열기 \(Shift\+M\)"/);
+  assert.match(html, /aria-keyshortcuts="Shift\+M"/);
+  setLanguage('en');
+  assert.match(renderToStaticMarkup(createElement(OpenChatButton, { onOpen() {} })), /aria-label="Open master chat"/);
+  setLanguage('ko');
 });
 
 test('what is heard follows its latest words only while it is scrolled to its end', () => {
