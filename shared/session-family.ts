@@ -1,6 +1,7 @@
-import type { Session } from '../../../shared/types';
+import type { Session } from './types.js';
 
-function familyIndex(sessions: Session[]) {
+/** Each session's family root: the session it was forked from as a subagent, followed to the top. */
+export function familyIndex(sessions: Session[]) {
   const byId = new Map(sessions.map(session => [session.id, session]));
   const roots = new Map<string, string>();
   for (const session of sessions) {

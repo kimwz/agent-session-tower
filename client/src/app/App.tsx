@@ -23,7 +23,7 @@ import { Graph } from '../graph/Graph';
 import { BrandMark, ProviderIcon } from '../common/Icons';
 import { useMediaQuery } from '../common/use-media-query';
 import { api, providerLabels, recoverRefusedConnection, sessionActivityAt, sessionStaysShown, sessionTitle, sortSessions } from '../common/lib';
-import { getMainSessionId, getMainSessions } from '../sessions/session-family';
+import { getMainSessionId, getMainSessions } from '../../../shared/session-family';
 import { acknowledgeSession, conversationRevision, parseReadState, pruneReadState, readStateKey } from '../sessions/session-read-state';
 import { NewSessionDialog, type SessionDraft } from '../sessions/NewSessionDialog';
 import { IssueDialog } from '../project-groups/IssueDialog';
