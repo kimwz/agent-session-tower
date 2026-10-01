@@ -121,7 +121,7 @@ test('restored steering validates shape and converts in-flight delivery to uncer
   const directory = await mkdtemp(join(tmpdir(), 'tower-claude-steering-restore-'));
   const now = new Date().toISOString();
   const base: Run = { id: nativeId, sessionId: `claude:${nativeId}`, prompt: 'test', output: '', createdAt: now, status: 'running' };
-  const valid = { ...base, steering: { targetRunId: '20000000-0000-4000-8000-000000000002', state: 'sending', requestedAt: now } };
+  const valid = { ...base, steerBlocked: 'origin', canSteer: true, steering: { targetRunId: '20000000-0000-4000-8000-000000000002', state: 'sending', requestedAt: now } };
   await writeFile(join(directory, 'runs.json'), JSON.stringify([valid, ...[null, 'bad', {}, { ...valid.steering, requestedAt: 42 }].map((steering, index) => ({ ...base, id: `invalid-${index}`, steering }))]));
   const manager = new RunManager({ stateDir: directory, getSession: () => undefined, refreshSessions: async () => {} });
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
@@ -129,4 +129,7 @@ test('restored steering validates shape and converts in-flight delivery to uncer
   assert.equal(manager.list().length, 1);
   assert.equal(manager.list()[0].steering?.state, 'uncertain');
   assert.equal(manager.list()[0].status, 'error');
+  // Whether it could be inserted belonged to the worker that saved it.
+  assert.equal(manager.list()[0].steerBlocked, undefined);
+  assert.equal(manager.list()[0].canSteer, false);
 });
