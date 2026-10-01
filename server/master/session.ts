@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { continuedRunById } from '../runs/continuations.js';
 import { join } from 'node:path';
-import { MASTER_FOLDER, type MasterBinding, type MasterSpeak, type MasterTaskState } from '../../shared/master.js';
+import { MASTER_FOLDER, type MasterBinding, type MasterSpeak, type MasterTaskState, type MasterUnspoken } from '../../shared/master.js';
 import type { AutoPromptJob, ChatMessage, Provider, Run, RunReply, SessionDetail, Snapshot } from '../../shared/types.js';
 import type { MasterEntryData } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
@@ -86,6 +86,8 @@ interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; fol
 /** What the voice gets from the master session. */
 export interface VoiceSide {
   speaks(report: boolean): 'pending' | 'unspoken' | undefined;
+  /** Why an answer with no voice page to read it is not read (the owner turned voice off, or no page was there). */
+  quiet?(): MasterUnspoken;
   deliver(): void;
   /** The master's words for a turn so far, to read while they are written. */
   stream?(input: { turn: string; kind: 'answer' | 'report'; key: string; request?: string; voiceSession?: string; replies: readonly RunReply[] }): void;
@@ -432,7 +434,7 @@ export class MasterSession {
     const report = item.kind === 'report';
     const state = voice.speaks(report);
     // Not read aloud because no voice page is there to read it: the owner is told when voice is on again.
-    const speak: MasterSpeak | undefined = state && { state, ...(state === 'unspoken' ? { reason: 'away' as const } : {}), ...(item.voice && !report ? { session: item.voice } : {}), timing: timingKey(item),
+    const speak: MasterSpeak | undefined = state && { state, ...(state === 'unspoken' ? { reason: voice.quiet?.() ?? 'away' } : {}), ...(item.voice && !report ? { session: item.voice } : {}), timing: timingKey(item),
       ...(item.cut && ended === 'completed' ? { cut: true as const } : {}) };
     const request = !report && item.key ? { request: item.key } : {};
     const data: MasterEntryData | undefined = !speak ? undefined : ended === 'completed' && item.answer

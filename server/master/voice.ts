@@ -111,6 +111,8 @@ interface Session {
   listening: boolean;
   seenAt: number;
   activity?: { receivedAt: number; lastSpeechAt: number };
+  /** How it ended (`endSession`), for what was still waiting on it. */
+  ended?: 'stopped' | 'away' | 'restart';
 }
 
 /** Audio being made (or made) for the page, kept a short while. */
@@ -199,16 +201,13 @@ const fail = (message: string, statusCode: number) => Object.assign(new Error(me
 const localDay = (time: number) => { const date = new Date(time); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; };
 const speakOf = (data: MasterEntryData | undefined): MasterSpeak | undefined => data && (data.kind === 'master' || data.kind === 'error' || data.kind === 'event') ? data.speak : undefined;
 const wake = (live: Live) => { for (const waiter of [...live.waiters]) waiter(); };
+/** How an answer's reading stands, without how an earlier reading of it ended. */
+const bare = ({ reason: _reason, heard: _heard, ...rest }: MasterSpeak): MasterSpeak => rest;
 /** An answer's reading ended without it being heard to its end, and why. */
-const unspoken = (speak: MasterSpeak | undefined, reason: MasterUnspoken, heard = false): MasterSpeak => {
-  const { reason: _reason, heard: _heard, ...rest } = speak ?? { state: 'unspoken' };
-  return { ...rest, state: 'unspoken', reason, ...(heard ? { heard: true as const } : {}) };
-};
+const unspoken = (speak: MasterSpeak | undefined, reason: MasterUnspoken, heard = false): MasterSpeak =>
+  ({ ...(speak ? bare(speak) : {}), state: 'unspoken', reason, ...(heard ? { heard: true as const } : {}) });
 /** An answer's reading went to its end. */
-const played = (speak: MasterSpeak | undefined): MasterSpeak => {
-  const { reason: _reason, heard: _heard, ...rest } = speak ?? { state: 'played' };
-  return { ...rest, state: 'played' };
-};
+const played = (speak: MasterSpeak | undefined): MasterSpeak => ({ ...(speak ? bare(speak) : {}), state: 'played' });
 const withSpeak = (data: MasterEntryData, speak: MasterSpeak): MasterEntryData => ({ ...data, speak } as MasterEntryData);
 /**
  * An mp3 stream without the ID3 tag it starts with. The parts of a long answer are made one after another into one
@@ -296,8 +295,8 @@ export class MasterVoice {
   private readonly stoppedTurns = new Map<string, { reason: MasterUnspoken; heard: boolean }>();
   /** The latest answer or report not read aloud that the owner is told of (see `MasterVoiceStatus.missed`). */
   private missed?: MasterMissed & { order: number; at: number };
-  /** How each ended session ended, for what was still waiting on it. */
-  private readonly endings = new WeakMap<Session, 'stopped' | 'away' | 'restart'>();
+  /** The session that ended last, for an answer that comes after it (`quiet`). */
+  private lastEnded?: Session;
   private pauseTimer?: ReturnType<typeof setInterval>;
   readonly timings: VoiceTimings;
 
@@ -554,7 +553,7 @@ export class MasterVoice {
     const speak = speakOf(entry?.data);
     if (!entry || !speak || (speak.state !== 'unspoken' && speak.state !== 'played') || speak.reason === 'empty') return false;
     this.ready();
-    const { reason: _reason, heard: _heard, ...rest } = speak;
+    const rest = bare(speak);
     // Made pending, it is taken into what waits to be read (`follow`) and read whole when its turn comes.
     this.setSpeak(entry, { ...rest, state: 'pending', again: new Date().toISOString() });
     return true;
@@ -1218,10 +1217,12 @@ export class MasterVoice {
     if (open && known < 0) {
       this.file.speaking.push({ id: event.entry.id, order: event.entry.order });
       while (this.file.speaking.length > KEEP_SPEAKING) {
-        const oldest = this.file.speaking.shift()!;
+        const oldest = this.file.speaking[0];
         const entry = this.options.room.get(oldest.id);
         const stale = speakOf(entry?.data);
-        if (entry && stale) this.setSpeak(entry, unspoken(stale, 'queue'));
+        // Given up on while still in the list, so its end is recorded and told of like any other.
+        if (entry && stale && (stale.state === 'pending' || stale.state === 'playing')) this.setSpeak(entry, unspoken(stale, 'queue'));
+        if (this.file.speaking[0] === oldest) this.file.speaking.shift();
       }
       if (speak?.state === 'pending') this.deliver();
     } else if (!open && known >= 0) this.file.speaking.splice(known, 1);
@@ -1239,11 +1240,11 @@ export class MasterVoice {
       if (missed && missed.order > entry.order) return;
       const text = entry.data.kind === 'owner' ? '' : entry.data.text.replace(/\s+/g, ' ').trim();
       this.missed = { entry: entry.id, order: entry.order, at: Date.now(), reason: speak.reason, ...(speak.heard ? { heard: true as const } : {}), text: text.length > 80 ? `${text.slice(0, 79)}…` : text };
-      this.broadcast();
+      this.broadcastSoon();
     } else if (missed && (missed.entry === entry.id || (speak.state === 'played' && entry.order > missed.order))) {
       // Heard after all, or something later was: no longer told of.
       this.missed = undefined;
-      this.broadcast();
+      this.broadcastSoon();
     }
   }
 
@@ -1288,7 +1289,10 @@ export class MasterVoice {
   }
 
   /** Why `session` is no longer the one to read to: how it ended, or its page gone (or voice moved). */
-  private gone(session: Session): MasterUnspoken { return this.session === session ? 'away' : this.endings.get(session) ?? 'away'; }
+  private gone(session: Session): MasterUnspoken { return this.session === session ? 'away' : session.ended ?? 'away'; }
+
+  /** Why an answer that comes with no voice page to read it is not read: voice turned off by the owner, or no page there. */
+  quiet(): MasterUnspoken { return !this.session && this.lastEnded?.ended === 'stopped' ? 'stopped' : 'away'; }
 
   /** The voice page is still there (it tells so every few seconds). */
   private alive(session: Session): boolean { return Date.now() - session.seenAt < this.timing.presenceMs; }
@@ -1300,10 +1304,12 @@ export class MasterVoice {
   private endSession(session: Session | undefined, reason: 'stopped' | 'away' | 'restart'): void {
     if (!session || this.session !== session) return;
     this.session = undefined;
-    this.endings.set(session, reason);
+    session.ended = reason;
+    this.lastEnded = session;
     this.options.firstReply?.close();
-    for (const stream of [...this.streams.values()]) if (stream.session === session) this.stopStream(stream, reason);
+    // The page's word first, so what each said ended with is recorded before its reading's outcome.
     for (const done of [...this.results.values()]) done(reason);
+    for (const stream of [...this.streams.values()]) if (stream.session === session) this.stopStream(stream, reason);
   }
 
   /** Playback, one thing at a time. */
@@ -1329,6 +1335,12 @@ export class MasterVoice {
   }
 
   broadcast(): void { this.options.room.broadcast({ type: 'voice', seq: 0, voice: this.status() }); }
+
+  /**
+   * Broadcast once the step under way is over: a reading ended while voice moves to another tab is told with the new
+   * session, so the tab it left sees it moved (not voice gone from the host).
+   */
+  private broadcastSoon(): void { queueMicrotask(() => { if (!this.closed) this.broadcast(); }); }
 
   private save(): Promise<void> {
     const write = () => writePrivateJson(this.path, JSON.stringify(this.file));

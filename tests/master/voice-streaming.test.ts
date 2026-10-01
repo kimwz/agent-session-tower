@@ -151,7 +151,7 @@ interface Page { answer?: (say: MasterSay) => string | undefined; delayMs?: numb
  * The master session and its voice, with a fake Tower whose master turns the test writes word by word (as the worker
  * passes them), a live state that tells of every change, a fake ElevenLabs, and a page that plays what it is given.
  */
-async function harness(t: test.TestContext, options: { settings?: Record<string, unknown>; page?: Page; followMs?: number; prepare?: (dir: string) => Promise<void> } = {}) {
+async function harness(t: test.TestContext, options: { settings?: Record<string, unknown>; page?: Page; followMs?: number; prepare?: (dir: string) => Promise<void>; playMs?: number } = {}) {
   const cleanup: Array<() => unknown> = [];
   const dir = await mkdtemp(join(tmpdir(), 'tower-voice-stream-'));
   t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(dir, { recursive: true, force: true }); });
@@ -202,7 +202,7 @@ async function harness(t: test.TestContext, options: { settings?: Record<string,
       return signal.aborted ? { skipped: 'failed' as const, warm: true } : { text: FIRST, warm: true };
     },
   };
-  const voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs, firstReply, timing: { firstChunkMs: 1_000, synthMs: 2_000, playMs: 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 },
+  const voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs, firstReply, timing: { firstChunkMs: 1_000, synthMs: 2_000, playMs: options.playMs ?? 2_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 },
     hooks: { hide: text => text, connectedSince: () => client.connectedSince(), send: input => session.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }),
       streamState: (turn, state) => session.voicedState(turn, state) } });
   session.setVoice(voice);
@@ -610,6 +610,7 @@ test('the browser refusing to play, a page gone or voice moved are told of; the 
   const away = await moved.entry(/다른 탭으로/);
   await until(() => moved.speakOf(away)?.state === 'unspoken' || undefined);
   assert.equal(moved.speakOf(away)?.reason, 'away');
+  assert.deepEqual(recordOf(moved, second.answer.ack!.request!)!.says!.map(say => say.result), ['away'], 'what was playing ended with voice moving');
   assert.equal((await until(() => moved.voice.status().missed)).entry, away.id);
 
   const skipped = await harness(t, { page: { answer: () => 'stopped' } });
@@ -620,7 +621,7 @@ test('the browser refusing to play, a page gone or voice moved are told of; the 
   const stopped = await skipped.entry(/주인이 멈춰요/);
   await until(() => skipped.speakOf(stopped)?.state === 'unspoken' || undefined);
   assert.equal(skipped.speakOf(stopped)?.reason, 'stopped');
-  await sleep(30);
+  await until(() => recordOf(skipped, third.answer.ack!.request!)?.outcome);
   assert.equal(skipped.voice.status().missed, undefined, 'the owner stopped it: nothing to tell');
 });
 
@@ -645,4 +646,34 @@ test('an answer kept shorter than it was ends, read aloud, saying the rest is on
   await until(() => h.speakOf(entry)?.state === 'played' || undefined);
   await until(() => h.spoken().length >= 2 || undefined);
   assert.deepEqual(h.spoken(), ['앞부분만 남은 긴 답이에요.', VOICE_REST]);
+});
+
+test('a page that never tells how it went, or kept it waiting too long, ends the answer told of; voice the owner turned off does not', async t => {
+  // MS_PER_CHAR (200 ms) a character is waited for on top of playMs: a short answer is given up on soon.
+  const silent = await harness(t, { playMs: 50, page: { answer: () => undefined } });
+  silent.on();
+  const session = silent.voice.status().session!;
+  const entry = silent.room.add({ kind: 'master', text: '네.', turnId: 't', final: true, speak: { state: 'pending', session } });
+  await until(() => silent.speakOf(entry)?.state === 'unspoken' || undefined, 5_000);
+  assert.equal(silent.speakOf(entry)?.reason, 'timeout');
+  assert.equal((await until(() => silent.voice.status().missed)).reason, 'timeout');
+
+  const late = await harness(t, { page: { answer: () => 'expired' } });
+  late.on();
+  const waited = late.room.add({ kind: 'master', text: '오래 기다린 답이에요.', turnId: 't', final: true, speak: { state: 'pending', session: late.voice.status().session! } });
+  await until(() => late.speakOf(waited)?.state === 'unspoken' || undefined);
+  assert.deepEqual({ reason: late.speakOf(waited)?.reason, heard: late.speakOf(waited)?.heard }, { reason: 'expired', heard: undefined });
+
+  // Voice turned off by the owner before the answer came: not read, and nothing to tell when voice is on again.
+  const off = await harness(t, { page: { delayMs: 5 } });
+  const current = off.on();
+  const { run } = await off.ask('끄기 전에 물은 것');
+  off.voice.voiceOff({ session: current });
+  off.write(run, 'm1:0', '음성이 꺼진 뒤에 온 답이에요.', true);
+  off.finish(run);
+  const quiet = await off.entry(/꺼진 뒤에 온 답/);
+  assert.deepEqual({ state: off.speakOf(quiet)?.state, reason: off.speakOf(quiet)?.reason }, { state: 'unspoken', reason: 'stopped' });
+  off.on();
+  await sleep(30);
+  assert.equal(off.voice.status().missed, undefined);
 });
