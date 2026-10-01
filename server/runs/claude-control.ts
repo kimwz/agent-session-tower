@@ -29,6 +29,8 @@ interface ClaudeControlOptions {
   onApproval(approval: RunApproval): void;
   onCancelled(id: string): void;
   onError(error: Error): void;
+  /** Claude answered `initialize`: from now on the turn can take inserted instructions. */
+  onReady?(): void;
   initializeTimeoutMs?: number;
   /** How long an instruction may wait for its replay once the turn has ended. */
   steerTimeoutMs?: number;
@@ -78,6 +80,7 @@ export class ClaudeControl {
       if (this.timer) clearTimeout(this.timer);
       const input = this.input; this.input = undefined;
       if (input) void this.send(input);
+      this.options.onReady?.();
       return true;
     }
     if (event.type === 'control_cancel_request') {

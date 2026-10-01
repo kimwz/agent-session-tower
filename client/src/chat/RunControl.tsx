@@ -22,11 +22,21 @@ export const RunControl = memo(function RunControl({ run, onCancel, onRetry, can
         {run.status === 'error' && <>{!run.steering && <button type="button" aria-label={t("요청 다시 작성")} disabled={disabled || retryDisabled} onClick={() => onRetry(run)}><RefreshCw size={11} aria-hidden="true" />{t("다시 작성")}</button>}{onDismiss && <button type="button" aria-label={t("실패 내역 지우기")} disabled={disabled || dismissing} onClick={() => onDismiss(run.id)}>{dismissing ? <LoaderCircle className="spin" size={11} aria-hidden="true" /> : <Trash2 size={11} aria-hidden="true" />}{t("지우기")}</button>}</>}
       </div>
     </div>
+    {run.status === 'queued' && !run.canSteer && !run.steering && run.steerBlocked && <p className="run-control-note">{steerBlockedNote(run.steerBlocked)}</p>}
     {active && run.origin?.kind === 'owner' && run.towerTools && run.towerTools !== 'attached' && <p className="run-control-note">{towerToolsNote(run.towerTools)}</p>}
     {run.status === 'error' && run.error && <p className="run-control-error">{translateMessage(run.error)}</p>}
     {approvals.map(approval => <RunApprovalCard key={approval.id} runId={run.id} approval={approval} token={token} disabled={disabled || cancelling || !onSnapshotRefresh} onSnapshotRefresh={onSnapshotRefresh || (() => {})} />)}
   </div>;
 });
+
+/** Why a queued message waits instead of going into the turn running now. */
+export function steerBlockedNote(reason: NonNullable<Run['steerBlocked']>): string {
+  return reason === 'instructions' ? t('이 메시지에는 Tower 지침이 함께 가야 해서 진행 중인 작업에 끼워넣지 않고 다음 턴으로 보냅니다.')
+    : reason === 'model' ? t('선택한 모델이 진행 중인 작업과 달라 끼워넣을 수 없습니다. 작업이 끝나면 이 모델로 실행합니다.')
+    : reason === 'effort' ? t('선택한 추론 수준이 진행 중인 작업과 달라 끼워넣을 수 없습니다. 작업이 끝나면 이 수준으로 실행합니다.')
+    : reason === 'origin' ? t('진행 중인 작업은 트리거·Slack·다른 컴퓨터처럼 이 메시지와 다른 곳에서 시작해 끼워넣을 수 없습니다. 작업이 끝나면 실행합니다.')
+    : t('진행 중인 작업이 지금은 메시지를 받을 수 없습니다. 시작하는 중이거나 다른 메시지를 받는 중이라 곧 끼워넣을 수 있습니다.');
+}
 
 /** Why an owner turn has no Tower tools. Agents can manage triggers only in turns that have them. */
 export function towerToolsNote(reason: NonNullable<Run['towerTools']>): string {

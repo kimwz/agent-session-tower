@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
-import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, RunInstructions, RunOrigin, Session } from '../../shared/types.js';
+import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, RunInstructions, RunOrigin, Session, SteerBlock } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { attachmentMetadata, attachmentPrompt, AttachmentStore } from '../stores/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
@@ -112,6 +112,11 @@ const NEEDS_INSTRUCTIONS = 'needsInstructions';
 const FIRST_TURN_NOTES_MS = 6_000;
 /** A run as anything outside the worker sees it: without its hidden instructions. */
 function shown(run: Run): Run { const { instructions: _hidden, ...rest } = run; return { ...rest }; }
+type SteerableAdapter = CodexStdioRun | CodexBridgeRun | ClaudeControl;
+/** What the page shows about inserting a queued instruction now: the button, or why not. */
+function steerable(steering: { target: Run } | { blocked: SteerBlock } | undefined): Pick<Run, 'canSteer' | 'steerBlocked'> {
+  return steering && 'blocked' in steering ? { canSteer: false, steerBlocked: steering.blocked } : { canSteer: Boolean(steering) };
+}
 function checkedInstructions(value: RunInstructions): RunInstructions {
   if (typeof value?.text !== 'string' || !value.text.trim() || value.text.length > MAX_INSTRUCTIONS) throw new RunError('Tower instructions for this turn are invalid or too long.', 413);
   return { text: value.text, ...(value.required ? { required: true } : {}) };
@@ -382,7 +387,7 @@ export class RunManager extends EventEmitter {
         for (const key of [NEEDS_INSTRUCTIONS, KEEP_QUEUED, RETAIN]) delete (run as unknown as Record<string, unknown>)[key];
         const instructions = needsInstructions && !FINISHED.has(run.status) ? kept.get(run.id) : undefined;
         if (instructions) { run.instructions = instructions; needsInstructions = false; }
-        delete run.canSteer;
+        delete run.canSteer; delete run.steerBlocked;
         delete run.backgroundWait;
         if (run.steering?.state === 'sending') run.steering.state = 'uncertain';
         const context = nativeContextObservation(run.contextUsage);
@@ -450,7 +455,7 @@ export class RunManager extends EventEmitter {
     return new Set(ids);
   }
 
-  list(): Run[] { return [...this.runs.values()].map((run) => ({ ...shown(run), canSteer: Boolean(this.steeringTarget(run)), ...(run.steering ? { steering: { ...run.steering } } : {}), ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
+  list(): Run[] { return [...this.runs.values()].map((run) => ({ ...shown(run), ...steerable(this.steering(run)), ...(run.steering ? { steering: { ...run.steering } } : {}), ...(run.attachments ? { attachments: run.attachments.map(item => ({ ...item })) } : {}),
     ...(run.contextUsage ? { contextUsage: { ...run.contextUsage } } : {}),
     ...(run.approvals ? { approvals: structuredClone(run.approvals) } : {}) })); }
   async attachment(id: string) {
@@ -668,15 +673,27 @@ export class RunManager extends EventEmitter {
   }
 
   private steeringTarget(run: Run) {
-    // Inserted text reaches the running turn alone: instructions it must not go without would be lost.
-    if (this.stopping || run.status !== 'queued' || run.steering || run.scheduled || run.instructions?.required || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
+    const steering = this.steering(run);
+    return steering && 'target' in steering ? steering : undefined;
+  }
+
+  /**
+   * The running turn a queued instruction can go into now, or why it cannot while one runs in its session. Nothing is
+   * said when no turn runs there or the instruction is not one the owner could insert (scheduled, being admitted).
+   */
+  private steering(run: Run): { target: Run; adapter: SteerableAdapter } | { blocked: SteerBlock } | undefined {
+    if (this.stopping || run.status !== 'queued' || run.steering || run.scheduled || this.admissions.has(run.id) || this.bridged.has(run.id)) return undefined;
     const target = [...this.runs.values()].find(item => item.sessionId === run.sessionId && item.status === 'running' && !item.steering);
-    if (!target || (run.model && run.model !== (target.model ?? this.getSession(run.sessionId)?.model)) || (run.effort && run.effort !== target.effort)) return undefined;
+    if (!target) return undefined;
+    // Inserted text reaches the running turn alone: instructions it must not go without would be lost.
+    if (run.instructions?.required) return { blocked: 'instructions' };
+    if (run.model && run.model !== (target.model ?? this.getSession(run.sessionId)?.model)) return { blocked: 'model' };
+    if (run.effort && run.effort !== target.effort) return { blocked: 'effort' };
     // An inserted instruction runs with the active turn's tools and approvals. Tools follow origin and
     // session alone, so the same origin in the same session is exactly the same authority.
-    if (!sameOrigin(run.origin, target.origin)) return undefined;
+    if (!sameOrigin(run.origin, target.origin)) return { blocked: 'origin' };
     const adapter = this.stdio.get(target.id) ?? this.bridged.get(target.id) ?? this.owned.get(target.id)?.claude;
-    return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : undefined;
+    return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : { blocked: 'starting' };
   }
 
   /** `targetRunId` inserts only into that turn: a decision made about one turn never lands in the next. */
@@ -717,7 +734,10 @@ export class RunManager extends EventEmitter {
         void delivery.then(() => this.settleSteer(run, selected.target.id), error => this.settleSteer(run, selected.target.id, error)).catch(() => {});
         return this.list().find(item => item.id === runId)!;
       }
-      await selected.adapter.steer!({ id: run.id, prompt, imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) });
+      const sending = selected.adapter.steer!({ id: run.id, prompt, imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) });
+      // Codex takes one insert at a time: other queued instructions show they wait for this one.
+      this.changed();
+      await sending;
       await this.settleSteer(run, selected.target.id);
       return this.list().find(item => item.id === runId)!;
     } catch (error) {
@@ -1250,6 +1270,8 @@ export class RunManager extends EventEmitter {
         this.changed();
       },
       onError: error => { streamError = error.message; this.stopOwned(run.id, owned); },
+      // Instructions queued behind this turn can be inserted now; the page is told without waiting for output.
+      onReady: () => this.changed(),
     });
     const closeInput = () => { inputClosedByTower = true; clearFinishTimer(); clearWaitTimers(); owned.claude?.close(); if (!child.stdin.writableEnded) child.stdin.end(); };
     const idle = () => !turnActive && run.status === 'running' && child.exitCode === null && !child.stdin.writableEnded;
@@ -1726,7 +1748,7 @@ export class RunManager extends EventEmitter {
     for (const id of this.carried) if (this.runs.get(id)?.status !== 'queued') this.carried.delete(id);
     // A wrap-up request is never carried: after a restart it would start as a turn of its own.
     if (this.updating) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain!.wrapUps.has(run.id)) this.carried.add(run.id);
-    const serialize = (finishedOutput?: number) => JSON.stringify(this.list().map(({ approvals: _liveApprovals, canSteer: _liveSteering, ...run }) => {
+    const serialize = (finishedOutput?: number) => JSON.stringify(this.list().map(({ approvals: _liveApprovals, canSteer: _liveSteering, steerBlocked: _liveBlock, ...run }) => {
       const saved: Record<string, unknown> = { ...run };
       if (finishedOutput !== undefined && FINISHED.has(run.status)) saved.output = run.output.slice(-finishedOutput);
       if (this.runs.get(run.id)?.instructions?.required && !FINISHED.has(run.status)) saved[NEEDS_INSTRUCTIONS] = true;

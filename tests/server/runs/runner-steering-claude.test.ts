@@ -12,19 +12,21 @@ import { until } from '../../helpers/until.ts';
 
 const nativeId = '10000000-0000-4000-8000-000000000001';
 
-async function fixture() {
+async function fixture(options: { holdInit?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-claude-steering-'));
   const session: Session = { id: `claude:${nativeId}`, nativeId, provider: 'claude', title: 'Fixture', cwd: directory,
     project: 'fixture', status: 'completed', statusReason: 'Done', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
     lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
   const received: Record<string, any>[] = [];
+  const heldInit: (() => void)[] = [];
   const child = new EventEmitter() as ChildProcessWithoutNullStreams;
   Object.assign(child, { stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null });
   const emit = (frame: Record<string, unknown>) => child.stdout.push(JSON.stringify(frame) + '\n');
   const exit = (code = 0) => { if (child.exitCode !== null) return; Object.assign(child, { exitCode: code }); child.emit('close', code, null); };
   Object.assign(child, { stdin: new Writable({ write(chunk, _encoding, done) {
     const input = JSON.parse(String(chunk)); received.push(input);
-    if (input.type === 'control_request') setImmediate(() => emit({ type: 'control_response', response: { subtype: 'success', request_id: input.request_id } }));
+    const answer = () => emit({ type: 'control_response', response: { subtype: 'success', request_id: input.request_id } });
+    if (input.type === 'control_request') { if (options.holdInit) heldInit.push(answer); else setImmediate(answer); }
     else if (!input.uuid) setImmediate(() => emit({ type: 'system', subtype: 'init', session_id: nativeId }));
     done();
   } }), kill: () => { exit(1); return true; } });
@@ -33,14 +35,28 @@ async function fixture() {
   const manager = new RunManager({ stateDir: directory, getSession: id => id === session.id ? session : undefined,
     refreshSessions: async () => {}, findExecutable: async () => '/fixture/claude', pollMs: 10,
     spawnProcess: () => { launches++; return child; } });
+  // What the page last received: the run list as it was when the worker published a change.
+  const published = new Map<string, Run>();
+  manager.on('change', () => { for (const run of manager.list()) published.set(run.id, run); });
   await manager.start();
   const first = await manager.enqueue(session.id, 'original work');
   const followup = await manager.enqueue(session.id, 'change the direction');
-  await until(() => manager.list().find(run => run.id === followup.id)?.canSteer === true);
-  return { manager, directory, child, received, emit, exit, first, followup, launches: () => launches,
+  if (!options.holdInit) await until(() => manager.list().find(run => run.id === followup.id)?.canSteer === true);
+  return { manager, session, directory, child, received, emit, exit, first, followup, launches: () => launches, published, heldInit,
     run: (id: string) => manager.list().find(run => run.id === id)!,
     cleanup: async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); } };
 }
+
+test('a message queued before Claude is ready is published as insertable once it is', async t => {
+  const f = await fixture({ holdInit: true }); t.after(f.cleanup);
+  // The answer to the message carries this state; nothing else changes while Claude starts.
+  await until(() => f.heldInit.length === 1 && f.run(f.followup.id).steerBlocked === 'starting');
+  assert.equal(f.run(f.followup.id).canSteer, false);
+  f.published.clear();
+  f.heldInit[0]();
+  await until(() => f.published.get(f.followup.id)?.canSteer === true);
+  assert.equal(f.published.get(f.followup.id)?.steerBlocked, undefined);
+});
 
 test('Claude result before steering replay keeps stdin open through the subsequent result', async t => {
   const f = await fixture(); t.after(f.cleanup);
