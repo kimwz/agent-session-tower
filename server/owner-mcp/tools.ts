@@ -42,6 +42,7 @@ These tools act as the owner on this computer's Tower: anything the owner's page
 - Whole files (${FILE_ROUTES.join(', ')}) do not fit a tool result: send them with curl, with the same local sign-in:
   TOKEN=$(curl -s ${base}/api/bootstrap | sed 's/.*"token":"\\([a-f0-9]*\\)".*/\\1/')
   curl -s -X POST ${base}/api/backup/export -H "${REQUEST_TOKEN_HEADER}: $TOKEN" -H '${LOCAL_AGENT_HEADER}: local' -H 'Content-Type: application/json' -d '{"passphrase":"…"}' -o tower-backup.json
+  curl -s -X POST ${base}/api/skills/import-plan -H "${REQUEST_TOKEN_HEADER}: $TOKEN" -H '${LOCAL_AGENT_HEADER}: local' -H 'Content-Type: application/json' --data-binary @tower-skills.json
 
 ## Routes (tower_api)
 ${apiCatalog()}

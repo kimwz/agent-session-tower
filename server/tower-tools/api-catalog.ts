@@ -35,7 +35,7 @@ Skills and guidance
 - POST /api/skills/(link|merge|adopt) {dir, cwd?} — link a skill where it applies, merge duplicate folders, take an outside skill into Tower.
 - POST /api/skills/delete {dir, cwd?} · POST /api/skills/dismiss {id} (a proposal) · POST /api/skills/settings {enabled?, provider?} (automatic proposals) · POST /api/skills/backfill {days?}
 - POST /api/skills/guidance {owner, revision} — the owner's guidance every agent gets (revision from GET /api/skills).
-- POST /api/skills/export {dirs:[dir], guidance?} · POST /api/skills/import-plan {bundle} · POST /api/skills/import {bundle, choices} — skill bundles (files).
+- POST /api/skills/export {dirs:[dir], guidance?} → the bundle file · POST /api/skills/import-plan <the bundle file itself as the body> → what each skill would do · POST /api/skills/import {bundle, choices:[{index, action:"add"|"replace"}]}
 
 Other computers (joined to this one)
 - Any route above for a joined computer: pass node:"<32-hex id>" (it goes to /api/nodes/{node}/...). Their ids are in GET /api/link (nodes).

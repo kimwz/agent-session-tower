@@ -35,6 +35,10 @@ function expand(route: string): string[] {
 function sourceRoutes(text: string): string[] {
   const routes = new Set<string>();
   for (const [, literal] of text.matchAll(/(?:(?:path|local) === |case )'(\/api\/[^']+)'/g)) routes.add(literal!);
+  // A route kept in a constant, compared by name.
+  for (const [, name, literal] of text.matchAll(/const ([A-Z_]+) = '(\/api\/[^']+)'/g)) if (new RegExp(`path === ${name}\\b`).test(text)) routes.add(literal!);
+  // A route of a joined computer answered here rather than passed on.
+  for (const [, rest] of text.matchAll(/nodeRoute\[2\] === '([^']+)'/g)) routes.add(`/api/nodes/{}/${rest}`);
   for (const [, pattern] of text.matchAll(/\/\^(\\\/api\\\/.*?)\$\//g)) {
     const route = pattern!
       .replace(/\\\//g, '/')
@@ -56,15 +60,29 @@ function catalogRoutes(text: string): Set<string> {
   return routes;
 }
 
-test('the route catalog the master and the owner\'s agents read lists every route the pages can call', async () => {
-  const listed = catalogRoutes(apiCatalog());
+async function missingFrom(catalog: string): Promise<string[]> {
+  const listed = catalogRoutes(catalog);
   const missing: string[] = [];
   for (const source of SOURCES) {
     for (const route of sourceRoutes(await readFile(source, 'utf8'))) {
       if (route === '/api/v1/{}' || NOT_FOR_AGENTS.has(route) || listed.has(route)) continue;
-      missing.push(`${route} (${source})`);
+      missing.push(route);
     }
   }
-  assert.deepEqual(missing, [], 'add these to server/tower-tools/api-catalog.ts, or to NOT_FOR_AGENTS with the reason');
+  return missing;
+}
+
+test('the route catalog the master and the owner\'s agents read lists every route the pages can call', async () => {
+  assert.deepEqual(await missingFrom(apiCatalog()), [], 'add these to server/tower-tools/api-catalog.ts, or to NOT_FOR_AGENTS with the reason');
+  const listed = catalogRoutes(apiCatalog());
   for (const route of FILE_ROUTES) assert.ok(listed.has(route), route);
+});
+
+test('a route left out of the catalog is noticed, whether matched by literal, pattern, constant or for a joined computer', async () => {
+  const without = (catalog: string, ...lines: RegExp[]) => catalog.split('\n').filter(line => !lines.some(pattern => pattern.test(line))).join('\n');
+  const catalog = apiCatalog();
+  assert.deepEqual(await missingFrom(without(catalog, /\/api\/auto-prompt-suggestions/)), ['/api/auto-prompt-suggestions']);
+  assert.deepEqual(await missingFrom(without(catalog, /\/api\/remote\/exclusions/)), ['/api/remote/exclusions', '/api/nodes/{}/view']);
+  assert.ok((await missingFrom(without(catalog, /\/api\/skills\/pin/))).includes('/api/skills/pin'));
+  assert.ok((await missingFrom(without(catalog, /\/api\/backup\/\(run/))).includes('/api/backup/run'));
 });
