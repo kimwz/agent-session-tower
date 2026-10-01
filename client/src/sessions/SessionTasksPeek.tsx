@@ -75,5 +75,5 @@ export function useSessionTasksPeek(tasks: readonly SessionTask[] | undefined, v
   }, [leave]);
   const panel = open && has ? createPortal(<div ref={card} className="session-tasks-peek" role="tooltip"
     style={{ width: PANEL_WIDTH, ...(place ? { left: place.left, top: place.top } : { visibility: 'hidden', left: 0, top: 0 }) }}><SessionTasksCard tasks={tasks} /></div>, document.body) : null;
-  return { anchor, panel, rowProps: { onPointerEnter: enter, onPointerLeave: leave, onPointerDown: leave } };
+  return { anchor, panel, dismiss: leave, rowProps: { onPointerEnter: enter, onPointerLeave: leave, onPointerDown: leave } };
 }

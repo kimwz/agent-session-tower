@@ -46,7 +46,7 @@ export const AgentNode = memo(function AgentNode({ data }: NodeProps<Node<AgentD
   const state = sessionState(session);
   const outcome = session.status !== 'working' ? session.outcome : undefined;
   return <>
-    <button ref={peek.anchor} {...peek.rowProps} className={`agent-card ${session.provider} ${session.status} ${data.selected ? 'selected' : ''} ${data.unread ? 'has-unread' : ''}${data.stale ? ' is-stale' : ''}`} onClick={() => data.onSelect(session.id)} aria-describedby={contextDescriptionId} aria-label={`${t("{0}: {1}, {2}{3}. 대화 열기", { 0: providerLabels[session.provider], 1: sessionTitle(session), 2: outcome ? `${state.label}, ${outcomeLabels[outcome]}` : state.label, 3: data.unread ? t(", 새 활동") : t(", 확인함") })}${data.stale ? ` ${t("(마지막으로 본 상태)")}` : ''}`}>
+    <button ref={peek.anchor} {...peek.rowProps} className={`agent-card ${session.provider} ${session.status} ${data.selected ? 'selected' : ''} ${data.unread ? 'has-unread' : ''}${data.stale ? ' is-stale' : ''}`} onClick={() => { peek.dismiss(); data.onSelect(session.id); }} aria-describedby={contextDescriptionId} aria-label={`${t("{0}: {1}, {2}{3}. 대화 열기", { 0: providerLabels[session.provider], 1: sessionTitle(session), 2: outcome ? `${state.label}, ${outcomeLabels[outcome]}` : state.label, 3: data.unread ? t(", 새 활동") : t(", 확인함") })}${data.stale ? ` ${t("(마지막으로 본 상태)")}` : ''}`}>
       {session.status === 'working' && !data.stale && <span className="agent-activity-border" aria-hidden="true" />}
       {data.unread && <i className="unread-dot" title={t("새 활동")} aria-hidden="true" />}
       {outcome && <span className="agent-card-flags"><span className={`agent-outcome ${outcome}`}><i />{outcomeLabels[outcome]}</span></span>}
