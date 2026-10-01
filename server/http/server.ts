@@ -182,7 +182,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
   const json = (res: ServerResponse, status: number, body: unknown) => {
     res.statusCode = status;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    sendBody(res.req, res, JSON.stringify(body));
+    sendBody(res, JSON.stringify(body));
   };
   const staticCompression = new StaticCompression();
   const snapshot = () => publicSnapshot(backend.snapshot());

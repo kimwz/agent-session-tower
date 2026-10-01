@@ -1,4 +1,6 @@
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import { createHash } from 'node:crypto';
+import type { ServerResponse } from 'node:http';
+import { extname } from 'node:path';
 import { promisify } from 'node:util';
 import { brotliCompress, brotliCompressSync, constants, createBrotliCompress, createGzip, gzip, gzipSync, type BrotliCompress, type Gzip } from 'node:zlib';
 import type { SseResponse } from './sse-client.js';
@@ -15,6 +17,15 @@ const MIN_BYTES = 1024;
 const DYNAMIC_BROTLI = 4;
 const STATIC_BROTLI = 9;
 const GZIP_LEVEL = 6;
+const STATIC_GZIP = 9;
+/**
+ * A 256 KiB window instead of brotli's 4 MiB default: an event stream keeps its compressor for the whole
+ * connection, and after a 3.8 MB snapshot the default holds about 14 MB per open page, this about 1 MB,
+ * for output still smaller than gzip's.
+ */
+const STREAM_WINDOW = 18;
+/** Only text is worth compressing; images and audio are compressed already, and media players expect them as they are. */
+const TEXT_FILES = new Set(['.html', '.js', '.mjs', '.css', '.json', '.map', '.svg', '.txt', '.webmanifest']);
 
 /** Brotli first, then gzip; a q=0 token refuses that encoding. */
 export function acceptedEncoding(header: string | string[] | undefined): Encoding | undefined {
@@ -34,10 +45,10 @@ function compressSync(bytes: Buffer, encoding: Encoding): Buffer {
 }
 
 /** Writes `body` compressed when the client accepts it and it is large enough; headers must not be sent yet. */
-export function sendBody(req: IncomingMessage, res: ServerResponse, body: string | Buffer): void {
+export function sendBody(res: ServerResponse, body: string | Buffer): void {
   const bytes = typeof body === 'string' ? Buffer.from(body) : body;
   res.setHeader('Vary', 'Accept-Encoding');
-  const encoding = bytes.length >= MIN_BYTES ? acceptedEncoding(req.headers['accept-encoding']) : undefined;
+  const encoding = bytes.length >= MIN_BYTES ? acceptedEncoding(res.req.headers['accept-encoding']) : undefined;
   if (encoding) res.setHeader('Content-Encoding', encoding);
   res.end(encoding ? compressSync(bytes, encoding) : bytes);
 }
@@ -45,26 +56,25 @@ export function sendBody(req: IncomingMessage, res: ServerResponse, body: string
 const brotliAsync = promisify(brotliCompress);
 const gzipAsync = promisify(gzip);
 
-/** Build-hashed files: their names change with their contents, so they may be cached and compressed once. */
+/** Build-hashed files: their names change with their contents, so browsers may keep them for good. */
 export function isBuildAsset(name: string): boolean {
   return name.startsWith('assets/');
 }
 
 /**
- * Web files for one build. Build assets are compressed once per process, off the event loop, keyed by the
- * file read, so the cache holds at most that build's files; anything else (the page itself) is small and
- * compressed per request.
+ * Web files for one build, compressed once per process and off the event loop. The cache is keyed by
+ * contents, not by URL (one file has many URLs, letter case included on case-insensitive disks), so it holds
+ * at most that build's text files.
  */
 export class StaticCompression {
   private readonly cache = new Map<string, Promise<Buffer>>();
 
   async body(name: string, content: Buffer, encoding: Encoding | undefined): Promise<{ body: Buffer; encoding?: Encoding }> {
-    if (!encoding || content.length < MIN_BYTES) return { body: content };
-    if (!isBuildAsset(name)) return { body: compressSync(content, encoding), encoding };
-    const key = `${encoding}:${name}`;
+    if (!encoding || content.length < MIN_BYTES || !TEXT_FILES.has(extname(name).toLowerCase())) return { body: content };
+    const key = `${encoding}:${createHash('sha256').update(content).digest('base64url')}`;
     let compressed = this.cache.get(key);
     if (!compressed) {
-      compressed = encoding === 'br' ? brotliAsync(content, brotliOptions(STATIC_BROTLI, content.length)) : gzipAsync(content, { level: 9 });
+      compressed = encoding === 'br' ? brotliAsync(content, brotliOptions(STATIC_BROTLI, content.length)) : gzipAsync(content, { level: STATIC_GZIP });
       this.cache.set(key, compressed);
       compressed.catch(() => this.cache.delete(key));
     }
@@ -79,7 +89,7 @@ export class StaticCompression {
  */
 export function compressedEventStream(res: ServerResponse, encoding: Encoding): SseResponse {
   const compressor: BrotliCompress | Gzip = encoding === 'br'
-    ? createBrotliCompress({ params: { [constants.BROTLI_PARAM_QUALITY]: DYNAMIC_BROTLI, [constants.BROTLI_PARAM_MODE]: constants.BROTLI_MODE_TEXT } })
+    ? createBrotliCompress({ params: { [constants.BROTLI_PARAM_QUALITY]: DYNAMIC_BROTLI, [constants.BROTLI_PARAM_LGWIN]: STREAM_WINDOW, [constants.BROTLI_PARAM_MODE]: constants.BROTLI_MODE_TEXT } })
     : createGzip({ level: GZIP_LEVEL });
   compressor.pipe(res);
   // A broken socket ends the stream through the response's 'close'; the compressor has nothing left to report.

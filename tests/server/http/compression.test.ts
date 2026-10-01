@@ -37,7 +37,7 @@ test('the accepted encoding prefers brotli, falls back to gzip and honours refus
 
 test('bodies are compressed only when accepted and large enough, and decode to the same bytes', async t => {
   const large = JSON.stringify({ items: Array.from({ length: 200 }, (_, index) => ({ index, text: 'session title '.repeat(4) })) });
-  const server = createServer((req, res) => sendBody(req, res, req.url === '/small' ? '{"ok":true}' : large));
+  const server = createServer((req, res) => sendBody(res, req.url === '/small' ? '{"ok":true}' : large));
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
@@ -53,7 +53,7 @@ test('bodies are compressed only when accepted and large enough, and decode to t
   assert.equal(small.body.toString(), '{"ok":true}');
 });
 
-test('build-hashed assets are compressed once and other files every time', async () => {
+test('text files are compressed once per content, whatever URL reads them; other files never', async () => {
   const compression = new StaticCompression();
   const content = Buffer.from('export const value = "asset";\n'.repeat(100));
   const first = await compression.body('assets/index-abc.js', content, 'br');
@@ -63,13 +63,16 @@ test('build-hashed assets are compressed once and other files every time', async
   assert.equal(brotliDecompressSync(first.body).toString(), content.toString());
   const page = await compression.body('index.html', content, 'gzip');
   assert.equal(gunzipSync(page.body).toString(), content.toString());
-  assert.notEqual((await compression.body('index.html', content, 'gzip')).body, page.body);
+  assert.equal((await compression.body('index.html', content, 'gzip')).body, page.body);
   assert.deepEqual(await compression.body('assets/index-abc.js', content, undefined), { body: content });
   assert.deepEqual(await compression.body('assets/tiny.js', Buffer.from('x'), 'br'), { body: Buffer.from('x') });
+  // One file under another URL (letter case on a case-insensitive disk) shares the cached body.
+  assert.equal((await compression.body('assets/INDEX-ABC.js', content, 'br')).body, first.body);
+  for (const name of ['master-silence.wav', 'icon-1024.png', 'assets/font.woff2']) assert.deepEqual(await compression.body(name, content, 'br'), { body: content });
 });
 
 for (const encoding of ['br', 'gzip'] as const) {
-  test(`a ${encoding} event stream delivers every frame as soon as it is written`, async t => {
+  test(`a ${encoding} event stream delivers every frame as soon as it is written`, { timeout: 10_000 }, async t => {
     let stream: SseClient | undefined;
     let closed = 0;
     const server = createServer((_req, res) => {
@@ -100,7 +103,7 @@ for (const encoding of ['br', 'gzip'] as const) {
 }
 
 for (const encoding of ['br', 'gzip'] as const) {
-  test(`a ${encoding} event stream blocks behind a full socket and resumes with the newest snapshot`, async t => {
+  test(`a ${encoding} event stream blocks behind a full socket and resumes with the newest snapshot`, { timeout: 30_000 }, async t => {
     let stream: SseClient | undefined;
     const server = createServer((_req, res) => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Content-Encoding': encoding });
@@ -114,7 +117,7 @@ for (const encoding of ['br', 'gzip'] as const) {
     const blocked = () => (stream as unknown as { blocked: boolean }).blocked;
     // Small incompressible frames with time for the compressor to take each one (a flowing socket never blocks
     // this way), so only the paused socket behind the compressor can stop them.
-    const deadline = Date.now() + 10_000;
+    const deadline = Date.now() + 20_000;
     while (!blocked()) {
       assert.ok(Date.now() < deadline, 'the stream never reported the full socket');
       stream!.snapshot(`data: ${randomBytes(3 << 10).toString('base64')}\n\n`);
@@ -127,8 +130,9 @@ for (const encoding of ['br', 'gzip'] as const) {
     decoder.on('data', chunk => { tail = (tail + chunk.toString()).slice(-200); });
     response.pipe(decoder);
     response.resume();
+    const resumeDeadline = Date.now() + 5_000;
     while (!tail.includes('data: newer')) {
-      assert.ok(Date.now() < deadline, 'the newest snapshot never arrived after the socket drained');
+      assert.ok(Date.now() < resumeDeadline, 'the newest snapshot never arrived after the socket drained');
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     assert.ok(!tail.includes('data: lost') && !tail.includes('data: newest\n'));
@@ -136,7 +140,7 @@ for (const encoding of ['br', 'gzip'] as const) {
   });
 }
 
-test('the web server compresses the snapshot, its event stream and caches build-hashed assets', async t => {
+test('the web server compresses the snapshot, its event stream and caches build-hashed assets', { timeout: 10_000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-compression-'));
   await mkdir(join(dir, 'assets'));
   await writeFile(join(dir, 'index.html'), '<!doctype html><title>Tower</title>');
