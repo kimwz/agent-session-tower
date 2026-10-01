@@ -852,7 +852,7 @@
   font-weight:560
 }
 
-/* A session's latest tasks, floating beside its row in the session list while the pointer rests on it. */
+/* A session's latest tasks, floating beside its card in the canvas while the pointer rests on it. */
 .session-tasks-peek {
   position:fixed;
   z-index:1000;

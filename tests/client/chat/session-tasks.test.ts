@@ -50,7 +50,7 @@ test('above the message box the current task shows, and opened every task with t
   } finally { setLanguage(language); }
 });
 
-test('resting on a session in the list shows its three latest tasks, newest first, and how many more there are', async () => {
+test('resting on a session in the canvas shows its three latest tasks, newest first, and how many more there are', async () => {
   const { SessionTasksCard, PEEK_TASKS } = await import('../../../client/src/sessions/SessionTasksPeek.js');
   const language = getLanguage();
   setLanguage('ko');
@@ -73,5 +73,19 @@ test('the card sits right of its row inside the window, under it when there is n
   assert.deepEqual(peekPlacement(row(16, 400), 200, viewport), { left: 286, top: 400 });
   assert.deepEqual(peekPlacement(row(16, 820), 200, viewport), { left: 286, top: 692 }, 'kept inside the bottom of the window');
   assert.deepEqual(peekPlacement(row(16, 300, 360), 200, { width: 390, height: 844 }), { left: 16, top: 396 }, 'no room on the right: under the row');
-  assert.equal(peekPlacement(row(0, 0, 0, 0), 200, viewport), undefined, 'a list hidden after a tap shows no card');
+  assert.equal(peekPlacement(row(0, 0, 0, 0), 200, viewport), undefined, 'a canvas hidden after a tap shows no card');
+});
+
+
+test('a canvas card outside the window or clipped canvas cannot leave a floating summary behind', async () => {
+  const { peekPlacement } = await import('../../../client/src/sessions/SessionTasksPeek.js');
+  const box = (left: number, top: number, width = 260, height = 90) => ({ left, top, right: left + width, bottom: top + height, width, height });
+  const viewport = { width: 1440, height: 900 };
+  for (const anchor of [box(-260, 100), box(1440, 100), box(400, -90), box(400, 900)]) {
+    assert.equal(peekPlacement(anchor, 200, viewport), undefined);
+  }
+  const canvas = box(300, 100, 800, 700);
+  assert.equal(peekPlacement(box(20, 200), 200, viewport, 300, canvas), undefined);
+  assert.equal(peekPlacement(box(500, 10), 200, viewport, 300, canvas), undefined);
+  assert.deepEqual(peekPlacement(box(250, 200), 200, viewport, 300, canvas), { left: 520, top: 200 }, 'partially visible zoomed nodes still show their summary');
 });
