@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { SlackPublicStatus } from '../../../shared/slack';
 import { api } from '../common/lib';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
-import { useI18n } from '../i18n/i18n';
+import { translate as t, useI18n } from '../i18n/i18n';
+import { startSlackMonitorPoll } from './slack-monitor-poll';
 
 export const SLACK_CHANGED_EVENT = 'tower:slack-changed';
 export function useSlackMonitor(connected: boolean, token = '') {
@@ -26,37 +27,22 @@ export function useSlackMonitor(connected: boolean, token = '') {
     return () => { disposed = true; };
   }, [connected, token, language]);
   useEffect(() => {
-    if (!connected) { setSlack(null); setError(''); return; }
-    let disposed = false;
-    let controller: AbortController | undefined;
-    let pending: Promise<void> | undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    function poll(): Promise<void> {
-      if (disposed) return Promise.resolve();
-      if (pending) return pending;
-      clearTimeout(timer);
-      controller = new AbortController();
-      pending = api<SlackPublicStatus>('/api/slack', { signal: controller.signal }).then(next => {
-        if (!disposed) { setSlack(next); setError(''); }
-      }).catch(cause => {
-        if (!disposed) setError(cause instanceof Error ? cause.message : String(cause));
-      }).finally(() => {
-        pending = undefined;
-        if (!disposed) timer = setTimeout(() => void poll(), 3000);
-      });
-      return pending;
-    }
-    const changed = () => { void poll().then(() => { if (!disposed) void poll(); }); };
-    refreshRef.current = poll;
+    // Keep the last successful overview across disconnects so hidden sessions and Slack selection stay stable.
+    if (!connected) return;
+    const poll = startSlackMonitorPoll({
+      read: signal => api<SlackPublicStatus>('/api/slack', { signal }),
+      loaded: next => { setSlack(next); setError(''); },
+      failed: cause => setError(cause.message),
+      timeoutMessage: () => t('세션 표시 정보를 불러오는 시간이 초과되었습니다. 다시 시도해 주세요.'),
+    });
+    const changed = () => { void poll.changed(); };
+    refreshRef.current = poll.refresh;
     window.addEventListener(SLACK_CHANGED_EVENT, changed);
-    void poll();
     return () => {
-      disposed = true;
-      clearTimeout(timer);
-      controller?.abort();
+      poll.dispose();
       refreshRef.current = async () => {};
       window.removeEventListener(SLACK_CHANGED_EVENT, changed);
     };
   }, [connected]);
-  return { slack, error: languageError || error, refresh };
+  return { slack, error: languageError || error, loadError: error, refresh };
 }
