@@ -223,6 +223,14 @@ test('steering controls expose only eligible sends and never offer uncertain del
   const render = (value: Run) => renderToStaticMarkup(createElement(RunControl, { run: value, onCancel() {}, onRetry() {}, onSteer() {}, onDismiss() {}, cancelling: false }));
   assert.doesNotMatch(render(run), /지금 끼워넣기/);
   assert.match(render({ ...run, canSteer: true }), /지금 끼워넣기/);
+  // A message that cannot join the running turn says why instead of offering the button.
+  const blocked = render({ ...run, canSteer: false, steerBlocked: 'model' });
+  assert.doesNotMatch(blocked, /지금 끼워넣기/);
+  assert.match(blocked, /선택한 모델이 진행 중인 작업과 달라 끼워넣을 수 없습니다/);
+  assert.doesNotMatch(render({ ...run, canSteer: true }), /run-control-note/);
+  setLanguage('en');
+  assert.match(render({ ...run, steerBlocked: 'starting' }), /The current work cannot take a message right now/);
+  setLanguage('ko');
   const steering: NonNullable<Run['steering']> = { targetRunId: 'active', state: 'delivered', requestedAt: run.createdAt };
   const delivered = render({ ...run, status: 'running', steering });
   assert.match(delivered, /현재 작업에 전달됨/);

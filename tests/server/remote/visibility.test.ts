@@ -22,7 +22,7 @@ const base = (): Snapshot => ({
     session('codex:coordinator', '/state/slack'),
     { ...session('codex:file', '/work/open'), filePath: '/Users/me/.codex/sessions/file.jsonl' },
   ],
-  runs: [run('r-open', 'codex:open', { origin: { kind: 'trigger', triggerId: 'daily' } }), run('r-secret', 'codex:secret'), run('r-deep', 'codex:deep'), run('r-coordinator', 'codex:coordinator')],
+  runs: [run('r-open', 'codex:open', { origin: { kind: 'trigger', triggerId: 'daily' }, canSteer: false, steerBlocked: 'origin' }), run('r-secret', 'codex:secret'), run('r-deep', 'codex:deep'), run('r-coordinator', 'codex:coordinator')],
   providers: [{ provider: 'codex', available: true, sessionCount: 7, executable: '/Users/me/bin/codex', error: 'raw provider error',
     usage: { status: 'available', windows: [{ id: 'week', usedPercent: 12 }], reason: 'raw usage reason' } }],
   groups: [{ cwd: '/work/open', title: 'Open', pinned: true, hidden: true }, { cwd: '/work/secret', title: 'Secret', pinned: true }, { cwd: '/work/secret/deep', title: 'Deep', pinned: false }],
@@ -53,6 +53,7 @@ test('only listed fields leave the machine, so a field added to the snapshot lat
   assert.equal('filePath' in view.sessions.find(item => item.id === 'codex:file')!, false);
   assert.deepEqual(view.groups, [{ cwd: '/work/open', title: 'Open', pinned: true }], 'screen hiding is the viewer’s own setting and is not shared');
   assert.deepEqual(view.runs[0].origin, { kind: 'trigger' }, 'only the kind of origin is shared');
+  assert.equal(view.runs[0].steerBlocked, 'origin', 'why a message waits is shown on the controlling computer too');
 });
 
 test('a session\'s task summaries reach the controller, which shows them and lets its master look them up', () => {
