@@ -307,3 +307,20 @@ test('turns that need no model call do not count against the day', async t => {
   assert.equal(saved.calls.count, 0);
   assert.ok(saved.sessions.a, 'the turn still counts as read');
 });
+
+test('a long stretch waiting for the next day is not read again and again meanwhile', { timeout: 10_000 }, async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-tasks-wait-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const long = Array.from({ length: 15 }, (_, i) => message('assistant', `${i} ${'w'.repeat(1_400)}`, iso(-900 + i)));
+  await writeFile(join(stateDir, 'session-tasks.json'), JSON.stringify({ version: 1, startedAt: iso(-10_000), calls: { day: new Date(NOW).toISOString().slice(0, 10), count: DAILY_CALLS },
+    sessions: { a: { mark: 'old', upTo: iso(-2_000), tasks: [{ id: 't', title: 'T', stage: 's', startedAt: iso(-3_000), updatedAt: iso(-3_000) }] } } }));
+  const list = [session('a')];
+  let reads = 0;
+  const tasks = new SessionTasks({ stateDir, sessions: () => list, history: async () => { reads++; return { messages: long, hasMore: false }; }, settleMs: 0, now: () => NOW,
+    model: async () => { throw new Error('the day is used up'); } });
+  await tasks.start();
+  t.after(() => tasks.close());
+  for (let i = 0; i < 3; i++) { tasks.changed(); await new Promise(resolve => setTimeout(resolve, 15)); }
+  await new Promise(resolve => setTimeout(resolve, 100));
+  assert.ok(reads <= 3, `read ${reads} times`);
+});

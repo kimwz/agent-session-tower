@@ -276,9 +276,8 @@ export class SessionTasks extends EventEmitter {
       const upTo = read.upTo ?? saved?.upTo;
       // A summary that read only part of what is new is not the turn's yet: the next pass reads on from where it stopped.
       const done = read.more ? '' : mark;
-      if (read.more) this.again = true;
       // Nothing new was said (a notice that changed only the count): the turn counts as read.
-      if (!read.text) { this.remember(session.id, { mark: done, ...(upTo ? { upTo } : {}), tasks: saved?.tasks ?? [] }); return; }
+      if (!read.text) { this.remember(session.id, { mark: done, ...(upTo ? { upTo } : {}), tasks: saved?.tasks ?? [] }, read.more); return; }
       const tasks = saved?.tasks ?? [];
       const current = currentTask(tasks);
       const prompt = [
@@ -293,7 +292,7 @@ export class SessionTasks extends EventEmitter {
         schema: SCHEMA as unknown as Record<string, unknown>, signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(CALL_LIMIT_MS)]) }, { timeoutMs: SUMMARY_TIMEOUT_MS });
       const next = applySummary(tasks, result, new Date(this.now()).toISOString());
       this.failed.delete(session.id);
-      this.remember(session.id, { mark: done, ...(upTo ? { upTo } : {}), tasks: next });
+      this.remember(session.id, { mark: done, ...(upTo ? { upTo } : {}), tasks: next }, read.more);
     } catch (error) {
       if (this.closed) return;
       const failed = this.failed.get(session.id);
@@ -335,7 +334,9 @@ export class SessionTasks extends EventEmitter {
     return messages;
   }
 
-  private remember(id: string, entry: SessionRecord): void {
+  /** `more`: only part of what is new was read; another pass reads on at once. */
+  private remember(id: string, entry: SessionRecord, more = false): void {
+    if (more) this.again = true;
     // Most recently summarized last, so the oldest go first when there are too many.
     delete this.state.sessions[id];
     this.state.sessions[id] = entry;
