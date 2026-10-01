@@ -22,6 +22,8 @@ export function useResumeCandidates(provider: Provider, include: string | undefi
     void api<{ sessions: Session[] }>(`/api/sessions/resume-candidates?${query}`).then(value => { if (live) setLoaded(value.sessions); }).catch(() => { if (live) setLoaded([]); });
     return () => { live = false; };
   }, [provider, include, sessions]);
-  // Until the answer for a newly chosen provider arrives, the other provider's candidates are not offered.
-  return resumeCandidates(sessions ?? loaded, provider);
+  if (sessions) return resumeCandidates(sessions, provider);
+  // The server already chose them, with the saved target after the newest; until the answer for a newly chosen
+  // provider arrives, the other provider's are not offered.
+  return loaded.filter(session => session.provider === provider);
 }
