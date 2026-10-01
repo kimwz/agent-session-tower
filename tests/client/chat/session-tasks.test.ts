@@ -27,7 +27,7 @@ test('a stage is shown in the color of its kind of work, in Korean or English', 
   assert.equal(stageTone('뭔가'), 'neutral');
 });
 
-test('the chat header shows the current task, and opened every task with the current one marked', () => {
+test('above the message box the current task shows, and opened every task with the current one marked', () => {
   const language = getLanguage();
   setLanguage('ko');
   try {
@@ -43,6 +43,7 @@ test('the chat header shows the current task, and opened every task with the cur
     const titles = [...open.matchAll(/session-task-title">([^<]+)</g)].map(match => match[1]);
     assert.deepEqual(titles, ['Snapshot compression', 'Task strip design', 'Voice playback fix']);
     assert.equal(open.match(/session-task [a-z]+ current/g)?.length, 1);
+    assert.ok(open.indexOf('session-tasks-list') < open.indexOf('session-tasks-line'), 'the list opens above the current line, toward the conversation');
     assert.match(open, /지금 작업/);
     const single = renderToStaticMarkup(createElement(SessionTasks, { tasks: [tasks[0]] }));
     assert.doesNotMatch(single, /session-tasks-count/, 'no count for a single task');
