@@ -267,6 +267,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       // The master agent calls with its own secret, and its calls count apart.
       const caller = req.headers['x-tower-master'];
       const masterCall = Boolean(master && typeof caller === 'string' && caller.length === master.callerSecret.length && timingSafeEqual(Buffer.from(caller), Buffer.from(master.callerSecret)));
+      // An agent of the owner's on this computer (`agent-session-tower mcp`) says so, and its changes count apart too.
+      const localAgent = !masterCall && identity.local && req.headers['x-tower-agent'] === 'local';
       if (req.method === 'POST') {
         const header = req.headers[REQUEST_TOKEN_HEADER.toLowerCase()];
         if (typeof header !== 'string' || !/^[a-f0-9]{64}$/.test(header) || !timingSafeEqual(Buffer.from(header), Buffer.from(token))) {
@@ -283,11 +285,11 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
           // so neither uses up the owner's changes and a flood of reports never keeps voice from turning off.
           const voice = master && !masterCall ? VOICE_REPORT.exec(path)?.[1] : undefined;
           const address = req.socket.remoteAddress || 'local';
-          const key = masterCall ? '\0master' : voice === 'off' ? `\0voice-off ${address}` : voice ? `\0voice ${address}` : address;
+          const key = masterCall ? '\0master' : localAgent ? '\0local-agent' : voice === 'off' ? `\0voice-off ${address}` : voice ? `\0voice ${address}` : address;
           const now = Date.now();
           const rate = rates.get(key);
           if (!rate || now - rate.at > 60_000) rates.set(key, { count: 1, at: now });
-          else if (++rate.count > (masterCall ? 120 : voice === 'off' ? 60 : voice ? 240 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+          else if (++rate.count > (masterCall || localAgent ? 120 : voice === 'off' ? 60 : voice ? 240 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
         }
       }
       if (master && path.startsWith('/api/master')) {

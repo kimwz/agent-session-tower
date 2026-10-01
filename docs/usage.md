@@ -129,6 +129,17 @@ Skills keep the ways you often work (how a new feature is designed and reviewed,
 - **항상 확인** (always check) pins a skill: Tower names it at the start of every turn it runs (chats, triggers, Slack, the master), so agents follow it even when the request does not mention it. A project's pinned skills are named only in that project, and never to work from a controlling computer.
 - **추천**: when a session you worked in on this computer has been quiet for 10 minutes, a light model (Claude Sonnet or Codex GPT-5.6 Terra, no tools, nothing saved as a conversation) sums up how you worked and may propose a skill. A proposal is shown once the same way of working appears in two sessions, or at once when you state it as a rule. Review and edit it, add it, or dismiss it for good. **최근 7일 분석** reads the last week at once. Work started by triggers, Slack, other agents or other computers, and closed sessions, are never read.
 
+## Your own agents
+
+An agent you run yourself on this computer (Claude Code, Codex, or anything else that speaks MCP over stdio) can use Tower on your behalf, with everything your pages can do on localhost:
+
+```sh
+claude mcp add tower-local -- agent-session-tower mcp
+codex mcp add tower-local -- agent-session-tower mcp
+```
+
+It finds the Tower running for the state directory (`--state-dir` to pick another) and signs in like your localhost page; nothing is stored. Its tools are `tower_api` (every route the pages use), `tower_query` (one read-only SQL query over Tower's state), `session_read`, `terminal_read`, and `tower_guide`, which lists every route, every `/api/v1` operation's input, and how to send whole files (backups, skill bundles) with curl. Its changes have a budget of their own, so a busy agent never slows your pages. It works only for the user Tower runs as, on this computer.
+
 ## Account usage
 
 The machine node shows separate usage indicators for the Claude Code and Codex accounts connected on that machine. Percentages represent **used capacity**, not remaining capacity. These are account-wide limits, so activity on other devices can count toward them.

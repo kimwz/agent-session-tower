@@ -2,9 +2,9 @@ import test from 'node:test';
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { createServer, type ServerResponse } from 'node:http';
-import { LiveState } from '../../server/master/live-state.js';
-import { lookupsSupported, ReadDatabase, tablesFrom } from '../../server/master/read-db.js';
-import { TowerClient } from '../../server/master/tower-client.js';
+import { LiveState } from '../../server/tower-tools/live-state.js';
+import { lookupsSupported, ReadDatabase, tablesFrom } from '../../server/tower-tools/read-db.js';
+import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import { diffSnapshots, indexSnapshot } from '../../shared/snapshot-patch.js';
 import type { Session, Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
@@ -124,7 +124,7 @@ test('every text in the lookup database is hidden before it is stored, names and
 
 test('a lookup process whose host was killed exits by itself', { skip: noLookups }, async () => {
   const helper = spawn(process.execPath, ['--import', 'tsx', '-e', `
-    const { ReadDatabase } = await import(${JSON.stringify(new URL('../../server/master/read-db.ts', import.meta.url).href)});
+    const { ReadDatabase } = await import(${JSON.stringify(new URL('../../server/tower-tools/read-db.ts', import.meta.url).href)});
     const db = new ReadDatabase();
     await db.query('SELECT 1 AS one', 'v', () => []);
     console.log('child ' + db.child.pid);
@@ -142,7 +142,7 @@ test('a lookup process whose host was killed exits by itself', { skip: noLookups
 
 test('a lookup process stuck in a runaway query when its host is killed is ended by its CPU limit', { skip: noLookups }, async () => {
   const helper = spawn(process.execPath, ['--import', 'tsx', '-e', `
-    const { ReadDatabase, tablesFrom } = await import(${JSON.stringify(new URL('../../server/master/read-db.ts', import.meta.url).href)});
+    const { ReadDatabase, tablesFrom } = await import(${JSON.stringify(new URL('../../server/tower-tools/read-db.ts', import.meta.url).href)});
     const db = new ReadDatabase({ cpuLimitSeconds: 1 });
     const rows = Array.from({ length: 300 }, (_, index) => ({ id: 's' + index, nativeId: 's', provider: 'claude', title: 't', cwd: '/w', project: 'p', status: 'idle', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true }));
     const tables = () => tablesFrom({ sessions: rows, runs: [], providers: [], scanning: false, hostname: 'h', version: 'v', updatedAt: '' }, new Map(), text => text);

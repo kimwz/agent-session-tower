@@ -6,11 +6,11 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ElevenLabs } from '../../server/master/elevenlabs.js';
-import type { LiveState } from '../../server/master/live-state.js';
+import type { LiveState } from '../../server/tower-tools/live-state.js';
 import { MasterRoom } from '../../server/master/room.js';
 import { MasterSession } from '../../server/master/session.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
-import { TowerClient } from '../../server/master/tower-client.js';
+import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import { MasterVoice, migrate, type VoiceTiming } from '../../server/master/voice.js';
 import { isNoise, READ_CHARS, speakable, VOICE_REST, VOICE_SAMPLE, voiced, voicedParts } from '../../server/master/voice-text.js';
 import type { FirstReply } from '../../server/master/first-reply.js';

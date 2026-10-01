@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { TowerClient } from '../../server/master/tower-client.js';
+import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import { createMonitorServer } from '../../server/http/server.js';
 import { masterRoutes } from '../../server/master/routes.js';
 import type { MasterClient } from '../../server/master/client.js';

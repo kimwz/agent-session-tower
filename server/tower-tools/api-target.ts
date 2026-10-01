@@ -14,21 +14,28 @@ export interface ApiTarget {
 }
 
 const NODE_PREFIX = /^\/api\/nodes\/([a-f0-9]{32})(\/.*)$/;
-/** Not operations: the master's own routes, sign-in, and live streams (read through their own tools). */
-const REFUSED = [/^\/api\/master(\/|$)/, /^\/api\/auth\/(login|logout|status)$/, /^\/api\/bootstrap$/, /^\/api\/health$/, /^\/api\/events$/, /^\/api\/workspace\/terminals\/[^/]+\/events$/];
+/** Not operations for an agent: sign-in, the page token, and live streams (read through their own tools). */
+export const AGENT_REFUSED: readonly RegExp[] = [/^\/api\/auth\/(login|logout|status)$/, /^\/api\/bootstrap$/, /^\/api\/health$/, /^\/api\/events$/,
+  /^\/api\/master\/events$/, /^\/api\/workspace\/terminals\/[^/]+\/events$/];
+/** The master also keeps off its own routes. */
+export const MASTER_REFUSED: readonly RegExp[] = [/^\/api\/master(\/|$)/, ...AGENT_REFUSED];
+/** Provider request IDs are opaque and may hold an encoded slash; the server matches this route on the raw path. */
+const APPROVAL = /^\/api\/(?:nodes\/[a-f0-9]{32}\/)?runs\/[^/]+\/approvals\/[^/]+$/;
+
 /**
  * Checks a path the model gave and describes it the way Tower's server will see it. Anything that could be read
- * differently by the server (encoded slashes, dot segments, doubled slashes) is refused.
+ * differently by the server (encoded slashes outside an approval's IDs, dot segments, doubled slashes) is refused.
  */
-export function apiTarget(method: string, path: string, node?: string | null): ApiTarget {
+export function apiTarget(method: string, path: string, node?: string | null, refused: readonly RegExp[] = MASTER_REFUSED): ApiTarget {
   if (method !== 'GET' && method !== 'POST') throw refusal('GET 또는 POST만 쓸 수 있습니다.');
   if (typeof path !== 'string' || !path.startsWith('/api/') || /[\s\\]/.test(path) || path.includes('#')) throw refusal('경로는 /api/로 시작해야 합니다.');
   // Dot segments are refused as written, before URL parsing quietly resolves them.
   if (/\/(?:\.|%2e){1,2}(?:\/|\?|$)/i.test(path)) throw refusal('경로가 올바르지 않습니다.');
   const url = new URL(path, 'http://tower.invalid');
-  if (/%2f|%5c/i.test(url.pathname)) throw refusal('경로에 인코딩된 구분자를 쓸 수 없습니다.');
+  const approval = APPROVAL.test(node ? `/api/nodes/${node}/${url.pathname.slice('/api/'.length)}` : url.pathname);
+  if (/%2f|%5c/i.test(url.pathname) && !approval) throw refusal('경로에 인코딩된 구분자를 쓸 수 없습니다.');
   let route: string;
-  try { route = decodeURIComponent(url.pathname); } catch { throw refusal('경로를 읽을 수 없습니다.'); }
+  try { route = approval ? url.pathname : decodeURIComponent(url.pathname); } catch { throw refusal('경로를 읽을 수 없습니다.'); }
   if (route.includes('//') || route.split('/').some(part => part === '.' || part === '..')) throw refusal('경로가 올바르지 않습니다.');
   let sent = `${url.pathname}${url.search}`;
   if (node) {
@@ -39,7 +46,7 @@ export function apiTarget(method: string, path: string, node?: string | null): A
   }
   const scoped = NODE_PREFIX.exec(route);
   const local = scoped ? `/api${scoped[2]}` : route;
-  if (REFUSED.some(pattern => pattern.test(local)) || (scoped && /^\/api\/nodes\//.test(local))) throw refusal('이 경로는 마스터가 부를 수 없습니다.');
+  if (refused.some(pattern => pattern.test(local)) || (scoped && /^\/api\/nodes\//.test(local))) throw refusal('이 경로는 도구로 부를 수 없습니다.');
   const operation = /^\/api\/v1\/([a-z]+\.[a-zA-Z]+)$/.exec(local)?.[1];
   const readOperation = operation !== undefined && isOperationName(operation) && !OPERATIONS[operation].write;
   const write = method === 'POST' && !readOperation && local !== '/api/auto-prompt-suggestions';

@@ -1,12 +1,18 @@
 import { request, type IncomingMessage } from 'node:http';
 import { REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
-import type { MasterCallState } from '../../shared/master.js';
 
 /** What the web hands the master host so it can call Tower's API like the owner's own page. */
 export interface WebCredentials { port: number; token: string; callerSecret: string }
 export const MASTER_CALLER_HEADER = 'X-Tower-Master';
+/** Says a call comes from an agent of the owner's on this computer, so it counts apart from the owner's pages. */
+export const LOCAL_AGENT_HEADER = 'X-Tower-Agent';
+/** Headers that say who calls: the master's own secret unless the client is told otherwise. */
+export type CallerHeaders = (credentials: WebCredentials) => Record<string, string>;
+const masterCaller: CallerHeaders = credentials => ({ [MASTER_CALLER_HEADER]: credentials.callerSecret });
 
-export interface TowerResponse { status: number; body: unknown; state: MasterCallState }
+/** Whether a call ran: `uncertain` may have, `not-admitted` surely did not. */
+export type CallState = 'succeeded' | 'failed' | 'uncertain' | 'not-admitted';
+export interface TowerResponse { status: number; body: unknown; state: CallState }
 
 const MAX_RESPONSE = 8 * 1024 * 1024;
 const WAIT_FOR_WEB_MS = 60_000;
@@ -16,7 +22,7 @@ const disposition = (body: unknown) => body && typeof body === 'object' ? (body 
  * How a finished call is filed. The server's `disposition` comes first: a local worker, a joined computer's request
  * ledger and the link proxy all use it to say whether the request may have run, whatever the HTTP status.
  */
-export function classify(status: number, body: unknown): MasterCallState {
+export function classify(status: number, body: unknown): CallState {
   const said = disposition(body);
   if (said === 'uncertain') return 'uncertain';
   if (said === 'not-admitted' || said === 'handoff') return status === 503 ? 'not-admitted' : 'failed';
@@ -37,7 +43,7 @@ export class TowerClient {
   private waiters: Array<() => void> = [];
   private changedAt = 0;
 
-  constructor(private readonly waitForWebMs = WAIT_FOR_WEB_MS) {}
+  constructor(private readonly waitForWebMs = WAIT_FOR_WEB_MS, private readonly caller: CallerHeaders = masterCaller) {}
 
   setCredentials(credentials: WebCredentials): void {
     const known = this.credentials;
@@ -118,7 +124,7 @@ export class TowerClient {
   async stream(path: string, signal: AbortSignal): Promise<IncomingMessage> {
     const credentials = await this.waitForCredentials(Date.now() + this.waitForWebMs, signal);
     return new Promise((resolve, reject) => {
-      const req = request({ host: '127.0.0.1', port: credentials.port, method: 'GET', path, signal, headers: { [MASTER_CALLER_HEADER]: credentials.callerSecret, Accept: 'text/event-stream' } }, res => {
+      const req = request({ host: '127.0.0.1', port: credentials.port, method: 'GET', path, signal, headers: { ...this.caller(credentials), Accept: 'text/event-stream' } }, res => {
         if (res.statusCode !== 200) { res.resume(); reject(new Error(`Tower stream answered ${res.statusCode}`)); return; }
         resolve(res);
       });
@@ -151,7 +157,7 @@ export class TowerClient {
         host: '127.0.0.1', port: credentials.port, method, path, signal,
         headers: {
           ...headers,
-          [MASTER_CALLER_HEADER]: credentials.callerSecret,
+          ...this.caller(credentials),
           ...(payload !== undefined ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload), [REQUEST_TOKEN_HEADER]: credentials.token } : {}),
         },
       }, res => {

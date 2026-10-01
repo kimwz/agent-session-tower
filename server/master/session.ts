@@ -5,13 +5,13 @@ import { MASTER_FOLDER, type MasterBinding, type MasterTaskState } from '../../s
 import type { AutoPromptJob, ChatMessage, Provider, Run, RunReply, SessionDetail, Snapshot } from '../../shared/types.js';
 import type { MasterEntryData } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
-import type { ApiTarget } from './api-target.js';
+import type { ApiTarget } from '../tower-tools/api-target.js';
 import { REPORT_MARK, VOICE_MARK, writeMasterGuide } from './guide.js';
-import type { LiveState } from './live-state.js';
-import type { Table } from './read-db.js';
+import type { LiveState } from '../tower-tools/live-state.js';
+import type { Table } from '../tower-tools/read-db.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
-import type { TowerClient } from './tower-client.js';
+import type { TowerClient } from '../tower-tools/tower-client.js';
 
 const FOLLOW_MS = 5_000;
 /** Work Tower cannot find for this long is reported as unknown. */
