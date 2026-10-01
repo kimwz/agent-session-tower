@@ -63,6 +63,12 @@ test('/mcp is for this computer only, and never for a browser page', async t => 
 });
 
 test('the /mcp request itself is not a page change; what its tools change counts on the local agents\' budget', async t => {
-  const { rpc } = await serve(t);
-  for (let index = 0; index < 40; index++) assert.equal((await rpc({ jsonrpc: '2.0', id: index, method: 'ping' })).status, 200);
+  const { base, rpc } = await serve(t);
+  const change = async (id: number) => JSON.parse((await (await rpc({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'tower_api', arguments: { method: 'POST', path: '/api/groups', body: { cwd: '/work' } } } })).json()).result.content[0].text).status as number;
+  const statuses: number[] = [];
+  for (let index = 0; index < 40; index++) statuses.push(await change(index));
+  assert.ok(!statuses.includes(429), 'more changes than a page may make in a minute: they count as the local agents\'');
+  const { token } = await (await fetch(`${base}/api/bootstrap`)).json();
+  const page = await fetch(`${base}/api/groups`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token }, body: '{"cwd":"/work"}' });
+  assert.notEqual(page.status, 429, 'and the owner\'s page keeps its whole budget');
 });
