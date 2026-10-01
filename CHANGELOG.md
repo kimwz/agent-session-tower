@@ -4,7 +4,10 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.98.2] - 2026-10-01
+## [1.99.0] - 2026-10-01
+
+### Added
+- **Rest the pointer on a session in the session list to see its three latest tasks** (title, stage, when) in a card beside it, without opening it; it says how many earlier tasks there are and closes as soon as you move away, scroll or click.
 
 ### Changed
 - **A session's task summary sits right above the message box** instead of under its title: the current task and its stage are in view where you write the next message. Opened, the task history unfolds upward toward the conversation, the newest task lowest, beside the current line.

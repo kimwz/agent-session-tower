@@ -49,3 +49,19 @@ test('above the message box the current task shows, and opened every task with t
     assert.doesNotMatch(single, /session-tasks-count/, 'no count for a single task');
   } finally { setLanguage(language); }
 });
+
+test('resting on a session in the list shows its three latest tasks, newest first, and how many more there are', async () => {
+  const { SessionTasksCard, PEEK_TASKS } = await import('../../../client/src/sessions/SessionTasksPeek.js');
+  const language = getLanguage();
+  setLanguage('ko');
+  try {
+    const many = [...tasks, task('d', 'Older work', '완료', '2026-09-30T01:00:00Z')];
+    const html = renderToStaticMarkup(createElement(SessionTasksCard, { tasks: many }));
+    const titles = [...html.matchAll(/session-tasks-peek-title">([^<]+)</g)].map(match => match[1]);
+    assert.equal(PEEK_TASKS, 3);
+    assert.deepEqual(titles, ['Snapshot compression', 'Task strip design', 'Voice playback fix']);
+    assert.match(html, /<li class="current">/);
+    assert.match(html, /이전 작업 1개 더/);
+    assert.doesNotMatch(renderToStaticMarkup(createElement(SessionTasksCard, { tasks })), /이전 작업/, 'nothing more to say for three tasks');
+  } finally { setLanguage(language); }
+});

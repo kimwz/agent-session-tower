@@ -2249,6 +2249,8 @@ export const english: Record<string, string> = {
   "이 세션의 작업 모두 보기": "Show every task of this session",
   "작업 {0}개": "{0} tasks",
   "지금 작업": "Now",
+  "최근 작업": "Recent tasks",
+  "이전 작업 {0}개 더": "{0} earlier tasks",
   "턴이 끝날 때마다 세션의 작업 제목과 단계를 요약합니다.": "After every turn, sums up the session's task title and stage.",
   "Slack 멘션 매칭": "Slack mention matching",
   "멘션에 맞는 규칙을 고릅니다.": "Chooses the rule that fits a mention.",

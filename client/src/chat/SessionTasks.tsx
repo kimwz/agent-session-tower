@@ -5,7 +5,8 @@ import { absoluteTime, relativeTime } from '../common/lib';
 import { translate as t, useI18n } from '../i18n/i18n';
 import { stageTone, taskTimeline } from './session-tasks';
 
-function Stage({ stage }: { stage: string }) {
+/** A task's stage as a pill in the color of its kind of work. */
+export function Stage({ stage }: { stage: string }) {
   return <span className={`session-task-stage ${stageTone(stage)}`}>{stage}</span>;
 }
 
