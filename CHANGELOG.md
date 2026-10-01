@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.100.2] - 2026-10-02
+
+### Fixed
+- **Recent task summaries now appear when hovering over a session on the canvas**, instead of a row in the session list. The card shows the latest three tasks after a short mouse hover and closes on click, canvas movement, zoom, scrolling or resize, including during the hover delay. The task summary above the chat message box is unchanged.
+
 ## [1.100.1] - 2026-10-02
 
 ### Fixed
