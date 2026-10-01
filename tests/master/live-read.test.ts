@@ -172,3 +172,15 @@ test('a key at the edge of a shortened text is hidden whole first in the lookup 
   const rows = await db.query(`SELECT title FROM sessions`, 'edge', () => tablesFrom(local, new Map(), hide));
   assert.doesNotMatch(JSON.stringify(rows), /AKIAABCDEF/);
 });
+
+test('quick lookups see the task each session works on now and every task it worked on', { skip: noLookups }, async t => {
+  const db = new ReadDatabase();
+  t.after(() => db.close());
+  const tasks = [{ id: 't1', title: 'Voice playback fix', stage: '배포됨', startedAt: '2026-09-27T01:00:00Z', updatedAt: '2026-09-27T02:00:00Z' },
+    { id: 't2', title: 'Snapshot compression', stage: 'PR 리뷰중', startedAt: '2026-09-27T03:00:00Z', updatedAt: '2026-09-27T04:00:00Z' }];
+  const tables = () => tablesFrom(snapshot([session('a', 'idle', { tasks }), session('b', 'idle')]), new Map(), text => text);
+  const current = await db.query(`SELECT id, task_title, task_stage FROM sessions ORDER BY id`, 'v1', tables);
+  assert.deepEqual(current.rows, [{ id: 'a', task_title: 'Snapshot compression', task_stage: 'PR 리뷰중' }, { id: 'b', task_title: null, task_stage: null }]);
+  const all = await db.query(`SELECT title, stage, current FROM session_tasks WHERE session_id = 'a' ORDER BY started_at`, 'v1', tables);
+  assert.deepEqual(all.rows, [{ title: 'Voice playback fix', stage: '배포됨', current: 0 }, { title: 'Snapshot compression', stage: 'PR 리뷰중', current: 1 }]);
+});

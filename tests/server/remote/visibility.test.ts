@@ -56,6 +56,12 @@ test('only listed fields leave the machine, so a field added to the snapshot lat
   assert.equal(view.runs[0].steerBlocked, 'origin', 'why a message waits is shown on the controlling computer too');
 });
 
+test('a session\'s task summaries reach the controller, which shows them and lets its master look them up', () => {
+  const tasks = [{ id: 't1', title: 'Voice playback fix', stage: 'PR 리뷰중', startedAt: now, updatedAt: now }];
+  const snapshot = { ...base(), sessions: [session('codex:open', '/work/open', { tasks })] };
+  assert.deepEqual(remoteSnapshot(snapshot, scope(), 'controller-a1b2c3d4e5f6').sessions[0].tasks, tasks);
+});
+
 test('providers are summarized: counts follow what is visible, and local paths and raw errors stay home', () => {
   const [provider] = remoteSnapshot(base(), scope(), 'controller-a1b2c3d4e5f6').providers;
   assert.equal(provider.sessionCount, 3);

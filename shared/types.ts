@@ -56,7 +56,11 @@ export interface Session {
   scheduledAt?: string;
   /** A fast judgment of how its last turn ended; only while it is not working and that turn is still its last. */
   outcome?: SessionOutcome;
+  /** What the conversation worked on, task by task, oldest first; summarized after its turns (server/sessions/tasks.ts). */
+  tasks?: SessionTask[];
 }
+/** A feature-level unit of work in a conversation and the stage it reached. The current one is the latest updated. */
+export interface SessionTask { id: string; title: string; stage: string; startedAt: string; updatedAt: string }
 export interface SessionContextUsage {
   usedTokens: number;
   contextWindow?: number;

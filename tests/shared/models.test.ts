@@ -15,10 +15,12 @@ test('every role starts with what its call used before the roles existed', () =>
   assert.deepEqual(table()['skills.advisor'], { provider: 'claude', model: 'sonnet' });
   assert.deepEqual(resolveRole(settings, 'skills.advisor', { provider: 'codex' }), { provider: 'claude', model: 'sonnet' }, 'a fixed role ignores the work provider');
   assert.deepEqual(table()['voice.firstReply'], { provider: 'claude', model: 'haiku', effort: 'off' });
+  // New with the role: a light model without thinking, since it runs after every turn.
+  assert.deepEqual(table()['sessions.summarizer'], { provider: 'claude', model: 'haiku', effort: 'off' });
   // Forms and starts that passed no model keep the CLI's default, on the provider each form preselected.
   for (const id of ['master.session', 'issues.register', 'chat.new', 'autoPrompt.new', 'publicAgents.new']) assert.deepEqual(table()[id], { provider: 'claude' }, id);
   for (const id of ['triggers.new', 'slack.newRule', 'github.newRule']) assert.deepEqual(table()[id], { provider: 'codex' }, id);
-  assert.equal(BUILTIN_ROLES.length, follow.length + 11, 'a new role gets a line here');
+  assert.equal(BUILTIN_ROLES.length, follow.length + 12, 'a new role gets a line here');
 });
 
 test('saved settings are read leniently, submitted ones strictly', () => {
