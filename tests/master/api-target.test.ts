@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { apiTarget } from '../../server/master/api-target.js';
-import { classify } from '../../server/master/tower-client.js';
+import { AGENT_REFUSED, apiTarget } from '../../server/tower-tools/api-target.js';
+import { classify } from '../../server/tower-tools/tower-client.js';
 
 const NODE = 'a'.repeat(32);
 
@@ -32,4 +32,22 @@ test('the master calls the same routes as the pages, and refuses paths the serve
   }
   assert.throws(() => apiTarget('GET', `/api/nodes/${NODE}/snapshot`, NODE), { statusCode: 400 });
   assert.throws(() => apiTarget('GET', '/api/snapshot', 'not-a-node'), { statusCode: 400 });
+});
+
+test('an approval answers the ID the run gave, encoded slash included, and only there', () => {
+  const answer = apiTarget('POST', '/api/runs/run-1/approvals/request%2F1');
+  assert.equal(answer.path, '/api/runs/run-1/approvals/request%2F1', 'sent as written, as the page sends it');
+  assert.equal(answer.write, true);
+  assert.equal(apiTarget('POST', '/api/runs/run-1/approvals/request%2F1', NODE).path, `/api/nodes/${NODE}/runs/run-1/approvals/request%2F1`);
+  assert.equal(apiTarget('POST', `/api/nodes/${NODE}/runs/run-1/approvals/a%2Fb`).node, NODE);
+  for (const path of ['/api/runs/run-1/cancel%2Fx', '/api/sessions/a%2Fb/messages', '/api/runs/r%2Fx/approvals']) assert.throws(() => apiTarget('POST', path), { statusCode: 400 }, path);
+});
+
+test('an agent of the owner\'s may call the master\'s routes too, but never sign-in or live streams', () => {
+  assert.equal(apiTarget('POST', '/api/master/settings', undefined, AGENT_REFUSED).local, '/api/master/settings');
+  assert.equal(apiTarget('GET', '/api/master/state', undefined, AGENT_REFUSED).write, false);
+  for (const [method, path] of [['POST', '/api/auth/logout'], ['POST', '/api/auth/login'], ['GET', '/api/bootstrap'], ['GET', '/api/events'], ['GET', '/api/master/events'], ['GET', '/api/workspace/terminals/x/events']]) {
+    assert.throws(() => apiTarget(method, path, undefined, AGENT_REFUSED), { statusCode: 400 }, `${method} ${path}`);
+  }
+  assert.throws(() => apiTarget('POST', '/api/master/settings'), { statusCode: 400 }, 'the master itself keeps off them');
 });

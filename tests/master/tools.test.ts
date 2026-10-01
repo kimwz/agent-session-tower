@@ -9,7 +9,7 @@ import { startMasterHost } from '../../server/master/host.js';
 import { MasterClient } from '../../server/master/client.js';
 import { startMasterMcp } from '../../server/master/mcp.js';
 import { MasterTools } from '../../server/master/tools.js';
-import { TowerClient } from '../../server/master/tower-client.js';
+import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import type { MasterStreamEvent } from '../../shared/master.js';
 import { until } from '../helpers/until.js';
 

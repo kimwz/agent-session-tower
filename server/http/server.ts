@@ -172,6 +172,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
     res.once('close', () => { active.delete(close); if (!active.size) streams.delete(id); });
   };
   const rates = new Map<string, { count: number; at: number }>();
+  /** When the master and the owner's local agents last changed something on each joined computer. */
+  const agentWrites = new Map<string, number[]>();
   const suggestions = { count: 0, at: 0, running: 0 };
   let scheduled: ReturnType<typeof setTimeout> | undefined;
   const json = (res: ServerResponse, status: number, body: unknown) => {
@@ -267,6 +269,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       // The master agent calls with its own secret, and its calls count apart.
       const caller = req.headers['x-tower-master'];
       const masterCall = Boolean(master && typeof caller === 'string' && caller.length === master.callerSecret.length && timingSafeEqual(Buffer.from(caller), Buffer.from(master.callerSecret)));
+      // An agent of the owner's on this computer (`agent-session-tower mcp`) says so, and its changes count apart too.
+      const localAgent = !masterCall && identity.local && req.headers['x-tower-agent'] === 'local';
       if (req.method === 'POST') {
         const header = req.headers[REQUEST_TOKEN_HEADER.toLowerCase()];
         if (typeof header !== 'string' || !/^[a-f0-9]{64}$/.test(header) || !timingSafeEqual(Buffer.from(header), Buffer.from(token))) {
@@ -283,11 +287,20 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
           // so neither uses up the owner's changes and a flood of reports never keeps voice from turning off.
           const voice = master && !masterCall ? VOICE_REPORT.exec(path)?.[1] : undefined;
           const address = req.socket.remoteAddress || 'local';
-          const key = masterCall ? '\0master' : voice === 'off' ? `\0voice-off ${address}` : voice ? `\0voice ${address}` : address;
+          const key = masterCall ? '\0master' : localAgent ? '\0local-agent' : voice === 'off' ? `\0voice-off ${address}` : voice ? `\0voice ${address}` : address;
           const now = Date.now();
           const rate = rates.get(key);
           if (!rate || now - rate.at > 60_000) rates.set(key, { count: 1, at: now });
-          else if (++rate.count > (masterCall ? 120 : voice === 'off' ? 60 : voice ? 240 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+          else if (++rate.count > (masterCall || localAgent ? 120 : voice === 'off' ? 60 : voice ? 240 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+          // A joined computer allows this computer 60 changes a minute, shared with the owner's pages: the master and
+          // the owner's local agents together keep to half of it, so the pages always have room there.
+          const node = masterCall || localAgent ? /^\/api\/nodes\/([a-f0-9]{32})\//.exec(path)?.[1] : undefined;
+          if (node) {
+            // Counted over the last minute, not a fixed one, so no minute of the joined computer's sees more than 30.
+            const recent = (agentWrites.get(node) ?? []).filter(at => now - at < 60_000);
+            if (recent.length >= 30) return json(res, 429, { error: '이 컴퓨터로 보내는 에이전트의 요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+            agentWrites.set(node, [...recent, now]);
+          }
         }
       }
       if (master && path.startsWith('/api/master')) {

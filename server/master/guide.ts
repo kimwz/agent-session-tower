@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { issueRequest } from '../../shared/issues.js';
-import { apiCatalog } from './api-catalog.js';
+import { apiCatalog } from '../tower-tools/api-catalog.js';
 
 /** How a spoken request starts in the master session, so the master answers it to be heard. */
 export const VOICE_MARK = '[voice]';

@@ -25,7 +25,8 @@ import { MasterClient } from './master/client.js';
 import { BackupService } from './backup/service.js';
 import { masterRoutes } from './master/routes.js';
 import { VoiceTurnEnd } from './master/voice-turn-end.js';
-import type { WebCredentials } from './master/tower-client.js';
+import type { WebCredentials } from './tower-tools/tower-client.js';
+import { startOwnerMcp } from './owner-mcp/tools.js';
 import { startSlackMcp, startTowerMcp } from './slack/mcp-bridge.js';
 import { getProviderHealth } from './providers/discovery.js';
 import { createMonitorServer } from './http/server.js';
@@ -85,6 +86,8 @@ Usage: agent-session-tower [run] [options]
   join <code>          Let another Tower control this computer (the code comes from its Remote computers panel)
   service <action>     install | uninstall | status: keep Tower running in the background (macOS)
   models <command>     list | get <role> | args <role>: the models Tower's roles use (models --help)
+  mcp                  Tower's tools over stdio for your own agents on this computer, with your rights
+                       e.g. claude mcp add tower-local -- agent-session-tower mcp
   --port <number>      Listening port (default: 8000)
   --host <IPv4>        Bind address (default: 127.0.0.1; 0.0.0.0 for remote access)
   --public-url <url>   Also accept requests for this origin from a reverse proxy or tunnel (repeatable)
@@ -128,6 +131,11 @@ async function main() {
     return;
   }
   if (args[0] === 'models') { await runModelsCommand(args.slice(1)); return; }
+  if (args[0] === 'mcp') {
+    if (!(args.length === 1 || (args.length === 3 && args[1] === '--state-dir' && args[2]))) throw new Error('Usage: agent-session-tower mcp [--state-dir <path>]');
+    await startOwnerMcp(args.length === 3 ? resolve(args[2]) : defaultStateDir());
+    process.exit(0);
+  }
   if (args[0] === 'join' || args[0] === 'service') {
     await runLinkCommand(args);
     return;

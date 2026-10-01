@@ -5,11 +5,11 @@ import { createServer } from 'node:http';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { LiveState } from '../../server/master/live-state.js';
+import type { LiveState } from '../../server/tower-tools/live-state.js';
 import { MasterRoom } from '../../server/master/room.js';
 import { MasterSession } from '../../server/master/session.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
-import { TowerClient } from '../../server/master/tower-client.js';
+import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import type { AutoPromptJob, ChatMessage, Run, Snapshot } from '../../shared/types.js';
 
 const MASTER = 'claude:master';

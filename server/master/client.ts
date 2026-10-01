@@ -9,7 +9,7 @@ import { APP_VERSION } from '../../shared/app-identity.js';
 import { readPrivateJson } from '../stores/private-json.js';
 import { MASTER_PROTOCOL, type MasterHostReply } from './host.js';
 import { masterPaths, type MasterPaths } from './paths.js';
-import type { WebCredentials } from './tower-client.js';
+import type { WebCredentials } from '../tower-tools/tower-client.js';
 
 const MAX_REPLY = 16 * 1024 * 1024;
 const failure = (message: string, statusCode: number, hostAbsent = false) => Object.assign(new Error(message), { statusCode, ...(hostAbsent ? { hostAbsent } : {}) });
