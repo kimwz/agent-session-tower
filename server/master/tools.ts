@@ -63,6 +63,7 @@ export class MasterTools extends TowerTools {
     return Boolean(waiting);
   }
 
+  /** A screen command in the tab showing the master, done by the page with its own controls. */
   private async ui(args: Record<string, unknown>): Promise<unknown> {
     let command: MasterScreenCommand;
     try { command = screenCommand(args); } catch (error) { return { error: (error as Error).message }; }

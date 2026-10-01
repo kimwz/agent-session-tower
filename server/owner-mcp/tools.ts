@@ -4,8 +4,9 @@ import { z } from 'zod';
 import { isOperationName, OPERATIONS } from '../../shared/api/operations.js';
 import { HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
 import { lockOwners } from '../instance/state-lock.js';
+import { inMasterFolder } from '../runs/subscription.js';
 import { serveToolBridge } from '../mcp/stdio.js';
-import { apiCatalog, FILE_ROUTES } from '../tower-tools/api-catalog.js';
+import { apiCatalog, FILE_ROUTES, isFileRoute } from '../tower-tools/api-catalog.js';
 import { AGENT_REFUSED } from '../tower-tools/api-target.js';
 import { LiveState } from '../tower-tools/live-state.js';
 import { lookupsSupported, ReadDatabase } from '../tower-tools/read-db.js';
@@ -42,6 +43,7 @@ These tools act as the owner on this computer's Tower: anything the owner's page
 - Whole files (${FILE_ROUTES.join(', ')}) do not fit a tool result: send them with curl, with the same local sign-in:
   TOKEN=$(curl -s ${base}/api/bootstrap | sed 's/.*"token":"\\([a-f0-9]*\\)".*/\\1/')
   curl -s -X POST ${base}/api/backup/export -H "${REQUEST_TOKEN_HEADER}: $TOKEN" -H '${LOCAL_AGENT_HEADER}: local' -H 'Content-Type: application/json' -d '{"passphrase":"…"}' -o tower-backup.json
+  curl -s ${base}/api/attachments/<id> -o attachment
   curl -s -X POST ${base}/api/skills/import-plan -H "${REQUEST_TOKEN_HEADER}: $TOKEN" -H '${LOCAL_AGENT_HEADER}: local' -H 'Content-Type: application/json' --data-binary @tower-skills.json
 
 ## Routes (tower_api)
@@ -91,6 +93,8 @@ export interface OwnerToolsOptions {
   ports?: () => Promise<number[]>;
   toolMs?: number;
   waitForWebMs?: number;
+  /** How often a lost web is looked for. */
+  watchMs?: number;
 }
 
 /**
@@ -108,16 +112,17 @@ export class OwnerTools {
 
   constructor(private readonly stateDir: string, private readonly options: OwnerToolsOptions = {}) {
     this.tower = new TowerClient(options.waitForWebMs, () => ({ [LOCAL_AGENT_HEADER]: 'local' }));
-    this.live = new LiveState((path, signal) => this.tower.stream(path, signal));
+    // Agents are many and look things up now and then: the live stream is let go a minute after the last lookup.
+    this.live = new LiveState((path, signal) => this.tower.stream(path, signal), 60_000);
     this.readDb = lookupsSupported() ? new ReadDatabase() : undefined;
     this.tools = new TowerTools({
       tower: this.tower, live: this.live, ...(this.readDb ? { readDb: this.readDb } : {}),
       started: async () => {}, delegated: () => ({ name: 'delegated', columns: DELEGATED, rows: [] }),
       refused: AGENT_REFUSED, ...(options.toolMs ? { toolMs: options.toolMs } : {}),
-      elsewhere: target => FILE_ROUTES.includes(target.local) ? '이 경로는 파일 전체를 주고받아 도구 결과에 담을 수 없습니다. tower_guide에 있는 curl 방법으로 보내세요.' : undefined,
+      elsewhere: target => isFileRoute(target.local) ? '이 경로는 파일 전체를 주고받아 도구 결과에 담을 수 없습니다. tower_guide에 있는 curl 방법으로 보내세요.' : undefined,
     });
     // A call that lost the web (restart, new page token) waits for it; this finds it again meanwhile.
-    this.watch = setInterval(() => { if (!this.tower.hasCredentials()) void this.find().catch(() => {}); }, 1000);
+    this.watch = setInterval(() => { if (!this.tower.hasCredentials()) void this.find().catch(() => {}); }, this.options.watchMs ?? 1000);
     this.watch.unref();
   }
 
@@ -148,8 +153,12 @@ export class OwnerTools {
 }
 
 /** `agent-session-tower mcp`: Tower's tools over stdio for an agent the owner runs on this computer. */
-export async function startOwnerMcp(stateDir: string, input: Readable = process.stdin, output: Writable = process.stdout): Promise<void> {
+export async function startOwnerMcp(stateDir: string, input: Readable = process.stdin, output: Writable = process.stdout, cwd = process.cwd()): Promise<void> {
+  // Registered for every session, it reaches the master too, which has its own tools (they report the work it hands out).
+  const master = inMasterFolder(stateDir, cwd);
   const tools = new OwnerTools(stateDir);
-  try { await serveToolBridge({ name: OWNER_TOOLS_SERVER, listTools: async () => OWNER_TOOLS, callTool: (name, args) => tools.call(name, args) }, input, output); }
-  finally { tools.close(); }
+  try {
+    await serveToolBridge({ name: OWNER_TOOLS_SERVER, listTools: async () => master ? [] : OWNER_TOOLS,
+      callTool: async (name, args) => master ? { error: '마스터는 자기 tower_master 도구를 씁니다.' } : tools.call(name, args) }, input, output);
+  } finally { tools.close(); }
 }

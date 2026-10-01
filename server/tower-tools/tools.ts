@@ -86,10 +86,9 @@ export class TowerTools {
   }
 
   /**
-   * A joined computer counts changes per controlling computer, shared with the owner's pages there; the master keeps
-   * to half of that budget so the pages always have room.
+   * A joined computer counts changes per controlling computer, shared with the owner's pages there; these tools keep
+   * to part of that budget so the pages always have room.
    */
-
   private async paceRemote(node: string, signal: AbortSignal): Promise<void> {
     const window = 60_000;
     const recent = (this.remoteWrites.get(node) ?? []).filter(at => Date.now() - at < window);
@@ -102,7 +101,6 @@ export class TowerTools {
   }
 
   /** A quick read-only SQL question over the live state. */
-
   private async towerQuery(args: Record<string, unknown>): Promise<unknown> {
     const { live, readDb } = this.options;
     if (!live || !readDb) return { error: '빠른 조회를 쓸 수 없습니다. tower_api로 조회하세요.' };
@@ -134,8 +132,6 @@ export class TowerTools {
       hasMore: detail.hasMore,
     } });
   }
-
-  /** A screen command in the tab showing the master, done by the page with its own controls. */
 
   private async terminalRead(args: Record<string, unknown>): Promise<unknown> {
     const id = typeof args.terminalId === 'string' && /^[0-9a-f-]{36}$/.test(args.terminalId) ? args.terminalId : '';

@@ -4,7 +4,7 @@ import { createServer, type Server } from 'node:http';
 import { PassThrough } from 'node:stream';
 import { HEALTH_APPLICATION_ID } from '../../shared/app-identity.js';
 import { serveToolBridge } from '../../server/mcp/stdio.js';
-import { OWNER_TOOLS, OWNER_TOOLS_SERVER, OwnerTools, ownerGuide } from '../../server/owner-mcp/tools.js';
+import { OWNER_TOOLS, OWNER_TOOLS_SERVER, OwnerTools, ownerGuide, startOwnerMcp } from '../../server/owner-mcp/tools.js';
 
 interface Seen { method: string; path: string; token?: string; agent?: string; master?: string; body?: unknown }
 
@@ -53,7 +53,7 @@ test('an agent\'s tools find this computer\'s Tower and act as the owner\'s page
 test('when Tower\'s web restarts, the tools find it again and a change is sent once', async t => {
   const first = await fakeWeb(t, 'a'.repeat(64));
   let ports = [first.port];
-  const tools = new OwnerTools('/unused', { ports: async () => ports, waitForWebMs: 5_000 });
+  const tools = new OwnerTools('/unused', { ports: async () => ports, waitForWebMs: 5_000, watchMs: 20 });
   t.after(() => tools.close());
   assert.equal((await tools.call('tower_api', { method: 'GET', path: '/api/snapshot' }) as { state: string }).state, 'succeeded');
 
@@ -106,6 +106,16 @@ test('the guide tells an agent every route and each operation\'s input; the tool
   const names = (JSON.parse(line!).result.tools as Array<{ name: string }>).map(tool => tool.name);
   assert.deepEqual(names, ['tower_api', 'tower_query', 'session_read', 'terminal_read', 'tower_guide']);
   assert.ok(!(OWNER_TOOLS.find(tool => tool.name === 'tower_query')!.description).includes('delegated('), 'no master-only table in the agent\'s schema');
+  input.end();
+  await served;
+});
+
+test('in the master\'s own folder the tools stay out of the way: the master has its own, which report the work it hands out', async () => {
+  const input = new PassThrough(), output = new PassThrough();
+  const served = startOwnerMcp('/state', input, output, '/state/master-session');
+  input.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) + '\n');
+  const [line] = await new Promise<string[]>(resolve => output.once('data', chunk => resolve(String(chunk).trim().split('\n'))));
+  assert.deepEqual(JSON.parse(line!).result.tools, []);
   input.end();
   await served;
 });

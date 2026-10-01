@@ -64,7 +64,12 @@ Account and Tower (this computer only)
 `.trim();
 
 /** Routes whose answer or body is a whole file: an agent sends them with curl (see the local tools' guide), not through a tool result. */
-export const FILE_ROUTES: readonly string[] = ['/api/backup/export', '/api/backup/remote/download', '/api/backup/restore/check', '/api/skills/export', '/api/skills/import-plan', '/api/skills/import'];
+export const FILE_ROUTES: readonly string[] = ['/api/backup/export', '/api/backup/remote/download', '/api/backup/restore/check', '/api/skills/export', '/api/skills/import-plan', '/api/skills/import',
+  '/api/attachments/{id}', '/api/chat-images/{id}'];
+/** Whether a route (without its query) is one of the file routes. */
+export function isFileRoute(route: string): boolean {
+  return FILE_ROUTES.some(file => file.endsWith('/{id}') ? route.startsWith(file.slice(0, -'{id}'.length)) && !route.slice(file.length - '{id}'.length).includes('/') : route === file);
+}
 
 function operations(): string {
   return Object.entries(OPERATIONS).map(([name, definition]) => `- POST /api/v1/${name} — ${definition.summary}${definition.write ? '' : ' (read)'}`).join('\n');

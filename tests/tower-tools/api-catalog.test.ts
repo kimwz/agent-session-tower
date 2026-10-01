@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { apiCatalog, FILE_ROUTES } from '../../server/tower-tools/api-catalog.js';
+import { apiCatalog, FILE_ROUTES, isFileRoute } from '../../server/tower-tools/api-catalog.js';
 import { OPERATIONS } from '../../shared/api/operations.js';
 
 /** Where Tower's HTTP routes are matched. */
@@ -75,7 +75,8 @@ async function missingFrom(catalog: string): Promise<string[]> {
 test('the route catalog the master and the owner\'s agents read lists every route the pages can call', async () => {
   assert.deepEqual(await missingFrom(apiCatalog()), [], 'add these to server/tower-tools/api-catalog.ts, or to NOT_FOR_AGENTS with the reason');
   const listed = catalogRoutes(apiCatalog());
-  for (const route of FILE_ROUTES) assert.ok(listed.has(route), route);
+  for (const route of FILE_ROUTES) assert.ok(listed.has(route.replace('{id}', '{}')), route);
+  assert.ok(isFileRoute('/api/attachments/abc') && isFileRoute('/api/backup/export') && !isFileRoute('/api/attachments/a/b') && !isFileRoute('/api/backup'));
 });
 
 test('a route left out of the catalog is noticed, whether matched by literal, pattern, constant or for a joined computer', async () => {

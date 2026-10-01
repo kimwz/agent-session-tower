@@ -290,6 +290,14 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
           const rate = rates.get(key);
           if (!rate || now - rate.at > 60_000) rates.set(key, { count: 1, at: now });
           else if (++rate.count > (masterCall || localAgent ? 120 : voice === 'off' ? 60 : voice ? 240 : 30)) return json(res, 429, { error: '요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+          // A joined computer allows this computer 60 changes a minute, shared with the owner's pages: the master and
+          // the owner's local agents together keep to half of it, so the pages always have room there.
+          const node = masterCall || localAgent ? /^\/api\/nodes\/([a-f0-9]{32})\//.exec(path)?.[1] : undefined;
+          if (node) {
+            const shared = rates.get(`\0agents ${node}`);
+            if (!shared || now - shared.at > 60_000) rates.set(`\0agents ${node}`, { count: 1, at: now });
+            else if (++shared.count > 30) return json(res, 429, { error: '이 컴퓨터로 보내는 에이전트의 요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+          }
         }
       }
       if (master && path.startsWith('/api/master')) {
