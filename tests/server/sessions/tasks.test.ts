@@ -30,7 +30,9 @@ async function setup(t: test.TestContext, options: { list?: Session[]; answers?:
   const answers = [...options.answers ?? [u('new', '', 'Voice playback fix', '원인 분석중')]];
   let history = options.history ?? [message('user', 'Voice does not play on the master'), message('tool', '', iso(-1_900), 'Bash'), message('assistant', 'Looking into the audio path.', iso(-1_500))];
   let now = options.startedAt ?? NOW - 10_000;
-  const dependencies: SessionTaskDependencies = { stateDir, sessions: () => list, history: async () => ({ messages: history, hasMore: false }), settleMs: 0, now: () => now,
+  /** Pages of history, when a test reads more than one. */
+  let pages: SessionTaskDependencies['history'] | undefined;
+  const dependencies: SessionTaskDependencies = { stateDir, sessions: () => list, history: (...args) => pages ? pages(...args) : Promise.resolve({ messages: history, hasMore: false }), settleMs: 0, now: () => now,
     model: async request => { requests.push(request); const answer = answers.shift() ?? u('continue', '', '', '구현중'); if (answer instanceof Error) throw answer; return answer; } };
   const tasks = new SessionTasks(dependencies);
   await tasks.start();
@@ -40,7 +42,7 @@ async function setup(t: test.TestContext, options: { list?: Session[]; answers?:
   tasks.on('change', () => changes++);
   /** Runs passes until nothing is left to do. */
   const settle = async () => { for (let i = 0; i < 6; i++) { tasks.changed(); await new Promise(resolve => setTimeout(resolve, 15)); } };
-  return { stateDir, tasks, list, requests, answers, settle, changes: () => changes, setHistory: (next: ChatMessage[]) => { history = next; }, setNow: (next: number) => { now = next; } };
+  return { stateDir, tasks, list, requests, answers, settle, changes: () => changes, setHistory: (next: ChatMessage[]) => { history = next; }, setNow: (next: number) => { now = next; }, setPages: (next: SessionTaskDependencies['history']) => { pages = next; } };
 }
 
 test('a finished turn of any conversation is summarized; helpers, joined computers and running turns are not', () => {
@@ -73,7 +75,8 @@ test('the same work moves its task on; different work adds a task; the current t
   await settle();
   const first = tasks.apply(list[0]).tasks![0];
   answers.push(u('continue', first.id, '', 'PR 리뷰중'));
-  setHistory([message('user', 'Open a PR', iso(-500)), message('assistant', 'Opened #12.', iso(-400))]);
+  setHistory([message('user', 'Voice does not play on the master', iso(-2_000)), message('assistant', 'Looking into the audio path.', iso(-1_500)),
+    message('user', 'Open a PR', iso(-500)), message('assistant', 'Opened #12.', iso(-400))]);
   list[0] = { ...list[0], messageCount: 6, lastMessage: 'Opened #12.' };
   await settle();
   let shown = tasks.apply(list[0]).tasks!;
@@ -106,16 +109,16 @@ test('turns that ended back to back on different work each get their task, the l
 });
 
 test('more than a page since the last summary is read back to it, page by page', async t => {
-  const { tasks, list, requests, settle, setHistory } = await setup(t);
+  const { list, requests, settle, setHistory, setPages } = await setup(t);
   await settle();
   const pages: Array<number | undefined> = [];
   const older = [message('user', 'ALREADY summarized', iso(-3_000)), message('user', 'EARLY request after the summary', iso(-900))];
   const latest = [message('assistant', 'LATE answer', iso(-100))];
   setHistory([]);
-  (tasks as unknown as { dependencies: { history: unknown } }).dependencies.history = async (_session: unknown, _limit: number, before?: number) => {
+  setPages(async (_session, _limit, before) => {
     pages.push(before);
     return before === undefined ? { messages: latest, hasMore: true, nextBefore: 7 } : { messages: older, hasMore: true, nextBefore: 3 };
-  };
+  });
   list[0] = { ...list[0], messageCount: 9, lastMessage: 'LATE answer' };
   await settle();
   assert.deepEqual(pages, [undefined, 7], 'reads back until it reaches what was summarized');
@@ -124,9 +127,9 @@ test('more than a page since the last summary is read back to it, page by page',
 });
 
 test('an empty history page with older pages behind it is read past', async t => {
-  const { tasks, list, requests, settle } = await setup(t);
-  (tasks as unknown as { dependencies: { history: unknown } }).dependencies.history = async (_session: unknown, _limit: number, before?: number) =>
-    before === undefined ? { messages: [], hasMore: true, nextBefore: 9 } : { messages: [message('user', 'BEHIND an empty page')], hasMore: false };
+  const { tasks, list, requests, settle, setPages } = await setup(t);
+  setPages(async (_session, _limit, before) =>
+    before === undefined ? { messages: [], hasMore: true, nextBefore: 9 } : { messages: [message('user', 'BEHIND an empty page')], hasMore: false });
   await settle();
   assert.equal(requests.length, 1);
   assert.match(requests[0].prompt, /BEHIND an empty page/);
@@ -267,4 +270,40 @@ let input = ''; process.stdin.on('data', chunk => input += chunk); process.stdin
   assert.ok(args.includes('--no-session-persistence'), 'no native conversation is saved');
   assert.deepEqual(args.slice(args.indexOf('--model'), args.indexOf('--model') + 2), ['--model', 'haiku']);
   assert.equal(args.includes('--effort'), false, 'thinking off passes no effort');
+});
+
+test('closing ends a summary underway instead of waiting for it, and saves nothing for that turn', { timeout: 10_000 }, async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-tasks-close-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  // Ended after the summaries started.
+  const list = [session('a', { lastCompletedAt: iso(1_000) })];
+  let started!: () => void;
+  const asked = new Promise<void>(resolve => { started = resolve; });
+  const tasks = new SessionTasks({ stateDir, sessions: () => list, history: async () => ({ messages: [message('user', 'hello')], hasMore: false }), settleMs: 0, now: () => NOW,
+    model: request => { started(); return new Promise((_, reject) => request.signal.addEventListener('abort', () => reject(new Error('aborted')))); } });
+  await tasks.start();
+  for (let i = 0; i < 3; i++) { tasks.changed(); await new Promise(resolve => setTimeout(resolve, 5)); }
+  await asked;
+  assert.equal(tasks.inFlight(), true);
+  const at = Date.now();
+  await tasks.close();
+  assert.ok(Date.now() - at < 1_000, 'close does not wait out the call');
+  assert.equal(tasks.apply(list[0]).tasks, undefined);
+});
+
+test('turns that need no model call do not count against the day', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-tasks-count-'));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const list = [session('a', { lastCompletedAt: iso(1_000) })];
+  let calls = 0;
+  const tasks = new SessionTasks({ stateDir, sessions: () => list, history: async () => ({ messages: [message('system', '')], hasMore: false }), settleMs: 0, now: () => NOW,
+    model: async () => { calls++; return u('new', '', 'T', 's'); } });
+  await tasks.start();
+  t.after(() => tasks.close());
+  for (let i = 0; i < 4; i++) { tasks.changed(); await new Promise(resolve => setTimeout(resolve, 15)); }
+  await tasks.flush();
+  assert.equal(calls, 0);
+  const saved = JSON.parse(await readFile(join(stateDir, 'session-tasks.json'), 'utf8'));
+  assert.equal(saved.calls.count, 0);
+  assert.ok(saved.sessions.a, 'the turn still counts as read');
 });

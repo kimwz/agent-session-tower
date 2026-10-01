@@ -18,6 +18,8 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { outcomeMark } from './outcomes.js';
 
 const FILE = 'session-tasks.json';
+/** Every task is kept, so the file may grow past the usual state-file limit before anything else would. */
+const MAX_FILE_BYTES = 64_000_000;
 /** A turn is summarized once its conversation has stayed the same this long, so its history has caught up. */
 const SETTLE_MS = 5_000;
 /** Turns that ended longer ago than this are left alone. */
@@ -149,6 +151,8 @@ export class SessionTasks extends EventEmitter {
   private closed = false;
   private calling = false;
   private writes: Promise<void> = Promise.resolve();
+  /** Ends a call underway when the worker closes: Tower's own summary, so nothing waits on it. */
+  private readonly abort = new AbortController();
 
   constructor(private readonly dependencies: SessionTaskDependencies) {
     super();
@@ -160,7 +164,7 @@ export class SessionTasks extends EventEmitter {
 
   async start(): Promise<void> {
     let saved: unknown;
-    try { saved = await readPrivateJson(this.path); }
+    try { saved = await readPrivateJson(this.path, MAX_FILE_BYTES); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         // A file this build cannot read is kept aside, never overwritten; summaries start over from new turns.
@@ -196,6 +200,8 @@ export class SessionTasks extends EventEmitter {
   async close(): Promise<void> {
     this.closed = true;
     this.clearTimers();
+    // A summary cut short is not saved, so the next worker asks again.
+    this.abort.abort();
     await this.running?.catch(() => {});
     await this.writes;
   }
@@ -242,11 +248,10 @@ export class SessionTasks extends EventEmitter {
     const due = this.due();
     for (const session of due) {
       if (this.closed || this.paused) return;
-      if (!this.claimCall()) { this.waitForNextDay(); return; }
       // The latest state: it may have started working again meanwhile.
       const latest = this.dependencies.sessions().find(item => item.id === session.id);
       if (!latest || !summarizable(latest) || outcomeMark(latest) !== outcomeMark(session)) continue;
-      await this.summarize(latest);
+      if (await this.summarize(latest) === 'limit') { this.waitForNextDay(); return; }
     }
     // More than one pass holds: the next one picks up the rest.
     if (due.length >= MOST) this.again = true;
@@ -260,7 +265,8 @@ export class SessionTasks extends EventEmitter {
     return true;
   }
 
-  private async summarize(session: Session): Promise<void> {
+  /** `limit` when the day's calls ran out before the model was asked. */
+  private async summarize(session: Session): Promise<'limit' | void> {
     const mark = outcomeMark(session);
     const saved = this.state.sessions[session.id];
     this.calling = true;
@@ -281,12 +287,15 @@ export class SessionTasks extends EventEmitter {
           : 'No tasks yet: this is the first summary, so start with a new task.',
         `${saved?.upTo ? 'Said since the last summary' : 'The conversation (latest part)'}:\n${read.text}`,
       ].join('\n\n');
+      // Counted only when the model is asked.
+      if (!this.claimCall()) return 'limit';
       const result = await this.dependencies.model({ ...await resolveModel(this.dependencies.stateDir, 'sessions.summarizer'), systemPrompt: SYSTEM, prompt,
-        schema: SCHEMA as unknown as Record<string, unknown>, signal: AbortSignal.timeout(CALL_LIMIT_MS) }, { timeoutMs: SUMMARY_TIMEOUT_MS });
+        schema: SCHEMA as unknown as Record<string, unknown>, signal: AbortSignal.any([this.abort.signal, AbortSignal.timeout(CALL_LIMIT_MS)]) }, { timeoutMs: SUMMARY_TIMEOUT_MS });
       const next = applySummary(tasks, result, new Date(this.now()).toISOString());
       this.failed.delete(session.id);
       this.remember(session.id, { mark: done, ...(upTo ? { upTo } : {}), tasks: next });
     } catch (error) {
+      if (this.closed) return;
       const failed = this.failed.get(session.id);
       const count = failed?.mark === mark ? failed.count + 1 : 1;
       this.failed.set(session.id, { mark, at: this.now(), count });
