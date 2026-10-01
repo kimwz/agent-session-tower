@@ -16,7 +16,9 @@ import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest
 import { isImageAttachment } from '../../shared/attachments.js';
 import { acceptedEncoding, compressedEventStream, isBuildAsset, sendBody, StaticCompression } from './compression.js';
 import { SseClient } from './sse-client.js';
-import { publicSnapshot } from './public-snapshot.js';
+import { publicSnapshot, scopedViews } from './public-snapshot.js';
+import { scopeFromBody, scopeFromParams } from '../../shared/session-scope.js';
+import { sessionActivityAt } from '../../shared/session-activity.js';
 import { SnapshotStream, type FrameFormat } from './snapshot-stream.js';
 import { APP_VERSION, HEALTH_APPLICATION_ID, REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
 import { assertWorkspace, listWorkspaceTree, readWorkspaceFile, saveWorkspaceFile, createWorkspaceDirectory, MAX_WORKSPACE_FILE_BYTES } from '../workspace-files.js';
@@ -145,6 +147,9 @@ export interface HttpOptions {
 const VOICE_REPORT = /^\/api\/master\/voice\/(presence|token|usage|request|activity|finished|played|off)$/;
 /** Suggestions follow the owner's typing; they change nothing, so they have their own budget apart from changes. */
 const SUGGESTION_PATH = '/api/auto-prompt-suggestions';
+/** Where a page changes which sessions its event stream holds; it only reads, so it costs none of the change budget. */
+const SCOPE_PATH = '/api/events/scope';
+const RESUME_CANDIDATES = 80;
 const SUGGESTIONS_PER_MINUTE = 60;
 const SUGGESTIONS_AT_ONCE = 4;
 const contentTypes: Record<string, string> = {
@@ -186,8 +191,10 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
   };
   const staticCompression = new StaticCompression();
   const snapshot = () => publicSnapshot(backend.snapshot());
-  const stream = new SnapshotStream(snapshot);
+  const stream = new SnapshotStream(snapshot, Date.now, undefined, scopedViews);
   const clients = new Set<SseClient>();
+  /** Event streams of pages that hold only some sessions, by the id each page was given to change its scope. */
+  const scopedStreams = new Map<string, SseClient>();
   const unsubscribe = backend.subscribe(() => {
     if (!scheduled) scheduled = setTimeout(() => { scheduled = undefined; stream.publish(); }, 200);
   });
@@ -305,7 +312,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         // Reading Tower state is not a mutation; only changes count against the request budget.
         const read = path.match(/^\/api\/(?:nodes\/[a-f0-9]{32}\/)?v1\/([a-z]+\.[a-zA-Z]+)$/)?.[1];
         const readOnly = read !== undefined && isOperationName(read) && !OPERATIONS[read].write;
-        if (!login && !readOnly && path !== SUGGESTION_PATH && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
+        if (!login && !readOnly && path !== SUGGESTION_PATH && path !== SCOPE_PATH && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
           // The master agent's own calls count apart, so they never use up the owner's budget (or the other way round).
           // The page where voice is on reports every few seconds, and turns voice off; each has a budget of its own,
           // so neither uses up the owner's changes and a flood of reports never keeps voice from turning off.
@@ -492,7 +499,10 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         return json(res, 200, auth!.overview());
       }
       if (req.method === 'GET' && path === '/api/bootstrap') return json(res, 200, { token });
-      if (req.method === 'GET' && path === '/api/snapshot') return json(res, 200, snapshot());
+      if (req.method === 'GET' && path === '/api/snapshot') {
+        const scope = scopeFromParams(url.searchParams);
+        return json(res, 200, scope ? scopedViews(snapshot())(scope) : snapshot());
+      }
       if (req.method === 'GET' && path === '/api/workspace/tree') {
         return json(res, 200, await listWorkspaceTree(url.searchParams.get('cwd'), url.searchParams.get('path') ?? '', backend.snapshot()));
       }
@@ -624,21 +634,42 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         const encoding = acceptedEncoding(req.headers['accept-encoding']);
         // no-transform keeps proxies such as Cloudflare from re-encoding or holding back frames.
         res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', 'Connection': 'keep-alive', 'X-Accel-Buffering': 'no', 'Vary': 'Accept-Encoding', ...(encoding ? { 'Content-Encoding': encoding } : {}) });
+        // A page that holds only some sessions is given an id with which it changes what it holds (SCOPE_PATH).
+        const scope = url.searchParams.get('patch') === '1' ? scopeFromParams(url.searchParams) : undefined;
+        const streamId = scope ? randomBytes(16).toString('hex') : undefined;
         const client = new SseClient(encoding ? compressedEventStream(res, encoding) : res, () => {
           clients.delete(client); stream.detach(client);
+          if (streamId) scopedStreams.delete(streamId);
           nodeClients.delete(client);
           for (const feed of nodeStreams.values()) feed.detach(client);
         });
         clients.add(client);
         if (!identity.local) trackStream(sessionId, res, () => client.end());
         // Pages that predate patches omit the parameter and keep receiving complete snapshots.
-        stream.attach(client, url.searchParams.get('patch') === '1', 'retry: 2000\n\n');
+        if (streamId) scopedStreams.set(streamId, client);
+        stream.attach(client, url.searchParams.get('patch') === '1', `retry: 2000\n\n${streamId ? `event: stream\ndata: ${JSON.stringify({ id: streamId })}\n\n` : ''}`, scope);
         // Pages that know about joined computers ask for them; others see only this Tower, as before.
         if (nodes && url.searchParams.get('nodes') === '1' && url.searchParams.get('patch') === '1') {
           nodeClients.add(client);
           for (const id of nodes.ids()) nodeChanged(id);
         }
         return;
+      }
+      if (req.method === 'POST' && path === SCOPE_PATH) {
+        const body = await readJson(req, 4 * 1024) as { stream?: unknown; scope?: unknown };
+        const client = typeof body.stream === 'string' ? scopedStreams.get(body.stream) : undefined;
+        if (!client || !stream.setScope(client, scopeFromBody(body.scope))) return json(res, 404, { error: '세션 목록 연결을 찾을 수 없습니다.' });
+        return json(res, 200, { ok: true });
+      }
+      if (req.method === 'GET' && path === '/api/sessions/resume-candidates') {
+        // What a trigger may continue: the provider's resumable conversations, newest first, and the one it names.
+        const provider = url.searchParams.get('provider');
+        const include = url.searchParams.get('include');
+        const sessions = backend.snapshot().sessions;
+        const candidates = sessions.filter(session => session.provider === provider && !session.isSubagent && !session.master && session.resumable)
+          .sort((a, b) => Date.parse(sessionActivityAt(b)) - Date.parse(sessionActivityAt(a))).slice(0, RESUME_CANDIDATES);
+        const named = include && !candidates.some(session => session.id === include) ? sessions.find(session => session.id === include) : undefined;
+        return json(res, 200, { sessions: [...candidates, ...(named ? [named] : [])].map(publicSession) });
       }
       if (req.method === 'POST' && path === '/api/sessions') {
         const input = parseCreateSession(await readJson(req));

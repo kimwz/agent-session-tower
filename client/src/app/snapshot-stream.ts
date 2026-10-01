@@ -1,5 +1,6 @@
 import type { Snapshot } from '../../../shared/types';
 import { applySnapshotPatch, type SnapshotPatch } from '../../../shared/snapshot-patch';
+import { sameScope, scopeParams, type SessionScope } from '../../../shared/session-scope';
 
 /** How long a write from outside the event stream may stand without a confirming stream frame. */
 export const RECONCILE_MS = 3000;
@@ -13,6 +14,8 @@ const WATCHDOG_MS = 5000;
 export const WAKE_STALE_MS = 20_000;
 /** Reconnects the browser gave up on are retried with a growing wait, up to this. */
 export const MAX_RETRY_MS = 15_000;
+/** A burst of scope changes (typing a filter, clicking through sessions) is sent as one. */
+export const RESCOPE_MS = 150;
 /** `EventSource.CLOSED`: the browser will not reconnect on its own. */
 const CLOSED = 2;
 
@@ -27,7 +30,7 @@ const realTimers: Timers = {
   clearTimeout: handle => globalThis.clearTimeout(handle as ReturnType<typeof setTimeout>),
   now: () => Date.now(),
 };
-export interface SnapshotRequest { readonly id: number; readonly frames: number }
+export interface SnapshotRequest { readonly id: number; readonly frames: number; readonly scopes: number }
 
 /**
  * The event stream is the only authority for the displayed snapshot. The server broadcasts every
@@ -40,6 +43,7 @@ export class SnapshotStore {
   private sequence?: number;
   private frames = 0;
   private requests = 0;
+  private scopes = 0;
   private connected = false;
   private reconcile?: unknown;
 
@@ -67,11 +71,14 @@ export class SnapshotStore {
     if (!connected) this.stopReconcile();
   }
 
-  beginRequest(): SnapshotRequest { return { id: ++this.requests, frames: this.frames }; }
+  beginRequest(): SnapshotRequest { return { id: ++this.requests, frames: this.frames, scopes: this.scopes }; }
 
-  /** Applies an HTTP snapshot only if it is the newest request and no stream frame arrived meanwhile. */
+  /** The page now needs other sessions: an HTTP snapshot asked for before holds the old ones. */
+  scopeChanged(): void { this.scopes++; }
+
+  /** Applies an HTTP snapshot only if it is the newest request and no stream frame or scope change came meanwhile. */
   response(request: SnapshotRequest, snapshot: Snapshot): void {
-    if (request.id !== this.requests || request.frames !== this.frames) return;
+    if (request.id !== this.requests || request.frames !== this.frames || request.scopes !== this.scopes) return;
     this.provisional(snapshot);
   }
 
@@ -145,7 +152,7 @@ export class NodeSnapshotStore {
 }
 
 export interface SnapshotEventSource {
-  addEventListener(type: 'snapshot' | 'patch' | 'node' | 'heartbeat', listener: (event: MessageEvent<string>) => void): void;
+  addEventListener(type: 'snapshot' | 'patch' | 'node' | 'heartbeat' | 'stream', listener: (event: MessageEvent<string>) => void): void;
   readonly readyState: number;
   onopen: ((event: Event) => void) | null;
   onerror: ((event: Event) => void) | null;
@@ -160,8 +167,18 @@ export interface SnapshotStreamHandlers {
   onUnreadable(): void;
 }
 
+/** A page that holds only some sessions: which ones it needs, and how it tells an open stream. */
+export interface StreamScoping {
+  /** Read at every connection and change. */
+  current(): SessionScope;
+  /** Changes the scope of the stream `id`; false when the server does not know it. */
+  send(id: string, scope: SessionScope): Promise<boolean>;
+}
+
 export interface SnapshotConnection {
   (): void;
+  /** The page needs other sessions now (`StreamScoping.current`). */
+  rescope(): void;
   /**
    * The page became usable again (shown, restored or back online). A mobile browser suspends a hidden page and
    * often drops its connection without telling it, so a connection that has been quiet reconnects at once.
@@ -175,8 +192,13 @@ export interface SnapshotConnection {
  * (a proxy answering in its place, or a server restart), one that went silent, and one a suspended page lost.
  */
 export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotStreamHandlers,
-  open: (url: string) => SnapshotEventSource = url => new EventSource(url), timers: Timers = realTimers, nodes?: NodeSnapshotStore): SnapshotConnection {
+  open: (url: string) => SnapshotEventSource = url => new EventSource(url), timers: Timers = realTimers, nodes?: NodeSnapshotStore, scoping?: StreamScoping): SnapshotConnection {
   let source: SnapshotEventSource | undefined;
+  /** The open stream's id for scope changes, the scope the server holds for it, and whether a change is on its way. */
+  let stream: { source: SnapshotEventSource; id: string; scope: SessionScope; sending: boolean } | undefined;
+  /** The scope in the URL of the connection being opened. */
+  let requested: SessionScope | undefined;
+  let rescopeTimer: unknown;
   let closed = false;
   let lastResync = -Infinity;
   let lastFrame = timers.now();
@@ -186,7 +208,15 @@ export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotSt
   const heard = () => { lastFrame = timers.now(); };
   const connect = () => {
     heard();
-    const current = source = open(nodes ? '/api/events?patch=1&nodes=1' : '/api/events?patch=1');
+    requested = scoping?.current();
+    stream = undefined;
+    const current = source = open(`${nodes ? '/api/events?patch=1&nodes=1' : '/api/events?patch=1'}${requested ? `&${scopeParams(requested)}` : ''}`);
+    current.addEventListener('stream', event => {
+      if (current !== source || !requested) return;
+      try { stream = { source: current, id: (JSON.parse(event.data) as { id: string }).id, scope: requested, sending: false }; } catch { return; }
+      // The scope may have changed while this connection was opening.
+      sendScope();
+    });
     current.addEventListener('snapshot', event => {
       if (current !== source) return;
       heard();
@@ -218,8 +248,27 @@ export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotSt
       store.setConnected(false);
       const retrying = current.readyState === CLOSED;
       handlers.onError(retrying);
-      if (retrying) restart(Math.min(MAX_RETRY_MS, 1000 * 2 ** failures++));
+      // A scoped stream never lets the browser retry: the browser would reopen the first URL with the scope it held then.
+      if (retrying || scoping) restart(Math.min(MAX_RETRY_MS, 1000 * 2 ** failures++));
     };
+  };
+  /**
+   * Tells the open stream the current scope, one change at a time so the server never takes them out of order; a
+   * change made meanwhile follows. A stream the server no longer knows is replaced by one opened with the scope.
+   */
+  const sendScope = () => {
+    const open = stream;
+    if (!scoping || !open || open.source !== source || open.sending) return;
+    const scope = scoping.current();
+    if (sameScope(scope, open.scope)) return;
+    open.sending = true;
+    void scoping.send(open.id, scope).catch(() => false).then(taken => {
+      open.sending = false;
+      if (stream !== open || source !== open.source) return;
+      if (!taken) { restart(0); return; }
+      open.scope = scope;
+      sendScope();
+    });
   };
   // A new connection always begins with a complete snapshot.
   const restart = (wait: number) => {
@@ -251,12 +300,19 @@ export function connectSnapshotStream(store: SnapshotStore, handlers: SnapshotSt
   const disconnect = () => {
     closed = true;
     if (restartTimer !== undefined) timers.clearTimeout(restartTimer);
+    if (rescopeTimer !== undefined) timers.clearTimeout(rescopeTimer);
     if (watchdog !== undefined) timers.clearTimeout(watchdog);
     source?.close();
     source = undefined;
     store.dispose();
   };
   return Object.assign(disconnect, {
+    rescope: () => {
+      if (closed) return;
+      store.scopeChanged();
+      if (rescopeTimer !== undefined) timers.clearTimeout(rescopeTimer);
+      rescopeTimer = timers.setTimeout(() => { rescopeTimer = undefined; sendScope(); }, RESCOPE_MS);
+    },
     wake: () => {
       if (closed) return;
       const quiet = timers.now() - lastFrame > WAKE_STALE_MS;

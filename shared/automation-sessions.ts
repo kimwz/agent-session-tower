@@ -31,7 +31,7 @@ export function finishedAutomationSessionIds(workflows: SlackWorkflow[], session
     }
   }
   const protectedIds = new Set(sessions.filter(session => aliases(session).some(id => active.has(id) || coordinators.has(id))
-    || session.status === 'working' || session.activeProcess || session.creationPending).map(session => session.id));
+    || session.status === 'working' || session.activeProcess || session.creationPending || session.familyActive).map(session => session.id));
   for (const id of [...protectedIds]) {
     const visited = new Set<string>();
     for (let ancestor = parents.get(id); ancestor && !visited.has(ancestor); ancestor = parents.get(ancestor)) {

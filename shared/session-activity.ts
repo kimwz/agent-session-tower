@@ -21,3 +21,11 @@ export function sortSessions(a: Session, b: Session) {
 export function sessionStaysShown(session: Pick<Session, 'status' | 'outcome'>) {
   return session.status !== 'working' && session.outcome !== undefined && session.outcome !== 'done';
 }
+
+/**
+ * Whether the session list shows an open main session with the time window starting at `cutoff`. The server sends a
+ * page exactly the sessions this rule may show (shared/session-scope.ts), so the two never disagree.
+ */
+export function listShows(session: Session, cutoff: number): boolean {
+  return session.status === 'working' || Boolean(session.activeProcess) || sessionStaysShown(session) || Date.parse(sessionActivityAt(session)) >= cutoff;
+}

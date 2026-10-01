@@ -15,6 +15,8 @@ const NOT_FOR_AGENTS = new Map<string, string>([
   ['/api/auth/login', 'sign-in of a browser'],
   ['/api/auth/logout', 'sign-out of a browser'],
   ['/api/events', 'the live stream; tower_query reads it'],
+  ['/api/events/scope', 'a page changing which sessions its live stream holds'],
+  ['/api/sessions/resume-candidates', 'the trigger editor\'s session choices; sessions.list serves agents'],
   ['/api/master/events', 'the master page\'s live stream'],
   ['/api/workspace/terminals/{}/events', 'a terminal\'s live stream; terminal_read reads it'],
   ['/api/master/presence', 'a page saying it shows the master'],

@@ -20,8 +20,17 @@ export function parseReadState(value: string | null): ReadState {
   } catch { return {}; }
 }
 
+/**
+ * This computer's sessions the page does not hold are never pruned, so the marks are bounded instead: a mark
+ * moves to the end when written, and the oldest written go first.
+ */
+export const READ_STATE_LIMIT = 3000;
+
 export function acknowledgeSession(state: ReadState, id: string, revision: string): ReadState {
-  return state[id] === revision ? state : { ...state, [id]: revision };
+  if (state[id] === revision) return state;
+  const { [id]: _previous, ...rest } = state;
+  const entries = Object.entries(rest);
+  return Object.fromEntries([...entries.slice(Math.max(0, entries.length - READ_STATE_LIMIT + 1)), [id, revision]]);
 }
 
 /** Drops read marks of sessions that are gone; `keep` spares those whose computer has not been heard from yet. */

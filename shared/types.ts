@@ -1,6 +1,7 @@
 import type { AutoUpdateStatus, RemoteNode } from './link.js';
 import type { RepositoryStatus } from './repositories.js';
 import type { TriggerOverview } from './triggers.js';
+import type { SessionScope, SessionSummary } from './session-scope.js';
 export type Provider = 'claude' | 'codex';
 /** Who reviews Codex approval requests. Absent keeps Codex's own configured reviewer. */
 export type CodexApprovalsReviewer = 'user' | 'auto_review';
@@ -58,6 +59,11 @@ export interface Session {
   outcome?: SessionOutcome;
   /** What the conversation worked on, task by task, oldest first; summarized after its turns (server/sessions/tasks.ts). */
   tasks?: SessionTask[];
+  /**
+   * Only in a page's scoped view (shared/session-scope.ts), on a family root whose other members are not sent:
+   * one of them is working or has a turn running or queued.
+   */
+  familyActive?: boolean;
 }
 /** A feature-level unit of work in a conversation and the stage it reached. The current one is the latest updated. */
 export interface SessionTask { id: string; title: string; stage: string; startedAt: string; updatedAt: string }
@@ -396,4 +402,8 @@ export interface Snapshot {
   autoUpdate?: AutoUpdateStatus;
   /** CPU, memory and disk of the computer running this Tower. */
   system?: SystemStatus;
+  /** Only in a page's scoped view: which sessions it holds (shared/session-scope.ts). */
+  sessionScope?: SessionScope;
+  /** Only in a page's scoped view: what the page shows about all sessions, including those it was not sent. */
+  sessionSummary?: SessionSummary;
 }

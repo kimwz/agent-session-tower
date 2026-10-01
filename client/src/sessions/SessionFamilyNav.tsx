@@ -2,7 +2,7 @@ import { translate as t, useI18n } from '../i18n/i18n';
 import { memo, useEffect, useMemo, useRef } from 'react';
 import { GitBranch } from 'lucide-react';
 import type { Session } from '../../../shared/types';
-import { getSessionFamily } from './session-family';
+import { getSessionFamily } from '../../../shared/session-family';
 import { sessionTitle, statusLabels } from '../common/lib';
 
 let pendingNavigationFocus: string | undefined;

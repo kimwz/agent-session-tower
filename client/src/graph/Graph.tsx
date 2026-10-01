@@ -31,7 +31,7 @@ type GraphProps = { slackUnreadIds?: ReadonlySet<string>; slack?: SlackPublicSta
   /** The list of joined computers is final; until then nothing saved for one of them is forgotten. */
   hostsComplete?: boolean;
   /** Every joined computer, including those the computer filter leaves off the canvas. */
-  allHosts?: Host[]; sessions: Session[]; allSessions?: Session[]; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string, draft?: SessionDraft) => void; onAutoPrompt: (cwd?: string, node?: string) => void; repositories?: RepositoryStatus[]; onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; onIssue?: (cwd: string) => void; emptyState?: ReactNode };
+  allHosts?: Host[]; sessions: Session[]; projectFolders?: ReadonlyArray<Pick<Session, 'cwd' | 'node' | 'project'>>; sessionsReady?: boolean; unreadIds?: ReadonlySet<string>; selectedId: string | null; hostname: string; onSelect: (id: string) => void; onCanvasClick?: () => void; filterKey: string; groups: ProjectGroup[]; visiblePins: ProjectGroup[]; groupSaving: ReadonlySet<string>; groupErrors: Readonly<Record<string, string>>; groupActionsDisabled: boolean; onGroupUpdate: (patch: ProjectGroupPatch) => Promise<boolean>; onGroupCreate: (cwd: string, draft?: SessionDraft) => void; onAutoPrompt: (cwd?: string, node?: string) => void; repositories?: RepositoryStatus[]; onRepositoryAction?: (cwd: string, action: RepositoryAction) => Promise<string | undefined>; onIssue?: (cwd: string) => void; emptyState?: ReactNode };
 
 const noEvents: TriggerEvent[] = [];
 
@@ -46,7 +46,7 @@ function viewportTransitionDuration() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 280;
 }
 
-function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, hosts, hostsComplete = true, allHosts, sessions, allSessions = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, onIssue, emptyState }: GraphProps) {
+function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, triggerOverview, triggerEvents = noEvents, triggerUnreadIds, selectedTriggerEventId, onSelectTriggerEvent, triggerHasMore = false, onMoreTriggers, token = '', providers, hosts, hostsComplete = true, allHosts, sessions, projectFolders = sessions, sessionsReady = true, unreadIds, selectedId, hostname, onSelect, onCanvasClick, filterKey, groups, visiblePins, groupSaving, groupErrors, groupActionsDisabled, onGroupUpdate, onGroupCreate, onAutoPrompt, repositories, onRepositoryAction, onIssue, emptyState }: GraphProps) {
   const { language } = useI18n();
   const { fitView, zoomIn, zoomOut, getViewport, setViewport } = useReactFlow();
   const canvas = useRef<HTMLDivElement>(null);
@@ -129,8 +129,8 @@ function Canvas({ slackUnreadIds, slack, selectedSlackId, onSelectSlack, trigger
     const grid = projectGrid(members.length, projectColumns(columns, id), minimumProjectWidths.get(id));
     return { id, width: grid.width, height: grid.height };
   }), [grouped, columns, minimumProjectWidths]);
-  // Until every session has been read, no saved folder is forgotten.
-  const liveProjects = useMemo(() => sessionsReady ? new Set([...allSessions.map(session => graphProjectId(graphProjectKey(session))), ...retainedGroups.map(group => graphProjectId(group.cwd))]) : undefined, [allSessions, sessionsReady, retainedGroups]);
+  // Until every session has been read, no saved folder is forgotten; folders of open sessions this page does not hold count too.
+  const liveProjects = useMemo(() => sessionsReady ? new Set([...projectFolders.map(folder => graphProjectId(graphProjectKey(folder))), ...retainedGroups.map(group => graphProjectId(group.cwd))]) : undefined, [projectFolders, sessionsReady, retainedGroups]);
   const machines = useMemo<Host[]>(() => hosts?.length ? hosts : [{ name: hostname, status: 'local', live: true, canWork: true, workspace: true, known: true, providers }], [hosts, hostname, providers]);
   // A computer this page has not heard from yet keeps its saved card and folder places until it has.
   const unknownNodes = useMemo(() => new Set((allHosts ?? machines).filter(host => host.node && !host.known).map(host => host.node!)), [allHosts, machines]);

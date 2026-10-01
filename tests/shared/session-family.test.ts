@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import type { Session } from '../../../shared/types.js';
-import { getMainSessionId, getMainSessions, getSessionFamily } from '../../../client/src/sessions/session-family.js';
-import { sessionActivityAt, sortSessions } from '../../../client/src/common/lib.js';
-import { graphSessionGroups } from '../../../client/src/graph/graph-layout.js';
+import type { Session } from '../../shared/types.js';
+import { getMainSessionId, getMainSessions, getSessionFamily } from '../../shared/session-family.js';
+import { sessionActivityAt, sortSessions } from '../../client/src/common/lib.js';
+import { graphSessionGroups } from '../../client/src/graph/graph-layout.js';
 
 function session(id: string, extra: Partial<Session> = {}): Session {
   return {

@@ -30,12 +30,13 @@ export interface SnapshotIndex {
   fields: Map<keyof Snapshot, string>;
 }
 
-export function indexSnapshot(snapshot: Snapshot): SnapshotIndex {
+/** `serialized` lets snapshots that share items serialize each one once. */
+export function indexSnapshot(snapshot: Snapshot, serialized?: WeakMap<object, string>): SnapshotIndex {
   const index: SnapshotIndex = { keyed: {}, fields: new Map() };
   for (const [key, value] of Object.entries(snapshot) as [keyof Snapshot, unknown][]) {
     // The broadcast time alone is not a change.
     if (value === undefined || key === 'updatedAt') continue;
-    const keyed = (KEYED as readonly string[]).includes(key) ? keyedIndex(value) : undefined;
+    const keyed = (KEYED as readonly string[]).includes(key) ? keyedIndex(value, serialized) : undefined;
     if (keyed) index.keyed[key as KeyedName] = keyed;
     else index.fields.set(key, JSON.stringify(value));
   }
@@ -43,14 +44,16 @@ export function indexSnapshot(snapshot: Snapshot): SnapshotIndex {
 }
 
 /** A collection with missing or repeated ids is compared and sent whole. */
-function keyedIndex(value: unknown): KeyedIndex | undefined {
+function keyedIndex(value: unknown, serialized?: WeakMap<object, string>): KeyedIndex | undefined {
   if (!Array.isArray(value)) return undefined;
   const index: KeyedIndex = { ids: [], json: new Map(), items: new Map() };
   for (const item of value as Item[]) {
     if (!item || typeof item.id !== 'string' || index.items.has(item.id)) return undefined;
     index.ids.push(item.id);
     index.items.set(item.id, item);
-    index.json.set(item.id, JSON.stringify(item));
+    let json = serialized?.get(item);
+    if (json === undefined) { json = JSON.stringify(item); serialized?.set(item, json); }
+    index.json.set(item.id, json);
   }
   return index;
 }
