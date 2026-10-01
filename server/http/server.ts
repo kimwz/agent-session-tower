@@ -129,12 +129,12 @@ export interface HttpOptions {
     /** `load` reads the state of the computer the draft is for, as it is right now: this one or a joined one. */
     suggestAutoPrompt(input: AutoPromptSuggestionRequest, load: () => Promise<Snapshot>, signal: AbortSignal): Promise<AutoPromptSuggestionResponse>;
   };
+  /** Tower's tools for the owner's own agents on this computer, as MCP over HTTP at `/mcp` (see owner-mcp). */
+  localMcp?: { answer(body: unknown): Promise<unknown> };
   /**
    * The master agent's `/api/master/*` routes, answered after the usual sign-in and page-token checks. Its own calls
    * to this API carry `callerSecret`, which gives them a request budget apart from the owner's pages.
    */
-  /** Tower's tools for the owner's own agents on this computer, as MCP over HTTP at `/mcp` (see owner-mcp). */
-  localMcp?: { answer(body: unknown): Promise<unknown> };
   master?: {
     callerSecret: string;
     handle(req: IncomingMessage, res: ServerResponse, path: string, url: URL, identity: { local: boolean }): Promise<boolean>;
@@ -277,7 +277,13 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (!localMcp) return json(res, 503, { error: 'MCP를 사용할 수 없습니다.' });
         if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
         if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON 요청이 필요합니다.' });
-        const reply = await localMcp.answer(await readJson(req, 1_000_000));
+        let body: Record<string, unknown>;
+        try { body = await readJson(req, 1_000_000); }
+        catch (error) {
+          if ((error as { statusCode?: number }).statusCode !== 400) throw error;
+          return json(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Invalid JSON (one message per request)' } });
+        }
+        const reply = await localMcp.answer(body);
         if (reply === undefined) { res.writeHead(202).end(); return; }
         return json(res, 200, reply);
       }

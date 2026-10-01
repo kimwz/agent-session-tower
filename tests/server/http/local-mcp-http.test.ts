@@ -34,6 +34,9 @@ test('an agent reaching this computer\'s localhost (an SSH tunnel too) uses Towe
   assert.equal((await rpc({ jsonrpc: '2.0', method: 'notifications/initialized' })).status, 202, 'a notification has no answer');
   assert.equal((await rpc({ jsonrpc: '2.0', id: 7, result: {} })).status, 202, 'nor a response');
   assert.equal((await rpc({ jsonrpc: '2.0', id: 8, error: { code: 1, message: 'x' } })).status, 202);
+  const broken = await fetch(`${new URL(init.url).origin}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"jsonrpc":' });
+  assert.equal(broken.status, 400);
+  assert.equal((await broken.json()).error.code, -32700, 'a body that is not one JSON message gets a JSON-RPC parse error');
   const list = await (await rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' })).json();
   assert.deepEqual(list.result.tools.map((tool: { name: string }) => tool.name), ['tower_api', 'tower_query', 'session_read', 'terminal_read', 'tower_guide']);
   const call = await (await rpc({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'tower_api', arguments: { method: 'GET', path: '/api/snapshot' } } })).json();
@@ -54,6 +57,7 @@ test('/mcp is for this computer only, and never for a browser page', async t => 
   assert.equal((await rpc(list, { 'Sec-Fetch-Site': 'cross-site' })).status, 403);
   assert.equal((await fetch(`${base}/mcp`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify(list) })).status, 415, 'a form-like body a page could send without asking');
   assert.equal((await fetch(`${base}/mcp`)).status, 405, 'no server-sent stream');
+  assert.equal((await fetch(`${base}/mcp`, { method: 'DELETE' })).status, 405, 'no sessions to end');
   const rebound = await new Promise<number>((resolve, reject) => {
     const url = new URL(`${base}/mcp`);
     const req = request({ host: url.hostname, port: url.port, path: '/mcp', method: 'POST', headers: { Host: 'evil.example', 'Content-Type': 'application/json' } }, res => { res.resume(); resolve(res.statusCode!); });
