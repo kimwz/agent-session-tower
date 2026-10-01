@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { pageSummary } from '../../../client/src/app/session-summary.js';
+import { graphProjectKey } from '../../../client/src/graph/graph-layout.js';
 import type { Session } from '../../../shared/types.js';
 import type { SessionSummary } from '../../../shared/session-scope.js';
 
@@ -26,4 +27,11 @@ test('without a summary every held session is counted, as before', () => {
   assert.deepEqual(summary.counts, { open: 1, closed: 1, working: 1, completed: 0 });
   assert.equal(summary.canvasHistory, false);
   assert.deepEqual(summary.uncounted.map(item => item.id), ['a']);
+});
+
+test('a folderless session outside the time window keeps its canvas frame known, under the key the canvas uses', () => {
+  const local: SessionSummary = { counts: { open: 1, closed: 0, working: 0, completed: 1 }, canvasHistory: true, projects: [{ cwd: '', project: 'orphan', open: true }] };
+  const summary = pageSummary(local, []);
+  assert.deepEqual(summary.openFolders.map(graphProjectKey), [graphProjectKey(session('orphan', { cwd: '', project: 'orphan' }))]);
+  assert.deepEqual(summary.folders.filter(folder => folder.cwd), [], 'folder choices still skip it');
 });

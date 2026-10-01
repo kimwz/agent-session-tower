@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { Provider, Session } from '../../../shared/types';
+import type { TriggerTarget } from '../../../shared/triggers';
 import { api } from '../common/lib';
 
 const LIMIT = 80;
@@ -7,6 +8,16 @@ const LIMIT = 80;
 /** The conversations of `provider` a trigger can continue, newest first; `include` keeps a trigger's saved target among them. */
 export function resumeCandidates(sessions: readonly Session[], provider: Provider): Session[] {
   return sessions.filter(session => session.provider === provider && !session.isSubagent && !session.master && session.resumable).slice(0, LIMIT);
+}
+
+/** A session target chosen before the candidates arrived names none yet; it takes the first once they do. */
+export function filledSessionTarget(target: TriggerTarget, candidates: readonly Session[]): TriggerTarget | undefined {
+  return target.mode === 'session' && !target.sessionId && candidates[0] ? { ...target, sessionId: candidates[0].id } : undefined;
+}
+
+/** What a page offers from the server's answer: the chosen provider's only, so an answer for the other one is never offered. */
+export function offeredCandidates(loaded: readonly Session[], provider: Provider): Session[] {
+  return loaded.filter(session => session.provider === provider);
 }
 
 /**
@@ -23,7 +34,6 @@ export function useResumeCandidates(provider: Provider, include: string | undefi
     return () => { live = false; };
   }, [provider, include, sessions]);
   if (sessions) return resumeCandidates(sessions, provider);
-  // The server already chose them, with the saved target after the newest; until the answer for a newly chosen
-  // provider arrives, the other provider's are not offered.
-  return loaded.filter(session => session.provider === provider);
+  // The server already chose them, with the saved target after the newest.
+  return offeredCandidates(loaded, provider);
 }

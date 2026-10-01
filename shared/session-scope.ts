@@ -1,5 +1,5 @@
 import { finishedAutomationSessionIds } from './automation-sessions.js';
-import { sessionActivityAt, sessionStaysShown } from './session-activity.js';
+import { listShows } from './session-activity.js';
 import { familyIndex } from './session-family.js';
 import type { AutoPromptJob, Run, Session, Snapshot } from './types.js';
 
@@ -19,7 +19,7 @@ export interface SessionScope {
 /** What a page shows about all of this computer's sessions, including those it was not sent. */
 export interface SessionSummary {
   counts: { open: number; closed: number; working: number; completed: number };
-  /** Every folder a main session ran in, with its project label; `open` when an open one did. */
+  /** Every folder a main session ran in, with its project label; `open` when an open one did. A session with no folder is listed by project, as the canvas groups it. */
   projects: Array<{ cwd: string; project: string; open: boolean }>;
   /** Some open main session would be on the canvas with no time filter. */
   canvasHistory: boolean;
@@ -116,8 +116,8 @@ export function sessionSelector(snapshot: Pick<Snapshot, 'sessions' | 'runs' | '
     const kept = new Set(always);
     const cutoff = scope.days === undefined ? -Infinity : now - scope.days * 86_400_000;
     for (const session of mains) {
-      const shown = session.closed ? scope.closed
-        : session.status === 'working' || session.activeProcess || session.creationPending || sessionStaysShown(session) || Date.parse(sessionActivityAt(session)) >= cutoff;
+      // A conversation still being created is sent too: its first turn is about to make it shown.
+      const shown = session.closed ? scope.closed : session.creationPending || listShows(session, cutoff);
       if (shown) kept.add(session.id);
     }
     const focused = scope.focus ? aliases.get(scope.focus) : undefined;
@@ -136,11 +136,12 @@ export function sessionSelector(snapshot: Pick<Snapshot, 'sessions' | 'runs' | '
 export function sessionSummary(sessions: Session[], runs: Run[]): SessionSummary {
   const { roots } = familyIndex(sessions);
   const counts = { open: 0, closed: 0, working: 0, completed: 0 };
-  const projects = new Map<string, { project: string; open: boolean }>();
+  const projects = new Map<string, { cwd: string; project: string; open: boolean }>();
   const canvas: Session[] = [];
   for (const session of sessions) {
     if (roots.get(session.id) !== session.id || session.launchedByAgent || session.master) continue;
-    if (session.cwd) projects.set(session.cwd, { project: session.project, open: !session.closed || projects.get(session.cwd)?.open === true });
+    const key = session.cwd || `\0${session.project}`;
+    projects.set(key, { cwd: session.cwd, project: session.project, open: !session.closed || projects.get(key)?.open === true });
     if (session.closed) { counts.closed++; continue; }
     counts.open++;
     if (session.status === 'working') counts.working++;
@@ -148,7 +149,10 @@ export function sessionSummary(sessions: Session[], runs: Run[]): SessionSummary
     if (!temporaryFolder(session.cwd)) canvas.push(session);
   }
   // Only a session a trigger started can leave the canvas when finished; Slack's delegated work is not known here.
-  const canvasHistory = canvas.some(session => session.launchedBy?.kind !== 'trigger')
-    || (canvas.length > 0 && (finished => canvas.some(session => !finished.has(session.id)))(finishedAutomationSessionIds([], sessions, runs)));
-  return { counts, projects: [...projects].map(([cwd, folder]) => ({ cwd, ...folder })), canvasHistory };
+  let canvasHistory = canvas.some(session => session.launchedBy?.kind !== 'trigger');
+  if (!canvasHistory && canvas.length) {
+    const finished = finishedAutomationSessionIds([], sessions, runs);
+    canvasHistory = canvas.some(session => !finished.has(session.id));
+  }
+  return { counts, projects: [...projects.values()], canvasHistory };
 }

@@ -100,3 +100,8 @@ test('canvas history leaves out temporary folders and finished trigger sessions,
   assert.equal(sessionSummary([session('t', { launchedBy: trigger }), session('s', { isSubagent: true, parentId: 't', status: 'working' })], []).canvasHistory, true);
   assert.equal(sessionSummary([session('t', { launchedBy: trigger })], [run('t', 'queued')]).canvasHistory, true);
 });
+
+test('a session with no folder is listed by project, as the canvas groups it, and projects stay apart', () => {
+  const summary = sessionSummary([session('a', { cwd: '', project: 'orphan', lastCompletedAt: hoursAgo(500) }), session('b', { cwd: '', project: 'other', closed: true }), session('c', { cwd: '', project: 'orphan' })], []);
+  assert.deepEqual(summary.projects, [{ cwd: '', project: 'orphan', open: true }, { cwd: '', project: 'other', open: false }]);
+});
