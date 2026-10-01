@@ -696,9 +696,9 @@
 .chat-images { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 10px; }
 .chat-images .chat-image { min-width: 0; }
 
-/* The task the conversation works on now, under its title; opened, every task it worked on, newest first. */
+/* The task the conversation works on now, above the message box; opened, every task it worked on above it, newest lowest. */
 .session-tasks {
-  margin-top:13px;
+  margin-bottom:10px;
   border:1px solid #2a3b53;
   border-radius:9px;
   background:linear-gradient(180deg,#172335,#141f2e);
@@ -783,9 +783,12 @@
 .session-tasks-list {
   list-style:none;
   margin:0;
-  padding:6px 12px 10px 14px;
-  border-top:1px solid #26364c;
-  max-height:min(40vh,360px);
+  padding:10px 12px 6px 14px;
+  border-bottom:1px solid #26364c;
+  /* Newest first in the page, shown lowest beside the current line; scrolled there from the start. */
+  display:flex;
+  flex-direction:column-reverse;
+  max-height:min(34vh,300px);
   overflow-y:auto;
   overscroll-behavior:contain
 }
@@ -795,8 +798,8 @@
   gap:11px;
   padding:7px 0
 }
-/* The line that joins the tasks, through each task's dot. */
-.session-task:not(:last-child)::after {
+/* The line that joins the tasks, through each task's dot down to the newer one below. */
+.session-task:not(:first-child)::after {
   content:'';
   position:absolute;
   left:4px;
@@ -847,4 +850,66 @@
 .session-task-now {
   color:#9fd8c6;
   font-weight:560
+}
+
+/* A session's latest tasks, floating beside its row in the session list while the pointer rests on it. */
+.session-tasks-peek {
+  position:fixed;
+  z-index:1000;
+  pointer-events:none;
+  padding:11px 13px 12px;
+  border:1px solid #3a5070;
+  border-radius:10px;
+  background:#152335f5;
+  backdrop-filter:blur(6px);
+  box-shadow:0 12px 36px #000a;
+  color:#d8e5f5;
+  font-size:11px;
+  animation:session-tasks-peek-in .12s ease-out
+}
+@keyframes session-tasks-peek-in { from { opacity:0; transform:translateY(3px) } to { opacity:1; transform:none } }
+.session-tasks-peek>strong {
+  display:block;
+  margin-bottom:8px;
+  color:#8fa6c4;
+  font-size:10px;
+  font-weight:560;
+  letter-spacing:.2px
+}
+.session-tasks-peek ol {
+  list-style:none;
+  margin:0;
+  padding:0;
+  display:flex;
+  flex-direction:column;
+  gap:9px
+}
+.session-tasks-peek li {
+  display:flex;
+  flex-direction:column;
+  gap:5px;
+  min-width:0
+}
+.session-tasks-peek-title {
+  color:#aebfd6;
+  font-size:12px;
+  line-height:1.4;
+  word-break:break-word
+}
+.session-tasks-peek li.current .session-tasks-peek-title {
+  color:#e2ebf7;
+  font-weight:540
+}
+.session-tasks-peek-meta {
+  display:flex;
+  align-items:center;
+  gap:7px;
+  color:#6f87a7;
+  font-size:10px
+}
+.session-tasks-peek-more {
+  display:block;
+  margin-top:9px;
+  color:#6f87a7;
+  font-size:10px
 }
