@@ -277,10 +277,13 @@ test('an upload stopped because Tower shuts down is not a failure, and the next 
   const bucket = await fakeBucket(t);
   let release!: () => void;
   const stalled = new Promise<void>(resolve => { release = resolve; });
+  let reached!: () => void;
+  const requested = new Promise<void>(resolve => { reached = resolve; });
   // The bucket answers only once released: the upload is still under way when Tower closes.
-  // A request made after Tower closed (a slow computer may still be preparing the upload at 200 ms) comes already
-  // aborted: it fails at once, as a real fetch does, instead of waiting for an abort that already happened.
+  // A request made after Tower closed comes already aborted: it fails at once, as a real fetch does, instead of
+  // waiting for an abort that already happened.
   const fetcher: typeof fetch = async (input, init) => {
+    reached();
     await Promise.race([stalled, new Promise((_, reject) => {
       if (init?.signal?.aborted) reject(new Error('aborted'));
       init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
@@ -295,7 +298,8 @@ test('an upload stopped because Tower shuts down is not a failure, and the next 
   await service.start();
   await service.saveSettings({ enabled: true, intervalHours: 24, keep: 3, passphrase: PASS, remote: { endpoint: bucket.endpoint, bucket: 'bucket', prefix: '', region: 'auto', accessKeyId: 'AKID', secretAccessKey: 'secret-key' } });
   const upload = service.upload();
-  await new Promise(resolve => setTimeout(resolve, 200));
+  // Closed once the upload's request is under way (however long preparing it took).
+  await requested;
   service.close();
   await assert.rejects(upload);
   release();
