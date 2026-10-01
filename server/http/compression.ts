@@ -20,8 +20,8 @@ const GZIP_LEVEL = 6;
 const STATIC_GZIP = 9;
 /**
  * A 256 KiB window instead of brotli's 4 MiB default: an event stream keeps its compressor for the whole
- * connection, and after a 3.8 MB snapshot the default holds about 14 MB per open page, this about 1 MB,
- * for output still smaller than gzip's.
+ * connection, and after a multi-megabyte snapshot the default window holds over 10 MB per open page. The
+ * smaller one holds a fraction of that, for output still smaller than gzip's.
  */
 const STREAM_WINDOW = 18;
 /** Only text is worth compressing; images and audio are compressed already, and media players expect them as they are. */

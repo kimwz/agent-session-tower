@@ -25,7 +25,7 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
     refreshSessions: async () => {}, pollMs: 10000, findExecutable: async () => '/fixture/codex', resolveRunTools: options.resolveRunTools,
     spawnProcess: () => { throw new Error('Native providers must never launch in steering fixtures'); },
     openCodexStdio: async config => {
-      let active = false; let ended = false;
+      let active = false; let ended = false; let inserting = false;
       const done = deferred();
       const finish = (result: CodexStdioResult = { status: 'completed' }) => {
         if (ended) return; ended = true; active = false; config.onFinished(result); done.resolve();
@@ -33,10 +33,14 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
       controls.push({ finish });
       return { start: async () => { await config.onSession(ID); active = true; config.onStarted?.('fixture-turn'); },
         done: done.promise, close: () => finish({ status: 'cancelled' }), cancel: async () => finish({ status: 'cancelled' }),
-        respondToApproval: async () => {}, canSteer: () => active,
-        steer: async input => { assert.equal(active, true); inputs.push(input); await options.onSteer?.(input); } };
+        respondToApproval: async () => {}, canSteer: () => active && !inserting,
+        // Like the Codex adapters, one insert at a time.
+        steer: async input => { assert.equal(active, true); inserting = true; try { inputs.push(input); await options.onSteer?.(input); } finally { inserting = false; } } };
     },
   });
+  // What the page last received: the run list as it was when the worker published a change.
+  const published = new Map<string, Run>();
+  manager.on('change', () => { for (const run of manager.list()) published.set(run.id, run); });
   await manager.start();
   t.after(async () => { await manager.close(); await rm(directory, { recursive: true, force: true }); });
   const read = (id: string) => manager.list().find(run => run.id === id)!;
@@ -52,7 +56,7 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
     await until(() => controls.length === 1 && read(first.id).status === 'running');
     return first;
   };
-  return { manager, session, controls, inputs, read, pair, running, stateDir };
+  return { manager, session, controls, inputs, read, pair, running, stateDir, published };
 }
 
 test('queued same-session instruction is persisted before delivery and follows original completion', async t => {
@@ -98,6 +102,51 @@ test('external activity and requested model changes cannot receive steering', as
   assert.equal(f.read(differentModel.id).canSteer, false);
   await assert.rejects(f.manager.steer(differentModel.id), { statusCode: 409 });
   assert.equal(f.inputs.length, 0);
+});
+
+test('a queued instruction that cannot join the running turn says why, and says nothing without one', async t => {
+  const external = await fixture(t, { external: true });
+  const alone = await external.manager.enqueue(external.session.id, 'Wait for external writer');
+  assert.equal(external.read(alone.id).steerBlocked, undefined);
+  const f = await fixture(t);
+  await f.running({ kind: 'owner' });
+  const owner = { origin: { kind: 'owner' as const } };
+  const cases = [
+    [await f.manager.enqueue(f.session.id, 'Other model', { model: 'model-b' }, owner), 'model'],
+    [await f.manager.enqueue(f.session.id, 'Other effort', { effort: 'high' }, owner), 'effort'],
+    [await f.manager.enqueue(f.session.id, 'Needs receipts', {}, { ...owner, instructions: { text: 'Tower receipt', required: true } }), 'instructions'],
+    [await f.manager.enqueue(f.session.id, 'From elsewhere', {}, { origin: { kind: 'unknown' } }), 'origin'],
+    [await f.manager.enqueue(f.session.id, 'Same work', { model: 'model-a' }, owner), undefined],
+  ] as const;
+  for (const [run, reason] of cases) {
+    assert.equal(f.read(run.id).steerBlocked, reason, run.prompt);
+    assert.equal(f.read(run.id).canSteer, reason === undefined, run.prompt);
+  }
+  await f.manager.flushState();
+  const saved: Run[] = JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'));
+  assert.ok(saved.every(run => run.steerBlocked === undefined && run.canSteer === undefined));
+});
+
+test('an owner message behind a trigger’s turn says the turn started elsewhere', async t => {
+  const f = await fixture(t);
+  await f.running({ kind: 'trigger', triggerId: 'trigger-1', eventId: 'event-1' });
+  const queued = await f.manager.enqueue(f.session.id, 'check again', {}, { origin: { kind: 'owner' } });
+  assert.equal(f.read(queued.id).canSteer, false);
+  assert.equal(f.read(queued.id).steerBlocked, 'origin');
+});
+
+test('while one instruction goes into a Codex turn, the others are published as waiting for it', async t => {
+  const gate = deferred();
+  const f = await fixture(t, { onSteer: () => gate.promise });
+  const { second } = await f.pair();
+  const third = await f.manager.enqueue(f.session.id, 'And another');
+  assert.equal(f.read(third.id).canSteer, true);
+  const sending = f.manager.steer(second.id);
+  await until(() => f.inputs.length === 1);
+  assert.equal(f.published.get(third.id)?.steerBlocked, 'starting');
+  assert.equal(f.published.get(third.id)?.canSteer, false);
+  gate.resolve(); await sending;
+  assert.equal(f.published.get(third.id)?.canSteer, true);
 });
 
 for (const disposition of ['rejected', 'uncertain'] as const) {
