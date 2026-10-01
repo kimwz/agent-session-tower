@@ -172,6 +172,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
     res.once('close', () => { active.delete(close); if (!active.size) streams.delete(id); });
   };
   const rates = new Map<string, { count: number; at: number }>();
+  /** When the master and the owner's local agents last changed something on each joined computer. */
+  const agentWrites = new Map<string, number[]>();
   const suggestions = { count: 0, at: 0, running: 0 };
   let scheduled: ReturnType<typeof setTimeout> | undefined;
   const json = (res: ServerResponse, status: number, body: unknown) => {
@@ -294,9 +296,10 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
           // the owner's local agents together keep to half of it, so the pages always have room there.
           const node = masterCall || localAgent ? /^\/api\/nodes\/([a-f0-9]{32})\//.exec(path)?.[1] : undefined;
           if (node) {
-            const shared = rates.get(`\0agents ${node}`);
-            if (!shared || now - shared.at > 60_000) rates.set(`\0agents ${node}`, { count: 1, at: now });
-            else if (++shared.count > 30) return json(res, 429, { error: '이 컴퓨터로 보내는 에이전트의 요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+            // Counted over the last minute, not a fixed one, so no minute of the joined computer's sees more than 30.
+            const recent = (agentWrites.get(node) ?? []).filter(at => now - at < 60_000);
+            if (recent.length >= 30) return json(res, 429, { error: '이 컴퓨터로 보내는 에이전트의 요청이 너무 많습니다. 잠시 후 다시 시도하세요.' });
+            agentWrites.set(node, [...recent, now]);
           }
         }
       }
