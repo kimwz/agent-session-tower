@@ -35,7 +35,7 @@ export function steerBlockedNote(reason: NonNullable<Run['steerBlocked']>): stri
     : reason === 'model' ? t('선택한 모델이 진행 중인 작업과 달라 끼워넣을 수 없습니다. 작업이 끝나면 이 모델로 실행합니다.')
     : reason === 'effort' ? t('선택한 추론 수준이 진행 중인 작업과 달라 끼워넣을 수 없습니다. 작업이 끝나면 이 수준으로 실행합니다.')
     : reason === 'origin' ? t('진행 중인 작업은 트리거·Slack·다른 컴퓨터처럼 이 메시지와 다른 곳에서 시작해 끼워넣을 수 없습니다. 작업이 끝나면 실행합니다.')
-    : t('진행 중인 작업이 지금은 메시지를 받을 수 없습니다. 시작하는 중이거나 다른 메시지를 받는 중이라 곧 끼워넣을 수 있습니다.');
+    : t('진행 중인 작업이 지금은 메시지를 받을 수 없습니다. 받을 수 있게 되면 끼워넣기 버튼이 나타나고, 그 전에 작업이 끝나면 다음 턴으로 실행합니다.');
 }
 
 /** Why an owner turn has no Tower tools. Agents can manage triggers only in turns that have them. */

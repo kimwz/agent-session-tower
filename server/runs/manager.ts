@@ -735,7 +735,8 @@ export class RunManager extends EventEmitter {
         return this.list().find(item => item.id === runId)!;
       }
       const sending = selected.adapter.steer!({ id: run.id, prompt, imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path) });
-      // Codex takes one insert at a time: other queued instructions show they wait for this one.
+      // Codex takes one insert at a time: other queued instructions show they wait for this one. Its outcome is
+      // recorded even if telling the page fails.
       try { this.changed(); } finally { await sending; }
       await this.settleSteer(run, selected.target.id);
       return this.list().find(item => item.id === runId)!;

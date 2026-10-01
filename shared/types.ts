@@ -227,7 +227,7 @@ export interface RunReply { id: string; text: string; done?: true; cut?: true }
 /**
  * `instructions`: it carries instructions Tower must not drop; `model`/`effort`: it asks for another one than the
  * running turn; `origin`: the running turn was started elsewhere (a trigger, Slack, another computer); `starting`: the running turn
- * cannot take input right now (it is starting, or a Codex turn is taking another insert).
+ * cannot take input right now (it is starting or ending, or a Codex turn is taking another insert).
  */
 export type SteerBlock = 'instructions' | 'model' | 'effort' | 'origin' | 'starting';
 export interface RunInstructions { text: string; required?: boolean }
