@@ -278,7 +278,15 @@ test('an upload stopped because Tower shuts down is not a failure, and the next 
   let release!: () => void;
   const stalled = new Promise<void>(resolve => { release = resolve; });
   // The bucket answers only once released: the upload is still under way when Tower closes.
-  const fetcher: typeof fetch = async (input, init) => { await Promise.race([stalled, new Promise((_, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))))]); return fetch(input, init); };
+  // A request made after Tower closed (a slow computer may still be preparing the upload at 200 ms) comes already
+  // aborted: it fails at once, as a real fetch does, instead of waiting for an abort that already happened.
+  const fetcher: typeof fetch = async (input, init) => {
+    await Promise.race([stalled, new Promise((_, reject) => {
+      if (init?.signal?.aborted) reject(new Error('aborted'));
+      init?.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+    })]);
+    return fetch(input, init);
+  };
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-backup-'));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
   const groups = new ProjectGroupStore(stateDir), exclusions = new RemoteExclusionStore(stateDir), decisions = new DecisionService(stateDir);
