@@ -65,4 +65,3 @@ export async function importPendingSecret(stateDir: string, id: string, password
   await unlink(path); await syncDirectory(stateDir);
 }
 async function syncDirectory(stateDir: string) { const handle = await open(root(stateDir), 'r'); try { await handle.sync(); } finally { await handle.close(); } }
-
