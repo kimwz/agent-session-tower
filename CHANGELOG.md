@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.96.0] - 2026-10-01
+
+### Added
+- **Tower's tools at `http://localhost:8000/mcp`**: an agent can use the same tools as `agent-session-tower mcp` by address (`claude mcp add --transport http tower-local http://localhost:8000/mcp`), so another computer that reaches this one's localhost through an SSH tunnel needs nothing installed. Only callers at this computer's localhost are answered; a page signed in from elsewhere is refused, and browsers cannot reach it.
+
 ## [1.95.0] - 2026-10-01
 
 ### Added

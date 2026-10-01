@@ -26,7 +26,7 @@ import { BackupService } from './backup/service.js';
 import { masterRoutes } from './master/routes.js';
 import { VoiceTurnEnd } from './master/voice-turn-end.js';
 import type { WebCredentials } from './tower-tools/tower-client.js';
-import { startOwnerMcp } from './owner-mcp/tools.js';
+import { ownerMcpOverHttp, startOwnerMcp } from './owner-mcp/tools.js';
 import { startSlackMcp, startTowerMcp } from './slack/mcp-bridge.js';
 import { getProviderHealth } from './providers/discovery.js';
 import { createMonitorServer } from './http/server.js';
@@ -508,6 +508,7 @@ async function main() {
   }
   // The master agent runs in its own process; this web only starts it, tells it how to reach this API, and relays.
   let webCredentials: WebCredentials | undefined;
+  const localMcp = ownerMcpOverHttp(stateDir, () => webCredentials?.port);
   const masterCallerSecret = randomBytes(32).toString('hex');
   const master = new MasterClient({ stateDir, credentials: () => webCredentials });
   // Full backups: the worker gives its skills; restores go through each process's own stores (see BackupService.apply).
@@ -556,7 +557,7 @@ async function main() {
       known: async session => await master.call('voiceKnown', { session }) === true, record: entry => decisions.record(entry) }) }) },
     auth, exclusions, links: identity && controllerLinks && nodeLinks ? { identity, hostname, controller: controllerLinks, node: nodeLinks, exclusions, changes: remoteChanges,
       sessionNames: () => new Map(runs.sessionList().map(session => { const titled = titles.apply(session); return [session.id, titled.customTitle || titled.title]; })) } : { error: linkError },
-    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups,
+    workspaceTerminals, remote: access.remote ? { origins: access.origins } : undefined, service: updates.managed, notifications, backup: backups, localMcp,
     decisions: {
       overview: () => decisions.overview(),
       // Turning the key or the canvas outcomes on or off shows or hides them at once.
@@ -643,6 +644,7 @@ async function main() {
     auth.close();
     // The master host keeps running; this web only lets go of it.
     master.dispose();
+    localMcp.close();
     dispose();
     server.closeAllConnections();
     server.close();

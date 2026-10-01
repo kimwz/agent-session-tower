@@ -129,6 +129,8 @@ export interface HttpOptions {
     /** `load` reads the state of the computer the draft is for, as it is right now: this one or a joined one. */
     suggestAutoPrompt(input: AutoPromptSuggestionRequest, load: () => Promise<Snapshot>, signal: AbortSignal): Promise<AutoPromptSuggestionResponse>;
   };
+  /** Tower's tools for the owner's own agents on this computer, as MCP over HTTP at `/mcp` (see owner-mcp). */
+  localMcp?: { answer(body: unknown): Promise<unknown> };
   /**
    * The master agent's `/api/master/*` routes, answered after the usual sign-in and page-token checks. Its own calls
    * to this API carry `callerSecret`, which gives them a request budget apart from the owner's pages.
@@ -155,7 +157,7 @@ function publicSession<T extends { filePath?: string }>(session: T): Omit<T, 'fi
   const { filePath: _, ...safe } = session;
   return safe;
 }
-export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, forceRunnerUpdate, service, notifications, decisions, master, backup }: HttpOptions) {
+export function createMonitorServer({ port, clientDir, backend, remote, auth, workspaceTerminals = new WorkspaceTerminals(), exclusions, links, nodes, onNodeMessage, towerUpdate, forceRunnerUpdate, service, notifications, decisions, master, backup, localMcp }: HttpOptions) {
   const token = randomBytes(32).toString('hex');
   const streams = new Map<string, Set<() => void>>();
   const unsubscribeAuth = auth?.onRevoke(id => {
@@ -266,6 +268,25 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (!authenticated && !login && !publicAsset) return json(res, 401, { error: '로그인이 필요합니다.' });
       const adminRoute = ['/api/auth/overview', '/api/auth/credentials', '/api/auth/unblock'].includes(path);
       if (adminRoute && !identity.local) return json(res, 403, { error: '계정 관리는 로컬 접속에서만 사용할 수 있습니다.' });
+      if (path === '/mcp') {
+        // Its tools act through loopback with this computer's rights, so only a caller at this computer may use it; a
+        // remote signed-in page would otherwise reach what only localhost may (accounts, updates).
+        if (!identity.local) return json(res, 403, { error: 'MCP는 이 컴퓨터(localhost)에서만 쓸 수 있습니다.' });
+        // Not even a page of Tower's own: only an agent calls it, and agents send neither header.
+        if (req.headers.origin || req.headers['sec-fetch-site']) return json(res, 403, { error: 'MCP는 브라우저에서 부를 수 없습니다.' });
+        if (!localMcp) return json(res, 503, { error: 'MCP를 사용할 수 없습니다.' });
+        if (req.method !== 'POST') { res.writeHead(405, { Allow: 'POST' }).end(); return; }
+        if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON 요청이 필요합니다.' });
+        let body: Record<string, unknown>;
+        try { body = await readJson(req, 1_000_000); }
+        catch (error) {
+          if ((error as { statusCode?: number }).statusCode !== 400) throw error;
+          return json(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Invalid JSON (one message per request)' } });
+        }
+        const reply = await localMcp.answer(body);
+        if (reply === undefined) { res.writeHead(202).end(); return; }
+        return json(res, 200, reply);
+      }
       // The master agent calls with its own secret, and its calls count apart.
       const caller = req.headers['x-tower-master'];
       const masterCall = Boolean(master && typeof caller === 'string' && caller.length === master.callerSecret.length && timingSafeEqual(Buffer.from(caller), Buffer.from(master.callerSecret)));
