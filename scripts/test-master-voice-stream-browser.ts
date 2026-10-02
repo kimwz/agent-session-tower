@@ -129,7 +129,7 @@ try {
   await sleep(10_000); // Keep the run open past this cached first MP3, within the 30-second stall watchdog.
   assert.equal(run.status, 'running'); assert.equal(run.finishedAt, undefined);
   assert.equal(played.some(item => item.id === answer.id), false, 'live progress does not settle held audio');
-  assert.ok(progress.some(item => item.id === answer.id && item.event === 'waiting'), 'first audio exhausts while the run stays open');
+  assert.ok(progress.some(item => item.id === answer.id && item.event === 'waiting' && item.playback?.position > 0), 'first audio exhausts while the run stays open');
   const heldEvidence = { at: Date.now(), runStatus: run.status, waits: progress.filter(item => item.id === answer.id && item.event === 'waiting'), firstTts: calls[0], started: progress.find(item => item.id === answer.id && item.event === 'started'), media: await page.evaluate(() => ({ position: (window as any).audio[0].currentTime, rmsMax: (window as any).rmsMax })) };
   write(run, residual, true); const endAt = Date.now(); finish(run);
   await until(() => played.find(item => item.id === answer.id && item.result === 'played'), 30_000);
