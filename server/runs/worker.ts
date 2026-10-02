@@ -759,7 +759,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       // Folders a trigger works in, and projects the owner pinned, are in use even with no conversation open there.
       // Pins are read from the web's saved file each time: this worker's copy is only read when it starts.
       reserved: async () => { const groups = new ProjectGroupStore(stateDir); await groups.start();
-        const triggers = triggerEngine?.list() ?? [];
+        const triggers = triggerEngine?.list({ includeArchived: true }) ?? [];
         // A trigger that continues a conversation works where that conversation does.
         const continued = sessionTargets(triggers).flatMap(id => { const cwd = runs.getSession(id)?.cwd; return cwd ? [cwd] : []; });
         return [...folderSettings(triggers), ...continued, ...groups.list().filter(group => group.pinned).map(group => group.cwd)]; } });

@@ -736,3 +736,129 @@ test('retained archived definitions cannot exhaust admission for existing recurr
   const event = await service.run(repeat.id, OWNER); await service.tick();
   assert.equal(service.event(event.id).status, 'running');
 });
+
+test('a tick waiting for a commit rechecks an edited once due time before consuming it', async t => {
+  const f = await fixture(t); const service = await f.open();
+  const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
+  f.clock.now = Date.parse('2026-09-24T01:00:01Z');
+  const engine = service as any; const commit = engine.commit.bind(engine);
+  let entered!: () => void; let release!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
+  let first = true;
+  engine.commit = async (...args: any[]) => { if (first) { first = false; entered(); await gate; } return commit(...args); };
+  const tick = service.tick(); await waiting;
+  await service.update(trigger.id, hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T02:00:00Z' }, catchUp: 'latest' } }), trigger.revision, OWNER);
+  release(); await tick;
+  assert.equal(service.events({ triggerId: trigger.id }).length, 0);
+  assert.equal(service.get(trigger.id).trigger.enabled, true);
+  assert.equal(service.overview().triggers.find(item => item.id === trigger.id)!.nextRunAt, '2026-09-24T02:00:00.000Z');
+});
+
+test('catch-up policy may change on a due once without changing its absolute reservation', async t => {
+  const f = await fixture(t); const service = await f.open();
+  const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
+  f.clock.now = Date.parse('2026-09-24T02:00:00Z');
+  const edited = await service.update(trigger.id, hourly(f.project, { source: { kind: 'schedule', schedule: trigger.source.schedule, catchUp: 'skip' } }), trigger.revision, OWNER);
+  assert.equal(edited.enabled, true); await service.tick();
+  assert.equal(service.events({ triggerId: trigger.id })[0].status, 'skipped');
+  assert.equal(f.calls.length, 0);
+});
+
+test('backup restore rechecks reservation capacity after concurrent local consumption', async t => {
+  const f = await fixture(t); let service = await f.open();
+  const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
+  service.close(); await service.settle();
+  const path = join(f.directory, 'trigger-engine.json'); const state = JSON.parse(await readFile(path, 'utf8'));
+  for (let i = 0; i < 1999; i++) state.onceConsumed[randomUUID()] = { at: new Date(f.clock.now).toISOString() };
+  await writeFile(path, JSON.stringify(state)); service = await f.open();
+  const backup = (await collectTriggers(f.directory))!;
+  const newId = randomUUID(); backup.triggers = [{ ...service.get(trigger.id).trigger, id: newId, name: 'Incoming reservation' }];
+  const engine = service as any; const validate = engine.validate.bind(engine);
+  let entered!: () => void; let release!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
+  engine.validate = async (...args: any[]) => { entered(); await gate; return validate(...args); };
+  const restore = service.restoreBackup(backup); await waiting;
+  await service.run(trigger.id, OWNER); release();
+  await assert.rejects(restore, /capacity/i);
+  assert.equal(service.overview().onceReservations!.used, 2000);
+  assert.ok(service.get(trigger.id).trigger.consumed);
+  assert.throws(() => service.get(newId), /not found/i);
+});
+
+test('unarchiving an already active recurring definition is a no-op and never turns it off', async t => {
+  const f = await fixture(t); const service = await f.open();
+  await service.updateSettings({ maxTriggers: 1 }, OWNER);
+  const trigger = await service.create(hourly(f.project), OWNER);
+  const result = await service.setArchived(trigger.id, false, trigger.revision, OWNER);
+  assert.equal(result.enabled, true); assert.equal(result.revision, trigger.revision);
+  assert.equal(service.get(trigger.id).trigger.enabled, true);
+});
+
+test('restoring an older backup preserves an explicit local archive and converges without new revisions', async t => {
+  const f = await fixture(t); const service = await f.open();
+  const trigger = await service.create(hourly(f.project), OWNER);
+  const backup = (await collectTriggers(f.directory))!;
+  const archived = await service.setArchived(trigger.id, true, trigger.revision, OWNER);
+  await service.restoreBackup(backup);
+  assert.equal(service.get(trigger.id).trigger.enabled, false);
+  assert.equal(service.get(trigger.id).trigger.archivedAt, archived.archivedAt);
+  const revision = service.get(trigger.id).trigger.revision;
+  await service.restoreBackup(backup);
+  assert.equal(service.get(trigger.id).trigger.revision, revision);
+});
+
+
+test('manual execution races a due tick as one reservation in both invocation orders', async t => {
+  for (const manualFirst of [true, false]) {
+    const f = await fixture(t); const service = await f.open();
+    const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
+    f.clock.now = Date.parse('2026-09-24T01:00:01Z');
+    await Promise.allSettled(manualFirst ? [service.run(trigger.id, OWNER), service.tick()] : [service.tick(), service.run(trigger.id, OWNER)]);
+    await service.tick();
+    assert.equal(service.events({ triggerId: trigger.id }).length, 1);
+    assert.equal(f.calls.length, 1);
+    assert.ok(service.get(trigger.id).trigger.consumed);
+  }
+});
+
+test('older backups keep archived definitions missing from the snapshot and preserve consumed unarchive choice', async t => {
+  const f = await fixture(t); const service = await f.open();
+  const emptyBackup = (await collectTriggers(f.directory))!;
+  const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
+  const event = await service.run(trigger.id, OWNER); await service.tick(); f.finish(); await service.tick();
+  const consumedBackup = (await collectTriggers(f.directory))!;
+  await service.restoreBackup(emptyBackup);
+  assert.ok(service.get(trigger.id).trigger.archivedAt);
+  assert.equal(service.event(event.id).status, 'completed');
+  const visible = await service.setArchived(trigger.id, false, service.get(trigger.id).trigger.revision, OWNER);
+  await service.restoreBackup(consumedBackup);
+  assert.equal(service.get(trigger.id).trigger.archivedAt, undefined);
+  assert.equal(service.get(trigger.id).trigger.revision, visible.revision);
+  assert.ok(service.get(trigger.id).trigger.consumed);
+});
+
+test('restoring a consumed unarchived definition respects the active definition limit', async t => {
+  const f = await fixture(t); const service = await f.open();
+  await service.updateSettings({ maxTriggers: 1 }, OWNER);
+  const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
+  await service.run(trigger.id, OWNER); await service.tick(); f.finish(); await service.tick();
+  const visible = await service.setArchived(trigger.id, false, service.get(trigger.id).trigger.revision, OWNER);
+  await service.remove(trigger.id, visible.revision, OWNER);
+  const repeat = await service.create(hourly(f.project), OWNER);
+  await assert.rejects(service.restore(trigger.id, OWNER), /active trigger definitions/);
+  assert.equal(service.get(repeat.id).trigger.enabled, true);
+});
+
+test('a missing downgrade consumption ledger is recovered from snapshots with one durable warning', async t => {
+  const f = await fixture(t); let service = await f.open();
+  const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
+  const event = await service.run(trigger.id, OWNER); await service.tick(); f.finish(); await service.tick();
+  service.close(); await service.settle();
+  const path = join(f.directory, 'trigger-engine.json'); const state = JSON.parse(await readFile(path, 'utf8')); delete state.onceConsumed;
+  await writeFile(path, JSON.stringify(state)); service = await f.open();
+  assert.equal(service.get(trigger.id).trigger.consumed!.eventId, event.id);
+  assert.equal(service.audit().filter(entry => entry.summary.includes('ledger was absent')).length, 1);
+  service.close(); await service.settle(); service = await f.open();
+  assert.equal(service.audit().filter(entry => entry.summary.includes('ledger was absent')).length, 1);
+  await assert.rejects(service.run(trigger.id, OWNER), /consumed/i);
+});

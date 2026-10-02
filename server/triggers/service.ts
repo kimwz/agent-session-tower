@@ -312,7 +312,7 @@ export class TriggerService extends EventEmitter {
       const keptHere = new Set<string>();
       const wanted = new Set([...named, ...incoming.map(item => item.id)]);
       for (const current of [...state.triggers]) {
-        if (wanted.has(current.id)) continue;
+        if (wanted.has(current.id) || current.archivedAt) continue;
         state.triggers = state.triggers.filter(item => item.id !== current.id);
         state.tombstones = [...state.tombstones, current].slice(-MAX_TOMBSTONES);
         this.cancelQueued(state, current.id, 'The trigger was removed by a restore before this ran.');
@@ -320,15 +320,25 @@ export class TriggerService extends EventEmitter {
         this.log(state, actor, 'delete', current, current.revision, undefined, `Removed by restoring a backup: ${this.describe(current)}`);
       }
       for (const id of named) if (!incoming.some(item => item.id === id)) keptHere.add(id);
-      for (const trigger of incoming) {
+      for (const saved of incoming) {
+        const trigger = structuredClone(saved);
         const current = state.triggers.find(item => item.id === trigger.id);
+        // A backup cannot undo this computer's explicit archive/unarchive choice.
+        if (current) {
+          delete trigger.archivedAt;
+          if (current.archivedAt) { trigger.archivedAt = current.archivedAt; trigger.enabled = false; }
+        }
+        if (state.onceConsumed[trigger.id]) {
+          trigger.enabled = false; trigger.consumed = state.onceConsumed[trigger.id];
+          if (!current) trigger.archivedAt ??= trigger.consumed.at;
+        }
         if (current && same(current, trigger)) continue;
         const draft = structuredClone(state);
         try {
           if (current) {
             const next = this.replace(draft, current, { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy }, actor);
             if (trigger.archivedAt) next.archivedAt = trigger.archivedAt;
-            if (consumed[trigger.id]) { next.consumed = consumed[trigger.id]; next.archivedAt ??= next.consumed.at; }
+            if (state.onceConsumed[trigger.id]) next.consumed = state.onceConsumed[trigger.id];
             // A restored definition counts from now: times missed before the restore never run with it.
             // What its source observed (GitHub history, an HTTP condition's state) stays: only the timing starts over.
             if (next.enabled) { const { failures: _failures, lastError: _error, ...previous } = draft.cursors[next.id] ?? { anchorAt: this.now() }; this.schedule(draft, next); draft.cursors[next.id] = { ...previous, ...draft.cursors[next.id]! }; }
@@ -366,6 +376,8 @@ export class TriggerService extends EventEmitter {
       }
       state.fired = { ...(record(backup.fired) ? backup.fired : {}), ...state.fired };
       this.normalizeOnce(state);
+      // Preflight validation yields; the final serialized state is the admission authority.
+      if (state.triggers.length > MAX_RETAINED_TRIGGERS || this.activeCount(state) > state.settings.maxTriggers || this.onceCount(state) > MAX_ONCE_RESERVATIONS) throw failure('The restored trigger state exceeds the supported capacity. Existing records were preserved.', 409);
       // Restoring trusts exactly the folders the backup trusted (and those of triggers kept here), nothing its triggers add.
       state.trustedFolders = trusted;
     }, 'settle');
@@ -563,6 +575,7 @@ export class TriggerService extends EventEmitter {
   async setArchived(id: string, archived: boolean, expectedRevision: number, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
     return this.commit(state => {
       const current = this.revisionOf(state, id, expectedRevision, scope);
+      if (Boolean(current.archivedAt) === archived) return structuredClone(current);
       if (state.events.some(event => event.triggerId === id && UNFINISHED.has(event.status))) throw failure('This trigger has unfinished work; wait for it to finish before archiving or unarchiving.', 409);
       if (!archived) { hereOnly(current, scope); this.room(state, true); }
       const next: Trigger = { ...unmarked(current), enabled: false, revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor, ...remoteMark(actor) };
@@ -611,7 +624,7 @@ export class TriggerService extends EventEmitter {
       if (!deleted || !seen(deleted, scope)) throw failure('This deleted trigger is no longer kept.', 404);
       hereOnly(deleted, scope);
       if (state.triggers.some(item => item.id === id)) throw failure('This trigger already exists.', 409);
-      this.room(state, false, Boolean(deleted.archivedAt || state.onceConsumed[id]));
+      this.room(state, false, Boolean(deleted.archivedAt));
       const now = new Date(this.now()).toISOString();
       // Restored from a controlling computer, it is that computer's to run; restored here, it is this computer's again.
       const trigger: Trigger = { ...unmarked(structuredClone(deleted)), revision: deleted.revision + 1, updatedAt: now, updatedBy: actor, enabled: false, ...remoteMark(actor) };
@@ -688,6 +701,7 @@ export class TriggerService extends EventEmitter {
       if (!current || !seen(current, scope)) throw failure('Trigger not found.', 404);
       hereOnly(current, scope);
       if (state.onceConsumed[id]) throw failure('This once reservation was consumed. Create a new reservation to retry.', 409);
+      if (current.archivedAt) throw failure('Unarchive this trigger before running it.', 409);
       if (current.source.schedule.type === 'once' && !current.enabled) throw failure('Turn the once reservation on before running it.', 409);
       const created = this.fire(state, current, `manual:${randomUUID()}`, this.now(), 'manual', actor);
       this.log(state, actor, 'run', current, current.revision, current.revision, `Ran now: ${created?.status ?? 'skipped'}`);
@@ -803,7 +817,7 @@ export class TriggerService extends EventEmitter {
         await this.commit(state => {
           const current = state.triggers.find(item => item.id === trigger.id);
           const position = state.cursors[trigger.id];
-          if (!current || !current.enabled || state.onceConsumed[current.id] || !position || position.nextAt === undefined) return;
+          if (this.held || !current || !current.enabled || state.onceConsumed[current.id] || !position || position.paused || position.nextAt === undefined || position.nextAt > this.now()) return;
           if (current.source.kind === 'schedule' && current.source.schedule.type === 'once') {
             const slot = position.nextAt;
             const event = this.fire(state, current, new Date(slot).toISOString(), slot, 'schedule');
@@ -1605,12 +1619,14 @@ export class TriggerService extends EventEmitter {
   private replace(state: EngineState, current: Trigger, input: TriggerInput, actor: TriggerActor): Trigger {
     if (state.onceConsumed[current.id] && (input.enabled || JSON.stringify(current.source) !== JSON.stringify(input.source))) throw failure('This once reservation was consumed. Create a new reservation to retry or change its schedule.', 409);
     if (current.archivedAt && input.enabled) throw failure('Unarchive this trigger before enabling it.', 409);
-    if (JSON.stringify(current.source) !== JSON.stringify(input.source) || (!current.enabled && input.enabled)) { this.futureOnce(input); this.onceRoom(state, input, current.id); }
+    if (JSON.stringify(current.source.schedule) !== JSON.stringify(input.source.schedule) || (!current.enabled && input.enabled)) this.futureOnce(input);
+    if (JSON.stringify(current.source) !== JSON.stringify(input.source)) this.onceRoom(state, input, current.id);
     const next: Trigger = { ...unmarked(current), ...structuredClone(input), revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor, ...remoteMark(actor) };
     this.grantSecrets(state, next, actor);
     state.revisions[current.id] = [...(state.revisions[current.id] ?? []), current].slice(-MAX_REVISIONS);
     state.triggers = state.triggers.map(item => item.id === current.id ? next : item);
-    if (JSON.stringify(current.source) !== JSON.stringify(next.source) || (!current.enabled && next.enabled)) {
+    const sameOnce = current.source.kind === 'schedule' && next.source.kind === 'schedule' && current.source.schedule.type === 'once' && next.source.schedule.type === 'once' && current.source.schedule.at === next.source.schedule.at;
+    if ((!sameOnce && JSON.stringify(current.source) !== JSON.stringify(next.source)) || (!current.enabled && next.enabled)) {
       const kept = current.enabled && next.enabled ? keptGitHub(current, next, state.cursors[current.id]) : undefined;
       this.schedule(state, next);
       if (kept) state.cursors[current.id].github = kept;
@@ -1754,6 +1770,11 @@ export class TriggerService extends EventEmitter {
         if (Array.isArray(triggerIds)) state.secretGrants[secretId] = triggerIds.filter(item => typeof item === 'string');
       }
     } catch { return undefined; }
+    if (saved.onceConsumed === undefined) {
+      const projection = [...state.triggers, ...state.tombstones, ...Object.values(state.revisions).flat()].find(trigger => OnceConsumptionSchema.safeParse(trigger.consumed).success);
+      if (projection) this.log(state, { kind: 'system', via: 'migration' }, 'consume', projection, projection.revision, projection.revision,
+        'The once consumption ledger was absent after a downgrade; retained snapshots were recovered. Deleted IDs beyond legacy retention cannot be recovered.');
+    }
     this.normalizeOnce(state);
     return state;
   }
@@ -1777,7 +1798,7 @@ function upgradeState(saved: EngineState, now: number): EngineState {
     const decoded = decodeOnceTrigger(value);
     const trigger = decoded.trigger;
     if (decoded.changed && record(trigger)) audit.push({ id: randomUUID(), at: new Date(now).toISOString(), actor: { kind: 'system', via: 'migration' }, action: 'disable',
-      triggerId: trigger.id, triggerName: trigger.name, summary: 'A reservation changed by an older engine was loaded turned off; inspect it before rescheduling.' });
+      triggerId: trigger.id, triggerName: trigger.name, summary: trigger.enabled ? 'An obsolete once marker was removed after a source change by an older engine; inspect the definition.' : 'A reservation changed by an older engine was loaded turned off or its obsolete marker removed; inspect it before rescheduling.' });
     return record(trigger) && record(trigger.source) && trigger.source.kind === 'github'
       ? { ...trigger, source: { ...trigger.source, watch: upgradeWatch(trigger.source.watch, record(trigger.policy) ? trigger.policy.overlap : undefined) } } : trigger;
   };
