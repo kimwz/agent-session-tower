@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.103.0] - 2026-10-02
+
+### Changed
+- Open the conversation secret control directly on a paste field: confirm a value, dotenv bundle or file for the current task, optionally save it to a vault, and search saved secrets to connect them with one click.
+- Separate saved secrets, project connections, remote sharing and security in Settings. Keep automatic connection and advanced permissions one level deeper, and select known remote computers by name.
+
+### Fixed
+- Save to the current project without requiring prior project registration, while preserving the same running task and its canonical root.
+- Keep explicit saved-key connections scoped to the chosen task/project and preserve disabled policies, expiry, selected fields, operations and fixed grant deadlines.
+
 ## [1.102.0] - 2026-10-02
 
 ### Added
