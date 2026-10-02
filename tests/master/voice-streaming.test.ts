@@ -703,3 +703,58 @@ test('page media diagnostics keep only bounded playback state, never arbitrary p
   assert.deepEqual(playbackRecord({ position: 12.5, muted: false, volume: 0.5, ready: 3, network: 2, context: 'running', text: 'private payload' }), { position: 12.5, muted: false, volume: 0.5, ready: 3, network: 2, context: 'running' });
   assert.equal(playbackRecord({ position: Infinity, muted: 'yes', volume: -1, ready: 100, network: 100, context: 'arbitrary payload' }), undefined);
 });
+
+
+test('live progress records receipt and real start before turn end without settling the say', async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const { answer, run } = await h.ask('진행 진단');
+  const key = answer.ack!.request!;
+  h.write(run, 'm1:0', '첫 문장은 실행 중에 읽어요. ');
+  const say = await until(() => h.says().find(item => item.kind === 'answer'));
+  const send = (event: string, elapsedMs: number, playback?: unknown, session = h.current()) => h.voice.voiceProgress({ session, id: say.id, event, elapsedMs, playback });
+  assert.equal(send('started', 1, { position: 0 }), false);
+  assert.equal(send('received', NaN), false);
+  assert.equal(send('received', 0, undefined, 'stale'), false);
+  assert.equal(send('received', 0), true);
+  assert.equal(send('source', 10), true);
+  assert.equal(send('started', 25, { position: 0.03, text: 'private' }), true);
+  assert.equal(send('waiting', 30, { position: 0.03 }), true);
+  assert.equal(send('resumed', 40, { position: 0.04 }), true);
+  assert.equal(send('progress', 5_000, { position: 1 }), true);
+  const record = recordOf(h, key)!;
+  const said = record.says!.find(item => item.id === say.id)!;
+  assert.equal(record.end, undefined);
+  assert.equal(record.outcome, undefined);
+  assert.equal(said.result, undefined);
+  assert.equal(said.started!.elapsedMs, 25);
+  assert.equal(said.started!.at, record.started);
+  assert.deepEqual(said.started!.playback, { position: 0.03 });
+  assert.equal(said.waits, 1);
+  assert.equal(said.latest!.event, 'progress');
+  assert.equal(typeof record.sentence, 'number');
+  assert.equal(record.runId, run.id);
+  assert.equal(typeof record.pieces?.[0].firstByte, 'number');
+  assert.equal(h.voice.streaming(run.id), true);
+  h.write(run, 'm1:0', '남은 문장도 읽습니다.', true);
+  h.finish(run);
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: say.id, result: 'played' }), true);
+  await until(() => recordOf(h, key)?.outcome);
+  assert.equal(send('progress', 6_000, { position: 2 }), false);
+});
+
+test('timing traces bound TTS attempts and preserve first attempt, and snapshots are detached', async t => {
+  const { VoiceTimings } = await import('../../server/master/voice-timings.js');
+  const dir = await mkdtemp(join(tmpdir(), 'voice-trace-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const timings = new VoiceTimings(join(dir, 'trace.json'));
+  timings.mark('key', 'request', 1);
+  for (let part = 0; part < 100; part++) timings.piece('key', { live: 'live', part, attempt: 0, start: part, bytes: 1, result: 'done' });
+  const record = timings.list()[0];
+  assert.equal(record.pieces!.length, 40);
+  assert.equal(record.pieces![0].part, 0);
+  assert.equal(record.pieces!.at(-1)!.part, 99);
+  record.pieces![0].bytes = 999;
+  assert.equal(timings.list()[0].pieces![0].bytes, 1);
+  await timings.flush();
+});

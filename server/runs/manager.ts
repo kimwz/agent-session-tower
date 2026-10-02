@@ -1199,7 +1199,7 @@ export class RunManager extends EventEmitter {
     // chose when the thread started, and Slack's tools require the automatic one.
     const owner = ownerOrigin(run.origin);
     const approvalsReviewer = mcpServers?.tower_slack || owner ? 'auto_review' as const : creating ? run.codexApprovalsReviewer : undefined;
-    const codexReplies = master ? new ReplyLog(run) : undefined;
+    const codexReplies = master ? new ReplyLog(run, Date.now) : undefined;
     const owned = await (this.options.openCodexStdio ?? openCodexStdioRun)({
       executable, cwd: session.cwd, env, spawnProcess: this.options.spawnProcess,
       mcpServers, ...(master ? { subscriptionOnly: true } : {}),

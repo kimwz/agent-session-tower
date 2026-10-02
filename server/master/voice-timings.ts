@@ -21,6 +21,17 @@ export interface VoiceTimingRecord {
   say?: number;
   /** The page started playing it (the page's own delay added to `say`). */
   play?: number;
+  /** First sentence flushed to the speech queue; independent of first observed reply text. */
+  sentence?: number;
+  /** The host received the page's first positive playback progress. */
+  started?: number;
+  runId?: string;
+  turnId?: string;
+  delta?: number;
+  completed?: number;
+  pieces?: VoiceTtsRecord[];
+  nativeEnd?: number;
+  replies?: { id: string; firstAt?: number; completedAt?: number }[];
   /** The master's turn ended. */
   end?: number;
   /**
@@ -32,7 +43,10 @@ export interface VoiceTimingRecord {
   outcome?: { at: number; state: 'played' | 'unspoken'; reason?: MasterUnspoken; heard?: true };
 }
 export interface VoicePlaybackRecord { position?: number; muted?: boolean; volume?: number; ready?: number; network?: number; context?: string }
-export interface VoiceSayRecord { id: string; at: number; chars?: number; play?: number; result?: string; detail?: string; playback?: VoicePlaybackRecord }
+export type VoiceProgressEvent = 'received' | 'source' | 'started' | 'waiting' | 'resumed' | 'progress';
+export interface VoiceProgressRecord { event: VoiceProgressEvent; at: number; elapsedMs: number; gate?: 'audio' | 'speech' | 'ready'; playback?: VoicePlaybackRecord }
+export interface VoiceTtsRecord { live: string; part: number; attempt: number; start: number; firstByte?: number; done?: number; bytes: number; result?: 'done' | 'failed' }
+export interface VoiceSayRecord { id: string; at: number; chars?: number; play?: number; result?: string; detail?: string; playback?: VoicePlaybackRecord; received?: VoiceProgressRecord; source?: VoiceProgressRecord; started?: VoiceProgressRecord; latest?: VoiceProgressRecord; waits?: number }
 /** Only media state is kept; arbitrary page input (including text) never enters timing records. */
 export function playbackRecord(value: unknown): VoicePlaybackRecord | undefined {
   if (!value || typeof value !== 'object') return undefined;
@@ -46,7 +60,7 @@ export function playbackRecord(value: unknown): VoicePlaybackRecord | undefined 
   if (['running', 'suspended', 'closed', 'interrupted'].includes(String(input.context))) result.context = String(input.context);
   return Object.keys(result).length ? result : undefined;
 }
-export type VoiceTimingField = Exclude<keyof VoiceTimingRecord, 'key' | 'kind' | 'mode' | 'says' | 'outcome'>;
+export type VoiceTimingField = 'request' | 'ack' | 'text' | 'tts' | 'audio' | 'say' | 'play' | 'end' | 'sentence' | 'started' | 'delta' | 'completed' | 'nativeEnd';
 
 const KEEP = 200;
 /** Things said kept per record: a long turn of many replies keeps its latest. */
@@ -108,6 +122,48 @@ export class VoiceTimings {
     this.later();
   }
 
+  /** Progress never settles playback, and keeps no arbitrary page content or event history. */
+  progress(key: string, id: string, progress: VoiceProgressRecord): void {
+    const record = this.find(key);
+    const say = record?.says?.find(item => item.id === id);
+    if (!record || !say || say.result) return;
+    if (progress.event === 'received' || progress.event === 'source' || progress.event === 'started') say[progress.event] ??= progress;
+    if (progress.event === 'started') this.mark(key, 'started', progress.at);
+    if (progress.event === 'waiting') say.waits = Math.min(10_000, (say.waits ?? 0) + 1);
+    say.latest = progress;
+    this.later();
+  }
+
+  piece(key: string | undefined, piece: VoiceTtsRecord): void {
+    const record = this.find(key);
+    if (!record) return;
+    const pieces = record.pieces ??= [];
+    const existing = pieces.find(item => item.live === piece.live && item.part === piece.part && item.attempt === piece.attempt);
+    if (existing) Object.assign(existing, piece);
+    else { pieces.push({ ...piece }); if (pieces.length > 40) pieces.splice(1, pieces.length - 40); }
+    this.later();
+  }
+
+  observe(key: string | undefined, input: { runId: string; turnId: string; finishedAt?: string; replies?: readonly { id: string; firstAt?: number; completedAt?: number }[] }): void {
+    const record = this.find(key);
+    if (!record) return;
+    record.runId ??= input.runId;
+    record.turnId ??= input.turnId;
+    const nativeEnd = input.finishedAt ? Date.parse(input.finishedAt) : NaN;
+    if (Number.isFinite(nativeEnd)) this.mark(key, 'nativeEnd', nativeEnd);
+    for (const reply of input.replies ?? []) {
+      if (reply.firstAt === undefined && reply.completedAt === undefined) continue;
+      const replies = record.replies ??= [];
+      let saved = replies.find(item => item.id === reply.id);
+      if (!saved) { replies.push(saved = { id: reply.id }); if (replies.length > 30) replies.splice(1, replies.length - 30); }
+      if (typeof reply.firstAt === 'number' && Number.isFinite(reply.firstAt)) saved.firstAt ??= reply.firstAt;
+      if (typeof reply.completedAt === 'number' && Number.isFinite(reply.completedAt)) saved.completedAt ??= reply.completedAt;
+      if (typeof reply.firstAt === 'number' && Number.isFinite(reply.firstAt)) this.mark(key, 'delta', reply.firstAt);
+      if (typeof reply.completedAt === 'number' && Number.isFinite(reply.completedAt)) this.mark(key, 'completed', reply.completedAt);
+    }
+    this.later();
+  }
+
   /** How the reading ended, written to the log too (each time: a reading heard again ends again). */
   outcome(key: string | undefined, outcome: Omit<NonNullable<VoiceTimingRecord['outcome']>, 'at'>, at = Date.now()): void {
     const record = this.find(key);
@@ -117,7 +173,7 @@ export class VoiceTimings {
     this.later();
   }
 
-  list(): VoiceTimingRecord[] { return this.records.map(item => ({ ...item, ...(item.says ? { says: item.says.map(say => ({ ...say })) } : {}) })); }
+  list(): VoiceTimingRecord[] { return structuredClone(this.records); }
 
   private find(key: string | undefined): VoiceTimingRecord | undefined { return key ? this.records.find(item => item.key === key) : undefined; }
 

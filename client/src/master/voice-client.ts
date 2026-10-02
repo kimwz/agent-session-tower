@@ -115,7 +115,7 @@ interface Playing {
   fetch: number; retrying?: boolean;
   /** Whether the current source has played at all (its place counts only then). */
   sourcePlayed?: boolean;
-  position?: number; progressAt?: number; advancing?: boolean;
+  position?: number; progressAt?: number; advancing?: boolean; traceAt?: number; traceWaiting?: boolean;
 }
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -334,7 +334,9 @@ export class VoiceSession {
     const order = this.order.admit(say, this.queue.map(item => item.say));
     for (const dropped of order.drop) { const index = this.queue.findIndex(item => item.say === dropped); if (index >= 0) this.queue.splice(index, 1); }
     if (!order.admit) return;
-    this.queue.push({ say, receivedAt: Date.now() });
+    const receivedAt = Date.now();
+    this.queue.push({ say, receivedAt });
+    this.trace(say, receivedAt, 'received', this.current ? 'audio' : this.utterance || this.open.size ? 'speech' : 'ready');
     while (this.queue.length > QUEUE) { const dropped = this.queue.shift()!; this.report(dropped.say, 'expired', undefined, 'queue-full'); }
     this.next();
   }
@@ -732,7 +734,11 @@ export class VoiceSession {
       say.streaming ? STREAMING_PLAY_MS : Math.max(30_000, say.text.length * 200)));
     this.audio.onplaying = () => { if (this.current !== current) return; this.pace(); this.progress(current); };
     this.audio.ontimeupdate = () => this.progress(current);
-    this.audio.onwaiting = this.audio.onstalled = () => { if (this.current === current) { current.advancing = false; this.show({}); } };
+    this.audio.onwaiting = this.audio.onstalled = () => { if (this.current === current) {
+      if (!current.traceWaiting) this.trace(current.say, current.receivedAt, 'waiting');
+      current.traceWaiting = true;
+      current.advancing = false; this.show({});
+    } };
     this.audio.onended = () => {
       if (this.current !== current) return;
       if (this.audio.muted || this.audio.volume === 0) { this.playbackFailed(current, 'output-muted'); return; }
@@ -745,6 +751,7 @@ export class VoiceSession {
       this.lost(current, current.fetch);
     };
     this.audio.src = say.audio;
+    this.trace(say, current.receivedAt, 'source');
     this.pace();
     if (this.audio.muted || this.audio.volume === 0) { this.playbackFailed(current, 'output-muted'); return; }
     const fetch = current.fetch;
@@ -772,11 +779,18 @@ export class VoiceSession {
     if (this.current !== current) return;
     const position = this.audio.currentTime;
     if (Number.isFinite(position) && position > (current.position ?? 0)) {
+      const first = current.playingAt === undefined;
+      const resumed = !current.advancing && !first;
       current.position = position;
       current.progressAt = Date.now();
       current.playingAt ??= Date.now();
       current.sourcePlayed = true;
       current.advancing = !this.audio.paused;
+      current.traceWaiting = false;
+      if (first || resumed || Date.now() - (current.traceAt ?? 0) >= PRESENCE_MS) {
+        current.traceAt = Date.now();
+        this.trace(current.say, current.receivedAt, first ? 'started' : resumed ? 'resumed' : 'progress');
+      }
       this.show({});
     }
   }
@@ -806,6 +820,7 @@ export class VoiceSession {
       const fetch = ++current.fetch;
       current.position = 0; current.progressAt = Date.now();
       this.audio.src = `${current.say.audio}?at=${at.toFixed(2)}`;
+      this.trace(current.say, current.receivedAt, 'source');
       this.pace();
       // Refused again (the web still away): another try, while tries and time are left.
       this.audio.play().catch(() => this.lost(current, fetch));
@@ -879,6 +894,15 @@ export class VoiceSession {
     const send = (left: number) => void post('/api/master/voice/played', this.options.token(), { session: this.session, id: say.id, result, ...(startedMs !== undefined ? { startedMs } : {}), ...(detail ? { detail } : {}), ...(playback ? { playback } : {}) })
       .catch(() => { if (left > 0 && !this.over) setTimeout(() => send(left - 1), 3_000); });
     send(3);
+  }
+
+  /** Diagnostic progress never settles a say; only the terminal report above does. */
+  private trace(say: MasterSay, receivedAt: number | undefined, event: 'received' | 'source' | 'started' | 'waiting' | 'resumed' | 'progress', gate?: 'audio' | 'speech' | 'ready'): void {
+    if (say.kind !== 'answer' && say.kind !== 'report' || receivedAt === undefined) return;
+    void post('/api/master/voice/progress', this.options.token(), {
+      session: this.session, id: say.id, event, elapsedMs: Math.max(0, Date.now() - receivedAt), ...(gate ? { gate } : {}),
+      ...(event !== 'received' ? { playback: { position: this.audio.currentTime || 0, muted: this.audio.muted, volume: this.audio.volume, ready: this.audio.readyState, network: this.audio.networkState, context: this.context?.state } } : {}),
+    }).catch(() => { /* Optional diagnostics do not delay or retry playback. */ });
   }
 
   // ─── keeping the master told ─────────────────────────────────────────────────────────────────────────────────

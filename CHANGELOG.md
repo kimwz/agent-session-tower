@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.103.2] - 2026-10-02
+
+### Fixed
+- Preserve playback diagnostics across the web-to-master RPC boundary instead of dropping the page's media state.
+- Record bounded live audio receipt, queue gate, actual playback progress and waits without settling the terminal playback ACK. Keep sentence flush, per-part TTS and native reply observation times linked to the same run so voice delays can be measured while the turn is still running.
+
 ## [1.103.1] - 2026-10-02
 
 ### Fixed

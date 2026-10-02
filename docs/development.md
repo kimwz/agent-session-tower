@@ -38,6 +38,22 @@ Use nonpersistent execution when the native interface supports it, but verify th
 
 If a check has already created personal history, use **Close session** in Tower to hide the specific test conversation. This preserves its native history and allows reopening it from **Closed sessions**. Do not hide all temporary paths: users may intentionally work in them.
 
+### Voice streaming diagnostics
+
+Speech starts from a readable sentence while the master turn is running; completing the turn flushes only its remaining text. The host persists bounded measurements in `<state-dir>/master/voice-timings.json`: run/turn IDs, reply observation times, first sentence flush, per-part TTS start/first byte/completion, say transmission, and page progress. `firstAt` and `completedAt` are native events observed by the worker. `nativeEnd` is the run's completion time; `end` is the voice follower's completion time. Aggregate `delta`/`completed` retain the first values observed in a snapshot; reply records preserve each message's times.
+
+The page reports receipt/queue gate, source assignment, actual positive media-clock progress, waits and resumed progress separately from the terminal playback ACK. A progress report never completes or retries a say. Progress `at` is the host's receipt time and `elapsedMs` is measured on the page since receipt of that say. Legacy `play` is an estimate (`say` plus that page delay) and excludes transmission time. These signals cannot prove that the owner's output device was audible.
+
+For a real media regression without native providers, personal microphones or new TTS calls, supply an existing nonpersonal valid MP3 and an installed Playwright module with Chromium:
+
+```sh
+VOICE_BROWSER_MP3=/absolute/path/to/fixture.mp3 \
+VOICE_BROWSER_PLAYWRIGHT=/absolute/path/to/playwright/index.mjs \
+node --import tsx scripts/test-master-voice-stream-browser.ts
+```
+
+The isolated browser uses synthetic microphone input and fixture Tower/TTS responses, but real HTMLAudio decoding and Web Audio PCM. It holds a run open until playback has progressed, then checks residual flush, deduplication and cancellation. Results are written to `tmp/voice-latency/browser-stream-result.json`.
+
 ## Package
 
 ```sh
