@@ -97,6 +97,9 @@ test('quick project save uses the verified canonical session root and works with
     assert.equal((await f.list(token)).secrets[0].name, 'QUICK_PROJECT');
     const second = await f.runtime.control('create', { ...input, name: 'ANOTHER_PROJECT_KEY' }) as SecretOverview;
     assert.equal(second.projects.length, 1); assert.equal(second.connected.length, 2);
+    const fresh = sessionRecord(f.alias, { id: 'codex:fresh-picker-session', nativeId: 'fresh-picker-session' }); f.sessions.set(fresh.id, fresh); f.origins.set(fresh.id, { kind: 'owner', untrustedInput: false });
+    const picker = await f.runtime.control('overview', { sessionId: fresh.id, projectRoot: '/forged' }) as SecretOverview;
+    assert.equal(picker.currentProjectId, first.projects[0].id); assert.equal(picker.target, undefined); assert.equal(f.service.currentTask(fresh.id, f.projectRoot), undefined);
     await assert.rejects(f.runtime.control('create', { ...input, sessionId: undefined }));
     await assert.rejects(f.runtime.control('create', { ...input, scope: 'global' }));
     assert.deepEqual(f.ledger, []);

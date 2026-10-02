@@ -33,6 +33,10 @@ test('quick connection shows paste input first even before vault setup and keeps
   assert.match(markup, /textarea autofocus/); assert.match(markup, /다음에도 쓰도록 저장/);
   assert.match(markup, /처음 한 번/); assert.doesNotMatch(markup, /공유 규칙|원격 연결 ID|허용할 사용 방식/);
 });
+test('an unlocked empty paste form offers confirmation, not another unlock', () => {
+  const markup = renderToStaticMarkup(createElement(SecretQuickConnect, { overview, busy: false, change, onConnected: noop, onManage: noop }));
+  assert.match(markup, /class="secret-primary" disabled="">확인/); assert.doesNotMatch(markup, /잠금 해제/);
+});
 test('quick dotenv detection is overridable and optional saving keeps manual task access as its default', () => {
   const raw = '# dotenv\nexport TOKEN=FAKE_TOKEN\nOTHER=FAKE_OTHER';
   assert.equal(quickSecretKind(raw, 'auto'), 'env'); assert.equal(quickSecretKind(raw, 'scalar'), 'scalar');
@@ -51,6 +55,7 @@ test('saved picker searches names, groups and dotenv fields while hiding other t
   assert.equal(savedSecretMatches(overview, overview.secrets[0], 'missing'), false);
   assert.equal(savedSecretMatches({ ...overview, groups: [{ ...overview.groups[0], scope: 'task', taskId: 'other' }] }, overview.secrets[0], ''), false);
   assert.equal(savedSecretMatches({ ...overview, groups: [{ ...overview.groups[0], scope: 'project', projectId: 'other' }] }, overview.secrets[0], ''), false);
+  assert.equal(savedSecretMatches({ ...overview, target: undefined, currentProjectId: 'chosen', groups: [{ ...overview.groups[0], scope: 'project', projectId: 'chosen' }] }, overview.secrets[0], ''), true);
 });
 
 test('joined-session requests address the source vault and pass only canonical session and node identities', () => {

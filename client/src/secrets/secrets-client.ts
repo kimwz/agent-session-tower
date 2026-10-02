@@ -52,7 +52,7 @@ export function quickSecretPayload(overview: SecretOverview, raw: string, format
   const kind = quickSecretKind(raw, format);
   const group = overview.groups.find(group => `group:${group.id}` === destination) ?? overview.groups.find(group =>
     (destination === 'global' && group.scope === 'global' && group.name === 'Global') ||
-    (destination === 'project' && group.scope === 'project' && group.projectId === overview.target?.projectId && group.name === 'Project'));
+    (destination === 'project' && group.scope === 'project' && group.projectId === (overview.target?.projectId ?? overview.currentProjectId) && group.name === 'Project'));
   const scope = group?.scope ?? (destination === 'project' ? 'project' : destination === 'global' ? 'global' : 'task');
   const firstField = kind === 'env' ? /(?:^|\n)\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(raw)?.[1] : undefined;
   return { name: name.trim() || (kind === 'file' ? fileName : firstField) || 'SESSION_SECRET', kind, scope,
@@ -63,7 +63,7 @@ export function quickSecretPayload(overview: SecretOverview, raw: string, format
 }
 export function savedSecretMatches(overview: SecretOverview, secret: SecretMetadata, query: string): boolean {
   const group = overview.groups.find(group => group.id === secret.groupId);
-  if (!group || group.scope === 'task' || (group.scope === 'project' && group.projectId !== overview.target?.projectId)) return false;
+  if (!group || group.scope === 'task' || (group.scope === 'project' && group.projectId !== (overview.target?.projectId ?? overview.currentProjectId))) return false;
   const project = overview.projects.find(project => project.id === group.projectId);
   return [secret.name, group.name, project?.name, ...(secret.fields ?? [])].join(' ').toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
 }

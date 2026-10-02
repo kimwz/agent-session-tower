@@ -219,11 +219,15 @@ export class SecretRuntime {
     else if (action === 'lock') await service.lock();
     else if (action === 'password') await service.changePassword(password('currentPassword'), password('newPassword'));
     else if (action === 'import') { if (!this.options.importPending || typeof input.id !== 'string') throw fail('가져올 암호화 기록이 필요합니다.'); await this.options.importPending(input.id, password('password')); }
-    let target: SecretTarget | undefined;
+    let target: SecretTarget | undefined; let currentProjectId: string | undefined;
     if (!service.status().locked && typeof input.sessionId === 'string') {
       const startsTask = ['create', 'attach', 'connect'].includes(action);
       if (typeof input.nodeId === 'string') target = remoteTarget ? await service.ensureRemoteTask({ ...remoteTarget, runId: 'owner-ui' }) : undefined;
       else target = startsTask ? await this.target(input.sessionId) : await this.peekTarget(input.sessionId);
+      if (!target && typeof input.nodeId !== 'string') {
+        const session = await this.session(input.sessionId);
+        currentProjectId = service.overview().projects.find(project => project.bindings.some(binding => binding.hostId === service.device().id && binding.root === session.cwd))?.id;
+      }
     }
     if (action === 'preview') return { fields: Object.keys(parseDotenv(typeof input.value === 'string' ? input.value : '')) };
     if (action === 'create') {
@@ -264,7 +268,8 @@ export class SecretRuntime {
       await service.trustPeer({ ...peer, enabled: true });
     } else if (action === 'untrust') await service.removePeer(z.string().parse(input.id));
     else if (!['initialize','unlock','lock','password','import','overview'].includes(action)) throw fail('알 수 없는 시크릿 작업입니다.', 404);
-    return this.overview(target);
+    const overview = await this.overview(target);
+    return { ...overview, currentProjectId: target?.projectId ?? currentProjectId };
   }
   peers(): SecretPeer[] { return this.options.service.status().locked ? [] : this.options.service.peers(); }
   device(): SecretDevice { return this.options.service.device(); }

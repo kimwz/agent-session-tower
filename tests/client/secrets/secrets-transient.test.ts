@@ -68,7 +68,7 @@ test('secret registration clears the raw input before the request resolves and s
 
 const formEvent = { preventDefault() {}, stopPropagation() {} };
 const find = (element: Element, type: string) => descendants(element).find(node => node.type === type)!;
-const readPayload = (fixture: ReturnType<typeof componentFixture>) => JSON.parse(JSON.stringify(fixture.sent[0])) as Record<string, any>;
+const readPayload = (fixture: ReturnType<typeof componentFixture>, index = 0) => JSON.parse(JSON.stringify(fixture.sent[index])) as Record<string, any>;
 
 test('quick confirmation clears the secret before completion, sends no chat submit and immediately connects task scope', async () => {
   let connected = false;
@@ -148,7 +148,7 @@ test('registration accepts empty uploaded file bytes and sends their canonical e
   fixture.complete(true); await pending; fixture.cleanup();
 });
 
-test('settings global registration requires explicit sharing choice for both manual and automatic activation', async () => {
+test('settings can save a global key without sharing, while automatic access still requires an explicit project choice', async () => {
   const overview = { status: { initialized: true, locked: false }, projects: [{ id: 'project-a', name: 'A', bindings: [] }], groups: [], secrets: [], rules: [], peers: [], connected: [] };
   const fixture = componentFixture('SecretRegistration', 'SecretRegistration.tsx', { overview, sessionId: undefined });
   let root = fixture.render();
@@ -156,7 +156,10 @@ test('settings global registration requires explicit sharing choice for both man
   name.props.onChange({ target: { value: 'GLOBAL_KEY' } });
   root = fixture.render();
   const submit = () => descendants(fixture.render()).find(node => node.type === 'button' && node.props.type === 'submit')!;
-  assert.equal(submit().props.disabled, true, 'global manual registration needs a sharing project');
+  assert.equal(submit().props.disabled, false, 'manual vault storage does not grant any project access');
+  const stored = fixture.render().props.onSubmit(formEvent);
+  assert.equal(readPayload(fixture).allProjects, false); assert.equal(readPayload(fixture).projectId, undefined); assert.equal(readPayload(fixture).activation, 'manual'); assert.equal(readPayload(fixture).connect, false);
+  fixture.complete(true); await stored;
   const activation = descendants(root).find(node => node.type === 'select' && node.props.value === 'manual')!;
   activation.props.onChange({ target: { value: 'auto' } });
   assert.equal(submit().props.disabled, true, 'automatic activation does not opt into all projects');
@@ -165,7 +168,7 @@ test('settings global registration requires explicit sharing choice for both man
   checkbox.props.onChange({ target: { checked: true } });
   assert.equal(submit().props.disabled, false);
   const pending = fixture.render().props.onSubmit(formEvent);
-  const body = readPayload(fixture);
+  const body = readPayload(fixture, 1);
   assert.equal(body.allProjects, true); assert.equal(body.projectId, undefined); assert.equal(body.activation, 'auto');
   fixture.complete(true); await pending; fixture.cleanup();
 });

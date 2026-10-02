@@ -17,7 +17,7 @@ export function SecretQuickConnect({ overview, busy, change, onConnected, onMana
   const disabled = busy || submitting || reading;
   const kind = quickSecretKind(raw, format);
   const saved = overview.secrets.filter(secret => savedSecretMatches(overview, secret, query));
-  const groups = overview.groups.filter(group => group.scope !== 'task' && (group.scope !== 'project' || group.projectId === overview.target?.projectId) && !overview.secrets.some(secret => secret.groupId === group.id && isRemoteSecret(secret, overview.device?.id)));
+  const groups = overview.groups.filter(group => group.scope !== 'task' && (group.scope !== 'project' || group.projectId === (overview.target?.projectId ?? overview.currentProjectId)) && !overview.secrets.some(secret => secret.groupId === group.id && isRemoteSecret(secret, overview.device?.id)));
   const hasInput = format === 'file' ? !!fileName : raw.length > 0;
   const accessReady = !!password && (!setup || (password.length >= MIN_VAULT_PASSWORD && password === confirmation));
   const clearValue = () => { generation.current++; setRaw(''); setFileName(''); };
@@ -52,7 +52,7 @@ export function SecretQuickConnect({ overview, busy, change, onConnected, onMana
         : <details className="secret-quick-details"><summary>{t('이름 지정')}</summary><label>{t('이름 (선택)')}<input value={name} maxLength={128} disabled={disabled} placeholder="SESSION_SECRET" onChange={event => setName(event.target.value)} /></label></details>}
       {needsAccess && <div className="secret-inline-access"><strong>{t(setup ? '처음 한 번, 보관함 비밀번호를 정하세요' : '보관함 잠금 해제')}</strong><p>{t(setup ? '이번 작업의 값도 비밀번호로 암호화합니다. 12자 이상 입력하세요.' : '비밀번호를 입력하면 붙여넣은 값과 저장 목록을 사용할 수 있습니다.')}</p><label>{t('비밀번호')}<input type="password" autoComplete={setup ? 'new-password' : 'current-password'} value={password} required minLength={setup ? MIN_VAULT_PASSWORD : undefined} disabled={disabled} onChange={event => setPassword(event.target.value)} /></label>{setup && <label>{t('비밀번호 확인')}<input type="password" autoComplete="new-password" required value={confirmation} disabled={disabled} onChange={event => setConfirmation(event.target.value)} /></label>}</div>}
       {error && <p role="alert" className="secret-error">{error}</p>}
-      <button type="submit" className="secret-primary" disabled={disabled || (!hasInput && !needsAccess) || (needsAccess && !accessReady)}>{t(submitting ? '연결 중…' : hasInput ? '확인' : setup ? '보관함 만들기' : '잠금 해제')}</button>
+      <button type="submit" className="secret-primary" disabled={disabled || (!hasInput && !needsAccess) || (needsAccess && !accessReady)}>{t(submitting ? '연결 중…' : hasInput || !needsAccess ? '확인' : setup ? '보관함 만들기' : '잠금 해제')}</button>
     </form>
     <section className="secret-saved"><div className="secret-section-head"><h3>{t('저장된 시크릿')}</h3><button type="button" onClick={onManage}>{t('보관함 설정')}</button></div>
       {!needsAccess && <><label className="secret-search"><Search size={15} aria-hidden="true" /><input type="search" aria-label={t('저장된 시크릿 검색')} placeholder={t('이름, 보관함, 환경 변수 검색')} value={query} onChange={event => setQuery(event.target.value)} /></label>

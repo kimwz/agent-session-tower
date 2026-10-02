@@ -33,6 +33,8 @@ export interface SecretOverview {
   status: VaultStatus; device?: SecretDevice; peers: SecretPeer[]; projects: SecretProject[];
   groups: SecretGroup[]; secrets: SecretMetadata[]; rules: SecretRule[];
   target?: SecretTarget; task?: SecretTask; connected: string[];
+  /** Owner-only project hint without creating a security task. */
+  currentProjectId?: string;
 }
 export interface SecretCreateInput {
   name: string; kind: SecretKind; scope: SecretScope; value?: string;
