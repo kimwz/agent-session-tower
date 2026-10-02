@@ -6,7 +6,7 @@ import { transformSync } from 'esbuild';
 import * as jsxRuntime from 'react/jsx-runtime';
 import type { ReactElement } from 'react';
 import * as secretTypes from '../../../shared/secrets.js';
-import { registrationPayload, isRemoteSecret, localSecretOverview } from '../../../client/src/secrets/secrets-client.js';
+import { registrationPayload, isRemoteSecret, localSecretOverview, quickSecretKind, quickSecretPayload, savedSecretMatches } from '../../../client/src/secrets/secrets-client.js';
 
 type Element = ReactElement<Record<string, any>>;
 function descendants(element: unknown): Element[] {
@@ -34,17 +34,19 @@ function componentFixture(component = 'SecretRegistration', file = 'SecretRegist
     if (name === '../common/lib') return { copyText: async () => true };
     if (name === './SecretRegistration') return { SecretOperations: () => null, scopeLabels: { global: '전역', project: '프로젝트', task: '이번 작업' }, operationLabels: { discover: '목록 확인' } };
     if (name === 'react-dom') return { createPortal: (node: unknown) => node };
-    if (name === 'lucide-react') return { KeyRound: () => null, LockKeyhole: () => null, X: () => null };
+    if (name === 'lucide-react') return { KeyRound: () => null, LockKeyhole: () => null, X: () => null, Check: () => null, FileKey: () => null, Search: () => null };
+    if (name === './SecretQuickConnect') return {};
+    if (name === '../settings/settings-open') return { openSettings() {} };
     if (name === '../settings/SettingsPane') return { SettingsFrameContext: {}, useSettingsGuard() {} };
     if (name === './SecretRecovery' || name === './SecretAccess' || name === './SecretManagement') return {};
-    if (name === './secrets-client') return { registrationPayload, isRemoteSecret, localSecretOverview };
+    if (name === './secrets-client') return { registrationPayload, isRemoteSecret, localSecretOverview, quickSecretKind, quickSecretPayload, savedSecretMatches };
     if (name === '../master/api') return { post: async () => ({ fields: [] }) };
     throw new Error(`Unexpected fixture import: ${name}`);
   } });
   const overview = { status: { initialized: true, locked: false }, projects: [], groups: [], secrets: [], rules: [], peers: [], connected: [] };
   const sent: unknown[] = [];
   let complete!: (value: boolean) => void;
-  const props = { overview, sessionId: 'session', token: 'token', busy: false, onClose() {}, change: async (_action: string, body: unknown) => { sent.push(body); return new Promise<boolean>(resolve => { complete = resolve; }); }, ...extra };
+  const props = { overview, sessionId: 'session', token: 'token', busy: false, onClose() {}, onConnected() {}, onManage() {}, change: async (_action: string, body: unknown) => { sent.push(body); return new Promise<boolean>(resolve => { complete = resolve; }); }, ...extra };
   const render = () => { cursor = 0; return module.exports[component](props); };
   return { render, sent, complete: (value: boolean) => complete(value), cleanup: () => cleanups.forEach(cleanup => cleanup()) };
 }
@@ -66,7 +68,26 @@ test('secret registration clears the raw input before the request resolves and s
 
 const formEvent = { preventDefault() {}, stopPropagation() {} };
 const find = (element: Element, type: string) => descendants(element).find(node => node.type === type)!;
-const readPayload = (fixture: ReturnType<typeof componentFixture>) => JSON.parse(JSON.stringify(fixture.sent[0])) as Record<string, any>;
+const readPayload = (fixture: ReturnType<typeof componentFixture>, index = 0) => JSON.parse(JSON.stringify(fixture.sent[index])) as Record<string, any>;
+
+test('quick confirmation clears the secret before completion, sends no chat submit and immediately connects task scope', async () => {
+  let connected = false;
+  const fixture = componentFixture('SecretQuickConnect', 'SecretQuickConnect.tsx', { onConnected() { connected = true; } });
+  find(fixture.render(), 'textarea').props.onChange({ target: { value: 'FAKE_QUICK_CANARY' } });
+  let prevented = false; let stopped = false;
+  find(fixture.render(), 'form').props.onSubmit({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  assert.equal(prevented, true); assert.equal(stopped, true); assert.equal(readPayload(fixture).value, 'FAKE_QUICK_CANARY');
+  assert.equal(readPayload(fixture).scope, 'task'); assert.equal(readPayload(fixture).connect, true);
+  assert.equal(find(fixture.render(), 'textarea').props.value, '');
+  fixture.complete(true); await new Promise(resolve => setImmediate(resolve)); assert.equal(connected, true); fixture.cleanup();
+});
+test('closing a pending quick dialog prevents its response from closing a later dialog', async () => {
+  let connected = false;
+  const fixture = componentFixture('SecretQuickConnect', 'SecretQuickConnect.tsx', { onConnected() { connected = true; } });
+  find(fixture.render(), 'textarea').props.onChange({ target: { value: 'FAKE_PENDING' } });
+  find(fixture.render(), 'form').props.onSubmit(formEvent); fixture.cleanup(); fixture.complete(true);
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(connected, false);
+});
 
 test('pending import sends only the selected ID and transient source password and clears input immediately', async () => {
   const fixture = componentFixture('SecretPendingImport', 'SecretRecovery.tsx', { ids: ['backup-a', 'backup-b'] });
@@ -127,7 +148,7 @@ test('registration accepts empty uploaded file bytes and sends their canonical e
   fixture.complete(true); await pending; fixture.cleanup();
 });
 
-test('settings global registration requires explicit sharing choice for both manual and automatic activation', async () => {
+test('settings can save a global key without sharing, while automatic access still requires an explicit project choice', async () => {
   const overview = { status: { initialized: true, locked: false }, projects: [{ id: 'project-a', name: 'A', bindings: [] }], groups: [], secrets: [], rules: [], peers: [], connected: [] };
   const fixture = componentFixture('SecretRegistration', 'SecretRegistration.tsx', { overview, sessionId: undefined });
   let root = fixture.render();
@@ -135,7 +156,10 @@ test('settings global registration requires explicit sharing choice for both man
   name.props.onChange({ target: { value: 'GLOBAL_KEY' } });
   root = fixture.render();
   const submit = () => descendants(fixture.render()).find(node => node.type === 'button' && node.props.type === 'submit')!;
-  assert.equal(submit().props.disabled, true, 'global manual registration needs a sharing project');
+  assert.equal(submit().props.disabled, false, 'manual vault storage does not grant any project access');
+  const stored = fixture.render().props.onSubmit(formEvent);
+  assert.equal(readPayload(fixture).allProjects, false); assert.equal(readPayload(fixture).projectId, undefined); assert.equal(readPayload(fixture).activation, 'manual'); assert.equal(readPayload(fixture).connect, false);
+  fixture.complete(true); await stored;
   const activation = descendants(root).find(node => node.type === 'select' && node.props.value === 'manual')!;
   activation.props.onChange({ target: { value: 'auto' } });
   assert.equal(submit().props.disabled, true, 'automatic activation does not opt into all projects');
@@ -144,7 +168,7 @@ test('settings global registration requires explicit sharing choice for both man
   checkbox.props.onChange({ target: { checked: true } });
   assert.equal(submit().props.disabled, false);
   const pending = fixture.render().props.onSubmit(formEvent);
-  const body = readPayload(fixture);
+  const body = readPayload(fixture, 1);
   assert.equal(body.allProjects, true); assert.equal(body.projectId, undefined); assert.equal(body.activation, 'auto');
   fixture.complete(true); await pending; fixture.cleanup();
 });

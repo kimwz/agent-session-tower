@@ -24,7 +24,7 @@ const NOT_FOR_AGENTS = new Map<string, string>([
   ['/api/master/voice/audio/{}', 'audio a page plays'],
   ...['on', 'off', 'presence', 'token', 'usage', 'request', 'activity', 'finished', 'played', 'missed'].map(action => [`/api/master/voice/${action}`, 'the page\'s microphone and speaker'] as [string, string]),
   ['/api/nodes/{}/{}', 'the joined-computer prefix; every route takes it through node'],
-  ...['overview','initialize','unlock','lock','password','create','update','remove','project','rule','attach','revoke','end-task','trust','untrust','preview','import'].map(action => [`/api/secrets/${action}`, 'dedicated owner Vault input; agents use run-scoped reference-only secret MCP tools'] as [string, string]),
+  ...['overview','initialize','unlock','lock','password','create','update','remove','project','rule','attach','connect','revoke','end-task','trust','untrust','preview','import'].map(action => [`/api/secrets/${action}`, 'dedicated owner Vault input; agents use run-scoped reference-only secret MCP tools'] as [string, string]),
 ]);
 
 /** `(a|b)` alternatives expanded, and parameters (`{id}` or a capturing pattern) written `{}`. */

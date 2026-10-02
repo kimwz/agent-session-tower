@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { MAX_SECRET_BYTES, SECRET_OPERATIONS, type SecretKind, type SecretOperation, type SecretOverview, type SecretScope } from '../../../shared/secrets';
+import { MAX_SECRET_BYTES, SECRET_OPERATIONS, DEFAULT_SECRET_USE_OPERATIONS, type SecretKind, type SecretOperation, type SecretOverview, type SecretScope } from '../../../shared/secrets';
 import { useI18n } from '../i18n/i18n';
 import { registrationPayload, postSecret } from './secrets-client';
 import type { SecretChange } from './SecretAccess';
@@ -17,7 +17,7 @@ export function SecretRegistration({ overview, sessionId, token, busy, change, o
   const [groupId, setGroupId] = useState(''); const [groupName, setGroupName] = useState('');
   const [projectId, setProject] = useState(overview.target?.projectId || '');
   const [allProjects, setAllProjects] = useState(false);
-  const [activation, setActivation] = useState<'manual' | 'auto'>('manual'); const [operations, setOperations] = useState<SecretOperation[]>(['discover', 'env', 'pipe', 'file']);
+  const [activation, setActivation] = useState<'manual' | 'auto'>('manual'); const [operations, setOperations] = useState<SecretOperation[]>([...DEFAULT_SECRET_USE_OPERATIONS]);
   const [fileSelected, setFileSelected] = useState(false);
   const [connect, setConnect] = useState(!!sessionId); const [fields, setFields] = useState<string[]>([]); const [error, setError] = useState(''); const [reading, setReading] = useState(false);
   const version = useRef(0);
@@ -49,15 +49,19 @@ export function SecretRegistration({ overview, sessionId, token, busy, change, o
     <label>{t('보관 범위')}<select value={scope} disabled={busy} onChange={event => { setScope(event.target.value as SecretScope); setGroupId(''); setAllProjects(false); }}>
       <option value="global">{t('전역')}</option><option value="project">{t('프로젝트')}</option>{sessionId && <option value="task">{t('이번 작업')}</option>}
     </select></label>
-    {scope === 'global' && <><label className="secret-check"><input type="checkbox" checked={allProjects} disabled={busy} onChange={event => setAllProjects(event.target.checked)} />{t('모든 프로젝트에 허용')}</label><p>{t('전역 보관과 공유 권한은 별개입니다. 사용할 프로젝트를 선택하세요.')}</p></>}
-    {(scope === 'project' || scope === 'global') && <label>{t(scope === 'global' ? '공유할 프로젝트' : '프로젝트')}<select required={scope === 'project' || (!sessionId && !allProjects)} value={projectId} disabled={busy || (scope === 'global' && allProjects)} onChange={event => { setProject(event.target.value); if (scope === 'project') setGroupId(''); }}><option value="">{t(scope === 'global' && sessionId ? '현재 세션의 프로젝트' : '프로젝트 선택')}</option>{overview.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>}
-    {scope === 'global' && !sessionId && !allProjects && !projectId && <p>{t('공유할 프로젝트를 선택하거나 모든 프로젝트에 허용을 직접 선택하세요.')}</p>}
+    {scope === 'project' && <label>{t('프로젝트')}<select required value={projectId} disabled={busy} onChange={event => { setProject(event.target.value); setGroupId(''); }}><option value="">{t('프로젝트 선택')}</option>{overview.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label>}
+    <details className="secret-advanced"><summary>{t('보관 그룹 지정')}</summary>
     <label>{t('그룹')}<select value={groupId} disabled={busy} onChange={event => setGroupId(event.target.value)}><option value="">{t('새 그룹')}</option>{overview.groups.filter(group => group.scope === scope && (scope !== 'project' || group.projectId === projectId) && (scope !== 'task' || group.taskId === overview.task?.id)).map(group => <option key={group.id} value={group.id}>{group.name}</option>)}</select></label>
     {!groupId && <label>{t('그룹 이름')}<input value={groupName} placeholder={name} maxLength={128} disabled={busy} onChange={event => setGroupName(event.target.value)} /></label>}
-    <label>{t('연결 방식')}<select value={activation} disabled={busy} onChange={event => setActivation(event.target.value as 'manual' | 'auto')}><option value="manual">{t('수동')}</option><option value="auto">{t('자동')}</option></select></label>
+    </details>
+    <details className="secret-advanced"><summary>{t('자동 연결 및 고급 권한')}</summary>
+    <label>{t('연결 방식')}<select value={activation} disabled={busy} onChange={event => setActivation(event.target.value as 'manual' | 'auto')}><option value="manual">{t('세션마다 직접 연결')}</option><option value="auto">{t('프로젝트 세션에서 항상 사용')}</option></select></label>
+    {scope === 'global' && <><label className="secret-check"><input type="checkbox" checked={allProjects} disabled={busy} onChange={event => setAllProjects(event.target.checked)} />{t('모든 프로젝트에 허용')}</label><label>{t('공유할 프로젝트')}<select required={activation === 'auto' && !sessionId && !allProjects} value={projectId} disabled={busy || allProjects} onChange={event => setProject(event.target.value)}><option value="">{t(sessionId ? '현재 세션의 프로젝트' : '프로젝트 선택')}</option>{overview.projects.map(project => <option key={project.id} value={project.id}>{project.name}</option>)}</select></label><p>{t('전역 보관과 공유 권한은 별개입니다. 사용할 프로젝트를 선택하세요.')}</p></>}
+    {scope === 'global' && activation === 'auto' && !sessionId && !allProjects && !projectId && <p>{t('공유할 프로젝트를 선택하거나 모든 프로젝트에 허용을 직접 선택하세요.')}</p>}
     <SecretOperations value={operations} onChange={setOperations} disabled={busy} />
     {sessionId && <label className="secret-check"><input type="checkbox" checked={connect} disabled={busy} onChange={event => setConnect(event.target.checked)} />{t('현재 작업에 연결')}</label>}
+    </details>
     {error && <p role="alert">{error}</p>}
-    <div className="secret-actions"><button type="button" onClick={() => { resetRaw(); onClose(); }}>{t('취소')}</button><button type="submit" disabled={busy || reading || !name.trim() || !operations.length || (kind === 'file' && !fileSelected) || (scope === 'project' && !projectId) || (scope === 'global' && !sessionId && !projectId && !allProjects)}>{t('등록')}</button></div>
+    <div className="secret-actions"><button type="button" onClick={() => { resetRaw(); onClose(); }}>{t('취소')}</button><button type="submit" disabled={busy || reading || !name.trim() || !operations.length || (kind === 'file' && !fileSelected) || (scope === 'project' && !projectId) || (scope === 'global' && activation === 'auto' && !sessionId && !projectId && !allProjects)}>{t('등록')}</button></div>
   </form>;
 }
