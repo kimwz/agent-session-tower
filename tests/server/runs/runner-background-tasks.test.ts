@@ -10,7 +10,7 @@ import { RunManager } from '../../../server/runs/manager.js';
 import { WakeupTracker } from '../../../server/runs/wakeup.js';
 import type { Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
-import { SECRET_CHANGED_INSTRUCTIONS, SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
+import { SECRET_CONNECTION_INSTRUCTIONS, SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
 
 const ID = '20000000-0000-4000-8000-000000000011';
 const SESSION = `claude:${ID}`;
@@ -85,7 +85,7 @@ test('an unacknowledged private notice releases completed input after delivery s
   const owned = await until(() => (f.manager as unknown as { owned: Map<string, { claude?: { canSteer(): boolean; options: { steerTimeoutMs?: number } } }> }).owned.get(run.id)?.claude);
   await until(() => owned.canSteer());
   owned.options.steerTimeoutMs = 30;
-  f.manager.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS, SESSION);
+  f.manager.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, SESSION);
   const done = await settled(f.manager, run.id);
   assert.equal(done.status, 'completed');
   assert.equal(f.manager.busy(), false);

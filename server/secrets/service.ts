@@ -85,15 +85,6 @@ export class SecretService {
     secret.metadata.version++; secret.metadata.fields = fields ? Object.keys(fields) : undefined;
     secret.metadata.reference = `tower-secret://${this.vault.vaultId}/${secret.metadata.id}@${secret.metadata.version}`; return this.metadata(secret);
   }); }
-  /** A task-owned resource belongs to one conversation; shared resources have no single session. */
-  taskSessionForSecret(id: string): string | undefined {
-    const secret = this.secrets().find(item => item.metadata.id === id);
-    return secret && this.taskSessionForGroup(secret.metadata.groupId);
-  }
-  taskSessionForGroup(id: string): string | undefined {
-    const group = this.groups().find(item => item.id === id);
-    return group?.scope === 'task' ? this.journal.tasks.find(task => task.id === group.taskId)?.sessionId : undefined;
-  }
   async remove(id: string) { return this.mutate(() => { this.data().secrets = this.data().secrets.filter(secret => secret.metadata.id !== id); this.journal.secrets = this.journal.secrets.filter(secret => secret.metadata.id !== id); this.journal.grants = this.journal.grants.filter(grant => grant.secretId !== id); }); }
   async setRule(input: Omit<SecretRule, 'id' | 'revision'> & { id?: string }): Promise<SecretRule> { return this.mutate(() => {
     const group = this.groups().find(group => group.id === input.groupId);

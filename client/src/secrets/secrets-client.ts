@@ -48,7 +48,7 @@ export function quickSecretKind(raw: string, format: QuickSecretFormat): SecretK
   const first = raw.replace(/^\uFEFF/, '').split(/\r?\n/).find(line => line.trim() && !line.trimStart().startsWith('#'));
   return first && /^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=/.test(first.trimStart()) ? 'env' : 'scalar';
 }
-export function quickSecretPayload(overview: SecretOverview, raw: string, format: QuickSecretFormat, name: string, destination: string, fileName = ''): SecretCreateInput & { currentProject?: boolean } {
+export function quickSecretPayload(overview: SecretOverview, raw: string, format: QuickSecretFormat, name: string, destination: string, fileName = ''): SecretCreateInput & { currentProject?: boolean; notifySession: true } {
   const kind = quickSecretKind(raw, format);
   const group = overview.groups.find(group => `group:${group.id}` === destination) ?? overview.groups.find(group =>
     (destination === 'global' && group.scope === 'global' && group.name === 'Global') ||
@@ -59,7 +59,7 @@ export function quickSecretPayload(overview: SecretOverview, raw: string, format
     ...(kind === 'file' ? { content: raw } : { value: raw }),
     ...(group ? { groupId: group.id, ...(group.projectId ? { projectId: group.projectId } : {}) } : { groupName: scope === 'task' ? 'Session' : scope === 'project' ? 'Project' : 'Global' }),
     ...(destination === 'project' ? { currentProject: true } : {}),
-    ...(scope === 'global' ? { allProjects: false } : {}), activation: 'manual', operations: [...DEFAULT_SECRET_USE_OPERATIONS], connect: true };
+    ...(scope === 'global' ? { allProjects: false } : {}), activation: 'manual', operations: [...DEFAULT_SECRET_USE_OPERATIONS], connect: true, notifySession: true };
 }
 export function savedSecretMatches(overview: SecretOverview, secret: SecretMetadata, query: string): boolean {
   const group = overview.groups.find(group => group.id === secret.groupId);

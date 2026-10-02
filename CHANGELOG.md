@@ -4,11 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.104.2] - 2026-10-02
+## [1.104.3] - 2026-10-02
 
 ### Fixed
 - Avoid WebKit's reproduced unknown-length MP3 startup stall by completing each bounded TTS part before sending its independent audio with an exact Content-Length. Keep playback during the native turn, reply order, final residual flush, cancellation and replay with per-part acknowledgements.
 - Require meaningful media-clock progress before marking voice playback as started or completed. Preserve bounded recovery for an initially stalled answer without shortening the watchdog or interrupting healthy playback.
+
+## [1.104.2] - 2026-10-02
+
+### Fixed
+- Discover secrets only when the current task needs credentials, without adding a vault guide to unrelated agent turns.
+- Send private connection notices only after the owner explicitly assigns a key through the chat input. Keep vault state, saved-key edits, automatic project connections and expiry silent, while preserving broker authorization and targeted remote delivery.
 
 ## [1.104.1] - 2026-10-02
 

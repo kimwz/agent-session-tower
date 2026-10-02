@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { RunApproval } from '../../../shared/types.js';
 import { openCodexStdioRun, type CodexStdioOptions, type CodexStdioResult } from '../../../server/runs/codex-stdio.js';
 import { until } from '../../helpers/until.ts';
-import { SECRET_CHANGED_INSTRUCTIONS, SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
+import { SECRET_CONNECTION_INSTRUCTIONS, SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
 import { parseMessages, towerInstructionsBlock } from '../../../server/sessions/parser.js';
 
 const ID = '10000000-0000-4000-8000-000000000001';
@@ -365,7 +365,7 @@ test('secret guidance and invalidation use hidden blocks on the existing native 
   await f.run.start();
   const start = f.sent.find(frame => frame.method === 'turn/start')!;
   assert.equal(start.params.input[1].text, towerInstructionsBlock(SECRET_USE_INSTRUCTIONS));
-  await f.run.steer!({ id: 'private-secret-change', prompt: towerInstructionsBlock(SECRET_CHANGED_INSTRUCTIONS) });
+  await f.run.steer!({ id: 'private-secret-change', prompt: towerInstructionsBlock(SECRET_CONNECTION_INSTRUCTIONS) });
   const inserted = f.sent.find(frame => frame.method === 'turn/steer')!;
   assert.equal(inserted.params.expectedTurnId, TURN);
   assert.deepEqual(parseMessages('codex', { type: 'response_item', payload: { type: 'message', role: 'user', content: inserted.params.input.map((item: { text: string }) => ({ type: 'input_text', text: item.text })) } }), []);
