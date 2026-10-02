@@ -8,6 +8,7 @@ import type { SlackService } from '../slack/service.js';
 import type { GitHubCoordinator } from '../triggers/github-coordinator.js';
 import type { CapabilityRegistry } from './mcp.js';
 import { SESSION_TOOLS_SERVER, sessionToolServer } from './session-tools.js';
+import { SECRET_USE_INSTRUCTIONS } from '../secrets/notices.js';
 
 /** How to start this build's own entry, so a tool server always matches the worker that answers it. */
 export function thisBuild(): { command: string; args: string[] } {
@@ -69,6 +70,7 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
       servers.tower_secrets = { command: build.command, args: [...build.args, '--secrets-mcp', options.stateDir], env: { TOWER_SECRET_CAPABILITY: options.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: session.id }), TOWER_SECRET_STATE_DIR: options.stateDir } };
     }
     if (!origin.controllerId && subscriptionOnly(options.stateDir, session.cwd)) servers.tower_master = masterToolServer(options.stateDir);
-    return { servers, required: Boolean(secretEligible && options.secrets?.initialized()), towerTools: 'attached' };
+    const secretInstructions = secretEligible ? SECRET_USE_INSTRUCTIONS : undefined;
+    return { servers, required: Boolean(secretEligible && options.secrets?.initialized()), ...(secretInstructions ? { instructions: secretInstructions } : {}), towerTools: 'attached' };
   }
 }

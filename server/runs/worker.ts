@@ -45,6 +45,7 @@ import { SkillService } from '../skills/service.js';
 import { SessionTasks } from '../sessions/tasks.js';
 import { SecretService } from '../secrets/service.js';
 import { SecretRuntime, SECRET_TOOLS } from '../secrets/runtime.js';
+import { SECRET_CHANGED_INSTRUCTIONS } from '../secrets/notices.js';
 import { SecretStore } from '../triggers/secrets.js';
 import { listPendingSecretImports, importPendingSecret } from '../backup/secrets.js';
 import type { SecretTarget } from '../../shared/secrets.js';
@@ -570,6 +571,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     await secretService.start();
     const secretStore = new SecretStore(stateDir, { vault: secretService });
     const secrets = new SecretRuntime({ stateDir, service: secretService, runs,
+      onChange: sessionId => runs.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS, sessionId),
       isClosed: async id => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds().has(id); },
       migrate: () => secretStore.migrate(), pendingImports: () => listPendingSecretImports(stateDir),
       importPending: (id, password) => importPendingSecret(stateDir, id, password, secretService, { restoreTriggers: async backup => { if (!triggerEngine) throw new Error('Triggers are still starting.'); await triggerEngine.restoreBackup(backup); } }) });

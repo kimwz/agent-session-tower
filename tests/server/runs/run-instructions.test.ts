@@ -86,6 +86,21 @@ test('notes that fail or take too long never hold up or break the turn', async t
   assert.equal(f.codex[0].instructions, undefined);
 });
 
+test('run-scoped tool guidance accompanies every eligible turn without becoming a visible request', async t => {
+  const f = await fixture(t);
+  f.manager.setRunToolResolver(() => ({ required: true, instructions: 'Use secrets_list before requesting credentials.' }));
+  const first = await f.manager.enqueue(f.native.id, 'Authenticate', {}, { origin: { kind: 'owner' }, instructions: { text: 'Existing policy' } });
+  await f.settled(first.id);
+  assert.equal(f.codex[0].prompt, 'Authenticate');
+  assert.equal(f.codex[0].instructions, 'Existing policy\n\nUse secrets_list before requesting credentials.');
+  const second = await f.manager.enqueue(f.native.id, 'Continue', {}, { origin: { kind: 'owner' } });
+  await f.settled(second.id);
+  assert.equal(f.codex[1].instructions, 'Use secrets_list before requesting credentials.');
+  await f.manager.flushState();
+  assert.doesNotMatch(JSON.stringify(f.manager.list()), /Use secrets_list/);
+  assert.doesNotMatch(await readFile(join(f.stateDir, 'runs.json'), 'utf8'), /Use secrets_list/);
+});
+
 test('a continuation keeps the instructions its turn could not go without, and is not started without them after a restart', async t => {
   const after: Run = { id: '50000000-0000-4000-8000-000000000001', sessionId: `codex:${NATIVE}`, origin: { kind: 'owner' }, prompt: 'Approve 1', status: 'completed', createdAt: now, output: '',
     instructions: { text: 'Receipt: owner approved reply 1', required: true } };

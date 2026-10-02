@@ -345,6 +345,66 @@ export class RunManager extends EventEmitter {
     return this.options.resolveRunTools?.(run, session) ?? NO_RUN_TOOLS;
   }
 
+  private providerInstructions(run: Run, tools: RunTools): string | undefined {
+    return [run.instructions?.text, tools.instructions].filter(Boolean).join('\n\n') || undefined;
+  }
+
+  private readonly toolNotices = new Map<string, string>();
+  private readonly toolNoticeSending = new Set<string>();
+
+  /** Trusted worker invalidation, not a user request: never creates or resumes a provider turn. */
+  notifyToolChange(instructions: string, sessionId?: string): void {
+    if (this.stopping || this.updating) return;
+    for (const run of this.runs.values()) {
+      if (run.status !== 'running' || run.steering || (sessionId && run.sessionId !== sessionId)) continue;
+      if (this.secretNoticeEligible(run)) this.toolNotices.set(run.id, instructions);
+    }
+    // Coalesce changes committed in the same tick before touching the native transport.
+    queueMicrotask(() => this.flushToolNotices());
+  }
+
+  private secretNoticeEligible(run: Run): boolean {
+    const session = this.getSession(run.sessionId);
+    return Boolean(session && !session.closed && !run.ownerStopped && run.origin?.kind === 'owner'
+      && run.towerTools === 'attached' && this.runTools(run, session).servers?.tower_secrets);
+  }
+
+  private flushToolNotices(): void {
+    for (const [id, text] of this.toolNotices) {
+      const run = this.runs.get(id);
+      if (!run || run.status !== 'running' || !this.secretNoticeEligible(run)) { this.toolNotices.delete(id); continue; }
+      if (this.stopping || this.updating || this.toolNoticeSending.has(id) || run.approvals?.length) continue;
+      if ([...this.runs.values()].some(other => other.sessionId === run.sessionId && (this.admissions.has(other.id) || other.steering?.state === 'sending'))) continue;
+      // Only Tower-owned native writers receive private instructions; desktop bridges own their own context.
+      const adapter = this.stdio.get(id) ?? this.owned.get(id)?.claude;
+      if (!adapter?.canSteer?.() || !adapter.steer) continue;
+      this.toolNotices.delete(id); this.toolNoticeSending.add(id);
+      const messageId = randomUUID();
+      const prompt = towerInstructionsBlock(text);
+      const send = async () => {
+        if (run.status !== 'running' || this.stopping || this.updating || !this.secretNoticeEligible(run) || !adapter.canSteer?.()) throw new SteeringError('Private notice target is no longer available.', 'rejected');
+        if (adapter instanceof ClaudeControl) await adapter.steer({ type: 'user', uuid: messageId, session_id: this.getSession(run.sessionId)!.nativeId, parent_tool_use_id: null,
+          message: { role: 'user', content: [{ type: 'text', text: prompt }] } });
+        else {
+          const steer = adapter.steer;
+          if (!steer) throw new SteeringError('Private notice writer is no longer available.', 'rejected');
+          await steer.call(adapter, { id: messageId, prompt });
+        }
+      };
+      void send().catch(error => {
+        if (error instanceof SteeringError && error.disposition === 'rejected' && run.status === 'running' && !this.stopping && this.secretNoticeEligible(run)) {
+          if (!this.toolNotices.has(id)) this.toolNotices.set(id, text);
+        } else {
+          // An uncertain message may already be in the turn: do not resend it or log provider text.
+          console.warn('Tower could not confirm a private secret-change notice; the next owner turn will refresh its secret list.');
+        }
+      }).finally(() => {
+        this.toolNoticeSending.delete(id);
+        this.owned.get(id)?.finishInput?.();
+      });
+    }
+  }
+
   /**
    * Provenance of a session Tower created. Native sessions the owner opened elsewhere return undefined.
    * A ledger link to external content always wins over the stored record.
@@ -938,6 +998,7 @@ export class RunManager extends EventEmitter {
   async close(): Promise<void> {
     if (this.stopping) return;
     this.stopping = true;
+    this.toolNotices.clear();
     if (this.pollTimer) clearInterval(this.pollTimer);
     if (this.notifyTimer) { clearTimeout(this.notifyTimer); this.notifyTimer = undefined; }
     this.cancelOutputPersist();
@@ -997,6 +1058,7 @@ export class RunManager extends EventEmitter {
     if (this.pumping || this.stopping || !this.started || !this.ready) return;
     this.pumping = true;
     try {
+      this.flushToolNotices();
       if (![...this.runs.values()].some((run) => run.status === 'queued' && due(run))) return;
       await this.options.refreshSessions();
       // While Tower switches workers an owner message does not extend a turn that is being wrapped up.
@@ -1208,7 +1270,7 @@ export class RunManager extends EventEmitter {
       ...(owner && !mcpServers?.tower_slack ? { approvalsReviewerPreferred: true } : {}),
       ...(run.model ? { model: run.model } : {}), ...(run.effort ? { effort: run.effort } : {}),
       prompt: attachmentPrompt(run.prompt, attachments),
-      ...(run.instructions ? { instructions: run.instructions.text } : {}),
+      ...(this.providerInstructions(run, tools) ? { instructions: this.providerInstructions(run, tools) } : {}),
       imagePaths: attachments.filter(item => isImageAttachment(item.metadata.mimeType)).map(item => item.path),
       onSession: async id => {
         if (!UUID.test(id) || (!creating && id !== session.nativeId)) throw new Error('Codex returned a different or invalid conversation ID. No message was submitted.');
@@ -1290,7 +1352,7 @@ export class RunManager extends EventEmitter {
       message: { role: 'user', content: [
         { type: 'text', text: prompt },
         // A block of its own, not the system prompt: Claude keeps a conversation's first system prompt for every later turn.
-        ...(run.instructions ? [{ type: 'text', text: towerInstructionsBlock(run.instructions.text) }] : []),
+        ...(this.providerInstructions(run, tools) ? [{ type: 'text', text: towerInstructionsBlock(this.providerInstructions(run, tools)!) }] : []),
         ...images.map(item => ({ type: 'image', source: { type: 'base64', media_type: item.metadata.mimeType, data: item.content.toString('base64') } })),
       ] },
     };
@@ -1947,7 +2009,7 @@ export class RunManager extends EventEmitter {
   }
 
   /** True while any provider process, desktop turn or admission is still live, whatever the run status says. */
-  busy(): boolean { return this.owned.size + this.bridged.size + this.stdio.size + this.admissions.size + this.reservedSessions.size > 0 || this.pumping; }
+  busy(): boolean { return this.owned.size + this.bridged.size + this.stdio.size + this.admissions.size + this.reservedSessions.size + this.toolNoticeSending.size > 0 || this.pumping; }
 
   private async flush(): Promise<void> {
     await this.writes;

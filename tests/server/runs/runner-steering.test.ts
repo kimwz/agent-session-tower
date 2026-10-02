@@ -13,6 +13,8 @@ import type { PermissionRequest } from '../../../shared/permissions.js';
 import { randomUUID } from 'node:crypto';
 import type { Run, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
+import { SECRET_CHANGED_INSTRUCTIONS, SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
+import { parseMessages, towerInstructionsBlock } from '../../../server/sessions/parser.js';
 
 const ID = '10000000-0000-4000-8000-000000000001';
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; }
@@ -65,6 +67,68 @@ async function fixture(t: TestContext, options: { external?: boolean; onSteer?: 
   };
   return { manager, session, controls, inputs, read, pair, running, stateDir, published };
 }
+
+const secretTools = () => ({ required: true, towerTools: 'attached' as const, instructions: SECRET_USE_INSTRUCTIONS,
+  servers: { tower_secrets: { command: '/fixture/secret-tool', args: [] } } });
+
+test('private tool changes reach only the active owner turn, with no new run or visible history', async t => {
+  const f = await fixture(t, { resolveRunTools: secretTools });
+  f.manager.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS, f.session.id);
+  await delay(5); assert.equal(f.controls.length, 0, 'idle notices do not start providers');
+  const first = await f.running({ kind: 'owner' });
+  f.manager.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS, 'another-session');
+  await delay(5); assert.equal(f.inputs.length, 0);
+  f.manager.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS, f.session.id);
+  f.manager.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS, f.session.id);
+  await until(() => f.inputs.length === 1);
+  assert.equal(f.inputs[0].prompt, towerInstructionsBlock(SECRET_CHANGED_INSTRUCTIONS));
+  assert.deepEqual(parseMessages('codex', { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: f.inputs[0].prompt }] } }), []);
+  assert.deepEqual(parseMessages('claude', { type: 'attachment', attachment: { type: 'queued_command', prompt: [{ type: 'text', text: f.inputs[0].prompt }] } }), []);
+  assert.equal(f.manager.list().length, 1);
+  assert.equal(f.read(first.id).prompt, 'Original instruction');
+  await f.manager.flushState();
+  assert.doesNotMatch(await readFile(join(f.stateDir, 'runs.json'), 'utf8'), /available secret connections/);
+  assert.doesNotMatch(JSON.stringify([...f.published.values()]), /available secret connections/);
+});
+
+test('private changes wait during approvals, coalesce and disappear when their original turn ends', async t => {
+  const f = await fixture(t, { resolveRunTools: secretTools });
+  const first = await f.running({ kind: 'owner' });
+  const internal = f.manager as unknown as { runs: Map<string, Run>; flushToolNotices(): void };
+  internal.runs.get(first.id)!.approvals = [{ id: 'approval', kind: 'command', title: 'Approve' } as never];
+  f.manager.notifyToolChange('Older private hint');
+  f.manager.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS);
+  await delay(5); assert.equal(f.inputs.length, 0);
+  delete internal.runs.get(first.id)!.approvals;
+  internal.flushToolNotices(); await until(() => f.inputs.length === 1);
+  assert.equal(f.inputs[0].prompt, towerInstructionsBlock(SECRET_CHANGED_INSTRUCTIONS));
+  internal.runs.get(first.id)!.approvals = [{ id: 'approval' } as never];
+  f.manager.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS);
+  await delay(5); f.controls[0].finish(); internal.flushToolNotices();
+  assert.equal(f.inputs.length, 1);
+  assert.equal(f.controls.length, 1, 'nothing resumes merely to deliver an expired notice');
+});
+
+test('unconfirmed hidden delivery is not resent and holds worker lifetime until it settles', async t => {
+  const gate = deferred(); t.after(() => gate.resolve());
+  const f = await fixture(t, { resolveRunTools: secretTools, onSteer: async () => { await gate.promise; throw new SteeringError('provider private canary', 'uncertain'); } });
+  await f.running({ kind: 'owner' });
+  f.manager.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS);
+  await until(() => f.inputs.length === 1);
+  f.controls[0].finish(); assert.equal(f.manager.busy(), true);
+  gate.resolve(); await until(() => !f.manager.busy());
+  (f.manager as unknown as { flushToolNotices(): void }).flushToolNotices();
+  assert.equal(f.inputs.length, 1);
+});
+
+test('secret notices exclude automation and turns without the actual secret MCP', async t => {
+  const automation = await fixture(t, { resolveRunTools: secretTools });
+  await automation.running({ kind: 'trigger', triggerId: 'fixture' });
+  automation.manager.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS); await delay(5); assert.equal(automation.inputs.length, 0);
+  const missing = await fixture(t, { resolveRunTools: () => ({ required: false, towerTools: 'attached', instructions: SECRET_USE_INSTRUCTIONS }) });
+  await missing.running({ kind: 'owner' }); missing.manager.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS);
+  await delay(5); assert.equal(missing.inputs.length, 0);
+});
 
 test('queued same-session instruction is persisted before delivery and follows original completion', async t => {
   const gate = deferred();
