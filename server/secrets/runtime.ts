@@ -108,6 +108,9 @@ export class SecretRuntime {
     let target = this.runTasks.get(run.id);
     if (!target) { target = await this.options.service.bindRun(session.id, session.cwd, run.startedAt ?? run.createdAt); this.runTasks.set(run.id, target); }
     if (target.root !== session.cwd) throw fail('실행의 프로젝트 경로가 변경되었습니다.', 403);
+    const current = this.options.service.currentTask(session.id, session.cwd, target.hostId);
+    // Project registration can change during a run, but its original task identity must never change.
+    if (current?.taskId === target.taskId) { target = { ...target, projectId: current.projectId }; this.runTasks.set(run.id, target); }
     // list/resolve revalidate the task; a closed task is never replaced for this run.
     return { ...target, runId: run.id };
   }
@@ -218,14 +221,20 @@ export class SecretRuntime {
     else if (action === 'import') { if (!this.options.importPending || typeof input.id !== 'string') throw fail('가져올 암호화 기록이 필요합니다.'); await this.options.importPending(input.id, password('password')); }
     let target: SecretTarget | undefined;
     if (!service.status().locked && typeof input.sessionId === 'string') {
-      const startsTask = ['create', 'attach'].includes(action);
+      const startsTask = ['create', 'attach', 'connect'].includes(action);
       if (typeof input.nodeId === 'string') target = remoteTarget ? await service.ensureRemoteTask({ ...remoteTarget, runId: 'owner-ui' }) : undefined;
       else target = startsTask ? await this.target(input.sessionId) : await this.peekTarget(input.sessionId);
     }
     if (action === 'preview') return { fields: Object.keys(parseDotenv(typeof input.value === 'string' ? input.value : '')) };
     if (action === 'create') {
       // Never accept target, hostId, taskId, or projectRoot supplied by the page.
-      const create = z.object({ name: z.string().min(1).max(256), kind: z.enum(['scalar','env','file']), scope: z.enum(['global','project','task']), value: z.string().optional(), content: z.string().optional(), groupId: z.string().optional(), groupName: z.string().max(256).optional(), allProjects: z.boolean().optional(), projectId: z.string().optional(), activation: z.enum(['manual','auto']).optional(), operations: z.array(z.enum(SECRET_OPERATIONS)).max(6).optional(), connect: z.boolean().optional(), expiresAt: z.number().optional() }).parse(input) as SecretCreateInput;
+      const { currentProject, ...create } = z.object({ name: z.string().min(1).max(256), kind: z.enum(['scalar','env','file']), scope: z.enum(['global','project','task']), value: z.string().optional(), content: z.string().optional(), groupId: z.string().optional(), groupName: z.string().max(256).optional(), allProjects: z.boolean().optional(), projectId: z.string().optional(), currentProject: z.boolean().optional(), activation: z.enum(['manual','auto']).optional(), operations: z.array(z.enum(SECRET_OPERATIONS)).max(6).optional(), connect: z.boolean().optional(), expiresAt: z.number().optional() }).parse(input);
+      if (currentProject) {
+        if (!target || create.scope !== 'project') throw fail('저장할 프로젝트 세션이 필요합니다.');
+        const project = target.projectId ? service.overview().projects.find(project => project.id === target!.projectId) : await service.project({ name: target.root.split('/').filter(Boolean).at(-1) || target.root, bindings: [{ hostId: target.hostId, root: target.root }] });
+        create.projectId = project!.id;
+        target = typeof input.nodeId === 'string' ? await service.ensureRemoteTask({ ...target, projectId: project!.id, runId: 'owner-ui' }) : await this.target(input.sessionId as string);
+      }
       const metadata = await service.create({ ...create, target });
       if (!target && (create.projectId || create.allProjects === true)) await service.setRule({ groupId: metadata.groupId, secretIds: [metadata.id], hostId: service.device().id, projectId: create.projectId, allProjects: create.allProjects === true && create.scope === 'global', activation: create.activation ?? 'manual', operations: create.operations ?? [...SECRET_OPERATIONS], enabled: true });
     } else if (action === 'update') await service.update(z.object({ id: z.string(), value: z.string().optional(), content: z.string().optional() }).parse(input));
@@ -244,10 +253,10 @@ export class SecretRuntime {
       // Remote grants have a finite deadline even if the page leaves it blank.
       if (rule.hostId !== service.device().id) rule.maxTtlMs ??= 8 * 60 * 60_000;
       await service.setRule(rule);
-    } else if (action === 'attach' || action === 'revoke') {
+    } else if (action === 'attach' || action === 'connect' || action === 'revoke') {
       if (!target) throw fail('연결할 프로젝트 세션이 필요합니다.');
       const ids = z.array(z.string()).min(1).max(4096).parse(input.secretIds);
-      if (action === 'attach') await service.attach(target, ids); else await service.revoke(target, ids);
+      if (action === 'attach') await service.attach(target, ids); else if (action === 'connect') await service.connect(target, ids); else await service.revoke(target, ids);
     } else if (action === 'end-task') { if (!target) throw fail('종료할 작업이 필요합니다.'); await this.endTask(target); target = undefined; }
     else if (action === 'trust') {
       const peer = z.object({ device: z.object({ id: z.string().uuid(), name: z.string().max(256), signingKey: z.string().max(4096), encryptionKey: z.string().max(4096), fingerprint: z.string() }), routeId: z.string().min(1).max(256), direction: z.enum(['node','controller']) }).parse(input);

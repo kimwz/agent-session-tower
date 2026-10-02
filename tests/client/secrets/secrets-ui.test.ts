@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { SecretOverview } from '../../../shared/secrets.js';
-import { registrationPayload, secretOverviewPath, secretSession, type Registration } from '../../../client/src/secrets/secrets-client.js';
+import { registrationPayload, secretOverviewPath, secretSession, quickSecretKind, quickSecretPayload, savedSecretMatches, type Registration } from '../../../client/src/secrets/secrets-client.js';
+import { SecretQuickConnect } from '../../../client/src/secrets/SecretQuickConnect.js';
 import { SecretAccess } from '../../../client/src/secrets/SecretAccess.js';
 import { SecretRegistration } from '../../../client/src/secrets/SecretRegistration.js';
 import { SecretWorkspace } from '../../../client/src/secrets/SecretsPanel.js';
@@ -25,6 +26,32 @@ const overview: SecretOverview = {
   connected: ['secret'], task: { id: 'task', hostId: device.id, sessionId: 'session', root: '/work', status: 'open', createdAt: 1, excluded: [] },
 };
 const form: Registration = { name: 'API_TOKEN', kind: 'scalar', scope: 'task', groupId: '', groupName: '배포 키', projectId: '', activation: 'manual', operations: ['discover', 'env'], connect: true };
+
+test('quick connection shows paste input first even before vault setup and keeps management out of the chat', () => {
+  const markup = renderToStaticMarkup(createElement(SecretQuickConnect, { overview: { ...overview, status: { initialized: false, locked: true }, secrets: [] }, busy: false, change, onConnected: noop, onManage: noop }));
+  assert.ok(markup.indexOf('시크릿 붙여넣기') < markup.indexOf('비밀번호 확인'));
+  assert.match(markup, /textarea autofocus/); assert.match(markup, /다음에도 쓰도록 저장/);
+  assert.match(markup, /처음 한 번/); assert.doesNotMatch(markup, /공유 규칙|원격 연결 ID|허용할 사용 방식/);
+});
+test('quick dotenv detection is overridable and optional saving keeps manual task access as its default', () => {
+  const raw = '# dotenv\nexport TOKEN=FAKE_TOKEN\nOTHER=FAKE_OTHER';
+  assert.equal(quickSecretKind(raw, 'auto'), 'env'); assert.equal(quickSecretKind(raw, 'scalar'), 'scalar');
+  assert.equal(quickSecretKind('fake-password', 'auto'), 'scalar');
+  const temporary = quickSecretPayload(overview, raw, 'auto', '', 'task');
+  assert.equal(temporary.scope, 'task'); assert.equal(temporary.connect, true); assert.equal(temporary.activation, 'manual'); assert.equal(temporary.name, 'TOKEN');
+  assert.equal(temporary.allProjects, undefined); assert.equal(temporary.value, raw);
+  const project = quickSecretPayload(overview, raw, 'auto', 'Env bundle', 'project');
+  assert.equal(project.scope, 'project'); assert.equal(project.currentProject, true); assert.equal(project.projectId, undefined);
+  const global = quickSecretPayload(overview, 'FAKE_RAW', 'auto', '', 'global');
+  assert.equal(global.scope, 'global'); assert.equal(global.allProjects, false); assert.equal(global.activation, 'manual');
+});
+test('saved picker searches names, groups and dotenv fields while hiding other task/project scope', () => {
+  assert.equal(savedSecretMatches(overview, overview.secrets[0], '배포'), true);
+  assert.equal(savedSecretMatches(overview, { ...overview.secrets[0], fields: ['DATABASE_URL'] }, 'database'), true);
+  assert.equal(savedSecretMatches(overview, overview.secrets[0], 'missing'), false);
+  assert.equal(savedSecretMatches({ ...overview, groups: [{ ...overview.groups[0], scope: 'task', taskId: 'other' }] }, overview.secrets[0], ''), false);
+  assert.equal(savedSecretMatches({ ...overview, groups: [{ ...overview.groups[0], scope: 'project', projectId: 'other' }] }, overview.secrets[0], ''), false);
+});
 
 test('joined-session requests address the source vault and pass only canonical session and node identities', () => {
   assert.deepEqual(secretSession(`@${node}/codex:session`), { sessionId: 'codex:session', nodeId: node });
@@ -78,6 +105,13 @@ test('discover-only rule editor retains the selected key and allows field and op
 test('peer public code parsing drops extra properties and rejects malformed codes without reflecting pasted data', () => {
   assert.deepEqual(parseSecretDevice(JSON.stringify({ ...device, password: 'private-canary' })), device);
   assert.throws(() => parseSecretDevice(JSON.stringify({ id: 'source', password: 'private-canary' })), /Invalid public device/);
+});
+
+test('remote approval chooses a known connection by name while still requiring public-code fingerprint verification', async () => {
+  const { SecretTrustEditor } = await import('../../../client/src/secrets/SecretManagement.js');
+  const markup = renderToStaticMarkup(createElement(SecretTrustEditor, { overview, busy: false, change, onClose: noop, computers: [{ node: 'connected-id', name: '테스트 서버', connected: true }, { node: 'offline-id', name: '꺼진 서버', connected: false }] }));
+  assert.match(markup, /연결된 컴퓨터/); assert.match(markup, /테스트 서버/); assert.match(markup, /value="offline-id" disabled/);
+  assert.doesNotMatch(markup, /원격 연결 ID/); assert.match(markup, /지문 확인/); assert.match(markup, /disabled="">컴퓨터 승인/);
 });
 
 test('secret controls have English translations while key names remain exact', () => {

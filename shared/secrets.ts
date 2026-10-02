@@ -1,5 +1,6 @@
 /** Public contracts contain names and references, never stored secret values. */
 export const SECRET_OPERATIONS = ['discover', 'env', 'pipe', 'file', 'compare', 'fingerprint'] as const;
+export const DEFAULT_SECRET_USE_OPERATIONS = ['discover', 'env', 'pipe', 'file'] as const;
 export type SecretOperation = typeof SECRET_OPERATIONS[number];
 export type SecretScope = 'global' | 'project' | 'task';
 export type SecretKind = 'scalar' | 'env' | 'file';

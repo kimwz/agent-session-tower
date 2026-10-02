@@ -375,7 +375,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         const answer = await towerUpdate(body.version as string | undefined);
         return json(res, answer.status, answer.body);
       }
-      const secretAction = path.match(/^\/api\/secrets\/(overview|initialize|unlock|lock|password|create|update|remove|project|rule|attach|revoke|end-task|trust|untrust|preview|import)$/);
+      const secretAction = path.match(/^\/api\/secrets\/(overview|initialize|unlock|lock|password|create|update|remove|project|rule|attach|connect|revoke|end-task|trust|untrust|preview|import)$/);
       if (secretAction && ((secretAction[1] === 'overview' && req.method === 'GET') || (secretAction[1] !== 'overview' && req.method === 'POST'))) {
         if (masterCall || localAgent) return json(res, 403, { error: '시크릿 보관함 관리는 소유자의 전용 화면에서만 가능합니다.' });
         // Only an explicitly configured HTTPS origin proves a secure reverse-proxy endpoint.

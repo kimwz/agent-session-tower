@@ -83,6 +83,26 @@ test('expiry cleanup holds the worker during writes and pauses for a handoff', a
   } finally { release?.(); await f.cleanup(); }
 });
 
+test('quick project save uses the verified canonical session root and works without prior project setup', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize();
+    const running = f.addRun('run-bound-before-project-save'); const token = f.tokenFor(running); await f.list(token);
+    const input = { sessionId: f.session.id, scope: 'project', currentProject: true, kind: 'scalar', name: 'QUICK_PROJECT', value: 'FAKE_QUICK_PROJECT', connect: true,
+      projectRoot: '/forged', hostId: 'forged-host', taskId: 'forged-task', projectId: 'forged-project', target: { root: '/forged' } };
+    const first = await f.runtime.control('create', input) as SecretOverview;
+    assert.equal(first.projects.length, 1); assert.equal(first.projects[0].bindings[0].root, f.projectRoot);
+    assert.equal(first.projects[0].bindings[0].hostId, f.service.device().id);
+    assert.equal(first.target?.projectId, first.projects[0].id); assert.equal(first.connected.length, 1);
+    assert.equal((await f.list(token)).secrets[0].name, 'QUICK_PROJECT');
+    const second = await f.runtime.control('create', { ...input, name: 'ANOTHER_PROJECT_KEY' }) as SecretOverview;
+    assert.equal(second.projects.length, 1); assert.equal(second.connected.length, 2);
+    await assert.rejects(f.runtime.control('create', { ...input, sessionId: undefined }));
+    await assert.rejects(f.runtime.control('create', { ...input, scope: 'global' }));
+    assert.deepEqual(f.ledger, []);
+  } finally { await f.cleanup(); }
+});
+
 test('owner MCP binds canonical cwd and one open task across summaries, turn completion and owner follow-up', async () => {
   const f = await fixture();
   try {

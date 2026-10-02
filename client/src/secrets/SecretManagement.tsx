@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import type { SecretDevice, SecretOverview, SecretProject, SecretRule } from '../../../shared/secrets';
+import { DEFAULT_SECRET_USE_OPERATIONS } from '../../../shared/secrets';
 import { useI18n } from '../i18n/i18n';
 import { copyText } from '../common/lib';
 import { SecretOperations } from './SecretRegistration';
@@ -13,8 +14,8 @@ export function SecretRuleEditor({ overview, rule, busy, change, onClose }: { ov
   const [projectId, setProject] = useState(rule?.projectId || overview.groups.find(group => group.id === (rule?.groupId || overview.groups[0]?.id))?.projectId || '');
   const [root, setRoot] = useState(rule?.root || '');
   const [allProjects, setAllProjects] = useState(rule?.allProjects ?? false);
-  const [activation, setActivation] = useState(rule?.activation || 'manual');
-  const [operations, setOperations] = useState(rule?.operations || ['discover'] as SecretRule['operations']);
+  const [activation, setActivation] = useState(rule?.activation || 'auto');
+  const [operations, setOperations] = useState(rule?.operations || [...DEFAULT_SECRET_USE_OPERATIONS]);
   const [fields, setFields] = useState<Record<string, string[]>>(rule?.fields || {});
   const [enabled, setEnabled] = useState(rule?.enabled ?? true);
   const [ttl, setTtl] = useState(rule?.maxTtlMs ? String(rule.maxTtlMs / 60_000) : '');
@@ -36,11 +37,13 @@ export function SecretRuleEditor({ overview, rule, busy, change, onClose }: { ov
     <label>{t('컴퓨터')}<select value={hostId} required disabled={busy} onChange={event => { setHost(event.target.value); setRoot(''); }}>{overview.device && <option value={overview.device.id}>{overview.device.name}</option>}{overview.peers.filter(peer => peer.enabled).map(peer => <option value={peer.device.id} key={peer.device.id}>{peer.device.name}</option>)}{hostId && hostId !== overview.device?.id && !overview.peers.some(peer => peer.enabled && peer.device.id === hostId) && <option value={hostId}>{hostId}</option>}</select></label>
     {group?.scope === 'global' && <label className="secret-check"><input type="checkbox" checked={allProjects} disabled={busy} onChange={event => setAllProjects(event.target.checked)} />{t('모든 프로젝트에 허용')}</label>}
     <label>{t('프로젝트')}<select value={projectId} disabled={busy || allProjects || group?.scope === 'project'} onChange={event => setProject(event.target.value)}><option value="">{root && !allProjects ? root : t('프로젝트 선택')}</option>{overview.projects.map(project => <option value={project.id} key={project.id}>{project.name}</option>)}</select></label>
-    <label>{t('연결 방식')}<select value={activation} disabled={busy} onChange={event => setActivation(event.target.value as SecretRule['activation'])}><option value="manual">{t('수동')}</option><option value="auto">{t('자동')}</option></select></label>
+    <label>{t('연결 방식')}<select value={activation} disabled={busy} onChange={event => setActivation(event.target.value as SecretRule['activation'])}><option value="manual">{t('세션마다 직접 연결')}</option><option value="auto">{t('프로젝트 세션에서 항상 사용')}</option></select></label>
+    <details className="secret-advanced"><summary>{t('고급 권한 및 만료')}</summary>
     <SecretOperations value={operations} onChange={setOperations} disabled={busy} />
     <label>{t('작업 내 최대 사용 시간 (분)')}<input type="number" min="1" value={ttl} disabled={busy} onChange={event => setTtl(event.target.value)} /></label>
     <label>{t('만료 시각')}<input type="datetime-local" value={expires} disabled={busy} onChange={event => setExpires(event.target.value)} /></label>
     <label className="secret-check"><input type="checkbox" checked={enabled} disabled={busy} onChange={event => setEnabled(event.target.checked)} />{t('규칙 활성화')}</label>
+    </details>
     <div className="secret-actions"><button type="button" onClick={onClose}>{t('취소')}</button><button type="submit" disabled={busy || !groupId || !secretIds.length || !hostId || !operations.length || (group?.scope === 'global' && !allProjects && !projectId && !root) || secretIds.some(id => fields[id]?.length === 0)}>{t('저장')}</button></div>
   </form>;
 }
@@ -63,7 +66,8 @@ export function parseSecretDevice(code: string): SecretDevice {
   const { id, name, signingKey, encryptionKey, fingerprint } = device as SecretDevice;
   return { id, name, signingKey, encryptionKey, fingerprint };
 }
-export function SecretTrustEditor({ overview, busy, change, onClose }: { overview: SecretOverview; busy: boolean; change: SecretChange; onClose: () => void }) {
+export interface SecretComputer { node: string; name: string; connected: boolean }
+export function SecretTrustEditor({ overview, computers = [], busy, change, onClose }: { overview: SecretOverview; computers?: SecretComputer[]; busy: boolean; change: SecretChange; onClose: () => void }) {
   const { t } = useI18n(); const [code, setCode] = useState(''); const [routeId, setRoute] = useState(''); const [direction, setDirection] = useState<'node' | 'controller'>('node'); const [error, setError] = useState(''); const [peer, setPeer] = useState<SecretDevice>();
   return <form className="secret-form" onSubmit={async event => {
     event.preventDefault(); event.stopPropagation(); if (!peer) return;
@@ -73,8 +77,8 @@ export function SecretTrustEditor({ overview, busy, change, onClose }: { overvie
     <label>{t('상대 컴퓨터의 공개 코드')}<textarea autoFocus rows={4} value={code} disabled={busy} onChange={event => { setCode(event.target.value); setPeer(undefined); setError(''); }} /></label>
     <button type="button" disabled={busy || !code.trim()} onClick={() => { try { setPeer(parseSecretDevice(code)); setError(''); } catch { setError(t('공개 코드 형식을 확인하세요.')); } }}>{t('지문 확인')}</button>
     {peer && <div className="secret-public-device"><strong>{peer.name}</strong><code>{peer.fingerprint}</code><p>{t('상대 컴퓨터 화면의 지문과 일치하는지 확인한 뒤 승인하세요.')}</p></div>}
-    <label>{t('원격 연결 ID')}<input value={routeId} required disabled={busy} onChange={event => setRoute(event.target.value)} /></label>
-    <label>{t('연결 방향')}<select value={direction} disabled={busy} onChange={event => setDirection(event.target.value as 'node' | 'controller')}><option value="node">{t('내가 연결한 컴퓨터')}</option><option value="controller">{t('나를 연결한 컴퓨터')}</option></select></label>
+    <label>{t('연결 방향')}<select value={direction} disabled={busy} onChange={event => { setDirection(event.target.value as 'node' | 'controller'); setRoute(''); }}><option value="node">{t('내가 연결한 컴퓨터')}</option><option value="controller">{t('나를 연결한 컴퓨터')}</option></select></label>
+    {direction === 'node' && computers.length ? <label>{t('연결된 컴퓨터')}<select value={routeId} required disabled={busy} onChange={event => setRoute(event.target.value)}><option value="">{t('컴퓨터 선택')}</option>{computers.map(computer => <option value={computer.node} key={computer.node} disabled={!computer.connected}>{computer.name}{computer.connected ? '' : ` (${t('연결 끊김')})`}</option>)}</select></label> : <label>{t('원격 연결 ID')}<input value={routeId} required disabled={busy} onChange={event => setRoute(event.target.value)} /></label>}
     {error && <p role="alert">{error}</p>}
     <div className="secret-actions"><button type="button" onClick={onClose}>{t('취소')}</button><button type="submit" disabled={busy || !peer || !routeId.trim()}>{t('컴퓨터 승인')}</button></div>
   </form>;

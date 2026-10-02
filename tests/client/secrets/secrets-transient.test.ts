@@ -6,7 +6,7 @@ import { transformSync } from 'esbuild';
 import * as jsxRuntime from 'react/jsx-runtime';
 import type { ReactElement } from 'react';
 import * as secretTypes from '../../../shared/secrets.js';
-import { registrationPayload, isRemoteSecret, localSecretOverview } from '../../../client/src/secrets/secrets-client.js';
+import { registrationPayload, isRemoteSecret, localSecretOverview, quickSecretKind, quickSecretPayload, savedSecretMatches } from '../../../client/src/secrets/secrets-client.js';
 
 type Element = ReactElement<Record<string, any>>;
 function descendants(element: unknown): Element[] {
@@ -34,17 +34,19 @@ function componentFixture(component = 'SecretRegistration', file = 'SecretRegist
     if (name === '../common/lib') return { copyText: async () => true };
     if (name === './SecretRegistration') return { SecretOperations: () => null, scopeLabels: { global: '전역', project: '프로젝트', task: '이번 작업' }, operationLabels: { discover: '목록 확인' } };
     if (name === 'react-dom') return { createPortal: (node: unknown) => node };
-    if (name === 'lucide-react') return { KeyRound: () => null, LockKeyhole: () => null, X: () => null };
+    if (name === 'lucide-react') return { KeyRound: () => null, LockKeyhole: () => null, X: () => null, Check: () => null, FileKey: () => null, Search: () => null };
+    if (name === './SecretQuickConnect') return {};
+    if (name === '../settings/settings-open') return { openSettings() {} };
     if (name === '../settings/SettingsPane') return { SettingsFrameContext: {}, useSettingsGuard() {} };
     if (name === './SecretRecovery' || name === './SecretAccess' || name === './SecretManagement') return {};
-    if (name === './secrets-client') return { registrationPayload, isRemoteSecret, localSecretOverview };
+    if (name === './secrets-client') return { registrationPayload, isRemoteSecret, localSecretOverview, quickSecretKind, quickSecretPayload, savedSecretMatches };
     if (name === '../master/api') return { post: async () => ({ fields: [] }) };
     throw new Error(`Unexpected fixture import: ${name}`);
   } });
   const overview = { status: { initialized: true, locked: false }, projects: [], groups: [], secrets: [], rules: [], peers: [], connected: [] };
   const sent: unknown[] = [];
   let complete!: (value: boolean) => void;
-  const props = { overview, sessionId: 'session', token: 'token', busy: false, onClose() {}, change: async (_action: string, body: unknown) => { sent.push(body); return new Promise<boolean>(resolve => { complete = resolve; }); }, ...extra };
+  const props = { overview, sessionId: 'session', token: 'token', busy: false, onClose() {}, onConnected() {}, onManage() {}, change: async (_action: string, body: unknown) => { sent.push(body); return new Promise<boolean>(resolve => { complete = resolve; }); }, ...extra };
   const render = () => { cursor = 0; return module.exports[component](props); };
   return { render, sent, complete: (value: boolean) => complete(value), cleanup: () => cleanups.forEach(cleanup => cleanup()) };
 }
@@ -67,6 +69,25 @@ test('secret registration clears the raw input before the request resolves and s
 const formEvent = { preventDefault() {}, stopPropagation() {} };
 const find = (element: Element, type: string) => descendants(element).find(node => node.type === type)!;
 const readPayload = (fixture: ReturnType<typeof componentFixture>) => JSON.parse(JSON.stringify(fixture.sent[0])) as Record<string, any>;
+
+test('quick confirmation clears the secret before completion, sends no chat submit and immediately connects task scope', async () => {
+  let connected = false;
+  const fixture = componentFixture('SecretQuickConnect', 'SecretQuickConnect.tsx', { onConnected() { connected = true; } });
+  find(fixture.render(), 'textarea').props.onChange({ target: { value: 'FAKE_QUICK_CANARY' } });
+  let prevented = false; let stopped = false;
+  find(fixture.render(), 'form').props.onSubmit({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
+  assert.equal(prevented, true); assert.equal(stopped, true); assert.equal(readPayload(fixture).value, 'FAKE_QUICK_CANARY');
+  assert.equal(readPayload(fixture).scope, 'task'); assert.equal(readPayload(fixture).connect, true);
+  assert.equal(find(fixture.render(), 'textarea').props.value, '');
+  fixture.complete(true); await new Promise(resolve => setImmediate(resolve)); assert.equal(connected, true); fixture.cleanup();
+});
+test('closing a pending quick dialog prevents its response from closing a later dialog', async () => {
+  let connected = false;
+  const fixture = componentFixture('SecretQuickConnect', 'SecretQuickConnect.tsx', { onConnected() { connected = true; } });
+  find(fixture.render(), 'textarea').props.onChange({ target: { value: 'FAKE_PENDING' } });
+  find(fixture.render(), 'form').props.onSubmit(formEvent); fixture.cleanup(); fixture.complete(true);
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(connected, false);
+});
 
 test('pending import sends only the selected ID and transient source password and clears input immediately', async () => {
   const fixture = componentFixture('SecretPendingImport', 'SecretRecovery.tsx', { ids: ['backup-a', 'backup-b'] });
