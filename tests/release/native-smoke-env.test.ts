@@ -5,7 +5,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { isolatedSmokeEnv } from '../../scripts/native-smoke-env.js';
 
-for (const provider of ['codex', 'claude'] as const) test(`${provider} smoke tests require separate storage before provider startup`, async t => {
+for (const provider of ['codex', 'claude'] as const) test(`${provider} smoke tests preserve existing login and validate optional separate storage`, async t => {
   const fixture = await mkdtemp(join(tmpdir(), 'tower-smoke-home-guard-'));
   t.after(() => rm(fixture, { recursive: true, force: true }));
   const selector = provider === 'codex' ? 'TOWER_SMOKE_CODEX_HOME' : 'TOWER_SMOKE_CLAUDE_HOME';
@@ -17,7 +17,7 @@ for (const provider of ['codex', 'claude'] as const) test(`${provider} smoke tes
   const nested = join(normal, 'nested');
   await Promise.all([mkdir(nested, { recursive: true }), mkdir(otherNormal), mkdir(isolated)]);
   const original = { [variable]: normal, [otherVariable]: otherNormal, UNRELATED_SETTING: 'unchanged' };
-  await assert.rejects(isolatedSmokeEnv(provider, original), new RegExp(selector));
+  assert.deepEqual(await isolatedSmokeEnv(provider, original), original, 'the existing login environment is the default; no credential is read or copied');
   const use = (path: string) => isolatedSmokeEnv(provider, { ...original, [selector]: path });
   await assert.rejects(use(normal), /must be separate/);
   await assert.rejects(use(otherNormal), /must be separate/);

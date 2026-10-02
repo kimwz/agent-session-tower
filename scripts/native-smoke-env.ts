@@ -17,12 +17,12 @@ async function rejectStorageLinks(path: string): Promise<void> {
   if (entry.isDirectory()) for (const name of await readdir(path)) await rejectStorageLinks(join(path, name));
 }
 
-/** Live smoke tests require a separately authenticated profile; never borrow normal session storage. */
+/** Preserve the existing CLI login; validate separate storage only when an optional home override is chosen. */
 export async function isolatedSmokeEnv(provider: 'codex' | 'claude', env: NodeJS.ProcessEnv = process.env): Promise<NodeJS.ProcessEnv> {
   const selector = provider === 'codex' ? 'TOWER_SMOKE_CODEX_HOME' : 'TOWER_SMOKE_CLAUDE_HOME';
   const variable = provider === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR';
   const configured = env[selector];
-  if (!configured?.trim()) throw new Error(`Set ${selector} to a separately authenticated test home. Smoke tests must not use your normal ${provider} profile.`);
+  if (!configured?.trim()) return { ...env };
   const testHome = await realpath(resolve(configured));
   if (!(await stat(testHome)).isDirectory()) throw new Error(`${selector} must be a directory.`);
   const normalHomes = [join(homedir(), '.codex'), join(homedir(), '.claude'), env.CODEX_HOME, env.CLAUDE_CONFIG_DIR].filter((path): path is string => !!path);
