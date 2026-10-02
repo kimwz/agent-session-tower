@@ -93,13 +93,12 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
     nextScript = start && interpreter;
     start = false;
     const input = redirect === '<';
-    const output = redirect === '>';
     redirect = undefined;
     if (!word) { evidence.notes.push('Dynamic shell word was not expanded for inspection.'); continue; }
     if (inlineNext) { inlineNext = false; evidence.notes.push('Inline code is in the exact command; nested file paths were not interpreted.'); continue; }
     if (interpreter && (shell ? /^-[a-z]*c[a-z]*$/.test(word) : ['-c', '-e', '--eval', '--print'].includes(word))) { inlineNext = true; continue; }
     if (!input && !directScript && !interpreterFile && SCRIPT.test(word) && !interpreter) evidence.notes.push('Code argument for an unknown command runner was not resolved.');
-    if (remote || output || word.startsWith('-') || (!input && !directScript && !interpreterFile && !(interpreter && SCRIPT.test(word)))) continue;
+    if (remote || word.startsWith('-') || (!input && !directScript && !interpreterFile && !(interpreter && SCRIPT.test(word)))) continue;
     if (!folder && !word.startsWith('/')) { evidence.notes.push(`Relative file not resolved: ${word}`); continue; }
     if (word.split('/').includes('..')) { evidence.notes.push('Parent traversal was not normalized through possible symlink directories.'); continue; }
     const path = resolve(folder ?? cwd, word);
