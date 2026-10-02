@@ -160,7 +160,7 @@ export function resolveRole(settings: ModelSettings, id: string, context: { prov
 /** A new delegated session: explicit fields win independently, using only the selected provider's pick. */
 export function masterWorkerModel(settings: ModelSettings, explicit: Partial<ResolvedModel> = {}): ResolvedModel {
   const role = settings.roles['master.worker'];
-  const provider = explicit.provider ?? role.provider;
+  const provider = explicit.provider === undefined ? role.provider : explicit.provider;
   if (provider !== 'claude' && provider !== 'codex') throw Object.assign(new Error('Invalid worker provider.'), { statusCode: 400 });
   return { provider, ...role[provider], ...(explicit.model !== undefined ? { model: explicit.model } : {}),
     ...(explicit.effort !== undefined ? { effort: explicit.effort } : {}) };

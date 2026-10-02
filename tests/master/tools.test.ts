@@ -125,6 +125,9 @@ test('remote direct creation resolves the receiving role before sending, and an 
     if (!supported) { assert.match(result.error!, /지원하지/); assert.equal(sent.length, 0); }
     else {
       assert.equal(sent.length, 1);
+      const invalid = await tools.call('tower_api', { method: 'POST', path: '/api/sessions', node: 'c'.repeat(32), body: { provider: null, prompt: 'new', cwd: '/project' } }) as { error?: string };
+      assert.match(invalid.error!, /Invalid worker provider/);
+      assert.equal(web.seen.filter(item => item.path.endsWith('/sessions')).length, 1);
       assert.deepEqual(sent[0].body, { provider: 'codex', prompt: 'new', cwd: '/project', model: 'gpt-6.1-sol', effort: 'low' });
     }
   }
