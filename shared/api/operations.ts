@@ -34,7 +34,7 @@ export const OPERATIONS = {
     model: z.string().max(200).optional(), effort: z.string().max(40).optional() }).strict().refine(value => value.provider !== undefined || value.modelRole === 'master.worker', { message: 'provider is required without a model role', path: ['provider'] }), write: true, agent: true, keyField: 'requestId',
     summary: 'Hand a task to the right project agent through Auto Prompt. The requestId identifies the request: reuse it to retry or check, never for a different task.' },
   'autoPrompt.get': { input: z.object({ requestId: uuid }).strict(), write: false, agent: true, summary: 'Read an Auto Prompt request and the run it started.' },
-  'triggers.list': { input: z.object({}).strict(), write: false, agent: true, summary: 'List triggers with their state and recent runs.' },
+  'triggers.list': { input: z.object({ includeArchived: z.boolean().optional() }).strict(), write: false, agent: true, summary: 'List active management definitions; includeArchived also returns retained reservations. Run completion is separate from task success.' },
   'triggers.get': { input: z.object({ id }).strict(), write: false, agent: true, summary: 'Read one trigger with its earlier revisions and recent runs.' },
   'triggers.events': { input: z.object({ triggerId: id.optional(), beforeId: id.optional(), ...page }).strict(), write: false, agent: true,
     summary: 'Read trigger runs, newest first. Pass the last run’s id as beforeId for the next page.' },
@@ -45,6 +45,7 @@ export const OPERATIONS = {
   'triggers.create': { input: z.object({ trigger: TriggerInputSchema }).strict(), write: true, agent: true, summary: 'Create a trigger. It takes effect immediately.' },
   'triggers.update': { input: z.object({ id, expectedRevision: revision, trigger: TriggerInputSchema }).strict(), write: true, agent: true, summary: 'Replace a trigger’s configuration as a new revision.' },
   'triggers.setEnabled': { input: z.object({ id, expectedRevision: revision, enabled: z.boolean() }).strict(), write: true, agent: true, summary: 'Turn a trigger on or off.' },
+  'triggers.setArchived': { input: z.object({ id, expectedRevision: revision, archived: z.boolean() }).strict(), write: true, agent: true, summary: 'Archive a finished trigger without deleting history, or unarchive it turned off. Consumed reservations cannot be rearmed.' },
   'triggers.delete': { input: z.object({ id, expectedRevision: revision }).strict(), write: true, agent: true, summary: 'Delete a trigger. It can be restored for a while.' },
   'triggers.restore': { input: z.object({ id }).strict(), write: true, agent: true, summary: 'Restore a deleted trigger, turned off.' },
   'triggers.revert': { input: z.object({ id, expectedRevision: revision, revision }).strict(), write: true, agent: true, summary: 'Restore an earlier revision as a new revision.' },
@@ -95,6 +96,6 @@ export type OperationName = keyof typeof OPERATIONS;
  * The worker answers them with only what this computer shares.
  */
 export const REMOTE_PAGE_OPERATIONS: ReadonlySet<string> = new Set(['triggers.list', 'triggers.get', 'triggers.events', 'triggers.event', 'triggers.audit', 'triggers.deleted',
-  'triggers.preview', 'triggers.previewIssues', 'triggers.settings', 'triggers.create', 'triggers.update', 'triggers.setEnabled', 'triggers.delete', 'triggers.restore', 'triggers.revert', 'triggers.run', 'secrets.list',
+  'triggers.preview', 'triggers.previewIssues', 'triggers.settings', 'triggers.create', 'triggers.update', 'triggers.setEnabled', 'triggers.setArchived', 'triggers.delete', 'triggers.restore', 'triggers.revert', 'triggers.run', 'secrets.list',
   'models.settings', 'models.update']);
 export const isOperationName = (value: unknown): value is OperationName => typeof value === 'string' && Object.hasOwn(OPERATIONS, value);

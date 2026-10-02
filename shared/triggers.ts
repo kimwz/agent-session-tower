@@ -9,11 +9,15 @@ const text = (max: number) => z.string().trim().min(1).max(max);
 const absolutePath = z.string().min(1).max(4096).refine(value => value.startsWith('/') && !value.includes('\0'), 'An absolute folder path is required.');
 
 export const CRON_FIELDS = 5;
-export const ScheduleSchema = z.discriminatedUnion('type', [
+export const RepeatingScheduleSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('cron'), expression: text(200), timezone: text(100) }).strict(),
   z.object({ type: z.literal('interval'), everySeconds: z.number().int().min(60).max(31 * 24 * 60 * 60) }).strict(),
 ]);
+export const OnceScheduleSchema = z.object({ type: z.literal('once'), at: z.string().datetime({ offset: true }).transform(value => new Date(value).toISOString()) }).strict();
+export const ScheduleSchema = z.discriminatedUnion('type', [...RepeatingScheduleSchema.options, OnceScheduleSchema]);
 export type Schedule = z.infer<typeof ScheduleSchema>;
+export const OnceConsumptionSchema = z.object({ at: z.string().datetime({ offset: true }), eventId: z.string().uuid().optional() }).strict();
+export type OnceConsumption = z.infer<typeof OnceConsumptionSchema>;
 
 export const ScheduleSourceSchema = z.object({
   kind: z.literal('schedule'),
@@ -52,7 +56,7 @@ export const HttpRequestSchema = z.object({
 export type HttpRequest = z.infer<typeof HttpRequestSchema>;
 export const HttpSourceSchema = z.object({
   kind: z.literal('http'),
-  schedule: ScheduleSchema,
+  schedule: RepeatingScheduleSchema,
   request: HttpRequestSchema,
   condition: HttpConditionSchema,
 }).strict();
@@ -132,7 +136,7 @@ export function upgradeWatch(watch: unknown, overlap?: unknown): unknown {
 }
 export const GitHubSourceSchema = z.object({
   kind: z.literal('github'),
-  schedule: ScheduleSchema,
+  schedule: RepeatingScheduleSchema,
   auth: GitHubAuthSchema,
   /** The account this trigger was set up with; checking stops if the login becomes another account. */
   account: z.string().trim().regex(/^[A-Za-z0-9-]{1,39}$/, 'Check the connection to fill in the GitHub account.'),
@@ -220,6 +224,10 @@ export interface TriggerActor {
 }
 
 export interface Trigger extends TriggerInput {
+  /** Retained separately from the active management list, without deleting its history. */
+  archivedAt?: string;
+  /** A reservation was taken, not evidence that the agent's real task succeeded. */
+  consumed?: OnceConsumption;
   id: string;
   revision: number;
   createdAt: string;
@@ -272,7 +280,7 @@ export interface TriggerAuditEntry {
   id: string;
   at: string;
   actor: TriggerActor;
-  action: 'create' | 'update' | 'delete' | 'enable' | 'disable' | 'run' | 'revert' | 'restore' | 'resume' | 'settings' | 'slack' | 'secret';
+  action: 'create' | 'update' | 'delete' | 'enable' | 'disable' | 'run' | 'revert' | 'restore' | 'resume' | 'settings' | 'slack' | 'secret' | 'archive' | 'unarchive' | 'consume';
   triggerId: string;
   triggerName: string;
   fromRevision?: number;
@@ -355,6 +363,8 @@ export interface HttpTestResult {
 
 /** What the canvas and header need; history and audit are paged separately. */
 export interface TriggerSummary {
+  archivedAt?: string;
+  consumed?: OnceConsumption;
   id: string;
   name: string;
   enabled: boolean;
@@ -368,6 +378,7 @@ export interface TriggerSummary {
   error?: string;
 }
 export interface TriggerOverview {
+  onceReservations?: { used: number; limit: number };
   triggers: TriggerSummary[];
   /** The latest runs, newest first. */
   recent: TriggerEvent[];

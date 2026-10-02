@@ -1,3 +1,4 @@
+import { absoluteTime } from '../common/lib';
 import type { ResolvedModel } from '../../../shared/models';
 import { createContext } from 'react';
 import type { IssueWatch, Trigger, TriggerAuditEntry, TriggerEvent, TriggerInput, TriggerOverview } from '../../../shared/triggers';
@@ -59,7 +60,7 @@ export function eventStatusLabel(status: TriggerEvent['status'], t: (key: string
 /** What each audit entry did, in the owner's language; the stored summary stays as detail. */
 export function auditActionLabel(action: TriggerAuditEntry['action'], t: (key: string) => string): string {
   const labels: Record<TriggerAuditEntry['action'], string> = { create: '만듦', update: '변경', delete: '삭제', enable: '켬', disable: '끔', run: '지금 실행', revert: '되돌림',
-    restore: '복원', resume: '다시 시작', settings: '한도 변경', slack: 'Slack 설정 변경', secret: '비밀 변경' };
+    archive: '보관', unarchive: '보관 해제', consume: '예약 소비', restore: '복원', resume: '다시 시작', settings: '한도 변경', slack: 'Slack 설정 변경', secret: '비밀 변경' };
   return t(labels[action]);
 }
 
@@ -71,7 +72,7 @@ export function kindLabel(kind: SourceKind | 'slack' | 'public', t: (key: string
 /** When a trigger looks, and at what. */
 export function scheduleLabel(trigger: Pick<Trigger, 'source'>, t: Translate): string {
   const schedule = trigger.source.schedule;
-  const when = schedule.type === 'interval' ? schedule.everySeconds % 3600 === 0 ? t('{0}시간마다', { 0: schedule.everySeconds / 3600 }) : t('{0}분마다', { 0: Math.round(schedule.everySeconds / 60) })
+  const when = schedule.type === 'once' ? `${t('한 번만')} · ${absoluteTime(schedule.at)}` : schedule.type === 'interval' ? schedule.everySeconds % 3600 === 0 ? t('{0}시간마다', { 0: schedule.everySeconds / 3600 }) : t('{0}분마다', { 0: Math.round(schedule.everySeconds / 60) })
     : `${schedule.expression} · ${schedule.timezone}`;
   if (trigger.source.kind === 'github') {
     const watch = trigger.source.watch;
@@ -87,10 +88,10 @@ export function scheduleLabel(trigger: Pick<Trigger, 'source'>, t: Translate): s
 /** Who counts as an author by default: the repository's owners, members and collaborators. */
 export const MEMBERS = ['OWNER', 'MEMBER', 'COLLABORATOR'] as const;
 export const browserZone = () => { try { return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'; } catch { return 'UTC'; } };
-export function blankHttpSource(schedule: Source['schedule'] = { type: 'interval', everySeconds: 300 }): HttpSource {
+export function blankHttpSource(schedule: HttpSource['schedule'] = { type: 'interval', everySeconds: 300 }): HttpSource {
   return { kind: 'http', schedule, request: { method: 'GET', url: '', headers: [], timeoutSeconds: 30 }, condition: { type: 'changed' } };
 }
-export function blankGitHubSource(schedule: Source['schedule'] = { type: 'interval', everySeconds: 300 }): GitHubSource {
+export function blankGitHubSource(schedule: GitHubSource['schedule'] = { type: 'interval', everySeconds: 300 }): GitHubSource {
   return { kind: 'github', schedule, auth: { type: 'gh' }, account: '', watch: blankIssueWatch([]) };
 }
 type Watch = GitHubSource['watch'];
