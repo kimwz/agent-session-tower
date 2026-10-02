@@ -1,8 +1,10 @@
 /**
- * Isolated real Chromium regression. Tower/native run updates and ElevenLabs are fixtures;
+ * Isolated finite-part browser regression (WebKit is the default). Tower/native run updates and ElevenLabs are fixtures;
  * HTMLAudio decoding, media clock, Web Audio PCM and VoiceSession are real. No provider is spawned.
  * Run: node --import tsx scripts/test-master-voice-stream-browser.ts
  * Required: VOICE_BROWSER_MP3=/absolute/path/to/existing/valid.mp3 (no TTS network calls)
+ * Optional: VOICE_BROWSER_ENGINE=webkit|chromium|chrome; VOICE_BROWSER_PCM=0|1 (default 1)
+ * Optional: VOICE_BROWSER_TTS_DELAY_MS=0..5000 delays completion of only the second part to verify the listening boundary.
  * Optional: VOICE_BROWSER_PLAYWRIGHT=/absolute/path/to/playwright/index.mjs
  */
 import assert from 'node:assert/strict';
@@ -38,24 +40,43 @@ async function listen(server: Server): Promise<number> {
 }
 async function stop(server: Server) { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
 const root = resolve(new URL('..', import.meta.url).pathname);
-const artifact = join(root, 'tmp/voice-latency/browser-stream-result.json');
+const engine = process.env.VOICE_BROWSER_ENGINE ?? 'webkit'; assert.ok(['webkit', 'chromium', 'chrome'].includes(engine));
+const pcm = process.env.VOICE_BROWSER_PCM !== '0';
+const ttsDelayMs = Number(process.env.VOICE_BROWSER_TTS_DELAY_MS ?? 0);
+assert.ok(Number.isInteger(ttsDelayMs) && ttsDelayMs >= 0 && ttsDelayMs <= 5000, 'VOICE_BROWSER_TTS_DELAY_MS must be an integer from 0 to 5000');
+const artifactDir = join(root, 'tmp/voice-recovery');
+const artifact = join(artifactDir, `finite-browser-${engine}-${pcm ? 'pcm' : 'raw'}${ttsDelayMs ? `-delay${ttsDelayMs}` : ''}.json`);
 if (!process.env.VOICE_BROWSER_MP3) throw new Error('Set VOICE_BROWSER_MP3 to an existing valid cached MP3; this test never generates TTS.');
 const mp3 = await readFile(process.env.VOICE_BROWSER_MP3);
 const playwrightModule = process.env.VOICE_BROWSER_PLAYWRIGHT ? pathToFileURL(process.env.VOICE_BROWSER_PLAYWRIGHT).href : 'playwright';
-const { chromium } = await import(playwrightModule);
+const { chromium, webkit } = await import(playwrightModule);
 const bundle = await build({ entryPoints: [join(root, 'scripts/fixtures/master-voice-stream-browser.ts')], bundle: true, write: false, platform: 'browser', format: 'iife' });
 const dir = await mkdtemp(join(tmpdir(), 'tower-voice-browser-fixture-'));
 const cleanups: Array<() => Promise<unknown>> = [() => rm(dir, { recursive: true, force: true })];
 const runs: Run[] = [];
-const calls: Array<{ text: string; at: number }> = [];
-const progress: any[] = [], played: any[] = [], audioRequests: any[] = [], says: any[] = [], transportReports: any[] = [];
+const calls: Array<{ text: string; at: number; firstByteAt?: number; responseEndedAt?: number }> = [];
+const progress: any[] = [], played: any[] = [], audioRequests: any[] = [], says: any[] = [], transportReports: any[] = [], webResponses: any[] = [];
 let voice: MasterVoice, session: MasterSession, browser: any, page: any, current = '';
+let boundaryEvidence: any;
+let timingSnapshot: () => unknown = () => undefined;
+let receiptOrder = 0;
 try {
   const labs = createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;
     if (req.method === 'POST' && req.url?.includes('/text-to-speech/')) {
-      calls.push({ text: JSON.parse(raw).text.replace(/^\[[a-z]+\] /, ''), at: Date.now() });
-      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `fixture-${calls.length}` }).end(mp3); return;
+      const call = { text: JSON.parse(raw).text.replace(/^\[[a-z]+\] /, ''), at: Date.now() } as typeof calls[number];
+      calls.push(call); const index = calls.length;
+      res.once('finish', () => { call.responseEndedAt = Date.now(); });
+      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `fixture-${index}` });
+      call.firstByteAt = Date.now();
+      if (index === 2 && ttsDelayMs) {
+        // Immediate first bytes preserve the existing first-chunk timeout; completion alone is delayed.
+        res.write(mp3.subarray(0, Math.min(4096, mp3.length - 1)));
+        const completeAt = call.firstByteAt + ttsDelayMs;
+        while (Date.now() < completeAt) await sleep(completeAt - Date.now());
+        res.end(mp3.subarray(Math.min(4096, mp3.length - 1)));
+      } else res.end(mp3);
+      return;
     }
     res.writeHead(200, { 'Content-Type': 'application/json' }).end('{}');
   });
@@ -84,8 +105,9 @@ try {
   session = new MasterSession({ stateDir: dir, dataDir: dir, settings, tower: client, live, room, followMs: 60_000 });
   voice = new MasterVoice({ dataDir: dir, settings, room, elevenLabs: new ElevenLabs({ key: () => settings.voiceKey(), apiBase: `http://127.0.0.1:${labsPort}`, historyDelaysMs: [10] }),
     firstReply: { prepare() {}, close() {}, make: async () => ({ skipped: 'failed', warm: true }) },
-    timing: { firstChunkMs: 1000, synthMs: 5000, playMs: 60_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 },
+    timing: { firstChunkMs: 1000, synthMs: Math.max(5000, ttsDelayMs + 1000), playMs: 60_000, resyncMs: 500, waitMs: 500, presenceMs: 60_000, tickMs: 60_000 },
     hooks: { hide: text => text, connectedSince: () => client.connectedSince(), send: input => session.spoken({ text: input.text, key: input.voice.key, voiceSession: input.voice.session ?? '' }), streamState: (turn, state) => session.voicedState(turn, state) } });
+  timingSnapshot = () => voice.timings.list();
   session.setVoice(voice); await voice.start(); await session.start();
   cleanups.push(async () => { await voice.close(); await session.close(); await room.flush(); });
   const subscribers = new Set<ServerResponse>();
@@ -132,96 +154,174 @@ try {
         if (url.pathname.endsWith('/on')) { const started = voice.voiceOn({ tabId: body.tabId, local: true }); current = started.session; answer = started; }
         else if (url.pathname.endsWith('/off')) answer = voice.voiceOff(body);
         else if (url.pathname.endsWith('/presence')) answer = voice.voicePresence(body);
-        else if (url.pathname.endsWith('/progress')) { answer = voice.voiceProgress(body); progress.push({ ...body, accepted: answer, at: Date.now() }); }
-        else if (url.pathname.endsWith('/played')) { answer = voice.voicePlayed(body); played.push({ ...body, accepted: answer, at: Date.now() }); }
+        else if (url.pathname.endsWith('/progress')) { answer = voice.voiceProgress(body); progress.push({ ...body, accepted: answer, at: Date.now(), receiptOrder: ++receiptOrder }); }
+        else if (url.pathname.endsWith('/played')) { answer = voice.voicePlayed(body); played.push({ ...body, accepted: answer, at: Date.now(), receiptOrder: ++receiptOrder }); }
+        else if (url.pathname.endsWith('/missed')) answer = voice.voiceMissed(body);
         else if (url.pathname.endsWith('/token')) answer = { tokenId: 'fixture-only', url: 'ws://127.0.0.1:1', expiresAt: Date.now() + 10_000 };
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(answer)); return;
       }
       const audio = /^\/api\/master\/voice\/audio\/(.*)$/.exec(url.pathname);
-      if (audio) { audioRequests.push({ id: audio[1], range: req.headers.range, at: Date.now() }); await proxy.pipeAudio(res, audio[1], Number(url.searchParams.get('at') ?? 0)); return; }
+      if (audio) { const request: any = { id: audio[1], range: req.headers.range, at: Date.now() }; audioRequests.push(request); res.once('finish', () => { request.finishedAt = Date.now(); }); await proxy.pipeAudio(res, audio[1], Number(url.searchParams.get('at') ?? 0)); return; }
       if (url.pathname === '/bundle.js') { res.writeHead(200, { 'Content-Type': 'text/javascript' }).end(bundle.outputFiles[0].contents); return; }
       if (url.pathname === '/master-pcm-tap.js') { res.writeHead(200, { 'Content-Type': 'text/javascript' }).end(worklet); return; }
       if (url.pathname === '/master-silence.wav') { res.writeHead(200, { 'Content-Type': 'audio/wav' }).end(silence); return; }
-      res.writeHead(200, { 'Content-Type': 'text/html' }).end('<button id="start">fixture start</button><script src="/bundle.js"></script>');
+      res.writeHead(200, { 'Content-Type': 'text/html' }).end(`<button id="start">fixture start</button><button id="listen">fixture listen</button><script>window.__voiceFixture=${JSON.stringify({ pcm, rate: 1.2, observeGate: ttsDelayMs > 0 })}</script><script src="/bundle.js"></script>`);
     } catch (error) { if (!res.headersSent) res.writeHead(500).end(String(error)); else res.destroy(); }
   });
   const webPort = await listen(web); cleanups.push(async () => { for (const res of subscribers) res.destroy(); await stop(web); });
-  browser = await chromium.launch({ headless: true, args: ['--autoplay-policy=user-gesture-required'] });
+  browser = engine === 'webkit' ? await webkit.launch({ headless: true }) : await chromium.launch({ headless: true, ...(engine === 'chrome' ? { channel: 'chrome' } : {}), args: ['--autoplay-policy=user-gesture-required'] });
   cleanups.push(() => browser.close());
   page = await browser.newPage(); const errors: string[] = []; page.on('pageerror', (error: Error) => errors.push(error.message));
+  page.on('response', async (response: any) => {
+    const url = new URL(response.url());
+    const audio = /^\/api\/master\/voice\/audio\/(.*)$/.exec(url.pathname);
+    if (!audio) return;
+    // Observe headers delivered at the actual browser boundary; writeHead need not retain getHeader values.
+    const headers = await response.allHeaders();
+    webResponses.push({ id: audio[1], at: Date.now(), contentLength: Number(headers['content-length']), contentType: headers['content-type'], status: response.status() });
+  });
   await page.goto(`http://127.0.0.1:${webPort}`); await page.click('#start'); await page.waitForFunction(() => (window as any).started);
   // Synthetic microphone is muted. All utterances below enter through the actual host API.
-  await page.evaluate(() => { (window as any).rmsMax = 0; });
+  await page.evaluate((enabled: boolean) => { (window as any).rmsMax = enabled ? 0 : null; }, pcm);
   const ask = async () => { await voice.voiceRequest({ session: current, text: '격리 fixture 요청', clientMessageId: randomUUID(), local: true }); return until(() => runs.at(-1)); };
   const first = '첫 문장을 지금 읽습니다.';
   const residual = ' 마지막 남은 내용을 읽습니다.';
+  const timingsFor = (id: string) => voice.timings.list().find(record => record.says?.some(say => say.id === id));
+  const terminal = (id: string) => played.find(item => item.id === id && item.accepted);
+  const meaningful = (id: string) => progress.find(item => item.id === id && item.event === 'started' && item.accepted && item.playback?.position >= 0.02);
+  const verifyPart = async (say: any, runId?: string) => {
+    const request = await until(() => timingsFor(say.id)?.audioRequests?.find(item => item.live === say.audio.split('/').at(-1) && item.host?.normal && item.host.close && item.web?.normal && item.web.close));
+    await until(() => webResponses.find(item => item.id === request.live));
+    const diagnosticEvents = ['received', 'source', 'play-attempt', 'play-resolved', 'started', 'ended'];
+    // Diagnostic POSTs and terminal ACKs are independent requests; wait for every receipt before reading history.
+    await until(() => diagnosticEvents.every(event => progress.some(item => item.id === say.id && item.event === event)) && terminal(say.id));
+    const timing = timingsFor(say.id)!;
+    const stored = timing.says!.find(item => item.id === say.id)!;
+    if (runId) { assert.equal(timing.runId, runId); assert.equal(timing.turnId, runId); }
+    assert.equal(stored.live, request.live);
+    assert.equal(request.host!.bytes, mp3.length); assert.equal(request.web!.bytes, mp3.length);
+    assert.ok(transportReports.some(report => report.requestId === request.requestId && report.accepted));
+    assert.ok(webResponses.some(item => item.id === request.live && item.contentLength === mp3.length && item.contentType === 'audio/mpeg' && item.status === 200), 'web exposes finite content length for each independent MP3');
+    for (const event of ['received', 'source', 'play-attempt', 'play-resolved', 'started', 'terminal'])
+      assert.ok(stored.events?.some(item => item.event === event), `part history retains ${event}`);
+    const audioPath = new URL(say.audio, 'http://fixture').pathname;
+    const domEnded = await page.evaluate((path: string) => (window as any).events.find((event: any) => event.event === 'ended' && new URL(event.src).pathname === path), audioPath);
+    assert.ok(domEnded, 'the actual DOM audio for this part emits ended');
+    const endedReceipt = progress.find(item => item.id === say.id && item.event === 'ended');
+    const terminalReceipt = terminal(say.id);
+    assert.equal(typeof endedReceipt.accepted, 'boolean', 'ended diagnostic HTTP receipt records its acceptance');
+    if (endedReceipt.accepted) assert.ok(stored.events?.some(item => item.event === 'ended'), 'accepted ended remains in part history');
+    else {
+      // Terminal ACK and ended diagnostics race over independent HTTP requests; terminal state stays authoritative.
+      assert.ok(Number.isFinite(endedReceipt.elapsedMs) && endedReceipt.elapsedMs >= 0 && endedReceipt.elapsedMs < 3_600_000, 'rejected ended has a valid diagnostic elapsed time');
+      assert.equal(endedReceipt.attempt, 0);
+      assert.equal(endedReceipt.playback?.ended, true);
+      assert.ok(terminalReceipt.receiptOrder < endedReceipt.receiptOrder && terminalReceipt.at <= endedReceipt.at, 'only an ended receipt arriving after accepted terminal ACK may be rejected');
+      assert.ok(endedReceipt.elapsedMs <= terminalReceipt.elapsedMs, 'the client emits ended before its terminal ACK');
+    }
+    assert.equal(stored.terminal?.result, 'played'); assert.equal(stored.terminal?.attempt, 0);
+    assert.equal(stored.terminal?.playback?.ended, true);
+    assert.equal(stored.started?.playback?.rate, 1.2);
+    assert.ok(stored.started!.playback!.position! >= 0.02, 'a <=5us initialization timestamp is not meaningful progress');
+    assert.equal(progress.some(item => item.id === say.id && item.event === 'retry'), false, 'healthy finite WebKit/Chromium audio never needs a watchdog retry');
+    // HTTP receipts may arrive out of order. Each browser stage carries its own monotonic clock.
+    const localEvents = progress.filter(item => item.id === say.id);
+    assert.ok(localEvents.every(item => item.elapsedMs >= 0));
+    assert.ok(stored.terminal!.elapsedMs! >= stored.started!.elapsedMs!);
+    return { request, timing, stored, completionEvidence: { domEnded, endedReceipt, terminalReceipt } };
+  };
   const run = await ask(); write(run, first + ' ');
   await until(() => calls.some(call => call.text === first));
   const answer = await until(() => says.find(say => say.kind === 'answer' && !say.cancelled));
-  await until(() => progress.find(item => item.id === answer.id && item.event === 'started' && item.accepted));
-  await page.waitForFunction(() => (window as any).rmsMax > 0.001 && (window as any).audio[0].currentTime > 0.1);
-  await sleep(10_000); // Keep the run open past this cached first MP3, within the 30-second stall watchdog.
+  await until(() => meaningful(answer.id));
+  const holdUntil = Date.now() + 10_000;
+  if (pcm) await page.waitForFunction(() => (window as any).rmsMax > 0.001);
+  await until(() => terminal(answer.id)?.result === 'played');
+  const firstStages = await verifyPart(answer, run.id);
+  await sleep(Math.max(0, holdUntil - Date.now()));
   assert.equal(run.status, 'running'); assert.equal(run.finishedAt, undefined);
-  assert.equal(played.some(item => item.id === answer.id), false, 'live progress does not settle held audio');
-  assert.ok(progress.some(item => item.id === answer.id && item.event === 'waiting' && item.playback?.position > 0), 'first audio exhausts while the run stays open');
-  const heldEvidence = { at: Date.now(), runStatus: run.status, waits: progress.filter(item => item.id === answer.id && item.event === 'waiting'), firstTts: calls[0], started: progress.find(item => item.id === answer.id && item.event === 'started'), media: await page.evaluate(() => ({ position: (window as any).audio[0].currentTime, rmsMax: (window as any).rmsMax })) };
+  assert.equal(calls.length, 1, 'completed sentence is its own part before residual exists');
+  const heldEvidence = { at: Date.now(), runStatus: run.status, firstTts: calls[0], started: meaningful(answer.id), terminal: terminal(answer.id), transport: firstStages.request, media: await page.evaluate(() => ({ position: (window as any).audio[0].currentTime, rmsMax: (window as any).rmsMax })) };
   write(run, residual, true); const endAt = Date.now(); finish(run);
-  await until(() => played.find(item => item.id === answer.id && item.result === 'played'), 30_000);
-  assert.deepEqual(calls.map(call => call.text), [first, residual.trim()], 'final residual is synthesized once without repeating first sentence');
-  assert.ok(heldEvidence.started.at < endAt && heldEvidence.firstTts.at < endAt);
-  // New diagnostic contract: page promise/media stages and both socket relay stages share this run/say/live.
-  const timingsFor = (id: string) => voice.timings.list().find(record => record.says?.some(say => say.id === id));
-  const transportComplete = () => timingsFor(answer.id)?.audioRequests?.find(request => request.host?.normal && request.host.close && request.web?.normal && request.web.close);
-  const firstTransport = await until(transportComplete);
-  const timing = timingsFor(answer.id)!;
-  const sayTiming = timing.says!.find(say => say.id === answer.id)!;
-  assert.equal(timing.runId, run.id); assert.equal(timing.turnId, run.id);
-  assert.equal(sayTiming.live, answer.audio.split('/').at(-1));
-  assert.equal(firstTransport.live, sayTiming.live);
-  assert.ok(firstTransport.host!.firstWrite! < endAt && firstTransport.web!.firstWrite! < endAt, 'host and web write while run remains open');
-  assert.ok(firstTransport.host!.end! >= endAt && firstTransport.web!.end! >= endAt, 'EOF follows residual and turn end');
-  assert.equal(firstTransport.host!.bytes, firstTransport.web!.bytes);
-  assert.ok(firstTransport.host!.bytes > mp3.length, 'transport carries both first and residual MP3 pieces');
-  for (const event of ['received', 'source', 'play-attempt', 'play-resolved', 'started', 'waiting', 'resumed', 'ended', 'terminal'])
-    assert.ok(sayTiming.events?.some(item => item.event === event), `bounded history retains ${event}`);
-  const elapsedEvents = sayTiming.events!.filter(event => event.elapsedMs !== undefined);
-  assert.ok(elapsedEvents.every((event, index) => !index || event.elapsedMs! >= elapsedEvents[index - 1].elapsedMs!), 'browser stage clock is monotonic');
-  assert.equal(sayTiming.terminal?.result, 'played'); assert.equal(sayTiming.terminal?.attempt, 0);
-  const mediaStart = sayTiming.started!.playback!;
-  assert.equal(mediaStart.rate, 1.2); assert.equal(mediaStart.paused, false);
-  assert.equal(typeof mediaStart.bufferedEnd, 'number');
-  assert.equal(sayTiming.terminal?.playback?.ended, true);
-  assert.ok(transportReports.some(report => report.requestId === firstTransport.requestId && report.accepted));
+  if (ttsDelayMs) {
+    await until(() => calls[1]);
+    assert.equal(calls[1].responseEndedAt, undefined, 'second TTS is still pending when listening is requested');
+    assert.equal(await page.evaluate(() => navigator.mediaDevices === (window as any).syntheticMediaDevices && navigator.mediaDevices.getUserMedia === (window as any).syntheticGetUserMedia), true, 'only the retained synthetic microphone override may be called');
+    // Match the real UI's user activation for AudioContext resume; getUserMedia remains synthetic.
+    await page.click('#listen');
+    await page.waitForFunction(() => (window as any).listenCompleted);
+    const microphone = await page.evaluate(() => ({ diagnostics: (window as any).syntheticDiagnostics, listen: (window as any).listenDiagnostics }));
+    assert.equal(microphone.listen.phase, 'completed');
+    assert.ok(microphone.listen.before.mediaDevicesIdentityMatches && microphone.listen.before.getUserMediaIdentityMatches);
+    assert.ok(microphone.listen.after.mediaDevicesIdentityMatches && microphone.listen.after.getUserMediaIdentityMatches);
+    assert.equal(microphone.diagnostics.length, 2, 'start and listen each call the synthetic microphone once');
+    assert.ok(microphone.diagnostics.every((item: any) => item.stage === 'complete' && item.trackStates.length > 0 && item.trackStates.every((state: string) => state === 'live')));
+    assert.equal(microphone.diagnostics[0].reusedProducer, false);
+    assert.equal(microphone.diagnostics[1].reusedProducer, true);
+    assert.ok(microphone.listen.after.streamDefined && microphone.listen.after.streamTrackStates.length > 0 && microphone.listen.after.streamTrackStates.every((state: string) => state === 'live'));
+    await page.waitForFunction(() => (window as any).gateStates.some((state: any) => state.armed));
+    assert.equal(calls[1].responseEndedAt, undefined, 'synthetic microphone arms inside the synthesis gap');
+  }
+  const second = await until(() => says.find(say => say.kind === 'answer' && say.request === answer.request && say.id !== answer.id && !say.cancelled));
+  assert.notEqual(second.audio, answer.audio, 'residual has independent finite audio and terminal ACK');
+  await until(() => terminal(second.id)?.result === 'played');
+  await verifyPart(second, run.id);
+  if (ttsDelayMs) {
+    const gateStates = await page.evaluate(() => (window as any).gateStates);
+    const armed = gateStates.find((state: any) => state.armed && state.at >= calls[1].at);
+    const disarmed = gateStates.find((state: any) => !state.armed && state.at > armed?.at);
+    const source = progress.find(item => item.id === second.id && item.event === 'source');
+    const started = meaningful(second.id);
+    const secondPlaying = await page.evaluate((audio: string) => (window as any).events.filter((event: any) => event.event === 'playing' && event.src.includes(audio)), second.audio);
+    assert.ok(armed && disarmed && disarmed.at <= started.at, 'listening arms during the gap and disarms before second meaningful playback');
+    assert.ok(secondPlaying.length && secondPlaying.every((event: any) => event.armed === false), 'second Audio playback keeps the microphone gate closed');
+    assert.ok(calls[1].responseEndedAt! - calls[1].firstByteAt! >= ttsDelayMs);
+    assert.ok(terminal(answer.id).at <= calls[1].at && calls[1].responseEndedAt! <= source.at);
+    assert.equal(played.some(item => item.id === second.id && ['timeout', 'expired'].includes(item.result)), false);
+    boundaryEvidence = { ttsDelayMs, firstAckAt: terminal(answer.id).at, requestedTtsAt: calls[1].at, firstByteAt: calls[1].firstByteAt, responseEndAt: calls[1].responseEndedAt,
+      secondSourceAt: source.at, secondStartedAt: started.at, secondAckAt: terminal(second.id).at,
+      ackToRequestedTtsMs: calls[1].at - terminal(answer.id).at,
+      synthesisCompletionMs: calls[1].responseEndedAt! - calls[1].at, responseEndToSourceMs: source.at - calls[1].responseEndedAt!,
+      ackToSourceMs: source.at - terminal(answer.id).at, ackToStartedMs: started.at - terminal(answer.id).at, gateStates, secondPlaying,
+      listenDiagnostics: await page.evaluate(() => (window as any).listenDiagnostics), syntheticDiagnostics: await page.evaluate(() => (window as any).syntheticDiagnostics) };
+    // Restore the default muted conditions for the remaining cancellation/replay checks.
+    await page.evaluate(() => (window as any).voice.mute());
+  }
+  assert.deepEqual(calls.map(call => call.text), [first, residual.trim()], 'ordered sentence and residual each synthesized once');
+  assert.ok(heldEvidence.started.at < endAt && heldEvidence.terminal.at < endAt, 'meaningful progress and first part ACK both precede run end');
+  assert.ok(heldEvidence.transport.host!.end! < endAt && heldEvidence.transport.web!.end! < endAt);
+  assert.ok(terminal(answer.id).at < meaningful(second.id).at, 'parts play in order across residual flush');
   const settledBefore = played.length;
-  assert.equal(voice.voiceProgress({ session: current, id: answer.id, event: 'progress', elapsedMs: 100, playback: { position: 1 } }), false, 'late progress cannot settle/revive finished say');
+  assert.equal(voice.voiceProgress({ session: current, id: answer.id, event: 'progress', elapsedMs: 100, playback: { position: 1 } }), false, 'late progress cannot revive completed part');
   assert.equal(played.length, settledBefore);
 
   const cancelRun = await ask(); write(cancelRun, '취소할 첫 문장을 읽습니다. ');
   const cancelSay = await until(() => says.find(say => say.kind === 'answer' && say.request !== answer.request && !say.cancelled));
-  await until(() => progress.find(item => item.id === cancelSay.id && item.event === 'started' && item.accepted));
-  // Same-id updates and a cancelled queue item exercise the real browser queue without TTS.
+  await until(() => meaningful(cancelSay.id));
   const queued = { ...cancelSay, id: randomUUID(), audio: `/api/master/voice/audio/${randomUUID()}` };
   await page.evaluate(([active, queued]: any[]) => { const win = window as any; win.voice.say(queued); win.voice.say({ ...active, text: '동일 ID 갱신' }); win.voice.say({ ...queued, cancelled: true }); win.voice.skip(); }, [cancelSay, queued]);
-  await until(() => played.find(item => item.id === cancelSay.id && item.result === 'stopped'));
+  await until(() => terminal(cancelSay.id)?.result === 'stopped');
   const beforeCancel = calls.length;
-  write(cancelRun, ' 취소 뒤 문장은 만들거나 재생하면 안 됩니다.', true); finish(cancelRun);
+  write(cancelRun, ' 취소 뒤 문장은 자동으로 읽으면 안 됩니다.', true); finish(cancelRun);
   await sleep(900);
-  assert.equal(calls.length, beforeCancel, 'cancelled turn never synthesizes its residual');
-  assert.equal(audioRequests.some(item => queued.audio.endsWith(item.id)), false, 'cancelled queued audio never fetched');
-  assert.equal(progress.filter(item => item.id === cancelSay.id && item.event === 'source').length, 1, 'same-id update never starts a new source; Chromium may issue multiple HTTP range requests');
-  assert.equal(await page.evaluate(() => (window as any).views.at(-1).playing), undefined);
-  assert.equal(await page.evaluate(() => (window as any).audio[0].paused), true, 'skip stops HTMLAudio');
-  await until(() => timingsFor(cancelSay.id)?.says?.find(say => say.id === cancelSay.id)?.terminal);
-  const cancelledTiming = timingsFor(cancelSay.id)!.says!.find(say => say.id === cancelSay.id)!;
-  assert.equal(cancelledTiming.terminal?.result, 'stopped'); assert.equal(cancelledTiming.terminal?.attempt, 0);
-  assert.ok(cancelledTiming.events?.some(event => event.event === 'play-attempt'));
-  assert.ok(cancelledTiming.events?.some(event => event.event === 'play-resolved'));
+  assert.equal(calls.length, beforeCancel, 'cancelled turn never synthesizes residual automatically');
+  assert.equal(audioRequests.some(item => queued.audio.endsWith(item.id)), false);
+  assert.equal(progress.filter(item => item.id === cancelSay.id && item.event === 'source').length, 1);
+  assert.equal(await page.evaluate(() => (window as any).audio[0].paused), true);
+  await until(() => timingsFor(cancelSay.id)?.says?.find(say => say.id === cancelSay.id)?.terminal?.result === 'stopped');
+  const cancelledEntry = await until(() => room.recent(200).find(entry => entry.data.kind === 'master' && entry.data.text.includes('취소 뒤 문장') && entry.data.speak?.state === 'unspoken'));
+  const beforeReplay = says.length;
+  await page.evaluate((entry: string) => (window as any).voice.replayMissed(entry), cancelledEntry.id);
+  const replay = await until(() => says.slice(beforeReplay).find(say => say.kind === 'answer' && !say.cancelled));
+  await until(() => terminal(replay.id)?.result === 'played');
+  await verifyPart(replay);
+  assert.equal(calls.length, beforeCancel + 1, 'explicit replay reads the completed answer once');
   assert.deepEqual(errors, []);
-  await mkdir(join(root, 'tmp/voice-latency'), { recursive: true });
-  await writeFile(artifact, JSON.stringify({ result: 'PASS', browser: 'isolated Playwright Chromium', scope: { actual: ['MasterSession', 'MasterVoice', 'VoiceSession', 'MasterClient socket audio proxy', 'HTMLAudio', 'WebAudio PCM'], fixtures: ['Tower HTTP API and native run snapshot updates', 'ElevenLabs HTTP responses using previously cached MP3'], nativeProviders: false, personalMicrophone: false, userBrowser: false, newTts: false }, heldEvidence, endAt, calls, progress, played, audioRequests, transportReports, timings: voice.timings.list(), events: await page.evaluate(() => (window as any).events), pageErrors: errors }, null, 2));
-  console.log(`PASS socket host/web firstWrite/EOF/close correlation + real media/promise/terminal history before held turn end; residual once; cancellation. Artifact: ${artifact}`);
+  await mkdir(artifactDir, { recursive: true });
+  await writeFile(artifact, JSON.stringify({ result: 'PASS', browser: `isolated Playwright ${engine}`, pcmMeasured: pcm, ttsDelayMs, boundaryEvidence, scope: { actual: ['MasterSession', 'MasterVoice', 'VoiceSession', 'MasterClient socket audio proxy', 'HTMLAudio', ...(pcm ? ['WebAudio PCM'] : [])], fixtures: ['Tower/native run snapshots', 'ElevenLabs HTTP existing cached MP3'], nativeProviders: false, personalMicrophone: false, userBrowser: false, newTts: false }, heldEvidence, endAt, replayId: replay.id, calls, progress, played, audioRequests, webResponses, transportReports, timings: voice.timings.list(), events: await page.evaluate(() => (window as any).events), pageErrors: errors }, null, 2));
+  console.log(`PASS finite independent parts with web Content-Length; meaningful progress/first ACK before held turn end; ordered residual; cancel and explicit replay. Artifact: ${artifact}`);
 } catch (error) {
-  await mkdir(join(root, 'tmp/voice-latency'), { recursive: true });
-  await writeFile(artifact, JSON.stringify({ result: 'FAIL', error: String(error), calls, progress, played, audioRequests, events: page ? await page.evaluate(() => (window as any).events).catch(() => []) : [] }, null, 2));
+  await mkdir(artifactDir, { recursive: true });
+  await writeFile(artifact, JSON.stringify({ result: 'FAIL', error: String(error), timings: timingSnapshot(), ttsDelayMs, boundaryEvidence, syntheticDiagnostics: page ? await page.evaluate(() => (window as any).syntheticDiagnostics).catch(() => []) : [], listenDiagnostics: page ? await page.evaluate(() => (window as any).listenDiagnostics).catch(() => undefined) : undefined, gateStates: page ? await page.evaluate(() => (window as any).gateStates).catch(() => []) : [], calls, progress, played, audioRequests, webResponses, events: page ? await page.evaluate(() => (window as any).events).catch(() => []) : [] }, null, 2));
   throw error;
 } finally { for (const cleanup of cleanups.reverse()) await cleanup(); }

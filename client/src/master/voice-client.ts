@@ -47,11 +47,13 @@ const CLOSE_MS = 10_000;
 /** A spare token older than this is traded for a fresh one (they last 15 minutes). */
 const SPARE_MS = 10 * 60_000;
 const QUEUE = 20;
-/** An answer read while it is written has no known length: it is given up on only after the longest one read (5,000 characters). */
+/** A streaming say may come from an older host with an open MP3; retain its upper bound across upgrades. */
 const STREAMING_PLAY_MS = 5_000 * 200 + 30_000;
 /** Audio cut off partway (the web restarting) is fetched again from where it was, this many times within this long. */
 const RESUMES = 3;
 const PROGRESS_WAIT_MS = 30_000;
+/** WebKit can resolve play() with its clock fixed at 1us; that initialization is not playback. */
+const FIRST_PROGRESS_SECONDS = 0.02;
 const RESUME_WITHIN_MS = 30_000;
 const STT_ERRORS = new Set(['auth_error', 'quota_exceeded', 'rate_limited', 'queue_overflow', 'resource_exhausted', 'session_time_limit_exceeded', 'input_error', 'invalid_request', 'chunk_size_exceeded', 'insufficient_audio_activity', 'transcriber_error', 'unaccepted_terms', 'commit_throttled', 'error']);
 
@@ -748,7 +750,8 @@ export class VoiceSession {
       if (this.current !== current) return;
       this.trace(current.say, current.receivedAt, 'ended', undefined, { attempt: current.fetch });
       if (this.audio.muted || this.audio.volume === 0) { this.playbackFailed(current, 'output-muted'); return; }
-      if (!(this.audio.currentTime > 0 || current.sourcePlayed)) { this.playbackFailed(current, 'ended-without-progress'); return; }
+      this.progress(current);
+      if (!current.sourcePlayed) { this.playbackFailed(current, 'ended-without-progress'); return; }
       say.kind === 'notice' ? this.noticeEnded(current) : this.finishPlay(current, 'played');
     };
     this.audio.onerror = () => {
@@ -789,7 +792,7 @@ export class VoiceSession {
   private progress(current: Playing): void {
     if (this.current !== current) return;
     const position = this.audio.currentTime;
-    if (Number.isFinite(position) && position > (current.position ?? 0)) {
+    if (Number.isFinite(position) && position > (current.position ?? 0) && (current.sourcePlayed || position >= FIRST_PROGRESS_SECONDS)) {
       const first = current.playingAt === undefined;
       const resumed = !current.advancing && !first;
       current.position = position;
@@ -814,7 +817,7 @@ export class VoiceSession {
   private resume(current: Playing, reason: 'no-progress' | 'media-error'): boolean {
     const kind = current.say.kind;
     this.progress(current);
-    if ((kind !== 'answer' && kind !== 'report') || !current.sourcePlayed && !current.base || current.resumes >= RESUMES) return false;
+    if ((kind !== 'answer' && kind !== 'report') || (reason !== 'no-progress' && !current.sourcePlayed && !current.base) || current.resumes >= RESUMES) return false;
     const now = Date.now();
     current.firstErrorAt ??= now;
     if (now - current.firstErrorAt > RESUME_WITHIN_MS) return false;

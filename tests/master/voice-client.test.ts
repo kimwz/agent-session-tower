@@ -254,6 +254,29 @@ test('nothing plays until an utterance\'s connection has really closed (or ten s
   } finally { page.end(); }
 });
 
+test('speech between finite answer parts holds the next part until the utterance connection closes', async () => {
+  const page = await harness();
+  try {
+    page.voice.say({ ...page.say('part-1', 'answer'), streaming: true });
+    page.audio.finish();
+    mock.timers.tick(400);
+    await flush();
+    const socket = await page.speak('문장 사이 요청');
+    page.voice.say({ ...page.say('part-2', 'answer'), streaming: true });
+    await flush();
+    assert.equal(socket.readyState, 2);
+    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/part-1', 'a pending part does not play over speech or its closing connection');
+    assert.deepEqual(page.results(), ['part-1:played']);
+    socket.closed();
+    await flush();
+    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/part-2');
+    page.audio.finish();
+    await flush();
+    assert.deepEqual(page.results(), ['part-1:played', 'part-2:played']);
+    assert.equal(page.audio.played.filter(src => src.endsWith('/part-2')).length, 1);
+  } finally { page.end(); }
+});
+
 test('what the microphone captured while something played is never heard, even when the page handles it late', async () => {
   const page = await harness();
   try {
@@ -1018,6 +1041,16 @@ test('a microphone the owner muted stays muted after a report is read, until the
     await flush();
     assert.deepEqual(page.results(), ['r1:played'], 'what the master reads aloud still plays while muted');
     assert.equal(page.view().listening, false, 'the report did not open the microphone again');
+    mock.timers.tick(400);
+    await flush();
+    page.voice.say(page.say('r1-part-2', 'report'));
+    await flush();
+    page.audio.finish();
+    mock.timers.tick(400);
+    await flush();
+    assert.deepEqual(page.results(), ['r1:played', 'r1-part-2:played']);
+    assert.equal(page.view().listening, false, 'later finite report parts also preserve the owner mute');
+    assert.equal(page.view().muted, true);
     await page.voice.listen();
     assert.equal(page.view().listening, true);
     assert.equal(page.view().muted, undefined);
@@ -1064,8 +1097,66 @@ test('a pending or stalled stream does not claim to be speaking and does not hol
     assert.equal(page.view().playing, undefined, 'onplaying at zero is not progress');
     mock.timers.tick(31_000);
     await flush();
+    assert.deepEqual(page.results(), [], 'an initial stall gets a bounded refetch');
+    assert.equal(page.view().playing, undefined);
+    mock.timers.tick(1_000);
+    await flush();
+    mock.timers.tick(31_000);
+    await flush();
     assert.deepEqual(page.results(), ['stalled:failed']);
+    assert.equal(posts.filter(p => p.body.event === 'retry').length, 1, 'permanent stalls cannot retain the queue indefinitely');
     assert.equal(posts.find(p => p.path.endsWith('/played'))?.body.detail, 'no-progress');
+  } finally { page.end(); }
+});
+
+test('a one-microsecond decoder clock does not establish audible playback', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as FakeAudio & { onplaying?: () => void; ontimeupdate?: () => void };
+    page.voice.say({ ...page.say('decoder-clock', 'answer'), streaming: true });
+    await flush();
+    // Recorded in both actual delayed sources: play resolves but the clock remains 1us.
+    // This reproduces the application's interpretation, not the original browser's decoder fault.
+    audio.currentTime = 0.000001;
+    audio.onplaying?.(); audio.ontimeupdate?.();
+    await flush();
+    assert.equal(page.view().playing, undefined, 'a decoder sentinel is not actual sound progress');
+    assert.equal(posts.some(p => p.body.id === 'decoder-clock' && p.body.event === 'started'), false);
+  } finally { page.end(); }
+});
+
+test('ended at a decoder sentinel cannot acknowledge an answer as played', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as FakeAudio & { ontimeupdate?: () => void };
+    page.voice.say(page.say('sentinel-ended', 'answer'));
+    await flush();
+    audio.currentTime = 0.000001; audio.ontimeupdate?.(); audio.onended?.();
+    await flush();
+    assert.deepEqual(page.results(), ['sentinel-ended:failed']);
+    assert.equal(posts.find(p => p.path.endsWith('/played'))?.body.detail, 'ended-without-progress');
+  } finally { page.end(); }
+});
+
+test('an initially stalled answer can refetch without claiming that its first source was heard', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as FakeAudio & { ontimeupdate?: () => void };
+    page.voice.say({ ...page.say('initial-stall', 'answer'), streaming: true });
+    await flush();
+    audio.currentTime = 0;
+    mock.timers.tick(30_000); await flush();
+    assert.equal(posts.find(p => p.body.event === 'retry')?.body.reason, 'no-progress');
+    assert.equal(posts.some(p => p.body.event === 'started'), false);
+    mock.timers.tick(1_000); await flush();
+    assert.deepEqual(posts.filter(p => p.body.event === 'play-attempt').map(p => p.body.attempt), [0, 1]);
+    assert.equal(page.view().playing, undefined);
+    audio.currentTime = 0.000001; audio.ontimeupdate?.();
+    assert.equal(posts.some(p => p.body.event === 'started'), false);
+    audio.currentTime = 0.25; audio.ontimeupdate?.();
+    assert.equal(posts.filter(p => p.body.event === 'started').length, 1);
+    audio.finish(); await flush();
+    assert.deepEqual(page.results(), ['initial-stall:played']);
   } finally { page.end(); }
 });
 
@@ -1211,7 +1302,7 @@ test('each play attempt and watchdog retry is diagnosable before the terminal AC
     await flush();
     assert.deepEqual(posts.filter(p => p.body.event === 'play-attempt').map(p => p.body.attempt), [0]);
     assert.deepEqual(posts.filter(p => p.body.event === 'play-resolved').map(p => p.body.attempt), [0]);
-    audio.currentTime = 0.000001; audio.ontimeupdate?.();
+    audio.currentTime = 0.5; audio.ontimeupdate?.();
     mock.timers.tick(30_000); mock.timers.tick(1_000); await flush();
     assert.equal(posts.find(p => p.body.event === 'retry')?.body.reason, 'no-progress');
     assert.deepEqual(posts.filter(p => p.body.event === 'source').map(p => p.body.attempt), [0, 1]);

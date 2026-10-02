@@ -38,7 +38,7 @@ const stop = (server: Server) => new Promise<void>(resolve => { server.closeAllC
 async function fakeElevenLabs() {
   const state = {
     tokens: 0, speeches: [] as Array<{ voice: string; body: Record<string, unknown>; key?: string }>, deletes: [] as string[], keys: [] as string[],
-    mode: 'ok' as 'ok' | 'cut' | 'error', fail: (_text: string) => false, silent: (_text: string) => false, lagMs: 0, chunks: [Buffer.from('ID3-first-'), Buffer.from('second-part')], gapMs: 20,
+    mode: 'ok' as 'ok' | 'cut' | 'error', fail: (_text: string) => false, silent: (_text: string) => false, lagMs: 0, chunks: [Buffer.from('ID3-first-'), Buffer.from('second-part')], gapMs: 20, completed: [] as number[],
   };
   const server = createServer(async (req: IncomingMessage, res) => {
     const chunks: Buffer[] = [];
@@ -52,13 +52,15 @@ async function fakeElevenLabs() {
     if (req.method === 'POST' && speech) {
       state.speeches.push({ voice: speech[1], body: JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>, key: req.headers['xi-api-key'] as string });
       if (state.mode === 'error' || state.fail(String(state.speeches.at(-1)!.body.text))) { res.writeHead(500).end('no'); return; }
-      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `h${state.speeches.length}` });
+      const speechNumber = state.speeches.length;
+      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'history-item-id': `h${speechNumber}` });
       if (state.silent(String(state.speeches.at(-1)!.body.text))) { res.end(); return; }
       if (state.lagMs) await sleep(state.lagMs);
       res.write(state.chunks[0]);
       await sleep(state.gapMs);
       if (state.mode === 'cut') { res.destroy(); return; }
       res.end(state.chunks[1]);
+      state.completed.push(speechNumber);
       return;
     }
     res.writeHead(404).end();
@@ -185,11 +187,11 @@ async function audioServer(t: test.TestContext, voice: MasterVoice) {
   const server = createServer((req, res) => { void voice.serveAudio(req.url!.slice(1), res); });
   const port = await listen(server);
   t.after(() => stop(server));
-  const fetchAudio = (id: string) => new Promise<{ status: number; body: Buffer; complete: boolean }>(resolve => {
+  const fetchAudio = (id: string) => new Promise<{ status: number; body: Buffer; complete: boolean; length?: string }>(resolve => {
     const chunks: Buffer[] = [];
     httpRequest({ host: '127.0.0.1', port, path: `/${id}` }, res => {
       res.on('data', chunk => chunks.push(chunk as Buffer));
-      res.on('end', () => resolve({ status: res.statusCode!, body: Buffer.concat(chunks), complete: res.complete }));
+      res.on('end', () => resolve({ status: res.statusCode!, body: Buffer.concat(chunks), complete: res.complete, length: res.headers['content-length'] }));
       res.on('error', () => resolve({ status: res.statusCode!, body: Buffer.concat(chunks), complete: false }));
       res.on('aborted', () => resolve({ status: res.statusCode!, body: Buffer.concat(chunks), complete: false }));
     }).on('error', () => resolve({ status: 0, body: Buffer.concat(chunks), complete: false })).end();
@@ -424,7 +426,7 @@ test('an answer to a spoken request is read aloud where voice is on and marked p
   assert.ok(h.labs.deletes.every(id => /^h\d+$/.test(id)), 'what ElevenLabs kept of a reading is removed');
 });
 
-test('audio streams to the page as it is made; cut-off audio cuts the page off, and a page gone leaves nothing waiting', async t => {
+test('finite audio has exact length; partial synthesis stays unpublished and a page gone leaves nothing waiting', async t => {
   const h = await harness(t, { steps: ['답 하나.', '답 둘.', '답 셋.'], timing: { waitMs: 10_000 } });
   const { fetchAudio, port: audioPort } = await audioServer(t, h.voice);
   const session = on(h);
@@ -437,26 +439,19 @@ test('audio streams to the page as it is made; cut-off audio cuts the page off, 
   assert.equal(whole.body.toString(), 'ID3-first-second-part');
   assert.ok(whole.complete);
   h.voice.voicePlayed({ session, id: first.id, result: 'played' });
-  // Failed after its first part: the page's connection is cut, never cleanly ended.
+  assert.equal(Number(whole.length), whole.body.length, 'completed file has its exact length');
+  // A partial synthesis is never published as a playable finite file.
   h.labs.mode = 'cut';
   await request(h, session, '두 번째');
-  const second = await until(() => h.says().filter(item => item.kind === 'answer')[1]);
-  const cut = await fetchAudio(second.audio.split('/').at(-1)!);
-  assert.equal(cut.complete, false);
-  assert.equal(cut.body.toString(), 'ID3-first-');
-  assert.equal(h.voice.listeners(second.audio.split('/').at(-1)!), 0);
-  // A page that comes only after the audio failed still gets what was made before its connection is cut.
-  const lateAt = Date.now();
-  const late = await fetchAudio(second.audio.split('/').at(-1)!);
-  assert.ok(Date.now() - lateAt < 3_000, 'cut off once sent, not after a wait');
-  assert.equal(late.complete, false);
-  assert.equal(late.body.toString(), 'ID3-first-');
+  const failed = await masterEntry(h, /답 둘/);
+  await until(() => h.speakOf(failed.id)?.state === 'unspoken');
+  assert.equal(h.speakOf(failed.id)?.reason, 'audio');
+  assert.equal(h.says().filter(item => item.kind === 'answer').length, 1);
   // A slow page that stops reading and then goes away leaves nothing waiting.
   h.labs.mode = 'ok';
   h.labs.chunks = [Buffer.alloc(900_000, 1), Buffer.alloc(900_000, 2)];
-  h.voice.voicePlayed({ session, id: second.id, result: 'played' });
   await request(h, session, '세 번째');
-  const third = await until(() => h.says().filter(item => item.kind === 'answer')[2]);
+  const third = await until(() => h.says().filter(item => item.kind === 'answer')[1]);
   const thirdId = third.audio.split('/').at(-1)!;
   await new Promise<void>(resolve => {
     const req = httpRequest({ host: '127.0.0.1', port: (audioPort), path: `/${thirdId}` }, res => { res.pause(); setTimeout(() => { req.destroy(); resolve(); }, 300); });
@@ -472,7 +467,35 @@ test('audio streams to the page as it is made; cut-off audio cuts the page off, 
 const readings = (h: Harness) => h.labs.speeches.map(item => String(item.body.text)).filter(text => !text.endsWith(FIRST));
 const mp3 = (frames: string, size = 35) => Buffer.concat([Buffer.from([0x49, 0x44, 0x33, 4, 0, 0, 0, 0, 0, size]), Buffer.alloc(size, 0x54), Buffer.from(frames)]);
 
-test('a long answer to a spoken request is read whole: parts of whole sentences, in order, made into one stream with one tag at its start', async t => {
+/** Read each completed file and ACK it; synthesis must not advance while its ACK is pending. */
+async function playFiniteAnswer(h: Harness, session: string, entry: string, fetchAudio: Awaited<ReturnType<typeof audioServer>>['fetchAudio'], offset = 0) {
+  const played: ReturnType<Harness['says']> = [];
+  let cursor = offset;
+  for (let guard = 0; guard < 100; guard++) {
+    const next = await until(() => {
+      const say = h.says().slice(cursor).find(item => item.kind === 'answer');
+      if (say) return { say };
+      const state = h.speakOf(entry)?.state;
+      return state === 'played' || state === 'unspoken' ? { state } : undefined;
+    });
+    if (!('say' in next)) return played;
+    const say = next.say!;
+    cursor = h.says().indexOf(say) + 1;
+    const audio = await fetchAudio(say.audio.split('/').at(-1)!);
+    assert.ok(audio.complete, 'each published file ends cleanly');
+    assert.equal(Number(audio.length), audio.body.length, 'each file has exact Content-Length');
+    assert.ok(audio.body.subarray(0, 3).equals(Buffer.from('ID3')), 'each finite MP3 retains its own tag');
+    assert.equal(say.streaming, true);
+    const made = readings(h).length;
+    await sleep(25);
+    assert.equal(readings(h).length, made, 'no synthesis beyond current ACK');
+    assert.equal(h.voice.voicePlayed({ session, id: say.id, result: 'played' }), true);
+    played.push(say);
+  }
+  assert.fail('finite answer exceeded bounded part count');
+}
+
+test('a long answer to a spoken request is read whole: parts of whole sentences, in order, served as finite files with one tag per part', async t => {
   const long = Array.from({ length: 24 }, (_, index) => `${index + 1}번째 문장은 끝까지 읽혀야 하는 설명이고, 빠지거나 겹치지 않고 이어집니다.`);
   const answer = `좋아요, 하나씩 말씀드릴게요!\n\n${long.slice(0, 12).map(line => `- ${line}`).join('\n')}\n\n${long.slice(12).join(' ')}`;
   const h = await harness(t, { steps: [answer] });
@@ -484,21 +507,17 @@ test('a long answer to a spoken request is read whole: parts of whole sentences,
   h.labs.gapMs = 5;
   await request(h, session, '길게 알려줘');
   const entry = await masterEntry(h, /하나씩 말씀드릴게요/);
-  const reading = await until(() => h.says().find(item => item.kind === 'answer'));
-  assert.equal(h.says().filter(item => item.kind === 'answer').length, 1, 'one thing to play for the answer');
-  assert.equal(reading.text, speakable(answer), 'the page is sent what is read, without tags');
-  assert.ok(!reading.text.includes('[cheerfully]'));
-  for (const line of long) assert.ok(reading.text.includes(line), line);
-  const audio = await fetchAudio(reading.audio.split('/').at(-1)!);
-  assert.ok(audio.complete);
+  const played = await playFiniteAnswer(h, session, entry.id, fetchAudio);
+  assert.equal(h.speakOf(entry.id)?.state, 'played', 'all finite parts settle the successful answer');
+  assert.ok(played.length > 2, 'made and played in finite parts');
+  assert.equal(played.map(item => item.text).join(' '), speakable(answer), 'plain parts cover the full answer once');
+  for (const item of played) assert.ok(!item.text.includes('[cheerfully]'));
+  for (const line of long) assert.ok(played.some(item => item.text.includes(line)), line);
   const texts = readings(h);
-  assert.ok(texts.length > 2, 'made in parts');
-  assert.ok(texts[0].length < 140, 'the first part is short, so it starts soon');
   assert.ok(texts.every(text => text.startsWith('[cheerfully] ')), 'each part keeps the tone');
-  assert.equal(texts.map(text => text.slice('[cheerfully] '.length)).join(' '), speakable(answer), 'nothing dropped, nothing said twice');
-  assert.deepEqual(audio.body, Buffer.concat([whole, ...texts.slice(1).map(() => Buffer.from('frames'))]), 'only the first tag stays');
-  h.voice.voicePlayed({ session, id: reading.id, result: 'played' });
-  await until(() => h.speakOf(entry.id)?.state === 'played');
+  assert.equal(texts.map(text => text.slice('[cheerfully] '.length)).join(' '), speakable(answer));
+  assert.ok(texts.every(text => text.length <= 520), 'whole sentence parts remain bounded');
+
 });
 
 test('a later part that fails before any sound is asked for once more; one that fails again cuts the answer off and marks it not said', async t => {
@@ -512,24 +531,24 @@ test('a later part that fails before any sound is asked for once more; one that 
   let failures = 0;
   h.labs.fail = text => text.includes('5번째') && failures++ === 0;
   await request(h, session, '하나');
-  const first = await until(() => h.says().find(item => item.kind === 'answer'));
-  const whole = await fetchAudio(first.audio.split('/').at(-1)!);
-  assert.ok(whole.complete, 'the part asked for again came, and the answer is whole');
-  const texts = readings(h).map(text => text.replace(/^\[cheerfully\] /, ''));
-  assert.equal(texts[1], texts[2], 'the failed part is asked for again');
-  assert.equal([texts[0], ...texts.slice(2)].join(' '), answer, 'and nothing else is said twice');
   const entry = await masterEntry(h, /설명입니다/);
-  h.voice.voicePlayed({ session, id: first.id, result: 'played' });
-  await until(() => h.speakOf(entry.id)?.state === 'played');
-  // Failing twice: the page's connection is cut after what came, and the answer is marked as not said aloud.
+  await playFiniteAnswer(h, session, entry.id, fetchAudio);
+  assert.equal(h.speakOf(entry.id)?.state, 'played', 'retry success settles the whole answer');
+  const texts = readings(h).map(text => text.replace(/^\[cheerfully\] /, ''));
+  const duplicate = texts.findIndex((text, index) => index > 0 && text === texts[index - 1]);
+  assert.ok(duplicate > 0, 'the failed part is asked for again');
+  assert.equal(texts.filter((_text, index) => index !== duplicate).join(' '), answer, 'only the retry duplicates a request');
+  // A permanent failure in a later part leaves prior finite files complete, with no failed-part say.
   h.labs.fail = text => text.includes('5번째');
+  const before = h.says().length;
   await request(h, session, '두 번째');
-  const second = await until(() => h.says().filter(item => item.kind === 'answer')[1]);
-  const cut = await fetchAudio(second.audio.split('/').at(-1)!);
-  assert.equal(cut.complete, false);
   const failed = await masterEntry(h, /이야기입니다/);
-  h.voice.voicePlayed({ session, id: second.id, result: 'failed' });
-  await until(() => h.speakOf(failed.id)?.state === 'unspoken');
+  const earlier = await playFiniteAnswer(h, session, failed.id, fetchAudio, before);
+  assert.ok(earlier.length > 0);
+  assert.equal(h.speakOf(failed.id)?.state, 'unspoken');
+  assert.equal(h.speakOf(failed.id)?.reason, 'audio');
+  assert.equal(h.speakOf(failed.id)?.heard, true, 'prior acknowledged parts remain heard after later failure');
+  assert.ok(!earlier.some(item => item.text.includes('5번째')), 'failed synthesis never becomes a say');
   // What is counted is what was asked for: the parts after the one that failed were never sent, nor paid for.
   assert.ok(!readings(h).some(text => text.includes('30번째 문장은 조금 길게 이어지는 이야기')));
   const asked = () => h.labs.speeches.reduce((sum, item) => sum + String(item.body.text).length, 0);
@@ -584,11 +603,14 @@ test('a later part that comes back without sound is asked for again, never skipp
   let silences = 0;
   h.labs.silent = text => text.includes('5번째') && silences++ === 0;
   await request(h, session, '하나');
-  const reading = await until(() => h.says().find(item => item.kind === 'answer'));
-  assert.ok((await fetchAudio(reading.audio.split('/').at(-1)!)).complete);
+  const entry = await masterEntry(h, /12번째/);
+  await playFiniteAnswer(h, session, entry.id, fetchAudio);
+  assert.equal(h.speakOf(entry.id)?.state, 'played', 'retry success settles the whole answer');
   const texts = readings(h).map(text => text.replace(/^\[cheerfully\] /, ''));
-  assert.equal(texts[1], texts[2], 'the silent part is asked for again');
-  assert.equal([texts[0], ...texts.slice(2)].join(' '), answer);
+  const duplicate = texts.findIndex((text, index) => index > 0 && text === texts[index - 1]);
+  assert.ok(duplicate > 0, 'the silent part is asked for again');
+  assert.equal(texts.filter((_text, index) => index !== duplicate).join(' '), answer);
+
 });
 
 test('voice records from GPT-Live calls become dollars once, counted and not yet counted, and settings keep everything but their old voice keys', async t => {
@@ -739,4 +761,39 @@ test('a spoken request steered into a report\'s turn is answered aloud even when
   kept.updatedAt = h.tick();
   await masterEntry(h, /W가 끝났습니다/);
   await until(() => h.says().find(item => item.kind === 'answer' && item.text.includes('W가 끝났습니다')));
+});
+
+
+test('finite first response waits for complete audio and serves its exact length', async t => {
+  const h = await harness(t, { steps: [() => undefined] });
+  const session = on(h);
+  h.labs.gapMs = 200;
+  const answer = await request(h, session, '먼저 응답해주세요');
+  assert.ok(answer.ack);
+  assert.ok(h.labs.completed.includes(1), 'first response cannot expose partial unknown-length audio');
+  const { fetchAudio } = await audioServer(t, h.voice);
+  const audio = await fetchAudio(answer.ack.audio.split('/').at(-1)!);
+  assert.equal(Number(audio.length), audio.body.length);
+  assert.equal(audio.complete, true);
+});
+
+test('finite first response discards audio completed after the answer started', async t => {
+  const h = await harness(t, { steps: [() => undefined] });
+  const session = on(h);
+  h.labs.gapMs = 250;
+  const clientMessageId = randomUUID();
+  const key = digestOf(clientMessageId);
+  const asking = h.voice.voiceRequest({ session, clientMessageId, text: '진행 상황 알려주세요', local: true });
+  await until(() => h.labs.speeches.length === 1 || undefined);
+  h.voice.stream({ turn: 'finite-answer-race', key, request: key, kind: 'answer', replies: [{ id: 'reply:0', text: '실제 답변을 바로 읽습니다. ', done: true }] });
+  assert.deepEqual(await asking, {}, 'an ACK completed after answering begins must not occupy the player');
+});
+
+test('finite first response retains the original deadline while TTS is incomplete', async t => {
+  const h = await harness(t, { steps: [() => undefined], timing: { synthMs: 4_000 } });
+  const session = on(h);
+  h.labs.gapMs = 3_000;
+  const started = Date.now();
+  assert.deepEqual(await request(h, session, '느린 첫 음성'), {});
+  assert.ok(Date.now() - started < 2_900, 'the existing 2.5 second first-response deadline also covers synthesis');
 });
