@@ -115,7 +115,7 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
       case 'decisions': return <DecisionPanel token={context.token} />;
       case 'remote': return <RemotePanel token={context.token} projects={context.projects} controlledBy={context.controlledBy} initialTab={place.remoteTab} />;
       case 'notifications': return <NotificationPanel token={context.token} />;
-      case 'secrets': return <SecretsPanel token={context.token} />;
+      case 'secrets': return <SecretsPanel token={context.token} computers={context.computers} />;
       case 'backup': return <BackupPanel token={context.token} />;
       case 'account': return <AccountSection />;
     }

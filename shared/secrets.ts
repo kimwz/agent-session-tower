@@ -1,5 +1,6 @@
 /** Public contracts contain names and references, never stored secret values. */
 export const SECRET_OPERATIONS = ['discover', 'env', 'pipe', 'file', 'compare', 'fingerprint'] as const;
+export const DEFAULT_SECRET_USE_OPERATIONS = ['discover', 'env', 'pipe', 'file'] as const;
 export type SecretOperation = typeof SECRET_OPERATIONS[number];
 export type SecretScope = 'global' | 'project' | 'task';
 export type SecretKind = 'scalar' | 'env' | 'file';
@@ -32,6 +33,8 @@ export interface SecretOverview {
   status: VaultStatus; device?: SecretDevice; peers: SecretPeer[]; projects: SecretProject[];
   groups: SecretGroup[]; secrets: SecretMetadata[]; rules: SecretRule[];
   target?: SecretTarget; task?: SecretTask; connected: string[];
+  /** Owner-only project hint without creating a security task. */
+  currentProjectId?: string;
 }
 export interface SecretCreateInput {
   name: string; kind: SecretKind; scope: SecretScope; value?: string;

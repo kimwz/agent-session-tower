@@ -1,4 +1,4 @@
-import type { SecretCreateInput, SecretMetadata, SecretOverview, SecretScope } from '../../../shared/secrets';
+import { DEFAULT_SECRET_USE_OPERATIONS, type SecretCreateInput, type SecretKind, type SecretMetadata, type SecretOverview, type SecretScope } from '../../../shared/secrets';
 import { api } from '../common/lib';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { localPart, nodeOf } from '../remote/scope';
@@ -39,4 +39,31 @@ export function localSecretOverview(overview: SecretOverview): SecretOverview {
   const groups = overview.groups.filter(group => !overview.secrets.some(secret => secret.groupId === group.id) || secrets.some(secret => secret.groupId === group.id));
   const groupIds = new Set(groups.map(group => group.id));
   return { ...overview, secrets, groups, rules: overview.rules.filter(rule => groupIds.has(rule.groupId)) };
+}
+
+export type QuickSecretFormat = 'auto' | SecretKind;
+/** A display hint only; the server validates dotenv syntax and preserves literal values. */
+export function quickSecretKind(raw: string, format: QuickSecretFormat): SecretKind {
+  if (format !== 'auto') return format;
+  const first = raw.replace(/^\uFEFF/, '').split(/\r?\n/).find(line => line.trim() && !line.trimStart().startsWith('#'));
+  return first && /^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=/.test(first.trimStart()) ? 'env' : 'scalar';
+}
+export function quickSecretPayload(overview: SecretOverview, raw: string, format: QuickSecretFormat, name: string, destination: string, fileName = ''): SecretCreateInput & { currentProject?: boolean } {
+  const kind = quickSecretKind(raw, format);
+  const group = overview.groups.find(group => `group:${group.id}` === destination) ?? overview.groups.find(group =>
+    (destination === 'global' && group.scope === 'global' && group.name === 'Global') ||
+    (destination === 'project' && group.scope === 'project' && group.projectId === (overview.target?.projectId ?? overview.currentProjectId) && group.name === 'Project'));
+  const scope = group?.scope ?? (destination === 'project' ? 'project' : destination === 'global' ? 'global' : 'task');
+  const firstField = kind === 'env' ? /(?:^|\n)\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=/.exec(raw)?.[1] : undefined;
+  return { name: name.trim() || (kind === 'file' ? fileName : firstField) || 'SESSION_SECRET', kind, scope,
+    ...(kind === 'file' ? { content: raw } : { value: raw }),
+    ...(group ? { groupId: group.id, ...(group.projectId ? { projectId: group.projectId } : {}) } : { groupName: scope === 'task' ? 'Session' : scope === 'project' ? 'Project' : 'Global' }),
+    ...(destination === 'project' ? { currentProject: true } : {}),
+    ...(scope === 'global' ? { allProjects: false } : {}), activation: 'manual', operations: [...DEFAULT_SECRET_USE_OPERATIONS], connect: true };
+}
+export function savedSecretMatches(overview: SecretOverview, secret: SecretMetadata, query: string): boolean {
+  const group = overview.groups.find(group => group.id === secret.groupId);
+  if (!group || group.scope === 'task' || (group.scope === 'project' && group.projectId !== (overview.target?.projectId ?? overview.currentProjectId))) return false;
+  const project = overview.projects.find(project => project.id === group.projectId);
+  return [secret.name, group.name, project?.name, ...(secret.fields ?? [])].join(' ').toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
 }
