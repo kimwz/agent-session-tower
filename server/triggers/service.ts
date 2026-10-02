@@ -234,7 +234,7 @@ export class TriggerService extends EventEmitter {
   /**
    * Makes a backup's triggers the definitions here, the way the owner's own edits would: an unchanged trigger keeps
    * its revision and schedule; a changed or new one gets a new revision and counts from now (never catching up); one
-   * missing from the backup is deleted. What either computer's GitHub watch already took is kept, so it is not taken
+   * missing from the backup is deleted unless archived; local archive choices and their recovery grants stay. What either computer's GitHub watch already took is kept, so it is not taken
    * again; history stays. Settings, trusted folders and secret grants come from the backup.
    */
   async restoreBackup(backup: TriggerBackup): Promise<void> {
@@ -312,7 +312,8 @@ export class TriggerService extends EventEmitter {
       const keptHere = new Set<string>();
       const wanted = new Set([...named, ...incoming.map(item => item.id)]);
       for (const current of [...state.triggers]) {
-        if (wanted.has(current.id) || current.archivedAt) continue;
+        if (wanted.has(current.id)) continue;
+        if (current.archivedAt) { keptHere.add(current.id); continue; }
         state.triggers = state.triggers.filter(item => item.id !== current.id);
         state.tombstones = [...state.tombstones, current].slice(-MAX_TOMBSTONES);
         this.cancelQueued(state, current.id, 'The trigger was removed by a restore before this ran.');

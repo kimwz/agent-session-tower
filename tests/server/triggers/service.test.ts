@@ -830,6 +830,7 @@ test('older backups keep archived definitions missing from the snapshot and pres
   await service.restoreBackup(emptyBackup);
   assert.ok(service.get(trigger.id).trigger.archivedAt);
   assert.equal(service.event(event.id).status, 'completed');
+  assert.ok((await collectTriggers(f.directory))!.trustedFolders.includes(f.project));
   const visible = await service.setArchived(trigger.id, false, service.get(trigger.id).trigger.revision, OWNER);
   await service.restoreBackup(consumedBackup);
   assert.equal(service.get(trigger.id).trigger.archivedAt, undefined);

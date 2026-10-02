@@ -11,6 +11,7 @@ format, and saved browser preferences are the compatibility surface.
 - Revision-checked archive management and durable consumption records across restart, deletion and backup restore.
 
 ### Changed
+- Preserve local archive choices and recovery grants during backup restore, rejecting restores that exceed final merged capacity.
 - Reviews and native checks use the computer's existing Claude/Codex CLI login by default; nonpersistent execution and test data separation no longer require a new authenticated profile.
 
 ## [1.105.0] - 2026-10-03
