@@ -63,7 +63,7 @@ export function masterRoutes(client: MasterClient, options: { turnEnd?: VoiceTur
         case 'finished': json(res, 200, options.turnEnd ? await options.turnEnd.judge({ session: body.session, text: body.text, pauseMs: body.pauseMs }) : { unavailable: true }); break;
         // An answer not read aloud: heard again, or no longer told of.
         case 'missed': await call('voiceMissed', { session: body.session, entry: body.entry, action: body.action }); break;
-        default: await call('voicePlayed', { session: body.session, id: body.id, result: body.result, ...(typeof body.startedMs === 'number' ? { startedMs: body.startedMs } : {}), ...(typeof body.detail === 'string' ? { detail: body.detail } : {}) });
+        default: await call('voicePlayed', { session: body.session, id: body.id, result: body.result, ...(typeof body.startedMs === 'number' ? { startedMs: body.startedMs } : {}), ...(typeof body.detail === 'string' ? { detail: body.detail } : {}), playback: body.playback });
       }
       return true;
     }

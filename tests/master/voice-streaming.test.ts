@@ -210,17 +210,19 @@ async function harness(t: test.TestContext, options: { settings?: Record<string,
   await session.start();
   cleanup.push(async () => { await voice.close(); await session.close(); await room.flush(); });
   const events: MasterStreamEvent[] = [];
+  const heardSays = new Set<string>();
   const page = options.page ?? {};
   room.subscribe(event => {
     events.push(event);
-    if (event.type !== 'say' || (event.say.kind !== 'answer' && event.say.kind !== 'report')) return;
+    if (event.type !== 'say' || event.say.cancelled || heardSays.has(event.say.id) || (event.say.kind !== 'answer' && event.say.kind !== 'report')) return;
+    heardSays.add(event.say.id);
     const result = page.answer ? page.answer(event.say) : 'played';
     // Sound that never started (refused, or waited too long) has no start to tell of.
     if (result) setTimeout(() => voice.voicePlayed({ session: current, id: event.say.id, result, ...(result === 'blocked' || result === 'expired' ? {} : { startedMs: 5 }) }), page.delayMs ?? 30);
   });
   let current = '';
   const on = () => (current = voice.voiceOn({ tabId: randomUUID(), local: true }).session);
-  const says = () => events.flatMap(event => event.type === 'say' ? [event.say] : []);
+  const says = () => [...new Map(events.flatMap(event => event.type === 'say' && !event.say.cancelled ? [[event.say.id, event.say] as const] : [])).values()];
   /** The master writes more of a reply (and maybe ends it); Tower's state changes. */
   const write = (run: Run, id: string, text: string, done = false) => {
     let reply = run.replies!.find(item => item.id === id);
@@ -676,4 +678,28 @@ test('a page that never tells how it went, or kept it waiting too long, ends the
   off.on();
   await sleep(30);
   assert.equal(off.voice.status().missed, undefined);
+});
+
+test('streaming text grows on the same say, and a cancelled turn promptly cancels its buffered audio', async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const { run } = await h.ask('스트리밍 경합 확인');
+  h.write(run, 'm1:0', '첫 문장을 먼저 말씀드릴게요. ');
+  const first = await until(() => h.says().find(say => say.kind === 'answer'));
+  const rest = '두 번째 문장의 추가 설명입니다. '.repeat(10);
+  h.write(run, 'm1:0', rest);
+  await until(() => h.says().find(say => say.id === first.id && say.text.includes('두 번째')));
+  assert.equal(h.says().filter(say => say.kind === 'answer').length, 1, 'text updates keep one audio id');
+  h.finish(run, 'cancelled');
+  await until(() => h.events.find(event => event.type === 'say' && event.say.id === first.id && event.say.cancelled));
+  await until(() => !h.voice.streaming(run.id) || undefined);
+  // An unheard cancelled turn may enqueue its error notice; the original playback wait is already gone.
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: first.id, result: 'played' }), false);
+  assert.equal(h.voice.streaming(run.id), false);
+});
+
+test('page media diagnostics keep only bounded playback state, never arbitrary payload', async () => {
+  const { playbackRecord } = await import('../../server/master/voice-timings.js');
+  assert.deepEqual(playbackRecord({ position: 12.5, muted: false, volume: 0.5, ready: 3, network: 2, context: 'running', text: 'private payload' }), { position: 12.5, muted: false, volume: 0.5, ready: 3, network: 2, context: 'running' });
+  assert.equal(playbackRecord({ position: Infinity, muted: 'yes', volume: -1, ready: 100, network: 100, context: 'arbitrary payload' }), undefined);
 });

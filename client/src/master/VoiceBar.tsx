@@ -107,11 +107,11 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
   const view = voice.view;
   const writing = Boolean(view && !view.playing && (view.capturing || view.hearing));
   const long = Boolean(view && (writing || (!view.playing && view.draft)));
-  const follow = useFollowEnd(view ? `${view.heard ?? ''}|${view.draft ?? ''}|${view.playing?.text ?? ''}` : '', writing, long);
+  const follow = useFollowEnd(view ? `${view.heard ?? ''}|${view.draft ?? ''}|${view.playing?.text ?? view.preparing?.text ?? ''}` : '', writing, long);
   if (view) {
-    const playing = view.playing;
+    const playing = view.playing ?? view.preparing;
     const missed = voice.status?.missed;
-    const label = playing ? (playing.kind === 'notice' ? `${words('되돌릴 수 없는 작업', 'Irreversible change')}: ${playing.text}` : playing.text)
+    const label = playing ? (playing.kind === 'notice' ? `${words('되돌릴 수 없는 작업', 'Irreversible change')}: ${playing.text}` : view.preparing ? `${words('소리 재생 대기', 'Waiting for audio')}: ${playing.text}` : playing.text)
       : view.capturing ? `${view.waiting ? words('듣고 있어요 · 이어서 말씀하세요', 'Listening · go on') : words('듣고 있어요', 'Listening')}: ${view.heard || '…'}`
       : view.hearing ? `${words('듣고 있어요', 'Listening')}: ${view.draft ? `${view.draft} …` : '…'}`
       : view.draft ? `${words('아직 보내지 않은 말', 'Not sent yet')}: ${view.draft}`
@@ -119,7 +119,7 @@ export function VoiceBar({ voice }: { voice: VoiceControls }) {
       : view.muted ? words('마이크 뮤트됨 · 답과 소식은 계속 읽어 드려요', 'Microphone muted · answers and news are still read aloud')
       : words('음성 켜짐 · 맡긴 일 소식은 읽어 드려요', 'Voice on · news of finished work is read aloud');
     // What is heard or read aloud has a line of its own; today's use sits beside the buttons below it, so neither covers the other.
-    return <div className={`master-voice live ${writing ? 'speaking' : playing ? 'playing' : ''} ${long ? 'long' : ''}`}>
+    return <div className={`master-voice live ${writing ? 'speaking' : view.playing ? 'playing' : ''} ${long ? 'long' : ''}`}>
       <div className="master-voice-now" role="status">
         <span className="master-voice-dot" aria-hidden />
         {playing ? <Volume2 size={13} /> : view.listening ? <Mic size={13} /> : <MicOff size={13} />}

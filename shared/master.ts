@@ -120,6 +120,8 @@ export interface MasterSay {
   request?: string;
   /** Read while the master is still writing it: its audio grows until the words end, so it may play long. */
   streaming?: true;
+  /** Same id: update its text or discard audio that the host stopped. */
+  cancelled?: true;
 }
 
 export type MasterCallState = 'sending' | 'succeeded' | 'failed' | 'uncertain' | 'not-admitted';
