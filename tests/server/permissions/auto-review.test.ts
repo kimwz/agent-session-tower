@@ -96,7 +96,7 @@ test('with auto-review on, a request waits for the reviewer; one it may not deci
   assert.equal(overview.requests.find(item => item.id === queued.request.id!)!.review!.status, 'queued');
   assert.equal(overview.pending, 1, 'a request with the reviewer is not counted as waiting for the owner');
   const broad = await f.service.request({ kind: 'command', value: 'rm -rf dist', scope: 'project', reason: 'clean' }, agent('claude:one', 'r2'));
-  assert.equal(f.service.overview().requests.find(item => item.id === broad.request.id!)!.review!.status, 'skipped');
+  assert.equal(f.service.overview().requests.find(item => item.id === broad.request.id!)!.review!.status, 'queued', 'blocked lasting rules still receive contextual review for one-shot narrowing');
   const outsider = await f.service.request({ kind: 'command', value: 'gh issue comment', scope: 'project', reason: 'reply' }, agent('codex:two', 'r3'));
   assert.equal(f.service.overview().requests.find(item => item.id === outsider.request.id!)!.review!.reason, '공개 에이전트의 요청은 소유자가 정합니다.');
   assert.equal(f.service.nextReview()!.id, queued.request.id!);
@@ -490,4 +490,108 @@ test('who sent a message is judged by the exact message; an unknown sender is th
   input = JSON.parse(prompt);
   assert.deepEqual(input.authority.ownerWords.map((word: { text: string }) => word.text), ['Review PR #33, but do not merge or deploy it.']);
   assert.ok(input.context.messagesFromAutomation.some((word: { kind: string }) => word.kind === 'sent for unknown sender'));
+});
+
+test('a blocked interpreter rule is reviewed and redirected to an exact run without a lasting rule', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const helper = join(f.root, 'outside.py');
+  await writeFile(helper, 'print("fixture")\n');
+  let calls = 0;
+  const told: string[] = [];
+  const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true, sources: sources(f, []),
+    model: async request => {
+      calls++;
+      const input = JSON.parse(request.prompt);
+      assert.equal(input.context.commandEvidence.files[0].text, 'print("fixture")\n');
+      assert.ok(input.context.ruleApprovalLimit);
+      return { verdict: 'approve', reason: '승인된 작업에 필요한 명령입니다.' };
+    }, notify: async (_, message) => { told.push(message); } });
+  const { request } = await f.service.request({ kind: 'command', value: `/usr/bin/python3 ${helper}`, scope: 'project', reason: 'run helper' }, agent('codex:two'));
+  assert.equal(f.service.nextReview()?.id, request.id);
+  reviewer.wake(); await reviewer.flush();
+  const after = f.service.overview().requests.find(item => item.id === request.id)!;
+  assert.equal(calls, 1);
+  assert.equal(after.status, 'withdrawn');
+  assert.equal(after.review?.verdict, 'narrow');
+  assert.match(told[0]!, /permissions_run/);
+  assert.equal(f.service.overview().rules.length, 0);
+  const exact = await f.service.requestRun({ command: `/usr/bin/python3 ${helper}`, reason: 'exact helper' }, agent('codex:two'));
+  await f.service.startReview(exact.request.id!);
+  const allowed = await f.service.applyReview(exact.request.id!, { verdict: 'approve', reason: '본문을 확인한 일회성 명령입니다.' });
+  assert.equal(allowed?.request.status, 'approved');
+  assert.equal(f.service.overview().rules.length, 0);
+});
+
+test('script contents changing during review cause a new review rather than applying stale approval', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const helper = join(f.root, 'run.py');
+  await writeFile(helper, 'print("before")');
+  let calls = 0;
+  const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true, sources: sources(f, []), notify: async () => {},
+    model: async request => {
+      calls++;
+      const input = JSON.parse(request.prompt);
+      if (calls === 1) { await writeFile(helper, 'print("after")'); }
+      else { assert.equal(input.context.commandEvidence.files[0].text, 'print("after")'); }
+      return { verdict: 'approve', reason: '작업에 필요한 단일 명령입니다.' };
+    } });
+  const { request } = await f.service.requestRun({ command: `python3 ${helper}`, reason: 'run helper' }, agent('claude:one'));
+  reviewer.wake();
+  while (reviewer.inFlight()) await reviewer.flush();
+  assert.equal(calls, 2);
+  assert.equal(f.service.overview().requests.find(item => item.id === request.id)?.status, 'approved');
+});
+
+test('Codex conversation verdict requests one-shot execution when the agent can hear it', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true, sources: sources(f, []), notify: async () => {},
+    model: async () => ({ verdict: 'approve', scope: 'conversation', reason: '현재 작업에 필요합니다.' }) });
+  const { request } = await f.service.request({ kind: 'command', value: 'supabase login', scope: 'project', reason: 'connect' }, agent('codex:two'));
+  reviewer.wake(); await reviewer.flush();
+  const after = f.service.overview().requests.find(item => item.id === request.id)!;
+  assert.equal(after.status, 'withdrawn');
+  assert.match(after.review?.suggestion ?? '', /permissions_run/);
+});
+
+test('an unstable script stops requeuing at the existing limit', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const helper = join(f.root, 'unstable.py');
+  await writeFile(helper, 'print(0)');
+  let calls = 0;
+  const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true, sources: sources(f, []), notify: async () => {},
+    model: async () => { await writeFile(helper, `print(${++calls})`); return { verdict: 'approve', reason: 'ok' }; } });
+  const { request } = await f.service.requestRun({ command: `python3 ${helper}`, reason: 'run helper' }, agent('claude:one'));
+  reviewer.wake(); while (reviewer.inFlight()) await reviewer.flush();
+  assert.equal(calls, 4);
+  const after = f.service.overview().requests.find(item => item.id === request.id)!;
+  assert.equal(after.status, 'pending');
+  assert.equal(after.review?.status, 'skipped');
+  assert.match(after.review?.reason ?? '', /참조 파일/);
+});
+
+test('a blocked rule still waits for the owner if its agent cannot receive narrowing', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const reviewer = new PermissionReviewer({ service: f.service, reachable: () => false, sources: sources(f, []), notify: async () => { assert.fail('unreachable'); },
+    model: async () => ({ verdict: 'approve', reason: 'needed' }) });
+  const { request } = await f.service.request({ kind: 'command', value: 'python3 /tmp/no-fixture.py', scope: 'project', reason: 'helper' }, agent('claude:one'));
+  reviewer.wake(); await reviewer.flush();
+  const after = f.service.overview().requests.find(item => item.id === request.id)!;
+  assert.equal(after.status, 'pending');
+  assert.equal(after.review?.verdict, 'owner');
+  assert.equal(f.service.overview().rules.length, 0);
+});
+
+test('a Claude-only conversation approval still creates a conversation rule through the reviewer', async t => {
+  const f = await fixture(t);
+  await f.service.saveAutoReview(ON);
+  const reviewer = new PermissionReviewer({ service: f.service, reachable: () => true, sources: sources(f, []), notify: async () => {},
+    model: async () => ({ verdict: 'approve', scope: 'conversation', reason: 'current Claude task' }) });
+  await f.service.request({ kind: 'command', value: 'gh pr view', scope: 'project', reason: 'read PR' }, agent('claude:one'));
+  reviewer.wake(); await reviewer.flush();
+  assert.equal(f.service.overview().rules[0]?.scope, 'conversation');
 });

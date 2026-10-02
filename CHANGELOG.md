@@ -14,6 +14,13 @@ format, and saved browser preferences are the compatibility surface.
 - Preserve local archive choices and recovery grants during backup restore, rejecting restores that exceed final merged capacity.
 - Reviews and native checks use the computer's existing Claude/Codex CLI login by default; nonpersistent execution and test data separation no longer require a new authenticated profile.
 
+## [1.105.1] - 2026-10-03
+
+### Fixed
+- Permission reviews inspect directly referenced local scripts and input files instead of relying on shortened conversation excerpts. Absolute-path and interpreter rules receive contextual review and can return to the agent as exact one-time execution requests.
+- Permission reviews honor the owner's explicit task scope for authorized work outside the project, publication and deployment, and request one-time execution when Codex cannot use a conversation-only rule.
+- Reviews retry when referenced script contents change while the model is deciding. Recognized authentication, secret and environment-value stdin is excluded from model evidence.
+
 ## [1.105.0] - 2026-10-03
 
 ### Changed

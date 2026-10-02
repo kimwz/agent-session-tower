@@ -1,5 +1,5 @@
 import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
-import type { PermissionRequest } from '../../shared/permissions.js';
+import { autoReviewBlock, type PermissionRequest } from '../../shared/permissions.js';
 import { REVIEW_SCHEMA, REVIEW_SYSTEM, ReviewSkip, reviewInput, type ReviewSources } from './context.js';
 import type { PermissionReviewResult, PermissionService } from './service.js';
 
@@ -74,17 +74,25 @@ export class PermissionReviewer {
     let result: PermissionReviewResult;
     try {
       const prompt = await reviewInput(request, this.options.sources);
-      const before = JSON.stringify(JSON.parse(prompt).authority);
+      const material = (input: string) => { const value = JSON.parse(input); return JSON.stringify([value.authority, value.context.commandEvidence]); };
+      const before = material(prompt);
       const model = await service.reviewModel();
       const answer = await this.options.model({ ...model, systemPrompt: REVIEW_SYSTEM, prompt,
         schema: REVIEW_SCHEMA as unknown as Record<string, unknown>, signal: controller.signal }, { timeoutMs: this.options.timeoutMs ?? REVIEW_TIMEOUT_MS });
       result = parse(answer, request, model.model ?? model.provider);
       // The owner said more, or confirmed or changed something, while the model answered: review again with that.
-      if (JSON.stringify(JSON.parse(await reviewInput(request, this.options.sources)).authority) !== before) {
+      if (material(await reviewInput(request, this.options.sources)) !== before) {
         const again = (this.requeued.get(request.id) ?? 0) + 1;
         this.requeued.set(request.id, again);
         if (again <= MAX_REQUEUE) { await service.requeueReview(request.id); return; }
-        throw new ReviewSkip('검토하는 동안 소유자의 지시가 계속 바뀌어 소유자에게 넘깁니다.');
+        throw new ReviewSkip('검토하는 동안 지시 또는 참조 파일이 계속 바뀌어 소유자에게 넘깁니다.');
+      }
+      if (result.verdict === 'approve' && request.rule.kind === 'command') {
+        const limit = autoReviewBlock({ kind: 'command', value: result.rule?.value ?? request.rule.value }, request.cwd);
+        const unsupported = result.scope === 'conversation' && (request.provider === 'codex' || request.rule.providers.includes('codex'));
+        if (limit || unsupported) result = { ...result, verdict: 'narrow',
+          reason: `${result.reason} (${limit ?? 'Codex는 대화 한정 규칙을 지원하지 않습니다.'})`,
+          suggestion: `Ask permissions_run for the exact command needed for this task, with every argument; no lasting rule is required.` };
       }
       // Sending the agent back only works when it hears about it; otherwise the owner decides.
       if (result.verdict === 'narrow' && (!settings.resume || !this.options.reachable(request))) {
