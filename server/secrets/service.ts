@@ -5,14 +5,16 @@ import { MAX_SECRET_BYTES, SECRET_OPERATIONS, DEFAULT_SECRET_USE_OPERATIONS } fr
 import { SecretVault } from './vault.js';
 import { decode } from './crypto.js';
 import { parseDotenv } from './dotenv.js';
-import { authorize, discoverable, openTask, projectId, matchingRules, activeRules, selectedFields, type PolicySecret, type PolicyState } from './policy.js';
+import { authorize, discoverable, openTask, projectId, sessionTask, matchingRules, activeRules, selectedFields, type PolicyGrant, type PolicySecret, type PolicyState } from './policy.js';
 interface StoredSecret { metadata: SecretMetadata; value: string; encoding?: 'base64'; fields?: Record<string, string> }
-interface Grant { taskId: string; secretId: string; version: number; ruleId: string; revision: number; deadline?: number }
+type Grant = PolicyGrant;
 interface Legacy { id: string; name: string; value: string; createdAt: string; origin: string }
 interface Permanent { device: SecretDevice; keys: { signingPrivateKey: string; encryptionPrivateKey: string }; hmac: string; peers: SecretPeer[]; projects: SecretProject[]; groups: SecretGroup[]; secrets: StoredSecret[]; rules: SecretRule[]; legacy: Legacy[] }
 interface Journal { groups: SecretGroup[]; rules: SecretRule[]; tasks: SecretTask[]; secrets: StoredSecret[]; grants: Grant[]; operations: Record<string, { taskId: string; runId: string; fingerprint: string; state: 'pending' | 'done'; remote: boolean; claimedAt?: number; result?: unknown }> }
 export interface ResolvedSecret { metadata: SecretMetadata; bytes: Buffer; fields?: Record<string, string> }
 export interface SecretDispatchUse { ref: string; operation: SecretOperation; value: ResolvedSecret }
+/** Written in plain text at every unlocked save: the policy to list names by while locked, and the sources it cannot reach then. */
+interface LockedIndex { policy: PolicyState; sources: string[] }
 const policySecret = (secret: StoredSecret): PolicySecret => ({ metadata: secret.metadata, fieldNames: secret.fields ? Object.keys(secret.fields) : undefined });
 const emptyJournal = (): Journal => ({ groups: [], rules: [], tasks: [], secrets: [], grants: [], operations: Object.create(null) });
 export class SecretService {
@@ -23,17 +25,17 @@ export class SecretService {
   private data(): Permanent { if (!this.permanent || this.vault.locked) throw new Error('Vault locked'); return this.permanent; }
   private serialize<T>(operation: () => Promise<T>): Promise<T> { const next = this.queue.then(operation); this.queue = next.catch(() => undefined); return next; }
   private async mutate<T>(operation: () => T | Promise<T>): Promise<T> {
-    return this.serialize(async () => { this.data(); const permanent = structuredClone(this.permanent); const journal = structuredClone(this.journal); let saving = false; try { const result = await operation(); saving = true; await this.vault.save(this.data(), this.journal, this.policy()); return result; } catch (error) { if (saving) { this.vault.lock(); this.permanent = undefined; this.journal = emptyJournal(); } else { this.permanent = permanent; this.journal = journal; } throw error; } });
+    return this.serialize(async () => { this.data(); const permanent = structuredClone(this.permanent); const journal = structuredClone(this.journal); let saving = false; try { const result = await operation(); saving = true; await this.vault.save(this.data(), this.journal, this.lockedIndex()); return result; } catch (error) { if (saving) { this.vault.lock(); this.permanent = undefined; this.journal = emptyJournal(); } else { this.permanent = permanent; this.journal = journal; } throw error; } });
   }
   async initialize(password: string) { return this.serialize(async () => {
     const signing = generateKeyPairSync('ed25519'); const encryption = generateKeyPairSync('x25519');
     const signingKey = signing.publicKey.export({ type: 'spki', format: 'pem' }).toString(); const encryptionKey = encryption.publicKey.export({ type: 'spki', format: 'pem' }).toString();
     const data: Permanent = { device: { id: String(randomUUID()), name: 'This computer', signingKey, encryptionKey, fingerprint: createHash('sha256').update(signingKey + ':' + encryptionKey).digest('hex') }, keys: { signingPrivateKey: signing.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), encryptionPrivateKey: encryption.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() }, hmac: randomBytes(32).toString('base64'), peers: [], projects: [], groups: [], secrets: [], rules: [], legacy: [] };
-    await this.vault.initialize(password, data, data.device.id); this.permanent = data; this.journal = emptyJournal(); await this.vault.save(data, this.journal, this.policy());
+    await this.vault.initialize(password, data, data.device.id); this.permanent = data; this.journal = emptyJournal(); await this.vault.save(data, this.journal, this.lockedIndex());
   }); }
   async unlock(password: string) { return this.serialize(async () => { const data = await this.vault.unlock(password) as Permanent; try { this.permanent = data; this.journal = { ...emptyJournal(), ...((await this.vault.journal() as Journal | undefined) ?? {}) }; this.data(); } catch (error) { this.vault.lock(); this.permanent = undefined; throw error; }
     // Vaults saved by older builds have no index yet; listing while locked works from the next lock on.
-    await this.vault.writeIndex(this.policy()).catch(() => console.warn('Tower could not refresh the secret name index; names stay unlisted while locked until the next save.'));
+    await this.vault.writeIndex(this.lockedIndex()).catch(() => console.warn('Tower could not refresh the secret name index; names stay unlisted while locked until the next save.'));
   }); }
   async lock() { return this.serialize(async () => { this.vault.lock(); this.permanent = undefined; this.journal = emptyJournal(); }); }
   async changePassword(current: string, next: string) { return this.mutate(() => this.vault.changePassword(current, next)); }
@@ -54,6 +56,7 @@ export class SecretService {
 
   private projectId(hostId: string, root: string) { return projectId(this.data(), hostId, root); }
   /** Live view for authorization: grants issued during an evaluation land in the journal it reads. */
+  private lockedIndex(): LockedIndex { return { policy: this.policy(), sources: this.data().peers.filter(peer => peer.enabled && peer.direction === 'controller').map(peer => peer.device.id) }; }
   private policy(): PolicyState { const data = this.data(); return { deviceId: data.device.id, projects: data.projects, groups: this.groups(), rules: this.allRules(), secrets: this.secrets().map(policySecret), tasks: this.journal.tasks, grants: this.journal.grants }; }
   private groups() { return [...this.data().groups, ...this.journal.groups]; }
   private allRules() { return [...this.data().rules, ...this.journal.rules]; }
@@ -109,7 +112,7 @@ export class SecretService {
     return this.ensureTask(sessionId, root, undefined, started);
   }
 
-  async ensureTask(sessionId: string, canonicalRoot: string, hostId?: string, runStartedAt?: number): Promise<SecretTarget> { return this.mutate(() => { hostId ??= this.device().id; if (runStartedAt !== undefined && this.journal.tasks.some(task => task.sessionId === sessionId && task.hostId === hostId && task.status === 'closed' && (task.closedAt ?? task.createdAt) >= runStartedAt)) throw new Error('Run predates task closure'); if (!sessionId || !isAbsolute(canonicalRoot) || normalize(canonicalRoot) !== canonicalRoot) throw new Error('Invalid task identity'); let task = this.journal.tasks.find(task => task.sessionId === sessionId && task.hostId === hostId && task.status === 'open'); if (task && task.root !== canonicalRoot) throw new Error('Task project changed'); if (!task) { if (this.journal.tasks.length >= 10000) throw new Error('Task count limit'); task = { id: randomUUID(), hostId, sessionId, root: canonicalRoot, status: 'open', createdAt: this.now(), excluded: [] }; this.journal.tasks.push(task); } return { hostId, sessionId, root: canonicalRoot, taskId: task.id, projectId: this.projectId(hostId, canonicalRoot) }; }); }
+  async ensureTask(sessionId: string, canonicalRoot: string, hostId?: string, runStartedAt?: number): Promise<SecretTarget> { return this.mutate(() => { hostId ??= this.device().id; if (!sessionId || !isAbsolute(canonicalRoot) || normalize(canonicalRoot) !== canonicalRoot) throw new Error('Invalid task identity'); let task = sessionTask(this.journal, sessionId, hostId, canonicalRoot, runStartedAt); if (!task) { if (this.journal.tasks.length >= 10000) throw new Error('Task count limit'); task = { id: randomUUID(), hostId, sessionId, root: canonicalRoot, status: 'open', createdAt: this.now(), excluded: [] }; this.journal.tasks.push(task); } return { hostId, sessionId, root: canonicalRoot, taskId: task.id, projectId: this.projectId(hostId, canonicalRoot) }; }); }
   async ensureRemoteTask(context: SecretContext): Promise<SecretContext> { return this.mutate(() => {
     if (!this.data().peers.some(peer => peer.enabled && peer.device.id === context.hostId) || !this.projectId(context.hostId, context.root) || !isAbsolute(context.root) || normalize(context.root) !== context.root || !/^[a-f0-9-]{36}$/.test(context.taskId) || !context.sessionId) throw new Error('Remote task denied');
     context = { ...context, projectId: this.projectId(context.hostId, context.root) };
@@ -177,20 +180,16 @@ export class SecretService {
   async revoke(target: SecretTarget, secretIds: string[]) { return this.mutate(() => { const task = this.task(target); task.excluded = [...new Set([...task.excluded, ...secretIds])]; this.journal.grants = this.journal.grants.filter(grant => grant.taskId !== task.id || !secretIds.includes(grant.secretId)); }); }
   private authorize(context: SecretContext, secret: StoredSecret, operation: SecretOperation, issueAutomatic = true) { const state = this.policy(); const task = openTask(state, context, this.now()); if (!context.runId) throw new Error('Secret access denied'); return authorize(state, task, policySecret(secret), operation, this.now(), issueAutomatic ? (task, secret, rule) => this.grant(task, secret, rule) : undefined); }
   async list(context: SecretContext): Promise<SecretMetadata[]> { return this.mutate(() => { const state = this.policy(); const task = openTask(state, context, this.now()); return context.runId ? discoverable(state, task, this.now(), (task, secret, rule) => this.grant(task, secret, rule)) : []; }); }
-  /** What a run may discover while the vault is locked, read from the plaintext index of the last unlocked save; never values. */
-  lockedList(sessionId: string, root: string, runStartedAt: string, bound?: SecretTarget): SecretMetadata[] {
-    const state = this.vault.index as PolicyState | undefined; if (!state) return [];
-    const now = this.now(); const hostId = state.deviceId;
-    let target = bound;
-    if (!target) {
-      // Mirrors bindRun/ensureTask; a task that does not exist yet has no grants or task-scoped secrets.
-      if (state.tasks.some(task => task.sessionId === sessionId && task.hostId === hostId && task.status === 'closed' && (task.closedAt ?? task.createdAt) >= Date.parse(runStartedAt))) throw new Error('Run predates task closure');
-      const open = state.tasks.find(task => task.sessionId === sessionId && task.hostId === hostId && task.status === 'open');
-      if (open && open.root !== root) throw new Error('Task project changed');
-      if (!open) return discoverable(state, { id: '', hostId, sessionId, root, status: 'open', createdAt: now, excluded: [] }, now, 'assume');
-      target = { hostId, sessionId, root, taskId: open.id };
-    }
-    return discoverable(state, openTask(state, { ...target, projectId: projectId(state, target.hostId, target.root) }, now), now, 'assume');
+  /** What a run may discover while the vault is locked, read from the plaintext index of the last unlocked save; undefined without one. */
+  lockedList(sessionId: string, root: string, runStartedAt: string, bound?: SecretTarget): { secrets: SecretMetadata[]; sources: string[] } | undefined {
+    const index = this.vault.index as LockedIndex | undefined; if (!index) return;
+    const { policy: state, sources } = index; const now = this.now();
+    // An unbound run gets the task binding would give it; a task binding would create has no grants or task-scoped secrets yet.
+    const open = bound ? undefined : sessionTask(state, sessionId, state.deviceId, root, Date.parse(runStartedAt));
+    const target = bound ?? (open && { hostId: state.deviceId, sessionId, root, taskId: open.id });
+    const task = target ? openTask(state, { ...target, projectId: projectId(state, target.hostId, target.root) }, now)
+      : { id: '', hostId: state.deviceId, sessionId, root, status: 'open' as const, createdAt: now, excluded: [] };
+    return { secrets: discoverable(state, task, now, 'assume'), sources };
   }
   async resolve(context: SecretContext, ref: string, operation: SecretOperation): Promise<ResolvedSecret> { return this.mutate(() => this.resolved(context, ref, operation, true)); }
   /** Validate committed grants and begin use in one turn; never hold policy writes for a consumer's runtime. */

@@ -16,6 +16,14 @@ export function openTask(state: PolicyState, target: SecretTarget, now: number):
   return task;
 }
 
+/** The open task a run of this session binds to, or undefined when binding would start one; throws where binding refuses. */
+export function sessionTask(state: Pick<PolicyState, 'tasks'>, sessionId: string, hostId: string, root: string, runStartedAt?: number): SecretTask | undefined {
+  if (runStartedAt !== undefined && state.tasks.some(task => task.sessionId === sessionId && task.hostId === hostId && task.status === 'closed' && (task.closedAt ?? task.createdAt) >= runStartedAt)) throw new Error('Run predates task closure');
+  const task = state.tasks.find(task => task.sessionId === sessionId && task.hostId === hostId && task.status === 'open');
+  if (task && task.root !== root) throw new Error('Task project changed');
+  return task;
+}
+
 export function matchingRules(state: PolicyState, task: SecretTask, secret: PolicySecret) {
   const group = state.groups.find(group => group.id === secret.metadata.groupId);
   if (!group || (group.scope === 'task' && group.taskId !== task.id) || (group.scope === 'project' && group.projectId !== projectId(state, task.hostId, task.root))) return [];

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { SecretService } from '../../../server/secrets/service.js';
 import { SecretRuntime } from '../../../server/secrets/runtime.js';
-import { SECRET_LOCKED_USE } from '../../../server/secrets/notices.js';
+import { SECRET_LOCKED_UNINDEXED, SECRET_LOCKED_USE, SECRET_NO_VAULT } from '../../../server/secrets/notices.js';
 import type { SecretContext, SecretMetadata } from '../../../shared/secrets.js';
 import type { Run, Session } from '../../../shared/types.js';
 import type { Capability } from '../../../server/api/mcp.js';
@@ -27,7 +27,7 @@ async function fixture(t: TestContext) {
   const startedAt = new Date(now).toISOString();
   const target = await service.bindRun('codex:session-a', root, startedAt);
   const context: SecretContext = { ...target, runId: 'run-a' };
-  return { stateDir, root, service, host, project, otherProject, target, context, startedAt, clock, restart: async () => { const next = new SecretService({ stateDir, now: () => now }); await next.start(); return next; } };
+  return { now: () => now, stateDir, root, service, host, project, otherProject, target, context, startedAt, clock, restart: async () => { const next = new SecretService({ stateDir, now: () => now }); await next.start(); return next; } };
 }
 
 /** Every rule shape that decides discovery or operations, so locked and unlocked evaluation are held to one outcome. */
@@ -38,7 +38,7 @@ async function scenario(f: Awaited<ReturnType<typeof fixture>>) {
   await service.create({ name: 'PROJECT_MANUAL_CONNECTED', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'manual', connect: true });
   await service.create({ name: 'TASK_ONLY', kind: 'scalar', scope: 'task', value: CANARY, target, activation: 'manual', operations: ['discover', 'env'], connect: true });
   await service.create({ name: 'OTHER_PROJECT', kind: 'scalar', scope: 'project', projectId: otherProject.id, value: CANARY, activation: 'auto' });
-  await service.create({ name: 'EXPIRING', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'auto', expiresAt: Date.now() + 60_000 });
+  await service.create({ name: 'EXPIRING', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'auto', expiresAt: f.now() + 60_000 });
   const dotenv = await service.create({ name: 'DOTENV', kind: 'env', scope: 'project', projectId: project.id, value: `A=${CANARY}\nB=${CANARY}\n`, target, activation: 'auto', operations: ['discover', 'env'] });
   const rule = service.overview().rules.find(rule => rule.secretIds.includes(dotenv.id))!;
   await service.setRule({ ...rule, fields: { [dotenv.id]: ['A'] } });
@@ -72,14 +72,14 @@ test('locked listing matches unlocked authorization, including operations, field
   assert.deepEqual(unlocked.find(item => item.name === 'OVERLAP')!.operations, ['discover']);
   assert.deepEqual(unlocked.find(item => item.name === 'DOTENV')!.fields, ['A']);
   await f.service.lock();
-  assert.deepEqual(wire(f.service.lockedList(f.target.sessionId, f.root, f.startedAt, f.target)), wire(unlocked));
+  assert.deepEqual(wire(f.service.lockedList(f.target.sessionId, f.root, f.startedAt, f.target)!.secrets), wire(unlocked));
   const restarted = await f.restart();
   assert.equal(restarted.status().locked, true);
-  assert.deepEqual(wire(restarted.lockedList(f.target.sessionId, f.root, f.startedAt, f.target)), wire(unlocked));
-  assert.deepEqual(wire(restarted.lockedList(f.target.sessionId, f.root, f.startedAt)), wire(unlocked), 'an unbound run finds the session’s open task');
+  assert.deepEqual(wire(restarted.lockedList(f.target.sessionId, f.root, f.startedAt, f.target)!.secrets), wire(unlocked));
+  assert.deepEqual(wire(restarted.lockedList(f.target.sessionId, f.root, f.startedAt)!.secrets), wire(unlocked), 'an unbound run finds the session’s open task');
 
   f.clock.advance(120_000);
-  const lockedLater = restarted.lockedList(f.target.sessionId, f.root, f.startedAt, f.target);
+  const lockedLater = restarted.lockedList(f.target.sessionId, f.root, f.startedAt, f.target)!.secrets;
   await restarted.unlock(PASSWORD);
   assert.deepEqual(wire(lockedLater), wire(await restarted.list(f.context)));
   assert.ok(!names(lockedLater).includes('EXPIRING')); assert.ok(!names(lockedLater).includes('DEADLINE'));
@@ -88,15 +88,15 @@ test('locked listing matches unlocked authorization, including operations, field
 test('a session without a task lists only what a fresh task would, and closed tasks stay closed', async t => {
   const f = await fixture(t); await scenario(f);
   await f.service.lock();
-  const fresh = f.service.lockedList('codex:session-b', f.root, new Date().toISOString());
+  const fresh = f.service.lockedList('codex:session-b', f.root, new Date(f.now()).toISOString())!.secrets;
   await f.service.unlock(PASSWORD);
-  const bound = await f.service.bindRun('codex:session-b', f.root, new Date().toISOString());
+  const bound = await f.service.bindRun('codex:session-b', f.root, new Date(f.now()).toISOString());
   assert.deepEqual(wire(fresh), wire(await f.service.list({ ...bound, runId: 'run-b' })));
   assert.deepEqual(names(fresh), ['AUTO_STALE', 'DOTENV', 'EXPIRING', 'GLOBAL_AUTO', 'OVERLAP', 'REVOKED'], 'a revocation belongs to the task it was made for');
 
   await f.service.closeTask(f.target.taskId); await f.service.lock();
-  assert.throws(() => f.service.lockedList(f.target.sessionId, f.root, f.startedAt, f.target), /Task identity denied/);
-  assert.throws(() => f.service.lockedList(f.target.sessionId, f.root, f.startedAt), /Run predates task closure/);
+  assert.throws(() => f.service.lockedList(f.target.sessionId, f.root, f.startedAt, f.target)!.secrets, /Task identity denied/);
+  assert.throws(() => f.service.lockedList(f.target.sessionId, f.root, f.startedAt)!.secrets, /Run predates task closure/);
 });
 
 test('the plaintext index holds names but no value or password, and a foreign index is ignored', async t => {
@@ -105,7 +105,7 @@ test('the plaintext index holds names but no value or password, and a foreign in
   assert.match(text, /GLOBAL_AUTO/); assert.doesNotMatch(text, new RegExp(`${CANARY}|${PASSWORD}`));
   const index = JSON.parse(text); index.vaultId = randomUUID();
   await writeFile(join(f.stateDir, 'secrets', 'index.json'), JSON.stringify(index));
-  assert.deepEqual((await f.restart()).lockedList(f.target.sessionId, f.root, f.startedAt), []);
+  assert.equal((await f.restart()).lockedList(f.target.sessionId, f.root, f.startedAt), undefined);
 });
 
 test('a failed index write never leaves an older index listing names, in memory or after restart', async t => {
@@ -115,9 +115,9 @@ test('a failed index write never leaves an older index listing names, in memory 
   await f.service.revoke(f.target, f.service.overview().secrets.map(secret => secret.id));
   assert.deepEqual(await f.service.list(f.context), []);
   await f.service.lock();
-  assert.deepEqual(f.service.lockedList(f.target.sessionId, f.root, f.startedAt, f.target), []);
+  assert.equal(f.service.lockedList(f.target.sessionId, f.root, f.startedAt, f.target), undefined);
   await rm(path, { recursive: true }); await writeFile(path, previous);
-  assert.deepEqual((await f.restart()).lockedList(f.target.sessionId, f.root, f.startedAt, f.target), [], 'an index from an earlier save is not trusted');
+  assert.equal((await f.restart()).lockedList(f.target.sessionId, f.root, f.startedAt, f.target), undefined, 'an index from an earlier save is not trusted');
 });
 
 class FixtureRuns {
@@ -151,6 +151,30 @@ test('locked tools list names and turn any use into an unlock request; ineligibl
   await assert.rejects(runtime.tool(capability, 'secrets_cli', { argv: ['fingerprint', reference] }), (error: Error & { statusCode?: number }) => error.statusCode === 423);
   await assert.rejects(runtime.tool(capability, 'secrets_cli', { operationId: 'locked-cli', argv: ['run', '--env', `KEY=${reference}`, '--', process.execPath, '-e', ''] }), (error: Error & { statusCode?: number }) => error.statusCode === 423);
 
+  // Archiving while locked records a closure that the unlock applies; the locked list honours it already.
+  await runtime.endSession(capability.sessionId);
+  await assert.rejects(runtime.tool(capability, 'secrets_list', {}), (error: Error & { statusCode?: number }) => error.statusCode === 403);
   runs.running.find(run => run.id === capability.runId)!.status = 'completed';
   await assert.rejects(runtime.tool(capability, 'secrets_list', {}), (error: Error & { statusCode?: number }) => error.statusCode === 403);
+});
+
+test('without an index the locked list says names are unknown, and a vault-less Tower never asks for an unlock', async t => {
+  const f = await fixture(t);
+  const runs = new FixtureRuns(); const runtime = new SecretRuntime({ stateDir: f.stateDir, service: f.service, runs }); t.after(() => runtime.close());
+  // An unbound run on a vault locked since start, as right after an upgrade from a build without the index.
+  await rm(join(f.stateDir, 'secrets', 'index.json'));
+  const upgraded = await f.restart(); const upgradedRuntime = new SecretRuntime({ stateDir: f.stateDir, service: upgraded, runs }); t.after(() => upgradedRuntime.close());
+  const capability = runs.add(f.root);
+  const unknown = await upgradedRuntime.tool(capability, 'secrets_list', {}) as { locked: boolean; notice: string; secrets: unknown[] };
+  assert.deepEqual([unknown.locked, unknown.notice, unknown.secrets], [true, SECRET_LOCKED_UNINDEXED, []]);
+  // The first unlock writes the index, so the next lock lists names for the same unbound run.
+  await upgraded.unlock(PASSWORD); await upgraded.create({ name: 'AFTER_UPGRADE', kind: 'scalar', scope: 'global', value: CANARY, allProjects: true, target: f.target, activation: 'auto' }); await upgraded.lock();
+  const listed = await upgradedRuntime.tool(capability, 'secrets_list', {}) as { secrets: SecretMetadata[] };
+  assert.deepEqual(names(listed.secrets), ['AFTER_UPGRADE']);
+
+  const emptyState = join(f.stateDir, '..', 'empty-state'); await mkdir(emptyState);
+  const empty = new SecretService({ stateDir: emptyState }); await empty.start();
+  const emptyRuntime = new SecretRuntime({ stateDir: emptyState, service: empty, runs }); t.after(() => emptyRuntime.close());
+  assert.deepEqual((await emptyRuntime.tool(capability, 'secrets_list', {}) as { secrets: unknown[] }).secrets, []);
+  await assert.rejects(emptyRuntime.tool(capability, 'secrets_run', { operationId: 'no-vault', command: process.execPath, env: { KEY: 'NAME' } }), (error: Error & { statusCode?: number }) => error.statusCode === 404 && error.message === SECRET_NO_VAULT);
 });

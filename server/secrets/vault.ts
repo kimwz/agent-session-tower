@@ -13,7 +13,7 @@ export class SecretVault {
   constructor(stateDir: string) { this.directory = join(stateDir, 'secrets'); }
   get initialized() { return !!this.envelope; } get locked() { return !this.key; }
   /** Ties the index to one saved vault state; a vault saved after a failed index write disowns the old index. */
-  private saved() { return createHash('sha256').update(JSON.stringify(this.envelope?.payload ?? null)).digest('hex'); }
+  private async saved() { return createHash('sha256').update(JSON.stringify(this.envelope?.payload ?? null)).update('\0').update((await this.read('journal.json')) ?? '').digest('hex'); }
   private aad(purpose: string) { return `tower-secrets:1:${this.vaultId}:${purpose}`; }
   async read(name: string): Promise<Buffer | undefined> {
     try { if (!(await lstat(this.directory)).isDirectory()) throw new Error('Invalid vault directory'); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
@@ -34,7 +34,7 @@ export class SecretVault {
     const value = JSON.parse(bytes.toString()) as Envelope;
     if (value.format !== 1 || typeof value.vaultId !== 'string' || !/^[a-f0-9-]{36}$/.test(value.vaultId) || JSON.stringify(value.kdf) !== JSON.stringify(KDF)) throw new Error('Unsupported vault format or KDF');
     this.envelope = value; this.vaultId = value.vaultId; this.index = undefined;
-    try { const index = JSON.parse((await this.read('index.json'))?.toString() ?? 'null'); if (index?.format === 1 && index.vaultId === this.vaultId && index.saved === this.saved()) this.index = index.state; }
+    try { const index = JSON.parse((await this.read('index.json'))?.toString() ?? 'null'); if (index?.format === 1 && index.vaultId === this.vaultId && index.saved === await this.saved()) this.index = index.state; }
     catch { /* An unreadable index only hides names until the next unlock. */ }
   }
   async initialize(password: string, payload: unknown, vaultId: string = randomUUID()) {
@@ -43,7 +43,7 @@ export class SecretVault {
     const envelope: Envelope = { format: 1, vaultId: this.vaultId, kdf: KDF, salt, wrappedKey: encrypt(wrapper, key, this.aad('key')), payload: encrypt(key, Buffer.from(JSON.stringify(payload)), this.aad('permanent')) }; wrapper.fill(0);
     try { await this.write('vault.json', Buffer.from(JSON.stringify(envelope))); this.envelope = envelope; this.key = key; } catch (error) { key.fill(0); throw error; }
   }
-  async writeIndex(state: unknown) { if (!this.envelope) throw new Error('Vault not initialized'); this.index = undefined; await this.write('index.json', Buffer.from(JSON.stringify({ format: 1, vaultId: this.vaultId, saved: this.saved(), state }))); this.index = JSON.parse(JSON.stringify(state)); }
+  async writeIndex(state: unknown) { if (!this.envelope) throw new Error('Vault not initialized'); this.index = undefined; await this.write('index.json', Buffer.from(JSON.stringify({ format: 1, vaultId: this.vaultId, saved: await this.saved(), state }))); this.index = JSON.parse(JSON.stringify(state)); }
   async unlock(password: string): Promise<unknown> {
     if (!this.envelope) throw new Error('Vault not initialized'); const wrapper = await passwordKey(password, this.envelope.salt); let key: Buffer | undefined;
     try { key = decrypt(wrapper, this.envelope.wrappedKey, this.aad('key')); if (key.length !== 32) throw new Error('Invalid vault key'); const payload = JSON.parse(decrypt(key, this.envelope.payload, this.aad('permanent')).toString()); this.lock(); this.key = key; return payload; } catch { key?.fill(0); throw new Error('Cannot unlock vault'); } finally { wrapper.fill(0); }
@@ -51,6 +51,7 @@ export class SecretVault {
   lock() { this.key?.fill(0); this.key = undefined; }
   async save(payload: unknown, journal: unknown, index: unknown) {
     if (!this.key || !this.envelope) throw new Error('Vault locked');
+    this.index = undefined;
     const envelope = { ...this.envelope, payload: encrypt(this.key, Buffer.from(JSON.stringify(payload)), this.aad('permanent')) };
     await this.write('journal.json', Buffer.from(JSON.stringify(encrypt(this.key, Buffer.from(JSON.stringify(journal)), this.aad('journal')))));
     await this.write('vault.json', Buffer.from(JSON.stringify(envelope))); this.envelope = envelope;
