@@ -818,11 +818,12 @@ export class TriggerService extends EventEmitter {
         await this.commit(state => {
           const current = state.triggers.find(item => item.id === trigger.id);
           const position = state.cursors[trigger.id];
-          if (this.held || !current || !current.enabled || state.onceConsumed[current.id] || !position || position.paused || position.nextAt === undefined || position.nextAt > this.now()) return;
+          const admissionNow = this.now();
+          if (this.held || !current || !current.enabled || state.onceConsumed[current.id] || !position || position.paused || position.nextAt === undefined || position.nextAt > admissionNow) return;
           if (current.source.kind === 'schedule' && current.source.schedule.type === 'once') {
             const slot = position.nextAt;
             const event = this.fire(state, current, new Date(slot).toISOString(), slot, 'schedule');
-            if (event && current.source.catchUp === 'skip' && now - slot > LATE_AFTER_MS) {
+            if (event && current.source.catchUp === 'skip' && admissionNow - slot > LATE_AFTER_MS) {
               event.status = 'skipped'; event.reason = 'The once reservation was missed and consumed without retrying.';
             }
             return;

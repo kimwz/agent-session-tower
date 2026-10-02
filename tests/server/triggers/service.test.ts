@@ -863,3 +863,18 @@ test('a missing downgrade consumption ledger is recovered from snapshots with on
   assert.equal(service.audit().filter(entry => entry.summary.includes('ledger was absent')).length, 1);
   await assert.rejects(service.run(trigger.id, OWNER), /consumed/i);
 });
+
+test('a once skip policy uses the admission time after waiting for a commit', async t => {
+  const f = await fixture(t); const service = await f.open();
+  const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'skip' } }), OWNER);
+  f.clock.now = Date.parse('2026-09-24T01:00:01Z');
+  const engine = service as any; const commit = engine.commit.bind(engine);
+  let entered!: () => void; let release!: () => void;
+  const waiting = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
+  let first = true;
+  engine.commit = async (...args: any[]) => { if (first) { first = false; entered(); await gate; } return commit(...args); };
+  const tick = service.tick(); await waiting;
+  f.clock.now = Date.parse('2026-09-24T01:02:00Z'); release(); await tick;
+  assert.equal(service.events({ triggerId: trigger.id })[0].status, 'skipped');
+  assert.equal(f.calls.length, 0); assert.ok(service.get(trigger.id).trigger.consumed);
+});
