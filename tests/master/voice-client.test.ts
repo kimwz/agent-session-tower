@@ -48,12 +48,16 @@ class FakeSocket {
 class FakeAudio {
   static all: FakeAudio[] = [];
   static refuse = false;
+  static deferPlay = false;
+  static rejectPlay?: (error: Error) => void;
   /** Holds the unlocking silence's play() until the test lets it finish. */
   static slowSilence?: () => void;
   /** As a browser does, a new source starts at the default rate. */
   private source = '';
   get src(): string { return this.source; }
-  set src(value: string) { this.source = value; this.playbackRate = this.defaultPlaybackRate; }
+  set src(value: string) { this.source = value; this.currentTime = 0; this.playbackRate = this.defaultPlaybackRate; }
+  currentTime = 0;
+  muted = false; volume = 1; readyState = 4; networkState = 1;
   playbackRate = 1;
   defaultPlaybackRate = 1;
   preservesPitch = true;
@@ -64,16 +68,20 @@ class FakeAudio {
   onended: (() => void) | null = null;
   onerror: (() => void) | null = null;
   constructor() { FakeAudio.all.push(this); }
-  paused: string[] = [];
+  paused = true;
+  pauses: string[] = [];
   play(): Promise<void> {
     if (FakeAudio.refuse && this.src !== '/master-silence.wav') return Promise.reject(new DOMException('Autoplay refused', 'NotAllowedError'));
+    this.paused = false;
     this.played.push(this.src);
     this.rates.push(this.playbackRate);
     if (this.src === '/master-silence.wav' && FakeAudio.slow) return new Promise(resolve => { FakeAudio.slowSilence = resolve; });
+    if (FakeAudio.deferPlay && this.src !== '/master-silence.wav') return new Promise((_resolve, reject) => { FakeAudio.rejectPlay = reject; });
     return Promise.resolve();
   }
   static slow = false;
-  pause(): void { this.paused.push(this.src); }
+  finish(): void { this.currentTime += 1; this.onended?.(); }
+  pause(): void { this.paused = true; this.pauses.push(this.src); }
   removeAttribute(): void { this.src = ''; }
 }
 
@@ -137,6 +145,7 @@ async function harness({ rate = 16_000, frame = 160, failTokens = 0 } = {}) {
   FakeSocket.all = [];
   FakeAudio.all = [];
   FakeAudio.refuse = false;
+  FakeAudio.deferPlay = false; FakeAudio.rejectPlay = undefined;
   FakeAudio.slow = false;
   FakeContext.rate = rate;
   posts.length = 0;
@@ -204,7 +213,7 @@ test('nothing plays until an utterance\'s connection has really closed (or ten s
     page.voice.say(page.say('early', 'answer'));
     // What waited began playing at once, before anything was said.
     assert.deepEqual(page.audio.played.slice(1), ['/api/master/voice/audio/early']);
-    page.audio.onended!();
+    page.audio.finish();
     mock.timers.tick(400);
     requestAnswer = { ack: page.say('ack-1', 'ack') };
     const first = await page.speak('첫 번째 요청');
@@ -216,7 +225,7 @@ test('nothing plays until an utterance\'s connection has really closed (or ten s
     first.closed();
     await flush();
     assert.deepEqual(page.audio.played.slice(2), ['/api/master/voice/audio/ack-1']);
-    page.audio.onended!();
+    page.audio.finish();
     mock.timers.tick(400);
     await flush();
 
@@ -230,7 +239,7 @@ test('nothing plays until an utterance\'s connection has really closed (or ten s
     await flush();
     assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/ack-2', 'a connection that never closes is let be after ten seconds');
     const sent = second.sent.length;
-    page.audio.onended!();
+    page.audio.finish();
     mock.timers.tick(400);
     // The owner speaks again, and turns listening off before ElevenLabs answers: nothing was sent, nothing is paid.
     const paid = page.usages().length;
@@ -251,7 +260,7 @@ test('what the microphone captured while something played is never heard, even w
     page.voice.say(page.say('a1', 'answer'));
     // The page is busy while the answer plays: what the microphone captured meanwhile waits.
     const during = [...page.frames(0.002, 200), ...page.frames(0.1, 600)];
-    page.audio.onended!();
+    page.audio.finish();
     mock.timers.tick(400);
     page.deliver(during);
     await flush();
@@ -267,7 +276,7 @@ for (const audio of [{ rate: 16_000, frame: 160 }, { rate: 48_000, frame: 128 },
   const page = await harness(audio);
   try {
     page.voice.say(page.say('n1', 'notice'));
-    page.audio.onended!();
+    page.audio.finish();
     // The page stalls right after the notice while the owner objects; the microphone reaches it in one burst, late.
     const stalled = [...page.frames(0.002, 700), ...page.frames(0.1, 600), ...page.frames(0.002, 1_500)];
     mock.timers.setTime(Date.now() + 2_800);
@@ -281,7 +290,7 @@ for (const audio of [{ rate: 16_000, frame: 160 }, { rate: 48_000, frame: 128 },
     page.voice.say(page.say('n2', 'notice'));
     // Captured while it played, handled after it ended: not the moment after.
     const during = [...page.frames(0.002, 300), ...page.frames(0.1, 500)];
-    page.audio.onended!();
+    page.audio.finish();
     page.deliver(during, true);
     await page.hear(0.002, 400 + 1_900);
     assert.deepEqual(page.results(), ['n1:interrupted'], 'a short pause, then two seconds heard');
@@ -296,7 +305,7 @@ test('notices cancelled one after another are each settled once, and never decid
     page.voice.say(page.say('a', 'notice'));
     page.voice.say(page.say('b', 'notice'));
     page.voice.say(page.say('c', 'notice'));
-    page.audio.onended!();
+    page.audio.finish();
     mock.timers.tick(400);
     page.voice.skip();
     assert.deepEqual(page.results(), ['a:interrupted']);
@@ -333,7 +342,7 @@ test('what the browser will not play by itself is told to the master as blocked;
     page.voice.say(page.say('r1-again', 'report'));
     await flush();
     assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/r1-again');
-    page.audio.onended!();
+    page.audio.finish();
     assert.deepEqual(page.results(), ['r1:blocked', 'r1-again:played']);
     page.voice.dismissMissed('entry-2');
     await flush();
@@ -354,10 +363,10 @@ test('what the browser will not play by itself is told to the master as blocked;
     third.closed();
     await flush();
     assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/r3');
-    const paused = page.audio.paused.length;
+    const paused = page.audio.pauses.length;
     FakeAudio.slowSilence!();
     await flush();
-    assert.equal(page.audio.paused.length, paused, 'the reading plays on');
+    assert.equal(page.audio.pauses.length, paused, 'the reading plays on');
   } finally { page.end(); }
 });
 
@@ -536,7 +545,7 @@ test('once the reply starts, talking over it is never written down; afterwards i
     assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/ack-1');
     await page.hearSlowly(0.1, 600);
     assert.deepEqual([FakeSocket.all.length, page.view().capturing], [1, false], 'the microphone is not heard while the reply plays');
-    page.audio.onended!();
+    page.audio.finish();
     mock.timers.tick(400);
     await flush();
 
@@ -868,17 +877,17 @@ test('a first response still waiting is dropped once its answer comes, a late on
     page.voice.say(of('late-q1', 'working', 'q1'));
     const played = () => page.audio.played.filter(src => src.startsWith('/api/'));
     assert.deepEqual(played(), ['/api/master/voice/audio/before']);
-    page.audio.onended!();
+    page.audio.finish();
     mock.timers.tick(400);
     await flush();
     assert.deepEqual(played(), ['/api/master/voice/audio/before', '/api/master/voice/audio/answer-q1'], 'the waiting first response went; the answer follows');
-    page.audio.onended!();
+    page.audio.finish();
     mock.timers.tick(400);
     // A first response already playing when its answer comes is heard out; the answer waits for it.
     page.voice.say(of('ack-q2', 'ack', 'q2'));
     page.voice.say(of('answer-q2', 'answer', 'q2'));
     assert.equal(played().at(-1), '/api/master/voice/audio/ack-q2');
-    page.audio.onended!();
+    page.audio.finish();
     mock.timers.tick(400);
     await flush();
     assert.equal(played().at(-1), '/api/master/voice/audio/answer-q2');
@@ -891,10 +900,11 @@ test('an answer read while it is written is waited for as long as the longest an
     const audio = page.audio as unknown as { currentTime: number; onplaying: (() => void) | null; onerror: (() => void) | null; onended: (() => void) | null; played: string[] };
     page.voice.say({ ...page.say('long', 'answer'), streaming: true });
     mock.timers.tick(10);
+    audio.currentTime = 0.1;
     audio.onplaying?.();
-    mock.timers.tick(60_000);
-    await flush();
-    assert.deepEqual(page.results(), [], 'still playing after a minute');
+    // A long stream is allowed while its media clock actually advances.
+    for (let step = 1; step <= 3; step++) { audio.currentTime = step * 5; mock.timers.tick(20_000); await flush(); }
+    assert.deepEqual(page.results(), [], 'still playing after a minute with progress');
     // The web restarts: the audio is cut twice, and each time fetched again from where it was in the whole.
     audio.currentTime = 20;
     audio.onerror?.();
@@ -908,6 +918,7 @@ test('an answer read while it is written is waited for as long as the longest an
     await flush();
     assert.equal(audio.played.at(-1), '/api/master/voice/audio/long?at=25.00', 'the place is kept across cuts');
     assert.deepEqual(page.results(), []);
+    audio.currentTime = 1;
     audio.onended?.();
     await flush();
     assert.deepEqual(page.results(), ['long:played']);
@@ -932,6 +943,7 @@ test('a fetch again that is refused while the web is still away is tried again, 
     mock.timers.tick(2_000);
     await flush();
     assert.equal(audio.played.at(-1), '/api/master/voice/audio/cut?at=4.00');
+    audio.currentTime = 1;
     audio.onended?.();
     await flush();
     assert.deepEqual(page.results(), ['cut:played']);
@@ -1002,7 +1014,7 @@ test('a microphone the owner muted stays muted after a report is read, until the
     assert.equal(page.view().muted, true);
     page.voice.say(page.say('r1', 'report'));
     await flush();
-    page.audio.onended!();
+    page.audio.finish();
     await flush();
     assert.deepEqual(page.results(), ['r1:played'], 'what the master reads aloud still plays while muted');
     assert.equal(page.view().listening, false, 'the report did not open the microphone again');
@@ -1018,7 +1030,7 @@ test('a microphone the owner muted stays muted after a report is read, until the
     mock.timers.tick(1_000);
     page.voice.say(page.say('r2', 'report'));
     await flush();
-    page.audio.onended!();
+    page.audio.finish();
     await flush();
     assert.equal(page.view().listening, true);
   } finally { page.end(); }
@@ -1039,4 +1051,121 @@ test('voice ended before the master answered turning it on is turned off there t
   assert.equal(ended, 'owner');
   assert.deepEqual(posts.map(post => post.path), ['/api/master/voice/on', '/api/master/voice/off']);
   assert.equal(posts[1]!.body.session, 'session-1');
+});
+
+test('a pending or stalled stream does not claim to be speaking and does not hold the queue for seventeen minutes', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as unknown as FakeAudio & { currentTime: number; onplaying?: () => void; onwaiting?: () => void; ontimeupdate?: () => void };
+    audio.currentTime = 0;
+    page.voice.say({ ...page.say('stalled', 'answer'), streaming: true });
+    assert.equal(page.view().playing, undefined, 'play requested is not sound playing');
+    audio.onplaying?.();
+    assert.equal(page.view().playing, undefined, 'onplaying at zero is not progress');
+    mock.timers.tick(31_000);
+    await flush();
+    assert.deepEqual(page.results(), ['stalled:failed']);
+    assert.equal(posts.find(p => p.path.endsWith('/played'))?.body.detail, 'no-progress');
+  } finally { page.end(); }
+});
+
+test('same-id streaming text updates do not replay audio, and cancelled audio cannot linger in the queue', async () => {
+  const page = await harness();
+  try {
+    const say = page.say('growing', 'answer');
+    page.voice.say(say);
+    const before = page.audio.played.length;
+    page.voice.say({ ...say, text: '후속 문장까지 표시합니다.' });
+    assert.equal(page.audio.played.length, before, 'a text update is not another play');
+    const pending = page.say('old-turn', 'answer');
+    page.voice.say(pending);
+    page.voice.say({ ...pending, cancelled: true } as MasterSay);
+    page.voice.skip();
+    mock.timers.tick(400);
+    await flush();
+    assert.equal(page.audio.played.some(src => src.includes('old-turn')), false, 'cancelled queued audio never starts');
+  } finally { page.end(); }
+});
+
+test('ended without media progress and output muted are failures, while microphone mute permits audio', async () => {
+  const page = await harness();
+  try {
+    page.voice.mute();
+    page.voice.say(page.say('empty-media', 'answer'));
+    page.audio.onended?.();
+    await flush();
+    assert.deepEqual(page.results(), ['empty-media:failed']);
+    assert.equal(posts.find(p => p.path.endsWith('/played'))?.body.detail, 'ended-without-progress');
+    page.audio.muted = true;
+    page.voice.say(page.say('muted-output', 'answer'));
+    await flush();
+    assert.deepEqual(page.results(), ['empty-media:failed', 'muted-output:failed']);
+    assert.equal(posts.filter(p => p.path.endsWith('/played')).at(-1)?.body.detail, 'output-muted');
+    page.audio.muted = false;
+    page.voice.say(page.say('audible', 'answer'));
+    page.audio.currentTime = 0.2;
+    mock.timers.tick(1_000);
+    assert.equal(page.view().playing?.text, 'answer audible');
+    page.audio.finish();
+    await flush();
+    assert.equal(page.results().at(-1), 'audible:played');
+    assert.equal(page.view().muted, true, 'microphone preference survives');
+  } finally { page.end(); }
+});
+
+test('a late rejected play promise cannot cancel a retry, and a host cancellation removes the retry timer', async () => {
+  const page = await harness();
+  try {
+    FakeAudio.deferPlay = true;
+    const say = page.say('race', 'answer');
+    page.voice.say(say);
+    const audio = page.audio as FakeAudio & { onplaying?: () => void };
+    audio.currentTime = 3;
+    audio.onplaying?.();
+    const reject = FakeAudio.rejectPlay!;
+    audio.onerror?.();
+    reject(new Error('old source failed'));
+    await flush();
+    assert.deepEqual(page.results(), [], 'old source promise does not finish the new attempt');
+    page.voice.say({ ...say, cancelled: true });
+    page.voice.say({ ...say, text: '취소 후 늦은 문구' });
+    FakeAudio.deferPlay = false;
+    mock.timers.tick(5_000);
+    await flush();
+    assert.equal(audio.played.some(src => src.includes('?at=')), false, 'cancelled retry never fetches');
+    assert.deepEqual(page.results(), ['race:stopped']);
+  } finally { page.end(); }
+});
+
+test('a notice that ends without progress or is muted during playback never authorizes its action', async () => {
+  const page = await harness();
+  try {
+    page.voice.say(page.say('empty-notice', 'notice'));
+    page.audio.onended?.();
+    mock.timers.tick(3_000);
+    await flush();
+    assert.deepEqual(page.results(), ['empty-notice:failed']);
+    page.voice.say(page.say('muted-notice', 'notice'));
+    page.audio.currentTime = 0.5;
+    mock.timers.tick(1_000);
+    page.audio.muted = true;
+    mock.timers.tick(1_000);
+    await flush();
+    assert.deepEqual(page.results(), ['empty-notice:failed', 'muted-notice:failed']);
+  } finally { page.end(); }
+});
+
+test('output muted immediately before ended is not reported played between watchdog ticks', async () => {
+  const page = await harness();
+  try {
+    page.voice.say(page.say('end-race', 'answer'));
+    page.audio.currentTime = 0.5;
+    page.audio.volume = 0;
+    page.audio.onended?.();
+    await flush();
+    assert.deepEqual(page.results(), ['end-race:failed']);
+    const report = posts.find(p => p.path.endsWith('/played'))!;
+    assert.equal(report.body.detail, 'output-muted');
+    assert.equal((report.body.playback as { volume: number }).volume, 0);
+  } finally { page.end(); }
 });

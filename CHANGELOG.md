@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.103.1] - 2026-10-02
+
+### Fixed
+- Master voice now distinguishes audio preparation and buffering from media-clock progress, and detects playback that makes no progress instead of displaying a speaking indicator indefinitely.
+- Cancelling a master turn discards its current and queued audio; late playback rejections cannot cancel a newer retry.
+- Streaming voice text follows the same audio without replaying it, and playback results retain bounded media state to diagnose silent or interrupted replies.
+
 ## [1.103.0] - 2026-10-02
 
 ### Changed

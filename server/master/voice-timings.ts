@@ -31,7 +31,21 @@ export interface VoiceTimingRecord {
   /** How its reading ended: heard to the end, or not (and why). */
   outcome?: { at: number; state: 'played' | 'unspoken'; reason?: MasterUnspoken; heard?: true };
 }
-export interface VoiceSayRecord { id: string; at: number; chars?: number; play?: number; result?: string; detail?: string }
+export interface VoicePlaybackRecord { position?: number; muted?: boolean; volume?: number; ready?: number; network?: number; context?: string }
+export interface VoiceSayRecord { id: string; at: number; chars?: number; play?: number; result?: string; detail?: string; playback?: VoicePlaybackRecord }
+/** Only media state is kept; arbitrary page input (including text) never enters timing records. */
+export function playbackRecord(value: unknown): VoicePlaybackRecord | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const input = value as Record<string, unknown>;
+  const result: VoicePlaybackRecord = {};
+  for (const [key, max] of [['position', 3_600], ['volume', 1], ['ready', 4], ['network', 3]] as const) {
+    const number = input[key];
+    if (typeof number === 'number' && Number.isFinite(number) && number >= 0 && number <= max) result[key] = number;
+  }
+  if (typeof input.muted === 'boolean') result.muted = input.muted;
+  if (['running', 'suspended', 'closed', 'interrupted'].includes(String(input.context))) result.context = String(input.context);
+  return Object.keys(result).length ? result : undefined;
+}
 export type VoiceTimingField = Exclude<keyof VoiceTimingRecord, 'key' | 'kind' | 'mode' | 'says' | 'outcome'>;
 
 const KEEP = 200;
@@ -84,12 +98,13 @@ export class VoiceTimings {
   }
 
   /** The page's word on one thing it was given: when its sound started, how it went, and what failed. */
-  heard(key: string | undefined, id: string, word: { play?: number; result?: string; detail?: string }): void {
+  heard(key: string | undefined, id: string, word: { play?: number; result?: string; detail?: string; playback?: VoicePlaybackRecord }): void {
     const say = this.find(key)?.says?.find(item => item.id === id);
     if (!say) return;
     if (word.play !== undefined) say.play ??= Math.round(word.play);
     if (word.result) say.result ??= word.result;
     if (word.detail) say.detail ??= word.detail;
+    if (word.playback) say.playback = word.playback;
     this.later();
   }
 
