@@ -44,7 +44,7 @@ import { startSessionsMcp } from './api/session-tools.js';
 import { startSecretsMcp } from './secrets/runtime.js';
 import { runSecretsCommand } from './secrets/cli.js';
 import { SecretRelay } from './secrets/relay.js';
-import { handleSecretLink, ownerRemoteTarget } from './secrets/link-routes.js';
+import { handleSecretLink, ownerSecretControl } from './secrets/link-routes.js';
 import type { SecretPeer } from '../shared/secrets.js';
 import type { RemoteSecretResponse } from './secrets/remote.js';
 import { overlapsRepository } from '../shared/repositories.js';
@@ -429,10 +429,7 @@ async function main() {
     cancelAutoPrompt: id => runs.cancelAutoPrompt(id),
     secrets: async (action, input) => {
       if (action === 'trust' && (typeof input.direction !== 'string' || typeof input.routeId !== 'string' || !secretRouteKnown(input.direction, input.routeId))) throw Object.assign(new Error('연결 설정에서 먼저 승인한 컴퓨터를 선택하세요.'), { statusCode: 400 });
-      const target = typeof input.sessionId === 'string' && action !== 'lock' ? await ownerRemoteTarget(remoteNodes, runs, input, ['create','attach','connect'].includes(action)) : undefined;
-      // target from the page is always stripped; only the verified private argument has authority.
-      const { target: _target, hostId: _host, taskId: _task, projectRoot: _root, ...safe } = input;
-      return runs.secretCall('control', [action, safe, target]);
+      return ownerSecretControl(remoteNodes, runs, action, input);
     },
     slackOverview: () => runs.slackOverview(),
     api: (operation, input, context) => runs.api(operation, input, context && admit(context)),

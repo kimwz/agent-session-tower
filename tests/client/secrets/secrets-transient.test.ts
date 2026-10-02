@@ -77,10 +77,25 @@ test('quick confirmation clears the secret before completion, sends no chat subm
   let prevented = false; let stopped = false;
   find(fixture.render(), 'form').props.onSubmit({ preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } });
   assert.equal(prevented, true); assert.equal(stopped, true); assert.equal(readPayload(fixture).value, 'FAKE_QUICK_CANARY');
-  assert.equal(readPayload(fixture).scope, 'task'); assert.equal(readPayload(fixture).connect, true);
+  assert.equal(readPayload(fixture).notifySession, true); assert.equal(readPayload(fixture).scope, 'task'); assert.equal(readPayload(fixture).connect, true);
   assert.equal(find(fixture.render(), 'textarea').props.value, '');
   fixture.complete(true); await new Promise(resolve => setImmediate(resolve)); assert.equal(connected, true); fixture.cleanup();
 });
+test('the chat saved picker opts into a notice but unlock alone does not', async () => {
+  const overview = { status: { initialized: true, locked: false }, projects: [], groups: [{ id: 'global', scope: 'global', name: 'Global' }], secrets: [{ id: 'saved', groupId: 'global', name: 'FAKE_SAVED', kind: 'scalar', version: 1 }], rules: [], peers: [], connected: [] };
+  const picker = componentFixture('SecretQuickConnect', 'SecretQuickConnect.tsx', { overview });
+  const button = descendants(picker.render()).find(node => node.props.className === 'secret-saved-key')!;
+  const pending = button.props.onClick();
+  assert.deepEqual(readPayload(picker), { secretIds: ['saved'], notifySession: true });
+  picker.complete(true); await pending; picker.cleanup();
+  const locked = componentFixture('SecretQuickConnect', 'SecretQuickConnect.tsx', { overview: { ...overview, status: { initialized: true, locked: true } } });
+  const password = descendants(locked.render()).find(node => node.type === 'input' && node.props.type === 'password')!;
+  password.props.onChange({ target: { value: 'FAKE_UNLOCK_PASSWORD' } });
+  find(locked.render(), 'form').props.onSubmit(formEvent);
+  assert.deepEqual(readPayload(locked), { password: 'FAKE_UNLOCK_PASSWORD' });
+  locked.complete(true); await new Promise(resolve => setImmediate(resolve)); locked.cleanup();
+});
+
 test('closing a pending quick dialog prevents its response from closing a later dialog', async () => {
   let connected = false;
   const fixture = componentFixture('SecretQuickConnect', 'SecretQuickConnect.tsx', { onConnected() { connected = true; } });

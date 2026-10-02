@@ -45,7 +45,7 @@ import { SkillService } from '../skills/service.js';
 import { SessionTasks } from '../sessions/tasks.js';
 import { SecretService } from '../secrets/service.js';
 import { SecretRuntime, SECRET_TOOLS } from '../secrets/runtime.js';
-import { SECRET_CHANGED_INSTRUCTIONS } from '../secrets/notices.js';
+import { SECRET_CONNECTION_INSTRUCTIONS } from '../secrets/notices.js';
 import { SecretStore } from '../triggers/secrets.js';
 import { listPendingSecretImports, importPendingSecret } from '../backup/secrets.js';
 import type { SecretTarget } from '../../shared/secrets.js';
@@ -251,17 +251,23 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'secretCall': {
         const secrets = options.secrets; if (!secrets) break;
         const operation = args[0];
-        if (operation === 'control') return secrets.control(String(args[1]), record(args[2]), args[3] as SecretTarget | undefined);
+        if (operation === 'control') return secrets.control(String(args[1]), record(args[2]), args[3] as SecretTarget | undefined, args[4] === true);
         if (operation === 'peers') return secrets.peers();
         if (operation === 'device') return secrets.device();
         if (operation === 'poll') return { requests: secrets.poll(String(args[1])) };
         if (operation === 'answer') return secrets.answer(String(args[1]), args[2] as RemoteSecretRequest);
         if (operation === 'deliver') { secrets.deliver(String(args[1]), args[2] as RemoteSecretResponse); return { delivered: true }; }
-        if (operation === 'target') {
+        if (operation === 'target' || operation === 'connection-notice') {
           const session = options.runs.getSession(String(args[1]));
           if (!session || coordinator(session.id)) throw Object.assign(new Error('Not found.'), { statusCode: 404 });
           await options.exclusions?.reload();
           if (options.exclusions && await options.exclusions.excludesNow(session.cwd)) throw Object.assign(new Error('Not found.'), { statusCode: 404 });
+          if (operation === 'connection-notice') {
+            const target = await secrets.peekTarget(session.id);
+            if (!target || target.taskId !== args[2]) throw Object.assign(new Error('Secret task no longer matches.'), { statusCode: 403 });
+            secrets.notifyConnection(target);
+            return { notified: true };
+          }
           return secrets.remoteTarget(session.id, args[2] !== false);
         }
         if (operation === 'close-session') { await secrets.endSession(String(args[1])); return { closed: true }; }
@@ -571,7 +577,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     await secretService.start();
     const secretStore = new SecretStore(stateDir, { vault: secretService });
     const secrets = new SecretRuntime({ stateDir, service: secretService, runs,
-      onChange: sessionId => runs.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS, sessionId),
+      onConnect: sessionId => runs.notifyToolChange(SECRET_CONNECTION_INSTRUCTIONS, sessionId),
       isClosed: async id => { const saved = new ClosedSessionStore(stateDir); await saved.start(); return saved.closedIds().has(id); },
       migrate: () => secretStore.migrate(), pendingImports: () => listPendingSecretImports(stateDir),
       importPending: (id, password) => importPendingSecret(stateDir, id, password, secretService, { restoreTriggers: async backup => { if (!triggerEngine) throw new Error('Triggers are still starting.'); await triggerEngine.restoreBackup(backup); } }) });

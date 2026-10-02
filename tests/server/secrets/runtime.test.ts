@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, realpath, readdir, rm, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { Run, Session } from '../../../shared/types.js';
 import type { SecretMetadata, SecretOverview, SecretRunResult } from '../../../shared/secrets.js';
 import { CapabilityRegistry, handleMcpRequest, type McpContext, type Capability } from '../../../server/api/mcp.js';
@@ -11,7 +12,7 @@ import type { SessionOrigin } from '../../../server/runs/origin.js';
 import { SecretRuntime, SECRET_TOOLS } from '../../../server/secrets/runtime.js';
 import { SecretService } from '../../../server/secrets/service.js';
 import { runSecretsCommand } from '../../../server/secrets/cli.js';
-import { SECRET_USE_INSTRUCTIONS, secretMetadataSignature } from '../../../server/secrets/notices.js';
+import { SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
 
 const password = 'fixture-runtime-password-1234';
 const canary = 'CANARY_RUNTIME_VALUE_DO_NOT_DISCLOSE';
@@ -38,7 +39,7 @@ async function fixture() {
     list: () => [...runs.values()], getSession: (id: string) => sessions.get(id), sessionOrigin: (id: string) => origins.get(id),
   };
   const notices: (string | undefined)[] = [];
-  const runtime = new SecretRuntime({ stateDir, service, runs: registry, onChange: id => { notices.push(id); } });
+  const runtime = new SecretRuntime({ stateDir, service, runs: registry, onConnect: id => { notices.push(id); } });
   const capabilities = new CapabilityRegistry(); const ledger: unknown[] = [];
   const context: McpContext = {
     capabilities, run: id => runs.get(id), secretTools: SECRET_TOOLS, secretTool: (capability, name, args) => runtime.tool(capability, name, args),
@@ -60,84 +61,125 @@ async function fixture() {
   return { advance: (milliseconds: number) => { now += milliseconds; }, now: () => now, directory, stateDir, projectRoot, alias, service, runtime, notices, sessions, runs, origins, session, capabilities, context, resolver, ledger, addRun, tokenFor, call, list, initialize, cleanup };
 }
 
-test('committed connections, updates, revocation and lock invalidate without exposing owner input', async () => {
+test('unrelated turns receive no secret guide and vault state changes stay silent', async () => {
   const f = await fixture();
   try {
-    const beforeInitialization = f.addRun('notice-before-initialize');
-    assert.equal(f.resolver(beforeInitialization, f.session).instructions, SECRET_USE_INSTRUCTIONS);
-    assert.equal(f.resolver(beforeInitialization, f.session).required, false, 'the established pre-initialization desktop fallback remains optional');
+    assert.equal(f.resolver(f.addRun('unrelated-before-setup'), f.session).instructions, undefined);
+    await f.initialize();
+    assert.equal(f.resolver(f.addRun('unrelated-after-setup'), f.session).instructions, undefined);
+    await f.runtime.control('lock', {});
+    await f.runtime.control('unlock', { password });
+    await f.runtime.control('create', { scope: 'global', name: 'QUIET_SAVED_KEY', kind: 'scalar', value: canary });
+    assert.deepEqual(f.notices, []);
+  } finally { await f.cleanup(); }
+});
+
+test('only explicit chat assignment announces the verified target session', async () => {
+  const f = await fixture();
+  try {
     await f.initialize(); f.notices.length = 0;
+    const saved = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: 'QUIET_TASK_KEY', kind: 'scalar', value: canary, connect: true }) as SecretOverview;
+    assert.deepEqual(f.notices, [], 'legacy/settings requests remain silent');
+    await f.runtime.control('connect', { sessionId: f.session.id, secretIds: saved.connected, notifySession: true });
+    assert.deepEqual(f.notices, [f.session.id]);
+    await f.runtime.control('revoke', { sessionId: f.session.id, secretIds: saved.connected, notifySession: true });
+    assert.deepEqual(f.notices, [f.session.id], 'the chat marker never turns a revocation into a connection');
+  } finally { await f.cleanup(); }
+});
+
+test('explicit assignment is value-free, committed before its receipt, and unrelated mutations are silent', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize();
     const run = f.addRun('notice-owner'); const tools = f.resolver(run, f.session);
-    assert.equal(tools.instructions, SECRET_USE_INSTRUCTIONS);
-    assert.doesNotMatch(tools.instructions!, /CANARY_RUNTIME_VALUE|fixture-runtime-password/);
-    assert.equal(f.resolver({ ...run, origin: { kind: 'trigger', triggerId: 'fixture' } }, f.session).instructions, undefined);
-    const saved = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: canary, kind: 'scalar', value: canary, connect: true }) as SecretOverview;
+    assert.equal(tools.instructions, undefined);
+    assert.ok(tools.servers?.tower_secrets, 'lazy discovery remains available');
+    assert.ok(SECRET_TOOLS.find(tool => tool.name === 'secrets_list')!.description.includes(SECRET_USE_INSTRUCTIONS));
+    const saved = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: canary, kind: 'scalar', value: canary, connect: true, notifySession: true }) as SecretOverview;
     assert.deepEqual(f.notices, [f.session.id]);
     await f.runtime.control('overview', { sessionId: f.session.id });
     await f.runtime.control('preview', { value: 'FAKE_KEY=FAKE_VALUE' });
-    assert.equal(f.notices.length, 1);
-    await assert.rejects(f.runtime.control('connect', { sessionId: f.session.id, secretIds: ['missing'] }));
-    assert.equal(f.notices.length, 1, 'a rejected mutation is not announced');
+    await assert.rejects(f.runtime.control('connect', { sessionId: f.session.id, secretIds: ['missing'], notifySession: true }));
     const id = saved.connected[0];
-    await f.runtime.control('update', { id, value: 'FAKE_REPLACEMENT' });
-    assert.equal(f.notices.at(-1), f.session.id, 'task-only updates remain scoped to their owner session');
+    await f.runtime.control('update', { id, value: 'FAKE_REPLACEMENT', notifySession: true });
     await f.runtime.control('revoke', { sessionId: f.session.id, secretIds: [id] });
-    assert.equal(f.notices.at(-1), f.session.id);
-    await f.runtime.control('lock', {}); assert.equal(f.notices.at(-1), undefined);
-    await f.runtime.control('unlock', { password }); assert.equal(f.notices.at(-1), undefined);
-    const automaticTask = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: 'FAKE_TASK_AUTO', kind: 'scalar', value: 'FAKE_TASK', activation: 'auto', connect: true }) as SecretOverview;
-    assert.equal(f.notices.at(-1), f.session.id, 'automatic activation never turns a task resource into a shared change');
-    const taskSecret = automaticTask.secrets.find(s => s.name === 'FAKE_TASK_AUTO')!;
-    const taskRule = automaticTask.rules.find(rule => rule.groupId === taskSecret.groupId)!;
-    await f.runtime.control('rule', { ...taskRule, enabled: false });
-    assert.equal(f.notices.at(-1), f.session.id, 'task rule changes stay within their session');
+    await f.runtime.control('lock', {});
+    await f.runtime.control('unlock', { password });
+    const automatic = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: 'FAKE_TASK_AUTO', kind: 'scalar', value: 'FAKE_TASK', activation: 'auto', connect: true }) as SecretOverview;
+    const taskSecret = automatic.secrets.find(secret => secret.name === 'FAKE_TASK_AUTO')!;
+    await f.runtime.control('rule', { ...automatic.rules.find(rule => rule.groupId === taskSecret.groupId)!, enabled: false });
     const shared = await f.runtime.control('create', { scope: 'global', name: 'FAKE_SHARED', kind: 'scalar', value: 'FAKE_GLOBAL' }) as SecretOverview;
-    await f.runtime.control('update', { id: shared.secrets.find(s => s.name === 'FAKE_SHARED')!.id, value: 'FAKE_GLOBAL_UPDATED' });
-    assert.equal(f.notices.at(-1), undefined, 'shared updates invalidate other eligible owner turns');
+    await f.runtime.control('update', { id: shared.secrets.find(secret => secret.name === 'FAKE_SHARED')!.id, value: 'FAKE_GLOBAL_UPDATED' });
+    assert.deepEqual(f.notices, [f.session.id]);
     assert.doesNotMatch(JSON.stringify(f.notices), /CANARY_RUNTIME_VALUE|fixture-runtime-password/);
-    const count = f.notices.length;
     f.runtime.overview = async () => { throw new Error('fixture overview failure'); };
-    await assert.rejects(f.runtime.control('update', { id, value: 'FAKE_COMMITTED_BEFORE_OVERVIEW_FAILURE' }));
-    assert.equal(f.notices.length, count + 1, 'a committed mutation is announced even when its receipt fails');
+    await assert.rejects(f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: 'FAKE_COMMITTED', kind: 'scalar', value: canary, connect: true, notifySession: true }));
+    assert.deepEqual(f.notices, [f.session.id, f.session.id]);
     await assert.rejects(f.runtime.control('remove', { id }));
-    assert.equal(f.notices.at(-1), f.session.id, 'deletion retains its task session before the resource disappears');
-    assert.equal(f.service.taskSessionForSecret(id), undefined);
+    assert.equal(f.notices.length, 2);
+    assert.ok(!f.service.overview().secrets.some(secret => secret.id === id));
   } finally { await f.cleanup(); }
 });
 
-test('metadata observation reports expiry and source availability without creating or replacing tasks', async () => {
+test('expiry, remote availability and task closure stay silent while the broker enforces them', async () => {
   const f = await fixture();
   try {
-    await f.initialize(); f.notices.length = 0;
+    await f.initialize();
     const run = f.addRun('notice-expiry');
     await f.runtime.sweep();
     assert.equal(f.service.currentTask(f.session.id), undefined);
-    assert.deepEqual(f.notices, []);
     const saved = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: 'FAKE_EXPIRING', kind: 'scalar', value: canary, connect: true, expiresAt: f.now() + 100 }) as SecretOverview;
-    await f.list(f.tokenFor(run));
-    f.notices.length = 0; f.advance(150); await f.runtime.sweep();
-    assert.deepEqual(f.notices, [f.session.id]);
-    await f.runtime.sweep(); assert.equal(f.notices.length, 1, 'unchanged availability is silent');
-    const originalSources = f.runtime.broker.unavailableSources.bind(f.runtime.broker);
+    const token = f.tokenFor(run);
+    assert.equal((await f.list(token)).secrets.length, 1);
+    f.advance(150); await f.runtime.sweep();
+    assert.equal((await f.list(token)).secrets.length, 0);
     f.runtime.broker.unavailableSources = () => [{ sourceHostId: 'fixture-remote', code: 'SECRET_SOURCE_UNAVAILABLE' }];
-    await f.runtime.sweep(); assert.equal(f.notices.length, 2);
-    f.runtime.broker.unavailableSources = originalSources;
-    await f.runtime.sweep(); assert.equal(f.notices.length, 3, 'source recovery is a change too');
+    await f.runtime.sweep(); await f.runtime.overview(saved.target);
     await f.service.closeTask(saved.target!.taskId); await f.runtime.sweep();
-    assert.equal(f.notices.length, 4); assert.equal(f.service.currentTask(f.session.id), undefined);
-    await f.runtime.sweep(); assert.equal(f.notices.length, 4);
+    assert.equal(f.service.currentTask(f.session.id), undefined);
+    await assert.rejects(f.list(token));
+    assert.deepEqual(f.notices, []);
   } finally { await f.cleanup(); }
 });
 
-test('automatic project policies notify and observed metadata order does not produce false changes', async () => {
+test('automatic project keys stay discoverable without notifying any session', async () => {
   const f = await fixture();
   try {
-    await f.initialize(); f.notices.length = 0;
+    await f.initialize();
     await f.runtime.control('create', { sessionId: f.session.id, scope: 'project', currentProject: true, name: 'FAKE_AUTO', kind: 'env', value: 'TOKEN=FAKE_TOKEN\nOTHER=FAKE_OTHER', activation: 'auto', connect: true });
-    assert.deepEqual(f.notices, [undefined]);
     const run = f.addRun('notice-automatic'); const secrets = (await f.list(f.tokenFor(run))).secrets;
     assert.equal(secrets[0].activation, 'auto');
-    assert.equal(secretMetadataSignature(secrets, []), secretMetadataSignature(secrets.map(s => ({ ...s, fields: s.fields?.slice().reverse(), operations: s.operations?.slice().reverse() })).reverse(), []));
+    assert.deepEqual(f.notices, []);
+  } finally { await f.cleanup(); }
+});
+
+test('invalid chat markers and receipt modes fail before task creation or secret mutation', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize();
+    const input = { sessionId: f.session.id, scope: 'task', name: 'FAKE_INVALID_MARKER', kind: 'scalar', value: canary, connect: true };
+    await assert.rejects(f.runtime.control('create', { ...input, notifySession: 'true' }));
+    await assert.rejects(f.runtime.control('create', { ...input, notifySession: true }, undefined, true));
+    assert.equal(f.service.currentTask(f.session.id), undefined);
+    assert.deepEqual(f.service.overview().secrets, []);
+    assert.deepEqual(f.notices, []);
+  } finally { await f.cleanup(); }
+});
+
+test('remote chat commit receipts never notify a same-named session on the source worker', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize();
+    const device = { ...f.service.device(), id: randomUUID() };
+    await f.service.trustPeer({ device, routeId: 'fixture-node', direction: 'node', enabled: true });
+    const project = await f.service.project({ name: 'Fixture remote', bindings: [{ hostId: device.id, root: '/fixture/remote' }] });
+    const target = { hostId: device.id, root: '/fixture/remote', sessionId: f.session.id, taskId: randomUUID(), projectId: project.id };
+    f.runtime.overview = async () => { throw new Error('fixture overview must follow the remote notice'); };
+    const receipt = await f.runtime.control('create', { sessionId: f.session.id, nodeId: 'fixture-node', scope: 'task', name: 'FAKE_REMOTE_CHAT_KEY', kind: 'scalar', value: canary, connect: true, notifySession: true }, target, true);
+    assert.ok('connectedTarget' in receipt); assert.deepEqual(receipt.connectedTarget, target);
+    assert.equal(f.service.currentTask(f.session.id), undefined);
+    assert.equal(f.service.currentTask(f.session.id, target.root, target.hostId)?.taskId, target.taskId);
+    assert.deepEqual(f.notices, []);
   } finally { await f.cleanup(); }
 });
 
