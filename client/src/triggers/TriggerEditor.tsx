@@ -365,7 +365,7 @@ function AdvancedSettings({ input, onChange }: { input: TriggerInput; onChange: 
       <label>{t('시간당 최대 실행')}<input type="number" min={1} max={60} value={input.policy.maxEventsPerHour} onChange={event => onChange({ ...input, policy: { ...input.policy, maxEventsPerHour: Math.min(60, Math.max(1, Number(event.target.value) || 1)) } })} />
         <small>{issues ? t('넘으면 다음 시간까지 기다립니다.') : t('넘으면 자동으로 일시 정지합니다.')}</small></label>
       {source.kind === 'schedule' && <label className="wide">{t('놓친 실행')}<select value={source.catchUp} onChange={event => onChange({ ...input, source: { ...source, catchUp: event.target.value as 'latest' | 'skip' } })}>
-        <option value="latest">{t('하루 안에 놓친 가장 최근 시간을 한 번 실행')}</option><option value="skip">{t('건너뛰기')}</option></select>
+        <option value="latest">{source.schedule.type === 'once' ? t('늦어도 예약을 한 번 실행') : t('하루 안에 놓친 가장 최근 시간을 한 번 실행')}</option><option value="skip">{t('건너뛰기')}</option></select>
         <small>{t('컴퓨터가 잠자기 상태였거나 Tower가 꺼져 있던 동안의 실행')}</small></label>}
       {source.kind === 'http' && <label>{t('제한 시간 (초)')}<input type="number" min={1} max={45} value={source.request.timeoutSeconds} onChange={event => onChange({ ...input, source: { ...source, request: { ...source.request, timeoutSeconds: Math.min(45, Math.max(1, Number(event.target.value) || 1)) } } })} /></label>}
       {/* Keyed by the kind of watch, so what the fields show always matches what is saved. */}

@@ -95,7 +95,7 @@ export function TriggerPanel({ token, overview: ownOverview, providers: ownProvi
     actions={computers.length > 0 && <label className="trigger-computer">{t('컴퓨터')}<select value={node} onChange={event => choose(event.target.value)}>
       <option value="">{t('이 컴퓨터')}</option>{computers.map(item => <option key={item.node} value={item.node} disabled={!item.ready && item.node !== node}>
         {item.ready ? item.name : !item.connected ? t('{0} (오프라인)', { 0: item.name }) : t('{0} (Tower 업데이트 필요)', { 0: item.name })}</option>)}</select></label>}
-    tabs={tabs.map(([id, label, Icon]) => ({ id, label, icon: <Icon size={14} /> }))} tab={tab} onTab={id => leave(() => { setView({ page: 'list' }); setTab(id); })}>
+    tabs={tabs.map(([id, label, Icon]) => ({ id, label, icon: <Icon size={14} /> }))} tab={tab} onTab={id => leave(() => { setView({ page: 'list' }); if (id !== tab) setTriggers(null); setTab(id); })}>
     <div className="trigger-body">
       {error && <p role="alert" className="slack-error">{translateMessage(error)}</p>}
       {overview?.storageError && <p role="alert" className="slack-error">{translateMessage(overview.storageError)}</p>}

@@ -616,7 +616,7 @@ export class TriggerService extends EventEmitter {
       // Restored from a controlling computer, it is that computer's to run; restored here, it is this computer's again.
       const trigger: Trigger = { ...unmarked(structuredClone(deleted)), revision: deleted.revision + 1, updatedAt: now, updatedBy: actor, enabled: false, ...remoteMark(actor) };
       const note = this.guardAutoReply(trigger, undefined, actor, 'strip') ?? '';
-      this.onceRoom(state, trigger);
+      this.onceRoom(state, trigger, trigger.id);
       this.grantSecrets(state, trigger, actor);
       state.triggers.push(trigger);
       this.normalizeOnce(state);
@@ -833,7 +833,12 @@ export class TriggerService extends EventEmitter {
         }, full ? 'settle' : 'grow').then(() => { if (poll && unlock) this.startPoll(trigger.id, poll.slot, poll.revision, unlock); else unlock?.(); }).catch(async error => {
           unlock?.();
           if ((error as { statusCode?: number }).statusCode !== 507) return;
-          // The run could not be recorded for lack of space: the schedule still moves on, with a visible warning.
+          // A once reservation keeps its due time without repeated settle writes until history has room.
+          if (trigger.source.schedule.type === 'once') {
+            this.capacityError = `"${trigger.name}" is waiting because trigger history is full.`;
+            return;
+          }
+          // Repeating schedules move on, with a visible warning.
           this.capacityError = `"${trigger.name}" skipped a scheduled run because trigger history is full.`;
           await this.commit(state => {
             const position = state.cursors[trigger.id];
@@ -1572,7 +1577,7 @@ export class TriggerService extends EventEmitter {
       updatedAt: at, updatedBy: { kind: 'system', via: 'migration' } };
     state.revisions[trigger.id] = [...(state.revisions[trigger.id] ?? []), trigger].slice(-MAX_REVISIONS);
     state.triggers = state.triggers.map(item => item.id === trigger.id ? next : item);
-    delete state.cursors[trigger.id].nextAt;
+    if (state.cursors[trigger.id]) delete state.cursors[trigger.id].nextAt;
     this.log(state, next.updatedBy, 'consume', next, trigger.revision, next.revision, 'Once reservation consumed and archived; run outcome is separate from task completion');
   }
   private normalizeOnce(state: EngineState): void {
@@ -1611,7 +1616,7 @@ export class TriggerService extends EventEmitter {
       if (kept) state.cursors[current.id].github = kept;
     }
     // However a trigger is turned off (toggle, edit or revert), waiting runs do not start; running ones continue.
-    if (!next.enabled) this.turnedOff(state, current.id);
+    if (current.enabled && !next.enabled) this.turnedOff(state, current.id);
     this.trust(state, next, actor);
     return next;
   }

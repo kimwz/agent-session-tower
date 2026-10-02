@@ -3,6 +3,7 @@ export const english: Record<string, string> = {
   "한 번만": "Once only",
   "예약 시각": "Reservation time",
   "이 브라우저의 시간대: {0}": "This browser’s time zone: {0}",
+  "늦어도 예약을 한 번 실행": "Run the reservation once even if late",
   "예약은 한 번 소비되고 보관됩니다. 실패해도 자동으로 다시 예약하지 않습니다.": "The reservation is consumed once and archived. Failure does not schedule another attempt.",
   "보관": "Archived",
   "보관 해제": "Unarchive",

@@ -689,3 +689,37 @@ test('backups retain consumption after deleting a definition and a fresh restore
   await assert.rejects(restored.run(trigger.id, OWNER), /consumed/i);
   assert.equal(fresh.calls.length, 0);
 });
+
+
+test('editing a consumed reservation preserves pending execution until explicit disable', async t => {
+  const f = await fixture(t); const service = await f.open();
+  await service.updateSettings({ maxConcurrentRuns: 1 }, OWNER);
+  await service.run((await service.create(hourly(f.project), OWNER)).id, OWNER); await service.tick();
+  const trigger = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
+  const event = await service.run(trigger.id, OWNER); await service.tick();
+  let current = service.get(trigger.id).trigger;
+  current = await service.update(trigger.id, { ...hourly(f.project), name: 'Renamed reservation', enabled: false, source: current.source }, current.revision, OWNER);
+  assert.equal(service.event(event.id).status, 'queued');
+  assert.equal(service.launchAllowed(trigger.id, event.id), true);
+  await service.setEnabled(trigger.id, false, current.revision, OWNER);
+  assert.equal(service.event(event.id).status, 'cancelled');
+  assert.equal(service.launchAllowed(trigger.id, event.id), false);
+});
+
+test('a full consumption ledger admits restoration of its own consumed ID and keeps recurring execution available', async t => {
+  const f = await fixture(t); let service = await f.open();
+  const once = await service.create(hourly(f.project, { source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } }), OWNER);
+  await service.run(once.id, OWNER); await service.tick(); f.finish(); await service.tick();
+  await service.remove(once.id, service.get(once.id).trigger.revision, OWNER);
+  service.close(); await service.settle();
+  const path = join(f.directory, 'trigger-engine.json'); const state = JSON.parse(await readFile(path, 'utf8'));
+  for (let i = 1; i < 2000; i++) state.onceConsumed[randomUUID()] = { at: new Date(f.clock.now).toISOString() };
+  await writeFile(path, JSON.stringify(state)); service = await f.open();
+  const restored = await service.restore(once.id, OWNER);
+  assert.equal(restored.enabled, false); assert.ok(restored.consumed);
+  await assert.rejects(service.create(hourly(f.project, { source: once.source }), OWNER), /records are full/);
+  const repeat = await service.create(hourly(f.project), OWNER);
+  await service.run(repeat.id, OWNER); await service.tick();
+  assert.equal(service.events({ triggerId: repeat.id })[0].status, 'running');
+  assert.equal(service.overview().onceReservations!.used, 2000);
+});
