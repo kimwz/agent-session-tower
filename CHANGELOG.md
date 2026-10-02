@@ -4,6 +4,13 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.101.1] - 2026-10-02
+
+### Fixed
+- Keep authenticated local follow-up delegations linked to the original master across project handoffs, steering, Auto Prompt routing, and restarts. Report execution status separately from goal completion, and show when a submission cannot be tracked without resubmitting accepted work.
+- Record permission decisions once and resume approved unfinished work in a fresh provider turn after the requesting turn ends normally. Current-turn notices cannot become standalone tasks; refusals, explicit stops, closed conversations, duplicate decisions, and worker updates preserve the continuation's lifecycle.
+- Hold master reports only for an explicit owner stop, and preserve follow-up reporting when a permission continuation arrives after an earlier result.
+
 ## [1.101.0] - 2026-10-02
 
 ### Added
