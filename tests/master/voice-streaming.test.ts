@@ -13,7 +13,7 @@ import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/tower-tools/tower-client.js';
 import { frameAt, id3Size, MasterVoice } from '../../server/master/voice.js';
 import { FIRST_CHUNK, TextFollower } from '../../server/master/voice-stream.js';
-import { streamTone, VOICE_REST, VOICE_TONES, voicedChunk } from '../../server/master/voice-text.js';
+import { streamTone, VOICE_REST, VOICE_TONES, voicedChunk, voicedChunkPairs, voicedParts, voicedPartPairs } from '../../server/master/voice-text.js';
 
 /** What the fake fast model says first. */
 const FIRST = '요청을 확인해 볼게요.';
@@ -1019,4 +1019,110 @@ test('finite parts hold their segment line so another entry cannot interrupt the
   assert.equal(next.kind, 'answer', 'global line stays with the current reply segment until all its parts are played');
   assert.ok(next.text.includes('같은 답변'), 'next audio is the rest of the same reply, not the queued report');
   h.finish(run, 'cancelled');
+});
+
+for (const example of [
+  { model: 'eleven_flash_v2_5', text: '[cheerfully] 본문에 적힌 문자열을 그대로 보여 줍니다.', speech: '[cheerfully] 본문에 적힌 문자열을 그대로 보여 줍니다.' },
+  { model: 'eleven_v3_conversational', text: '[WIP] 본문의 괄호를 그대로 보여 줍니다.', speech: '[cheerfully] (WIP) 본문의 괄호를 그대로 보여 줍니다.' },
+]) {
+  for (const mode of ['stream', 'replay'] as const) test(`finite ${mode} preserves original display text for ${example.model}`, async t => {
+    const h = await harness(t, { settings: { voice: { model: example.model } }, page: { answer: () => undefined } });
+    h.on();
+    if (mode === 'stream') {
+      const { run } = await h.ask('표시 원문 확인');
+      h.write(run, 'm1:0', `${example.text} `, true);
+      h.finish(run);
+    } else {
+      const entry = h.room.add({ kind: 'master', text: example.text, turnId: 'literal-replay', final: true, speak: { state: 'played', session: h.voice.status().session! } });
+      assert.equal(h.voice.voiceMissed({ session: h.current(), entry: entry.id, action: 'replay' }), true);
+    }
+    const say = await until(() => h.says().find(item => item.kind === 'answer'));
+    assert.equal(h.labs.speeches.at(-1), example.speech, 'speech retains existing tag and bracket behavior');
+    assert.equal(say.text, example.text, 'page retains original readable text, independently of speech tags');
+    assert.equal(h.voice.voicePlayed({ session: h.current(), id: say.id, result: 'played' }), true);
+  });
+}
+
+for (const stop of ['native-cancel', 'voice-off'] as const) test(`a future-text waiter wakes on ${stop} after the active part ACK`, async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const { run } = await h.ask('대기 중 취소 확인');
+  h.write(run, 'm1:0', '첫 부분을 끝까지 읽고 새 문장을 기다립니다. ');
+  const first = await until(() => h.says().find(item => item.kind === 'answer'));
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: first.id, result: 'played' }), true);
+  await sleep(30);
+  assert.equal(h.voice.streaming(run.id), true, 'ACK leaves the native turn open, waiting for future text');
+  h.room.add({ kind: 'event', text: '취소 뒤 대기열의 보고가 재개됩니다.', speak: { state: 'pending' } });
+  await sleep(30);
+  assert.equal(h.says().filter(item => item.kind === 'report').length, 0, 'the reply still owns the line');
+  const before = h.labs.speeches.filter(text => text.includes('첫 부분')).length;
+  if (stop === 'native-cancel') h.finish(run, 'cancelled');
+  else assert.equal(h.voice.voiceOff({ session: h.current() }), true);
+  await until(() => !h.voice.streaming(run.id) || undefined, 500);
+  if (stop === 'voice-off') {
+    assert.equal(h.voice.status().session, undefined);
+    await until(() => !h.voice.busy() || undefined, 500);
+    assert.equal(h.says().filter(item => item.kind === 'report').length, 0, 'voice off ends all playback');
+    assert.ok(!h.labs.speeches.some(text => text.includes('취소 뒤 대기열')), 'old queued report is not synthesized');
+    h.on();
+    h.room.add({ kind: 'event', text: '새 음성 세션의 보고를 즉시 읽습니다.', speak: { state: 'pending' } });
+  }
+  const report = await until(() => h.says().find(item => item.kind === 'report'), 1_000);
+  if (stop === 'voice-off') assert.equal(report.text, '새 음성 세션의 보고를 즉시 읽습니다.', 'new session proves the old line waiter released');
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: first.id, result: 'played' }), false, 'old ACK stays settled');
+  h.write(run, 'm1:0', '취소 이후의 문장은 합성되지 않습니다.', true);
+  h.finish(run, 'cancelled');
+  await sleep(50);
+  assert.equal(h.labs.speeches.filter(text => text.includes('첫 부분')).length, before);
+  assert.ok(!h.labs.speeches.some(text => text.includes('취소 이후')));
+  if (report) assert.equal(h.voice.voicePlayed({ session: h.current(), id: report.id, result: 'played' }), true);
+});
+
+test('future text owns the line for at most five minutes while presence remains alive', async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const { run } = await h.ask('대기 상한 확인');
+  h.write(run, 'm1:0', '첫 부분 뒤 미래 문장을 기다립니다. ');
+  const first = await until(() => h.says().find(item => item.kind === 'answer'));
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.now() });
+  t.after(() => t.mock.timers.reset());
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: first.id, result: 'played' }), true);
+  for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+  h.room.add({ kind: 'event', text: '상한 뒤에만 이 보고를 읽습니다.', speak: { state: 'pending' } });
+  for (let step = 0; step < 10; step++) {
+    const advance = step === 9 ? 29_999 : 30_000;
+    t.mock.timers.tick(advance);
+    assert.equal(h.voice.voicePresence({ session: h.current(), listening: true }), true);
+    for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+  }
+  assert.ok(!h.labs.speeches.some(text => text.includes('상한 뒤')));
+  assert.equal(h.says().filter(item => item.kind === 'report').length, 0, '299999ms still holds the report');
+  t.mock.timers.tick(1);
+  for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+  t.mock.timers.reset();
+  const report = await until(() => h.says().find(item => item.kind === 'report'), 1_000);
+  assert.equal(run.status, 'running', 'the bound does not end the native run');
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: report.id, result: 'played' }), true);
+  h.finish(run);
+});
+
+
+test('paired voice parts keep original brackets, existing speech partitions and bounded final remainder', () => {
+  const original = '[cheerfully] 첫 문자열입니다. [WIP.] 다음 괄호도 본문입니다. '.repeat(125).trim();
+  for (const model of ['eleven_flash_v2_5', 'eleven_v3_conversational']) {
+    const pairs = voicedPartPairs(original, model, 'answer');
+    assert.deepEqual(pairs.map(part => part.speech), voicedParts(original, model, 'answer'));
+    assert.ok(pairs.every(part => part.text.includes('[') || part.text === VOICE_REST));
+    assert.ok(pairs.at(-1)!.text.endsWith(VOICE_REST));
+    const chunk = original.slice(0, 950);
+    const tag = streamTone(chunk, model, 'answer');
+    const chunks = voicedChunkPairs(chunk, model, tag);
+    assert.deepEqual(chunks.map(part => part.speech), voicedChunk(chunk, model, tag));
+    assert.equal(chunks.map(part => part.text).join(' '), chunk.trim());
+    assert.ok(chunks.every(part => part.text.length <= 500));
+    for (const part of chunks) {
+      const expected = model === 'eleven_flash_v2_5' ? part.text : part.text.replaceAll('[', '(').replaceAll(']', ')');
+      assert.equal(part.speech, tag ? `${tag} ${expected}` : expected);
+    }
+  }
 });

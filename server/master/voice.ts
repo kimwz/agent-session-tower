@@ -9,14 +9,9 @@ import type { ElevenLabs, VoiceInfo } from './elevenlabs.js';
 import type { FirstReplyMaker } from './first-reply.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
-import { isNoise, READ_CHARS, speakable, streamTone, VOICE_REST, VOICE_SAMPLE, VOICE_TONES, voiced, voicedChunk, voicedParts } from './voice-text.js';
+import { isNoise, READ_CHARS, speakable, streamTone, VOICE_REST, VOICE_SAMPLE, voiced, voicedChunkPairs, voicedPartPairs } from './voice-text.js';
 import { CHUNK_PAUSE_MS, TextFollower } from './voice-stream.js';
 import { playbackRecord, VoiceTimings, progressRecord, elapsed, attemptNumber, transportStage, type VoiceTtsRecord, type VoiceTransportStage } from './voice-timings.js';
-
-const plainPart = (speech: string): string => {
-  for (const tag of Object.values(VOICE_TONES)) if (speech.startsWith(`${tag} `)) return speech.slice(tag.length).trim();
-  return speech;
-};
 
 /** Estimated prices: ElevenLabs realtime speech-to-text per second, text-to-speech per character by model. */
 const STT_DOLLARS_PER_SECOND = 0.39 / 3600;
@@ -621,13 +616,12 @@ export class MasterVoice {
     if (!speak || speak.state !== 'pending') return;
     const text = this.content(entry.data);
     const model = this.options.settings.current().voice.model;
-    // All of it is read, in parts of whole sentences made into one stream; the tone tag goes only to speech, and the
-    // page is sent the text as it is.
+    // Each finite part keeps its original display text; tags and bracket conversion belong only to speech.
     const kind = entry.data.kind === 'error' ? 'error' : speak.session ? 'answer' : 'report';
-    const parts = voicedParts(text, model, kind);
+    const parts = voicedPartPairs(text, model, kind);
     // Kept shorter than it was: the owner hears that the rest is on the screen.
-    if (speak.cut && parts.length && !parts.at(-1)!.endsWith(VOICE_REST)) parts.push(voiced(VOICE_REST, model, kind));
-    const chars = parts.reduce((sum, part) => sum + part.length, 0);
+    if (speak.cut && parts.length && !parts.at(-1)!.text.endsWith(VOICE_REST)) parts.push({ text: VOICE_REST, speech: voiced(VOICE_REST, model, kind) });
+    const chars = parts.reduce((sum, part) => sum + part.speech.length, 0);
     // Judged and recorded together: nothing else can start making audio in between.
     const refused: MasterUnspoken | undefined = !parts.length ? 'empty' : this.session !== session || !this.alive(session) ? this.gone(session) : this.limited(Date.now(), chars * ttsDollarsPerChar(model)) ? 'limit' : undefined;
     if (refused) { this.setSpeak(entry, unspoken(speak, refused)); return; }
@@ -637,9 +631,9 @@ export class MasterVoice {
     let heard = false;
     for (let index = 0; index < parts.length; index++) {
       const part = parts[index];
-      const refuse = this.session !== session || !this.alive(session) ? this.gone(session) : this.limited(Date.now(), part.length * ttsDollarsPerChar(model)) ? 'limit' : undefined;
+      const refuse = this.session !== session || !this.alive(session) ? this.gone(session) : this.limited(Date.now(), part.speech.length * ttsDollarsPerChar(model)) ? 'limit' : undefined;
       if (refuse) { this.setSpeak(entry, unspoken(speakOf(this.options.room.get(entry.id)?.data) ?? speak, refuse, heard)); return; }
-      const live = this.synthesize(part, undefined, key);
+      const live = this.synthesize(part.speech, undefined, key);
       live.session = session; live.held = true; live.partIndex = index;
       try {
         if (!await this.complete(live) || this.session !== session) {
@@ -647,8 +641,8 @@ export class MasterVoice {
           this.setSpeak(entry, unspoken(speakOf(this.options.room.get(entry.id)?.data) ?? speak, this.session !== session ? this.gone(session) : 'audio', heard)); return;
         }
         this.setSpeak(entry, { ...speak, state: 'playing' });
-        const { result, started } = await this.play(session, { kind: speak.session ? 'answer' : 'report', text: plainPart(part), audio: live.id, streaming: true,
-          ...(request ? { request } : {}), ...(key ? { timing: key } : {}) }, this.timing.playMs + part.length * MS_PER_CHAR);
+        const { result, started } = await this.play(session, { kind: speak.session ? 'answer' : 'report', text: part.text, audio: live.id, streaming: true,
+          ...(request ? { request } : {}), ...(key ? { timing: key } : {}) }, this.timing.playMs + part.speech.length * MS_PER_CHAR);
         heard ||= started || result === 'played';
         if (result !== 'played') {
           this.setSpeak(entry, unspoken(speakOf(this.options.room.get(entry.id)?.data) ?? speak, reasonOf(result), heard)); return;
@@ -775,7 +769,7 @@ export class MasterVoice {
     const model = this.options.settings.current().voice.model;
     stream.tag = streamTone(plain, model, stream.kind, stream.tag);
     this.timings.mark(stream.key, 'sentence');
-    segment.parts.push(...voicedChunk(plain, model, stream.tag).map(speech => ({ speech, text: plainPart(speech) })));
+    segment.parts.push(...voicedChunkPairs(plain, model, stream.tag));
     segment.text = `${segment.text} ${plain}`.trim();
     stream.read += plain.length;
     stream.lastChunkAt = Date.now();

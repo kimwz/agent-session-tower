@@ -254,6 +254,29 @@ test('nothing plays until an utterance\'s connection has really closed (or ten s
   } finally { page.end(); }
 });
 
+test('speech between finite answer parts holds the next part until the utterance connection closes', async () => {
+  const page = await harness();
+  try {
+    page.voice.say({ ...page.say('part-1', 'answer'), streaming: true });
+    page.audio.finish();
+    mock.timers.tick(400);
+    await flush();
+    const socket = await page.speak('문장 사이 요청');
+    page.voice.say({ ...page.say('part-2', 'answer'), streaming: true });
+    await flush();
+    assert.equal(socket.readyState, 2);
+    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/part-1', 'a pending part does not play over speech or its closing connection');
+    assert.deepEqual(page.results(), ['part-1:played']);
+    socket.closed();
+    await flush();
+    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/part-2');
+    page.audio.finish();
+    await flush();
+    assert.deepEqual(page.results(), ['part-1:played', 'part-2:played']);
+    assert.equal(page.audio.played.filter(src => src.endsWith('/part-2')).length, 1);
+  } finally { page.end(); }
+});
+
 test('what the microphone captured while something played is never heard, even when the page handles it late', async () => {
   const page = await harness();
   try {
@@ -1018,6 +1041,16 @@ test('a microphone the owner muted stays muted after a report is read, until the
     await flush();
     assert.deepEqual(page.results(), ['r1:played'], 'what the master reads aloud still plays while muted');
     assert.equal(page.view().listening, false, 'the report did not open the microphone again');
+    mock.timers.tick(400);
+    await flush();
+    page.voice.say(page.say('r1-part-2', 'report'));
+    await flush();
+    page.audio.finish();
+    mock.timers.tick(400);
+    await flush();
+    assert.deepEqual(page.results(), ['r1:played', 'r1-part-2:played']);
+    assert.equal(page.view().listening, false, 'later finite report parts also preserve the owner mute');
+    assert.equal(page.view().muted, true);
     await page.voice.listen();
     assert.equal(page.view().listening, true);
     assert.equal(page.view().muted, undefined);

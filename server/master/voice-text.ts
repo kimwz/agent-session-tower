@@ -123,8 +123,20 @@ function pieces(sentence: string, limit: number): string[] {
  * tag in front (a tag holds only within the text it is sent with). Nothing is repeated or dropped between parts.
  * Past `READ_CHARS` the reading ends at a sentence and says the rest is on the screen.
  */
+export interface VoicePart { text: string; speech: string }
+const voicedPair = (text: string, model: string, tag: string): VoicePart => {
+  const speech = untagged(text, model);
+  return { text, speech: tag ? `${tag} ${speech}` : speech };
+};
+
 export function voicedParts(text: string, model: string, kind: VoiceKind): string[] {
-  const plain = untagged(text, model).trim();
+  return voicedPartPairs(text, model, kind).map(part => part.speech);
+}
+
+/** Preserve display text alongside speech; bracket conversion changes neither offsets nor split boundaries. */
+export function voicedPartPairs(text: string, model: string, kind: VoiceKind): VoicePart[] {
+  const original = text.trim();
+  const plain = untagged(original, model);
   if (!plain) return [];
   const tag = tone(plain, model, kind);
   const parts: string[] = [];
@@ -140,13 +152,13 @@ export function voicedParts(text: string, model: string, kind: VoiceKind): strin
       total += piece.length;
       const limit = parts.length ? PART : FIRST_PART;
       if (part && part.length + piece.length > limit) { parts.push(part); part = ''; }
-      part += piece;
+      part += original.slice(total - piece.length, total);
     }
     if (cut) break;
   }
   if (cut) part += (part && !/\s$/.test(part) ? ' ' : '') + VOICE_REST;
   if (part.trim()) parts.push(part);
-  return parts.map(item => item.trim()).filter(Boolean).map(item => tag ? `${tag} ${item}` : item);
+  return parts.map(item => item.trim()).filter(Boolean).map(item => voicedPair(item, model, tag));
 }
 
 /**
@@ -165,16 +177,24 @@ export function streamTone(plain: string, model: string, kind: VoiceKind, before
  * `PART` characters, each with the tag in front. Nothing is repeated or dropped between parts.
  */
 export function voicedChunk(plain: string, model: string, tag: string): string[] {
-  const text = untagged(plain, model).trim();
+  return voicedChunkPairs(plain, model, tag).map(part => part.speech);
+}
+
+/** A chunk's original display text shares the existing speech partition and tone. */
+export function voicedChunkPairs(plain: string, model: string, tag: string): VoicePart[] {
+  const original = plain.trim();
+  const text = untagged(original, model);
   if (!text) return [];
   const parts: string[] = [];
   let part = '';
+  let offset = 0;
   for (const sentence of sentences(text)) {
     for (const piece of pieces(sentence, PART)) {
       if (part && part.length + piece.length > PART) { parts.push(part); part = ''; }
-      part += piece;
+      part += original.slice(offset, offset + piece.length);
+      offset += piece.length;
     }
   }
   if (part.trim()) parts.push(part);
-  return parts.map(item => item.trim()).filter(Boolean).map(item => tag ? `${tag} ${item}` : item);
+  return parts.map(item => item.trim()).filter(Boolean).map(item => voicedPair(item, model, tag));
 }
