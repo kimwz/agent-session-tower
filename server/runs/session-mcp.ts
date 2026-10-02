@@ -24,6 +24,8 @@ export interface RunTools {
   /** Run-scoped reporting credentials, inherited by the provider's command tools. Never persisted. */
   env?: Record<string, string>;
   required: boolean;
+  /** Fixed worker guidance delivered in a private provider block, never the visible request. */
+  instructions?: string;
   /** For an owner turn: whether Tower's own tools are attached, and if not, why. */
   towerTools?: 'attached' | 'external-input' | 'not-owner-session' | 'remote';
 }

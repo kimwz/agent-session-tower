@@ -4,11 +4,17 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.103.3] - 2026-10-02
+## [1.104.1] - 2026-10-02
 
 ### Fixed
 - Preserve bounded master voice wait, retry and play-attempt history instead of overwriting the evidence with later progress. Record terminal ACK receipt independently of diagnostic request ordering.
 - Correlate TTS queue/start/first-byte/completion and host/web audio request delivery measurements with the same run and say, without recording speech or changing playback policy.
+
+## [1.104.0] - 2026-10-02
+
+### Added
+- Give owner agents private instructions to discover available Tower secrets before asking for credentials, and map permitted references to consumer environment variables.
+- Notify active owner turns privately when secret connections, values, permissions or source availability change. Coalesce notices, defer them during approvals, and keep them out of Tower chat without starting idle sessions or changing broker authorization.
 
 ## [1.103.2] - 2026-10-02
 
