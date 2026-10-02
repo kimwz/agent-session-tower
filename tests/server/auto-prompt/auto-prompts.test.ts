@@ -598,3 +598,35 @@ test('a new conversation whose folder is still to be chosen asks the router and 
   f.current.providers[0].models = [{ id: 'other-model', label: 'Other' }];
   await assert.rejects(f.manager.submit(request(undefined, { sessionMode: 'new' })), { statusCode: 422 });
 });
+
+test('delegation survives routing and restart without changing authority or admitting a different caller retry', async t => {
+  const f = await fixture(t);
+  const delegation = { parentRunId: randomUUID(), rootRunId: randomUUID() };
+  const origin = { kind: 'owner' as const };
+  const input = request(f.cwd);
+  const accepted = await f.manager.submit(input, { origin, delegation });
+  const job = await f.finished(accepted.id);
+  assert.deepEqual(job.delegation, delegation);
+  assert.deepEqual(f.dispatches[0].internal?.delegation, delegation);
+  assert.deepEqual(f.dispatches[0].internal?.origin, origin);
+  await assert.rejects(f.manager.submit(input, { origin, delegation: { ...delegation, parentRunId: randomUUID() } }), { statusCode: 409 });
+  await assert.rejects(f.manager.submit(input, { origin }), { statusCode: 409 });
+  await f.manager.close();
+  const restored = new AutoPromptManager(f.options);
+  try {
+    await restored.start();
+    assert.deepEqual(restored.get(job.id)?.delegation, delegation);
+    assert.equal((await restored.submit(input, { origin, delegation })).id, job.id);
+    assert.equal(f.dispatches.length, 1);
+  } finally { await restored.close(); }
+});
+
+test('a calling turn that expires during preparation leaves no accepted Auto Prompt', async t => {
+  const f = await fixture(t);
+  const input = request(f.cwd);
+  await assert.rejects(f.manager.submit(input, { delegation: { parentRunId: randomUUID(), rootRunId: randomUUID() },
+    validate: () => { throw Object.assign(new Error('calling turn expired'), { statusCode: 403 }); } }), /calling turn expired/);
+  assert.equal(f.manager.get(input.requestId), undefined);
+  assert.equal(f.dispatches.length, 0);
+  assert.equal(f.calls.length, 0);
+});

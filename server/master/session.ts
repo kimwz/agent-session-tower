@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { continuedRunById } from '../runs/continuations.js';
 import { join } from 'node:path';
 import { MASTER_FOLDER, type MasterBinding, type MasterSpeak, type MasterTaskState, type MasterUnspoken } from '../../shared/master.js';
-import type { AutoPromptJob, ChatMessage, Provider, Run, RunReply, SessionDetail, Snapshot } from '../../shared/types.js';
+import type { AutoPromptJob, ChatMessage, Provider, Run, RunReply, SessionDetail, SessionOutcome, Snapshot } from '../../shared/types.js';
 import type { MasterEntryData } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { ApiTarget } from '../tower-tools/api-target.js';
@@ -42,6 +42,9 @@ export interface Followed {
   runId?: string;
   /** The run that currently carries this work on after a forced worker update; `runId` stays the first one. */
   currentRunId?: string;
+  /** First authenticated caller in this chain, retained even if its run leaves history. */
+  rootRunId?: string;
+  outcome?: SessionOutcome;
   jobId?: string;
   node?: string;
   prompt?: string;
@@ -81,7 +84,7 @@ export interface Followed {
 export interface VoicedTurn { turn: string; state: 'started' | 'stopped' | 'done'; at: string }
 const VOICED = 200;
 
-interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; followed: Followed[]; voiced?: VoicedTurn[] }
+interface FollowFile { version: 1; baselineAt: string; masterRuns: string[]; followed: Followed[]; voiced?: VoicedTurn[]; stoppedAt?: string }
 
 /** What the voice gets from the master session. */
 export interface VoiceSide {
@@ -144,6 +147,7 @@ export class MasterSession {
     const saved = await readPrivateJson(this.path).catch(() => undefined) as Partial<FollowFile> | undefined;
     if (saved?.version === 1 && Array.isArray(saved.followed) && Array.isArray(saved.masterRuns) && typeof saved.baselineAt === 'string') {
       this.file = { version: 1, baselineAt: saved.baselineAt, masterRuns: saved.masterRuns.filter(id => typeof id === 'string'), followed: saved.followed.filter(item => item && typeof item.id === 'string'),
+        ...(typeof saved.stoppedAt === 'string' ? { stoppedAt: saved.stoppedAt } : {}),
         voiced: (Array.isArray(saved.voiced) ? saved.voiced : []).filter(item => item && typeof item.turn === 'string')
           // What was being read when the host stopped is not read on: its place in the words is gone.
           .map(item => item.state === 'started' ? { ...item, state: 'stopped' as const } : item) };
@@ -232,8 +236,8 @@ export class MasterSession {
 
   /** The work handed out, as tower_query shows it. */
   delegatedTable(): Table {
-    return { name: 'delegated', columns: ['id', 'title', 'state', 'session_id', 'node', 'created_at', 'report'],
-      rows: this.file.followed.filter(item => item.kind === 'delegated').map(item => [item.id, item.title, item.state, item.sessionId ?? null, item.node ?? null, item.createdAt, item.report ?? null]) };
+    return { name: 'delegated', columns: ['id', 'title', 'state', 'session_id', 'node', 'created_at', 'report', 'outcome'],
+      rows: this.file.followed.filter(item => item.kind === 'delegated').map(item => [item.id, item.title, item.state, item.sessionId ?? null, item.node ?? null, item.createdAt, item.report ?? null, item.outcome ?? null]) };
   }
 
   /**
@@ -306,7 +310,7 @@ export class MasterSession {
 
   /** Work a tower_api call started (a new session, a message, an Auto Prompt), followed so its end is reported. */
   async started(target: ApiTarget, body: Record<string, unknown> | undefined, answer: unknown): Promise<void> {
-    const value = (answer ?? {}) as { session?: { id?: string }; run?: { id?: string; sessionId?: string }; job?: { id?: string }; result?: { job?: { id?: string } } };
+    const value = (answer ?? {}) as { session?: { id?: string }; run?: { id?: string; sessionId?: string; delegation?: Run['delegation'] }; job?: { id?: string }; result?: { job?: { id?: string } } };
     const prompt = typeof body?.prompt === 'string' ? body.prompt : '';
     const title = truncate(typeof body?.title === 'string' && body.title ? body.title : prompt || target.local, 80);
     const message = /^\/api\/sessions\/([^/]+)\/messages$/.exec(target.local);
@@ -319,7 +323,7 @@ export class MasterSession {
     // Work sent to the master session itself is its own conversation, not work handed out.
     if (!target.node && found.sessionId === this.binding()?.sessionId) return;
     if (this.file.followed.some(item => (found.runId && item.runId === found.runId) || (found.jobId && item.jobId === found.jobId))) return;
-    this.add({ id: randomUUID(), kind: 'delegated', title, ...found, ...(target.node ? { node: target.node } : {}), ...(prompt ? { prompt } : {}), createdAt: new Date().toISOString(), state: 'running' });
+    this.add({ id: randomUUID(), kind: 'delegated', title, ...found, ...(target.node ? { node: target.node } : {}), ...(value.run?.delegation ? { rootRunId: value.run.delegation.rootRunId } : {}), ...(prompt ? { prompt } : {}), createdAt: new Date().toISOString(), state: 'running' });
     await this.save();
     this.options.onChange?.();
   }
@@ -360,20 +364,60 @@ export class MasterSession {
   private discover(snapshot: Snapshot, binding: MasterBinding): boolean {
     let changed = false;
     for (const run of snapshot.runs ?? []) if (run.sessionId === binding.sessionId && !this.file.masterRuns.includes(run.id)) { this.remember(run.id); changed = true; }
-    const ours = (origin: Run['origin']) => origin?.kind === 'agent' && !!origin.runId && this.file.masterRuns.includes(origin.runId);
+    const masterTurns = (snapshot.runs ?? []).filter(run => run.sessionId === binding.sessionId);
+    // An explicit stop must not be undone by a background report. A newer owner request releases the hold.
+    for (const run of masterTurns) {
+      if (run.status !== 'cancelled' || !run.ownerStopped || continuedRunById(snapshot.runs ?? [], run.id)?.id !== run.id) continue;
+      const at = run.finishedAt ?? run.createdAt;
+      if (!this.file.stoppedAt || Date.parse(at) > Date.parse(this.file.stoppedAt)) { this.file.stoppedAt = at; changed = true; }
+    }
+    if (this.file.stoppedAt && masterTurns.some(run => Date.parse(run.createdAt) > Date.parse(this.file.stoppedAt!)
+      && !run.delegation && !run.prompt.startsWith(REPORT_MARK) && (!run.origin || run.origin.kind === 'owner'))) {
+      delete this.file.stoppedAt; changed = true;
+    }
     const after = (at: string) => Date.parse(at) >= Date.parse(this.file.baselineAt);
+    for (const item of this.file.followed) {
+      if (item.kind !== 'delegated' || item.node) continue;
+      const run = (snapshot.runs ?? []).find(run => run.id === (item.currentRunId ?? item.runId));
+      const continued = continuedRunById(snapshot.runs ?? [], item.currentRunId ?? item.runId);
+      if (continued && continued.id !== (item.currentRunId ?? item.runId) && item.state !== 'running') {
+        item.state = 'running';
+        delete item.answer; delete item.outcome; delete item.cut;
+        delete item.report; delete item.reportId; delete item.reportAt; delete item.reportTries; delete item.reportHeld;
+        changed = true;
+      }
+      if (run?.steering?.state === 'delivered' && item.turn !== run.steering.targetRunId) { item.turn = run.steering.targetRunId; changed = true; }
+    }
+    const callers = new Set([...this.file.masterRuns, ...this.file.followed.filter(item => item.kind === 'delegated' && !item.node)
+      .flatMap(item => [item.runId, item.currentRunId, item.rootRunId, item.turn].filter((id): id is string => !!id))]);
+    const ours = (item: Pick<Run, 'origin' | 'delegation'>) => item.delegation
+      ? callers.has(item.delegation.parentRunId) || callers.has(item.delegation.rootRunId)
+      : item.origin?.kind === 'agent' && !!item.origin.runId && callers.has(item.origin.runId);
+    // Snapshots need not be in parent-first order. Include job dispatches and update continuations in the same closure.
+    for (let added = true; added;) {
+      added = false;
+      for (const item of [...(snapshot.autoPrompts ?? []), ...(snapshot.runs ?? [])]) {
+        if (!after(item.createdAt)) continue;
+        const id = 'sessionId' in item && 'output' in item ? item.id : (item as AutoPromptJob).runId;
+        const continuation = 'scheduled' in item && (item.scheduled?.resume === 'update' || item.scheduled?.resume === 'permission') && callers.has(item.scheduled.afterRunId);
+        if (id && !callers.has(id) && (ours(item) || continuation)) { callers.add(id); added = true; }
+        if (id && callers.has(id) && 'steering' in item && item.steering?.state === 'delivered' && !callers.has(item.steering.targetRunId)) {
+          callers.add(item.steering.targetRunId); added = true;
+        }
+      }
+    }
     // Jobs first: a job's run is the same work, found through the job.
     for (const job of snapshot.autoPrompts ?? []) {
       const known = this.file.followed.find(item => item.jobId === job.id);
       if (known && job.runId && !known.runId) { known.runId = job.runId; if (job.sessionId) known.sessionId = job.sessionId; changed = true; }
-      if (known || !ours(job.origin) || !after(job.createdAt) || this.file.followed.some(item => job.runId && item.runId === job.runId)) continue;
-      this.add({ id: randomUUID(), kind: 'delegated', title: truncate(job.prompt, 80), jobId: job.id, ...(job.runId ? { runId: job.runId } : {}), ...(job.sessionId ? { sessionId: job.sessionId } : {}), prompt: job.prompt, createdAt: job.createdAt, state: 'running' });
+      if (known || !ours(job) || !after(job.createdAt) || this.file.followed.some(item => job.runId && item.runId === job.runId)) continue;
+      this.add({ id: randomUUID(), kind: 'delegated', title: truncate(job.prompt, 80), ...(job.delegation ? { rootRunId: job.delegation.rootRunId } : job.origin?.runId ? { rootRunId: job.origin.runId } : {}), jobId: job.id, ...(job.runId ? { runId: job.runId } : {}), ...(job.sessionId ? { sessionId: job.sessionId } : {}), prompt: job.prompt, createdAt: job.createdAt, state: 'running' });
       changed = true;
     }
     for (const run of snapshot.runs ?? []) {
       // Tower's continuation after a forced update carries on a run already followed; it is not new work.
-      if (run.scheduled?.resume === 'update' || run.updateWrapUp || !ours(run.origin) || !after(run.createdAt) || run.sessionId === binding.sessionId || this.file.followed.some(item => item.runId === run.id)) continue;
-      this.add({ id: randomUUID(), kind: 'delegated', title: truncate(run.prompt, 80), runId: run.id, sessionId: run.sessionId, prompt: run.prompt, createdAt: run.createdAt, state: 'running' });
+      if (run.scheduled?.resume === 'update' || run.scheduled?.resume === 'permission' || run.permissionNotice || run.updateWrapUp || !ours(run) || !after(run.createdAt) || run.sessionId === binding.sessionId || this.file.followed.some(item => item.runId === run.id)) continue;
+      this.add({ id: randomUUID(), kind: 'delegated', title: truncate(run.prompt, 80), ...(run.delegation ? { rootRunId: run.delegation.rootRunId } : run.origin?.runId ? { rootRunId: run.origin.runId } : {}), runId: run.id, sessionId: run.sessionId, prompt: run.prompt, createdAt: run.createdAt, state: 'running' });
       changed = true;
     }
     return changed;
@@ -419,6 +463,7 @@ export class MasterSession {
     if (found?.text) { item.answer = truncate(found.text, keep); if (found.text.length > keep) item.cut = true; }
     if (item.kind === 'delegated') {
       item.report = 'pending';
+      if (found && 'outcome' in found && found.outcome) item.outcome = found.outcome;
       if (!found && run?.error) item.answer = `Error: ${truncate(run.error, 500)}`;
     } else this.speak(item, ended, turnRun);
     return true;
@@ -464,10 +509,12 @@ export class MasterSession {
     const retry = this.options.reportRetryMs ?? REPORT_RETRY_MS;
     const since = (item: Followed) => Date.now() - Date.parse(item.reportAt ?? item.createdAt);
     const due = (item: Followed) => item.reportHeld ? since(item) >= retry : !item.reportTries || since(item) >= retry * 2 ** (item.reportTries - 1);
+    if (this.file.stoppedAt) return false;
     const waiting = this.file.followed.filter(item => item.kind === 'delegated' && item.report === 'pending' && due(item));
     if (!waiting.length) return false;
     const line = (item: Followed) => `- "${item.title}" — ${item.state}${item.sessionId ? ` (session ${item.sessionId}${item.node ? ` on node ${item.node}` : ''})` : ''}`
-      + (item.answer ? `\n  Its answer:\n${indent(item.answer)}` : '\n  Its answer could not be read; the owner can open the session.');
+      + (item.answer ? `\n  Its answer:\n${indent(item.answer)}` : '\n  Its answer could not be read; the owner can open the session.')
+      + `\n  Goal outcome: ${item.outcome ?? 'unknown (not yet verified)'}.`;
     const batches: Followed[][] = [];
     let size = 0;
     for (const item of waiting) {
@@ -478,7 +525,7 @@ export class MasterSession {
     }
     for (const batch of batches) {
       const reportId = randomUUID().slice(0, 8);
-      const prompt = `${REPORT_MARK} Work you handed out ended (report ${reportId}):\n${batch.map(line).join('\n')}`;
+      const prompt = `${REPORT_MARK} Work you handed out ended (report ${reportId}):\n${batch.map(line).join('\n')}\n\nExecution completed is not proof that the owner's goal is done. Inspect the answers and tracked follow-up work; continue authorized remaining steps, respect real approval waits and owner stops, and do not resubmit work already running.`;
       for (const item of batch) { item.report = 'sending'; item.reportId = reportId; item.reportAt = new Date().toISOString(); }
       await this.save();
       const response = await this.options.tower.call('POST', `/api/sessions/${encodeURIComponent(binding.sessionId)}/messages`, { prompt }, { write: true })
@@ -559,7 +606,7 @@ export class MasterSession {
    * before the next message the session received. It waits until the session's history has caught up with the run's
    * end. When the request cannot be found, there is no answer rather than a guess.
    */
-  private async finalAnswer(item: Followed, run: Run | undefined, together: string[] = []): Promise<{ text: string; followedBy: boolean } | undefined> {
+  private async finalAnswer(item: Followed, run: Run | undefined, together: string[] = []): Promise<{ text: string; followedBy: boolean; outcome?: SessionOutcome } | undefined> {
     const prompt = normalize(run?.prompt ?? item.prompt ?? '');
     if (!prompt) return undefined;
     const path = `${item.node ? `/api/nodes/${item.node}` : '/api'}/sessions/${encodeURIComponent(item.sessionId!)}?limit=200`;
@@ -603,7 +650,13 @@ export class MasterSession {
           return false;
         });
         const answer = messages.slice(request + 1, next < 0 ? messages.length : next).reverse().find(message => message.role === 'assistant' && message.text.trim());
-        if (answer) return { text: answer.text, followedBy: next >= 0 };
+        if (answer) {
+          // Outcome is a judgment of the session's latest turn, not necessarily the run we are reporting.
+          const latestTurn = next < 0 && !detail.hasMore && detail.session?.status !== 'working'
+            && detail.session?.messageCount === messages.length && detail.session?.lastRequestAt === messages[request].timestamp
+            && !!detail.session?.lastMessage && normalize(answer.text).startsWith(normalize(detail.session.lastMessage));
+          return { text: answer.text, followedBy: next >= 0, ...(latestTurn && detail.session.outcome ? { outcome: detail.session.outcome } : {}) };
+        }
       }
       if (caughtUp) return undefined;
     }

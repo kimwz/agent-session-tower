@@ -100,7 +100,7 @@ export class PermissionReviewer {
     this.requeued.delete(request.id);
     // The owner may have turned the notice off meanwhile: a request sent back that nobody tells returns to the owner.
     if (outcome?.request.status === 'withdrawn' && !service.autoReview().resume) { await service.reopenForOwner(outcome.request.id, '에이전트에게 전하지 않도록 설정돼 소유자에게 넘깁니다'); return; }
-    if (outcome?.message && service.autoReview().resume) await this.options.notify(outcome.request, outcome.message).catch(async error => {
+    if (outcome?.message && service.autoReview().resume) await service.deliverNotification(outcome.request.id, this.options.notify).catch(async error => {
       console.error(`Permission review could not reach its conversation: ${error instanceof Error ? error.message : String(error)}`);
       // An agent never told to ask again would wait for good: the owner decides instead.
       if (outcome.request.status === 'withdrawn') await service.reopenForOwner(outcome.request.id, '에이전트에게 전하지 못해 소유자에게 넘깁니다');

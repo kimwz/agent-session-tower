@@ -52,3 +52,29 @@ test('changes the owner\'s agents send to a joined computer keep to half of what
   assert.notEqual((await send(other, { 'X-Tower-Agent': 'local' })).status, 429, 'another joined computer has its own share');
   assert.notEqual((await send(node)).status, 429, 'and the owner\'s page still reaches the first one');
 });
+
+
+test('submission provenance comes only from a local reporting header, never body claims', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-caller-http-'));
+  const { auth, origins, cookie, fetch: remoteFetch } = await createRemoteAuthFixture(dir);
+  const calls: unknown[] = [];
+  const { server, dispose } = createMonitorServer({ port: 0, clientDir: dir, auth, remote: { origins },
+    backend: { snapshot: () => snapshot, detail: async () => undefined,
+      enqueue: async (_id, _prompt, _attachments, context) => { calls.push(context); return { id: 'child', sessionId: 'codex:child', prompt: '', status: 'queued', createdAt: '', output: '' }; },
+      cancel: async () => {}, subscribe: () => () => {} } });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  t.after(async () => { dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(dir, { recursive: true, force: true }); });
+  const { token } = await (await fetch(`${base}/api/bootstrap`)).json();
+  const body = JSON.stringify({ prompt: 'work', origin: { kind: 'agent', runId: 'forged' }, delegation: { parentRunId: 'forged', rootRunId: 'forged' }, callerCapability: 'b'.repeat(64) });
+  const send = (caller?: string, remote = false) => (remote ? remoteFetch : fetch)(`${base}/api/sessions/codex:child/messages`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Monitor-Token': token,
+      ...(caller ? { 'X-Tower-Run-Capability': caller } : {}), ...(remote ? { cookie } : {}) }, body });
+  assert.equal((await send()).status, 202);
+  assert.equal(calls[0], undefined);
+  assert.equal((await send('a'.repeat(64))).status, 202);
+  assert.deepEqual(calls[1], { callerCapability: 'a'.repeat(64) });
+  assert.equal((await send('invalid')).status, 403);
+  assert.equal((await send('a'.repeat(64), true)).status, 403);
+  assert.equal(calls.length, 2, 'invalid and remote headers never reach admission');
+});

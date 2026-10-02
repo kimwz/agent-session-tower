@@ -16,6 +16,8 @@ import { remoteRequestTime } from '../remote/request-ledger.js';
 import { remoteJob, remoteJobVisible, type RemoteScope } from '../remote/visibility.js';
 import { eventPaths, handlerPaths, RemoteView, type KeptTriggers } from './remote-view.js';
 
+type CallContext = Pick<RunAdmission, 'delegation' | 'validate'>;
+
 const failure = (message: string, statusCode: number) => Object.assign(new Error(message), { statusCode });
 const REQUEST_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_REQUESTS = 1000;
@@ -36,7 +38,7 @@ export interface TowerServices {
   };
   runs?: { list(): Run[] };
   projects?: () => Array<{ cwd: string; title: string; sessions: number; pinned: boolean }>;
-  autoPrompts?: { submit(request: AutoPromptRequest, internal: Pick<RunAdmission, 'origin'>): Promise<AutoPromptJob>; get(id: string): AutoPromptJob | undefined };
+  autoPrompts?: { submit(request: AutoPromptRequest, internal: Pick<RunAdmission, 'origin' | 'delegation' | 'validate'>): Promise<AutoPromptJob>; get(id: string): AutoPromptJob | undefined };
   github?: { workflow(sessionId: string): SlackWorkflow | undefined; approveReply(workflowId: string, requestKey: string, text: string): Promise<unknown> };
   permissions?: PermissionService;
   /** What this computer keeps from controlling computers, with these folders' real locations resolved again now. */
@@ -65,13 +67,13 @@ export class TowerApi {
    * An agent names each creating call with a `requestKey`. The same key with the same input returns the
    * first result; a call whose outcome was not recorded is reported as uncertain rather than repeated.
    */
-  async call(name: unknown, input: unknown, actor: TriggerActor, requestKey?: string): Promise<unknown> {
-    const answer = await this.answer(name, input, actor, requestKey);
+  async call(name: unknown, input: unknown, actor: TriggerActor, requestKey?: string, context?: CallContext): Promise<unknown> {
+    const answer = await this.answer(name, input, actor, requestKey, context);
     // A controlling computer's answer is judged by what this computer shares now, a retry's recorded answer too.
     return actor.controllerId && isOperationName(name) ? this.shown(name, OPERATIONS[name].input.parse(input ?? {}) as Record<string, any>, answer, actor) : answer;
   }
 
-  private async answer(name: unknown, input: unknown, actor: TriggerActor, requestKey?: string): Promise<unknown> {
+  private async answer(name: unknown, input: unknown, actor: TriggerActor, requestKey?: string, context?: CallContext): Promise<unknown> {
     if (!isOperationName(name)) throw failure('Unknown Tower operation.', 404);
     const operation = OPERATIONS[name];
     if ('ownerOnly' in operation && operation.ownerOnly && actor.kind !== 'owner') throw failure('Only the owner can do this in Tower.', 403);
@@ -80,7 +82,7 @@ export class TowerApi {
     const parsed = operation.input.safeParse(input ?? {});
     if (!parsed.success) throw failure(`Invalid request: ${parsed.error.issues.map(issue => `${issue.path.join('.') || 'input'}: ${issue.message}`).join('; ')}`, 400);
     // Changes from agents, and from controlling computers, are made once per request.
-    if ((actor.kind !== 'agent' && !actor.controllerId) || !operation.write) return this.perform(name, parsed.data as Record<string, any>, actor);
+    if ((actor.kind !== 'agent' && !actor.controllerId) || !operation.write) return this.perform(name, parsed.data as Record<string, any>, actor, context);
     // An Auto Prompt request is known by its requestId everywhere; other changes by the calling run's requestKey.
     const keyField = 'keyField' in operation ? operation.keyField : undefined;
     const ownKey = keyField ? (parsed.data as Record<string, string>)[keyField] : requestKey;
@@ -110,7 +112,7 @@ export class TowerApi {
     let result: unknown;
     // Operations fail before changing anything (validation, a refused save), so a failure frees the key, unless
     // the failure says something may already have happened outside Tower (a sent POST): then the key stays taken.
-    try { result = await this.perform(name, parsed.data as Record<string, any>, actor); }
+    try { result = await this.perform(name, parsed.data as Record<string, any>, actor, context); }
     catch (error) {
       if (!(error as { uncertain?: boolean }).uncertain) { requests.delete(key); await this.save().catch(() => {}); }
       throw error;
@@ -140,11 +142,11 @@ export class TowerApi {
     return new RemoteView(await remote(paths), sessions, kept);
   }
 
-  private async perform(name: OperationName, value: Record<string, any>, actor: TriggerActor): Promise<unknown> {
-    if (!actor.controllerId) return this.performLocal(name, value, actor);
+  private async perform(name: OperationName, value: Record<string, any>, actor: TriggerActor, context?: CallContext): Promise<unknown> {
+    if (!actor.controllerId) return this.performLocal(name, value, actor, undefined, context);
     // What a controlling computer reads is gathered when it is answered, after the latest look (see `shown`).
     if (!OPERATIONS[name].write) return undefined;
-    if (!name.startsWith('triggers.')) return this.performLocal(name, value, actor);
+    if (!name.startsWith('triggers.')) return this.performLocal(name, value, actor, undefined, context);
     // A change is judged by a fresh look at every folder it names. What it cannot see reads exactly as absent, and it
     // cannot aim a trigger at it (see TriggerScope).
     const input = value.trigger as TriggerInput | undefined;
@@ -290,7 +292,7 @@ export class TowerApi {
     }
   }
 
-  private async performLocal(name: OperationName, value: Record<string, any>, actor: TriggerActor, scope?: TriggerScope): Promise<unknown> {
+  private async performLocal(name: OperationName, value: Record<string, any>, actor: TriggerActor, scope?: TriggerScope, context?: CallContext): Promise<unknown> {
     const { triggers, sessions, runs, autoPrompts } = this.services;
     switch (name) {
       case 'sessions.list': {
@@ -325,7 +327,7 @@ export class TowerApi {
         const from = actor.controllerId ? { controllerId: actor.controllerId } : {};
         const origin: RunOrigin = actor.kind === 'agent' ? { kind: 'agent', ...(actor.runId ? { runId: actor.runId } : {}), ...from } : { kind: 'owner', ...from };
         return { job: await autoPrompts.submit({ requestId: value.requestId, provider: value.provider, prompt: value.prompt, ...(value.cwd ? { cwd: value.cwd } : {}),
-          ...(value.model ? { model: value.model } : {}), ...(value.effort ? { effort: value.effort } : {}) }, { origin }) };
+          ...(value.model ? { model: value.model } : {}), ...(value.effort ? { effort: value.effort } : {}) }, { origin, ...context }) };
       }
       case 'permissions.request': return this.permissions().request(value as Parameters<PermissionService['request']>[0], actor);
       case 'permissions.run': return this.permissions().requestRun(value as Parameters<PermissionService['requestRun']>[0], actor);

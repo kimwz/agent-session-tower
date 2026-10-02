@@ -80,8 +80,13 @@ export class TowerTools {
     // Past the deadline a change still waiting for the web does not go; one on its way is not cut off.
     const response = await this.options.tower.call('POST', target.path, body, { write: true, headers, beforeSend: signal })
       .catch((error: unknown): TowerResponse => ({ status: 0, body: { error: error instanceof Error ? error.message : String(error) }, state: 'uncertain' }));
-    if (response.state === 'succeeded') await this.options.started(target, body, response.body).catch(() => {});
+    let trackingWarning: string | undefined;
+    if (response.state === 'succeeded') {
+      try { await this.options.started(target, body, response.body); }
+      catch { trackingWarning = 'The work was accepted, but saving its report subscription failed. Do not resubmit it; keep the returned id and check its result.'; }
+    }
     const result = answer(response);
+    if (trackingWarning) return { ...result, trackingWarning };
     return response.state === 'uncertain' ? { ...result, note: '결과를 알 수 없습니다. 다시 보내지 말고 상태를 확인하세요.' } : result;
   }
 

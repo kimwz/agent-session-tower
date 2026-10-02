@@ -80,6 +80,8 @@ export interface PermissionRequest {
   /** Who decided it: the owner, or Tower's reviewer. */
   decidedBy?: 'owner' | 'auto';
   review?: PermissionReview;
+  /** Opt-in committed with the decision; only pending intents are recovered. */
+  notification?: { state: 'pending' | 'recorded'; message: string };
   /** For a `run` request: the command's run, once allowed. */
   run?: PermissionRun;
   /** For a `run` request: what makes a retry the same request (the agent's key, or the conversation and command). */

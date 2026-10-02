@@ -6,7 +6,7 @@ import { HEALTH_APPLICATION_ID } from '../../shared/app-identity.js';
 import { serveToolBridge } from '../../server/mcp/stdio.js';
 import { OWNER_TOOLS, OWNER_TOOLS_SERVER, OwnerTools, ownerGuide, startOwnerMcp } from '../../server/owner-mcp/tools.js';
 
-interface Seen { method: string; path: string; token?: string; agent?: string; master?: string; body?: unknown }
+interface Seen { method: string; path: string; token?: string; agent?: string; master?: string; caller?: string; body?: unknown }
 
 /** A web that answers like Tower's on localhost: health, a page token, and whatever the test makes it answer. */
 async function fakeWeb(t: test.TestContext, token: string, answer?: (seen: Seen, res: import('node:http').ServerResponse) => boolean) {
@@ -15,7 +15,7 @@ async function fakeWeb(t: test.TestContext, token: string, answer?: (seen: Seen,
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const item: Seen = { method: req.method!, path: req.url!, token: req.headers['x-agent-monitor-token'] as string, agent: req.headers['x-tower-agent'] as string,
-      master: req.headers['x-tower-master'] as string, ...(chunks.length ? { body: JSON.parse(Buffer.concat(chunks).toString('utf8')) } : {}) };
+      master: req.headers['x-tower-master'] as string, caller: req.headers['x-tower-run-capability'] as string, ...(chunks.length ? { body: JSON.parse(Buffer.concat(chunks).toString('utf8')) } : {}) };
     if (req.url === '/api/health') { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, application: HEALTH_APPLICATION_ID })); return; }
     if (req.url === '/api/bootstrap') { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ token })); return; }
     seen.push(item);
@@ -118,4 +118,32 @@ test('in the master\'s own folder the tools stay out of the way: the master has 
   assert.deepEqual(JSON.parse(line!).result.tools, []);
   input.end();
   await served;
+});
+
+
+test('owner HTTP tools forward reporting credentials and distinguish linked, unlinked and uncertain submissions', async t => {
+  const credential = 'd'.repeat(64);
+  const web = await fakeWeb(t, 'a'.repeat(64), (item, res) => {
+    if (item.path === '/api/sessions/lost/messages') { res.destroy(); return true; }
+    const linked = item.path === '/api/sessions/linked/messages';
+    res.writeHead(202, { 'Content-Type': 'application/json' }).end(JSON.stringify({ run: { id: 'child', ...(linked ? { delegation: { parentRunId: 'parent', rootRunId: 'master' } } : {}) } }));
+    return true;
+  });
+  const tools = new OwnerTools('/unused', { ports: async () => [web.port], callerCapability: credential });
+  t.after(() => tools.close());
+  const call = (id: string) => tools.call('tower_api', { method: 'POST', path: `/api/sessions/${id}/messages`, body: { prompt: 'work' } }) as Promise<{ state: string; tracking?: { state: string; note?: string } }>;
+  assert.equal((await call('linked')).tracking?.state, 'linked');
+  const unlinked = await call('unlinked');
+  assert.equal(unlinked.tracking?.state, 'unlinked');
+  assert.match(unlinked.tracking!.note!, /Do not resubmit/);
+  const lost = await call('lost');
+  assert.equal(lost.state, 'uncertain');
+  assert.equal(lost.tracking, undefined);
+  assert.equal(web.seen.filter(item => item.path === '/api/sessions/lost/messages').length, 1);
+  for (const item of web.seen) {
+    assert.equal(item.caller, credential);
+    assert.equal(item.agent, 'local');
+    assert.equal(item.master, undefined);
+    assert.equal(item.token, 'a'.repeat(64));
+  }
 });

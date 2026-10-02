@@ -184,5 +184,5 @@ export const READ_SCHEMA = `Tables (read-only SQLite; node '' is this computer, 
 - folders(node, cwd, title, pinned, hidden)
 - triggers(node, id, name, kind, enabled, next_run_at, last_status, last_at, updated_at, error)
 - trigger_runs(node, id, trigger_id, trigger_name, status, occurred_at, summary, session_id, error)
-- delegated(id, title, state, session_id, node, created_at) — work you handed out, as Tower follows it for its reports
+- delegated(id, title, state, session_id, node, created_at, report, outcome) — work you handed out and its tracked follow-ups; state is execution status, outcome is a separate goal judgment (null means unverified)
 Times are ISO-8601 UTC text. Texts are shortened. One SELECT per call; at most ${MAX_ROWS} rows.`;

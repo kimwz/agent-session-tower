@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path';
-import type { Run, Session } from '../../shared/types.js';
+import type { Run, RunDelegation, Session } from '../../shared/types.js';
 import { attachmentMetadata } from '../stores/attachments.js';
 import { validEffort, validModelId } from '../providers/models.js';
 import { PROVIDERS } from '../providers/discovery.js';
@@ -7,6 +7,12 @@ import type { SessionOrigin } from './origin.js';
 
 /** Nothing restored from disk is trusted: these guards decide what may re-enter the queue. */
 export const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
+
+export function isSavedDelegation(value: unknown): value is RunDelegation {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const item = value as Partial<RunDelegation>;
+  return typeof item.parentRunId === 'string' && UUID.test(item.parentRunId) && typeof item.rootRunId === 'string' && UUID.test(item.rootRunId);
+}
 
 export interface CreatedSession {
   session: Session;
@@ -27,7 +33,11 @@ export function isSavedRun(value: unknown): value is Run {
     && (run.effort === undefined || validEffort(run.effort))
     && (run.codexApprovalsReviewer === undefined || ['user', 'auto_review'].includes(run.codexApprovalsReviewer))
     && (run.autoPromptId === undefined || UUID.test(run.autoPromptId))
+    && (run.delegation === undefined || isSavedDelegation(run.delegation))
     && (run.steering === undefined || isSavedSteering(run.steering, run))
+    && (run.ownerStopped === undefined || run.ownerStopped === true)
+    && (run.permissionRequestIds === undefined || (Array.isArray(run.permissionRequestIds) && run.permissionRequestIds.every(id => typeof id === 'string' && UUID.test(id))))
+    && (run.permissionNotice === undefined || (typeof run.permissionNotice === 'object' && run.permissionNotice !== null && typeof run.permissionNotice.targetRunId === 'string' && UUID.test(run.permissionNotice.targetRunId)))
     && (run.scheduled === undefined || isSavedSchedule(run.scheduled, run))
     && (run.attachments === undefined || (Array.isArray(run.attachments) && run.attachments.length <= 10 && run.attachments.every(item => attachmentMetadata(item))))
     && ['queued', 'running', 'completed', 'error', 'cancelled'].includes(run.status ?? '');
@@ -50,7 +60,7 @@ export function isSavedSchedule(value: unknown, run: Partial<Run>): boolean {
   return typeof scheduled.at === 'string' && Number.isFinite(Date.parse(scheduled.at))
     && typeof scheduled.afterRunId === 'string' && UUID.test(scheduled.afterRunId) && scheduled.afterRunId !== run.id
     && (scheduled.backgroundRecoveryAttempt === undefined || (Number.isInteger(scheduled.backgroundRecoveryAttempt) && scheduled.backgroundRecoveryAttempt >= 1 && scheduled.backgroundRecoveryAttempt <= 3))
-    && (scheduled.resume === undefined || scheduled.resume === 'update')
+    && (scheduled.resume === undefined || scheduled.resume === 'update' || scheduled.resume === 'permission')
     && run.steering === undefined && !run.attachments?.length;
 }
 

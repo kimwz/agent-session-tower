@@ -7,4 +7,6 @@ import type { RunOrigin } from '../../shared/types.js';
 export interface RequestContext {
   origin?: RunOrigin;
   requestId?: string;
+  /** Unverified local reporting credential. Only the execution worker may resolve it. */
+  callerCapability?: string;
 }

@@ -13,6 +13,12 @@ export interface ApiTarget {
   write: boolean;
 }
 
+/** These routes accept new work; their successful response must say whether its caller was recorded. */
+export function startsWork(target: ApiTarget): boolean {
+  return target.method === 'POST' && (['/api/sessions', '/api/auto-prompts', '/api/v1/autoPrompt.submit'].includes(target.local)
+    || /^\/api\/sessions\/[^/]+\/messages$/.test(target.local));
+}
+
 const NODE_PREFIX = /^\/api\/nodes\/([a-f0-9]{32})(\/.*)$/;
 /** Not operations for an agent: sign-in, the page token, and live streams (read through their own tools). */
 export const AGENT_REFUSED: readonly RegExp[] = [/^\/api\/auth\/(login|logout|status)$/, /^\/api\/bootstrap$/, /^\/api\/health$/, /^\/api\/events$/,

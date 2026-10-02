@@ -9,6 +9,7 @@ import type { Attachment, AttachmentInput, AutoPromptDecision, AutoPromptJob, Au
 import { isImageAttachment } from '../../shared/attachments.js';
 import { AttachmentStore, attachmentMetadata, type StoredAttachment } from '../stores/attachments.js';
 import { RunError, type RunAdmission, type RunManager } from '../runs/manager.js';
+import { isSavedDelegation } from '../runs/saved-state.js';
 import { ownerOrigin, parseRunOrigin } from '../runs/origin.js';
 import { runAutoPromptModel } from './native.js';
 import { resolveModel } from '../models/settings.js';
@@ -136,6 +137,7 @@ export class AutoPromptManager extends EventEmitter {
         for (const entry of saved as Entry[]) {
           if (this.entries.has(entry.job.id)) throw new Error('Saved Auto Prompt IDs are duplicated.');
           // A malformed origin never reads back as owner work; a missing one stays missing.
+          if (entry.job.delegation !== undefined && !isSavedDelegation(entry.job.delegation)) throw new Error('Saved delegation is invalid.');
           if (entry.job.origin !== undefined) entry.job.origin = parseRunOrigin(entry.job.origin) ?? { kind: 'unknown' };
           if (entry.job.untrustedInput !== undefined && entry.job.untrustedInput !== true) entry.job.untrustedInput = true;
           this.entries.set(entry.job.id, entry);
@@ -158,10 +160,12 @@ export class AutoPromptManager extends EventEmitter {
   get(id: string): AutoPromptJob | undefined { const job = this.entries.get(id.toLowerCase())?.job; return job ? copy(job) : undefined; }
 
   /** `internal` comes from Tower itself (web owner, Slack, triggers); request fields cannot set it. */
-  async submit(input: AutoPromptRequest, internal: Pick<RunAdmission, 'origin' | 'untrustedInput' | 'unattended'> = {}): Promise<AutoPromptJob> {
+  async submit(input: AutoPromptRequest, internal: Pick<RunAdmission, 'origin' | 'untrustedInput' | 'unattended' | 'delegation' | 'validate'> = {}): Promise<AutoPromptJob> {
     if (!this.started || this.stopping) throw new RunError('Auto Prompt가 요청을 받지 않고 있습니다.', 503);
     const origin = internal.origin === undefined ? { kind: 'unknown' as const } : parseRunOrigin(internal.origin);
     if (!origin) throw new RunError('Auto Prompt 요청 출처가 올바르지 않습니다.');
+    const delegation = internal.delegation;
+    if (delegation !== undefined && !isSavedDelegation(delegation)) throw new RunError('Invalid delegation record.');
     const untrustedInput = internal.untrustedInput === true;
     // External content never continues an existing conversation.
     if (untrustedInput && input?.sessionMode !== 'new') throw new RunError('외부 입력 요청은 새 세션에서만 실행할 수 있습니다.');
@@ -187,7 +191,7 @@ export class AutoPromptManager extends EventEmitter {
       ...(input.codexApprovalsReviewer ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}) };
     const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
     const unattended = internal.unattended === true;
-    const fingerprint = hash({ ...request, origin, ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}) });
+    const fingerprint = hash({ ...request, origin, ...(delegation ? { delegation } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}) });
     const previous = this.entries.get(input.requestId);
     const admitting = this.admissions.get(input.requestId);
     // Jobs saved before origins existed were fingerprinted without one; a retry of the same request still matches.
@@ -196,12 +200,12 @@ export class AutoPromptManager extends EventEmitter {
     if (admitting) return admitting.promise;
     if (previous) return copy(previous.job);
     if (this.admissions.size + [...this.entries.values()].filter(entry => !TERMINAL.has(entry.job.status)).length >= MAX_PENDING) throw new RunError('Auto Prompt 대기열이 가득 찼습니다. 진행 중인 라우팅을 기다려 주세요.', 429);
-    const promise = this.admit(input, fingerprint, origin, untrustedInput, unattended).finally(() => { this.admissions.delete(input.requestId); this.pump(); });
+    const promise = this.admit(input, fingerprint, origin, untrustedInput, unattended, internal).finally(() => { this.admissions.delete(input.requestId); this.pump(); });
     this.admissions.set(input.requestId, { fingerprint, promise });
     return promise;
   }
 
-  private async admit(input: AutoPromptRequest, fingerprint: string, origin: RunOrigin, untrustedInput: boolean, unattended: boolean): Promise<AutoPromptJob> {
+  private async admit(input: AutoPromptRequest, fingerprint: string, origin: RunOrigin, untrustedInput: boolean, unattended: boolean, context: Pick<RunAdmission, 'delegation' | 'validate'>): Promise<AutoPromptJob> {
     const snapshot = await this.snapshotFor(origin);
     // A folder that cannot be used is refused the same way whether or not the provider is ready.
     const inventory = directories(snapshot);
@@ -212,7 +216,7 @@ export class AutoPromptManager extends EventEmitter {
     const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments });
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, staged: prepared.attachments, job: {
-      id: input.requestId, origin, ...(origin.controllerId ? { exclusionRevision: this.options.remote!.matcher().revision } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
+      id: input.requestId, origin, ...(context.delegation ? { delegation: { ...context.delegation } } : {}), ...(origin.controllerId ? { exclusionRevision: this.options.remote!.matcher().revision } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
       // The owner's own turns always use Codex's automatic reviewer; only other work keeps the one it chose.
       ...(input.provider === 'codex' && input.codexApprovalsReviewer && !ownerOrigin(origin) ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}),
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
@@ -225,6 +229,7 @@ export class AutoPromptManager extends EventEmitter {
     } };
     try {
       if (this.stopping) throw new RunError('Auto Prompt가 종료되고 있습니다.', 503);
+      context.validate?.();
       this.entries.set(entry.job.id, entry);
       this.prune();
       await this.persist();
@@ -404,7 +409,7 @@ export class AutoPromptManager extends EventEmitter {
     this.update(job, { status: 'dispatching', decision });
     await this.persist(); this.emit('change');
     const attachments: AttachmentInput[] = staged.map(({ metadata, content }) => ({ name: metadata.name, mimeType: metadata.mimeType, data: content.toString('base64') }));
-    const internal: RunAdmission = { autoPromptId: job.id, validate, origin: job.origin ?? { kind: 'unknown' }, ...(job.untrustedInput ? { untrustedInput: true } : {}), ...(job.unattended ? { unattended: true } : {}) };
+    const internal: RunAdmission = { autoPromptId: job.id, validate, origin: job.origin ?? { kind: 'unknown' }, ...(job.delegation ? { delegation: job.delegation } : {}), ...(job.untrustedInput ? { untrustedInput: true } : {}), ...(job.unattended ? { unattended: true } : {}) };
     const run = decision.action === 'resume'
       ? await this.options.runs.enqueue(decision.sessionId!, job.prompt, { attachments, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}) }, internal)
       : (await this.options.runs.create({ provider: job.provider, cwd, prompt: job.prompt, attachments, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}),

@@ -165,12 +165,15 @@ export interface RunOrigin {
    */
   controllerId?: string;
 }
+/** Authenticated caller links for reporting, independent of the authority in RunOrigin. */
+export interface RunDelegation { parentRunId: string; rootRunId: string }
 export interface Run {
   id: string;
   sessionId: string;
   /** Set only in a controller's page, for an item of a joined computer: that computer's id. Servers never send it. */
   node?: string;
   origin?: RunOrigin;
+  delegation?: RunDelegation;
   /**
    * Trigger work set to approve automatically. Tower's own turns always run in the provider's automatic approval
    * mode; this marks the automated work that does too.
@@ -211,9 +214,15 @@ export interface Run {
    */
   /** Tower's own request that a running turn wrap up for a forced worker update; not work of its own. */
   updateWrapUp?: true;
+  /** A decision notice belongs only to the named live turn; it never launches a provider. */
+  permissionNotice?: { targetRunId: string };
+  /** Durable decision receipts, including cancelled and consumed continuations. */
+  permissionRequestIds?: string[];
+  /** Durable evidence of an explicit owner stop, distinct from provider/update cancellation. */
+  ownerStopped?: true;
   scheduled?: { at: string; afterRunId: string; backgroundRecoveryAttempt?: number;
     /** Tower's own continuation for a turn a forced worker update ended; watchers of `afterRunId` follow it. */
-    resume?: 'update' };
+    resume?: 'update' | 'permission' };
   /**
    * The turn has answered but background work it started (a background command, Monitor or agent) is still running
    * inside the provider process. Tower keeps the turn open so the agent can pick up the results; `since` is when the
@@ -309,6 +318,7 @@ export interface AutoPromptJob {
   /** Set only in a controller's page, for an item of a joined computer: that computer's id. Servers never send it. */
   node?: string;
   origin?: RunOrigin;
+  delegation?: RunDelegation;
   /** For remote work: the remote-sharing exclusion revision its candidates were filtered with. */
   exclusionRevision?: number;
   unattended?: boolean;

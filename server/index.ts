@@ -261,7 +261,7 @@ async function main() {
       }
     }
   };
-  const admit = (context?: RequestContext) => ({ origin: context?.origin ?? OWNER, ...(context?.requestId ? { requestId: context.requestId } : {}), ...(context?.origin ? {} : { authored: true }) });
+  const admit = (context?: RequestContext) => ({ origin: context?.origin ?? OWNER, ...(context?.callerCapability ? { callerCapability: context.callerCapability } : {}), ...(context?.requestId ? { requestId: context.requestId } : {}), ...(context?.origin ? {} : { authored: true }) });
   // The worker has indexed native sessions before it answers, so the session list is complete here.
   const history = nativeHistory(runs);
   const listeners = new Set<() => void>();
@@ -442,7 +442,7 @@ async function main() {
       const run = await runs.enqueue(id, prompt, attachments, admit(context));
       // A message sent from this computer's page while the conversation works may belong to that work; the answer does
       // not wait for the judgment. Requests from a controlling computer (with `context`) are left as they are.
-      if (!context) void insertIfItBelongs({ engine: () => decisions.engine('steerTiming'), canTarget: () => runs.supports('steerTargets'), runs: () => runs.list(),
+      if (!context?.origin) void insertIfItBelongs({ engine: () => decisions.engine('steerTiming'), canTarget: () => runs.supports('steerTargets'), runs: () => runs.list(),
         steer: (runId, targetRunId) => runs.steer(runId, { targetRunId }), record: entry => decisions.record(entry), claim: runId => judgedMessages.claim(runId) }, run).catch(() => {});
       return run;
     },

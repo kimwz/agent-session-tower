@@ -8,6 +8,8 @@ import { RunManager, type RunAdmission } from '../../../server/runs/manager.js';
 import { AttachmentStore } from '../../../server/stores/attachments.js';
 import { SteeringError, type SteeringInput } from '../../../server/runs/steering.js';
 import type { CodexStdioResult } from '../../../server/runs/codex-stdio.js';
+import type { PermissionRequest } from '../../../shared/permissions.js';
+import { randomUUID } from 'node:crypto';
 import type { Run, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
 
@@ -258,4 +260,117 @@ test('an insert meant for one turn is refused once another turn runs, and the me
   const delivered = await f.manager.steer(second.id, { targetRunId: first.id });
   assert.equal(delivered.steering?.state, 'delivered');
   assert.equal(delivered.steering?.targetRunId, first.id);
+});
+
+function permissionRequest(f: Awaited<ReturnType<typeof fixture>>, runId: string, status: PermissionRequest['status'] = 'approved'): PermissionRequest {
+  return { id: randomUUID(), sessionId: f.session.id, runId, status, rule: { kind: 'command', value: 'gh pr merge', providers: ['codex'], scope: 'project', cwd: f.session.cwd }, reason: 'Fixture', cwd: f.session.cwd, createdAt: new Date().toISOString() };
+}
+
+test('permission approval persists one protected next turn and a turn-only notice, preserving authority', async t => {
+  const f = await fixture(t); const parent = await f.running({ kind: 'owner' });
+  const request = permissionRequest(f, parent.id);
+  const resume = await f.manager.permissionDecision(request, 'Approved for the next provider turn.');
+  assert.equal(resume.scheduled?.resume, 'permission'); assert.equal(resume.status, 'queued');
+  assert.equal(f.controls.length, 1); assert.equal(f.inputs.length, 1);
+  assert.match(f.inputs[0].prompt, /next provider turn/);
+  const notice = f.manager.list().find(run => run.permissionNotice)!;
+  assert.equal(notice.steering?.targetRunId, parent.id);
+  assert.equal((await f.manager.permissionDecision(request, 'Repeated')).id, resume.id);
+  assert.equal(f.inputs.length, 1);
+  await assert.rejects(f.manager.steer(resume.id), /cannot be inserted/);
+  f.controls[0].finish();
+  await until(() => f.controls.length === 2 && f.read(resume.id).status === 'running');
+  assert.deepEqual(f.read(resume.id).origin, parent.origin);
+  f.controls[1].finish(); await until(() => f.read(resume.id).status === 'completed');
+  assert.equal((await f.manager.permissionDecision(request, 'Late retry')).id, resume.id);
+  assert.equal(f.controls.length, 2);
+});
+
+test('approvals of steering aliases merge into one next turn with separate durable receipts', async t => {
+  const f = await fixture(t); const { first, second } = await f.pair(); await f.manager.steer(second.id);
+  const one = permissionRequest(f, second.id); const two = permissionRequest(f, first.id);
+  const [a, b] = await Promise.all([f.manager.permissionDecision(one, 'One'), f.manager.permissionDecision(two, 'Two')]);
+  assert.equal(a.id, b.id); assert.equal(f.read(a.id).scheduled?.afterRunId, first.id);
+  assert.deepEqual(new Set(f.read(a.id).permissionRequestIds), new Set([one.id, two.id]));
+  f.controls[0].finish(); await until(() => f.controls.length === 2); f.controls[1].finish();
+});
+
+test('permission denial and explicit parent cancellation never launch a continuation', async t => {
+  const f = await fixture(t); const parent = await f.running();
+  const denied = await f.manager.permissionDecision(permissionRequest(f, parent.id, 'denied'), 'Refused.');
+  assert.equal(denied.status, 'cancelled'); assert.equal(denied.scheduled, undefined);
+  const request = permissionRequest(f, parent.id); const resume = await f.manager.permissionDecision(request, 'Allowed.');
+  await f.manager.cancel(parent.id); await until(() => f.read(resume.id).status === 'cancelled');
+  assert.equal((await f.manager.permissionDecision(request, 'Retry')).status, 'cancelled');
+  assert.equal(f.controls.length, 1);
+});
+
+test('failed permission notice is never launched as standalone work and a newer owner instruction supersedes resume', async t => {
+  const f = await fixture(t, { onSteer: async () => { throw new SteeringError('Not delivered', 'rejected'); } });
+  const parent = await f.running(); const request = permissionRequest(f, parent.id);
+  const resume = await f.manager.permissionDecision(request, 'Allowed.');
+  const notice = f.manager.list().find(run => run.permissionNotice)!;
+  assert.equal(notice.status, 'cancelled'); assert.equal(notice.steering, undefined);
+  await f.manager.enqueue(f.session.id, 'New owner instruction');
+  assert.equal(f.read(resume.id).status, 'cancelled');
+  f.controls[0].finish(); await until(() => f.controls.length === 2);
+  assert.equal((await f.manager.permissionDecision(request, 'Retry')).status, 'cancelled');
+  f.controls[1].finish(); assert.equal(f.controls.length, 2);
+});
+
+test('permission continuation survives queued restore but never restarts an uncertain parent', async t => {
+  const f = await fixture(t); const parent = await f.running(); const request = permissionRequest(f, parent.id);
+  const resume = await f.manager.permissionDecision(request, 'Allowed.'); await f.manager.flushState();
+  // Read the persisted state using another manager with no provider transport: any launch is forbidden.
+  const restored = new RunManager({ stateDir: f.stateDir, getSession: () => f.session, refreshSessions: async () => {}, pollMs: 10000,
+    spawnProcess: () => { throw new Error('Native provider forbidden'); }, findExecutable: async () => { throw new Error('Launch forbidden'); } });
+  await restored.start(); t.after(() => restored.close());
+  assert.equal(restored.list().find(run => run.id === parent.id)?.status, 'error');
+  assert.equal((await restored.permissionDecision(request, 'Retry')).id, resume.id);
+  await until(() => restored.list().find(run => run.id === resume.id)?.status === 'cancelled');
+});
+
+
+test('forced update merges permission receipts into one continuation rather than starting both', async t => {
+  const f = await fixture(t); const parent = await f.running(); const request = permissionRequest(f, parent.id);
+  const resume = await f.manager.permissionDecision(request, 'Approved.');
+  f.manager.beginUpdateDrain(Date.now() + 60000, () => false); f.manager.driveUpdateDrain();
+  await until(() => f.inputs.length === 2);
+  f.controls[0].finish(); await until(() => f.read(parent.id).status === 'completed');
+  assert.equal(f.read(resume.id).scheduled?.resume, 'update');
+  assert.deepEqual(f.read(resume.id).permissionRequestIds, [request.id]);
+  assert.equal(f.manager.list().filter(run => run.status === 'queued' && run.scheduled?.afterRunId === parent.id).length, 1);
+  f.manager.endUpdateDrain(); await until(() => f.controls.length === 2); f.controls[1].finish();
+  assert.equal((await f.manager.permissionDecision(request, 'Retry')).id, resume.id);
+});
+
+test('a parent completed while waiting for permission resumes, but a closed conversation does not', async t => {
+  const f = await fixture(t); const parent = await f.running(); f.controls[0].finish(); await until(() => f.read(parent.id).status === 'completed');
+  const denied = await f.manager.permissionDecision(permissionRequest(f, parent.id), 'Approved.', { closed: true });
+  assert.equal(denied.status, 'cancelled'); assert.equal(f.inputs.length, 0);
+  const request = permissionRequest(f, parent.id); const resume = await f.manager.permissionDecision(request, 'Approved.');
+  await until(() => f.controls.length === 2); assert.equal(f.inputs.length, 0); f.controls[1].finish();
+  assert.match(resume.prompt, /Continue only unfinished work/);
+});
+
+
+test('an exact completed task outcome and missing requesting run cannot restart work', async t => {
+  const f = await fixture(t); const parent = await f.running(); f.controls[0].finish(); await until(() => f.read(parent.id).status === 'completed');
+  const ended = f.read(parent.id);
+  f.session.outcome = 'done'; f.session.lastRequestAt = ended.startedAt; f.session.updatedAt = ended.finishedAt!;
+  const receipt = await f.manager.permissionDecision(permissionRequest(f, parent.id), 'Approved.');
+  assert.equal(receipt.status, 'cancelled'); assert.equal(f.controls.length, 1);
+  await assert.rejects(f.manager.permissionDecision(permissionRequest(f, randomUUID()), 'Approved.'), /can no longer be reached/);
+});
+
+test('a saved queued turn-only notice is cancelled on restore and owner stop evidence survives', async t => {
+  const f = await fixture(t); const parent = await f.running(); await f.manager.cancel(parent.id); await f.manager.flushState();
+  const saved = JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8')) as Run[];
+  saved.push({ id: randomUUID(), sessionId: f.session.id, prompt: 'Turn only', createdAt: new Date().toISOString(), output: '', status: 'queued', permissionNotice: { targetRunId: parent.id } });
+  await writeFile(join(f.stateDir, 'runs.json'), JSON.stringify(saved));
+  const restored = new RunManager({ stateDir: f.stateDir, getSession: () => f.session, refreshSessions: async () => {}, pollMs: 10000,
+    spawnProcess: () => { throw new Error('Native provider forbidden'); } });
+  await restored.start(); t.after(() => restored.close());
+  assert.equal(restored.list().find(run => run.id === parent.id)?.ownerStopped, true);
+  assert.equal(restored.list().find(run => run.permissionNotice)?.status, 'cancelled');
 });
