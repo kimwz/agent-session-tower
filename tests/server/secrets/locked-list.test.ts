@@ -1,6 +1,6 @@
 import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -52,6 +52,13 @@ async function scenario(f: Awaited<ReturnType<typeof fixture>>) {
   await service.revoke(target, [revoked.id]);
   const stale = await service.create({ name: 'STALE_GRANT', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'manual', connect: true });
   await service.update({ id: stale.id, value: `${CANARY}-v2` });
+  // An automatic grant issued before a value change no longer matches the secret's version.
+  const autoStale = await service.create({ name: 'AUTO_STALE', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'auto' });
+  await service.list(f.context); await service.update({ id: autoStale.id, value: `${CANARY}-v2` });
+  // A grant with a deadline that passes while the vault is locked.
+  const deadline = await service.create({ name: 'DEADLINE', kind: 'scalar', scope: 'project', projectId: project.id, value: CANARY, target, activation: 'manual' });
+  const deadlineRule = service.overview().rules.find(rule => rule.secretIds.includes(deadline.id))!;
+  await service.setRule({ ...deadlineRule, maxTtlMs: 60_000 }); await service.connect(target, [deadline.id]);
 }
 
 const names = (list: SecretMetadata[]) => list.map(item => item.name).sort();
@@ -61,7 +68,7 @@ const wire = (value: unknown) => JSON.parse(JSON.stringify(value));
 test('locked listing matches unlocked authorization, including operations, fields, grants and expiry', async t => {
   const f = await fixture(t); await scenario(f);
   const unlocked = await f.service.list(f.context);
-  assert.deepEqual(names(unlocked), ['DOTENV', 'EXPIRING', 'GLOBAL_AUTO', 'OVERLAP', 'PROJECT_MANUAL_CONNECTED', 'TASK_ONLY']);
+  assert.deepEqual(names(unlocked), ['DEADLINE', 'DOTENV', 'EXPIRING', 'GLOBAL_AUTO', 'OVERLAP', 'PROJECT_MANUAL_CONNECTED', 'TASK_ONLY']);
   assert.deepEqual(unlocked.find(item => item.name === 'OVERLAP')!.operations, ['discover']);
   assert.deepEqual(unlocked.find(item => item.name === 'DOTENV')!.fields, ['A']);
   await f.service.lock();
@@ -75,7 +82,7 @@ test('locked listing matches unlocked authorization, including operations, field
   const lockedLater = restarted.lockedList(f.target.sessionId, f.root, f.startedAt, f.target);
   await restarted.unlock(PASSWORD);
   assert.deepEqual(wire(lockedLater), wire(await restarted.list(f.context)));
-  assert.ok(!names(lockedLater).includes('EXPIRING'));
+  assert.ok(!names(lockedLater).includes('EXPIRING')); assert.ok(!names(lockedLater).includes('DEADLINE'));
 });
 
 test('a session without a task lists only what a fresh task would, and closed tasks stay closed', async t => {
@@ -85,7 +92,7 @@ test('a session without a task lists only what a fresh task would, and closed ta
   await f.service.unlock(PASSWORD);
   const bound = await f.service.bindRun('codex:session-b', f.root, new Date().toISOString());
   assert.deepEqual(wire(fresh), wire(await f.service.list({ ...bound, runId: 'run-b' })));
-  assert.deepEqual(names(fresh), ['DOTENV', 'EXPIRING', 'GLOBAL_AUTO', 'OVERLAP', 'REVOKED'], 'a revocation belongs to the task it was made for');
+  assert.deepEqual(names(fresh), ['AUTO_STALE', 'DOTENV', 'EXPIRING', 'GLOBAL_AUTO', 'OVERLAP', 'REVOKED'], 'a revocation belongs to the task it was made for');
 
   await f.service.closeTask(f.target.taskId); await f.service.lock();
   assert.throws(() => f.service.lockedList(f.target.sessionId, f.root, f.startedAt, f.target), /Task identity denied/);
@@ -97,8 +104,20 @@ test('the plaintext index holds names but no value or password, and a foreign in
   const text = await readFile(join(f.stateDir, 'secrets', 'index.json'), 'utf8');
   assert.match(text, /GLOBAL_AUTO/); assert.doesNotMatch(text, new RegExp(`${CANARY}|${PASSWORD}`));
   const index = JSON.parse(text); index.vaultId = randomUUID();
-  const { writeFile } = await import('node:fs/promises'); await writeFile(join(f.stateDir, 'secrets', 'index.json'), JSON.stringify(index));
+  await writeFile(join(f.stateDir, 'secrets', 'index.json'), JSON.stringify(index));
   assert.deepEqual((await f.restart()).lockedList(f.target.sessionId, f.root, f.startedAt), []);
+});
+
+test('a failed index write never leaves an older index listing names, in memory or after restart', async t => {
+  const f = await fixture(t); await scenario(f);
+  const path = join(f.stateDir, 'secrets', 'index.json'); const previous = await readFile(path, 'utf8');
+  await rm(path); await mkdir(join(path, 'blocked'), { recursive: true });
+  await f.service.revoke(f.target, f.service.overview().secrets.map(secret => secret.id));
+  assert.deepEqual(await f.service.list(f.context), []);
+  await f.service.lock();
+  assert.deepEqual(f.service.lockedList(f.target.sessionId, f.root, f.startedAt, f.target), []);
+  await rm(path, { recursive: true }); await writeFile(path, previous);
+  assert.deepEqual((await f.restart()).lockedList(f.target.sessionId, f.root, f.startedAt, f.target), [], 'an index from an earlier save is not trusted');
 });
 
 class FixtureRuns {
@@ -130,6 +149,7 @@ test('locked tools list names and turn any use into an unlock request; ineligibl
   await assert.rejects(runtime.tool(capability, 'secrets_run', { operationId: 'locked-use', command: process.execPath, args: ['-e', ''], env: { KEY: reference } }),
     (error: Error & { statusCode?: number }) => error.statusCode === 423 && error.message === SECRET_LOCKED_USE);
   await assert.rejects(runtime.tool(capability, 'secrets_cli', { argv: ['fingerprint', reference] }), (error: Error & { statusCode?: number }) => error.statusCode === 423);
+  await assert.rejects(runtime.tool(capability, 'secrets_cli', { operationId: 'locked-cli', argv: ['run', '--env', `KEY=${reference}`, '--', process.execPath, '-e', ''] }), (error: Error & { statusCode?: number }) => error.statusCode === 423);
 
   runs.running.find(run => run.id === capability.runId)!.status = 'completed';
   await assert.rejects(runtime.tool(capability, 'secrets_list', {}), (error: Error & { statusCode?: number }) => error.statusCode === 403);

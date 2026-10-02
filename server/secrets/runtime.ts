@@ -155,7 +155,8 @@ export class SecretRuntime {
   /** Names stay listable while locked; using one asks the agent to get the owner's unlock. */
   private async lockedTool(capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>): Promise<unknown> {
     const { run, session } = await this.ownerRun(capability);
-    const listing = name === 'secrets_list' || (name === 'secrets_cli' && parseSecretCli(schemas.secrets_cli.parse(args).argv).kind === 'list');
+    const argv = name === 'secrets_cli' ? schemas.secrets_cli.parse(args).argv : [];
+    const listing = name === 'secrets_list' || (argv[0] === 'list' && parseSecretCli(argv).kind === 'list');
     if (!listing) throw fail(SECRET_LOCKED_USE, 423);
     if (!this.options.service.status().initialized) return { secrets: [], unavailableSources: [], usage: descriptions.secrets_cli };
     const bound = this.runTasks.get(run.id);
