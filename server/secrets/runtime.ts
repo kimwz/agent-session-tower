@@ -137,8 +137,8 @@ export class SecretRuntime {
     if (this.options.service.status().locked) return this.lockedTool(capability, name, args);
     try { return await this.unlockedTool(capability, name, args); }
     catch (error) {
-      // Locked by the owner or a failed save during this call.
-      if (this.options.service.status().locked && !(error as { statusCode?: number }).statusCode) throw fail(SECRET_LOCKED_USE, 423);
+      // Locked by the owner or a failed save during this call: answer as the locked path would.
+      if (this.options.service.status().locked && !(error as { statusCode?: number }).statusCode) return this.lockedTool(capability, name, args);
       throw error;
     }
   }

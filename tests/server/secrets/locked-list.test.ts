@@ -168,6 +168,8 @@ test('without an index the locked list says names are unknown, and a vault-less 
   const unknown = await upgradedRuntime.tool(capability, 'secrets_list', {}) as { locked: boolean; notice: string; secrets: unknown[] };
   assert.deepEqual([unknown.locked, unknown.notice, unknown.secrets], [true, SECRET_LOCKED_UNINDEXED, []]);
   // The first unlock writes the index, so the next lock lists names for the same unbound run.
+  await upgraded.unlock(PASSWORD); await upgraded.lock();
+  assert.ok(upgraded.lockedList(f.target.sessionId, f.root, f.startedAt), 'unlocking alone writes the index');
   await upgraded.unlock(PASSWORD); await upgraded.create({ name: 'AFTER_UPGRADE', kind: 'scalar', scope: 'global', value: CANARY, allProjects: true, target: f.target, activation: 'auto' }); await upgraded.lock();
   const listed = await upgradedRuntime.tool(capability, 'secrets_list', {}) as { secrets: SecretMetadata[] };
   assert.deepEqual(names(listed.secrets), ['AFTER_UPGRADE']);
@@ -177,4 +179,16 @@ test('without an index the locked list says names are unknown, and a vault-less 
   const emptyRuntime = new SecretRuntime({ stateDir: emptyState, service: empty, runs }); t.after(() => emptyRuntime.close());
   assert.deepEqual((await emptyRuntime.tool(capability, 'secrets_list', {}) as { secrets: unknown[] }).secrets, []);
   await assert.rejects(emptyRuntime.tool(capability, 'secrets_run', { operationId: 'no-vault', command: process.execPath, env: { KEY: 'NAME' } }), (error: Error & { statusCode?: number }) => error.statusCode === 404 && error.message === SECRET_NO_VAULT);
+});
+
+test('a lock that lands during an unlocked call still answers as the locked path', async t => {
+  const f = await fixture(t); await scenario(f);
+  const runs = new FixtureRuns(); const runtime = new SecretRuntime({ stateDir: f.stateDir, service: f.service, runs }); t.after(() => runtime.close());
+  const capability = runs.add(f.root);
+  const bindRun = f.service.bindRun.bind(f.service);
+  f.service.bindRun = async (...args) => { await f.service.lock(); return bindRun(...args); };
+  const listed = await runtime.tool(capability, 'secrets_list', {}) as { locked: boolean; secrets: SecretMetadata[] };
+  assert.equal(listed.locked, true); assert.ok(names(listed.secrets).includes('GLOBAL_AUTO'));
+  await f.service.unlock(PASSWORD);
+  await assert.rejects(runtime.tool(capability, 'secrets_fingerprint', { reference: listed.secrets[0].reference }), (error: Error & { statusCode?: number }) => error.statusCode === 423 && error.message === SECRET_LOCKED_USE);
 });
