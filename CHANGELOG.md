@@ -4,7 +4,7 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.105.0] - 2026-10-03
+## [1.106.0] - 2026-10-03
 
 ### Added
 - Explicit once reservations that are consumed only once and archived automatically, with retained run/audit history and a separate archived trigger list.
@@ -12,6 +12,13 @@ format, and saved browser preferences are the compatibility surface.
 
 ### Changed
 - Reviews and native checks use the computer's existing Claude/Codex CLI login by default; nonpersistent execution and test data separation no longer require a new authenticated profile.
+
+## [1.105.0] - 2026-10-03
+
+### Changed
+- List secret names, references and permitted operations while the vault is locked, from a plaintext index (no values or keys) of its last unlocked state. Discovering keys no longer makes agents ask for an unlock.
+- Turn the use of a secret while the vault is locked into a clear request: the agent asks the owner to unlock it, naming the secret it needs, and retries after they confirm.
+
 
 ## [1.104.3] - 2026-10-02
 
