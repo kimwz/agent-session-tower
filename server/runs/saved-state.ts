@@ -36,6 +36,8 @@ export function isSavedRun(value: unknown): value is Run {
     && (run.delegation === undefined || isSavedDelegation(run.delegation))
     && (run.steering === undefined || isSavedSteering(run.steering, run))
     && (run.ownerStopped === undefined || run.ownerStopped === true)
+    && (run.permissionRequestedAt === undefined || (typeof run.permissionRequestedAt === 'string' && Number.isFinite(Date.parse(run.permissionRequestedAt))))
+    && (run.permissionDecisionRevisions === undefined || (typeof run.permissionDecisionRevisions === 'object' && run.permissionDecisionRevisions !== null && Object.entries(run.permissionDecisionRevisions).every(([id, revision]) => UUID.test(id) && typeof revision === 'string')))
     && (run.permissionRequestIds === undefined || (Array.isArray(run.permissionRequestIds) && run.permissionRequestIds.every(id => typeof id === 'string' && UUID.test(id))))
     && (run.permissionNotice === undefined || (typeof run.permissionNotice === 'object' && run.permissionNotice !== null && typeof run.permissionNotice.targetRunId === 'string' && UUID.test(run.permissionNotice.targetRunId)))
     && (run.scheduled === undefined || isSavedSchedule(run.scheduled, run))

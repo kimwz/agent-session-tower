@@ -1,3 +1,4 @@
+import { latestNativeUserMessage } from './native-user-message.js';
 import { installLaunchShims, launchMarksDir } from '../sessions/launch-marks.js';
 import { finishedAutomationSessionIds } from '../../shared/automation-sessions.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -525,7 +526,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   // Without the shims a helper's launcher is proven only while the process tree shows it; the worker still starts.
   const shims = await installLaunchShims(stateDir).catch(error => { console.error(`Launch shims were not installed: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
   const terminals = new WorkspaceTerminals({ keepAliveOnDisconnect: true });
-  const runs = new RunManager({ stateDir, ...(shims ? { launchMarks: { shims, marks: launchMarksDir(stateDir) } } : {}), getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true),
+  const runs: RunManager = new RunManager({ stateDir, ...(shims ? { launchMarks: { shims, marks: launchMarksDir(stateDir) } } : {}), getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true),
+    latestUserMessage: id => latestNativeUserMessage(runs, id, nativeId => sessions.detail(nativeId, undefined, 200)),
     openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }), trustWorkspace,
     // Restored turns wait until tools, gates and limits below are set up.
     holdUntilReady: true });

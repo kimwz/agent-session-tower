@@ -42,6 +42,8 @@ interface RunnerOptions {
   isExternallyLinked?: (sessionIds: readonly string[]) => boolean;
   getSession: (id: string) => Session | undefined;
   refreshSessions: () => Promise<void>;
+  /** Latest native user record, read afresh for permission admission; never inferred from activity timestamps. */
+  latestUserMessage?: (sessionId: string) => Promise<{ text: string; timestamp: string } | undefined>;
   stateDir?: string;
   /** How the master's Claude sign-in is checked before its turn (tests replace it). */
   checkClaudeSubscription?: typeof checkClaudeSubscription;
@@ -275,6 +277,23 @@ export class RunManager extends EventEmitter {
   private async prepareLaunch(run: Run): Promise<void> {
     // A look that fails leaves the gate with what it knows; a folder it cannot tell about counts as private.
     if (run.status === 'queued') await this.launchPrepare?.(run).catch(() => {});
+    if (run.status === 'queued' && run.permissionRequestIds?.length && run.scheduled) await this.checkPermissionUserMessage(run);
+  }
+
+  private async checkPermissionUserMessage(run: Run): Promise<void> {
+    const observed = this.getSession(run.sessionId)?.lastRequestAt;
+    let latest: { text: string; timestamp: string } | undefined;
+    try { latest = await this.options.latestUserMessage?.(run.sessionId); }
+    catch { if (run.status === 'queued') this.supersede(run, 'The latest native user instruction could not be verified.'); return; }
+    if (run.status !== 'queued') return;
+    const recorded = this.getSession(run.sessionId)?.lastRequestAt ?? observed;
+    const newest = Math.max(Date.parse(recorded ?? '') || 0, Date.parse(latest?.timestamp ?? '') || 0);
+    if (newest <= Date.parse(run.permissionRequestedAt ?? run.createdAt)) return;
+    const ownNotice = latest && Date.parse(latest.timestamp) === newest && [...this.runs.values()].some(notice =>
+      notice.sessionId === run.sessionId && notice.steering?.state === 'delivered' && notice.steering.targetRunId === run.scheduled!.afterRunId
+      && (notice.permissionNotice?.targetRunId === run.scheduled!.afterRunId || notice.updateWrapUp)
+      && notice.prompt === latest.text);
+    if (!ownNotice) this.supersede(run, 'A newer native user instruction replaced the permission continuation, or its source could not be confirmed.');
   }
 
   /** Checked again at the last moment before a provider is started, after every asynchronous step. */
@@ -711,10 +730,24 @@ export class RunManager extends EventEmitter {
     return adapter?.canSteer?.() && adapter.steer ? { target, adapter } : { blocked: 'starting' };
   }
 
+  private readonly permissionDeliveries = new Map<string, Promise<Run>>();
+
+  permissionDecision(request: PermissionRequest, prompt: string, options: { closed?: boolean } = {}): Promise<Run> {
+    const pending = this.permissionDeliveries.get(request.id);
+    if (pending) return pending;
+    const delivery = this.recordPermissionDecision(request, prompt, options);
+    this.permissionDeliveries.set(request.id, delivery);
+    void delivery.finally(() => this.permissionDeliveries.delete(request.id)).catch(() => {});
+    return delivery;
+  }
+
   /** Records a permission decision once; approval needs a fresh provider turn, never an insert. */
-  async permissionDecision(request: PermissionRequest, prompt: string, options: { closed?: boolean } = {}): Promise<Run> {
+  private async recordPermissionDecision(request: PermissionRequest, prompt: string, options: { closed?: boolean } = {}): Promise<Run> {
     const existing = [...this.runs.values()].find(run => run.permissionRequestIds?.includes(request.id));
-    if (existing) { await this.flush(); return shown(existing); }
+    const revision = `${request.status}:${request.decidedAt ?? request.createdAt}`;
+    const reopenedDecision = existing?.error && existing.permissionDecisionRevisions?.[request.id]?.startsWith('withdrawn:')
+      && request.status !== 'withdrawn' && request.status !== 'pending' && existing.permissionDecisionRevisions[request.id] !== revision;
+    if (existing && !reopenedDecision) { await this.flush(); if (!existing.scheduled && existing.error) throw new RunError(existing.error, 409); return shown(existing); }
     let target = request.runId ? this.runs.get(request.runId) : undefined;
     const visited = new Set<string>();
     while (target?.steering && !visited.has(target.id)) { visited.add(target.id); target = this.runs.get(target.steering.targetRunId); }
@@ -739,19 +772,38 @@ export class RunManager extends EventEmitter {
       ...(target.delegation ? { delegation: { ...target.delegation } } : {}), ...(target.instructions?.required ? { instructions: { ...target.instructions } } : {}),
       ...(target.codexApprovalsReviewer ? { codexApprovalsReviewer: target.codexApprovalsReviewer } : {}),
       ...(target.unattended ? { unattended: true } : {}), ...(target.model ? { model: target.model } : {}), ...(target.effort ? { effort: target.effort } : {}) };
+    if (!approved) continuation.error = 'Permission decision notice could not be delivered to its requesting turn.';
+    continuation.permissionRequestedAt = !continuation.permissionRequestedAt || Date.parse(request.createdAt) < Date.parse(continuation.permissionRequestedAt)
+      ? request.createdAt : continuation.permissionRequestedAt;
+    continuation.permissionDecisionRevisions = { ...(continuation.permissionDecisionRevisions ?? {}), [request.id]: revision };
     continuation.permissionRequestIds = [...(continuation.permissionRequestIds ?? []), request.id];
     if (merge) continuation.prompt += `\n${prompt.replace(/the next provider turn/g, 'this provider turn')}`;
     this.runs.set(continuation.id, continuation);
     this.changed(); await this.flush();
+    // Check the native owner record before our notice can become its latest user message.
+    if (approved && continuation.status === 'queued') { await this.checkPermissionUserMessage(continuation); await this.flush(); }
     // Persisted intent precedes any notice. A failed/uncertain insert never becomes a separate native turn.
     if (!stopped && target.status === 'running' && !this.stopping && (!approved || continuation.status === 'queued')) {
       const notice: Run = { id: randomUUID(), sessionId: target.sessionId, origin: target.origin ?? { kind: 'unknown' },
-        prompt: `${TOWER_NOTICE} ${approved ? 'The permission rule was approved and applies from the next provider turn. Bring the current step to a safe stopping point and end this turn normally. Tower will resume unfinished work in a fresh turn; do not repeat completed actions.' : prompt}`,
+        prompt: `${TOWER_NOTICE} [Permission decision ${request.id}] ${approved ? 'The permission rule was approved and applies from the next provider turn. Bring the current step to a safe stopping point and end this turn normally. Tower will resume unfinished work in a fresh turn; do not repeat completed actions.' : prompt}`,
         status: 'queued', createdAt: now, output: '', permissionNotice: { targetRunId: target.id } };
       this.runs.set(notice.id, notice); this.admissions.add(notice.id); this.changed(); await this.flush(); this.admissions.delete(notice.id);
-      try { await this.steer(notice.id, { targetRunId: target.id }); }
+      try {
+        await this.steer(notice.id, { targetRunId: target.id });
+        if (!approved && notice.steering?.state === 'sending') await new Promise<void>((resolve, reject) => {
+          const finish = (delivered: boolean) => { clearTimeout(timer); this.off('change', check); if (delivered) resolve(); else reject(new Error('Permission decision notice delivery could not be confirmed.')); };
+          const check = () => {
+            if (notice.steering?.state === 'sending' && target.status === 'running' && !this.stopping) return;
+            finish(notice.steering?.state === 'delivered');
+          };
+          const timer = setTimeout(() => finish(false), 30_000); timer.unref();
+          this.on('change', check); check();
+        });
+        if (!approved && notice.steering?.state === 'delivered') { delete continuation.error; this.changed(); await this.flush(); }
+      }
       catch { if (notice.status === 'queued') { notice.status = 'cancelled'; notice.finishedAt = new Date().toISOString(); this.changed(); await this.flush(); } }
     }
+    if (!approved && continuation.error) throw new RunError(continuation.error, 409);
     void this.pump();
     return shown(continuation);
   }
@@ -1261,9 +1313,9 @@ export class RunManager extends EventEmitter {
     }
     const privateConfig = mcpServers && Object.values(mcpServers).some(server => server.env) ? await privateMcpConfig(mcpServers) : undefined;
     // Writing the file yielded; nothing may have stopped the run in the meantime.
-    if (privateConfig) await this.prepareLaunch(run);
-    if (privateConfig && (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session))) {
-      privateConfig.remove(); this.reservedSessions.delete(session.id); return;
+    if (privateConfig || run.permissionRequestIds?.length) await this.prepareLaunch(run);
+    if ((privateConfig || run.permissionRequestIds?.length) && (run.status !== 'queued' || this.stopping || this.refusedAtLaunch(run, session))) {
+      privateConfig?.remove(); this.reservedSessions.delete(session.id); return;
     }
     if (mcpServers) args.push('--mcp-config', privateConfig?.path ?? JSON.stringify({ mcpServers }));
     let child: ChildProcessWithoutNullStreams;

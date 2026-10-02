@@ -218,6 +218,10 @@ export interface Run {
   permissionNotice?: { targetRunId: string };
   /** Durable decision receipts, including cancelled and consumed continuations. */
   permissionRequestIds?: string[];
+  /** A withdrawn request may be reopened and decided again; a new decision is not a delivery retry. */
+  permissionDecisionRevisions?: Record<string, string>;
+  /** Earliest request represented by this continuation; native replacement checks begin before approval. */
+  permissionRequestedAt?: string;
   /** Durable evidence of an explicit owner stop, distinct from provider/update cancellation. */
   ownerStopped?: true;
   scheduled?: { at: string; afterRunId: string; backgroundRecoveryAttempt?: number;

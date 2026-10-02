@@ -4,6 +4,8 @@ import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile
 import { homedir, tmpdir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 import { test } from 'node:test';
+import { CapabilityRegistry } from '../../../server/api/mcp.js';
+import { runToolResolver } from '../../../server/api/run-tools.js';
 import { RunManager } from '../../../server/runs/manager.js';
 import { buildCreateArgs, buildResumeArgs } from '../../../server/runs/claude-args.js';
 import { findExecutable } from '../../../server/providers/discovery.js';
@@ -22,7 +24,7 @@ function makeSession(cwd: string, overrides: Partial<Session> = {}): Session {
 }
 
 
-async function fixture(options: { permissionMode?: string; mode?: string; provider?: 'codex' | 'claude'; busy?: boolean; maxConcurrent?: number; refreshError?: boolean; path?: string; shebang?: boolean; openCodexBridge?: OpenCodexBridge; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools']; contextFrames?: unknown[] } = {}) {
+async function fixture(options: { inheritedCaller?: string; permissionMode?: string; mode?: string; provider?: 'codex' | 'claude'; busy?: boolean; maxConcurrent?: number; refreshError?: boolean; path?: string; shebang?: boolean; openCodexBridge?: OpenCodexBridge; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools']; contextFrames?: unknown[] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'agent-monitor-runner-'));
   const script = join(directory, 'provider.mjs');
   await writeFile(script, `#!/usr/bin/env node
@@ -30,6 +32,7 @@ import { writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { startCodexFixture } from ${JSON.stringify(new URL('./fixtures/provider-stdio.mjs', import.meta.url).href)};
+writeFileSync(process.env.RECEIVED_PATH + '.env', JSON.stringify({ caller: process.env.TOWER_CALLER_CAPABILITY }));
 let prompt = '';
 process.stdin.setEncoding('utf8');
 const claudeInput = process.argv.includes('-p');
@@ -74,7 +77,7 @@ function processPrompt() {
     getSession: (id) => sessions.get(id), refreshSessions: async () => { refreshes++; if(options.refreshError) throw new Error('activity unavailable'); }, stateDir,
     pollMs: 25, maxConcurrent: options.maxConcurrent, findExecutable: async (provider) => `/fixture/${provider}`,
     openCodexBridge: options.openCodexBridge, resolveRunTools: options.resolveRunTools,
-    env: { FIXTURE_MODE: options.mode ?? '', RECEIVED_PATH: join(directory, 'received.json'), CLAUDECODE: '1', ...(options.permissionMode ? { FIXTURE_PERMISSION_MODE: options.permissionMode } : {}), ...(options.path !== undefined ? { PATH: options.path } : {}),
+    env: { ...(options.inheritedCaller ? { TOWER_CALLER_CAPABILITY: options.inheritedCaller } : {}), FIXTURE_MODE: options.mode ?? '', RECEIVED_PATH: join(directory, 'received.json'), CLAUDECODE: '1', ...(options.permissionMode ? { FIXTURE_PERMISSION_MODE: options.permissionMode } : {}), ...(options.path !== undefined ? { PATH: options.path } : {}),
       ...(options.contextFrames ? { FIXTURE_CONTEXT_FRAMES: JSON.stringify(options.contextFrames) } : {}) },
     spawnProcess: (file, args, spawnOptions) => {
       launches.push({file,args,path:spawnOptions.env?.PATH});
@@ -985,4 +988,47 @@ test('a turn forwarded to the open Codex app is marked as having no Tower tools'
   f.sessions.set(f.session.id, { ...f.session, status: 'idle', activeProcess: true });
   const run = await f.manager.enqueue(f.session.id, 'Forward to the desktop app', {}, { origin: { kind: 'owner' } });
   assert.equal((await finished(f.manager, run.id)).towerTools, 'desktop-app');
+});
+
+
+test('fake CLI launches inherit only the resolver-issued caller credential, and remove stale credentials without a resolver', async t => {
+  for (const provider of ['codex', 'claude'] as const) {
+    await t.test(provider, async t => {
+      const capabilities = new CapabilityRegistry();
+      let resolve!: ReturnType<typeof runToolResolver>;
+      const f = await fixture({ provider, inheritedCaller: 'stale-caller', resolveRunTools: (run, session) => resolve(run, session) });
+      t.after(f.cleanup);
+      resolve = runToolResolver({ stateDir: f.stateDir, runs: { sessionOrigin: () => undefined }, capabilities });
+      const run = await f.manager.enqueue(f.session.id, 'fake launch with caller identity', {}, { origin: { kind: 'owner' } });
+      assert.equal((await finished(f.manager, run.id)).status, 'completed');
+      const observed = JSON.parse(await readFile(join(f.directory, 'received.json.env'), 'utf8'));
+      assert.notEqual(observed.caller, 'stale-caller');
+      assert.deepEqual(capabilities.resolve(observed.caller), { kind: 'caller-run', runId: run.id, sessionId: run.sessionId });
+      assert.equal(f.launches.length, 1);
+      assert.equal(f.launches[0].args.join(' ').includes(observed.caller), false, 'the reporting credential never goes through argv');
+      const untracked = await fixture({ provider, inheritedCaller: 'stale-caller' });
+      t.after(untracked.cleanup);
+      const plain = await untracked.manager.enqueue(untracked.session.id, 'fake launch without caller identity');
+      assert.equal((await finished(untracked.manager, plain.id)).status, 'completed');
+      assert.deepEqual(JSON.parse(await readFile(join(untracked.directory, 'received.json.env'), 'utf8')), {}, 'a child cannot reuse its launcher’s stale reporting credential');
+    });
+  }
+});
+
+test('optional desktop forwarding attaches neither caller environment nor CLI tool configuration', async t => {
+  let bridge!: CodexBridgeOptions;
+  const f = await fixture({ inheritedCaller: 'stale-caller',
+    resolveRunTools: () => ({ env: { TOWER_CALLER_CAPABILITY: 'c'.repeat(64) }, servers: { tower: { command: '/fixture/node', args: [], env: { TOWER_MCP_CAPABILITY: 'd'.repeat(64) } } }, required: false, towerTools: 'attached' }),
+    openCodexBridge: async options => { bridge = options; return { done: Promise.resolve(), start: async () => { options.onStarted('turn'); options.onFinished({ status: 'completed' }); }, cancel: async () => {}, close: () => {} }; },
+  });
+  t.after(f.cleanup);
+  f.sessions.set(f.session.id, { ...f.session, status: 'idle', activeProcess: true });
+  const run = await f.manager.enqueue(f.session.id, 'fake desktop fallback', {}, { origin: { kind: 'owner' } });
+  const result = await finished(f.manager, run.id);
+  assert.equal(result.towerTools, 'desktop-app');
+  assert.equal(f.launches.length, 0, 'no provider CLI is spawned');
+  assert.equal('env' in bridge, false);
+  assert.equal('mcpServers' in bridge, false);
+  assert.doesNotMatch(JSON.stringify(bridge), /stale-caller|cccccccc|dddddddd/, 'bridge receives neither reporting nor MCP credentials');
+  await assert.rejects(stat(join(f.directory, 'received.json.env')), { code: 'ENOENT' });
 });

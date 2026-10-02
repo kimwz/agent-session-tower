@@ -416,7 +416,7 @@ export class MasterSession {
     }
     for (const run of snapshot.runs ?? []) {
       // Tower's continuation after a forced update carries on a run already followed; it is not new work.
-      if (run.scheduled?.resume === 'update' || run.scheduled?.resume === 'permission' || run.permissionNotice || run.updateWrapUp || !ours(run) || !after(run.createdAt) || run.sessionId === binding.sessionId || this.file.followed.some(item => item.runId === run.id)) continue;
+      if (run.scheduled?.resume === 'update' || run.scheduled?.resume === 'permission' || run.permissionNotice || run.permissionRequestIds?.length || run.updateWrapUp || !ours(run) || !after(run.createdAt) || run.sessionId === binding.sessionId || this.file.followed.some(item => item.runId === run.id)) continue;
       this.add({ id: randomUUID(), kind: 'delegated', title: truncate(run.prompt, 80), ...(run.delegation ? { rootRunId: run.delegation.rootRunId } : run.origin?.runId ? { rootRunId: run.origin.runId } : {}), runId: run.id, sessionId: run.sessionId, prompt: run.prompt, createdAt: run.createdAt, state: 'running' });
       changed = true;
     }
