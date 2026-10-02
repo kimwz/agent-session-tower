@@ -13,7 +13,7 @@ import { handleLinkRoute, type LinkRoutes } from '../link/routes.js';
 import type { RemoteNodes } from '../link/nodes.js';
 import { proxyToNode } from '../link/proxy.js';
 import { normalizeProjectGroupPatch } from '../stores/project-groups.js';
-import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
+import type { Attachment, AutoPromptJob, AutoPromptInput, NewSessionInput, MessageAttachments, ProjectGroup, ProjectGroupPatch, Snapshot, Session, SessionDetail, Run, RunApprovalResponse } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { acceptedEncoding, compressedEventStream, isBuildAsset, sendBody, StaticCompression } from './compression.js';
 import { SseClient } from './sse-client.js';
@@ -67,8 +67,8 @@ export interface Backend {
   acknowledgeOutcome?(id: string): Promise<Session | undefined>;
   setGroup?(patch: ProjectGroupPatch): Promise<ProjectGroup>;
   repositoryAction?(cwd: string, action: RepositoryAction): Promise<RepositoryStatus>;
-  createSession?(input: CreateSessionRequest, context?: RequestContext): Promise<{ session: Session; run: Run }>;
-  startAutoPrompt?(input: AutoPromptRequest, context?: RequestContext): Promise<AutoPromptJob>;
+  createSession?(input: NewSessionInput, context?: RequestContext): Promise<{ session: Session; run: Run }>;
+  startAutoPrompt?(input: AutoPromptInput, context?: RequestContext): Promise<AutoPromptJob>;
   getAutoPrompt?(id: string): AutoPromptJob | undefined;
   cancelAutoPrompt?(id: string): Promise<AutoPromptJob>;
   enqueue(id: string, prompt: string, attachments?: MessageAttachments, context?: RequestContext): Promise<Run>;
@@ -321,7 +321,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (!req.headers['content-type']?.startsWith('application/json')) return json(res, 415, { error: 'JSON 요청이 필요합니다.' });
         // Keystrokes and resize events have their own per-terminal byte/request budget.
         // Reading Tower state is not a mutation; only changes count against the request budget.
-        const read = path.match(/^\/api\/(?:nodes\/[a-f0-9]{32}\/)?v1\/([a-z]+\.[a-zA-Z]+)$/)?.[1];
+        const read = path.match(/^\/api\/(?:nodes\/[a-f0-9]{32}\/)?v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/)?.[1];
         const readOnly = read !== undefined && isOperationName(read) && !OPERATIONS[read].write;
         if (!login && !readOnly && path !== SUGGESTION_PATH && path !== SCOPE_PATH && !/^\/api\/(nodes\/[a-f0-9]{32}\/)?workspace\/terminals\/[0-9a-f-]{36}\/(input|resize)$/.test(path)) {
           // The master agent's own calls count apart, so they never use up the owner's budget (or the other way round).
@@ -351,11 +351,13 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         if (await master.handle(req, res, path, url, identity)) return;
       }
       const secureOrigin = origins.has(`https://${req.headers.host}`) && !origins.has(`http://${req.headers.host}`);
-      const operation = path.match(/^\/api\/v1\/([a-z]+\.[a-zA-Z]+)$/);
+      const operation = path.match(/^\/api\/v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/);
       if (operation && req.method === 'POST') {
         if (!isOperationName(operation[1])) return json(res, 404, { error: 'Unknown Tower operation.' });
         if (!backend.api) return json(res, 503, { error: 'Tower operations are unavailable.' });
-        return json(res, 200, { result: await backend.api(operation[1], await readJson(req, 1_000_000), callerContext()) });
+        const input = await readJson(req, 1_000_000);
+        if (masterCall && operation[1] === 'autoPrompt.submit') input.modelRole = 'master.worker';
+        return json(res, 200, { result: await backend.api(operation[1], input, callerContext()) });
       }
       if (path === '/api/runner/force-update' && req.method === 'POST') {
         if (!forceRunnerUpdate) return json(res, 503, { error: 'Updates are unavailable.' });
@@ -573,7 +575,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         return json(res, 200, { ok: true });
       }
       if (req.method === 'POST' && path === '/api/auto-prompts') {
-        const request = parseAutoPrompt(await readJson(req, ATTACHMENT_BODY_BYTES));
+        const body = await readJson(req, ATTACHMENT_BODY_BYTES);
+        const request = parseAutoPrompt(masterCall ? { ...body, modelRole: 'master.worker' } : body);
         if (!backend.startAutoPrompt) return json(res, 503, { error: 'Auto Prompt를 현재 사용할 수 없습니다.' });
         return json(res, 202, { job: await backend.startAutoPrompt(request, callerContext()) });
       }
@@ -694,7 +697,8 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         return json(res, 200, { sessions: [...candidates, ...(named ? [named] : [])].map(publicSession) });
       }
       if (req.method === 'POST' && path === '/api/sessions') {
-        const input = parseCreateSession(await readJson(req));
+        const body = await readJson(req);
+        const input = parseCreateSession(masterCall ? { ...body, modelRole: 'master.worker' } : body);
         if (!backend.createSession) return json(res, 503, { error: '새 세션을 생성할 수 없습니다.' });
         const result = await backend.createSession(input, callerContext());
         return json(res, 202, { ...result, session: publicSession(result.session) });

@@ -5,15 +5,15 @@ import { constants } from 'node:fs';
 import { mkdir, open, rename, stat, unlink } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { isAbsolute, join } from 'node:path';
-import type { Attachment, AttachmentInput, AutoPromptDecision, AutoPromptJob, AutoPromptRequest, Run, RunOrigin, Session, SessionDetail, Snapshot } from '../../shared/types.js';
+import type { Attachment, AttachmentInput, AutoPromptDecision, AutoPromptJob, AutoPromptInput, AutoPromptRequest, Run, RunOrigin, Session, SessionDetail, Snapshot } from '../../shared/types.js';
 import { isImageAttachment } from '../../shared/attachments.js';
 import { AttachmentStore, attachmentMetadata, type StoredAttachment } from '../stores/attachments.js';
 import { RunError, type RunAdmission, type RunManager } from '../runs/manager.js';
 import { isSavedDelegation } from '../runs/saved-state.js';
 import { ownerOrigin, parseRunOrigin } from '../runs/origin.js';
 import { runAutoPromptModel } from './native.js';
-import { resolveModel } from '../models/settings.js';
-import type { ResolvedModel } from '../../shared/models.js';
+import { readModelSettings, resolveModel } from '../models/settings.js';
+import { masterWorkerModel, pickProblem, type ResolvedModel } from '../../shared/models.js';
 import type { ExclusionMatcher } from '../remote/exclusions.js';
 import { remoteWorkingSnapshot } from '../remote/visibility.js';
 import { directories, eligible, type Directory } from './inventory.js';
@@ -160,7 +160,7 @@ export class AutoPromptManager extends EventEmitter {
   get(id: string): AutoPromptJob | undefined { const job = this.entries.get(id.toLowerCase())?.job; return job ? copy(job) : undefined; }
 
   /** `internal` comes from Tower itself (web owner, Slack, triggers); request fields cannot set it. */
-  async submit(input: AutoPromptRequest, internal: Pick<RunAdmission, 'origin' | 'untrustedInput' | 'unattended' | 'delegation' | 'validate'> = {}): Promise<AutoPromptJob> {
+  async submit(input: AutoPromptInput, internal: Pick<RunAdmission, 'origin' | 'untrustedInput' | 'unattended' | 'delegation' | 'validate'> = {}): Promise<AutoPromptJob> {
     if (!this.started || this.stopping) throw new RunError('Auto Prompt가 요청을 받지 않고 있습니다.', 503);
     const origin = internal.origin === undefined ? { kind: 'unknown' as const } : parseRunOrigin(internal.origin);
     if (!origin) throw new RunError('Auto Prompt 요청 출처가 올바르지 않습니다.');
@@ -169,7 +169,8 @@ export class AutoPromptManager extends EventEmitter {
     const untrustedInput = internal.untrustedInput === true;
     // External content never continues an existing conversation.
     if (untrustedInput && input?.sessionMode !== 'new') throw new RunError('외부 입력 요청은 새 세션에서만 실행할 수 있습니다.');
-    if (!input || typeof input.requestId !== 'string' || !UUID.test(input.requestId) || !['claude', 'codex'].includes(input.provider)) throw new RunError('올바른 요청 ID와 Claude 또는 Codex가 필요합니다.');
+    if (input?.modelRole !== undefined && input.modelRole !== 'master.worker') throw new RunError('알 수 없는 작업 모델 역할입니다.');
+    if (!input || typeof input.requestId !== 'string' || !UUID.test(input.requestId) || (!['claude', 'codex'].includes(input.provider ?? '') && !(input.provider === undefined && input.modelRole === 'master.worker'))) throw new RunError('올바른 요청 ID와 Claude 또는 Codex가 필요합니다.');
     if (typeof input.prompt !== 'string' || input.prompt.length > 32_000 || (!input.prompt.trim() && !input.attachments?.length)) throw new RunError('지시문 또는 첨부 파일이 필요하며 지시문은 32,000자 이하여야 합니다.');
     if (input.cwd !== undefined && (typeof input.cwd !== 'string' || !isAbsolute(input.cwd) || input.cwd.includes('\0') || input.cwd.length > 4096)) throw new RunError('목록에 있는 작업 폴더를 선택하세요.');
     if (input.codexApprovalsReviewer !== undefined && !['user', 'auto_review'].includes(input.codexApprovalsReviewer)) throw new RunError('승인 검토는 자동 검토 또는 직접 확인만 선택할 수 있습니다.');
@@ -182,7 +183,7 @@ export class AutoPromptManager extends EventEmitter {
     requestedEffort(input.effort, input.provider);
     input = copy(input);
     input.requestId = input.requestId.toLowerCase();
-    const request = { provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: input.attachments ?? [],
+    const request = { ...(input.modelRole ? { modelRole: input.modelRole } : {}), provider: input.provider, cwd: input.cwd ?? null, prompt: input.prompt, attachments: input.attachments ?? [],
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
       ...(input.targetSessionId !== undefined ? { targetSessionId: input.targetSessionId } : {}),
       ...(input.routingContext !== undefined ? { routingContext: input.routingContext } : {}),
@@ -205,8 +206,17 @@ export class AutoPromptManager extends EventEmitter {
     return promise;
   }
 
-  private async admit(input: AutoPromptRequest, fingerprint: string, origin: RunOrigin, untrustedInput: boolean, unattended: boolean, context: Pick<RunAdmission, 'delegation' | 'validate'>): Promise<AutoPromptJob> {
+  private async admit(request: AutoPromptInput, fingerprint: string, origin: RunOrigin, untrustedInput: boolean, unattended: boolean, context: Pick<RunAdmission, 'delegation' | 'validate'>): Promise<AutoPromptJob> {
     const snapshot = await this.snapshotFor(origin);
+    // Resolve after deduplication; a settings change never changes a retry's accepted choice. A named existing
+    // session supplies its provider when omitted, while the role's model/effort remain new-session-only.
+    const target = request.targetSessionId ? snapshot.sessions.find(session => session.id === request.targetSessionId) : undefined;
+    const defaults = request.modelRole ? masterWorkerModel(await readModelSettings(this.options.stateDir), { provider: request.provider ?? target?.provider }) : undefined;
+    const provider = request.provider ?? defaults?.provider;
+    if (!provider) throw new RunError('Claude 또는 Codex가 필요합니다.');
+    requestedEffort(request.effort, provider);
+    const input: AutoPromptRequest = { ...request, provider };
+    const newSessionModel = defaults ? { ...(defaults.model !== undefined ? { model: defaults.model } : {}), ...(defaults.effort !== undefined ? { effort: defaults.effort } : {}) } : undefined;
     // A folder that cannot be used is refused the same way whether or not the provider is ready.
     const inventory = directories(snapshot);
     if (!inventory.length) throw new RunError('라우팅할 작업 폴더가 없습니다. 먼저 프로젝트 폴더를 추가하세요.');
@@ -216,7 +226,7 @@ export class AutoPromptManager extends EventEmitter {
     const prepared = await this.attachments.prepare(input.requestId, { attachments: input.attachments });
     const now = new Date().toISOString();
     const entry: Entry = { fingerprint, staged: prepared.attachments, job: {
-      id: input.requestId, origin, ...(context.delegation ? { delegation: { ...context.delegation } } : {}), ...(origin.controllerId ? { exclusionRevision: this.options.remote!.matcher().revision } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
+      id: input.requestId, ...(newSessionModel ? { newSessionModel } : {}), origin, ...(context.delegation ? { delegation: { ...context.delegation } } : {}), ...(origin.controllerId ? { exclusionRevision: this.options.remote!.matcher().revision } : {}), ...(untrustedInput ? { untrustedInput } : {}), ...(unattended ? { unattended } : {}), provider: input.provider, ...(input.cwd ? { cwd: input.cwd } : {}), prompt: input.prompt,
       // The owner's own turns always use Codex's automatic reviewer; only other work keeps the one it chose.
       ...(input.provider === 'codex' && input.codexApprovalsReviewer && !ownerOrigin(origin) ? { codexApprovalsReviewer: input.codexApprovalsReviewer } : {}),
       ...(input.sessionMode ? { sessionMode: input.sessionMode } : {}),
@@ -412,7 +422,7 @@ export class AutoPromptManager extends EventEmitter {
     const internal: RunAdmission = { autoPromptId: job.id, validate, origin: job.origin ?? { kind: 'unknown' }, ...(job.delegation ? { delegation: job.delegation } : {}), ...(job.untrustedInput ? { untrustedInput: true } : {}), ...(job.unattended ? { unattended: true } : {}) };
     const run = decision.action === 'resume'
       ? await this.options.runs.enqueue(decision.sessionId!, job.prompt, { attachments, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}) }, internal)
-      : (await this.options.runs.create({ provider: job.provider, cwd, prompt: job.prompt, attachments, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}),
+      : (await this.options.runs.create({ provider: job.provider, cwd, prompt: job.prompt, attachments, ...job.newSessionModel, ...(job.model ? { model: job.model } : {}), ...(job.effort ? { effort: job.effort } : {}),
         ...(job.codexApprovalsReviewer ? { codexApprovalsReviewer: job.codexApprovalsReviewer } : {}) }, internal)).run;
     this.complete(entry, run);
     await this.persist(); this.emit('change');
@@ -484,6 +494,7 @@ function validEntry(value: unknown): value is Entry {
     && (job.sessionMode === undefined || job.sessionMode === 'new')
     && (job.targetSessionId === undefined || (validTarget(job.targetSessionId) && job.sessionMode === undefined && typeof job.cwd === 'string'))
     && (job.routingContext === undefined || typeof job.routingContext === 'string' && job.routingContext.length <= 32_000)
+    && (job.newSessionModel === undefined || !pickProblem(job.newSessionModel, job.provider as 'claude' | 'codex'))
     && (job.model === undefined || validModelId(job.model))
     && (job.effort === undefined || validEffort(job.effort))
     && typeof job.prompt === 'string' && job.prompt.length <= 32_000 && typeof job.routerModel === 'string'

@@ -1,3 +1,5 @@
+import { initialModelSettings } from '../../../shared/models.js';
+import { saveModelSettings } from '../../../server/models/settings.js';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
@@ -629,4 +631,74 @@ test('a calling turn that expires during preparation leaves no accepted Auto Pro
   assert.equal(f.manager.get(input.requestId), undefined);
   assert.equal(f.dispatches.length, 0);
   assert.equal(f.calls.length, 0);
+});
+
+
+test('master role defaults affect routed creates, never resumes, and explicit fields still win', async t => {
+  const f = await fixture(t);
+  const settings = initialModelSettings();
+  settings.roles['master.worker'] = { provider: 'claude', claude: { model: 'sonnet', effort: 'high' }, codex: { model: 'codex-worker', effort: 'low' } };
+  await saveModelSettings(f.directory, settings);
+  f.respond(async () => create());
+  const input = { requestId: randomUUID(), modelRole: 'master.worker' as const, provider: 'codex' as const, cwd: f.cwd, prompt: 'new work' };
+  const created = await f.finished((await f.manager.submit(input)).id);
+  assert.equal(created.status, 'completed');
+  assert.deepEqual(created.newSessionModel, { model: 'codex-worker', effort: 'low' });
+  assert.equal(f.dispatches[0].input.model, 'codex-worker'); assert.equal(f.dispatches[0].input.effort, 'low');
+  assert.equal((f.dispatches[0].input as CreateSessionRequest).provider, 'codex');
+  f.respond(async () => resume(f.session.id));
+  const resumed = await f.finished((await f.manager.submit({ ...input, requestId: randomUUID(), prompt: 'continue' })).id);
+  assert.equal(resumed.status, 'completed');
+  assert.equal(f.dispatches[1].action, 'resume');
+  assert.equal(f.dispatches[1].input.model, undefined); assert.equal(f.dispatches[1].input.effort, undefined);
+  await f.finished((await f.manager.submit({ ...input, requestId: randomUUID(), model: 'explicit', effort: 'xhigh' })).id);
+  assert.equal(f.dispatches[2].input.model, 'explicit'); assert.equal(f.dispatches[2].input.effort, 'xhigh');
+  f.respond(async () => create());
+  await f.finished((await f.manager.submit({ ...input, requestId: randomUUID(), provider: undefined, model: 'explicit-claude' })).id);
+  assert.equal((f.dispatches[3].input as CreateSessionRequest).provider, 'claude');
+  assert.equal(f.dispatches[3].input.model, 'explicit-claude'); assert.equal(f.dispatches[3].input.effort, 'high');
+});
+
+test('master role omissions are stable on retry after settings changes, and named existing sessions keep their provider', async t => {
+  const f = await fixture(t);
+  const settings = initialModelSettings();
+  settings.roles['master.worker'] = { provider: 'claude', claude: { model: 'sonnet' }, codex: { model: 'worker', effort: 'high' } };
+  await saveModelSettings(f.directory, settings);
+  const input = { requestId: randomUUID(), modelRole: 'master.worker' as const, cwd: f.cwd, targetSessionId: f.session.id, prompt: 'continue exactly here' };
+  const before = await f.finished((await f.manager.submit(input)).id);
+  assert.equal(before.status, 'completed'); assert.equal(before.provider, 'codex');
+  assert.equal(f.dispatches[0].action, 'resume'); assert.equal(f.dispatches[0].input.model, undefined);
+  settings.roles['master.worker'] = { provider: 'codex', claude: {}, codex: { model: 'changed' } };
+  await saveModelSettings(f.directory, settings);
+  assert.deepEqual(await f.manager.submit(input), before);
+  assert.equal(f.dispatches.length, 1);
+  await assert.rejects(f.manager.submit({ ...input, modelRole: undefined }), /Claude 또는 Codex/);
+  await assert.rejects(f.manager.submit({ ...input, requestId: randomUUID(), model: '' }), /Invalid model/);
+});
+
+
+test('a queued master request keeps its admission snapshot through settings changes, retries, and restore', async t => {
+  const f = await fixture(t);
+  let route!: (value: unknown) => void;
+  f.respond(() => new Promise(resolve => { route = resolve; }));
+  const input = { requestId: randomUUID(), modelRole: 'master.worker' as const, cwd: f.cwd, prompt: 'separate job' };
+  const accepted = await f.manager.submit(input);
+  await until(() => f.calls.length > 0);
+  const settings = initialModelSettings();
+  settings.roles['master.worker'] = { provider: 'claude', claude: { model: 'sonnet' }, codex: { model: 'new-default' } };
+  await saveModelSettings(f.directory, settings);
+  assert.equal((await f.manager.submit(input)).provider, 'codex');
+  route(create());
+  const job = await f.finished(accepted.id);
+  assert.equal(job.status, 'completed');
+  assert.equal(f.dispatches[0].input.model, 'gpt-6.1-sol');
+  assert.equal((f.dispatches[0].input as CreateSessionRequest).provider, 'codex');
+  await f.manager.close();
+  const restored = new AutoPromptManager(f.options);
+  try {
+    await restored.start();
+    assert.deepEqual(restored.get(job.id)?.newSessionModel, { model: 'gpt-6.1-sol' });
+    assert.deepEqual(await restored.submit(input), job);
+    assert.equal(f.dispatches.length, 1);
+  } finally { await restored.close(); }
 });

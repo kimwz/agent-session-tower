@@ -143,7 +143,7 @@ test('coordinator result notifications retain the snapshotted model after rule e
       return { run, session: { id: 'chat', nativeId: 'chat', provider: input.provider, cwd: input.cwd, project: 'Slack', title: 'Slack', status: 'completed', statusReason: '', createdAt: '', updatedAt: '', lastMessage: '', messageCount: 0, isSubagent: false, resumable: true } };
     },
     enqueue: async (_id, _prompt, options) => { assert.equal(options?.model, 'opus'); resumed++; return { ...runs[1], id: 'resumed', status: 'queued' }; },
-  }, autoPrompts: { get: () => undefined, submit: async input => ({ id: input.requestId, provider: input.provider, prompt: input.prompt, routerModel: 'opus', status: 'completed', createdAt: '', updatedAt: '', runId: 'delegated' }) }, refresh: async () => {} }, {
+  }, autoPrompts: { get: () => undefined, submit: async input => { assert.ok(input.provider); return { id: input.requestId, provider: input.provider, prompt: input.prompt, routerModel: 'opus', status: 'completed', createdAt: '', updatedAt: '', runId: 'delegated' }; } }, refresh: async () => {} }, {
     client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [{ user: 'U2', text: 'Review', ts: '1' }], reply: async () => { throw new Error('Must not send'); } }),
   });
   let resumed = 0;
@@ -219,7 +219,7 @@ test('Slack conversations, their delegated work and result resumes all run as Sl
     },
     enqueue: async (_id, _prompt, _options, internal) => { admissions.push(['resume', internal]); return { ...runs[1], id: 'resumed', status: 'queued' }; },
   }, autoPrompts: { get: id => id === delegatedRequest ? { id, provider: 'codex', prompt: '', routerModel: 'gpt', status: 'completed', createdAt: '', updatedAt: '', runId: 'delegated', sessionId: 'work' } : undefined,
-    submit: async (input, internal) => { delegatedRequest = input.requestId; admissions.push(['delegate', internal as Admission]); assert.equal(input.sessionMode, 'new');
+    submit: async (input, internal) => { assert.ok(input.provider); delegatedRequest = input.requestId; admissions.push(['delegate', internal as Admission]); assert.equal(input.sessionMode, 'new');
       return { id: input.requestId, provider: input.provider, prompt: input.prompt, routerModel: 'gpt', status: 'completed', createdAt: '', updatedAt: '', runId: 'delegated', sessionId: 'work' }; } },
   refresh: async () => {} }, {
     client: () => ({ auth: async () => ({ teamId: 'T1', userId: 'U1' }), thread: async () => [{ user: 'U2', text: 'Review', ts: '1' }], reply: async () => { throw new Error('Must not send'); } }),

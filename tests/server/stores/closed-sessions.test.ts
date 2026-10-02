@@ -68,7 +68,7 @@ test('session creation, closure and reopen HTTP routes authenticate, validate, a
     snapshot, detail: async () => ({ session: store.apply(session), messages: [], hasMore: false }),
     setClosed: async (id, closed) => { if (id !== session.id) return undefined; const result = await store.set(session, closed); changed(); return result; },
     acknowledgeOutcome: async id => id === session.id ? { ...store.apply(session), outcome: 'done' } : undefined,
-    createSession: async input => { created.push(input); return { session, run }; },
+    createSession: async input => { assert.ok(input.provider); created.push({ ...input, provider: input.provider }); return { session, run }; },
     enqueue: async () => { throw new Error('Session actions must not resume a conversation'); },
     cancel: async () => { throw new Error('Closing must not stop a native process'); },
     subscribe: listener => { listeners.add(listener); return () => { listeners.delete(listener); }; },

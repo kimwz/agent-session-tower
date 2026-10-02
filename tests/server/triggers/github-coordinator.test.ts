@@ -69,7 +69,7 @@ async function fixture(t: TestContext, options: { login?: string; postStatus?: n
   };
   let service: TriggerService | undefined;
   const coordinator = new GitHubCoordinator({ stateDir: directory, runs: runManager as never, refresh: async () => {},
-    autoPrompts: { get: id => jobs.get(id), submit: async (request, internal) => { submitted.push({ request, internal }); const job = { id: request.requestId, provider: request.provider, prompt: request.prompt, routerModel: 'r', status: 'queued' as const, createdAt: '', updatedAt: '' }; jobs.set(job.id, job); return job; } },
+    autoPrompts: { get: id => jobs.get(id), submit: async (request, internal) => { assert.ok(request.provider); submitted.push({ request: { ...request, provider: request.provider }, internal }); const job = { id: request.requestId, provider: request.provider, prompt: request.prompt, routerModel: 'r', status: 'queued' as const, createdAt: '', updatedAt: '' }; jobs.set(job.id, job); return job; } },
     github: (triggerId, fresh) => service!.githubClient(triggerId, fresh) });
   const executor: TriggerExecutor = {
     submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,

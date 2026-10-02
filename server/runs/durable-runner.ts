@@ -7,7 +7,7 @@ import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import type { SlackPublicStatus } from '../../shared/slack.js';
 import type { PublicAgentOverview, PublicConversationView, PublicVisitorState } from '../../shared/public-agents.js';
-import type { Attachment, AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunApprovalResponse, Session } from '../../shared/types.js';
+import type { Attachment, AutoPromptJob, AutoPromptInput, NewSessionInput, MessageAttachments, Run, RunApprovalResponse, Session } from '../../shared/types.js';
 import type { RunAdmission } from './manager.js';
 import type { WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { markMaster, subscriptionOnly } from './subscription.js';
@@ -220,7 +220,13 @@ export class DurableRunManager extends EventEmitter {
       throw Object.assign(new Error('실행 워커가 아직 새 버전으로 바뀌지 않아 마스터에게 보내지 않았습니다. 진행 중인 작업이 끝나면 바뀝니다.'), { statusCode: 503, disposition: 'not-admitted' });
     }
   }
-  async create(input: CreateSessionRequest, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
+  private requireModelRole(input: unknown): void {
+    if (input && typeof input === 'object' && 'modelRole' in input && !this.supports('masterWorker')) {
+      throw Object.assign(new Error('The execution worker has not updated to support master.worker. Nothing was submitted.'), { statusCode: 503, disposition: 'not-admitted' });
+    }
+  }
+  async create(input: NewSessionInput, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
+    this.requireModelRole(input);
     internal.validate?.();
     this.requireOrigins(internal);
     this.requireSubscription(input.cwd);
@@ -246,6 +252,7 @@ export class DurableRunManager extends EventEmitter {
   triggerOverview(): TriggerOverview | undefined { return this.snapshot?.triggers && structuredClone(this.snapshot.triggers); }
   /** Tower operations run in the worker; an outdated worker is told apart from a real error. */
   async api(operation: string, input: unknown, internal?: Pick<RunAdmission, 'origin' | 'requestId' | 'callerCapability'>): Promise<unknown> {
+    if (operation === 'autoPrompt.submit') this.requireModelRole(input);
     if (!this.supports('triggers')) throw Object.assign(new Error('The execution worker has not updated yet. Triggers become available once it hands over to the new version.'), { statusCode: 503 });
     if (operation.startsWith('models.') && !this.supports('models')) throw Object.assign(new Error('The execution worker has not updated yet. Model settings become available once it hands over to the new version.'), { statusCode: 503, disposition: 'not-admitted' });
     this.requireOrigins(internal ?? {});
@@ -282,7 +289,8 @@ export class DurableRunManager extends EventEmitter {
     return this.call('publicVisit', [action, slug, input]) as Promise<{ state: PublicVisitorState; token?: string }>;
   }
   getAutoPrompt(id: string): AutoPromptJob | undefined { return this.autoPromptList().find(job => job.id === id.toLowerCase()); }
-  async submitAutoPrompt(input: AutoPromptRequest, internal: Pick<RunAdmission, 'origin' | 'requestId' | 'callerCapability'> = {}): Promise<AutoPromptJob> {
+  async submitAutoPrompt(input: AutoPromptInput, internal: Pick<RunAdmission, 'origin' | 'requestId' | 'callerCapability'> = {}): Promise<AutoPromptJob> {
+    this.requireModelRole(input);
     this.requireOrigins(internal);
     // An older worker would ignore a target it does not know and route the request somewhere else.
     if ((input.targetSessionId !== undefined && !this.supports('autoPromptTargets')) || (input.sessionMode !== undefined && !this.supports('origins'))) {

@@ -22,7 +22,7 @@ test('Auto Prompt uses the existing remote, origin and mutation protections befo
     auth, remote: { origins }, backend: {
       snapshot: () => ({ sessions: [], runs: [], providers: [], autoPrompts: [job], scanning: false, hostname: 'test', version: 'test', updatedAt: now }),
       detail: async () => undefined, enqueue: async () => { throw new Error('Not used'); }, cancel: async () => {}, subscribe: () => () => {},
-      startAutoPrompt: async input => { submissions.push(input); return job; },
+      startAutoPrompt: async input => { assert.ok(input.provider); submissions.push({ ...input, provider: input.provider }); return job; },
       getAutoPrompt: value => value === id ? job : undefined,
       cancelAutoPrompt: async value => {
         if (value !== id) throw Object.assign(new Error('Not found'), { statusCode: 404 });

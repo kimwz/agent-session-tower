@@ -1,3 +1,4 @@
+import { newWorkerSession } from '../models/worker.js';
 import { latestNativeUserMessage } from './native-user-message.js';
 import { installLaunchShims, launchMarksDir } from '../sessions/launch-marks.js';
 import { finishedAutomationSessionIds } from '../../shared/automation-sessions.js';
@@ -5,7 +6,7 @@ import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { chmod, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { homedir, hostname } from 'node:os';
-import type { AutoPromptRequest, ChatMessage, CreateSessionRequest, MessageAttachments, Run, RunApprovalResponse, Snapshot } from '../../shared/types.js';
+import type { AutoPromptInput, ChatMessage, NewSessionInput, MessageAttachments, Run, RunApprovalResponse, Snapshot } from '../../shared/types.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { AutoPromptManager } from '../auto-prompt/manager.js';
 import { SlackService } from '../slack/service.js';
@@ -199,7 +200,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       }
       case 'create': {
         const admitted = admit(args[1]);
-        return remote(admitted, 'create', args[0], undefined, () => options.runs.create(args[0] as CreateSessionRequest, admitted),
+        return remote(admitted, 'create', args[0], undefined, async () => options.runs.create(await newWorkerSession(options.stateDir, args[0] as NewSessionInput), admitted),
           value => ({ kind: 'session', sessionId: value.session.id, runId: value.run.id }),
           result => {
             if (result.kind !== 'session') return undefined;
@@ -241,7 +242,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'submitAutoPrompt': if (options.autoPrompts) {
         const admitted = admit(args[1]);
         const autoPrompts = options.autoPrompts;
-        const request = args[0] as AutoPromptRequest;
+        const request = args[0] as AutoPromptInput;
         return remote(admitted, 'autoPrompt', request, undefined, async () => { await context?.refresh(); return autoPrompts.submit(request, { origin: admitted.origin, ...(admitted.delegation ? { delegation: admitted.delegation, validate: admitted.validate } : {}) }); },
           value => ({ kind: 'autoPrompt', jobId: value.id }), result => result.kind === 'autoPrompt' ? autoPrompts.get(result.jobId) : undefined);
       } break;

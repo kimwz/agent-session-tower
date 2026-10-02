@@ -53,6 +53,7 @@ export const BUILTIN_ROLES = [
   { id: 'sessions.summarizer', kind: 'auto', label: '세션 작업 요약', description: '턴이 끝날 때마다 세션의 작업 제목과 단계를 요약합니다.', initial: { provider: 'claude', claude: { model: 'haiku', effort: EFFORT_OFF }, codex: { model: 'gpt-5.6-terra' } } },
   { id: 'voice.firstReply', kind: 'auto', label: '음성 첫 답변', description: '음성으로 말하면 바로 짧게 답합니다.', providers: ['claude'], initial: { provider: 'claude', claude: { model: 'haiku', effort: EFFORT_OFF }, codex: {} } },
   { id: 'master.session', kind: 'start', label: '마스터 에이전트', description: '마스터 에이전트를 시작할 때 씁니다.', initial: cliDefault('claude') },
+  { id: 'master.worker', kind: 'start', label: '마스터 작업 에이전트', description: '마스터가 새 작업 세션을 열 때 생략한 모델 선택에 적용됩니다. 기존 세션은 유지합니다.', initial: { provider: 'codex', claude: {}, codex: { model: 'gpt-6.1-sol' } } },
   { id: 'issues.register', kind: 'start', label: '이슈 등록', description: '폴더의 이슈 버튼으로 이슈를 등록할 때 씁니다.', initial: cliDefault('claude') },
   { id: 'chat.new', kind: 'default', label: '새 채팅', description: '새 세션을 만들 때 미리 선택됩니다.', initial: cliDefault('claude') },
   { id: 'autoPrompt.new', kind: 'default', label: 'Auto Prompt 작업', description: 'Auto Prompt로 보낼 때 미리 선택됩니다.', initial: cliDefault('claude') },
@@ -123,6 +124,15 @@ export function parseModelSettings(value: unknown, strict = false, base: ModelSe
   for (const entry of custom.slice(0, MAX_CUSTOM_ROLES)) {
     const id = entry && typeof entry === 'object' ? (entry as Record<string, unknown>).id : undefined;
     const label = entry && typeof entry === 'object' ? (entry as Record<string, unknown>).label : undefined;
+    // This formerly available custom name is now built in. A legacy read promotes it; an old page saving its
+    // custom copy must not overwrite the current builtin (which `base` already read and migrated).
+    if (id === 'master.worker' && !settingProblem(entry, { kind: 'start' })) {
+      if (!strict && roles[id] === undefined) {
+        const old = entry as CustomRole;
+        result.roles[id] = { provider: old.provider, claude: cleanPick(old.claude), codex: cleanPick(old.codex) };
+      }
+      continue;
+    }
     const problem = typeof id !== 'string' || !ROLE_ID.test(id) ? '역할 이름은 review.codex처럼 점으로 나눈 영문 이름이어야 합니다.'
       : isBuiltinRole(id) ? `${id}는 기본 역할의 이름입니다.`
       : seen.has(id) ? `${id} 역할이 두 번 있습니다.`
@@ -145,6 +155,15 @@ export function resolveRole(settings: ModelSettings, id: string, context: { prov
   if (!setting) throw Object.assign(new Error(`알 수 없는 모델 역할입니다: ${id}`), { statusCode: 404 });
   const provider = setting.provider === 'follow' ? context.provider ?? 'claude' : setting.provider;
   return { provider, ...cleanPick(setting[provider]) };
+}
+
+/** A new delegated session: explicit fields win independently, using only the selected provider's pick. */
+export function masterWorkerModel(settings: ModelSettings, explicit: Partial<ResolvedModel> = {}): ResolvedModel {
+  const role = settings.roles['master.worker'];
+  const provider = explicit.provider === undefined ? role.provider : explicit.provider;
+  if (provider !== 'claude' && provider !== 'codex') throw Object.assign(new Error('Invalid worker provider.'), { statusCode: 400 });
+  return { provider, ...role[provider], ...(explicit.model !== undefined ? { model: explicit.model } : {}),
+    ...(explicit.effort !== undefined ? { effort: explicit.effort } : {}) };
 }
 
 /** Command-line flags that select a resolved model: for `codex exec` or `claude -p`. */

@@ -1,3 +1,4 @@
+import { initialModelSettings } from '../../shared/models.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -17,12 +18,13 @@ const TOKEN = 'a'.repeat(64);
 const SECRET = 'b'.repeat(64);
 
 /** A web that answers like Tower's and notes what it was asked. */
-async function fakeWeb(t: test.TestContext) {
+async function fakeWeb(t: test.TestContext, remoteSettings?: unknown) {
   const seen: Array<{ method: string; path: string; token?: string; caller?: string; body?: unknown }> = [];
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     seen.push({ method: req.method!, path: req.url!, token: req.headers['x-agent-monitor-token'] as string, caller: req.headers['x-tower-master'] as string, ...(chunks.length ? { body: JSON.parse(Buffer.concat(chunks).toString('utf8')) } : {}) });
+    if (req.url?.endsWith('/v1/models.settings') && remoteSettings) { res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ result: { settings: remoteSettings } })); return; }
     if (req.method === 'POST' && req.url === '/api/sessions') { res.writeHead(202, { 'Content-Type': 'application/json' }).end(JSON.stringify({ session: { id: 'claude:new' }, run: { id: 'run-new', sessionId: 'claude:new' } })); return; }
     res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, path: req.url }));
   });
@@ -48,6 +50,7 @@ test('the master\'s tools call Tower like a page, follow the work they start, an
   assert.deepEqual(started, ['/api/sessions'], 'work a call started is followed');
   const post = web.seen.find(item => item.method === 'POST')!;
   assert.equal(post.token, TOKEN, 'a change carries the page token, like the owner\'s page');
+  assert.equal((post.body as { modelRole?: string }).modelRole, 'master.worker');
   assert.equal(post.caller, SECRET, 'and the master\'s own budget marker');
   assert.match(String((await tools.call('tower_api', { method: 'GET', path: '/api/master' }) as { error: string }).error), /부를 수 없습니다/);
   assert.match(String((await tools.call('tower_api', { method: 'GET', path: '/api/../x' }) as { error: string }).error), /올바르지 않습니다/);
@@ -105,4 +108,40 @@ test('a failed report subscription preserves the accepted work and exposes a war
   assert.equal(answer.body.run.id, 'run-new');
   assert.match(answer.trackingWarning ?? '', /Do not resubmit/);
   assert.equal(web.seen.filter(request => request.method === 'POST').length, 1);
+});
+
+
+test('remote direct creation resolves the receiving role before sending, and an older remote gets no work', async t => {
+  const settings = initialModelSettings();
+  settings.roles['master.worker'] = { provider: 'claude', claude: { model: 'sonnet', effort: 'high' }, codex: { model: 'gpt-6.1-sol', effort: 'low' } };
+  for (const supported of [true, false]) {
+    const remote = structuredClone(settings);
+    if (!supported) delete (remote.roles as Record<string, unknown>)['master.worker'];
+    const web = await fakeWeb(t, remote);
+    const tower = new TowerClient(1_000); tower.setCredentials({ port: web.port, token: TOKEN, callerSecret: SECRET });
+    const tools = new MasterTools({ tower, delegated: () => ({ name: 'delegated', columns: [], rows: [] }), started: async () => {}, broadcast: () => {} });
+    const result = await tools.call('tower_api', { method: 'POST', path: '/api/sessions', node: 'c'.repeat(32), body: { provider: 'codex', prompt: 'new', cwd: '/project' } }) as { error?: string };
+    const sent = web.seen.filter(item => item.path.endsWith('/sessions'));
+    if (!supported) { assert.match(result.error!, /지원하지/); assert.equal(sent.length, 0); }
+    else {
+      assert.equal(sent.length, 1);
+      const invalid = await tools.call('tower_api', { method: 'POST', path: '/api/sessions', node: 'c'.repeat(32), body: { provider: null, prompt: 'new', cwd: '/project' } }) as { error?: string };
+      assert.match(invalid.error!, /Invalid worker provider/);
+      assert.equal(web.seen.filter(item => item.path.endsWith('/sessions')).length, 1);
+      assert.deepEqual(sent[0].body, { provider: 'codex', prompt: 'new', cwd: '/project', model: 'gpt-6.1-sol', effort: 'low' });
+    }
+  }
+});
+
+test('master Auto Prompt variants get the selector but existing messages get no defaults', async t => {
+  const web = await fakeWeb(t);
+  const tower = new TowerClient(1_000); tower.setCredentials({ port: web.port, token: TOKEN, callerSecret: SECRET });
+  const tools = new MasterTools({ tower, delegated: () => ({ name: 'delegated', columns: [], rows: [] }), started: async () => {}, broadcast: () => {} });
+  for (const path of ['/api/auto-prompts', '/api/v1/autoPrompt.submit']) {
+    await tools.call('tower_api', { method: 'POST', path, body: { prompt: 'work', model: 'explicit' } });
+    assert.equal((web.seen.at(-1)!.body as any).modelRole, 'master.worker');
+    assert.equal((web.seen.at(-1)!.body as any).model, 'explicit');
+  }
+  await tools.call('tower_api', { method: 'POST', path: '/api/sessions/codex:existing/messages', body: { prompt: 'continue' } });
+  assert.deepEqual(web.seen.at(-1)!.body, { prompt: 'continue' });
 });

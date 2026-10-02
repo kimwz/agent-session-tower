@@ -160,6 +160,12 @@ The chat composer lets you choose a model for the next request. **Agent default*
 
 Codex models come from the native model catalog. Claude Code supports its native model aliases. Existing session models can also appear in the selector. Changing the selection does not interrupt the current turn; it applies when the next request runs. In an open Codex app session, an explicit choice updates that session's native model setting before the request is queued. Another client changing the same session's model settings can affect queued turns.
 
+Settings → Models → **Master worker** (`master.worker`) controls new work sessions delegated by the master. Tower applies the role in code for direct session creation and Auto Prompt, including the master's run-scoped MCP calls. Each explicit provider, model, or effort takes precedence over that field's default. An explicit provider uses only that provider's stored pick. Existing-session messages and Auto Prompt continuations receive only explicitly requested model changes; a named existing session supplies its provider when omitted. Ordinary new chats and skill review roles are unchanged.
+
+The role belongs to the computer that executes the work, including joined computers. Its initial choice is Codex / `gpt-6.1-sol` / default effort. Auto Prompt captures new-session defaults when it accepts a request, so settings changes and retries do not change an accepted job. A worker that cannot honor the role refuses the submission before starting work.
+
+API clients may select these defaults with `modelRole: "master.worker"` on `POST /api/sessions`, `POST /api/auto-prompts`, or `autoPrompt.submit`; only a role-selected request may omit `provider`. The master's own tools add this selector automatically. `autoPrompt.submit` also accepts `sessionMode: "new"` or `targetSessionId` with `cwd`. Model settings remain version 1: older files acquire the new role without changing other roles, and saves from older pages preserve it. A legacy custom role named `master.worker` is promoted on read; an existing builtin takes precedence over a stale custom copy.
+
 ## Remote access
 
 Stop the existing server before changing its bind address:

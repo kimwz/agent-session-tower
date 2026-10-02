@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.102.0] - 2026-10-02
+
+### Added
+- Configure the master's new work sessions with the built-in `master.worker` model role. Direct creation and Auto Prompt apply omitted provider, model, and effort defaults in code on the receiving computer; existing conversations retain their choices unless explicitly changed.
+- Preserve accepted Auto Prompt model defaults across retries and settings changes, migrate an existing custom `master.worker` role without replacing other choices, and refuse delegation to workers that cannot honor the role.
+
+### Fixed
+- Recognize the documented `autoPrompt.submit` HTTP operation path, including its uppercase character, consistently on local and joined computers.
+
 ## [1.101.1] - 2026-10-02
 
 ### Fixed

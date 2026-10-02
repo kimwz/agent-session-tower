@@ -10,7 +10,7 @@ import { saveModelSettings, useModelSettings } from './model-settings';
 
 const GROUPS: { kind: RoleKind; title: string; description: string }[] = [
   { kind: 'auto', title: '자동 판단', description: 'Tower가 스스로 여는 호출입니다. 도구 없이 한 번 판단하고 끝납니다.' },
-  { kind: 'start', title: '시작할 때', description: '이 창에서 바로 시작하는 세션에 씁니다.' },
+  { kind: 'start', title: '시작할 때', description: '새 세션을 시작할 때 적용합니다.' },
   { kind: 'default', title: '새 항목 기본값', description: '만들 때 미리 선택되는 값입니다. 이미 만든 항목은 각자 고른 모델을 그대로 씁니다.' },
 ];
 const PROVIDER_LABEL: Record<ModelProvider, string> = { claude: 'Claude', codex: 'Codex' };
@@ -60,8 +60,8 @@ export function ModelsPanel({ token, providers: ownProviders, computers }: { tok
           {GROUPS.map(group => <section key={group.kind} className="models-group">
             <h3>{t(group.title)}</h3>
             <p className="auth-hint">{t(group.description)}</p>
-            {(BUILTIN_ROLES as readonly BuiltinRole[]).filter(role => role.kind === group.kind).map(role => <RoleRow key={role.id} role={role} setting={draft.roles[role.id as keyof ModelSettings['roles']]} providers={providers} disabled={busy}
-              onChange={setting => setRole(role.id, setting)} />)}
+            {(BUILTIN_ROLES as readonly BuiltinRole[]).filter(role => role.kind === group.kind).map(role => draft.roles[role.id as keyof ModelSettings['roles']] ? <RoleRow key={role.id} role={role} setting={draft.roles[role.id as keyof ModelSettings['roles']]} providers={providers} disabled={busy}
+              onChange={setting => setRole(role.id, setting)} /> : <div className="models-role" key={role.id}><div className="models-role-text"><strong>{t(role.label)}</strong><code>{role.id}</code></div><p className="auth-hint">{t('실행 워커가 업데이트되면 이 역할을 설정할 수 있습니다.')}</p></div>)}
           </section>)}
           <section className="models-group">
             <h3>{t('스킬용 역할')}</h3>

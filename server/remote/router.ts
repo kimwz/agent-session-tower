@@ -306,7 +306,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
     }
     if (method !== 'POST') throw notFound();
     // Tower operations a controlling computer may use; the worker answers with only what this computer shares.
-    const operation = path.match(/^\/api\/v1\/([a-z]+\.[a-zA-Z]+)$/)?.[1];
+    const operation = path.match(/^\/api\/v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/)?.[1];
     if (operation) {
       if (!REMOTE_PAGE_OPERATIONS.has(operation) || !backend.api) throw notFound();
       const write = isOperationName(operation) && OPERATIONS[operation].write;

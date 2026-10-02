@@ -846,3 +846,35 @@ test('worker records a verified calling turn without treating its message as own
   assert.equal(saved.includes(token), false, 'credentials never enter persisted run history');
   assert.ok(saved.includes(parent.id));
 });
+
+
+test('an old worker cannot silently ignore master.worker on direct, Auto Prompt, or v1 submissions', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-legacy-worker-role-'));
+  const stateDir = join(directory, 'state');
+  const legacy = await startLegacyRunner(stateDir, { runs: [], sessions: [], nativeIds: {}, settled: [], autoPrompts: [] });
+  const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/must-not-spawn.js', startupTimeoutMs: 1000 });
+  t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
+  await client.start();
+  const input = { provider: 'codex' as const, prompt: 'work', cwd: directory, modelRole: 'master.worker' as const };
+  const expected = { statusCode: 503, disposition: 'not-admitted' };
+  await assert.rejects(client.create(input), expected);
+  await assert.rejects(client.submitAutoPrompt({ ...input, requestId: '12345678-1234-4234-8234-123456789abd' }), expected);
+  await assert.rejects(client.api('autoPrompt.submit', { ...input, requestId: '12345678-1234-4234-8234-123456789abe' }), expected);
+  assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
+});
+
+
+test('the receiving worker resolves master.worker for direct creation before RunManager admission', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const received: unknown[] = [];
+  f.runs.create = async input => {
+    received.push(input);
+    return { session: f.session, run: { id: 'role-fixture', sessionId: f.session.id, prompt: input.prompt, status: 'queued', output: '', createdAt: '' } };
+  };
+  const client = await f.connect();
+  assert.equal(client.supports('masterWorker'), true);
+  await client.create({ modelRole: 'master.worker', cwd: f.directory, prompt: 'new work' });
+  assert.deepEqual(received[0], { provider: 'codex', model: 'gpt-6.1-sol', cwd: f.directory, prompt: 'new work' });
+  await client.create({ provider: 'codex', cwd: f.directory, prompt: 'ordinary' });
+  assert.deepEqual(received[1], { provider: 'codex', cwd: f.directory, prompt: 'ordinary' });
+});
