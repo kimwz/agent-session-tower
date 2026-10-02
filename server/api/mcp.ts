@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import { OPERATIONS, type OperationName } from '../../shared/api/operations.js';
-import type { Run } from '../../shared/types.js';
+import type { Run, RunDelegation } from '../../shared/types.js';
 import { GITHUB_SESSION_TOOLS } from '../triggers/github-coordinator.js';
 import { SLACK_SESSION_TOOLS } from '../slack/mcp-bridge.js';
 import { SESSION_TOOL_OPERATIONS } from './session-tools.js';
@@ -9,6 +9,8 @@ import type { TowerApi } from './tower-api.js';
 
 /** What a capability lets its holder do. The holder never chooses; the worker decides when it issues one. */
 export type Capability = { kind: 'owner-run'; runId: string; sessionId: string } | { kind: 'slack-workflow'; workflowId: string } | { kind: 'github-workflow'; workflowId: string }
+  /** Reports who started work through the local HTTP API; grants no API or owner approval rights. */
+  | { kind: 'caller-run'; runId: string; sessionId: string }
   | { kind: 'secret-run'; runId: string; sessionId: string }
   /** The standing key of the session lookup tools every agent here gets (see session-tools.ts). */
   | { kind: 'session-reader' };
@@ -45,6 +47,20 @@ export class CapabilityRegistry {
   resolve(token: string): Capability | undefined { return /^[a-f\d]{64}$/.test(token) ? this.standing.get(token) ?? this.tokens.get(token) : undefined; }
 }
 
+/** An authenticated calling run, with a stable ancestor even after intermediate runs leave history. */
+export function delegationOf(run: Run): RunDelegation {
+  return { parentRunId: run.id, rootRunId: run.delegation?.rootRunId ?? run.origin?.runId ?? run.id };
+}
+
+export function callerDelegation(registry: CapabilityRegistry, find: (id: string) => Run | undefined, token: string): RunDelegation {
+  const capability = registry.resolve(token);
+  const run = capability?.kind === 'caller-run' ? find(capability.runId) : undefined;
+  if (!run || capability?.kind !== 'caller-run' || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.controllerId) {
+    throw Object.assign(new Error('The calling turn is no longer running here, or its reporting credential is invalid. Nothing was submitted.'), { statusCode: 403, disposition: 'not-admitted' });
+  }
+  return delegationOf(run);
+}
+
 /** Tool names agents see (`mcp__tower__triggers_create`), with a requestKey on operations that create something. */
 export function towerTools(only?: ReadonlySet<string>) {
   return (Object.entries(OPERATIONS) as [OperationName, (typeof OPERATIONS)[OperationName]][]).filter(([name, operation]) => 'agent' in operation && operation.agent && (!only || only.has(name))).map(([name, operation]) => {
@@ -73,6 +89,7 @@ export interface McpContext {
 export async function handleMcpRequest(context: McpContext, token: string, body: { method?: unknown; name?: unknown; arguments?: unknown }): Promise<unknown> {
   const capability = context.capabilities.resolve(token);
   if (!capability) throw Object.assign(new Error('This tool credential is not valid.'), { statusCode: 403 });
+  if (capability.kind === 'caller-run') throw Object.assign(new Error('A reporting credential cannot call Tower tools.'), { statusCode: 403 });
   if (capability.kind === 'session-reader') {
     if (body.method === 'tools/list') return { tools: towerTools(SESSION_TOOL_OPERATIONS) };
     const operation = typeof body.name === 'string' ? operationOf(body.name) : undefined;
@@ -109,7 +126,18 @@ export async function handleMcpRequest(context: McpContext, token: string, body:
   if (body.method !== 'tools/call' || !operation) throw Object.assign(new Error('Unknown Tower tool.'), { statusCode: 404 });
   if (!context.api) throw Object.assign(new Error('Tower operations are unavailable.'), { statusCode: 503 });
   const { requestKey, ...input } = (body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments) ? body.arguments : {}) as Record<string, unknown>;
+  // Admission may prepare files asynchronously. Recheck the credential at its commit point, without
+  // keeping this transient gate on an already admitted durable job.
+  const controllerId = run.origin.controllerId;
+  const validate = () => {
+    const current = context.run(capability.runId);
+    if (context.capabilities.resolve(token) !== capability || !current || current.sessionId !== capability.sessionId
+      || current.status !== 'running' || current.origin?.kind !== 'owner' || current.towerTools !== 'attached'
+      || current.origin.controllerId !== controllerId) {
+      throw Object.assign(new Error('The calling turn lost its Tower authority before admission. Nothing was submitted.'), { statusCode: 403, disposition: 'not-admitted' });
+    }
+  };
   // A turn started from a controlling computer keeps to what that computer may see and change.
   return context.api.call(operation, input, { kind: 'agent', via: 'mcp', sessionId: capability.sessionId, runId: run.id, ...(run.origin.controllerId ? { controllerId: run.origin.controllerId } : {}) },
-    typeof requestKey === 'string' ? requestKey : undefined);
+    typeof requestKey === 'string' ? requestKey : undefined, { delegation: delegationOf(run), validate });
 }

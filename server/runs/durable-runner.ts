@@ -198,7 +198,10 @@ export class DurableRunManager extends EventEmitter {
    * A worker that predates origins drops them and treats every message as the owner's, so
    * work on anyone else's behalf is refused there instead of being admitted as owner work.
    */
-  private requireOrigins(internal: Pick<RunAdmission, 'origin'>): void {
+  private requireOrigins(internal: Pick<RunAdmission, 'origin' | 'callerCapability'>): void {
+    if (internal.callerCapability && !this.supports('delegation')) {
+      throw Object.assign(new Error('The execution worker cannot yet track the calling turn. Nothing was submitted; retry after its safe handoff.'), { statusCode: 503, disposition: 'not-admitted' });
+    }
     if (internal.origin && internal.origin.kind !== 'owner' && !this.supports('origins')) {
       throw Object.assign(new Error('The execution worker is outdated and cannot keep who started this work. It was not submitted; retry after the worker updates.'), { statusCode: 409 });
     }
@@ -221,13 +224,13 @@ export class DurableRunManager extends EventEmitter {
     internal.validate?.();
     this.requireOrigins(internal);
     this.requireSubscription(input.cwd);
-    return this.call('create', [input, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) }]) as Promise<{ session: Session; run: Run }>;
+    return this.call('create', [input, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as Promise<{ session: Session; run: Run }>;
   }
   async enqueue(id: string, prompt: string, attachments: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
     internal.validate?.();
     this.requireOrigins(internal);
     this.requireSubscription(this.getSession(id)?.cwd);
-    return this.call('enqueue', [id, prompt, attachments, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) }]) as Promise<Run>;
+    return this.call('enqueue', [id, prompt, attachments, { autoPromptId: internal.autoPromptId, ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]) as Promise<Run>;
   }
   /** An older worker would ignore `targetRunId` and insert into whatever turn runs, so it is never sent one. */
   async steer(id: string, options: { targetRunId?: string } = {}): Promise<Run> {
@@ -242,13 +245,14 @@ export class DurableRunManager extends EventEmitter {
   autoPromptList(): AutoPromptJob[] { return structuredClone(this.snapshot?.autoPrompts ?? []); }
   triggerOverview(): TriggerOverview | undefined { return this.snapshot?.triggers && structuredClone(this.snapshot.triggers); }
   /** Tower operations run in the worker; an outdated worker is told apart from a real error. */
-  async api(operation: string, input: unknown, internal?: Pick<RunAdmission, 'origin' | 'requestId'>): Promise<unknown> {
+  async api(operation: string, input: unknown, internal?: Pick<RunAdmission, 'origin' | 'requestId' | 'callerCapability'>): Promise<unknown> {
     if (!this.supports('triggers')) throw Object.assign(new Error('The execution worker has not updated yet. Triggers become available once it hands over to the new version.'), { statusCode: 503 });
     if (operation.startsWith('models.') && !this.supports('models')) throw Object.assign(new Error('The execution worker has not updated yet. Model settings become available once it hands over to the new version.'), { statusCode: 503, disposition: 'not-admitted' });
-    if (!internal?.origin?.controllerId) return this.call('api', [operation, input]);
+    this.requireOrigins(internal ?? {});
+    if (!internal?.origin?.controllerId) return this.call('api', [operation, input, ...(internal?.callerCapability ? [{ callerCapability: internal.callerCapability }] : [])]);
     // An older worker would answer a controlling computer as the owner here, folders kept from sharing included.
     if (!this.supports('remoteTriggers')) throw Object.assign(new Error('The execution worker on this computer has not updated yet, so it cannot take remote requests for this. Nothing was done.'), { statusCode: 503, disposition: 'not-admitted' });
-    return this.call('api', [operation, input, { origin: internal.origin, ...(internal.requestId ? { requestId: internal.requestId } : {}) }]);
+    return this.call('api', [operation, input, { origin: internal.origin, ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]);
   }
   async slackOverview(): Promise<SlackPublicStatus> { return this.call('slackOverview', []) as Promise<SlackPublicStatus>; }
   async secretCall(operation: string, args: unknown[] = []): Promise<unknown> {
@@ -278,7 +282,7 @@ export class DurableRunManager extends EventEmitter {
     return this.call('publicVisit', [action, slug, input]) as Promise<{ state: PublicVisitorState; token?: string }>;
   }
   getAutoPrompt(id: string): AutoPromptJob | undefined { return this.autoPromptList().find(job => job.id === id.toLowerCase()); }
-  async submitAutoPrompt(input: AutoPromptRequest, internal: Pick<RunAdmission, 'origin' | 'requestId'> = {}): Promise<AutoPromptJob> {
+  async submitAutoPrompt(input: AutoPromptRequest, internal: Pick<RunAdmission, 'origin' | 'requestId' | 'callerCapability'> = {}): Promise<AutoPromptJob> {
     this.requireOrigins(internal);
     // An older worker would ignore a target it does not know and route the request somewhere else.
     if ((input.targetSessionId !== undefined && !this.supports('autoPromptTargets')) || (input.sessionMode !== undefined && !this.supports('origins'))) {
@@ -288,7 +292,7 @@ export class DurableRunManager extends EventEmitter {
     if (input.targetSessionId) this.requireSubscription(this.getSession(input.targetSessionId)?.cwd);
     // An older worker routes by itself and does not know to keep other work out of the master's conversation.
     else if (!input.cwd) for (const session of this.snapshot?.sessions ?? []) this.requireSubscription(session.cwd);
-    const admitted = { ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}) };
+    const admitted = { ...(internal.origin ? { origin: internal.origin } : {}), ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) };
     return this.call('submitAutoPrompt', [input, ...(Object.keys(admitted).length ? [admitted] : [])]) as Promise<AutoPromptJob>;
   }
   async cancelAutoPrompt(id: string): Promise<AutoPromptJob> { return this.call('cancelAutoPrompt', [id]) as Promise<AutoPromptJob>; }

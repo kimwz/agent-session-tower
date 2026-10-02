@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { subscriptionOnly } from '../runs/subscription.js';
 import type { Run, Session } from '../../shared/types.js';
 import type { RunManager } from '../runs/manager.js';
-import { NO_RUN_TOOLS, type RunTools, type SessionMcpServer, type SessionMcpServers } from '../runs/session-mcp.js';
+import { CALLER_CAPABILITY_ENV, NO_RUN_TOOLS, type RunTools, type SessionMcpServer, type SessionMcpServers } from '../runs/session-mcp.js';
 import type { SlackService } from '../slack/service.js';
 import type { GitHubCoordinator } from '../triggers/github-coordinator.js';
 import type { CapabilityRegistry } from './mcp.js';
@@ -36,8 +36,13 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
   const lookups = { [SESSION_TOOLS_SERVER]: sessionToolServer(options.stateDir, thisBuild()) };
   return (run: Run, session: Session): RunTools => {
     const tools = resolve(run, session);
+    if (run.origin?.controllerId) return tools;
+    const env = { [CALLER_CAPABILITY_ENV]: options.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: run.sessionId }) };
+    // A global HTTP MCP connection has no per-turn environment. Override it only where owner tools already belong.
+    const local: SessionMcpServers = tools.towerTools === 'attached' && !subscriptionOnly(options.stateDir, session.cwd)
+      ? { tower_local: { ...thisBuild(), args: [...thisBuild().args, 'mcp', '--state-dir', options.stateDir], env } } : {};
     // Given here too, so they work even where the user configuration does not name them.
-    return run.origin?.controllerId ? tools : { ...tools, servers: { ...tools.servers, ...lookups } };
+    return { ...tools, env, servers: { ...tools.servers, ...local, ...lookups } };
   };
   function resolve(run: Run, session: Session): RunTools {
     const origin = run.origin;

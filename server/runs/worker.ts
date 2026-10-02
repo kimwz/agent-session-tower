@@ -1,3 +1,4 @@
+import { latestNativeUserMessage } from './native-user-message.js';
 import { installLaunchShims, launchMarksDir } from '../sessions/launch-marks.js';
 import { finishedAutomationSessionIds } from '../../shared/automation-sessions.js';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
@@ -31,7 +32,7 @@ import { REMOTE_FOLDER_REFUSED, TriggerService } from '../triggers/service.js';
 import { GitHubCoordinator } from '../triggers/github-coordinator.js';
 import { PUBLIC_TRIGGER_PREFIX, PublicAgentService } from '../public-agents/service.js';
 import { TowerApi } from '../api/tower-api.js';
-import { CapabilityRegistry, handleMcpRequest } from '../api/mcp.js';
+import { callerDelegation, CapabilityRegistry, handleMcpRequest } from '../api/mcp.js';
 import { sessionToolsKey } from '../api/session-tools.js';
 import { DecisionService } from '../decisions/service.js';
 import { relatedSessionNotes } from '../sessions/related.js';
@@ -158,6 +159,14 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     return options.ledger.once(controllerId, operation, admitted.requestId, content, execute, record, replay);
   };
   const findRun = (id: string) => options.runs.list().find(run => run.id === id);
+  const admit = (value: unknown): RunAdmission => {
+    const admitted = admission(value);
+    const token = record(value).callerCapability;
+    if (token === undefined) return admitted;
+    if (typeof token !== 'string' || admitted.origin?.controllerId) throw Object.assign(new Error('Invalid local calling-turn credential.'), { statusCode: 403 });
+    const validate = () => { callerDelegation(capabilities, findRun, token); };
+    return { ...admitted, delegation: callerDelegation(capabilities, findRun, token), validate };
+  };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
     if (draining && !READS_DURING_HANDOFF.has(method)) {
@@ -189,7 +198,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         return { accepted: true, deadline: new Date(forced.deadline).toISOString() };
       }
       case 'create': {
-        const admitted = admission(args[1]);
+        const admitted = admit(args[1]);
         return remote(admitted, 'create', args[0], undefined, () => options.runs.create(args[0] as CreateSessionRequest, admitted),
           value => ({ kind: 'session', sessionId: value.session.id, runId: value.run.id }),
           result => {
@@ -199,13 +208,13 @@ export async function startRunnerHost(options: RunnerHostOptions) {
           });
       }
       case 'enqueue': {
-        const admitted = admission(args[3]);
+        const admitted = admit(args[3]);
         if (admitted.origin?.controllerId) {
           return remote(admitted, 'enqueue', [args[0], args[1], args[2]], args[0] as string, () => options.runs.enqueue(args[0] as string, args[1] as string, args[2] as MessageAttachments, admitted),
             value => ({ kind: 'run', runId: value.id }), result => result.kind === 'run' ? findRun(result.runId) : undefined);
         }
         // Only the owner's own message may carry Slack send approval; the origin decides, never a correlation ID.
-        const owner = admitted.origin?.kind === 'owner';
+        const owner = admitted.origin?.kind === 'owner' && !admitted.delegation;
         const slackTurn = options.slack && owner ? await options.slack.ownerChat(args[0] as string, args[1] as string) : { prompt: args[1] as string };
         // The same holds in a GitHub coordinator conversation: only the owner's message can approve a comment.
         const turn = options.github && owner ? await options.github.ownerChat(args[0] as string, slackTurn.prompt) : slackTurn;
@@ -230,10 +239,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       case 'terminalResize': if (options.terminals) return options.terminals.resize(args[0] as string, args[1], args[2]); break;
       case 'terminalClose': if (options.terminals) return options.terminals.close(args[0] as string); break;
       case 'submitAutoPrompt': if (options.autoPrompts) {
-        const admitted = admission(args[1]);
+        const admitted = admit(args[1]);
         const autoPrompts = options.autoPrompts;
         const request = args[0] as AutoPromptRequest;
-        return remote(admitted, 'autoPrompt', request, undefined, async () => { await context?.refresh(); return autoPrompts.submit(request, { origin: admitted.origin }); },
+        return remote(admitted, 'autoPrompt', request, undefined, async () => { await context?.refresh(); return autoPrompts.submit(request, { origin: admitted.origin, ...(admitted.delegation ? { delegation: admitted.delegation, validate: admitted.validate } : {}) }); },
           value => ({ kind: 'autoPrompt', jobId: value.id }), result => result.kind === 'autoPrompt' ? autoPrompts.get(result.jobId) : undefined);
       } break;
       case 'cancelAutoPrompt': if (options.autoPrompts) return options.autoPrompts.cancel(args[0] as string); break;
@@ -267,9 +276,9 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       } break;
       case 'api': if (options.api) {
         // The owner here, or the owner at a controlling computer: then it sees and changes only what is shared.
-        const admitted = args[2] === undefined ? undefined : admission(args[2]);
+        const admitted = args[2] === undefined ? undefined : admit(args[2]);
         const controllerId = admitted?.origin?.controllerId;
-        return options.api.call(args[0], args[1], controllerId ? { kind: 'owner', via: 'remote', controllerId } : { kind: 'owner', via: 'ui' }, admitted?.requestId);
+        return options.api.call(args[0], args[1], controllerId ? { kind: 'owner', via: 'remote', controllerId } : { kind: 'owner', via: 'ui' }, admitted?.requestId, admitted && { delegation: admitted.delegation, validate: admitted.validate });
       } break;
       case 'slackTool': if (options.slack) return options.slack.tool(args[0] as string, args[1] as string, args[2] as Record<string, unknown>); break;
       case 'skillsOverview': if (options.skills) return options.skills.overview(record(args[0])); break;
@@ -517,7 +526,8 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
   // Without the shims a helper's launcher is proven only while the process tree shows it; the worker still starts.
   const shims = await installLaunchShims(stateDir).catch(error => { console.error(`Launch shims were not installed: ${error instanceof Error ? error.message : String(error)}`); return undefined; });
   const terminals = new WorkspaceTerminals({ keepAliveOnDisconnect: true });
-  const runs = new RunManager({ stateDir, ...(shims ? { launchMarks: { shims, marks: launchMarksDir(stateDir) } } : {}), getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true),
+  const runs: RunManager = new RunManager({ stateDir, ...(shims ? { launchMarks: { shims, marks: launchMarksDir(stateDir) } } : {}), getSession: id => sessions.get(id), refreshSessions: () => sessions.refresh(true),
+    latestUserMessage: id => latestNativeUserMessage(runs, id, nativeId => sessions.detail(nativeId, undefined, 200)),
     openCodexBridge: options => openCodexBridgeRun({ ...options, codexHome: sessions.codexHome }), trustWorkspace,
     // Restored turns wait until tools, gates and limits below are set up.
     holdUntilReady: true });
@@ -552,7 +562,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     coordinators = () => new Set([...slack.coordinatorSessionIds(), ...github.coordinatorSessionIds()]);
     // A delegated task's run stays until its coordinator has finished with it, across pruning and restarts.
     runs.setRetained(() => [...slack.automation.retainedRuns(), ...github.automation.retainedRuns()]);
-    const capabilities = new CapabilityRegistry(capability => (capability.kind !== 'owner-run' && capability.kind !== 'secret-run')
+    const capabilities = new CapabilityRegistry(capability => (capability.kind !== 'owner-run' && capability.kind !== 'caller-run' && capability.kind !== 'secret-run')
       || runs.list().some(run => run.id === capability.runId && (run.status === 'running' || run.status === 'queued')));
     capabilities.grant(await sessionToolsKey(stateDir), { kind: 'session-reader' });
     const secretService = new SecretService({ stateDir });
@@ -658,6 +668,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     };
     const stopTelling = () => { stopping = true; for (const timer of runWaits) clearTimeout(timer); runWaits.clear(); };
     const permissions: PermissionService = new PermissionService({ stateDir, session: id => runs.getSession(id), globalCodex: resolve(stateDir) === resolve(defaultStateDir()),
+      decision: async (request, prompt) => runs.permissionDecision(request, prompt, { closed: await closedNow(request.sessionId) }),
       resume: async (sessionId, prompt) => { await runs.enqueue(sessionId, prompt, {}, { origin: { kind: 'owner' } }); },
       // A public agent's requests always wait for the owner: its conversations carry outsiders' words.
       autoReviewSkip: request => {
@@ -724,12 +735,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       },
       // The decision reaches the conversation as the work it already was: the requesting turn's origin and approvals.
       reachable: request => Boolean(request.runId && runs.list().find(item => item.id === request.runId)?.origin),
-      notify: async (request, message) => {
-        const run = request.runId ? runs.list().find(item => item.id === request.runId) : undefined;
-        // Gone since: the reviewer hands the request back to the owner.
-        if (!run?.origin) throw new Error('The requesting conversation can no longer be reached.');
-        await runs.enqueue(request.sessionId, `${TOWER_NOTICE} ${message}`, {}, { origin: run.origin, ...(run.unattended ? { unattended: true } : {}) });
-      } });
+      notify: (request, message) => runs.permissionDecision(request, `${TOWER_NOTICE} ${message}`).then(() => undefined) });
 
     runs.setClaudeSettings((cwd, sessionId) => permissions.claudeSettings(cwd, sessionId));
     runs.setTurnNotes(async (_run, session) => {
@@ -776,6 +782,11 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
     // A coordinator conversation already under way continues, like an accepted Slack conversation; only its first turn waits on the trigger.
     const remoteLaunch = remoteTriggerLaunch(exclusions, runs);
     runs.setLaunchGate(run => {
+      if (run.permissionRequestIds?.length) {
+        const applicationError = permissions.ruleApplicationError(runs.getSession(run.sessionId)?.cwd ?? '');
+        if (applicationError) return `Permission rules were not applied: ${applicationError}`;
+      }
+      if (run.permissionRequestIds?.length && visible.allSessions().some(session => session.id === run.sessionId && session.closed)) return 'The owner closed the conversation before permission continuation.';
       if (run.origin?.kind !== 'trigger' || !run.origin.triggerId) return undefined;
       // A public agent's work starts only while that agent still exists and is on.
       if (run.origin.triggerId.startsWith(PUBLIC_TRIGGER_PREFIX)) return publicAgents.launchAllowed(run.origin.triggerId.slice(PUBLIC_TRIGGER_PREFIX.length)) ? undefined : 'The public agent was turned off or deleted before this run started, so it did not run.';
@@ -813,6 +824,7 @@ export async function runRunnerWorker(stateDir: string): Promise<void> {
       resume: () => { paused = false; secrets.resume(); tools?.resume(); slack.resume(); triggers.resume(); github.resume(); publicAgents.resume(); skills.resume(); tasks.resume(); worktrees.resume(); permissions.resume(); reviewer.release(); sessions.resume(); },
       // Nothing is running, so nothing is cancelled; the successor owns the state from here.
       onHandedOff: () => { clearInterval(secretExpiry); secrets.close(); stopTelling(); void tools?.stop(); triggers.close(); github.close(); slack.close(); publicAgents.close(); skills.close(); void tasks.close(); worktrees.close(); reviewer.close(); clearInterval(expiryTimer); permissions.close(); sessions.stop(); setTimeout(() => process.exit(0), 2000); } });
+    await permissions.reconcileNotifications().catch(error => console.error(`Permission decisions did not recover: ${error instanceof Error ? error.message : String(error)}`));
     runs.markReady();
     // A restore's skills are written once the worker serves: linking into project folders (on a slow volume, say) never
     // keeps it from starting. The restore is recorded as done after them; a worker that stops first leaves it to the next.

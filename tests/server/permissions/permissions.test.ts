@@ -237,3 +237,24 @@ test('editing a rule an approval made saves the rule, never decides the finished
   const draft = ruleDraft({ id: 'r1', kind: 'command', value: 'gh pr merge', providers: ['claude'], scope: 'global', requestId: 'q1', source: 'request', createdAt: '', updatedAt: '' } as never);
   assert.deepEqual(draft, { id: 'r1', kind: 'command', value: 'gh pr merge', providers: ['claude'], scope: 'global' });
 });
+
+
+test('decision opt-in is durable; recovery applies rules before recording a request-aware notification', async t => {
+  const f = await fixture(t); await f.service.flush(); f.service.close();
+  let fail = true; const notified: string[] = [];
+  const make = () => new PermissionService({ stateDir: f.stateDir, env: { CODEX_HOME: f.codexHome }, session: id => f.sessions.get(id),
+    decision: async request => { if (fail) throw new Error('Fixture enqueue unavailable'); notified.push(request.id); } });
+  const service = make(); await service.start(); await service.flush();
+  const first = (await service.request({ kind: 'command', value: 'gh pr merge', scope: 'project', providers: ['claude'], reason: 'Fixture' }, agent('claude:one'))).request!;
+  const result = await service.decide(first.id!, true, undefined, true);
+  assert.ok(result.resumed && 'error' in result.resumed);
+  assert.equal(service.overview().requests.find(item => item.id === first.id)?.notification?.state, 'pending');
+  const second = (await service.request({ kind: 'command', value: 'gh pr view', scope: 'project', providers: ['claude'], reason: 'Fixture' }, agent('claude:one'))).request!;
+  await service.decide(second.id!, true, undefined, false);
+  assert.equal(service.overview().requests.find(item => item.id === second.id)?.notification, undefined);
+  await service.flush(); service.close(); fail = false;
+  const restored = make(); await restored.start(); await restored.reconcileNotifications();
+  assert.deepEqual(notified, [first.id]);
+  assert.equal(restored.overview().requests.find(item => item.id === first.id)?.notification?.state, 'recorded');
+  await restored.reconcileNotifications(); assert.deepEqual(notified, [first.id]); restored.close();
+});

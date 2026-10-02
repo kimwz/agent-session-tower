@@ -5,6 +5,7 @@
 - Prefer fixture-based checks. For live checks, verify that child agents use isolated storage too; do not assume an ephemeral parent guarantees this.
 - If an earlier check leaked a session, hide only the proven test session IDs using Tower's existing close-session API. Preserve native records and unrelated sessions. Do not add broad filters for temporary paths.
 - See [docs/development.md](docs/development.md) for the live-check workflow.
+- When UI verification is part of authorized delivery, an already permitted isolated Playwright test browser with fixture data does not need a second approval merely because no personal browser is connected. Honor an explicitly selected browser and actual access denials; do not bypass them.
 
 # Execution lifetime
 

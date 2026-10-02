@@ -65,6 +65,7 @@ export interface PermissionServiceOptions {
   globalCodex?: boolean;
   /** Sends the owner's decision to the requesting conversation as the owner's next message. */
   resume?(sessionId: string, prompt: string): Promise<void>;
+  decision?(request: PermissionRequest, prompt: string): Promise<unknown>;
   /** Why the reviewer may not decide requests from this conversation (a public agent's, for one); undefined when it may. */
   autoReviewSkip?(request: PermissionRequest): string | undefined;
   /** A request is waiting for Tower's reviewer. */
@@ -110,7 +111,7 @@ export class PermissionService {
       }
     }
     // Rules files are brought in line in the background: a slow disk or git never holds up the worker's start.
-    void this.serial(() => this.apply()).catch(() => {});
+    void this.reconcileNotifications().catch(() => {});
   }
 
   /** Waits for changes under way; later calls are refused once closed. */
@@ -257,6 +258,7 @@ export class PermissionService {
             const item = state.requests.find(entry => entry.id === id)!;
             item.status = 'approved'; item.decidedAt = at; item.ruleId = made.id; item.decidedBy = 'auto';
             item.review = review({ verdict: 'approve' });
+            if (this.autoReview().resume) item.notification = { state: 'pending', message: reviewMessage(item, given) };
           });
         } catch (error) { return owner(error instanceof Error ? error.message : String(error)); }
         await this.apply();
@@ -272,6 +274,7 @@ export class PermissionService {
           const item = state.requests.find(entry => entry.id === id)!;
           item.status = 'withdrawn'; item.decidedAt = at; item.decidedBy = 'auto';
           item.review = review({ verdict: 'narrow', ...(suggestion ? { suggestion } : {}) });
+          if (this.autoReview().resume) item.notification = { state: 'pending', message: reviewMessage(item) };
         });
         const item = this.state.requests.find(entry => entry.id === id)!;
         return { request: item, message: reviewMessage(item) };
@@ -295,7 +298,7 @@ export class PermissionService {
       await this.commit(state => {
         const item = state.requests.find(entry => entry.id === id);
         if (!item || item.status !== 'withdrawn' || item.decidedBy !== 'auto') return;
-        item.status = 'pending'; delete item.decidedAt; delete item.decidedBy;
+        item.status = 'pending'; delete item.decidedAt; delete item.decidedBy; delete item.notification;
         item.review = { ...(item.review ?? { status: 'done' }), status: 'done', verdict: 'owner', reason: `${item.review?.reason ?? ''} (${why})`.trim() };
       });
     });
@@ -525,7 +528,7 @@ export class PermissionService {
       if (request.status !== 'pending') throw failure('이미 처리한 요청입니다.', 409);
       const at = this.now();
       if (!approve) {
-        await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.status = 'denied'; item.decidedAt = at; item.decidedBy = 'owner'; });
+        await this.commit(state => { const item = state.requests.find(entry => entry.id === id)!; item.status = 'denied'; item.decidedAt = at; item.decidedBy = 'owner'; if (resume && request.rule.kind !== 'run') item.notification = { state: 'pending', message: decisionMessage(request.rule, undefined) }; });
         return { request, rule: undefined };
       }
       if (request.rule.kind === 'run') {
@@ -543,17 +546,39 @@ export class PermissionService {
         replaced = dropOverlappingAuto(state, made);
         const item = state.requests.find(entry => entry.id === id)!;
         item.status = 'approved'; item.decidedAt = at; item.ruleId = made.id; item.decidedBy = 'owner';
+        if (resume) item.notification = { state: 'pending', message: decisionMessage(request.rule, rule) };
       });
       await this.apply();
       return { request, rule };
     });
     const extra = replaced.length ? { replaced } : {};
-    if (!resume || !this.options.resume) return { ...this.overview(), ...extra };
+    if (!resume || (!this.options.resume && !this.options.decision)) return { ...this.overview(), ...extra };
     // The decision stands whether or not the conversation can take a message now.
     // A run's own message comes with its result; a refused run is said now.
     if (run) return { ...this.overview(), ...extra };
-    const note = await this.options.resume(request.sessionId, decisionMessage(request.rule, rule)).then(() => undefined, error => error instanceof Error ? error.message : String(error));
+    const note = await (request.rule.kind === 'run' ? this.options.resume?.(request.sessionId, decisionMessage(request.rule, rule)) ?? Promise.resolve() : this.deliverNotification(request.id)).then(() => undefined, error => error instanceof Error ? error.message : String(error));
     return { ...this.overview(), ...extra, resumed: note ? { error: note } : { sent: true } };
+  }
+
+  /** Applies saved rules before admitting opt-in decisions, including after a crash before enqueue. */
+  ruleApplicationError(cwd: string): string | undefined { return this.targets(cwd).find(target => target.error)?.error; }
+
+  async reconcileNotifications(): Promise<void> {
+    await this.serial(() => this.apply());
+    for (const request of [...this.state.requests]) if (request.notification?.state === 'pending') await this.deliverNotification(request.id).catch(() => {});
+  }
+
+  async deliverNotification(id: string, fallback?: (request: PermissionRequest, message: string) => Promise<unknown>): Promise<void> {
+    await this.serial(async () => {
+      const request = this.state.requests.find(item => item.id === id);
+      if (!request || request.notification?.state !== 'pending') return;
+      if (request.status === 'approved' && this.targets(request.cwd).some(target => target.error)) throw failure('Permission rules could not be applied; continuation was not admitted.', 503);
+      const notify = this.options.decision ?? fallback;
+      if (notify) await notify(structuredClone(request), request.notification.message);
+      else if (this.options.resume) await this.options.resume(request.sessionId, request.notification.message);
+      else return;
+      await this.commit(state => { const item = state.requests.find(entry => entry.id === id); if (item?.notification) item.notification.state = 'recorded'; });
+    });
   }
 
   /** A rule this computer can keep: a Codex rule for a project whose rules file would be the one for every project cannot. */
@@ -638,7 +663,7 @@ function decisionMessage(asked: PermissionRuleInput, allowed: PermissionRuleInpu
   if (!allowed) return `The owner refused your permission request for \`${asked.value}\` in Tower. Do not look for another way to do it: finish what you can without it and report what remains blocked.`;
   const changed = allowed.value !== asked.value || allowed.scope !== asked.scope || allowed.kind !== asked.kind;
   return `The owner allowed \`${allowed.value}\` for ${allowed.providers.map(provider => provider === 'claude' ? 'Claude Code' : 'Codex').join(' and ')} in ${where(allowed)}`
-    + `${changed ? ` (you asked for \`${asked.value}\` in ${where(asked)})` : ''}. It applies from this turn. Continue the task where it waited on this permission.`;
+    + `${changed ? ` (you asked for \`${asked.value}\` in ${where(asked)})` : ''}. It applies from the next provider turn. Continue the task where it waited on this permission.`;
 }
 
 /** What the requesting agent is told after Tower's reviewer allowed its request or sent it back. */
@@ -647,7 +672,7 @@ function reviewMessage(request: PermissionRequest, allowed?: PermissionRuleInput
   if (allowed) {
     const changed = allowed.value !== request.rule.value || request.rule.scope !== allowed.scope;
     return `Tower's permission reviewer allowed \`${allowed.value}\` for ${allowed.providers.map(provider => provider === 'claude' ? 'Claude Code' : 'Codex').join(' and ')} in ${allowed.scope === 'conversation' ? 'this conversation only (for 24 hours)' : 'this project'}`
-      + `${changed ? ` (you asked for \`${request.rule.value}\`${request.rule.scope === 'global' ? ' in every project' : ''})` : ''}.${why} It applies from this turn. Continue the task where it waited on this permission.`;
+      + `${changed ? ` (you asked for \`${request.rule.value}\`${request.rule.scope === 'global' ? ' in every project' : ''})` : ''}.${why} It applies from the next provider turn. Continue the task where it waited on this permission.`;
   }
   const instead = request.review?.suggestion ? ` Ask for this instead: ${request.review.suggestion}` : ' Ask for a narrower rule that covers only what the task needs.';
   return `Tower's permission reviewer did not allow \`${request.rule.value}\` as asked, and withdrew the request.${why}${instead} If the task still needs it, send a new permissions_request; do not look for another way around the refusal.`;
@@ -746,7 +771,7 @@ function trim(state: PermissionState, now: Date): void {
   const decided = state.requests.filter(request => request.status !== 'pending' && at(request) >= cutoff).sort((a, b) => at(a) - at(b)).slice(-MAX_DECIDED);
   const keep = new Set(decided);
   // A run still waiting or running, or whose result its conversation has yet to hear, is kept whatever its age.
-  state.requests = state.requests.filter(request => request.status === 'pending' || keep.has(request)
+  state.requests = state.requests.filter(request => request.status === 'pending' || request.notification?.state === 'pending' || keep.has(request)
     || (request.run && (!finishedRun(request.run) || (request.run.notify && !request.run.delivered))));
 }
 
@@ -779,6 +804,7 @@ function normalize(value: unknown): PermissionState {
       ...(typeof item.runId === 'string' ? { runId: item.runId } : {}), cwd: item.cwd, ...(item.provider === 'claude' || item.provider === 'codex' ? { provider: item.provider } : {}),
       createdAt: text(item.createdAt, 40), ...(typeof item.decidedAt === 'string' ? { decidedAt: item.decidedAt } : {}), ...(typeof item.ruleId === 'string' ? { ruleId: item.ruleId } : {}),
       ...(item.decidedBy === 'owner' || item.decidedBy === 'auto' ? { decidedBy: item.decidedBy } : {}), ...(reviewOf(item.review, item.status === 'pending' || item.status === undefined) ?? {}),
+      ...(item.notification && (item.notification.state === 'pending' || item.notification.state === 'recorded') && typeof item.notification.message === 'string' ? { notification: { state: item.notification.state, message: text(item.notification.message, 4000) } } : {}),
       ...(rule.kind === 'run' ? runFields(item) : {}) });
   }
   if (typeof input.lost === 'string') state.lost = input.lost;

@@ -18,6 +18,7 @@ import type { Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
 import { nativeHistory } from '../../../server/sessions/native-history.js';
 import { startLegacyRunner } from './fixtures/legacy-runner.ts';
+import { CapabilityRegistry } from '../../../server/api/mcp.js';
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'tower-durable-fixture-'));
@@ -384,6 +385,11 @@ test('an outdated worker is only given the owner’s own requests, never work on
   await assert.rejects(client.enqueue(session.id, '1번 보내주세요', {}, { origin: agent }), { statusCode: 409, message: /outdated/ });
   await assert.rejects(client.create({ provider: 'codex', cwd: directory, prompt: 'Agent task' }, { origin: agent }), /outdated/);
   await assert.rejects(client.submitAutoPrompt({ requestId: '12345678-1234-4234-8234-123456789abd', provider: 'codex', prompt: 'Agent task' }, { origin: agent }), /outdated/);
+  const caller = { callerCapability: 'a'.repeat(64) };
+  await assert.rejects(client.enqueue(session.id, 'Tracked work', {}, caller), /cannot yet track/);
+  await assert.rejects(client.create({ provider: 'codex', cwd: directory, prompt: 'Tracked work' }, caller), /cannot yet track/);
+  await assert.rejects(client.submitAutoPrompt({ requestId: '12345678-1234-4234-8234-123456789abe', provider: 'codex', prompt: 'Tracked work' }, caller), /cannot yet track/);
+  await assert.rejects(client.api('autoPrompt.submit', {}, caller), /not updated/);
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
   await client.enqueue(session.id, 'Owner message', {}, { origin: { kind: 'owner' } });
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), ['enqueue']);
@@ -808,4 +814,35 @@ test('the current worker says it keeps the master to a subscription sign-in', as
   const f = await fixture(); t.after(f.cleanup);
   const client = await f.connect();
   assert.equal(client.supports('subscriptionOnly'), true);
+});
+
+test('worker records a verified calling turn without treating its message as owner approval', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  await f.host.close();
+  const capabilities = new CapabilityRegistry();
+  const ownerMessages: string[] = [];
+  const slack = { sessionMcp: () => undefined, coordinatorSessionIds: () => [],
+    ownerChat: async (_id: string, prompt: string) => { ownerMessages.push(prompt); return { prompt };  } } as unknown as SlackService;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, capabilities, slack });
+  t.after(() => host.close());
+  const client = await f.connect();
+  const parent = await client.enqueue(f.session.id, 'Implement the goal');
+  await until(() => f.starts() === 1);
+  const token = capabilities.issue({ kind: 'caller-run', runId: parent.id, sessionId: parent.sessionId });
+  const child = await client.enqueue(f.session.id, '1번 보내주세요', {}, { callerCapability: token });
+  assert.deepEqual(child.delegation, { parentRunId: parent.id, rootRunId: parent.id });
+  assert.deepEqual(child.origin, { kind: 'owner' }, 'reporting lineage never changes execution authority');
+  assert.deepEqual(ownerMessages, ['Implement the goal'], 'an attributed agent message cannot consume owner approval');
+  const before = f.runs.list().length;
+  await assert.rejects(client.enqueue(f.session.id, 'Forged', {}, { callerCapability: 'f'.repeat(64) }), { statusCode: 403 });
+  const mismatched = capabilities.issue({ kind: 'caller-run', runId: parent.id, sessionId: 'codex:someone-else' });
+  await assert.rejects(client.enqueue(f.session.id, 'Wrong session', {}, { callerCapability: mismatched }), { statusCode: 403 });
+  assert.equal(f.runs.list().length, before);
+  await f.runs.cancel(child.id);
+  f.finish();
+  await until(() => f.runs.list().find(run => run.id === parent.id)?.status === 'completed');
+  await assert.rejects(client.enqueue(f.session.id, 'Expired', {}, { callerCapability: token }), { statusCode: 403 });
+  const saved = await readFile(join(f.stateDir, 'runs.json'), 'utf8');
+  assert.equal(saved.includes(token), false, 'credentials never enter persisted run history');
+  assert.ok(saved.includes(parent.id));
 });

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import test, { type TestContext } from 'node:test';
-import { CapabilityRegistry, handleMcpRequest, towerTools, type McpContext } from '../../../server/api/mcp.js';
+import { CapabilityRegistry, callerDelegation, handleMcpRequest, towerTools, type McpContext } from '../../../server/api/mcp.js';
 import { runToolResolver } from '../../../server/api/run-tools.js';
 import { TowerApi } from '../../../server/api/tower-api.js';
 import { TriggerService } from '../../../server/triggers/service.js';
@@ -15,7 +15,7 @@ import type { AutoPromptJob, Run, Session } from '../../../shared/types.js';
 const session = (id: string): Session => ({ id, nativeId: id.split(':')[1], provider: 'codex', title: 'Mine', cwd: '/project', project: 'project', status: 'idle', statusReason: '',
   createdAt: '', updatedAt: '', lastMessage: '', messageCount: 1, isSubagent: false, resumable: true });
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, preparing?: (internal: { validate?: () => void }) => Promise<void>) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-tools-'));
   const project = join(stateDir, 'project');
   await mkdir(project);
@@ -25,7 +25,7 @@ async function fixture(t: TestContext) {
     create: async () => { throw new Error('unused'); }, enqueue: async () => { throw new Error('unused'); }, runs: () => runs, session: () => undefined } });
   await triggers.start();
   const api = new TowerApi({ stateDir, triggers, runs: { list: () => runs },
-    autoPrompts: { submit: async (request, internal) => { submitted.push({ request, internal }); return { id: request.requestId, provider: request.provider, prompt: request.prompt, routerModel: 'r', status: 'queued', createdAt: '', updatedAt: '' } as AutoPromptJob; }, get: () => undefined } });
+    autoPrompts: { submit: async (request, internal) => { await preparing?.(internal); submitted.push({ request, internal }); return { id: request.requestId, provider: request.provider, prompt: request.prompt, routerModel: 'r', status: 'queued', createdAt: '', updatedAt: '' } as AutoPromptJob; }, get: () => undefined } });
   const capabilities = new CapabilityRegistry();
   const context: McpContext = { api, capabilities, run: runId => runs.find(run => run.id === runId) };
   t.after(async () => { triggers.close(); await rm(stateDir, { recursive: true, force: true }); });
@@ -101,7 +101,9 @@ test('work an agent hands to Auto Prompt runs as the agent’s, never as the own
   const token = f.token(run);
   const requestId = randomUUID();
   await handleMcpRequest(f.context, token, { method: 'tools/call', name: 'autoPrompt_submit', arguments: { requestId, provider: 'codex', prompt: 'Fix the flaky test' } });
-  assert.deepEqual((f.submitted[0] as { internal: unknown }).internal, { origin: { kind: 'agent', runId: run.id } });
+  const { validate, ...admission } = (f.submitted[0] as { internal: { validate?: () => void } }).internal;
+  assert.equal(typeof validate, 'function');
+  assert.deepEqual(admission, { origin: { kind: 'agent', runId: run.id }, delegation: { parentRunId: run.id, rootRunId: run.id } });
   await assert.rejects(f.api.call('triggers.updateSettings', { settings: { maxTriggers: 5, maxConcurrentRuns: 1, maxEventsPerHour: 5 } }, { kind: 'agent', via: 'mcp', sessionId: 'codex:mine' }), { statusCode: 403 });
 });
 
@@ -134,7 +136,7 @@ test('only owner turns in the owner’s own conversations receive Tower tools; e
   assert.match(native.servers!.tower.env!.TOWER_MCP_CAPABILITY, /^[a-f\d]{64}$/);
   assert.equal(resolve(owner, session('codex:created')).towerTools, 'attached');
   const lookups = (tools: ReturnType<typeof resolve>) => Object.keys(tools.servers ?? {}).sort();
-  assert.deepEqual(lookups(native), ['tower', 'tower_sessions']);
+  assert.deepEqual(lookups(native), ['tower', 'tower_local', 'tower_sessions']);
   assert.deepEqual(native.servers!.tower_sessions.args.slice(-2), ['--sessions-mcp', f.stateDir]);
   assert.equal(native.servers!.tower_sessions.env, undefined, 'its key stays in the state directory');
   const issue = resolve(owner, session('codex:issue'));
@@ -245,4 +247,71 @@ test('the owner\'s turns in the master\'s folder also get the master\'s page too
   assert.equal(resolver(turn(master.id, { kind: 'owner', controllerId: 'c'.repeat(32) }), master).servers?.tower_master, undefined, 'not from a controlling computer');
   assert.equal(resolver(turn(master.id, { kind: 'agent' }), master).servers?.tower_master, undefined);
   assert.equal(resolver(turn('codex:native', { kind: 'owner' }), session('codex:native')).servers?.tower_master, undefined);
+});
+
+
+test('reporting credentials prove a live local caller but cannot grant owner tools', async t => {
+  const f = await fixture(t);
+  const run = f.ownerTurn('codex:caller');
+  run.delegation = { parentRunId: 'intermediate', rootRunId: 'master' };
+  const token = f.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: run.sessionId });
+  const resolve = (key: string) => callerDelegation(f.capabilities, f.context.run, key);
+  assert.deepEqual(resolve(token), { parentRunId: run.id, rootRunId: 'master' });
+  await assert.rejects(handleMcpRequest(f.context, token, { method: 'tools/list' }), { statusCode: 403 });
+  assert.throws(() => resolve(f.token(run)), { statusCode: 403 });
+  assert.throws(() => resolve('invalid'), { statusCode: 403 });
+  const mismatched = f.capabilities.issue({ kind: 'caller-run', runId: run.id, sessionId: 'codex:other' });
+  assert.throws(() => resolve(mismatched), { statusCode: 403 });
+  run.status = 'completed';
+  assert.throws(() => resolve(token), { statusCode: 403, disposition: 'not-admitted' });
+  f.ownerTurn(run.sessionId);
+  assert.throws(() => resolve(token), { statusCode: 403 });
+  run.status = 'running'; run.origin = { kind: 'owner', controllerId: 'c'.repeat(32) };
+  assert.throws(() => resolve(token), { statusCode: 403 });
+});
+
+test('only existing owner authority gets local tools; reporting env never grants tools or crosses controllers', async t => {
+  const f = await fixture(t);
+  const resolver = runToolResolver({ stateDir: f.stateDir, runs: { sessionOrigin: () => undefined }, capabilities: f.capabilities });
+  const owner = f.ownerTurn('codex:local');
+  const tools = resolver(owner, session(owner.sessionId));
+  const token = tools.env!.TOWER_CALLER_CAPABILITY;
+  assert.equal(tools.servers!.tower_local.env!.TOWER_CALLER_CAPABILITY, token);
+  assert.deepEqual(f.capabilities.resolve(token), { kind: 'caller-run', runId: owner.id, sessionId: owner.sessionId });
+  const delegated = resolver({ ...owner, origin: { kind: 'agent' } }, session(owner.sessionId));
+  assert.ok(delegated.env!.TOWER_CALLER_CAPABILITY);
+  assert.equal(delegated.servers!.tower_local, undefined);
+  assert.equal(delegated.servers!.tower, undefined);
+  const remote = resolver({ ...owner, origin: { kind: 'owner', controllerId: 'c'.repeat(32) } }, session(owner.sessionId));
+  assert.equal(remote.env, undefined);
+  assert.equal(remote.servers!.tower_local, undefined);
+});
+
+
+test('MCP rechecks parent authority after async preparation and before new job admission', async t => {
+  for (const change of ['completed', 'cancelled', 'session', 'origin', 'tools', 'controller', 'credential'] as const) {
+    await t.test(change, async t => {
+      let entered!: () => void, release!: () => void;
+      const ready = new Promise<void>(resolve => { entered = resolve; });
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const f = await fixture(t, async internal => { entered(); await gate; internal.validate?.(); });
+      const run = f.ownerTurn('codex:parent');
+      const token = f.token(run);
+      const pending = handleMcpRequest(f.context, token, { method: 'tools/call', name: 'autoPrompt_submit', arguments: { requestId: randomUUID(), provider: 'codex', prompt: 'follow up' } });
+      const refused = assert.rejects(pending, { statusCode: 403, disposition: 'not-admitted' });
+      await ready;
+      switch (change) {
+        case 'completed': run.status = 'completed'; break;
+        case 'cancelled': run.status = 'cancelled'; break;
+        case 'session': run.sessionId = 'codex:other'; break;
+        case 'origin': run.origin = { kind: 'agent' }; break;
+        case 'tools': run.towerTools = 'desktop-app'; break;
+        case 'controller': run.origin = { kind: 'owner', controllerId: 'c'.repeat(32) }; break;
+        case 'credential': f.capabilities.grant(token, { kind: 'session-reader' }); break;
+      }
+      release();
+      await refused;
+      assert.equal(f.submitted.length, 0, 'no new durable job was admitted');
+    });
+  }
 });

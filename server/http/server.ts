@@ -7,6 +7,7 @@ import { ATTACHMENT_BODY_BYTES, approvalResponse, errorDisposition, errorStatus,
 import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSummary } from '../../shared/skills.js';
 import { MAX_SKILL_BUNDLE_BYTES } from '../../shared/skills.js';
 import type { RequestContext } from './request-context.js';
+import { CALLER_CAPABILITY_HEADER } from '../runs/session-mcp.js';
 import type { RemoteExclusionStore } from '../remote/exclusions.js';
 import { handleLinkRoute, type LinkRoutes } from '../link/routes.js';
 import type { RemoteNodes } from '../link/nodes.js';
@@ -304,6 +305,14 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       const masterCall = Boolean(master && typeof caller === 'string' && caller.length === master.callerSecret.length && timingSafeEqual(Buffer.from(caller), Buffer.from(master.callerSecret)));
       // An agent of the owner's on this computer (`agent-session-tower mcp`) says so, and its changes count apart too.
       const localAgent = !masterCall && identity.local && req.headers['x-tower-agent'] === 'local';
+      const callerContext = (): RequestContext | undefined => {
+        const capability = req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()];
+        if (capability === undefined) return undefined;
+        if (!identity.local || typeof capability !== 'string' || !/^[a-f\d]{64}$/.test(capability)) {
+          throw Object.assign(new Error('A calling turn must use its local reporting credential.'), { statusCode: 403 });
+        }
+        return { callerCapability: capability };
+      };
       if (req.method === 'POST') {
         const header = req.headers[REQUEST_TOKEN_HEADER.toLowerCase()];
         if (typeof header !== 'string' || !/^[a-f0-9]{64}$/.test(header) || !timingSafeEqual(Buffer.from(header), Buffer.from(token))) {
@@ -346,7 +355,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (operation && req.method === 'POST') {
         if (!isOperationName(operation[1])) return json(res, 404, { error: 'Unknown Tower operation.' });
         if (!backend.api) return json(res, 503, { error: 'Tower operations are unavailable.' });
-        return json(res, 200, { result: await backend.api(operation[1], await readJson(req, 1_000_000)) });
+        return json(res, 200, { result: await backend.api(operation[1], await readJson(req, 1_000_000), callerContext()) });
       }
       if (path === '/api/runner/force-update' && req.method === 'POST') {
         if (!forceRunnerUpdate) return json(res, 503, { error: 'Updates are unavailable.' });
@@ -566,7 +575,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (req.method === 'POST' && path === '/api/auto-prompts') {
         const request = parseAutoPrompt(await readJson(req, ATTACHMENT_BODY_BYTES));
         if (!backend.startAutoPrompt) return json(res, 503, { error: 'Auto Prompt를 현재 사용할 수 없습니다.' });
-        return json(res, 202, { job: await backend.startAutoPrompt(request) });
+        return json(res, 202, { job: await backend.startAutoPrompt(request, callerContext()) });
       }
       const autoPromptMatch = url.pathname.match(/^\/api\/auto-prompts\/([a-f\d-]+)(\/cancel)?$/i);
       if (autoPromptMatch && UUID.test(autoPromptMatch[1])) {
@@ -687,7 +696,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (req.method === 'POST' && path === '/api/sessions') {
         const input = parseCreateSession(await readJson(req));
         if (!backend.createSession) return json(res, 503, { error: '새 세션을 생성할 수 없습니다.' });
-        const result = await backend.createSession(input);
+        const result = await backend.createSession(input, callerContext());
         return json(res, 202, { ...result, session: publicSession(result.session) });
       }
       const detailMatch = path.match(/^\/api\/sessions\/([^/]+)$/);
@@ -729,7 +738,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       const messageMatch = path.match(/^\/api\/sessions\/([^/]+)\/messages$/);
       if (req.method === 'POST' && messageMatch) {
         const message = parseMessage(await readJson(req, ATTACHMENT_BODY_BYTES));
-        const run = await backend.enqueue(messageMatch[1], message.prompt, message.attachments);
+        const run = await backend.enqueue(messageMatch[1], message.prompt, message.attachments, callerContext());
         return json(res, 202, { run });
       }
       // Provider request IDs are opaque and may contain an encoded slash.

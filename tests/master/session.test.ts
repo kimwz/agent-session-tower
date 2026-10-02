@@ -10,7 +10,7 @@ import { MasterRoom } from '../../server/master/room.js';
 import { MasterSession } from '../../server/master/session.js';
 import { MasterSettingsStore } from '../../server/master/settings.js';
 import { TowerClient } from '../../server/tower-tools/tower-client.js';
-import type { AutoPromptJob, ChatMessage, Run, Snapshot } from '../../shared/types.js';
+import type { AutoPromptJob, ChatMessage, Run, SessionOutcome, Snapshot } from '../../shared/types.js';
 
 const MASTER = 'claude:master';
 
@@ -21,6 +21,7 @@ async function harness(t: test.TestContext, options: { bound?: boolean; createSt
   t.after(async () => { for (const step of cleanup.reverse()) await step(); await rm(dir, { recursive: true, force: true }); });
   const runs: Run[] = [];
   const jobs: AutoPromptJob[] = [];
+  const outcomes = new Map<string, SessionOutcome>();
   const histories = new Map<string, { updatedAt: string; messages: ChatMessage[] }>();
   const posted: Array<{ path: string; body: Record<string, unknown> }> = [];
   let clock = Date.now();
@@ -61,7 +62,7 @@ async function harness(t: test.TestContext, options: { bound?: boolean; createSt
       const before = url.searchParams.get('before');
       const end = before === null ? kept.messages.length : Number(before);
       const start = Math.max(0, end - pageSize);
-      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ session: { id, updatedAt: kept.updatedAt }, messages: kept.messages.slice(start, end), hasMore: start > 0, ...(start > 0 ? { nextBefore: start } : {}) }));
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ session: { id, updatedAt: kept.updatedAt, status: 'completed', lastRequestAt: kept.messages.findLast(item => item.role === 'user')?.timestamp, lastMessage: kept.messages.at(-1)?.text.replace(/\s+/g, ' ').trim().slice(0, 180), messageCount: kept.messages.length, outcome: outcomes.get(id) }, messages: kept.messages.slice(start, end), hasMore: start > 0, ...(start > 0 ? { nextBefore: start } : {}) }));
       return;
     }
     res.writeHead(404, { 'Content-Type': 'application/json' }).end('{}');
@@ -86,7 +87,7 @@ async function harness(t: test.TestContext, options: { bound?: boolean; createSt
   const session = await open();
   // Reports Tower took: each became a turn of the master session.
   const reports = () => runs.filter(run => run.sessionId === MASTER && run.prompt.startsWith('[Tower report]')).map(run => ({ body: { prompt: run.prompt } }));
-  return { dir, session, settings, runs, jobs, posted, finish, reports, open, tick, history, setMessageStatus: (status: number) => { messageStatus = status; }, setPageSize: (size: number) => { pageSize = size; } };
+  return { dir, session, settings, runs, jobs, posted, finish, reports, open, tick, history, outcomes, setMessageStatus: (status: number) => { messageStatus = status; }, setPageSize: (size: number) => { pageSize = size; } };
 }
 
 test('the first message starts the master session in its own folder, with its guide; a second start needs "replace"', async t => {
@@ -306,4 +307,162 @@ test('a spoken request in doubt keeps its key however much else is followed sinc
   await h.session.follow();
   await h.session.spoken({ text: '한 번만', voiceSession: 'v', key: 'once' });
   assert.equal(h.posted.filter(item => String(item.body.prompt).includes('한 번만')).length, 1);
+});
+
+test('a project hands the next step to another project: the root master follows and reports that step after restart', async t => {
+  const h = await harness(t, { bound: true });
+  const summary: Run = { id: 'summary-run', sessionId: 'codex:summary', prompt: 'deploy summary then start secrets', status: 'running', createdAt: h.tick(), output: '' };
+  h.runs.push(summary);
+  await h.session.started({ method: 'POST', path: '/api/sessions/codex:summary/messages', route: '/api/sessions/:id/messages', local: '/api/sessions/codex:summary/messages', write: true }, { prompt: summary.prompt }, { run: summary });
+  h.finish(summary, 'Summary deployed; secrets started.');
+  await h.session.follow();
+  assert.equal(h.reports().length, 1);
+  await h.session.close();
+  const restarted = await h.open();
+  const secrets: Run = { id: 'secrets-run', sessionId: 'codex:secrets', prompt: 'implement, verify and deploy secrets', status: 'running', createdAt: h.tick(), output: '', origin: { kind: 'agent', runId: summary.id } };
+  h.runs.unshift(secrets);
+  await restarted.follow();
+  assert.equal(restarted.activeTasks(), 1, 'the summary report is not the end of the owner’s multistep goal');
+  h.finish(secrets, 'Implementation and CI passed. Waiting for a browser; not deployed.');
+  await restarted.follow();
+  await restarted.follow();
+  assert.equal(h.reports().length, 2, 'one report for each step, including the unfinished goal');
+  assert.match(h.reports()[1].body.prompt, /Waiting for a browser; not deployed/);
+});
+
+test('authenticated lineage is independent of authority, snapshot order and pruned intermediate runs', async t => {
+  const h = await harness(t, { bound: true });
+  const root = randomUUID();
+  await h.session.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: 'summary' }, { session: { id: 'codex:summary' }, run: { id: root } });
+  const middle: Run = { id: randomUUID(), sessionId: 'codex:middle', prompt: 'middle', status: 'running', createdAt: h.tick(), output: '', origin: { kind: 'owner' }, delegation: { parentRunId: root, rootRunId: root } };
+  const end: Run = { id: randomUUID(), sessionId: 'codex:end', prompt: 'end', status: 'running', createdAt: h.tick(), output: '', origin: { kind: 'owner' }, delegation: { parentRunId: middle.id, rootRunId: root } };
+  h.runs.push(end, middle);
+  await h.session.follow();
+  assert.equal(h.session.delegatedTable().rows.length, 3);
+  await h.session.close();
+  h.runs.splice(h.runs.indexOf(middle), 1);
+  const restarted = await h.open();
+  h.finish(end, 'Access denied; deployment is blocked.');
+  h.outcomes.set(end.sessionId, 'blocked');
+  await restarted.follow();
+  await restarted.follow();
+  assert.equal(h.reports().length, 1);
+  assert.match(h.reports()[0].body.prompt, /Goal outcome: blocked/);
+  assert.match(h.reports()[0].body.prompt, /Execution completed is not proof/);
+});
+
+test('legacy nested delegation closure handles reversed runs and jobs without duplicate reports', async t => {
+  const h = await harness(t, { bound: true });
+  const master: Run = { id: 'master-turn', sessionId: MASTER, prompt: 'three steps', status: 'completed', createdAt: h.tick(), output: '' };
+  const one: Run = { id: 'one', sessionId: 'codex:one', prompt: 'one', status: 'running', createdAt: h.tick(), output: '', origin: { kind: 'agent', runId: master.id } };
+  const two: Run = { id: 'two', sessionId: 'codex:two', prompt: 'two', status: 'running', createdAt: h.tick(), output: '', origin: { kind: 'agent', runId: one.id } };
+  const three: Run = { id: 'three', sessionId: 'codex:three', prompt: 'three', status: 'running', createdAt: h.tick(), output: '', origin: { kind: 'agent', runId: two.id } };
+  h.jobs.push({ id: 'job-two', provider: 'codex', prompt: two.prompt, routerModel: '', status: 'completed', createdAt: two.createdAt, updatedAt: two.createdAt, origin: two.origin, runId: two.id, sessionId: two.sessionId });
+  h.runs.push(three, two, one, master);
+  await h.session.follow();
+  await h.session.follow();
+  assert.equal(h.session.activeTasks(), 3, 'job two and run two are the same delegation');
+  for (const run of [one, two, three]) h.finish(run, 'Done');
+  await h.session.follow();
+  assert.equal(h.session.delegatedTable().rows.length, 3);
+  assert.equal(h.reports().length, 1, 'one batch with three distinct results');
+});
+
+test('goal outcomes are separate from a completed run; a later turn cannot lend its done outcome', async t => {
+  const h = await harness(t, { bound: true });
+  for (const outcome of ['done', 'needsOwner', 'blocked', 'progress', undefined] as const) {
+    const run: Run = { id: randomUUID(), sessionId: `codex:${outcome}`, prompt: `work ${outcome}`, status: 'running', createdAt: h.tick(), output: '' };
+    h.runs.push(run);
+    await h.session.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: run.prompt }, { session: { id: run.sessionId }, run });
+    h.finish(run, outcome === 'needsOwner' ? 'Real approval required.' : String(outcome));
+    if (outcome) h.outcomes.set(run.sessionId, outcome);
+  }
+  const old = h.runs[0];
+  const later: Run = { id: randomUUID(), sessionId: old.sessionId, prompt: 'another goal', status: 'running', createdAt: h.tick(), output: '' };
+  h.finish(later, 'The other goal is done.');
+  await h.session.follow();
+  const table = h.session.delegatedTable();
+  const outcomeColumn = table.columns.indexOf('outcome');
+  assert.deepEqual(table.rows.map(row => row[outcomeColumn]), [null, 'needsOwner', 'blocked', 'progress', null]);
+  assert.match(h.reports()[0].body.prompt, /unknown \(not yet verified\)/);
+  assert.match(h.reports()[0].body.prompt, /respect real approval waits and owner stops/);
+});
+
+test('an owner-stopped master holds reports across restart until a new owner instruction; cancelled children stay cancelled', async t => {
+  const h = await harness(t, { bound: true });
+  const master: Run = { id: 'stopped-master', sessionId: MASTER, prompt: 'stop here', ownerStopped: true, status: 'running', createdAt: h.tick(), output: '' };
+  const child: Run = { id: 'cancelled-child', sessionId: 'codex:child', prompt: 'work', status: 'running', createdAt: h.tick(), output: '', origin: { kind: 'agent', runId: master.id } };
+  h.runs.push(master, child);
+  h.finish(child, 'Owner stopped this task.', 'cancelled');
+  h.finish(master, 'Stopped.', 'cancelled');
+  h.runs.push({ id: randomUUID(), sessionId: MASTER, prompt: 'Permission continuation', status: 'cancelled', createdAt: h.tick(), output: '', origin: { kind: 'owner' },
+    scheduled: { at: h.tick(), afterRunId: master.id, resume: 'permission' } });
+  await h.session.follow();
+  assert.equal(h.reports().length, 0);
+  await h.session.close();
+  h.runs.splice(h.runs.indexOf(master), 1);
+  const restarted = await h.open();
+  await restarted.follow();
+  assert.equal(h.reports().length, 0, 'persisted hold does not disappear when the cancelled run is pruned');
+  h.runs.push({ id: 'owner-resumed', sessionId: MASTER, prompt: 'show the results', status: 'running', createdAt: h.tick(), output: '', origin: { kind: 'owner' } });
+  await restarted.follow();
+  assert.equal(h.reports().length, 1);
+  assert.equal(child.status, 'cancelled');
+  assert.equal(h.runs.filter(run => run.sessionId === child.sessionId).length, 1);
+});
+
+test('a delegated message inserted into an existing turn keeps that turn’s later delegations linked', async t => {
+  const h = await harness(t, { bound: true });
+  const inserted: Run = { id: 'inserted-work', sessionId: 'codex:project', prompt: 'continue and hand off', status: 'running', createdAt: h.tick(), output: '',
+    steering: { targetRunId: 'actual-provider-turn', state: 'delivered', requestedAt: h.tick(), deliveredAt: h.tick() } };
+  h.runs.push(inserted);
+  await h.session.started({ method: 'POST', path: '/api/sessions/codex:project/messages', route: '/api/sessions/codex:project/messages', local: '/api/sessions/codex:project/messages', write: true }, { prompt: inserted.prompt }, { run: inserted });
+  await h.session.follow();
+  await h.session.close();
+  h.runs.length = 0;
+  const next: Run = { id: 'next-after-insert', sessionId: 'codex:next', prompt: 'finish deployment', status: 'running', createdAt: h.tick(), output: '',
+    origin: { kind: 'agent', runId: 'actual-provider-turn' } };
+  h.runs.push(next);
+  const restarted = await h.open();
+  await restarted.follow();
+  assert.equal(restarted.delegatedTable().rows.length, 2);
+  h.finish(next, 'Needs a real approval.');
+  await restarted.follow();
+  assert.equal(h.reports().length, 1);
+});
+
+test('a permission continuation arriving after a completion report is still followed once', async t => {
+  const h = await harness(t, { bound: true });
+  const parent: Run = { id: randomUUID(), sessionId: 'codex:approval', prompt: 'Deploy the verified change', status: 'running', createdAt: h.tick(), output: '' };
+  h.runs.push(parent);
+  await h.session.started({ method: 'POST', path: '/api/sessions', route: '/api/sessions', local: '/api/sessions', write: true }, { prompt: parent.prompt }, { session: { id: parent.sessionId }, run: parent });
+  h.finish(parent, 'Waiting for the required rule.');
+  await h.session.follow();
+  assert.equal(h.reports().length, 1);
+  const continuation: Run = { ...parent, id: randomUUID(), prompt: 'Approval applies from this turn', status: 'queued', createdAt: h.tick(), finishedAt: undefined,
+    scheduled: { at: h.tick(), afterRunId: parent.id, resume: 'permission' } };
+  h.runs.push(continuation);
+  await h.session.follow();
+  assert.equal(h.session.activeTasks(), 1);
+  assert.equal(h.reports().length, 1);
+  continuation.status = 'running';
+  await h.session.follow();
+  h.finish(continuation, 'Deployment verified.');
+  await h.session.follow();
+  await h.session.follow();
+  assert.equal(h.reports().length, 2);
+  assert.equal(h.session.delegatedTable().rows.length, 1, 'the continuation is the same delegated goal');
+  assert.match(h.reports()[1].body.prompt, /Deployment verified/);
+});
+
+test('a master report cancelled by worker recovery does not stop later goal reports', async t => {
+  const h = await harness(t, { bound: true });
+  const root: Run = { id: randomUUID(), sessionId: MASTER, prompt: 'Implement the goal', status: 'completed', createdAt: h.tick(), output: '' };
+  const recovered: Run = { id: randomUUID(), sessionId: MASTER, prompt: '[Tower report] earlier result', status: 'cancelled', createdAt: h.tick(), finishedAt: h.tick(), output: '', error: 'Tower restarted before this run started.' };
+  const child: Run = { id: randomUUID(), sessionId: 'codex:child', prompt: 'Finish deployment', status: 'running', createdAt: h.tick(), output: '', origin: { kind: 'agent', runId: root.id } };
+  h.runs.push(root, recovered, child);
+  h.finish(child, 'Deployment verified');
+  await h.session.follow();
+  assert.equal(h.reports().length, 2, 'one recovered record and one newly delivered report');
+  assert.match(h.reports()[1].body.prompt, /Deployment verified/);
 });

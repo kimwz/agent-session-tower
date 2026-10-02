@@ -2,6 +2,9 @@ import { access } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
+export const CALLER_CAPABILITY_ENV = 'TOWER_CALLER_CAPABILITY';
+export const CALLER_CAPABILITY_HEADER = 'X-Tower-Run-Capability';
+
 /** Trusted worker configuration; never accepted from a public session request. */
 export interface SessionMcpServer {
   command: string;
@@ -18,6 +21,8 @@ export type SessionMcpServers = Record<string, SessionMcpServer>;
  */
 export interface RunTools {
   servers?: SessionMcpServers;
+  /** Run-scoped reporting credentials, inherited by the provider's command tools. Never persisted. */
+  env?: Record<string, string>;
   required: boolean;
   /** For an owner turn: whether Tower's own tools are attached, and if not, why. */
   towerTools?: 'attached' | 'external-input' | 'not-owner-session' | 'remote';

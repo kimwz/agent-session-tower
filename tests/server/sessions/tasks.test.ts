@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { until } from '../../helpers/until.js';
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -24,7 +25,6 @@ const update = (action: string, taskId: string, title: string, stage: string) =>
 const u = (action: string, taskId: string, title: string, stage: string) => ({ updates: [update(action, taskId, title, stage)] });
 async function setup(t: test.TestContext, options: { list?: Session[]; answers?: Answer[]; history?: ChatMessage[]; startedAt?: number } = {}) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-tasks-'));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
   const list = options.list ?? [session('a')];
   const requests: AutoPromptModelRequest[] = [];
   const answers = [...options.answers ?? [u('new', '', 'Voice playback fix', '원인 분석중')]];
@@ -37,11 +37,17 @@ async function setup(t: test.TestContext, options: { list?: Session[]; answers?:
   const tasks = new SessionTasks(dependencies);
   await tasks.start();
   now = NOW;
-  t.after(() => tasks.close());
+  t.after(async () => { await tasks.close(); await rm(stateDir, { recursive: true, force: true }); });
   let changes = 0;
   tasks.on('change', () => changes++);
   /** Runs passes until nothing is left to do. */
-  const settle = async () => { for (let i = 0; i < 6; i++) { tasks.changed(); await new Promise(resolve => setTimeout(resolve, 15)); } };
+  const settle = async () => {
+    tasks.changed();
+    // Wait for scheduled passes and their writes, including a slow CI filesystem.
+    const pending = tasks as unknown as { timer?: unknown; running?: Promise<void>; again: boolean };
+    await until(() => !pending.timer && !pending.running && !pending.again);
+    await tasks.flush();
+  };
   return { stateDir, tasks, list, requests, answers, settle, changes: () => changes, setHistory: (next: ChatMessage[]) => { history = next; }, setNow: (next: number) => { now = next; }, setPages: (next: SessionTaskDependencies['history']) => { pages = next; } };
 }
 

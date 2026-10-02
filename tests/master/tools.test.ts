@@ -93,3 +93,16 @@ test('the master session\'s tool server lists the tools and relays each call to 
   assert.equal(answered.result.isError, undefined);
   assert.equal(JSON.parse(answered.result.content[0].text).body.path, '/api/snapshot');
 });
+
+test('a failed report subscription preserves the accepted work and exposes a warning without replay', async t => {
+  const web = await fakeWeb(t);
+  const tower = new TowerClient(1_000);
+  tower.setCredentials({ port: web.port, token: TOKEN, callerSecret: SECRET });
+  const tools = new MasterTools({ tower, delegated: () => ({ name: 'delegated', columns: [], rows: [] }),
+    started: async () => { throw new Error('Fixture persistence failure'); }, broadcast: () => {} });
+  const answer = await tools.call('tower_api', { method: 'POST', path: '/api/sessions', body: { provider: 'codex', cwd: '/work', prompt: 'fix it' } }) as { state: string; trackingWarning?: string; body: { run: { id: string } } };
+  assert.equal(answer.state, 'succeeded');
+  assert.equal(answer.body.run.id, 'run-new');
+  assert.match(answer.trackingWarning ?? '', /Do not resubmit/);
+  assert.equal(web.seen.filter(request => request.method === 'POST').length, 1);
+});
