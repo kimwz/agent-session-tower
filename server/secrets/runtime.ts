@@ -283,6 +283,7 @@ export class SecretRuntime {
       }
       const metadata = await service.create({ ...create, target });
       if (!target && (create.projectId || create.allProjects === true)) await service.setRule({ groupId: metadata.groupId, secretIds: [metadata.id], hostId: service.device().id, projectId: create.projectId, allProjects: create.allProjects === true && create.scope === 'global', activation: create.activation ?? 'manual', operations: create.operations ?? [...SECRET_OPERATIONS], enabled: true });
+      if (target && (create.scope === 'task' || create.activation !== 'auto')) changedSessionId = target.sessionId;
     } else if (action === 'update') {
       const update = z.object({ id: z.string(), value: z.string().optional(), content: z.string().optional() }).parse(input);
       changedSessionId = service.taskSessionForSecret(update.id); await service.update(update);
@@ -302,6 +303,7 @@ export class SecretRuntime {
       if (rule.hostId !== service.device().id && !service.peers().some(peer => peer.enabled && peer.device.id === rule.hostId)) throw fail('승인한 시크릿 컴퓨터를 선택하세요.');
       // Remote grants have a finite deadline even if the page leaves it blank.
       if (rule.hostId !== service.device().id) rule.maxTtlMs ??= 8 * 60 * 60_000;
+      changedSessionId = service.taskSessionForGroup(rule.groupId);
       await service.setRule(rule);
     } else if (action === 'attach' || action === 'connect' || action === 'revoke') {
       if (!target) throw fail('연결할 프로젝트 세션이 필요합니다.');
@@ -316,8 +318,7 @@ export class SecretRuntime {
     else if (!['initialize','unlock','lock','password','import','overview'].includes(action)) throw fail('알 수 없는 시크릿 작업입니다.', 404);
     // Notify after mutation commit even if the owner's following overview cannot be returned.
     if (action !== 'overview' && action !== 'end-task') {
-      const scoped = ['attach', 'connect', 'revoke', 'end-task'].includes(action)
-        || (action === 'create' && target && input.activation !== 'auto');
+      const scoped = ['attach', 'connect', 'revoke'].includes(action);
       this.changed(scoped ? input.sessionId as string : changedSessionId);
     }
     const overview = await this.overview(target, action === 'overview');

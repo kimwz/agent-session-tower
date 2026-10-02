@@ -88,7 +88,10 @@ export class SecretService {
   /** A task-owned resource belongs to one conversation; shared resources have no single session. */
   taskSessionForSecret(id: string): string | undefined {
     const secret = this.secrets().find(item => item.metadata.id === id);
-    const group = secret && this.groups().find(item => item.id === secret.metadata.groupId);
+    return secret && this.taskSessionForGroup(secret.metadata.groupId);
+  }
+  taskSessionForGroup(id: string): string | undefined {
+    const group = this.groups().find(item => item.id === id);
     return group?.scope === 'task' ? this.journal.tasks.find(task => task.id === group.taskId)?.sessionId : undefined;
   }
   async remove(id: string) { return this.mutate(() => { this.data().secrets = this.data().secrets.filter(secret => secret.metadata.id !== id); this.journal.secrets = this.journal.secrets.filter(secret => secret.metadata.id !== id); this.journal.grants = this.journal.grants.filter(grant => grant.secretId !== id); }); }

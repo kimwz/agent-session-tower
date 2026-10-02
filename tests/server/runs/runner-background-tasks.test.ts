@@ -10,6 +10,7 @@ import { RunManager } from '../../../server/runs/manager.js';
 import { WakeupTracker } from '../../../server/runs/wakeup.js';
 import type { Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.ts';
+import { SECRET_CHANGED_INSTRUCTIONS, SECRET_USE_INSTRUCTIONS } from '../../../server/secrets/notices.js';
 
 const ID = '20000000-0000-4000-8000-000000000011';
 const SESSION = `claude:${ID}`;
@@ -37,6 +38,7 @@ createInterface({ input: process.stdin }).on('line', line => {
     for (const step of script.later ?? []) setTimeout(() => { for (const frame of step.frames ?? []) send({ session_id: id, ...frame }); if (step.exit) { if (step.stderr) process.stderr.write(step.stderr); process.exit(step.code ?? 0); } }, step.at);
     return;
   }
+  if (script.unacknowledgedReply) { send({ type: 'result', session_id: id, is_error: false, result: 'finished without replay' }); return; }
   setTimeout(() => {
     send({ type: 'user', isReplay: true, uuid: message.uuid, session_id: id, parent_tool_use_id: null, message: message.message });
     for (const frame of script.reply ?? []) send({ session_id: id, ...frame });
@@ -53,7 +55,7 @@ const takes = (taskId: string) => ({ type: 'user', isReplay: true, parent_tool_u
   message: { role: 'user', content: `<task-notification>\n<task-id>${taskId}</task-id>\n<status>completed</status>\n</task-notification>` } });
 const result = { type: 'result', is_error: false, result: 'follow-up done' };
 
-async function fixture(script: Record<string, unknown>, options: { followUpMs?: number; waitMaxMs?: number; recoveryMs?: number } = {}) {
+async function fixture(script: Record<string, unknown>, options: { followUpMs?: number; waitMaxMs?: number; recoveryMs?: number; resolveRunTools?: ConstructorParameters<typeof RunManager>[0]['resolveRunTools'] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-background-'));
   const provider = join(directory, 'provider.mjs');
   const log = join(directory, 'provider.log');
@@ -62,7 +64,7 @@ async function fixture(script: Record<string, unknown>, options: { followUpMs?: 
   const session: Session = { id: SESSION, nativeId: ID, provider: 'claude', title: 'Background fixture', cwd: directory, project: 'fixture', status: 'completed', statusReason: '',
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
   const manager = new RunManager({ getSession: id => id === SESSION ? session : undefined, refreshSessions: async () => {}, stateDir: join(directory, 'state'), pollMs: 20,
-    findExecutable: async provider => `/fixture/${provider}`, env: { LOG: log, SCRIPT: JSON.stringify(script) },
+    findExecutable: async provider => `/fixture/${provider}`, env: { LOG: log, SCRIPT: JSON.stringify(script) }, resolveRunTools: options.resolveRunTools,
     backgroundRecoveryMs: options.recoveryMs ?? 100,
     backgroundFollowUpMs: options.followUpMs ?? 5000, backgroundWaitMaxMs: options.waitMaxMs ?? 30_000,
     spawnProcess: (_file, args, spawnOptions) => spawn(process.execPath, [provider, ...args], spawnOptions) });
@@ -73,6 +75,24 @@ async function fixture(script: Record<string, unknown>, options: { followUpMs?: 
 
 const find = (manager: RunManager, id: string) => manager.list().find(run => run.id === id)!;
 const settled = (manager: RunManager, id: string) => until(() => { const run = find(manager, id); return run && !['queued', 'running'].includes(run.status) ? run : undefined; }, 10_000);
+
+test('an unacknowledged private notice releases completed input after delivery settles', async t => {
+  const f = await fixture({ first: [says('Working.')], noResult: true, unacknowledgedReply: true }, {
+    resolveRunTools: () => ({ required: true, towerTools: 'attached', instructions: SECRET_USE_INSTRUCTIONS, servers: { tower_secrets: { command: '/fixture/secret-tool', args: [] } } }),
+  });
+  t.after(f.cleanup);
+  const run = await f.manager.enqueue(SESSION, 'Use a fixture key', {}, { origin: { kind: 'owner' } });
+  const owned = await until(() => (f.manager as unknown as { owned: Map<string, { claude?: { canSteer(): boolean; options: { steerTimeoutMs?: number } } }> }).owned.get(run.id)?.claude);
+  await until(() => owned.canSteer());
+  owned.options.steerTimeoutMs = 30;
+  f.manager.notifyToolChange(SECRET_CHANGED_INSTRUCTIONS, SESSION);
+  const done = await settled(f.manager, run.id);
+  assert.equal(done.status, 'completed');
+  assert.equal(f.manager.busy(), false);
+  assert.equal(f.manager.list().length, 1);
+  assert.equal((await f.entries()).filter(entry => entry.user).length, 2);
+  assert.equal((await f.entries()).at(-1)?.end, true);
+});
 
 test('a turn stays open while its background task runs and ends after Claude takes the result', async t => {
   const { manager, entries, cleanup } = await fixture({ first: [started('bash-1'), says('I will report when the reviews finish.')],

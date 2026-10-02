@@ -85,6 +85,12 @@ test('committed connections, updates, revocation and lock invalidate without exp
     assert.equal(f.notices.at(-1), f.session.id);
     await f.runtime.control('lock', {}); assert.equal(f.notices.at(-1), undefined);
     await f.runtime.control('unlock', { password }); assert.equal(f.notices.at(-1), undefined);
+    const automaticTask = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: 'FAKE_TASK_AUTO', kind: 'scalar', value: 'FAKE_TASK', activation: 'auto', connect: true }) as SecretOverview;
+    assert.equal(f.notices.at(-1), f.session.id, 'automatic activation never turns a task resource into a shared change');
+    const taskSecret = automaticTask.secrets.find(s => s.name === 'FAKE_TASK_AUTO')!;
+    const taskRule = automaticTask.rules.find(rule => rule.groupId === taskSecret.groupId)!;
+    await f.runtime.control('rule', { ...taskRule, enabled: false });
+    assert.equal(f.notices.at(-1), f.session.id, 'task rule changes stay within their session');
     const shared = await f.runtime.control('create', { scope: 'global', name: 'FAKE_SHARED', kind: 'scalar', value: 'FAKE_GLOBAL' }) as SecretOverview;
     await f.runtime.control('update', { id: shared.secrets.find(s => s.name === 'FAKE_SHARED')!.id, value: 'FAKE_GLOBAL_UPDATED' });
     assert.equal(f.notices.at(-1), undefined, 'shared updates invalidate other eligible owner turns');

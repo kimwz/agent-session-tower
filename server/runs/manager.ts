@@ -398,7 +398,10 @@ export class RunManager extends EventEmitter {
           // An uncertain message may already be in the turn: do not resend it or log provider text.
           console.warn('Tower could not confirm a private secret-change notice; the next owner turn will refresh its secret list.');
         }
-      }).finally(() => this.toolNoticeSending.delete(id));
+      }).finally(() => {
+        this.toolNoticeSending.delete(id);
+        this.owned.get(id)?.finishInput?.();
+      });
     }
   }
 
