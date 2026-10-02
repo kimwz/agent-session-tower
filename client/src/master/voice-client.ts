@@ -733,7 +733,11 @@ export class VoiceSession {
     this.audio.onplaying = () => { if (this.current !== current) return; this.pace(); this.progress(current); };
     this.audio.ontimeupdate = () => this.progress(current);
     this.audio.onwaiting = this.audio.onstalled = () => { if (this.current === current) { current.advancing = false; this.show({}); } };
-    this.audio.onended = () => { if (this.current === current) say.kind === 'notice' ? this.noticeEnded(current) : this.finishPlay(current, this.audio.currentTime > 0 || current.sourcePlayed ? 'played' : 'failed', this.audio.currentTime > 0 || current.sourcePlayed ? undefined : 'ended-without-progress'); };
+    this.audio.onended = () => {
+      if (this.current !== current) return;
+      if (!(this.audio.currentTime > 0 || current.sourcePlayed)) { this.playbackFailed(current, 'ended-without-progress'); return; }
+      say.kind === 'notice' ? this.noticeEnded(current) : this.finishPlay(current, 'played');
+    };
     this.audio.onerror = () => {
       if (this.current !== current) return;
       if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); return; }
@@ -741,11 +745,7 @@ export class VoiceSession {
     };
     this.audio.src = say.audio;
     this.pace();
-    if (this.audio.muted || this.audio.volume === 0) {
-      if (say.kind === 'notice') { current.failed = true; this.decideNotice(current); }
-      else this.finishPlay(current, 'failed', 'output-muted');
-      return;
-    }
+    if (this.audio.muted || this.audio.volume === 0) { this.playbackFailed(current, 'output-muted'); return; }
     const fetch = current.fetch;
     this.audio.play().catch((error: unknown) => {
       if (this.current !== current || current.fetch !== fetch || current.retrying) return;
@@ -762,6 +762,11 @@ export class VoiceSession {
    * a few times within a while: `base` keeps the place in the whole audio across several cuts.
    */
   /** The current fetch of an answer failed: fetched again if it can be, otherwise the answer failed. Once per fetch. */
+  private playbackFailed(current: Playing, detail: string): void {
+    if (current.say.kind === 'notice') { current.failed = true; this.decideNotice(current); }
+    else this.finishPlay(current, 'failed', detail);
+  }
+
   private progress(current: Playing): void {
     if (this.current !== current) return;
     const position = this.audio.currentTime;
@@ -822,7 +827,7 @@ export class VoiceSession {
     for (const timer of current.timers) clearTimeout(timer);
     this.current = undefined;
     this.audio.pause();
-    this.report(current.say, result, current.playingAt !== undefined && current.receivedAt !== undefined ? current.playingAt - current.receivedAt : undefined, detail);
+    this.report(current.say, result, current.playingAt !== undefined && current.receivedAt !== undefined ? current.playingAt - current.receivedAt : undefined, detail, true);
     // A report read aloud turns listening back on, so the owner can answer it.
     if (current.say.kind === 'report' && result === 'played') { this.lastActivityAt = Date.now(); void this.listenAgain(); }
     this.show({});
@@ -857,7 +862,7 @@ export class VoiceSession {
     this.current = undefined;
     this.disarm();
     this.audio.pause();
-    this.report(current.say, outcome);
+    this.report(current.say, outcome, undefined, undefined, true);
     this.lastReportAt = 0;
     this.show({});
     setTimeout(() => this.next(), COOLDOWN_MS);
@@ -867,10 +872,10 @@ export class VoiceSession {
    * Tells the host how something it gave to play went (and how long the sound took to start), tried again a few
    * times so a web restarting just then does not lose it.
    */
-  private report(say: MasterSay, result: string, startedMs?: number, detail?: string): void {
+  private report(say: MasterSay, result: string, startedMs?: number, detail?: string, hasAudio = false): void {
     if (say.kind === 'ack' || say.kind === 'working') return;
-    const playback = { position: this.audio.currentTime || 0, muted: this.audio.muted, volume: this.audio.volume, ready: this.audio.readyState, network: this.audio.networkState, context: this.context?.state };
-    const send = (left: number) => void post('/api/master/voice/played', this.options.token(), { session: this.session, id: say.id, result, ...(startedMs !== undefined ? { startedMs } : {}), ...(detail ? { detail } : {}), playback })
+    const playback = hasAudio ? { position: this.audio.currentTime || 0, muted: this.audio.muted, volume: this.audio.volume, ready: this.audio.readyState, network: this.audio.networkState, context: this.context?.state } : undefined;
+    const send = (left: number) => void post('/api/master/voice/played', this.options.token(), { session: this.session, id: say.id, result, ...(startedMs !== undefined ? { startedMs } : {}), ...(detail ? { detail } : {}), ...(playback ? { playback } : {}) })
       .catch(() => { if (left > 0 && !this.over) setTimeout(() => send(left - 1), 3_000); });
     send(3);
   }
@@ -883,9 +888,9 @@ export class VoiceSession {
     if (this.current) {
       const current = this.current;
       this.pace(); this.progress(current);
-      if (current.say.kind !== 'notice' && (this.audio.muted || this.audio.volume === 0)) { this.finishPlay(current, 'failed', 'output-muted'); }
-      else if (current.say.kind !== 'notice' && !current.retrying && now - (current.progressAt ?? current.startedAt) >= PROGRESS_WAIT_MS) {
-        if (!this.resume(current)) this.finishPlay(current, 'failed', 'no-progress');
+      if (this.audio.muted || this.audio.volume === 0) this.playbackFailed(current, 'output-muted');
+      else if (!current.armedAt && !current.retrying && now - (current.progressAt ?? current.startedAt) >= PROGRESS_WAIT_MS) {
+        if (!this.resume(current)) this.playbackFailed(current, 'no-progress');
       }
     }
     if (this.listening && !this.utterance && !this.current && listenExpired(this.lastActivityAt, this.options.settings().listenMinutes, now)) this.stopListening();

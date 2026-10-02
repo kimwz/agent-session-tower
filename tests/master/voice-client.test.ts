@@ -1136,3 +1136,21 @@ test('a late rejected play promise cannot cancel a retry, and a host cancellatio
     assert.deepEqual(page.results(), ['race:stopped']);
   } finally { page.end(); }
 });
+
+test('a notice that ends without progress or is muted during playback never authorizes its action', async () => {
+  const page = await harness();
+  try {
+    page.voice.say(page.say('empty-notice', 'notice'));
+    page.audio.onended?.();
+    mock.timers.tick(3_000);
+    await flush();
+    assert.deepEqual(page.results(), ['empty-notice:failed']);
+    page.voice.say(page.say('muted-notice', 'notice'));
+    page.audio.currentTime = 0.5;
+    mock.timers.tick(1_000);
+    page.audio.muted = true;
+    mock.timers.tick(1_000);
+    await flush();
+    assert.deepEqual(page.results(), ['empty-notice:failed', 'muted-notice:failed']);
+  } finally { page.end(); }
+});
