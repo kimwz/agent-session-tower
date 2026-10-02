@@ -13,7 +13,7 @@ export interface CommandEvidence { files: FileEvidence[]; notes: string[] }
 
 /** Lexes only literal shell words. It never expands variables, substitutions or shell code. */
 function tokens(command: string): string[] {
-  return command.replace(/\\\r?\n/g, ' ').match(/\d*[<>]&[\d-]+|&>>?|<<<|<<-?|(?:[^\s;&|<>(){}"'\\]+|"(?:\\.|[^"\\])*"|'[^']*'|\\.)+|&&|\|\||[;&|<>(){}\n]/g) ?? [];
+  return command.replace(/\\\r?\n/g, ' ').match(/\d*[<>]&[\d-]+|&>>?|<<<|<<-?|\d*[<>]{1,2}|(?:[^\s;&|<>(){}"'\\]+|"(?:\\.|[^"\\])*"|'[^']*'|\\.)+|&&|\|\||[;&|<>(){}\n]/g) ?? [];
 }
 function literal(token: string): string | undefined {
   if (/[$`*?{}~]/.test(token)) return undefined;
@@ -24,10 +24,12 @@ function literal(token: string): string | undefined {
 export async function commandEvidence(command: string, cwd: string): Promise<CommandEvidence> {
   const evidence: CommandEvidence = { files: [], notes: [] };
   const candidates = new Set<string>();
+  const excludedInputs = new Set<string>();
   let folder: string | undefined = cwd;
   let start = true;
   let redirect: '<' | '>' | undefined;
   const parts = tokens(command.trim());
+  const credentialInput = parts.some(part => /^(?:--with-token|--password-stdin|--password-file|--token-file|--client-secret-file)(?:=|$)/.test(literal(part) ?? ''));
   if (parts.some(token => token.includes('`') || ['(', ')', '{', '}', '<<', '<<-', '<<<'].includes(token))) {
     evidence.notes.push('Inline shell structure (group/subshell/heredoc) was not interpreted; judge inline code from the exact command and do not assume local file contents.');
     return evidence;
@@ -58,10 +60,11 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
     }
     if (/^\d*[<>]&[\d-]+$/.test(token)) continue;
     if (token === '&>' || token === '&>>') { redirect = '>'; continue; }
-    if (token === '<' || token === '>') {
+    if (/^\d*[<>]{1,2}$/.test(token)) {
       if (start) { evidence.notes.push('Leading redirection was not interpreted; no local file contents were assumed.'); return evidence; }
-      redirect = token; continue;
+      redirect = token.includes('<') ? '<' : '>'; continue;
     }
+    if (redirect === '>') { redirect = undefined; continue; }
     if (start && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
     const word = literal(token);
     if (start && !word) { evidence.notes.push('Dynamic command name was not interpreted; no local file contents were assumed.'); return evidence; }
@@ -72,7 +75,7 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
     if (word === 'cd' && !start && !interpreter) { evidence.notes.push('Non-command cd word was not interpreted; no local file contents were assumed.'); return evidence; }
     if (start && word === 'cd') {
       const next = parts[i + 1];
-      const target = next && !['&&', '||', ';', '|', '\n', '&'].includes(next) ? literal(parts[++i]!) : undefined;
+      const target = next && !/^\d*[<>]/.test(next) && !['&&', '||', ';', '|', '\n', '&'].includes(next) ? literal(parts[++i]!) : undefined;
       folder = !target || target.startsWith('-') ? undefined : target.startsWith('/') ? resolve(target) : folder ? resolve(folder, target) : undefined;
       if (!folder) evidence.notes.push('Working directory was not resolved; relative files were not inspected.');
       start = false; continue;
@@ -83,7 +86,7 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
       const program = basename(word ?? '');
       interpreter = /^(?:python[\d.]*|node|bash|sh|zsh|ruby|perl|php|lua|tsx)$/.test(program);
       shell = ['bash', 'sh', 'zsh'].includes(program);
-      if (program === 'ruby' && parts.slice(i + 1, segmentEnd).some(part => /^-[CX]/.test(literal(part) ?? ''))) {
+      if (program === 'ruby' && parts.slice(i + 1, segmentEnd).some(part => /^-[^-]*[CXx]/.test(part))) {
         evidence.notes.push('Interpreter directory-changing options were not interpreted; no local file contents were assumed.'); return evidence;
       }
     }
@@ -99,11 +102,14 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
     if (remote || output || word.startsWith('-') || (!input && !directScript && !interpreterFile && !(interpreter && SCRIPT.test(word)))) continue;
     if (!folder && !word.startsWith('/')) { evidence.notes.push(`Relative file not resolved: ${word}`); continue; }
     if (word.split('/').includes('..')) { evidence.notes.push('Parent traversal was not normalized through possible symlink directories.'); continue; }
-    candidates.add(resolve(folder ?? cwd, word));
+    const path = resolve(folder ?? cwd, word);
+    candidates.add(path);
+    if (input && credentialInput) excludedInputs.add(path);
   }
   let total = 0;
   for (const path of candidates) {
     if (evidence.files.length >= MAX_FILES) { evidence.notes.push('Additional referenced files were not inspected (file count limit).'); break; }
+    if (excludedInputs.has(path)) { evidence.files.push({ path, status: 'excluded' }); continue; }
     let file: Awaited<ReturnType<typeof open>> | undefined;
     try {
       const canonical = await realpath(path);

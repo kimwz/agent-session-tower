@@ -9,7 +9,7 @@ format, and saved browser preferences are the compatibility surface.
 ### Fixed
 - Permission reviews inspect directly referenced local scripts and input files instead of relying on shortened conversation excerpts. Absolute-path and interpreter rules receive contextual review and can return to the agent as exact one-time execution requests.
 - Permission reviews honor the owner's explicit task scope for authorized work outside the project, publication and deployment, and request one-time execution when Codex cannot use a conversation-only rule.
-- Reviews retry when referenced script contents change while the model is deciding.
+- Reviews retry when referenced script contents change while the model is deciding. Credential stdin is excluded from model evidence.
 
 ## [1.105.0] - 2026-10-03
 
