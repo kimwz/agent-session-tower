@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { BACKUP_EXTENSION, DEFAULT_BACKUP_SETTINGS, MAX_BACKUP_FILE_BYTES, type BackupOverview, type BackupPart, type BackupPreview, type BackupSettingsInput, type BackupStatus, type RemoteBackup, type RestoreReport } from '../../shared/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { BackupError, checkPassphrase, decryptBackup, encryptBackup, readBackupHeader, type BackupHeader } from './crypto.js';
+import { collectEncryptedVault, stageVaultImport, stageLegacyImport } from './secrets.js';
 import { collectTriggers, collectWorkerFiles, parsePayload, payloadParts, WORKER_FILES, type BackupPayload, type SkillBackup } from './payload.js';
 import { keepBefore, readReport, removePendingWorker, writePendingWorker, writeReport } from './restore-files.js';
 import { S3Client, endpointUrl, unsafeKey } from './s3.js';
@@ -158,7 +159,7 @@ export class BackupService {
     return {
       version: 1,
       machine: this.saved.machine,
-      worker: { files: await collectWorkerFiles(stateDir), ...(triggers ? { triggers } : {}), skills },
+      worker: { files: await collectWorkerFiles(stateDir), encryptedVault: await collectEncryptedVault(stateDir), ...(triggers ? { triggers } : {}), skills },
       web: { projectGroups: this.options.stores.groups.backupValue(), remoteExclusions: this.options.stores.exclusions.backupValue(), decisions: this.options.stores.decisions.backupValue(), backup: settings },
       // Only a computer that set the master up has anything to bring back.
       ...(record(master) && master.voice !== undefined || record(voiceKey) && typeof voiceKey.apiKey === 'string'
@@ -301,11 +302,19 @@ export class BackupService {
     const item = typeof id === 'string' ? this.checked.get(id) : undefined;
     if (!item || this.now() - item.at > CHECKED_KEPT_MS) throw new BackupError('확인한 백업이 만료되었습니다. 파일을 다시 확인하세요.', 409);
     this.checked.delete(id as string);
-    const { payload, header, passphrase } = item;
+    const { header, passphrase } = item;
+    const payload = structuredClone(item.payload);
     const stateDir = this.options.stateDir;
-    const before = await keepBefore(stateDir, REPLACED, new Date(this.now()));
+    const targetHasVault = Boolean(await collectEncryptedVault(stateDir));
+    const before = await keepBefore(stateDir, targetHasVault ? REPLACED.filter(name => name !== 'trigger-secrets.json') : REPLACED, new Date(this.now()));
     // A worker part still waiting from an earlier restore is replaced by this one.
     await removePendingWorker(stateDir);
+    const restoreId = randomUUID(); const pendingSecretImports: string[] = [];
+    if (payload.worker.encryptedVault) { pendingSecretImports.push(await stageVaultImport(stateDir, payload.worker.encryptedVault, restoreId)); delete payload.worker.encryptedVault; }
+    if ((targetHasVault || pendingSecretImports.length > 0) && (payload.worker.files['trigger-secrets.json'] !== undefined || payload.worker.triggers)) {
+      pendingSecretImports.push(await stageLegacyImport(stateDir, payload.worker.files['trigger-secrets.json'] ?? [], passphrase, restoreId, payload.worker.triggers));
+      delete payload.worker.files['trigger-secrets.json']; delete payload.worker.triggers;
+    }
     const worker = payloadParts({ ...payload, web: {}, master: undefined });
     const applied: BackupPart[] = [], errors: string[] = [];
     let passphraseAdopted = false;
@@ -333,9 +342,9 @@ export class BackupService {
     if (master && this.options.master) await step('master', () => this.options.master!({ ...(master.settings?.voice !== undefined ? { voice: master.settings.voice } : {}), voiceKey: master.voiceKey ?? null }));
     if (applied.length) this.options.onChange?.();
     const requestedAt = new Date(this.now()).toISOString();
-    const report: RestoreReport = { id: randomUUID(), status: worker.length ? 'waiting-worker' : 'applied', requestedAt, from: header.from, createdAt: header.createdAt, applied, worker, errors, before,
-      ...(passphraseAdopted ? { notes: ['자동 백업은 이제 이 백업을 연 암호로 암호화됩니다.'] } : {}),
-      ...(worker.length ? {} : { appliedAt: requestedAt }) };
+    const report: RestoreReport = { id: restoreId, status: worker.length ? 'waiting-worker' : pendingSecretImports.length ? 'waiting-secrets' : 'applied', requestedAt, from: header.from, createdAt: header.createdAt, applied, worker, errors, before, ...(pendingSecretImports.length ? { pendingSecretImports } : {}),
+      ...((passphraseAdopted || pendingSecretImports.length) ? { notes: [...(passphraseAdopted ? ['자동 백업은 이제 이 백업을 연 암호로 암호화됩니다.'] : []), ...(pendingSecretImports.length ? ['시크릿과 트리거 복원은 암호화 가져오기 대기 중입니다. Vault 기록에는 원본 Vault 비밀번호를, 트리거·이전 시크릿 기록에는 백업 암호를 입력하세요.'] : [])] } : {}),
+      ...(worker.length || pendingSecretImports.length ? {} : { appliedAt: requestedAt }) };
     await writeReport(stateDir, report);
     if (!worker.length) return report;
     try { await writePendingWorker(stateDir, { ...payload.worker, id: report.id }); }

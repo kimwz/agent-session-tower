@@ -25,6 +25,7 @@ import { EffortPicker, ModelPicker, supportedEffort } from './ModelPicker';
 import { useChatAppearance } from './chat-appearance';
 import { REQUEST_TOKEN_HEADER } from '../../../shared/app-identity';
 import { localPart, nodeHeaders, nodeOf, pathFor, scopeDetail, settleRequest } from '../remote/scope';
+import { SecretComposer, SecretChips, SecretComposerProvider } from '../secrets/SecretsPanel';
 import { RemoteContent } from '../remote/remote-content';
 
 const emptyMessages: readonly ChatMessage[] = [];
@@ -259,7 +260,8 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
         {detail && detail.messages.length === 0 && !loadError && <div className="empty-chat"><MessageSquare size={27} /><h3>{t("대화가 시작될 자리")}</h3><p>{t("이 세션에 첫 요청을 보내거나")}<br />{t("에이전트의 활동을 기다리세요.")}</p></div>}
       </>}
     </div>
-    <div className="composer-section">
+    <SecretComposerProvider key={sessionId} token={token} sessionId={sessionId} cwd={current?.cwd}><div className="composer-section">
+      <SecretChips key={sessionId} token={token} sessionId={sessionId} cwd={current?.cwd} />
       {/* Floats just above the section, whatever it holds (task line, run controls, errors). */}
       {!following && <button className="jump-latest" onClick={scrollToBottom}><ArrowDown size={13} />{t("최신 대화")}</button>}
       {current?.resumable === false && current.parentId && <button className="parent-session-link" onClick={() => onNavigate(current.parentId!)}><GitBranch size={14} /><span>{t("부모 세션에서 이어가기")}</span><ArrowUp size={13} /></button>}
@@ -285,6 +287,7 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
           onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) { event.preventDefault(); void sendPrompt(); } }} />
         <div className="composer-bottom">
           <button className="attach-button" type="button" aria-label={t("파일 첨부")} title={t("파일 첨부 · 최대 {0}개, 합계 {1} · 이미지 붙여넣기 가능", { 0: MAX_ATTACHMENTS, 1: formatAttachmentSize(MAX_TOTAL_ATTACHMENT_BYTES) })} disabled={disabled || sending} onClick={() => fileInput.current?.click()}><Paperclip size={16} aria-hidden="true" /></button>
+          <SecretComposer key={sessionId} token={token} sessionId={sessionId} cwd={current?.cwd} />
           <span className="composer-hint">{sending ? <span role="status">{sendingLabel}…</span> : prompt.length > 24000 ? t("{0} / 32,000자", { 0: prompt.length.toLocaleString() }) : composerHint}</span>
           <ModelPicker provider={provider} observedModel={current?.model} value={draft.model} disabled={disabled || sending} onChange={model => {
             const latest = getComposerState(sessionId).draft;
@@ -296,6 +299,6 @@ export function ChatPanel({ sessionId, session, allSessions, provider, host, run
       </form>
       <p className="composer-note"><Terminal size={11} />{host ? t("{0}의 {1}에서 기존 대화를 이어갑니다.", { 0: host.name, 1: current ? providerLabels[current.provider] : t("에이전트") })
         : t("이 기기의 {0}에서 기존 대화를 이어갑니다.", { 0: current ? providerLabels[current.provider] : t("에이전트") })}</p>
-    </div>
+    </div></SecretComposerProvider>
   </aside></RemoteContent.Provider>;
 }

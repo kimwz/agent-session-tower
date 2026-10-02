@@ -6,7 +6,7 @@ export const MIN_BACKUP_PASSPHRASE = 8;
 export const MAX_BACKUP_FILE_BYTES = 40 * 1024 * 1024;
 
 /** What a restore brings back, in the words the page shows. */
-export type BackupPart = 'triggers' | 'triggerSecrets' | 'permissions' | 'models' | 'slack' | 'github' | 'publicAgents' | 'skills' | 'decisions' | 'projectGroups' | 'remoteExclusions' | 'master' | 'backup';
+export type BackupPart = 'triggers' | 'triggerSecrets' | 'secretVault' | 'permissions' | 'models' | 'slack' | 'github' | 'publicAgents' | 'skills' | 'decisions' | 'projectGroups' | 'remoteExclusions' | 'master' | 'backup';
 
 /** A checked backup, before it is applied. */
 export interface BackupPreview {
@@ -23,7 +23,7 @@ export interface BackupPreview {
 /** Where the last restore is: waiting for the execution worker to take its part, or done. */
 export interface RestoreReport {
   id: string;
-  status: 'waiting-worker' | 'applied' | 'cancelled';
+  status: 'waiting-worker' | 'waiting-secrets' | 'applied' | 'cancelled';
   requestedAt: string;
   from: string;
   createdAt: string;
@@ -32,6 +32,8 @@ export interface RestoreReport {
   /** Waiting for (or applied by) the execution worker. */
   worker: BackupPart[];
   appliedAt?: string;
+  /** Encrypted imports need a separate owner source password after target unlock. */
+  pendingSecretImports?: string[];
   /** Skills written, and those left out with why. */
   skills?: { restored: string[]; skipped: { name: string; reason: string }[] };
   errors: string[];

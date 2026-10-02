@@ -32,7 +32,7 @@ function toolServer(stateDir: string, mode: '--tower-mcp' | '--slack-mcp', extra
  * lookups, which Claude Code and Codex elsewhere on this computer get from their user configuration. The owner's turns in
  * the master's folder also get the master's page tools.
  */
-export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry }) {
+export function runToolResolver(options: { stateDir: string; runs: Pick<RunManager, 'sessionOrigin'>; slack?: Pick<SlackService, 'sessionMcp'>; github?: Pick<GitHubCoordinator, 'sessionWorkflow'>; capabilities: CapabilityRegistry; secrets?: { initialized(): boolean } }) {
   const lookups = { [SESSION_TOOLS_SERVER]: sessionToolServer(options.stateDir, thisBuild()) };
   return (run: Run, session: Session): RunTools => {
     const tools = resolve(run, session);
@@ -63,7 +63,12 @@ export function runToolResolver(options: { stateDir: string; runs: Pick<RunManag
     // Bound to this run: a later turn, even in the same conversation, gets its own credential.
     const tower = toolServer(options.stateDir, '--tower-mcp', [], options.capabilities.issue({ kind: 'owner-run', runId: run.id, sessionId: session.id }));
     const servers: SessionMcpServers = { tower };
+    const secretEligible = options.secrets && !session.isSubagent && !session.launchedByAgent && !session.parentId && !session.launchedBy;
+    if (secretEligible) {
+      const build = thisBuild();
+      servers.tower_secrets = { command: build.command, args: [...build.args, '--secrets-mcp', options.stateDir], env: { TOWER_SECRET_CAPABILITY: options.capabilities.issue({ kind: 'secret-run', runId: run.id, sessionId: session.id }), TOWER_SECRET_STATE_DIR: options.stateDir } };
+    }
     if (!origin.controllerId && subscriptionOnly(options.stateDir, session.cwd)) servers.tower_master = masterToolServer(options.stateDir);
-    return { servers, required: false, towerTools: 'attached' };
+    return { servers, required: Boolean(secretEligible && options.secrets?.initialized()), towerTools: 'attached' };
   }
 }

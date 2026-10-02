@@ -68,6 +68,8 @@ async function fixture(t: TestContext, ownPorts: number[] = []) {
   };
   t.after(async () => {
     for (const service of services) service.close();
+    // A manual run's dispatch tick can save after settle() starts; let that tick finish before deleting its state.
+    await until(() => services.every(service => !service.inFlight()));
     await Promise.allSettled(services.map(service => service.settle()));
     await rm(directory, { recursive: true, force: true });
   });

@@ -10,8 +10,8 @@ import { openPermissions } from '../../../client/src/permissions/permissions-ope
 import { SettingsFrameContext, SettingsPane } from '../../../client/src/settings/SettingsPane.js';
 
 test('the settings list every section in one order, account management only where signing in is set up', () => {
-  assert.deepEqual(settingsSections(true), ['general', 'models', 'triggers', 'skills', 'permissions', 'decisions', 'remote', 'notifications', 'backup', 'account']);
-  assert.deepEqual(settingsSections(false), ['general', 'models', 'triggers', 'skills', 'permissions', 'decisions', 'remote', 'notifications', 'backup']);
+  assert.deepEqual(settingsSections(true), ['general', 'models', 'triggers', 'skills', 'permissions', 'decisions', 'remote', 'notifications', 'backup', 'secrets', 'account']);
+  assert.deepEqual(settingsSections(false), ['general', 'models', 'triggers', 'skills', 'permissions', 'decisions', 'remote', 'notifications', 'backup', 'secrets']);
 });
 
 test('the settings button shows a waiting permission request first, then proposals, then only a dot', () => {
