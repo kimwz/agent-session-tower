@@ -4,6 +4,15 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.105.0] - 2026-10-03
+
+### Added
+- Explicit once reservations that are consumed only once and archived automatically, with retained run/audit history and a separate archived trigger list.
+- Revision-checked archive management and durable consumption records across restart, deletion and backup restore.
+
+### Changed
+- Reviews and native checks use the computer's existing Claude/Codex CLI login by default; nonpersistent execution and test data separation no longer require a new authenticated profile.
+
 ## [1.104.3] - 2026-10-02
 
 ### Fixed
