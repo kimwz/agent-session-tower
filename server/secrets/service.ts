@@ -5,13 +5,17 @@ import { MAX_SECRET_BYTES, SECRET_OPERATIONS, DEFAULT_SECRET_USE_OPERATIONS } fr
 import { SecretVault } from './vault.js';
 import { decode } from './crypto.js';
 import { parseDotenv } from './dotenv.js';
+import { authorize, discoverable, openTask, projectId, sessionTask, matchingRules, activeRules, selectedFields, type PolicyGrant, type PolicySecret, type PolicyState } from './policy.js';
 interface StoredSecret { metadata: SecretMetadata; value: string; encoding?: 'base64'; fields?: Record<string, string> }
-interface Grant { taskId: string; secretId: string; version: number; ruleId: string; revision: number; deadline?: number }
+type Grant = PolicyGrant;
 interface Legacy { id: string; name: string; value: string; createdAt: string; origin: string }
 interface Permanent { device: SecretDevice; keys: { signingPrivateKey: string; encryptionPrivateKey: string }; hmac: string; peers: SecretPeer[]; projects: SecretProject[]; groups: SecretGroup[]; secrets: StoredSecret[]; rules: SecretRule[]; legacy: Legacy[] }
 interface Journal { groups: SecretGroup[]; rules: SecretRule[]; tasks: SecretTask[]; secrets: StoredSecret[]; grants: Grant[]; operations: Record<string, { taskId: string; runId: string; fingerprint: string; state: 'pending' | 'done'; remote: boolean; claimedAt?: number; result?: unknown }> }
 export interface ResolvedSecret { metadata: SecretMetadata; bytes: Buffer; fields?: Record<string, string> }
 export interface SecretDispatchUse { ref: string; operation: SecretOperation; value: ResolvedSecret }
+/** Written in plain text at every unlocked save: the policy to list names by while locked, and the sources it cannot reach then. */
+interface LockedIndex { policy: PolicyState; sources: string[] }
+const policySecret = (secret: StoredSecret): PolicySecret => ({ metadata: secret.metadata, fieldNames: secret.fields ? Object.keys(secret.fields) : undefined });
 const emptyJournal = (): Journal => ({ groups: [], rules: [], tasks: [], secrets: [], grants: [], operations: Object.create(null) });
 export class SecretService {
   readonly vault: SecretVault; private permanent?: Permanent; private journal = emptyJournal(); private queue: Promise<unknown> = Promise.resolve(); private readonly now: () => number;
@@ -21,15 +25,18 @@ export class SecretService {
   private data(): Permanent { if (!this.permanent || this.vault.locked) throw new Error('Vault locked'); return this.permanent; }
   private serialize<T>(operation: () => Promise<T>): Promise<T> { const next = this.queue.then(operation); this.queue = next.catch(() => undefined); return next; }
   private async mutate<T>(operation: () => T | Promise<T>): Promise<T> {
-    return this.serialize(async () => { this.data(); const permanent = structuredClone(this.permanent); const journal = structuredClone(this.journal); let saving = false; try { const result = await operation(); saving = true; await this.vault.save(this.data(), this.journal); return result; } catch (error) { if (saving) { this.vault.lock(); this.permanent = undefined; this.journal = emptyJournal(); } else { this.permanent = permanent; this.journal = journal; } throw error; } });
+    return this.serialize(async () => { this.data(); const permanent = structuredClone(this.permanent); const journal = structuredClone(this.journal); let saving = false; try { const result = await operation(); saving = true; await this.vault.save(this.data(), this.journal, this.lockedIndex()); return result; } catch (error) { if (saving) { this.vault.lock(); this.permanent = undefined; this.journal = emptyJournal(); } else { this.permanent = permanent; this.journal = journal; } throw error; } });
   }
   async initialize(password: string) { return this.serialize(async () => {
     const signing = generateKeyPairSync('ed25519'); const encryption = generateKeyPairSync('x25519');
     const signingKey = signing.publicKey.export({ type: 'spki', format: 'pem' }).toString(); const encryptionKey = encryption.publicKey.export({ type: 'spki', format: 'pem' }).toString();
     const data: Permanent = { device: { id: String(randomUUID()), name: 'This computer', signingKey, encryptionKey, fingerprint: createHash('sha256').update(signingKey + ':' + encryptionKey).digest('hex') }, keys: { signingPrivateKey: signing.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), encryptionPrivateKey: encryption.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() }, hmac: randomBytes(32).toString('base64'), peers: [], projects: [], groups: [], secrets: [], rules: [], legacy: [] };
-    await this.vault.initialize(password, data, data.device.id); this.permanent = data; this.journal = emptyJournal(); await this.vault.save(data, this.journal);
+    await this.vault.initialize(password, data, data.device.id); this.permanent = data; this.journal = emptyJournal(); await this.vault.save(data, this.journal, this.lockedIndex());
   }); }
-  async unlock(password: string) { return this.serialize(async () => { const data = await this.vault.unlock(password) as Permanent; try { this.permanent = data; this.journal = { ...emptyJournal(), ...((await this.vault.journal() as Journal | undefined) ?? {}) }; this.data(); } catch (error) { this.vault.lock(); this.permanent = undefined; throw error; } }); }
+  async unlock(password: string) { return this.serialize(async () => { const data = await this.vault.unlock(password) as Permanent; try { this.permanent = data; this.journal = { ...emptyJournal(), ...((await this.vault.journal() as Journal | undefined) ?? {}) }; this.data(); } catch (error) { this.vault.lock(); this.permanent = undefined; throw error; }
+    // Vaults saved by older builds have no index yet; listing while locked works from the next lock on.
+    await this.vault.writeIndex(this.lockedIndex()).catch(() => console.warn('Tower could not refresh the secret name index; names stay unlisted while locked until the next save.'));
+  }); }
   async lock() { return this.serialize(async () => { this.vault.lock(); this.permanent = undefined; this.journal = emptyJournal(); }); }
   async changePassword(current: string, next: string) { return this.mutate(() => this.vault.changePassword(current, next)); }
   async flush() { return this.mutate(() => undefined); }
@@ -47,7 +54,10 @@ export class SecretService {
     this.data().projects = [...this.data().projects.filter(item => item.id !== project.id), project]; return structuredClone(project);
   }); }
 
-  private projectId(hostId: string, root: string) { return this.data().projects.find(project => project.bindings.some(binding => binding.hostId === hostId && binding.root === root))?.id; }
+  private projectId(hostId: string, root: string) { return projectId(this.data(), hostId, root); }
+  /** Live view for authorization: grants issued during an evaluation land in the journal it reads. */
+  private lockedIndex(): LockedIndex { return { policy: this.policy(), sources: this.data().peers.filter(peer => peer.enabled && peer.direction === 'controller').map(peer => peer.device.id) }; }
+  private policy(): PolicyState { const data = this.data(); return { deviceId: data.device.id, projects: data.projects, groups: this.groups(), rules: this.allRules(), secrets: this.secrets().map(policySecret), tasks: this.journal.tasks, grants: this.journal.grants }; }
   private groups() { return [...this.data().groups, ...this.journal.groups]; }
   private allRules() { return [...this.data().rules, ...this.journal.rules]; }
   private secrets() { return [...this.data().secrets, ...this.journal.secrets]; }
@@ -72,7 +82,7 @@ export class SecretService {
     const id = randomUUID(); const fields = input.kind === 'env' ? parseDotenv(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) : undefined;
     const secret: StoredSecret = { metadata: { id, name: input.name, groupId: group.id, kind: input.kind, version: 1, reference: `tower-secret://${this.vault.vaultId}/${id}@1`, fields: fields ? Object.keys(fields) : undefined, expiresAt: input.expiresAt }, value, encoding: binary ? 'base64' : undefined, fields };
     (input.scope === 'task' ? this.journal.secrets : this.data().secrets).push(secret);
-    if (input.target) { const target = this.task(input.target); const operations = input.operations ?? [...SECRET_OPERATIONS]; const rule: SecretRule = { id: randomUUID(), groupId: group.id, secretIds: [id], hostId: target.hostId, projectId: input.allProjects && group.scope === 'global' ? undefined : input.projectId ?? this.projectId(target.hostId, target.root), ...(group.scope === 'global' && input.allProjects ? { allProjects: true } : {}), ...(!input.projectId && !this.projectId(target.hostId, target.root) && !input.allProjects ? { root: target.root } : {}), activation: input.activation ?? 'manual', operations, enabled: true, revision: 1, ...(target.hostId !== this.device().id ? { maxTtlMs: 8 * 60 * 60_000 } : {}) }; (group.scope === 'task' ? this.journal.rules : this.data().rules).push(rule); if (input.connect) { if (!this.rules(target, secret).includes(rule)) throw new Error('Connection policy does not match task'); this.grant(target, secret, rule); } }
+    if (input.target) { const target = this.task(input.target); const operations = input.operations ?? [...SECRET_OPERATIONS]; const rule: SecretRule = { id: randomUUID(), groupId: group.id, secretIds: [id], hostId: target.hostId, projectId: input.allProjects && group.scope === 'global' ? undefined : input.projectId ?? this.projectId(target.hostId, target.root), ...(group.scope === 'global' && input.allProjects ? { allProjects: true } : {}), ...(!input.projectId && !this.projectId(target.hostId, target.root) && !input.allProjects ? { root: target.root } : {}), activation: input.activation ?? 'manual', operations, enabled: true, revision: 1, ...(target.hostId !== this.device().id ? { maxTtlMs: 8 * 60 * 60_000 } : {}) }; (group.scope === 'task' ? this.journal.rules : this.data().rules).push(rule); if (input.connect) { if (!this.rules(target, secret).includes(rule)) throw new Error('Connection policy does not match task'); this.grant(target, policySecret(secret), rule); } }
     return this.metadata(secret);
   }); }
   async update(input: { id: string; value?: string; content?: string }): Promise<SecretMetadata> { return this.mutate(() => {
@@ -102,7 +112,7 @@ export class SecretService {
     return this.ensureTask(sessionId, root, undefined, started);
   }
 
-  async ensureTask(sessionId: string, canonicalRoot: string, hostId?: string, runStartedAt?: number): Promise<SecretTarget> { return this.mutate(() => { hostId ??= this.device().id; if (runStartedAt !== undefined && this.journal.tasks.some(task => task.sessionId === sessionId && task.hostId === hostId && task.status === 'closed' && (task.closedAt ?? task.createdAt) >= runStartedAt)) throw new Error('Run predates task closure'); if (!sessionId || !isAbsolute(canonicalRoot) || normalize(canonicalRoot) !== canonicalRoot) throw new Error('Invalid task identity'); let task = this.journal.tasks.find(task => task.sessionId === sessionId && task.hostId === hostId && task.status === 'open'); if (task && task.root !== canonicalRoot) throw new Error('Task project changed'); if (!task) { if (this.journal.tasks.length >= 10000) throw new Error('Task count limit'); task = { id: randomUUID(), hostId, sessionId, root: canonicalRoot, status: 'open', createdAt: this.now(), excluded: [] }; this.journal.tasks.push(task); } return { hostId, sessionId, root: canonicalRoot, taskId: task.id, projectId: this.projectId(hostId, canonicalRoot) }; }); }
+  async ensureTask(sessionId: string, canonicalRoot: string, hostId?: string, runStartedAt?: number): Promise<SecretTarget> { return this.mutate(() => { hostId ??= this.device().id; if (!sessionId || !isAbsolute(canonicalRoot) || normalize(canonicalRoot) !== canonicalRoot) throw new Error('Invalid task identity'); let task = sessionTask(this.journal, sessionId, hostId, canonicalRoot, runStartedAt); if (!task) { if (this.journal.tasks.length >= 10000) throw new Error('Task count limit'); task = { id: randomUUID(), hostId, sessionId, root: canonicalRoot, status: 'open', createdAt: this.now(), excluded: [] }; this.journal.tasks.push(task); } return { hostId, sessionId, root: canonicalRoot, taskId: task.id, projectId: this.projectId(hostId, canonicalRoot) }; }); }
   async ensureRemoteTask(context: SecretContext): Promise<SecretContext> { return this.mutate(() => {
     if (!this.data().peers.some(peer => peer.enabled && peer.device.id === context.hostId) || !this.projectId(context.hostId, context.root) || !isAbsolute(context.root) || normalize(context.root) !== context.root || !/^[a-f0-9-]{36}$/.test(context.taskId) || !context.sessionId) throw new Error('Remote task denied');
     context = { ...context, projectId: this.projectId(context.hostId, context.root) };
@@ -110,7 +120,7 @@ export class SecretService {
     if (existing) { this.task(context); return context; }
     this.journal.tasks.push({ id: context.taskId, hostId: context.hostId, sessionId: context.sessionId, root: context.root, status: 'open', createdAt: this.now(), expiresAt: this.now() + 8 * 60 * 60_000, excluded: [] }); return context;
   }); }
-  private task(target: SecretTarget): SecretTask { const task = this.journal.tasks.find(task => task.id === target.taskId); if (!task || task.status !== 'open' || task.hostId !== target.hostId || task.sessionId !== target.sessionId || task.root !== target.root || (task.expiresAt !== undefined && task.expiresAt <= this.now()) || target.projectId !== this.projectId(task.hostId, task.root)) throw new Error('Task identity denied'); return task; }
+  private task(target: SecretTarget): SecretTask { return openTask(this.policy(), target, this.now()); }
   /** Recipient-side task closure and exclusions also apply to remotely owned secrets. */
   checkTask(target: SecretTarget, secretId?: string): void {
     const task = this.task(target);
@@ -141,16 +151,11 @@ export class SecretService {
       if (remote ? operation.claimedAt !== undefined && operation.claimedAt + 60_000 < this.now() : !liveRuns.has(operation.runId)) delete this.journal.operations[id];
     }
   }); }
-  private matchingRules(task: SecretTask, secret: StoredSecret) { const group = this.groups().find(group => group.id === secret.metadata.groupId); if (!group || (group.scope === 'task' && group.taskId !== task.id) || (group.scope === 'project' && group.projectId !== this.projectId(task.hostId, task.root))) return []; return this.allRules().filter(rule => rule.groupId === group.id && rule.secretIds.includes(secret.metadata.id) && rule.hostId === task.hostId && ((rule.projectId !== undefined && rule.projectId === this.projectId(task.hostId, task.root)) || (rule.projectId === undefined && ((group.scope === 'global' && rule.allProjects === true) || (rule.root !== undefined && rule.root === task.root) || (group.scope === 'task' && group.taskId === task.id))))); }
-  private rules(task: SecretTask, secret: StoredSecret) { return this.matchingRules(task, secret).filter(rule => rule.enabled && (rule.expiresAt === undefined || rule.expiresAt > this.now())); }
-  private selectedFields(secret: StoredSecret, rule: Pick<SecretRule, 'fields'>): string[] | undefined {
-    const selected = rule.fields?.[secret.metadata.id];
-    if (selected === undefined) return secret.fields ? Object.keys(secret.fields) : undefined;
-    if (!secret.fields || !Array.isArray(selected) || new Set(selected).size !== selected.length || selected.some(field => typeof field !== 'string' || !Object.hasOwn(secret.fields!, field))) throw new Error('Invalid field selection');
-    return selected;
-  }
-  private grant(task: SecretTask, secret: StoredSecret, rule: SecretRule, renew = false) { this.selectedFields(secret, rule); if (task.excluded.includes(secret.metadata.id)) throw new Error('Secret revoked for task'); let grant = this.journal.grants.find(grant => grant.taskId === task.id && grant.secretId === secret.metadata.id && grant.ruleId === rule.id); if (!grant) { grant = { taskId: task.id, secretId: secret.metadata.id, version: secret.metadata.version, ruleId: rule.id, revision: rule.revision, deadline: rule.maxTtlMs === undefined ? undefined : this.now() + rule.maxTtlMs }; this.journal.grants.push(grant); } else if (renew) { grant.version = secret.metadata.version; grant.revision = rule.revision; } return grant; }
-  async attach(target: SecretTarget, secretIds: string[]) { return this.mutate(() => { const task = this.task(target); for (const id of secretIds) { const secret = this.secrets().find(secret => secret.metadata.id === id); if (!secret) throw new Error('Unknown secret'); const rules = this.rules(task, secret); if (!rules.length) throw new Error('Matching rule required'); for (const rule of rules) this.grant(task, secret, rule, true); } }); }
+  private matchingRules(task: SecretTask, secret: StoredSecret) { return matchingRules(this.policy(), task, policySecret(secret)); }
+  private rules(task: SecretTask, secret: StoredSecret) { return activeRules(this.policy(), task, policySecret(secret), this.now()); }
+  private selectedFields(secret: StoredSecret, rule: Pick<SecretRule, 'fields'>): string[] | undefined { return selectedFields(policySecret(secret), rule); }
+  private grant(task: SecretTask, secret: PolicySecret, rule: SecretRule, renew = false) { selectedFields(secret, rule); if (task.excluded.includes(secret.metadata.id)) throw new Error('Secret revoked for task'); let grant = this.journal.grants.find(grant => grant.taskId === task.id && grant.secretId === secret.metadata.id && grant.ruleId === rule.id); if (!grant) { grant = { taskId: task.id, secretId: secret.metadata.id, version: secret.metadata.version, ruleId: rule.id, revision: rule.revision, deadline: rule.maxTtlMs === undefined ? undefined : this.now() + rule.maxTtlMs }; this.journal.grants.push(grant); } else if (renew) { grant.version = secret.metadata.version; grant.revision = rule.revision; } return grant; }
+  async attach(target: SecretTarget, secretIds: string[]) { return this.mutate(() => { const task = this.task(target); for (const id of secretIds) { const secret = this.secrets().find(secret => secret.metadata.id === id); if (!secret) throw new Error('Unknown secret'); const rules = this.rules(task, secret); if (!rules.length) throw new Error('Matching rule required'); for (const rule of rules) this.grant(task, policySecret(secret), rule, true); } }); }
   /** An explicit owner click may authorize a saved global key for this exact project, never automatically. */
   async connect(target: SecretTarget, secretIds: string[]) { return this.mutate(() => {
     const task = this.task(target);
@@ -169,12 +174,23 @@ export class SecretService {
       }
       if (this.journal.grants.some(grant => grant.taskId === task.id && grant.secretId === id && grant.deadline !== undefined && grant.deadline <= this.now())) throw new Error('Secret grant expired for this task');
       task.excluded = task.excluded.filter(excluded => excluded !== id);
-      for (const rule of rules) this.grant(task, secret, rule, true);
+      for (const rule of rules) this.grant(task, policySecret(secret), rule, true);
     }
   }); }
   async revoke(target: SecretTarget, secretIds: string[]) { return this.mutate(() => { const task = this.task(target); task.excluded = [...new Set([...task.excluded, ...secretIds])]; this.journal.grants = this.journal.grants.filter(grant => grant.taskId !== task.id || !secretIds.includes(grant.secretId)); }); }
-  private authorize(context: SecretContext, secret: StoredSecret, operation: SecretOperation, issueAutomatic = true) { const task = this.task(context); if (!context.runId || task.excluded.includes(secret.metadata.id) || (secret.metadata.expiresAt !== undefined && secret.metadata.expiresAt <= this.now())) throw new Error('Secret access denied'); const rules = this.rules(task, secret).filter(rule => rule.operations.includes(operation)); if (rules.length !== 1) throw new Error('Single matching rule required'); const rule = rules[0]; this.selectedFields(secret, rule); if (!rule.operations.includes(operation)) throw new Error('Operation denied'); let grant = this.journal.grants.find(grant => grant.taskId === task.id && grant.secretId === secret.metadata.id && grant.ruleId === rule.id); if (!grant && rule.activation === 'auto' && issueAutomatic) grant = this.grant(task, secret, rule); if (!grant || grant.revision !== rule.revision || grant.version !== secret.metadata.version || (grant.deadline !== undefined && grant.deadline <= this.now())) throw new Error('Grant denied'); return rule; }
-  async list(context: SecretContext): Promise<SecretMetadata[]> { return this.mutate(() => { this.task(context); const result: SecretMetadata[] = []; for (const secret of this.secrets()) { try { const rule = this.authorize(context, secret, 'discover'); result.push({ ...this.metadata(secret), fields: secret.fields ? rule.fields?.[secret.metadata.id] ?? Object.keys(secret.fields) : undefined, operations: SECRET_OPERATIONS.filter(operation => { try { this.authorize(context, secret, operation); return true; } catch { return false; } }), activation: rule.activation, sourceHostId: this.device().id }); } catch { /* A list omits resources not authorized for this subject. */ } } return result; }); }
+  private authorize(context: SecretContext, secret: StoredSecret, operation: SecretOperation, issueAutomatic = true) { const state = this.policy(); const task = openTask(state, context, this.now()); if (!context.runId) throw new Error('Secret access denied'); return authorize(state, task, policySecret(secret), operation, this.now(), issueAutomatic ? (task, secret, rule) => this.grant(task, secret, rule) : undefined); }
+  async list(context: SecretContext): Promise<SecretMetadata[]> { return this.mutate(() => { const state = this.policy(); const task = openTask(state, context, this.now()); return context.runId ? discoverable(state, task, this.now(), (task, secret, rule) => this.grant(task, secret, rule)) : []; }); }
+  /** What a run may discover while the vault is locked, read from the plaintext index of the last unlocked save; undefined without one. */
+  lockedList(sessionId: string, root: string, runStartedAt: string, bound?: SecretTarget): { secrets: SecretMetadata[]; sources: string[] } | undefined {
+    const index = this.vault.index as LockedIndex | undefined; if (!index) return;
+    const { policy: state, sources } = index; const now = this.now();
+    // An unbound run gets the task binding would give it; a task binding would create has no grants or task-scoped secrets yet.
+    const open = bound ? undefined : sessionTask(state, sessionId, state.deviceId, root, Date.parse(runStartedAt));
+    const target = bound ?? (open && { hostId: state.deviceId, sessionId, root, taskId: open.id });
+    const task = target ? openTask(state, { ...target, projectId: projectId(state, target.hostId, target.root) }, now)
+      : { id: '', hostId: state.deviceId, sessionId, root, status: 'open' as const, createdAt: now, excluded: [] };
+    return { secrets: discoverable(state, task, now, 'assume'), sources };
+  }
   async resolve(context: SecretContext, ref: string, operation: SecretOperation): Promise<ResolvedSecret> { return this.mutate(() => this.resolved(context, ref, operation, true)); }
   /** Validate committed grants and begin use in one turn; never hold policy writes for a consumer's runtime. */
   dispatch<T>(context: SecretContext, uses: readonly SecretDispatchUse[], start: () => T): Promise<{ result: T }> {

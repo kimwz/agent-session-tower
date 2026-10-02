@@ -4,12 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
-## [1.104.4] - 2026-10-03
+## [1.105.0] - 2026-10-03
 
-### Fixed
-- Permission reviews inspect directly referenced local scripts and input files instead of relying on shortened conversation excerpts. Absolute-path and interpreter rules receive contextual review and can return to the agent as exact one-time execution requests.
-- Permission reviews honor the owner's explicit task scope for authorized work outside the project, publication and deployment, and request one-time execution when Codex cannot use a conversation-only rule.
-- Reviews retry when referenced script contents change while the model is deciding.
+### Changed
+- List secret names, references and permitted operations while the vault is locked, from a plaintext index (no values or keys) of its last unlocked state. Discovering keys no longer makes agents ask for an unlock.
+- Turn the use of a secret while the vault is locked into a clear request: the agent asks the owner to unlock it, naming the secret it needs, and retries after they confirm.
 
 ## [1.104.3] - 2026-10-02
 
