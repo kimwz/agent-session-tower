@@ -13,6 +13,7 @@ import { parseSecretCli } from './cli.js';
 import { parseDotenv } from './dotenv.js';
 import { RemoteSecretBroker, type RemoteSecretRequest, type RemoteSecretResponse } from './remote.js';
 import { SecretService } from './service.js';
+import { secretMetadataSignature } from './notices.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 const fail = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
@@ -47,12 +48,15 @@ export class SecretRuntime {
   private housekeeping = 0;
   private closures: Promise<unknown> = Promise.resolve();
   private readonly runTasks = new Map<string, SecretTarget>();
+  private readonly observedTasks = new Map<string, string>();
   constructor(private readonly options: {
     stateDir: string; service: SecretService; runs: Runs;
     migrate?: () => Promise<void>; pendingImports?: () => Promise<string[]>;
     importPending?: (id: string, password: string) => Promise<void>;
     remoteAllowed?: (context: SecretContext) => boolean;
     isClosed?: (id: string) => Promise<boolean>;
+    /** Fixed-text invalidation only; owner input and secret material never reach the callback. */
+    onChange?: (sessionId?: string) => void;
   }) {
     const service = options.service;
     const accepted = new Map<string, SecretContext>();
@@ -82,11 +86,46 @@ export class SecretRuntime {
   async sweep(): Promise<void> {
     if (this.paused || this.blocked || this.housekeeping || this.options.service.status().locked) return;
     this.housekeeping++;
-    try { await this.options.service.sweep(new Set(this.options.runs.list().filter(run => run.status === 'running' || run.status === 'queued').map(run => run.id))); }
+    try {
+      await this.options.service.sweep(new Set(this.options.runs.list().filter(run => run.status === 'running' || run.status === 'queued').map(run => run.id)));
+      await this.observeActiveTasks();
+    }
     finally { this.housekeeping--; }
   }
   async flush(): Promise<void> { if (!this.options.service.status().locked) await this.options.service.flush(); }
   close(): void { this.remote.close(); }
+
+  private changed(sessionId?: string): void {
+    try { this.options.onChange?.(sessionId); }
+    catch { console.warn('Tower could not queue a private secret-change notice; the next owner turn will refresh its secret list.'); }
+  }
+  private observe(target: SecretTarget, signature: string, emit = true): void {
+    const key = `${target.hostId}:${target.taskId}`;
+    const previous = this.observedTasks.get(key);
+    if (this.observedTasks.size >= 256 && !this.observedTasks.has(key)) this.observedTasks.delete(this.observedTasks.keys().next().value!);
+    this.observedTasks.set(key, signature);
+    if (emit && previous !== undefined && signature !== previous) this.changed(target.sessionId);
+  }
+  private async observeActiveTasks(): Promise<void> {
+    if (!this.options.onChange) return;
+    for (const run of this.options.runs.list()) {
+      const session = this.options.runs.getSession(run.sessionId);
+      const origin = session && this.options.runs.sessionOrigin(session.id);
+      if (run.status !== 'running' || run.origin?.kind !== 'owner' || run.towerTools !== 'attached' || !session
+        || session.closed || session.isSubagent || session.launchedByAgent || session.parentId || session.launchedBy
+        || origin?.untrustedInput || (origin && origin.kind !== 'owner') || await this.options.isClosed?.(session.id)) continue;
+      // Observing must not create or rotate a security task.
+      const bound = this.runTasks.get(run.id);
+      const current = this.options.service.currentTask(session.id);
+      const target = bound && current?.taskId === bound.taskId ? { ...bound, projectId: current.projectId } : bound ?? current;
+      if (!target) continue;
+      try {
+        const context = { ...target, runId: run.id };
+        const metadata = await this.broker.list(context);
+        this.observe(target, secretMetadataSignature(metadata, this.broker.unavailableSources(context)));
+      } catch { this.observe(target, 'task-unavailable'); }
+    }
+  }
 
   private async session(id: string): Promise<Session & { cwd: string }> {
     const session = this.options.runs.getSession(id);
@@ -179,11 +218,12 @@ export class SecretRuntime {
       const peers = service.peers().filter(peer => peer.enabled && peer.direction === 'controller');
       // A disconnected source expires its grants; failure is visible to the owner.
       await service.closeTask(target.taskId);
+      this.changed(target.sessionId);
       const results = await Promise.allSettled(peers.map(peer => this.remote.request(peer.device.id, context, 'close', {})));
       if (results.some(result => result.status === 'rejected')) throw fail('로컬 작업은 종료했습니다. 연결할 수 없는 원본 컴퓨터의 정리는 권한 만료 후 완료됩니다.', 503);
-    } else await service.closeTask(target.taskId);
+    } else { await service.closeTask(target.taskId); this.changed(target.sessionId); }
   }
-  async overview(target?: SecretTarget): Promise<SecretOverview> {
+  async overview(target?: SecretTarget, observeChanges = true): Promise<SecretOverview> {
     const service = this.options.service;
     const result = service.overview(target);
     const ids = await this.options.pendingImports?.() ?? [];
@@ -191,6 +231,7 @@ export class SecretRuntime {
     if (target && !result.status.locked) {
       const context = { ...target, runId: 'owner-ui' };
       const available = target.hostId === service.device().id ? await this.broker.list(context) : await service.list(context);
+      this.observe(target, secretMetadataSignature(available, target.hostId === service.device().id ? this.broker.unavailableSources(context) : []), observeChanges);
       result.connected = available.map(secret => secret.id);
       result.secrets = result.secrets.map(secret => ({ ...secret, ...available.find(item => item.id === secret.id) }));
       for (const secret of available) {
@@ -208,6 +249,7 @@ export class SecretRuntime {
   /** Owner input travels only on the private owner API/RPC, never TowerApi's agent ledger. */
   async control(action: string, input: Record<string, unknown>, remoteTarget?: SecretTarget): Promise<SecretOverview | { fields: string[] }> {
     const service = this.options.service;
+    let changedSessionId: string | undefined;
     const password = (field: string) => { if (typeof input[field] !== 'string') throw fail('보관함 비밀번호가 필요합니다.'); return input[field] as string; };
     if (action === 'initialize' || action === 'unlock') {
       this.blocked = true;
@@ -241,8 +283,12 @@ export class SecretRuntime {
       }
       const metadata = await service.create({ ...create, target });
       if (!target && (create.projectId || create.allProjects === true)) await service.setRule({ groupId: metadata.groupId, secretIds: [metadata.id], hostId: service.device().id, projectId: create.projectId, allProjects: create.allProjects === true && create.scope === 'global', activation: create.activation ?? 'manual', operations: create.operations ?? [...SECRET_OPERATIONS], enabled: true });
-    } else if (action === 'update') await service.update(z.object({ id: z.string(), value: z.string().optional(), content: z.string().optional() }).parse(input));
-    else if (action === 'remove') await service.remove(z.string().parse(input.id));
+    } else if (action === 'update') {
+      const update = z.object({ id: z.string(), value: z.string().optional(), content: z.string().optional() }).parse(input);
+      changedSessionId = service.taskSessionForSecret(update.id); await service.update(update);
+    } else if (action === 'remove') {
+      const id = z.string().parse(input.id); changedSessionId = service.taskSessionForSecret(id); await service.remove(id);
+    }
     else if (action === 'project') {
       const project = z.object({ id: z.string().optional(), name: z.string().min(1).max(256), bindings: z.array(z.object({ hostId: z.string(), root: z.string() })).min(1).max(100) }).parse(input);
       for (const binding of project.bindings) {
@@ -268,7 +314,13 @@ export class SecretRuntime {
       await service.trustPeer({ ...peer, enabled: true });
     } else if (action === 'untrust') await service.removePeer(z.string().parse(input.id));
     else if (!['initialize','unlock','lock','password','import','overview'].includes(action)) throw fail('알 수 없는 시크릿 작업입니다.', 404);
-    const overview = await this.overview(target);
+    // Notify after mutation commit even if the owner's following overview cannot be returned.
+    if (action !== 'overview' && action !== 'end-task') {
+      const scoped = ['attach', 'connect', 'revoke', 'end-task'].includes(action)
+        || (action === 'create' && target && input.activation !== 'auto');
+      this.changed(scoped ? input.sessionId as string : changedSessionId);
+    }
+    const overview = await this.overview(target, action === 'overview');
     return { ...overview, currentProjectId: target?.projectId ?? currentProjectId };
   }
   peers(): SecretPeer[] { return this.options.service.status().locked ? [] : this.options.service.peers(); }

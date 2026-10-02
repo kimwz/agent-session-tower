@@ -11,6 +11,7 @@ import type { SessionOrigin } from '../../../server/runs/origin.js';
 import { SecretRuntime, SECRET_TOOLS } from '../../../server/secrets/runtime.js';
 import { SecretService } from '../../../server/secrets/service.js';
 import { runSecretsCommand } from '../../../server/secrets/cli.js';
+import { SECRET_USE_INSTRUCTIONS, secretMetadataSignature } from '../../../server/secrets/notices.js';
 
 const password = 'fixture-runtime-password-1234';
 const canary = 'CANARY_RUNTIME_VALUE_DO_NOT_DISCLOSE';
@@ -36,7 +37,8 @@ async function fixture() {
   const registry = {
     list: () => [...runs.values()], getSession: (id: string) => sessions.get(id), sessionOrigin: (id: string) => origins.get(id),
   };
-  const runtime = new SecretRuntime({ stateDir, service, runs: registry });
+  const notices: (string | undefined)[] = [];
+  const runtime = new SecretRuntime({ stateDir, service, runs: registry, onChange: id => { notices.push(id); } });
   const capabilities = new CapabilityRegistry(); const ledger: unknown[] = [];
   const context: McpContext = {
     capabilities, run: id => runs.get(id), secretTools: SECRET_TOOLS, secretTool: (capability, name, args) => runtime.tool(capability, name, args),
@@ -55,8 +57,83 @@ async function fixture() {
   const list = async (token: string) => (await call(token, 'secrets_list')) as { secrets: SecretMetadata[]; usage: string };
   const initialize = async () => { await runtime.control('initialize', { password }); };
   const cleanup = async () => { runtime.close(); await rm(directory, { recursive: true, force: true }); };
-  return { advance: (milliseconds: number) => { now += milliseconds; }, now: () => now, directory, stateDir, projectRoot, alias, service, runtime, sessions, runs, origins, session, capabilities, context, resolver, ledger, addRun, tokenFor, call, list, initialize, cleanup };
+  return { advance: (milliseconds: number) => { now += milliseconds; }, now: () => now, directory, stateDir, projectRoot, alias, service, runtime, notices, sessions, runs, origins, session, capabilities, context, resolver, ledger, addRun, tokenFor, call, list, initialize, cleanup };
 }
+
+test('committed connections, updates, revocation and lock invalidate without exposing owner input', async () => {
+  const f = await fixture();
+  try {
+    const beforeInitialization = f.addRun('notice-before-initialize');
+    assert.equal(f.resolver(beforeInitialization, f.session).instructions, SECRET_USE_INSTRUCTIONS);
+    assert.equal(f.resolver(beforeInitialization, f.session).required, false, 'the established pre-initialization desktop fallback remains optional');
+    await f.initialize(); f.notices.length = 0;
+    const run = f.addRun('notice-owner'); const tools = f.resolver(run, f.session);
+    assert.equal(tools.instructions, SECRET_USE_INSTRUCTIONS);
+    assert.doesNotMatch(tools.instructions!, /CANARY_RUNTIME_VALUE|fixture-runtime-password/);
+    assert.equal(f.resolver({ ...run, origin: { kind: 'trigger', triggerId: 'fixture' } }, f.session).instructions, undefined);
+    const saved = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: canary, kind: 'scalar', value: canary, connect: true }) as SecretOverview;
+    assert.deepEqual(f.notices, [f.session.id]);
+    await f.runtime.control('overview', { sessionId: f.session.id });
+    await f.runtime.control('preview', { value: 'FAKE_KEY=FAKE_VALUE' });
+    assert.equal(f.notices.length, 1);
+    await assert.rejects(f.runtime.control('connect', { sessionId: f.session.id, secretIds: ['missing'] }));
+    assert.equal(f.notices.length, 1, 'a rejected mutation is not announced');
+    const id = saved.connected[0];
+    await f.runtime.control('update', { id, value: 'FAKE_REPLACEMENT' });
+    assert.equal(f.notices.at(-1), f.session.id, 'task-only updates remain scoped to their owner session');
+    await f.runtime.control('revoke', { sessionId: f.session.id, secretIds: [id] });
+    assert.equal(f.notices.at(-1), f.session.id);
+    await f.runtime.control('lock', {}); assert.equal(f.notices.at(-1), undefined);
+    await f.runtime.control('unlock', { password }); assert.equal(f.notices.at(-1), undefined);
+    const shared = await f.runtime.control('create', { scope: 'global', name: 'FAKE_SHARED', kind: 'scalar', value: 'FAKE_GLOBAL' }) as SecretOverview;
+    await f.runtime.control('update', { id: shared.secrets.find(s => s.name === 'FAKE_SHARED')!.id, value: 'FAKE_GLOBAL_UPDATED' });
+    assert.equal(f.notices.at(-1), undefined, 'shared updates invalidate other eligible owner turns');
+    assert.doesNotMatch(JSON.stringify(f.notices), /CANARY_RUNTIME_VALUE|fixture-runtime-password/);
+    const count = f.notices.length;
+    f.runtime.overview = async () => { throw new Error('fixture overview failure'); };
+    await assert.rejects(f.runtime.control('update', { id, value: 'FAKE_COMMITTED_BEFORE_OVERVIEW_FAILURE' }));
+    assert.equal(f.notices.length, count + 1, 'a committed mutation is announced even when its receipt fails');
+    await assert.rejects(f.runtime.control('remove', { id }));
+    assert.equal(f.notices.at(-1), f.session.id, 'deletion retains its task session before the resource disappears');
+    assert.equal(f.service.taskSessionForSecret(id), undefined);
+  } finally { await f.cleanup(); }
+});
+
+test('metadata observation reports expiry and source availability without creating or replacing tasks', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize(); f.notices.length = 0;
+    const run = f.addRun('notice-expiry');
+    await f.runtime.sweep();
+    assert.equal(f.service.currentTask(f.session.id), undefined);
+    assert.deepEqual(f.notices, []);
+    const saved = await f.runtime.control('create', { sessionId: f.session.id, scope: 'task', name: 'FAKE_EXPIRING', kind: 'scalar', value: canary, connect: true, expiresAt: f.now() + 100 }) as SecretOverview;
+    await f.list(f.tokenFor(run));
+    f.notices.length = 0; f.advance(150); await f.runtime.sweep();
+    assert.deepEqual(f.notices, [f.session.id]);
+    await f.runtime.sweep(); assert.equal(f.notices.length, 1, 'unchanged availability is silent');
+    const originalSources = f.runtime.broker.unavailableSources.bind(f.runtime.broker);
+    f.runtime.broker.unavailableSources = () => [{ sourceHostId: 'fixture-remote', code: 'SECRET_SOURCE_UNAVAILABLE' }];
+    await f.runtime.sweep(); assert.equal(f.notices.length, 2);
+    f.runtime.broker.unavailableSources = originalSources;
+    await f.runtime.sweep(); assert.equal(f.notices.length, 3, 'source recovery is a change too');
+    await f.service.closeTask(saved.target!.taskId); await f.runtime.sweep();
+    assert.equal(f.notices.length, 4); assert.equal(f.service.currentTask(f.session.id), undefined);
+    await f.runtime.sweep(); assert.equal(f.notices.length, 4);
+  } finally { await f.cleanup(); }
+});
+
+test('automatic project policies notify and observed metadata order does not produce false changes', async () => {
+  const f = await fixture();
+  try {
+    await f.initialize(); f.notices.length = 0;
+    await f.runtime.control('create', { sessionId: f.session.id, scope: 'project', currentProject: true, name: 'FAKE_AUTO', kind: 'env', value: 'TOKEN=FAKE_TOKEN\nOTHER=FAKE_OTHER', activation: 'auto', connect: true });
+    assert.deepEqual(f.notices, [undefined]);
+    const run = f.addRun('notice-automatic'); const secrets = (await f.list(f.tokenFor(run))).secrets;
+    assert.equal(secrets[0].activation, 'auto');
+    assert.equal(secretMetadataSignature(secrets, []), secretMetadataSignature(secrets.map(s => ({ ...s, fields: s.fields?.slice().reverse(), operations: s.operations?.slice().reverse() })).reverse(), []));
+  } finally { await f.cleanup(); }
+});
 
 test('expiry cleanup holds the worker during writes and pauses for a handoff', async () => {
   const f = await fixture();
