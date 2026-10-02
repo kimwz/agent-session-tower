@@ -395,6 +395,8 @@ test('an owner-stopped master holds reports across restart until a new owner ins
   h.runs.push(master, child);
   h.finish(child, 'Owner stopped this task.', 'cancelled');
   h.finish(master, 'Stopped.', 'cancelled');
+  h.runs.push({ id: randomUUID(), sessionId: MASTER, prompt: 'Permission continuation', status: 'cancelled', createdAt: h.tick(), output: '', origin: { kind: 'owner' },
+    scheduled: { at: h.tick(), afterRunId: master.id, resume: 'permission' } });
   await h.session.follow();
   assert.equal(h.reports().length, 0);
   await h.session.close();

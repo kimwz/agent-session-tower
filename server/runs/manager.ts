@@ -280,12 +280,23 @@ export class RunManager extends EventEmitter {
     if (run.status === 'queued' && run.permissionRequestIds?.length && run.scheduled) await this.checkPermissionUserMessage(run);
   }
 
+  private permissionGoalFinished(target: Run | undefined): boolean {
+    if (!target || target.status !== 'completed' || !target.finishedAt) return false;
+    const session = this.getSession(target.sessionId);
+    return session?.outcome === 'done' && !!session.lastRequestAt
+      && Date.parse(session.lastRequestAt) >= Date.parse(target.startedAt ?? target.createdAt)
+      && Date.parse(session.lastRequestAt) <= Date.parse(target.finishedAt) && Date.parse(session.updatedAt) >= Date.parse(target.finishedAt);
+  }
+
   private async checkPermissionUserMessage(run: Run): Promise<void> {
     const observed = this.getSession(run.sessionId)?.lastRequestAt;
     let latest: { text: string; timestamp: string } | undefined;
     try { latest = await this.options.latestUserMessage?.(run.sessionId); }
     catch { if (run.status === 'queued') this.supersede(run, 'The latest native user instruction could not be verified.'); return; }
     if (run.status !== 'queued') return;
+    if (this.permissionGoalFinished(this.runs.get(run.scheduled!.afterRunId))) {
+      this.supersede(run, 'The requesting turn already completed the task.'); return;
+    }
     const recorded = this.getSession(run.sessionId)?.lastRequestAt ?? observed;
     const newest = Math.max(Date.parse(recorded ?? '') || 0, Date.parse(latest?.timestamp ?? '') || 0);
     if (newest <= Date.parse(run.permissionRequestedAt ?? run.createdAt)) return;
@@ -757,9 +768,7 @@ export class RunManager extends EventEmitter {
     const updateResume = [...this.runs.values()].find(run => run.status === 'queued' && run.sessionId === target!.sessionId && run.scheduled?.afterRunId === target!.id && run.scheduled.resume === 'update');
     const session = this.getSession(target.sessionId);
     // A latest native outcome is usable only when its user message falls inside this exact provider turn.
-    const finishedTask = target.status === 'completed' && session?.outcome === 'done' && !!target.finishedAt && !!session.lastRequestAt
-      && Date.parse(session.lastRequestAt) >= Date.parse(target.startedAt ?? target.createdAt)
-      && Date.parse(session.lastRequestAt) <= Date.parse(target.finishedAt) && Date.parse(session.updatedAt) >= Date.parse(target.finishedAt);
+    const finishedTask = this.permissionGoalFinished(target);
     const superseded = [...this.runs.values()].some(run => run.sessionId === target!.sessionId && !run.permissionNotice && !run.permissionRequestIds?.length
       && !run.steering && run.id !== target!.id && Date.parse(run.createdAt) > Date.parse(request.createdAt) && run.origin?.kind === 'owner');
     const stopped = options.closed || session?.closed || finishedTask || superseded || target.ownerStopped

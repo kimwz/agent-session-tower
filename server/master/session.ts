@@ -367,12 +367,12 @@ export class MasterSession {
     const masterTurns = (snapshot.runs ?? []).filter(run => run.sessionId === binding.sessionId);
     // An explicit stop must not be undone by a background report. A newer owner request releases the hold.
     for (const run of masterTurns) {
-      if (run.status !== 'cancelled' || !run.ownerStopped || continuedRunById(snapshot.runs ?? [], run.id)?.id !== run.id) continue;
+      if (run.status !== 'cancelled' || !run.ownerStopped) continue;
       const at = run.finishedAt ?? run.createdAt;
       if (!this.file.stoppedAt || Date.parse(at) > Date.parse(this.file.stoppedAt)) { this.file.stoppedAt = at; changed = true; }
     }
     if (this.file.stoppedAt && masterTurns.some(run => Date.parse(run.createdAt) > Date.parse(this.file.stoppedAt!)
-      && !run.delegation && !run.prompt.startsWith(REPORT_MARK) && (!run.origin || run.origin.kind === 'owner'))) {
+      && !run.delegation && !run.scheduled && !run.permissionNotice && !run.updateWrapUp && !run.prompt.startsWith(REPORT_MARK) && (!run.origin || run.origin.kind === 'owner'))) {
       delete this.file.stoppedAt; changed = true;
     }
     const after = (at: string) => Date.parse(at) >= Date.parse(this.file.baselineAt);

@@ -463,3 +463,15 @@ test('native user history rejects unavailable or skipped records instead of trea
   await assert.rejects(latestNativeUserMessage(mapper, 'codex:monitor-fixture', async () => undefined), /could not be read completely/);
   await assert.rejects(latestNativeUserMessage(mapper, 'codex:monitor-fixture', async () => ({ messages: [], skipped: 1 })), /could not be read completely/);
 });
+
+test('an approved continuation is consumed when its still-running parent finishes the goal', async t => {
+  const f = await fixture(t); const parent = await f.running(); const request = permissionRequest(f, parent.id);
+  const resume = await f.manager.permissionDecision(request, 'Approved.');
+  assert.equal(resume.status, 'queued');
+  f.session.outcome = 'done'; f.session.lastRequestAt = f.read(parent.id).startedAt;
+  f.session.updatedAt = new Date(Date.now() + 1000).toISOString();
+  f.controls[0].finish();
+  await until(() => f.read(resume.id).status === 'cancelled');
+  assert.equal(f.controls.length, 1, 'finishing the goal consumes the pending resume without another provider turn');
+  assert.equal((await f.manager.permissionDecision(request, 'Retry')).id, resume.id);
+});
