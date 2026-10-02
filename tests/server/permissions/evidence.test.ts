@@ -151,9 +151,11 @@ test('credential stdin is excluded by its consumer even when the filename is ord
   const root = await mkdtemp(join(tmpdir(), 'tower-evidence-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, 'input.txt'), 'credential-fixture-never-forward');
-  const evidence = await commandEvidence('gh auth login --with-token < input.txt', root);
-  assert.equal(evidence.files[0]?.status, 'excluded');
-  assert.ok(!JSON.stringify(evidence).includes('credential-fixture-never-forward'));
+  for (const command of ['gh auth login --with-token < input.txt', 'gh secret set NAME < input.txt', 'wrangler secret put X < input.txt', 'vercel env add NAME production < input.txt', 'glab auth login --stdin < input.txt']) {
+    const evidence = await commandEvidence(command, root);
+    assert.equal(evidence.files[0]?.status, 'excluded');
+    assert.ok(!JSON.stringify(evidence).includes('credential-fixture-never-forward'));
+  }
 });
 
 test('numeric redirects preserve an extensionless interpreter operand', async t => {
@@ -163,4 +165,15 @@ test('numeric redirects preserve an extensionless interpreter operand', async t 
   await writeFile(join(root, '2'), 'wrong fd word');
   const evidence = await commandEvidence('bash 2>/dev/null release', root);
   assert.deepEqual(evidence.files.map(file => [file.path, file.text]), [[join(root, 'release'), '#!/bin/sh\necho fixture']]);
+});
+
+test('quoted and dynamic Ruby directory flags do not attach cwd script contents', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'tower-evidence-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'run.rb'), 'wrong cwd script');
+  for (const command of ["ruby '-C' sub run.rb", 'ruby "-wC" sub run.rb', 'ruby "-C$DIR" run.rb', 'ruby -C$DIR run.rb']) {
+    const evidence = await commandEvidence(command, root);
+    assert.equal(evidence.files.length, 0);
+    assert.ok(evidence.notes.length > 0);
+  }
 });

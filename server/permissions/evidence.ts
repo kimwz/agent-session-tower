@@ -29,7 +29,7 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
   let start = true;
   let redirect: '<' | '>' | undefined;
   const parts = tokens(command.trim());
-  const credentialInput = parts.some(part => /^(?:--with-token|--password-stdin|--password-file|--token-file|--client-secret-file)(?:=|$)/.test(literal(part) ?? ''));
+  const credentialInput = parts.some(part => /^(?:--with-token|--password-stdin|--password-file|--token-file|--client-secret-file)(?:=|$)/.test(literal(part) ?? '') || /^(?:auth|login|signin|secret|secrets|password|token|env)$/.test(literal(part) ?? ''));
   if (parts.some(token => token.includes('`') || ['(', ')', '{', '}', '<<', '<<-', '<<<'].includes(token))) {
     evidence.notes.push('Inline shell structure (group/subshell/heredoc) was not interpreted; judge inline code from the exact command and do not assume local file contents.');
     return evidence;
@@ -86,7 +86,7 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
       const program = basename(word ?? '');
       interpreter = /^(?:python[\d.]*|node|bash|sh|zsh|ruby|perl|php|lua|tsx)$/.test(program);
       shell = ['bash', 'sh', 'zsh'].includes(program);
-      if (program === 'ruby' && parts.slice(i + 1, segmentEnd).some(part => /^-[^-]*[CXx]/.test(part))) {
+      if (program === 'ruby' && parts.slice(i + 1, segmentEnd).some(part => /^-[^-]*[CXx]/.test(literal(part) ?? part.replace(/^["']/, '')))) {
         evidence.notes.push('Interpreter directory-changing options were not interpreted; no local file contents were assumed.'); return evidence;
       }
     }
