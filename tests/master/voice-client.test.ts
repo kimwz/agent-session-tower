@@ -1169,3 +1169,31 @@ test('output muted immediately before ended is not reported played between watch
     assert.equal((report.body.playback as { volume: number }).volume, 0);
   } finally { page.end(); }
 });
+
+
+test('live media progress is reported before terminal ACK and distinguishes queued audio from stalled playback', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as FakeAudio & { onplaying?: () => void; onwaiting?: () => void; ontimeupdate?: () => void };
+    page.voice.say({ ...page.say('live', 'answer'), streaming: true });
+    page.voice.say(page.say('queued', 'answer'));
+    await flush();
+    assert.equal(posts.find(p => p.path.endsWith('/progress') && p.body.id === 'queued')?.body.gate, 'audio');
+    audio.onplaying?.();
+    assert.equal(posts.some(p => p.body.event === 'started'), false, 'playing at zero does not count');
+    audio.onwaiting?.(); audio.onwaiting?.();
+    assert.equal(posts.filter(p => p.body.event === 'waiting').length, 1, 'one observation per wait');
+    audio.currentTime = 0.3; audio.ontimeupdate?.();
+    await flush();
+    assert.equal(posts.find(p => p.body.event === 'started')?.body.id, 'live');
+    assert.deepEqual(page.results(), [], 'live diagnostic does not finish the audio');
+    audio.onwaiting?.();
+    audio.currentTime = 0.6; audio.ontimeupdate?.();
+    assert.equal(posts.filter(p => p.body.event === 'resumed').length, 1);
+    mock.timers.tick(5_000); audio.currentTime = 1; audio.ontimeupdate?.();
+    assert.equal(posts.filter(p => p.body.event === 'progress').length, 1);
+    page.voice.say({ ...page.say('queued', 'answer'), cancelled: true });
+    audio.finish(); await flush();
+    assert.deepEqual(page.results(), ['live:played']);
+  } finally { page.end(); }
+});

@@ -7,11 +7,98 @@ import { join } from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 import { test, type TestContext } from 'node:test';
 import { RunManager } from '../../../server/runs/manager.js';
+import type { CodexStdioOptions } from '../../../server/runs/codex-stdio.js';
 import { MAX_REPLIES, MAX_REPLY_CHARS, ReplyLog } from '../../../server/runs/replies.js';
 import type { Run, Session } from '../../../shared/types.js';
 import { until } from '../../helpers/until.js';
 
 const nativeId = '10000000-0000-4000-8000-00000000abcd';
+
+test('reply observation timing is opt-in, preserves the first text and completion, and ignores late events', () => {
+  const run = {} as Run;
+  let now = 0;
+  let reads = 0;
+  const log = new ReplyLog(run, () => { reads++; return now; });
+  log.add('stream:0', '');
+  assert.deepEqual(run.replies, [{ id: 'stream:0', text: '' }], 'opening an empty block is not text observation');
+  assert.equal(reads, 0);
+  log.add('stream:0', 'First ');
+  now = 20;
+  log.add('stream:0', 'sentence.');
+  assert.equal(run.replies![0].firstAt, 0, 'a zero timestamp is preserved across deltas');
+  assert.equal(reads, 1, 'later deltas do not sample the clock');
+  now = 40;
+  log.add('stream:0', '', true);
+  now = 60;
+  assert.equal(log.finish('stream:0'), false);
+  assert.equal(log.add('stream:0', 'Late text', true), false);
+  assert.equal(log.finish('unknown:0'), false);
+  assert.deepEqual(run.replies, [{ id: 'stream:0', text: 'First sentence.', firstAt: 0, completedAt: 40, done: true }]);
+  assert.equal(reads, 2, 'duplicate completion and late text do not sample the clock');
+});
+
+test('whole replies and explicit completion use observation timing within the existing bounds', () => {
+  const run = {} as Run;
+  let now = 100;
+  const log = new ReplyLog(run, () => now++);
+  log.add('whole:0', 'A complete reply.', true);
+  assert.deepEqual(run.replies, [{ id: 'whole:0', text: 'A complete reply.', firstAt: 100, completedAt: 100, done: true }]);
+  log.add('empty:0', '');
+  log.finish('empty:0');
+  assert.deepEqual(run.replies![1], { id: 'empty:0', text: '', completedAt: 101, done: true });
+  for (let index = 0; index < MAX_REPLIES; index++) log.add(`new:${index}`, 'x', true);
+  assert.equal(run.replies!.length, MAX_REPLIES);
+  assert.equal(log.has('whole:0'), false, 'timing goes away with the bounded reply');
+  assert.equal(log.has('empty:0'), false);
+  assert.equal(run.replies![0].firstAt, 102);
+  assert.equal(run.replies!.at(-1)!.completedAt, 101 + MAX_REPLIES);
+  assert.equal(run.repliesTrimmed, true);
+});
+
+test('only the attached Codex master observes reply timing while its turn is still running', async t => {
+  for (const master of [true, false]) await t.test(master ? 'master' : 'ordinary', async t => {
+    const stateDir = await mkdtemp(join(tmpdir(), 'tower-codex-reply-timing-'));
+    const cwd = join(stateDir, master ? 'master-session' : 'project');
+    await mkdir(cwd, { recursive: true });
+    const session: Session = { id: `codex:${nativeId}`, nativeId, provider: 'codex', title: 'Fixture', cwd, project: 'fixture', status: 'completed', statusReason: 'Done',
+      createdAt: '', updatedAt: '', lastMessage: '', messageCount: 1, isSubagent: false, resumable: true };
+    let config!: CodexStdioOptions;
+    const manager = new RunManager({ stateDir, getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {},
+      findExecutable: async () => '/fixture/codex', pollMs: 10,
+      spawnProcess: () => { throw new Error('Reply timing fixtures must never spawn native providers'); },
+      openCodexStdio: async options => {
+        config = options;
+        let resolve!: () => void;
+        const done = new Promise<void>(r => { resolve = r; });
+        let finished = false;
+        const finish = () => { if (!finished) { finished = true; config.onFinished({ status: 'cancelled' }); resolve(); } };
+        return { done, start: async () => { await config.onSession(nativeId); config.onStarted?.('fixture-turn'); },
+          cancel: async () => finish(), close: finish, respondToApproval: async () => {} };
+      } });
+    await manager.start();
+    t.after(async () => { await manager.close(); await rm(stateDir, { recursive: true, force: true }); });
+    const run = await manager.enqueue(session.id, 'fixture', {}, { origin: { kind: 'owner' } });
+    const read = () => manager.list().find(item => item.id === run.id)!;
+    await until(() => read().status === 'running');
+    if (!master) {
+      assert.equal(config.onReply, undefined);
+      assert.equal(read().replies, undefined);
+      return;
+    }
+    const before = Date.now();
+    config.onReply!('message:0', 'A first sentence.', false);
+    const firstAt = read().replies![0].firstAt!;
+    assert.ok(firstAt >= before && firstAt <= Date.now());
+    assert.equal(read().replies![0].completedAt, undefined);
+    config.onReply!('message:0', '', true);
+    const completed = read().replies![0];
+    assert.equal(completed.firstAt, firstAt);
+    assert.ok(completed.completedAt! >= firstAt && completed.completedAt! <= Date.now());
+    assert.equal(read().status, 'running', 'reply completion does not end the native turn');
+    config.onReply!('message:0', 'Late duplicate', true);
+    assert.deepEqual(read().replies![0], completed);
+  });
+});
 
 test('a reply only grows: never cut at its start; too long it stops growing, and past the bounds the oldest whole replies go', () => {
   const run = { replies: undefined } as unknown as Run;

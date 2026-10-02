@@ -11,7 +11,7 @@ import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
 import { isNoise, READ_CHARS, speakable, streamTone, VOICE_REST, VOICE_SAMPLE, voiced, voicedChunk, voicedParts } from './voice-text.js';
 import { CHUNK_PAUSE_MS, TextFollower } from './voice-stream.js';
-import { playbackRecord, VoiceTimings } from './voice-timings.js';
+import { playbackRecord, VoiceTimings, type VoiceProgressEvent, type VoiceTtsRecord } from './voice-timings.js';
 
 /** Estimated prices: ElevenLabs realtime speech-to-text per second, text-to-speech per character by model. */
 const STT_DOLLARS_PER_SECOND = 0.39 / 3600;
@@ -542,6 +542,22 @@ export class MasterVoice {
     return true;
   }
 
+  /** A current page's diagnostic receipt/progress; terminal results remain in voicePlayed. */
+  voiceProgress(input: { session: unknown; id: unknown; event: unknown; elapsedMs: unknown; gate?: unknown; playback?: unknown }): boolean {
+    if (!this.current(input.session) || typeof input.id !== 'string' || !this.results.has(input.id)) return false;
+    const said = this.says.get(input.id);
+    if (!said || typeof input.event !== 'string' || !['received', 'source', 'started', 'waiting', 'resumed', 'progress'].includes(input.event)) return false;
+    if (typeof input.elapsedMs !== 'number' || !Number.isFinite(input.elapsedMs) || input.elapsedMs < 0 || input.elapsedMs >= 3_600_000) return false;
+    const playback = playbackRecord(input.playback);
+    if (input.event === 'started' && !(playback?.position && playback.position > 0)) return false;
+    if (input.gate !== undefined && (input.event !== 'received' || !['audio', 'speech', 'ready'].includes(String(input.gate)))) return false;
+    const at = Date.now();
+    if (input.event === 'started') said.started = true;
+    this.timings.progress(said.key, input.id, { event: input.event as VoiceProgressEvent, at, elapsedMs: input.elapsedMs,
+      ...(input.gate ? { gate: input.gate as 'audio' | 'speech' | 'ready' } : {}), ...(playback ? { playback } : {}) });
+    return true;
+  }
+
   /**
    * The owner's answer to an answer not read aloud (`MasterVoiceStatus.missed`): heard again whole, read like one that
    * waited for its turn's end, or dismissed. Either way it is no longer told of. Nothing to read stays unread.
@@ -730,6 +746,7 @@ export class MasterVoice {
     }
     const model = this.options.settings.current().voice.model;
     stream.tag = streamTone(plain, model, stream.kind, stream.tag);
+    this.timings.mark(stream.key, 'sentence');
     segment.parts.push(...voicedChunk(plain, model, stream.tag));
     segment.text = `${segment.text} ${plain}`.trim();
     stream.read += plain.length;
@@ -959,6 +976,8 @@ export class MasterVoice {
           const idle = () => { clearTimeout(deadline); deadline = setTimeout(() => controller.abort(new Error('시간 초과')), this.timing.synthMs); };
           idle();
           let got = false;
+          const piece: VoiceTtsRecord = { live: live.id, part: index, attempt, start: Date.now(), bytes: 0 };
+          this.timings.piece(live.timing, piece);
           this.timings.mark(live.timing, 'tts');
           try {
             const stream = this.options.elevenLabs.speak(part, live.voiceId, live.model, controller.signal);
@@ -966,19 +985,22 @@ export class MasterVoice {
               if (live.failed) throw new Error('stopped');
               if (live.bytes + chunk.length > most) throw new Error('too large');
               idle();
-              if (!got) this.timings.mark(live.timing, 'audio');
+              piece.bytes += chunk.length;
+              if (!got) { this.timings.mark(live.timing, 'audio'); piece.firstByte = Date.now(); this.timings.piece(live.timing, piece); }
               got = true;
               live.chunks.push(chunk);
               live.bytes += chunk.length;
               wake(live);
             }
             if (!got) throw new Error('no sound');
+            piece.result = 'done';
             break;
           } catch (error) {
+            piece.result = 'failed';
             if (got || attempt > 0 || live.failed || (error as Error).message === 'too large' || this.limited(Date.now(), part.length * ttsDollarsPerChar(live.model))) throw error;
             this.add(Date.now(), { ttsChars: part.length, model: live.model });
             void this.save();
-          } finally { clearTimeout(deadline); }
+          } finally { clearTimeout(deadline); piece.done = Date.now(); this.timings.piece(live.timing, piece); }
         }
       }
     } catch {

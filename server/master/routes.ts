@@ -47,7 +47,7 @@ export function masterRoutes(client: MasterClient, options: { turnEnd?: VoiceTur
     }
     if (req.method === 'POST' && path === '/api/master/settings') { await call('settings', { body: await readJson(req, 16 * 1024) }); return true; }
     // Voice: the page turns it on, writes down what is said with a token from here, and plays what is read aloud.
-    const voice = /^\/api\/master\/voice\/(on|off|presence|token|usage|request|activity|finished|played|missed)$/.exec(path);
+    const voice = /^\/api\/master\/voice\/(on|off|presence|token|usage|request|activity|finished|played|progress|missed)$/.exec(path);
     if (req.method === 'POST' && voice) {
       const body = await readJson(req, voice[1] === 'request' ? 16 * 1024 : 4 * 1024);
       switch (voice[1]) {
@@ -63,6 +63,7 @@ export function masterRoutes(client: MasterClient, options: { turnEnd?: VoiceTur
         case 'finished': json(res, 200, options.turnEnd ? await options.turnEnd.judge({ session: body.session, text: body.text, pauseMs: body.pauseMs }) : { unavailable: true }); break;
         // An answer not read aloud: heard again, or no longer told of.
         case 'missed': await call('voiceMissed', { session: body.session, entry: body.entry, action: body.action }); break;
+        case 'progress': await call('voiceProgress', { session: body.session, id: body.id, event: body.event, elapsedMs: body.elapsedMs, gate: body.gate, playback: body.playback }); break;
         default: await call('voicePlayed', { session: body.session, id: body.id, result: body.result, ...(typeof body.startedMs === 'number' ? { startedMs: body.startedMs } : {}), ...(typeof body.detail === 'string' ? { detail: body.detail } : {}), playback: body.playback });
       }
       return true;

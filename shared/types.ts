@@ -246,7 +246,13 @@ export interface Run {
  * blocks of one message share the part before the colon. Its text only grows; `done` once the block is complete, `cut`
  * when it grew too long to keep more.
  */
-export interface RunReply { id: string; text: string; done?: true; cut?: true }
+export interface RunReply {
+  id: string; text: string; done?: true; cut?: true;
+  /** First nonempty text observed by the host, in epoch milliseconds; not provider creation time. */
+  firstAt?: number;
+  /** Completion observed by the host, in epoch milliseconds; absent until the block is complete. */
+  completedAt?: number;
+}
 /**
  * `instructions`: it carries instructions Tower must not drop; `model`/`effort`: it asks for another one than the
  * running turn; `origin`: the running turn was started elsewhere (a trigger, Slack, another computer); `starting`: the running turn

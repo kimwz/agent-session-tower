@@ -100,7 +100,7 @@ export interface VoiceSide {
   streamingTurns?(): string[];
   /** A turn with a voiced record ended: the rest is read, and its entry added (never waiting to be read again). */
   finishStream?(input: { turn: string; replies?: readonly RunReply[]; completed: boolean; data?: MasterEntryData }): void;
-  timings?: { mark(key: string | undefined, field: 'request' | 'text' | 'end', at?: number, about?: { kind?: 'answer' | 'report' }): void };
+  timings?: { observe?(key: string | undefined, input: { runId: string; turnId: string; finishedAt?: string; replies?: readonly RunReply[] }): void; mark(key: string | undefined, field: 'request' | 'text' | 'end', at?: number, about?: { kind?: 'answer' | 'report' }): void };
 }
 const FINISHED_RUN = new Set<Run['status']>(['completed', 'error', 'cancelled']);
 
@@ -187,6 +187,7 @@ export class MasterSession {
         if (!run) continue;
         const turn = turnOf(run, snapshot);
         covered.add(turn.id);
+        if (item.kind === 'spoken' || item.kind === 'report') this.voice?.timings?.observe?.(timingKey(item), { runId: run.id, turnId: turn.id, finishedAt: turn.finishedAt, replies: turn.replies });
         if (FINISHED_RUN.has(turn.status) || FINISHED_RUN.has(run.status)) { ended = true; continue; }
         if ((item.kind !== 'spoken' && item.kind !== 'report') || seen.has(turn.id)) continue;
         seen.add(turn.id);

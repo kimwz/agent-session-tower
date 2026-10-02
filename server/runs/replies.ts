@@ -10,7 +10,7 @@ export const MAX_REPLY_CHARS = 24_000;
  * dropped. Either marks the run `repliesTrimmed`, so its replies are not taken for every word of the turn.
  */
 export class ReplyLog {
-  constructor(private readonly run: Run) {}
+  constructor(private readonly run: Run, private readonly clock?: () => number) {}
 
   /** Adds text to a reply, opening it first if it is new. False when nothing changed. */
   add(id: string, text: string, done = false): boolean {
@@ -19,13 +19,20 @@ export class ReplyLog {
     let changed = false;
     if (!reply) { reply = { id, text: '' }; replies.push(reply); changed = true; }
     if (reply.done) return false;
+    const firstText = Boolean(text) && reply.firstAt === undefined;
+    const observedAt = this.clock && (firstText || done) ? this.clock() : undefined;
+    if (firstText && observedAt !== undefined) reply.firstAt = observedAt;
     if (text && !reply.cut) {
       const room = MAX_REPLY_CHARS - reply.text.length;
       if (text.length > room) { reply.text += text.slice(0, Math.max(0, room)); reply.cut = true; this.run.repliesTrimmed = true; }
       else reply.text += text;
       changed = true;
     }
-    if (done) { reply.done = true; changed = true; }
+    if (done) {
+      reply.done = true;
+      if (observedAt !== undefined) reply.completedAt = observedAt;
+      changed = true;
+    }
     this.bound();
     return changed;
   }
@@ -35,6 +42,7 @@ export class ReplyLog {
     const reply = this.run.replies?.find(item => item.id === id);
     if (!reply || reply.done) return false;
     reply.done = true;
+    if (this.clock) reply.completedAt = this.clock();
     return true;
   }
 

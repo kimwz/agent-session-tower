@@ -7,10 +7,23 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { startMasterHost } from '../../server/master/host.js';
 import { MasterClient } from '../../server/master/client.js';
+import { MasterVoice } from '../../server/master/voice.js';
 import { masterPaths } from '../../server/master/paths.js';
 import { writePrivateJson } from '../../server/stores/private-json.js';
 import type { MasterCheckpoint, MasterOverview } from '../../shared/master.js';
 import { until } from '../helpers/until.js';
+
+test('playback diagnostics survive the web to master-host RPC boundary', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-playback-rpc-'));
+  const host = await startMasterHost({ stateDir, idleMs: 60_000 });
+  const client = new MasterClient({ stateDir, credentials: () => undefined });
+  t.after(async () => { client.dispose(); await host.close(); await rm(stateDir, { recursive: true, force: true }); });
+  // Observe the real callee; an unknown session still follows its normal rejection path.
+  const heard = t.mock.method(MasterVoice.prototype, 'voicePlayed');
+  const playback = { position: 2.5, muted: false, volume: 1, ready: 4, network: 1, context: 'running' };
+  assert.equal(await client.call('voicePlayed', { session: 'unknown', id: 'unknown', result: 'played', playback }), false);
+  assert.deepEqual(heard.mock.calls.at(-1)!.arguments[0].playback, playback);
+});
 
 test('the master host keeps its folder private, relays its live stream through the web, and lets go of it without stopping', async t => {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-host-'));

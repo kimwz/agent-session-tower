@@ -147,7 +147,7 @@ export interface HttpOptions {
   };
 }
 /** What the page where voice is on sends while it listens and plays (turning voice on counts as an ordinary change). */
-const VOICE_REPORT = /^\/api\/master\/voice\/(presence|token|usage|request|activity|finished|played|off)$/;
+const VOICE_REPORT = /^\/api\/master\/voice\/(presence|token|usage|request|activity|finished|played|progress|off)$/;
 /** Suggestions follow the owner's typing; they change nothing, so they have their own budget apart from changes. */
 const SUGGESTION_PATH = '/api/auto-prompt-suggestions';
 /** Where a page changes which sessions its event stream holds; it only reads, so it costs none of the change budget. */
