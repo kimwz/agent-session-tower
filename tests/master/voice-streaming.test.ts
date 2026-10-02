@@ -1120,8 +1120,9 @@ test('future text owns the line for at most five minutes while presence remains 
   assert.ok(!h.labs.speeches.some(text => text.includes('상한 뒤')));
   assert.equal(h.says().filter(item => item.kind === 'report').length, 0, '299999ms still holds the report');
   t.mock.timers.tick(1);
-  for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+  // Restore real timers before the released line starts report I/O and the fixture's TTS gap.
   t.mock.timers.reset();
+  for (let turn = 0; turn < 10; turn++) await Promise.resolve();
   const report = await until(() => h.says().find(item => item.kind === 'report'), 1_000);
   assert.equal(run.status, 'running', 'the bound does not end the native run');
   assert.equal(h.voice.voicePlayed({ session: h.current(), id: report.id, result: 'played' }), true);
