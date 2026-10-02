@@ -364,7 +364,7 @@ export class PermissionService {
       const request: PermissionRequest = { id: randomUUID(), status: 'pending', rule, reason: input.reason.trim(), sessionId: caller.sessionId, ...(caller.runId ? { runId: caller.runId } : {}),
         cwd: session.cwd, provider, createdAt: this.now() };
       if (this.autoReview().enabled) {
-        const skip = autoReviewBlock(rule, session.cwd) ?? this.options.autoReviewSkip?.(request);
+        const skip = (rule.kind === 'command' ? undefined : autoReviewBlock(rule, session.cwd)) ?? this.options.autoReviewSkip?.(request);
         request.review = skip ? { status: 'skipped', reason: skip, at: this.now() } : { status: 'queued', at: this.now() };
       }
       await this.commit(state => { state.requests.push(request); });
@@ -675,7 +675,7 @@ function reviewMessage(request: PermissionRequest, allowed?: PermissionRuleInput
       + `${changed ? ` (you asked for \`${request.rule.value}\`${request.rule.scope === 'global' ? ' in every project' : ''})` : ''}.${why} It applies from the next provider turn. Continue the task where it waited on this permission.`;
   }
   const instead = request.review?.suggestion ? ` Ask for this instead: ${request.review.suggestion}` : ' Ask for a narrower rule that covers only what the task needs.';
-  return `Tower's permission reviewer did not allow \`${request.rule.value}\` as asked, and withdrew the request.${why}${instead} If the task still needs it, send a new permissions_request; do not look for another way around the refusal.`;
+  return `Tower's permission reviewer did not allow \`${request.rule.value}\` as asked, and withdrew the request.${why}${instead} If the task still needs it, send the narrower request suggested above (permissions_run for an exact one-time command, permissions_request for a rule); do not look for another way around the refusal.`;
 }
 
 const REVIEW_NOTE = 'Tower\'s permission reviewer checks this request against the owner\'s instructions for this task first; the owner can also decide it. Do not look for another way around the refusal. An allowed rule applies from your next turn: say in your reply what waits on this permission and end your turn, or go on with other work first. The decision is sent to this conversation; permissions_list also shows it.';
