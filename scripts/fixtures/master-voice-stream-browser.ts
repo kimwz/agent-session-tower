@@ -25,7 +25,7 @@ navigator.mediaDevices.getUserMedia = async () => {
 };
 const voice = new VoiceSession({
   token: () => 'fixture-only', tabId: '00000000-0000-4000-8000-000000000001',
-  settings: () => ({ voiceId: 'fixture', model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0, playbackRate: 1 }),
+  settings: () => ({ voiceId: 'fixture', model: 'eleven_v3_conversational', endSilenceMs: 1000, listenMinutes: 5, readReports: true, dailyDollars: 0, playbackRate: 1.2 }),
   viewContext: () => undefined, onView: view => win.views.push(view), onEnded: reason => { win.ended = reason; },
 });
 win.voice = voice;

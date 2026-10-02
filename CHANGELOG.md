@@ -4,6 +4,12 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.103.3] - 2026-10-02
+
+### Fixed
+- Preserve bounded master voice wait, retry and play-attempt history instead of overwriting the evidence with later progress. Record terminal ACK receipt independently of diagnostic request ordering.
+- Correlate TTS queue/start/first-byte/completion and host/web audio request delivery measurements with the same run and say, without recording speech or changing playback policy.
+
 ## [1.103.2] - 2026-10-02
 
 ### Fixed

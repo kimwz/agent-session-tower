@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
@@ -8,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { readPrivateJson } from '../stores/private-json.js';
 import { MASTER_PROTOCOL, type MasterHostReply } from './host.js';
+import type { VoiceTransportStage } from './voice-timings.js';
 import { masterPaths, type MasterPaths } from './paths.js';
 import type { WebCredentials } from '../tower-tools/tower-client.js';
 
@@ -108,8 +110,13 @@ export class MasterClient {
     await this.ensureHost();
     const token = await this.credential();
     const paths = await this.hostPaths();
+    const requestId = randomUUID();
+    const stage: VoiceTransportStage = { request: Date.now(), bytes: 0 };
+    const report = () => { void this.exchange('voiceTransport', { live: id, requestId, web: { ...stage } }).catch(() => { /* Diagnostics never delay or retry audio. */ }); };
+    response.once('finish', () => { stage.end = Date.now(); stage.normal = true; report(); });
+    response.once('close', () => { stage.close = Date.now(); stage.normal ??= false; report(); });
     await new Promise<void>((resolve, reject) => {
-      const req = request({ socketPath: paths.socket, path: `/audio/${encodeURIComponent(id)}${at > 0 ? `?at=${at}` : ''}`, headers: { authorization: `Bearer ${token}` } }, upstream => {
+      const req = request({ socketPath: paths.socket, path: `/audio/${encodeURIComponent(id)}${at > 0 ? `?at=${at}` : ''}`, headers: { authorization: `Bearer ${token}`, 'x-tower-audio-request-id': requestId } }, upstream => {
         if (response.destroyed || response.writableEnded) { upstream.destroy(); resolve(); return; }
         if (upstream.statusCode !== 200) { upstream.resume(); response.writeHead(upstream.statusCode === 404 ? 404 : 502).end(); resolve(); return; }
         response.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', ...(upstream.headers['content-length'] ? { 'Content-Length': upstream.headers['content-length'] } : {}) });
@@ -117,6 +124,8 @@ export class MasterClient {
         upstream.on('aborted', () => response.destroy());
         upstream.on('close', () => { if (!upstream.complete) response.destroy(); });
         upstream.pipe(response);
+        // Pipe's data handler writes first; this observes that write, not browser receipt.
+        upstream.on('data', (chunk: Buffer) => { const first = stage.firstWrite === undefined; stage.firstWrite ??= Date.now(); stage.bytes += chunk.length; if (first) report(); });
         resolve();
       });
       this.streams.add(req);

@@ -30,6 +30,8 @@ export interface VoiceTimingRecord {
   delta?: number;
   completed?: number;
   pieces?: VoiceTtsRecord[];
+  audioRequests?: VoiceAudioRequest[];
+  droppedAudioRequests?: number;
   nativeEnd?: number;
   replies?: { id: string; firstAt?: number; completedAt?: number }[];
   /** The master's turn ended. */
@@ -42,24 +44,54 @@ export interface VoiceTimingRecord {
   /** How its reading ended: heard to the end, or not (and why). */
   outcome?: { at: number; state: 'played' | 'unspoken'; reason?: MasterUnspoken; heard?: true };
 }
-export interface VoicePlaybackRecord { position?: number; muted?: boolean; volume?: number; ready?: number; network?: number; context?: string }
-export type VoiceProgressEvent = 'received' | 'source' | 'started' | 'waiting' | 'resumed' | 'progress';
-export interface VoiceProgressRecord { event: VoiceProgressEvent; at: number; elapsedMs: number; gate?: 'audio' | 'speech' | 'ready'; playback?: VoicePlaybackRecord }
-export interface VoiceTtsRecord { live: string; part: number; attempt: number; start: number; firstByte?: number; done?: number; bytes: number; result?: 'done' | 'failed' }
-export interface VoiceSayRecord { id: string; at: number; chars?: number; play?: number; result?: string; detail?: string; playback?: VoicePlaybackRecord; received?: VoiceProgressRecord; source?: VoiceProgressRecord; started?: VoiceProgressRecord; latest?: VoiceProgressRecord; waits?: number }
-/** Only media state is kept; arbitrary page input (including text) never enters timing records. */
+export interface VoicePlaybackRecord { position?: number; muted?: boolean; volume?: number; ready?: number; network?: number; context?: string; paused?: boolean; ended?: boolean; seeking?: boolean; rate?: number; bufferedEnd?: number; errorCode?: number }
+export type VoiceProgressEvent = 'received' | 'source' | 'play-attempt' | 'play-resolved' | 'play-rejected' | 'started' | 'waiting' | 'resumed' | 'progress' | 'retry' | 'ended' | 'media-error' | 'terminal';
+export interface VoiceProgressRecord { event: VoiceProgressEvent; at: number; elapsedMs?: number; attempt?: number; reason?: 'no-progress' | 'media-error'; error?: string; gate?: 'audio' | 'speech' | 'ready'; playback?: VoicePlaybackRecord; result?: string }
+export interface VoiceTtsRecord { live: string; part: number; attempt: number; queuedAt?: number; start: number; firstByte?: number; done?: number; bytes: number; result?: 'done' | 'failed' }
+export interface VoiceSayRecord { id: string; live?: string; at: number; chars?: number; play?: number; result?: string; detail?: string; playback?: VoicePlaybackRecord; received?: VoiceProgressRecord; source?: VoiceProgressRecord; started?: VoiceProgressRecord; latest?: VoiceProgressRecord; terminal?: VoiceProgressRecord; waits?: number; events?: VoiceProgressRecord[]; droppedEvents?: number }
+/** Server HTTP stages: firstWrite means a server write, not browser receipt, decoded PCM or audible output. */
+export interface VoiceTransportStage { request: number; firstWrite?: number; end?: number; close?: number; bytes: number; normal?: boolean }
+export interface VoiceAudioRequest { requestId: string; live: string; offset: number; host?: VoiceTransportStage; web?: VoiceTransportStage }
+const PROGRESS_EVENTS = new Set(['received', 'source', 'play-attempt', 'play-resolved', 'play-rejected', 'started', 'waiting', 'resumed', 'progress', 'retry', 'ended', 'media-error']);
+const ERRORS = new Set(['NotAllowedError', 'NotSupportedError', 'AbortError', 'InvalidStateError', 'NetworkError', 'Error', 'Other']);
+export function elapsed(value: unknown): number | undefined { return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value < 3_600_000 ? value : undefined; }
+export function attemptNumber(value: unknown): number | undefined { return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 3 ? value : undefined; }
+export function progressRecord(input: { event: unknown; elapsedMs: unknown; attempt?: unknown; reason?: unknown; error?: unknown; gate?: unknown; playback?: unknown }): VoiceProgressRecord | undefined {
+  if (typeof input.event !== 'string' || !PROGRESS_EVENTS.has(input.event) || elapsed(input.elapsedMs) === undefined) return undefined;
+  if (input.attempt !== undefined && attemptNumber(input.attempt) === undefined) return undefined;
+  if (input.reason !== undefined && !['no-progress', 'media-error'].includes(String(input.reason))) return undefined;
+  if (input.error !== undefined && (typeof input.error !== 'string' || !ERRORS.has(input.error))) return undefined;
+  if (input.gate !== undefined && (input.event !== 'received' || !['audio', 'speech', 'ready'].includes(String(input.gate)))) return undefined;
+  const playback = playbackRecord(input.playback);
+  if (input.event === 'started' && !(playback?.position && playback.position > 0)) return undefined;
+  return { event: input.event as VoiceProgressEvent, at: Date.now(), elapsedMs: input.elapsedMs as number,
+    ...(input.attempt !== undefined ? { attempt: input.attempt as number } : {}), ...(input.reason ? { reason: input.reason as 'no-progress' | 'media-error' } : {}),
+    ...(input.error ? { error: input.error as string } : {}), ...(input.gate ? { gate: input.gate as 'audio' | 'speech' | 'ready' } : {}), ...(playback ? { playback } : {}) };
+}
+/** Only whitelisted media state enters timing records. */
 export function playbackRecord(value: unknown): VoicePlaybackRecord | undefined {
   if (!value || typeof value !== 'object') return undefined;
   const input = value as Record<string, unknown>;
   const result: VoicePlaybackRecord = {};
-  for (const [key, max] of [['position', 3_600], ['volume', 1], ['ready', 4], ['network', 3]] as const) {
+  for (const [key, max] of [['position', 3_600], ['volume', 1], ['ready', 4], ['network', 3], ['rate', 4], ['bufferedEnd', 3_600], ['errorCode', 4]] as const) {
     const number = input[key];
-    if (typeof number === 'number' && Number.isFinite(number) && number >= 0 && number <= max) result[key] = number;
+    if (typeof number === 'number' && Number.isFinite(number) && number >= (key === 'rate' ? 0.25 : 0) && number <= max) result[key] = number;
   }
-  if (typeof input.muted === 'boolean') result.muted = input.muted;
+  for (const key of ['muted', 'paused', 'ended', 'seeking'] as const) if (typeof input[key] === 'boolean') result[key] = input[key];
   if (['running', 'suspended', 'closed', 'interrupted'].includes(String(input.context))) result.context = String(input.context);
   return Object.keys(result).length ? result : undefined;
 }
+export function transportStage(value: unknown): VoiceTransportStage | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const input = value as Record<string, unknown>;
+  if (typeof input.request !== 'number' || !Number.isFinite(input.request) || input.request < 0 || typeof input.bytes !== 'number' || !Number.isInteger(input.bytes) || input.bytes < 0 || input.bytes > 100 * 1024 * 1024) return undefined;
+  const result: VoiceTransportStage = { request: input.request, bytes: input.bytes };
+  for (const key of ['firstWrite', 'end', 'close'] as const) if (typeof input[key] === 'number' && Number.isFinite(input[key]) && input[key] >= input.request) result[key] = input[key];
+  if (typeof input.normal === 'boolean') result.normal = input.normal;
+  return result;
+}
+function count(value: unknown): number { return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.min(1_000_000, Math.floor(value))) : 0; }
+function trim<T>(items: T[], max: number, first: number): number { const dropped = Math.max(0, items.length - max); if (dropped) items.splice(first, dropped); return dropped; }
 export type VoiceTimingField = 'request' | 'ack' | 'text' | 'tts' | 'audio' | 'say' | 'play' | 'end' | 'sentence' | 'started' | 'delta' | 'completed' | 'nativeEnd';
 
 const KEEP = 200;
@@ -81,6 +113,10 @@ export class VoiceTimings {
   async start(): Promise<void> {
     const saved = await readPrivateJson(this.path).catch(() => undefined) as { records?: unknown } | undefined;
     if (Array.isArray(saved?.records)) this.records = saved.records.filter((item): item is VoiceTimingRecord => typeof (item as VoiceTimingRecord)?.key === 'string').slice(-KEEP);
+    for (const record of this.records) {
+      if (Array.isArray(record.says)) { record.says = record.says.slice(-SAYS); for (const say of record.says) if (Array.isArray(say.events)) say.droppedEvents = Math.min(1_000_000, count(say.droppedEvents) + trim(say.events, 64, 16)); }
+      if (Array.isArray(record.audioRequests)) record.droppedAudioRequests = Math.min(1_000_000, count(record.droppedAudioRequests) + trim(record.audioRequests, 30, 8));
+    }
   }
 
   mark(key: string | undefined, field: VoiceTimingField, at = Date.now(), about: Pick<VoiceTimingRecord, 'kind' | 'mode'> = {}): void {
@@ -102,11 +138,11 @@ export class VoiceTimings {
   }
 
   /** One thing given to the page to play, every time (not only the first). */
-  said(key: string | undefined, id: string, at: number, chars: number): void {
+  said(key: string | undefined, id: string, at: number, chars: number, live?: string): void {
     const record = this.find(key);
     if (!record) return;
     const says = record.says ??= [];
-    says.push({ id, at: Math.round(at), chars });
+    says.push({ id, at: Math.round(at), chars, ...(live ? { live } : {}) });
     if (says.length > SAYS) says.splice(0, says.length - SAYS);
     this.later();
   }
@@ -122,7 +158,7 @@ export class VoiceTimings {
     this.later();
   }
 
-  /** Progress never settles playback, and keeps no arbitrary page content or event history. */
+  /** Progress never settles playback; its bounded history contains only validated diagnostic fields. */
   progress(key: string, id: string, progress: VoiceProgressRecord): void {
     const record = this.find(key);
     const say = record?.says?.find(item => item.id === id);
@@ -131,7 +167,40 @@ export class VoiceTimings {
     if (progress.event === 'started') this.mark(key, 'started', progress.at);
     if (progress.event === 'waiting') say.waits = Math.min(10_000, (say.waits ?? 0) + 1);
     say.latest = progress;
+    this.event(say, progress);
     this.later();
+  }
+
+  terminal(key: string, id: string, terminal: VoiceProgressRecord): void {
+    const say = this.find(key)?.says?.find(item => item.id === id);
+    if (!say || say.terminal) return;
+    say.terminal = terminal;
+    this.event(say, terminal);
+    this.later();
+  }
+
+  private event(say: VoiceSayRecord, event: VoiceProgressRecord): void {
+    const events = say.events ??= [];
+    events.push(event);
+    say.droppedEvents = Math.min(1_000_000, count(say.droppedEvents) + trim(events, 64, 16));
+  }
+
+  audioRequest(key: string | undefined, live: string, requestId: string, offset: number, host: VoiceTransportStage): void {
+    const record = this.find(key);
+    if (!record) return;
+    const requests = record.audioRequests ??= [];
+    const existing = requests.find(item => item.requestId === requestId && item.live === live);
+    if (existing) existing.host = { ...host };
+    else { requests.push({ live, requestId, offset, host: { ...host } }); record.droppedAudioRequests = Math.min(1_000_000, count(record.droppedAudioRequests) + trim(requests, 30, 8)); }
+    this.later();
+  }
+
+  webTransport(live: string, requestId: string, web: VoiceTransportStage): boolean {
+    const request = this.records.flatMap(record => record.audioRequests ?? []).find(item => item.live === live && item.requestId === requestId);
+    if (!request) return false;
+    request.web = { ...request.web, ...web, request: Math.min(request.web?.request ?? web.request, web.request), bytes: Math.max(request.web?.bytes ?? 0, web.bytes), ...(request.web?.normal === true ? { normal: true } : {}) };
+    this.later();
+    return true;
   }
 
   piece(key: string | undefined, piece: VoiceTtsRecord): void {

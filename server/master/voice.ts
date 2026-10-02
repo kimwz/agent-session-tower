@@ -11,7 +11,7 @@ import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
 import { isNoise, READ_CHARS, speakable, streamTone, VOICE_REST, VOICE_SAMPLE, voiced, voicedChunk, voicedParts } from './voice-text.js';
 import { CHUNK_PAUSE_MS, TextFollower } from './voice-stream.js';
-import { playbackRecord, VoiceTimings, type VoiceProgressEvent, type VoiceTtsRecord } from './voice-timings.js';
+import { playbackRecord, VoiceTimings, progressRecord, elapsed, attemptNumber, transportStage, type VoiceTtsRecord, type VoiceTransportStage } from './voice-timings.js';
 
 /** Estimated prices: ElevenLabs realtime speech-to-text per second, text-to-speech per character by model. */
 const STT_DOLLARS_PER_SECOND = 0.39 / 3600;
@@ -139,6 +139,8 @@ interface Live {
   held: boolean;
   /** The spoken request (or report) it answers, for the timing records. */
   timing?: string;
+  /** First part waited in the segment queue from this time; later parts share that segment origin. */
+  queuedAt?: number;
 }
 
 /** Input for reading a turn while the master writes it. */
@@ -166,6 +168,7 @@ interface Segment {
   text: string;
   done: boolean;
   queued: boolean;
+  queuedAt?: number;
   /** Heard to its end on the page. */
   played?: true;
   /** Its sound started on the page. */
@@ -527,7 +530,7 @@ export class MasterVoice {
    * The page's word on something it was given to play: how it went (`PAGE_RESULTS`), when its sound started, and for
    * a failure what failed (`detail`, kept in the timing record).
    */
-  voicePlayed(input: { session: unknown; id: unknown; result: unknown; startedMs?: unknown; detail?: unknown; playback?: unknown }): boolean {
+  voicePlayed(input: { session: unknown; id: unknown; result: unknown; startedMs?: unknown; detail?: unknown; playback?: unknown; elapsedMs?: unknown; attempt?: unknown }): boolean {
     if (!this.current(input.session) || typeof input.id !== 'string') return false;
     const done = this.results.get(input.id);
     if (!done) return false;
@@ -537,25 +540,28 @@ export class MasterVoice {
     const started = said && typeof input.startedMs === 'number' && Number.isFinite(input.startedMs) && input.startedMs >= 0 && input.startedMs < 3_600_000 ? said.at + input.startedMs : undefined;
     if (said && started !== undefined) this.timings.mark(said.key, 'play', started);
     if (said && started !== undefined) said.started = true;
+    if (said) this.timings.terminal(said.key, input.id, { event: 'terminal', at: Date.now(), result, ...(elapsed(input.elapsedMs) !== undefined ? { elapsedMs: elapsed(input.elapsedMs) } : {}), ...(attemptNumber(input.attempt) !== undefined ? { attempt: attemptNumber(input.attempt) } : {}), ...(playbackRecord(input.playback) ? { playback: playbackRecord(input.playback) } : {}) });
     if (said) this.timings.heard(said.key, input.id, { ...(started !== undefined ? { play: started } : {}), result, ...(typeof input.detail === 'string' && input.detail ? { detail: input.detail.slice(0, 80) } : {}), playback: playbackRecord(input.playback) });
     done(result);
     return true;
   }
 
   /** A current page's diagnostic receipt/progress; terminal results remain in voicePlayed. */
-  voiceProgress(input: { session: unknown; id: unknown; event: unknown; elapsedMs: unknown; gate?: unknown; playback?: unknown }): boolean {
+  voiceProgress(input: { session: unknown; id: unknown; event: unknown; elapsedMs: unknown; gate?: unknown; playback?: unknown; attempt?: unknown; reason?: unknown; error?: unknown }): boolean {
     if (!this.current(input.session) || typeof input.id !== 'string' || !this.results.has(input.id)) return false;
     const said = this.says.get(input.id);
-    if (!said || typeof input.event !== 'string' || !['received', 'source', 'started', 'waiting', 'resumed', 'progress'].includes(input.event)) return false;
-    if (typeof input.elapsedMs !== 'number' || !Number.isFinite(input.elapsedMs) || input.elapsedMs < 0 || input.elapsedMs >= 3_600_000) return false;
-    const playback = playbackRecord(input.playback);
-    if (input.event === 'started' && !(playback?.position && playback.position > 0)) return false;
-    if (input.gate !== undefined && (input.event !== 'received' || !['audio', 'speech', 'ready'].includes(String(input.gate)))) return false;
-    const at = Date.now();
-    if (input.event === 'started') said.started = true;
-    this.timings.progress(said.key, input.id, { event: input.event as VoiceProgressEvent, at, elapsedMs: input.elapsedMs,
-      ...(input.gate ? { gate: input.gate as 'audio' | 'speech' | 'ready' } : {}), ...(playback ? { playback } : {}) });
+    const progress = progressRecord(input);
+    if (!said || !progress) return false;
+    if (progress.event === 'started') said.started = true;
+    this.timings.progress(said.key, input.id, progress);
     return true;
+  }
+
+  /** Only the authenticated web relay can report a request the host already observed. */
+  voiceTransport(input: { live: unknown; requestId: unknown; web: unknown }): boolean {
+    if (typeof input.live !== 'string' || !UUID.test(input.live) || typeof input.requestId !== 'string' || !UUID.test(input.requestId)) return false;
+    const web = transportStage(input.web);
+    return Boolean(web && this.timings.webTransport(input.live, input.requestId, web));
   }
 
   /**
@@ -781,6 +787,7 @@ export class MasterVoice {
     }
     if (segment.queued || !segment.parts.length) return;
     segment.queued = true;
+    segment.queuedAt = Date.now();
     void this.onLine(() => this.playSegment(stream, segment));
   }
 
@@ -791,6 +798,7 @@ export class MasterVoice {
     if (this.session !== session || !this.alive(session)) { this.stopStream(stream, this.gone(session)); return; }
     const live = this.openLive(undefined, stream.key);
     live.held = true;
+    live.queuedAt = segment.queuedAt;
     segment.live = live;
     this.pump(stream, segment);
     // Nothing could be paid for: the turn is not read further.
@@ -884,7 +892,7 @@ export class MasterVoice {
       this.results.set(id, finish);
       signal?.addEventListener('abort', stopped, { once: true });
       if (signal?.aborted || this.session !== session) { finish('stopped'); return; }
-      if (key) { this.says.set(id, { key, at: Date.now() }); this.timings.mark(key, 'say'); this.timings.said(key, id, Date.now(), what.text.length); }
+      if (key) { this.says.set(id, { key, at: Date.now() }); this.timings.mark(key, 'say'); this.timings.said(key, id, Date.now(), what.text.length, what.audio); }
       onSay?.(say);
       this.options.room.broadcast({ type: 'say', seq: 0, say });
     });
@@ -976,7 +984,7 @@ export class MasterVoice {
           const idle = () => { clearTimeout(deadline); deadline = setTimeout(() => controller.abort(new Error('시간 초과')), this.timing.synthMs); };
           idle();
           let got = false;
-          const piece: VoiceTtsRecord = { live: live.id, part: index, attempt, start: Date.now(), bytes: 0 };
+          const piece: VoiceTtsRecord = { live: live.id, part: index, attempt, ...(live.queuedAt !== undefined ? { queuedAt: live.queuedAt } : {}), start: Date.now(), bytes: 0 };
           this.timings.piece(live.timing, piece);
           this.timings.mark(live.timing, 'tts');
           try {
@@ -1061,7 +1069,7 @@ export class MasterVoice {
    * Streams audio to the page (through the web): what is made so far, then the rest as it comes. A slow page is
    * waited for, but never past its connection closing or a while; nothing waiting is left behind either way.
    */
-  async serveAudio(id: string, res: ServerResponse, at = 0): Promise<void> {
+  async serveAudio(id: string, res: ServerResponse, at = 0, requestId: string = randomUUID()): Promise<void> {
     const preview = /^preview-([a-f0-9]{64})$/.exec(id);
     if (preview) {
       const data = await readFile(join(this.previews, `${preview[1]}.mp3`)).catch(() => undefined);
@@ -1071,6 +1079,12 @@ export class MasterVoice {
     }
     const live = this.lives.get(id);
     if (!live) { res.writeHead(404).end(); return; }
+    const stage: VoiceTransportStage = { request: Date.now(), bytes: 0 };
+    const record = () => this.timings.audioRequest(live.timing, id, requestId, at, stage);
+    record();
+    res.once('finish', () => { stage.end = Date.now(); stage.normal = true; record(); });
+    res.once('close', () => { stage.close = Date.now(); stage.normal ??= false; record(); });
+    const write = (chunk: Buffer) => { const sent = res.write(chunk); stage.bytes += chunk.length; if (stage.firstWrite === undefined) { stage.firstWrite = Date.now(); record(); } return sent; };
     res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store' });
     live.readers.add(res);
     let index = 0;
@@ -1080,12 +1094,12 @@ export class MasterVoice {
         const made = Buffer.concat(live.chunks);
         index = live.chunks.length;
         const from = frameAt(made, id3Size(made) + Math.floor(at * MP3_BYTES_PER_SECOND));
-        if (from < made.length && !res.write(made.subarray(from)) && !await this.wait(res, live, true)) { res.destroy(); return; }
+        if (from < made.length && !write(made.subarray(from)) && !await this.wait(res, live, true)) { res.destroy(); return; }
       }
       while (!res.destroyed && !res.writableEnded) {
         while (index < live.chunks.length && !res.destroyed) {
           // A page that does not take what it was sent in a while is cut off.
-          if (!res.write(live.chunks[index++]) && !await this.wait(res, live, true)) { res.destroy(); return; }
+          if (!write(live.chunks[index++]) && !await this.wait(res, live, true)) { res.destroy(); return; }
         }
         if (res.destroyed) return;
         if (live.failed) { this.cutOff(res); return; }

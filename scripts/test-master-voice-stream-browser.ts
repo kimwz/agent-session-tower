@@ -17,6 +17,10 @@ import { ElevenLabs } from '../server/master/elevenlabs.js';
 import { MasterRoom } from '../server/master/room.js';
 import { MasterSession } from '../server/master/session.js';
 import { MasterSettingsStore } from '../server/master/settings.js';
+import { MasterClient } from '../server/master/client.js';
+import { masterPaths } from '../server/master/paths.js';
+import { MASTER_PROTOCOL } from '../server/master/host.js';
+import { APP_VERSION } from '../shared/app-identity.js';
 import { MasterVoice } from '../server/master/voice.js';
 import { TowerClient } from '../server/tower-tools/tower-client.js';
 import type { LiveState } from '../server/tower-tools/live-state.js';
@@ -44,7 +48,7 @@ const dir = await mkdtemp(join(tmpdir(), 'tower-voice-browser-fixture-'));
 const cleanups: Array<() => Promise<unknown>> = [() => rm(dir, { recursive: true, force: true })];
 const runs: Run[] = [];
 const calls: Array<{ text: string; at: number }> = [];
-const progress: any[] = [], played: any[] = [], audioRequests: any[] = [], says: any[] = [];
+const progress: any[] = [], played: any[] = [], audioRequests: any[] = [], says: any[] = [], transportReports: any[] = [];
 let voice: MasterVoice, session: MasterSession, browser: any, page: any, current = '';
 try {
   const labs = createServer(async (req, res) => {
@@ -86,6 +90,36 @@ try {
   cleanups.push(async () => { await voice.close(); await session.close(); await room.flush(); });
   const subscribers = new Set<ServerResponse>();
   room.subscribe(event => { if (event.type !== 'say') return; says.push({ ...event.say, observedAt: Date.now() }); for (const res of subscribers) res.write(`data: ${JSON.stringify(event)}\n\n`); });
+  const paths = await masterPaths(dir);
+  cleanups.push(() => rm(resolve(paths.token, '..'), { recursive: true, force: true }));
+  await writeFile(paths.token, 'c'.repeat(64), { mode: 0o600 });
+  const socketHost = createServer(async (req, res) => {
+    try {
+      assert.equal(req.headers.authorization, `Bearer ${'c'.repeat(64)}`);
+      const url = new URL(req.url!, 'http://fixture-host');
+      if (url.pathname === '/rpc') {
+        let raw = ''; for await (const chunk of req) raw += chunk;
+        const body = JSON.parse(raw); let result: unknown;
+        if (body.method === 'ping') result = { busy: false };
+        else if (body.method === 'voiceTransport') {
+          result = voice.voiceTransport(body.args); transportReports.push({ ...body.args, accepted: result });
+        } else throw new Error(`Fixture forbids host operation ${body.method}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ protocol: MASTER_PROTOCOL, stateDir: paths.stateDir, version: APP_VERSION, result })); return;
+      }
+      const audio = /^\/audio\/([0-9a-f-]{36})$/.exec(url.pathname);
+      if (!audio) { res.writeHead(404).end(); return; }
+      const requestId = req.headers['x-tower-audio-request-id'];
+      assert.equal(typeof requestId, 'string');
+      await voice.serveAudio(audio[1], res, Number(url.searchParams.get('at') ?? 0), requestId as string);
+    } catch (error) { if (!res.headersSent) res.writeHead(500).end(String(error)); else res.destroy(); }
+  });
+  cleanups.push(() => stop(socketHost));
+  await new Promise<void>((resolve, reject) => { socketHost.once('error', reject); socketHost.listen(paths.socket, resolve); });
+  const proxy = new MasterClient({ stateDir: dir, credentials: () => undefined, attachOnly: true });
+  // Guard the provider/host spawn path before invoking the actual pipeAudio implementation.
+  // A missing or incompatible fixture host fails instead of starting any process.
+  (proxy as unknown as { startHost: () => Promise<void> }).startHost = async () => { assert.equal(await proxy.hostVersion(), APP_VERSION); };
+  cleanups.push(async () => proxy.dispose());
   const worklet = await readFile(join(root, 'client/public/master-pcm-tap.js'));
   const silence = await readFile(join(root, 'client/public/master-silence.wav'));
   const web = createServer(async (req, res) => {
@@ -104,7 +138,7 @@ try {
         res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(answer)); return;
       }
       const audio = /^\/api\/master\/voice\/audio\/(.*)$/.exec(url.pathname);
-      if (audio) { audioRequests.push({ id: audio[1], range: req.headers.range, at: Date.now() }); await voice.serveAudio(audio[1], res); return; }
+      if (audio) { audioRequests.push({ id: audio[1], range: req.headers.range, at: Date.now() }); await proxy.pipeAudio(res, audio[1], Number(url.searchParams.get('at') ?? 0)); return; }
       if (url.pathname === '/bundle.js') { res.writeHead(200, { 'Content-Type': 'text/javascript' }).end(bundle.outputFiles[0].contents); return; }
       if (url.pathname === '/master-pcm-tap.js') { res.writeHead(200, { 'Content-Type': 'text/javascript' }).end(worklet); return; }
       if (url.pathname === '/master-silence.wav') { res.writeHead(200, { 'Content-Type': 'audio/wav' }).end(silence); return; }
@@ -135,6 +169,29 @@ try {
   await until(() => played.find(item => item.id === answer.id && item.result === 'played'), 30_000);
   assert.deepEqual(calls.map(call => call.text), [first, residual.trim()], 'final residual is synthesized once without repeating first sentence');
   assert.ok(heldEvidence.started.at < endAt && heldEvidence.firstTts.at < endAt);
+  // New diagnostic contract: page promise/media stages and both socket relay stages share this run/say/live.
+  const timingsFor = (id: string) => voice.timings.list().find(record => record.says?.some(say => say.id === id));
+  const transportComplete = () => timingsFor(answer.id)?.audioRequests?.find(request => request.host?.normal && request.host.close && request.web?.normal && request.web.close);
+  const firstTransport = await until(transportComplete);
+  const timing = timingsFor(answer.id)!;
+  const sayTiming = timing.says!.find(say => say.id === answer.id)!;
+  assert.equal(timing.runId, run.id); assert.equal(timing.turnId, run.id);
+  assert.equal(sayTiming.live, answer.audio.split('/').at(-1));
+  assert.equal(firstTransport.live, sayTiming.live);
+  assert.ok(firstTransport.host!.firstWrite! < endAt && firstTransport.web!.firstWrite! < endAt, 'host and web write while run remains open');
+  assert.ok(firstTransport.host!.end! >= endAt && firstTransport.web!.end! >= endAt, 'EOF follows residual and turn end');
+  assert.equal(firstTransport.host!.bytes, firstTransport.web!.bytes);
+  assert.ok(firstTransport.host!.bytes > mp3.length, 'transport carries both first and residual MP3 pieces');
+  for (const event of ['received', 'source', 'play-attempt', 'play-resolved', 'started', 'waiting', 'resumed', 'ended', 'terminal'])
+    assert.ok(sayTiming.events?.some(item => item.event === event), `bounded history retains ${event}`);
+  const elapsedEvents = sayTiming.events!.filter(event => event.elapsedMs !== undefined);
+  assert.ok(elapsedEvents.every((event, index) => !index || event.elapsedMs! >= elapsedEvents[index - 1].elapsedMs!), 'browser stage clock is monotonic');
+  assert.equal(sayTiming.terminal?.result, 'played'); assert.equal(sayTiming.terminal?.attempt, 0);
+  const mediaStart = sayTiming.started!.playback!;
+  assert.equal(mediaStart.rate, 1.2); assert.equal(mediaStart.paused, false);
+  assert.equal(typeof mediaStart.bufferedEnd, 'number');
+  assert.equal(sayTiming.terminal?.playback?.ended, true);
+  assert.ok(transportReports.some(report => report.requestId === firstTransport.requestId && report.accepted));
   const settledBefore = played.length;
   assert.equal(voice.voiceProgress({ session: current, id: answer.id, event: 'progress', elapsedMs: 100, playback: { position: 1 } }), false, 'late progress cannot settle/revive finished say');
   assert.equal(played.length, settledBefore);
@@ -154,10 +211,15 @@ try {
   assert.equal(progress.filter(item => item.id === cancelSay.id && item.event === 'source').length, 1, 'same-id update never starts a new source; Chromium may issue multiple HTTP range requests');
   assert.equal(await page.evaluate(() => (window as any).views.at(-1).playing), undefined);
   assert.equal(await page.evaluate(() => (window as any).audio[0].paused), true, 'skip stops HTMLAudio');
+  await until(() => timingsFor(cancelSay.id)?.says?.find(say => say.id === cancelSay.id)?.terminal);
+  const cancelledTiming = timingsFor(cancelSay.id)!.says!.find(say => say.id === cancelSay.id)!;
+  assert.equal(cancelledTiming.terminal?.result, 'stopped'); assert.equal(cancelledTiming.terminal?.attempt, 0);
+  assert.ok(cancelledTiming.events?.some(event => event.event === 'play-attempt'));
+  assert.ok(cancelledTiming.events?.some(event => event.event === 'play-resolved'));
   assert.deepEqual(errors, []);
   await mkdir(join(root, 'tmp/voice-latency'), { recursive: true });
-  await writeFile(artifact, JSON.stringify({ result: 'PASS', browser: 'isolated Playwright Chromium', scope: { actual: ['MasterSession', 'MasterVoice', 'VoiceSession', 'HTMLAudio', 'WebAudio PCM'], fixtures: ['Tower HTTP API and native run snapshot updates', 'ElevenLabs HTTP responses using previously cached MP3'], nativeProviders: false, personalMicrophone: false, userBrowser: false, newTts: false }, heldEvidence, endAt, calls, progress, played, audioRequests, events: await page.evaluate(() => (window as any).events), pageErrors: errors }, null, 2));
-  console.log(`PASS real media progression/PCM + accepted live progress before held turn end; residual once; cancellation. Artifact: ${artifact}`);
+  await writeFile(artifact, JSON.stringify({ result: 'PASS', browser: 'isolated Playwright Chromium', scope: { actual: ['MasterSession', 'MasterVoice', 'VoiceSession', 'MasterClient socket audio proxy', 'HTMLAudio', 'WebAudio PCM'], fixtures: ['Tower HTTP API and native run snapshot updates', 'ElevenLabs HTTP responses using previously cached MP3'], nativeProviders: false, personalMicrophone: false, userBrowser: false, newTts: false }, heldEvidence, endAt, calls, progress, played, audioRequests, transportReports, timings: voice.timings.list(), events: await page.evaluate(() => (window as any).events), pageErrors: errors }, null, 2));
+  console.log(`PASS socket host/web firstWrite/EOF/close correlation + real media/promise/terminal history before held turn end; residual once; cancellation. Artifact: ${artifact}`);
 } catch (error) {
   await mkdir(join(root, 'tmp/voice-latency'), { recursive: true });
   await writeFile(artifact, JSON.stringify({ result: 'FAIL', error: String(error), calls, progress, played, audioRequests, events: page ? await page.evaluate(() => (window as any).events).catch(() => []) : [] }, null, 2));
