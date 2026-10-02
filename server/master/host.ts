@@ -132,9 +132,10 @@ export async function startMasterHost(options: MasterHostOptions) {
       case 'voiceRequest': return speech.voiceRequest({ session: args.session, clientMessageId: args.clientMessageId, text: args.text, local: args.local === true });
       case 'voiceActivity': return speech.voiceActivity({ session: args.session, speaking: args.speaking, sinceSpeechMs: args.sinceSpeechMs });
       case 'voiceKnown': return speech.voiceKnown({ session: args.session });
-      case 'voicePlayed': return speech.voicePlayed({ session: args.session, id: args.id, result: args.result, startedMs: args.startedMs, detail: args.detail, playback: args.playback });
+      case 'voicePlayed': return speech.voicePlayed({ session: args.session, id: args.id, result: args.result, startedMs: args.startedMs, detail: args.detail, playback: args.playback, elapsedMs: args.elapsedMs, attempt: args.attempt });
       case 'voiceMissed': return speech.voiceMissed({ session: args.session, entry: args.entry, action: args.action });
-      case 'voiceProgress': return speech.voiceProgress({ session: args.session, id: args.id, event: args.event, elapsedMs: args.elapsedMs, gate: args.gate, playback: args.playback });
+      case 'voiceProgress': return speech.voiceProgress({ session: args.session, id: args.id, event: args.event, elapsedMs: args.elapsedMs, gate: args.gate, playback: args.playback, attempt: args.attempt, reason: args.reason, error: args.error });
+      case 'voiceTransport': return speech.voiceTransport({ live: args.live, requestId: args.requestId, web: args.web });
       case 'voiceTimings': return speech.timings.list();
       case 'voiceVoices': return speech.voiceVoices();
       case 'voicePreview': return speech.voicePreview({ voiceId: args.voiceId });
@@ -158,7 +159,8 @@ export async function startMasterHost(options: MasterHostOptions) {
     if (req.method === 'GET' && audio) {
       lastRequest = Date.now();
       const at = Number(url.searchParams.get('at') ?? '0');
-      void voice!.serveAudio(audio[1], res, Number.isFinite(at) && at > 0 && at <= 1_200 ? at : 0).catch(() => { if (!res.headersSent) res.writeHead(500); res.destroy(); });
+      const requestId = req.headers['x-tower-audio-request-id'];
+      void voice!.serveAudio(audio[1], res, Number.isFinite(at) && at > 0 && at <= 1_200 ? at : 0, typeof requestId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId) ? requestId : undefined).catch(() => { if (!res.headersSent) res.writeHead(500); res.destroy(); });
       return;
     }
     if (req.method !== 'POST' || url.pathname !== '/rpc') { res.writeHead(404); res.end(); return; }

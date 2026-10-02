@@ -1127,6 +1127,11 @@ test('a late rejected play promise cannot cancel a retry, and a host cancellatio
     reject(new Error('old source failed'));
     await flush();
     assert.deepEqual(page.results(), [], 'old source promise does not finish the new attempt');
+    const rejection = posts.find(p => p.body.event === 'play-rejected')!.body;
+    assert.equal(rejection.attempt, 0);
+    assert.equal(rejection.error, 'Error');
+    assert.equal(rejection.playback, undefined, 'late promise must not snapshot the replacement source');
+    assert.equal(JSON.stringify(rejection).includes('old source failed'), false);
     page.voice.say({ ...say, cancelled: true });
     page.voice.say({ ...say, text: '취소 후 늦은 문구' });
     FakeAudio.deferPlay = false;
@@ -1196,4 +1201,40 @@ test('live media progress is reported before terminal ACK and distinguishes queu
     audio.finish(); await flush();
     assert.deepEqual(page.results(), ['live:played']);
   } finally { page.end(); }
+});
+
+test('each play attempt and watchdog retry is diagnosable before the terminal ACK', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as FakeAudio & { ontimeupdate?: () => void };
+    page.voice.say({ ...page.say('attempts', 'answer'), streaming: true });
+    await flush();
+    assert.deepEqual(posts.filter(p => p.body.event === 'play-attempt').map(p => p.body.attempt), [0]);
+    assert.deepEqual(posts.filter(p => p.body.event === 'play-resolved').map(p => p.body.attempt), [0]);
+    audio.currentTime = 0.000001; audio.ontimeupdate?.();
+    mock.timers.tick(30_000); mock.timers.tick(1_000); await flush();
+    assert.equal(posts.find(p => p.body.event === 'retry')?.body.reason, 'no-progress');
+    assert.deepEqual(posts.filter(p => p.body.event === 'source').map(p => p.body.attempt), [0, 1]);
+    assert.deepEqual(posts.filter(p => p.body.event === 'play-attempt').map(p => p.body.attempt), [0, 1]);
+    assert.deepEqual(page.results(), []);
+    audio.currentTime = 1; audio.finish(); await flush();
+    const terminal = posts.find(p => p.path.endsWith('/played'))!.body;
+    assert.equal(terminal.attempt, 1);
+    assert.equal(typeof terminal.elapsedMs, 'number');
+    assert.equal((terminal.playback as { rate: number }).rate, 1);
+  } finally { page.end(); }
+});
+
+test('rejected optional diagnostics cannot prevent audio or terminal reporting', async () => {
+  const page = await harness();
+  const originalFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = ((path: string, init: any) => path.endsWith('/progress')
+      ? Promise.reject(new Error('fixture diagnostic offline')) : originalFetch(path, init)) as typeof fetch;
+    page.voice.say(page.say('diagnostic-offline', 'answer'));
+    await flush();
+    assert.equal(page.audio.played.at(-1), '/api/master/voice/audio/diagnostic-offline');
+    page.audio.finish(); await flush();
+    assert.deepEqual(page.results(), ['diagnostic-offline:played']);
+  } finally { globalThis.fetch = originalFetch; page.end(); }
 });
