@@ -40,11 +40,19 @@ test('the paired connection notice accepts only fixed target metadata from an ap
   assert.equal((await incoming({ sessionId: target.sessionId, taskId }, true, true)).status, 403);
 });
 
+test('invalid chat markers cannot create a remote task before validation', async () => {
+  let calls = 0;
+  const worker = { secretCall: async () => { calls++; throw new Error('must not reach the worker'); } };
+  await assert.rejects(ownerSecretControl(undefined, worker, 'create', { nodeId: 'fixture-link', sessionId: target.sessionId, notifySession: 'true' }));
+  assert.equal(calls, 0);
+});
+
 test('remote explicit assignment sends one notice after commit and before a failed overview', async t => {
   const events: string[] = [];
   const notices: unknown[] = [];
+  let targetReads = 0;
   const server = createServer((req, res) => {
-    if (req.url?.startsWith('/secret-target')) { res.end(JSON.stringify(target)); return; }
+    if (req.url?.startsWith('/secret-target')) { targetReads++; res.end(JSON.stringify(target)); return; }
     if (req.url === '/secret-connection-notice') {
       let raw = ''; req.on('data', chunk => { raw += chunk; }); req.on('end', () => {
         events.push('notice'); notices.push(JSON.parse(raw)); res.end(JSON.stringify({ notified: true }));
@@ -63,6 +71,8 @@ test('remote explicit assignment sends one notice after commit and before a fail
     assert.equal((args[1] as Record<string, unknown>).target, undefined);
     events.push('commit'); return { connectedTarget: target };
   } };
+  await assert.rejects(ownerSecretControl(nodes, worker, 'create', { nodeId: 'fixture-link', sessionId: target.sessionId, notifySession: 'true' }));
+  assert.equal(targetReads, 0, 'invalid markers fail before even asking the remote worker to create a task');
   await assert.rejects(ownerSecretControl(nodes, worker, 'create', { nodeId: 'fixture-link', sessionId: target.sessionId, connect: true, notifySession: true, target: { taskId: 'spoofed' }, value: 'FAKE_OWNER_VALUE' }), /overview failed/);
   assert.deepEqual(events, ['commit', 'notice', 'overview']);
   assert.deepEqual(notices, [{ sessionId: target.sessionId, taskId }]);
@@ -74,4 +84,11 @@ test('remote explicit assignment sends one notice after commit and before a fail
   } };
   await ownerSecretControl(nodes, quietWorker, 'unlock', { nodeId: 'fixture-link', sessionId: target.sessionId, notifySession: true });
   assert.deepEqual(events, ['quiet-mutation']); assert.equal(notices.length, 1);
+  events.length = 0;
+  const rejectedWorker = { secretCall: async (operation: string) => {
+    if (operation === 'peers') return [peer('node')];
+    events.push('rejected'); throw new Error('fixture mutation refused');
+  } };
+  await assert.rejects(ownerSecretControl(nodes, rejectedWorker, 'connect', { nodeId: 'fixture-link', sessionId: target.sessionId, notifySession: true, secretIds: ['fake'] }), /mutation refused/);
+  assert.deepEqual(events, ['rejected']); assert.equal(notices.length, 1);
 });

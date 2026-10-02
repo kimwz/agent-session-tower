@@ -291,7 +291,8 @@ export class SecretRuntime {
     if (explicitConnection && target) this.notifyConnection(target);
     if (receiptOnly) {
       if (!target) throw fail('연결한 원격 작업을 확인할 수 없습니다.', 503);
-      return { connectedTarget: target };
+      const { hostId, sessionId, root, taskId, projectId } = target;
+      return { connectedTarget: { hostId, sessionId, root, taskId, ...(projectId ? { projectId } : {}) } };
     }
     const overview = await this.overview(target);
     return { ...overview, currentProjectId: target?.projectId ?? currentProjectId };

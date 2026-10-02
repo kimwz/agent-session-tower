@@ -48,6 +48,7 @@ export async function ownerRemoteTarget(nodes: RemoteNodes | undefined, worker: 
 
 /** Owner assignment only: carry a fixed notice to its verified remote worker before reading the overview. */
 export async function ownerSecretControl(nodes: RemoteNodes | undefined, worker: Worker, action: string, input: Record<string, unknown>): Promise<unknown> {
+  z.boolean().optional().parse(input.notifySession);
   const target = typeof input.sessionId === 'string' && action !== 'lock' ? await ownerRemoteTarget(nodes, worker, input, ['create','attach','connect'].includes(action)) : undefined;
   const { target: _target, hostId: _host, taskId: _task, projectRoot: _root, ...safe } = input;
   const remoteConnection = !!target && input.notifySession === true && ((action === 'create' && input.connect === true) || action === 'connect' || action === 'attach');
