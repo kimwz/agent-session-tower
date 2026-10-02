@@ -35,7 +35,7 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
   // Directory effects are sound for a linear AND chain: if a later command executes, every preceding cd succeeded.
   // Other control flow is deliberately not simulated. This is evidence collection, not another shell interpreter.
   const unsupported = new Set(['if', 'then', 'else', 'elif', 'fi', 'for', 'while', 'until', 'do', 'done', 'case', 'esac', 'function', 'select', '!',
-    'time', 'pushd', 'popd', 'builtin', 'command', 'eval', 'source', '.', 'env', 'sudo', 'doas', 'nohup', 'exec']);
+    'time', 'chdir', 'pushd', 'popd', 'builtin', 'command', 'eval', 'source', '.', 'env', 'sudo', 'doas', 'nohup', 'exec']);
   if (parts.some(token => literal(token) === 'cd') && parts.some(token => ['||', ';', '|', '\n', '&'].includes(token))) {
     evidence.notes.push('Directory changes outside a linear && chain were not interpreted; no local file contents were assumed.');
     return evidence;
@@ -44,19 +44,24 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
   const remotes = new Set(['ssh', 'docker', 'podman', 'kubectl', 'nerdctl', 'oc']);
   let nextScript = false;
   let interpreter = false;
+  let shell = false;
   let inlineNext = false;
   let remote = false;
+  let segmentEnd = parts.length;
   for (let i = 0; i < parts.length; i++) {
     const token = parts[i]!;
     if (separators.has(token)) { start = true; interpreter = false; inlineNext = false; nextScript = false; remote = false; redirect = undefined; continue; }
     if (start) {
-      let end = i; while (end < parts.length && !separators.has(parts[end]!)) end++;
-      remote = parts.slice(i, end).some(part => remotes.has(basename(literal(part) ?? '')));
+      segmentEnd = i; while (segmentEnd < parts.length && !separators.has(parts[segmentEnd]!)) segmentEnd++;
+      remote = parts.slice(i, segmentEnd).some(part => remotes.has(basename(literal(part) ?? '')));
       if (remote) evidence.notes.push('Remote/container command segment was not treated as local file execution.');
     }
     if (/^\d*[<>]&[\d-]+$/.test(token)) continue;
     if (token === '&>' || token === '&>>') { redirect = '>'; continue; }
-    if (token === '<' || token === '>') { redirect = token; continue; }
+    if (token === '<' || token === '>') {
+      if (start) { evidence.notes.push('Leading redirection was not interpreted; no local file contents were assumed.'); return evidence; }
+      redirect = token; continue;
+    }
     if (start && /^[A-Za-z_][A-Za-z0-9_]*=/.test(token)) continue;
     const word = literal(token);
     if (start && !word) { evidence.notes.push('Dynamic command name was not interpreted; no local file contents were assumed.'); return evidence; }
@@ -64,6 +69,7 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
       evidence.notes.push('Shell control flow or command wrapper was not interpreted; no local file contents were assumed.');
       return evidence;
     }
+    if (word === 'cd' && !start && !interpreter) { evidence.notes.push('Non-command cd word was not interpreted; no local file contents were assumed.'); return evidence; }
     if (start && word === 'cd') {
       const next = parts[i + 1];
       const target = next && !['&&', '||', ';', '|', '\n', '&'].includes(next) ? literal(parts[++i]!) : undefined;
@@ -73,7 +79,14 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
     }
     const directScript = start && Boolean(word?.startsWith('./') || (word?.includes('/') && SCRIPT.test(word)));
     const interpreterFile = nextScript;
-    if (start) interpreter = /^(?:python[\d.]*|node|bash|sh|zsh|ruby|perl|php|lua|tsx)$/.test(basename(word ?? ''));
+    if (start) {
+      const program = basename(word ?? '');
+      interpreter = /^(?:python[\d.]*|node|bash|sh|zsh|ruby|perl|php|lua|tsx)$/.test(program);
+      shell = ['bash', 'sh', 'zsh'].includes(program);
+      if (program === 'ruby' && parts.slice(i + 1, segmentEnd).some(part => /^-[CX]/.test(literal(part) ?? ''))) {
+        evidence.notes.push('Interpreter directory-changing options were not interpreted; no local file contents were assumed.'); return evidence;
+      }
+    }
     nextScript = start && interpreter;
     start = false;
     const input = redirect === '<';
@@ -81,10 +94,11 @@ export async function commandEvidence(command: string, cwd: string): Promise<Com
     redirect = undefined;
     if (!word) { evidence.notes.push('Dynamic shell word was not expanded for inspection.'); continue; }
     if (inlineNext) { inlineNext = false; evidence.notes.push('Inline code is in the exact command; nested file paths were not interpreted.'); continue; }
-    if (interpreter && ['-c', '-e', '--eval', '--print'].includes(word)) { inlineNext = true; continue; }
+    if (interpreter && (shell ? /^-[a-z]*c[a-z]*$/.test(word) : ['-c', '-e', '--eval', '--print'].includes(word))) { inlineNext = true; continue; }
     if (!input && !directScript && !interpreterFile && SCRIPT.test(word) && !interpreter) evidence.notes.push('Code argument for an unknown command runner was not resolved.');
     if (remote || output || word.startsWith('-') || (!input && !directScript && !interpreterFile && !(interpreter && SCRIPT.test(word)))) continue;
     if (!folder && !word.startsWith('/')) { evidence.notes.push(`Relative file not resolved: ${word}`); continue; }
+    if (word.split('/').includes('..')) { evidence.notes.push('Parent traversal was not normalized through possible symlink directories.'); continue; }
     candidates.add(resolve(folder ?? cwd, word));
   }
   let total = 0;

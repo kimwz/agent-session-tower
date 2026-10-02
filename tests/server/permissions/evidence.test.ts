@@ -124,3 +124,25 @@ test('unknown runners with directory options do not attach cwd code as executed 
   assert.equal(evidence.files.length, 0);
   assert.ok(evidence.notes.length > 0);
 });
+
+
+test('leading redirects, parent traversal and interpreter directory options never attach a wrong body', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'tower-evidence-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'run.py'), 'wrong code');
+  await writeFile(join(root, 'run.rb'), 'wrong code');
+  for (const command of ['2>/dev/null cd sub && python3 run.py', '>/dev/null cd sub && python3 run.py', 'python3 link/../run.py', 'cd link && python3 ../run.py', 'ruby -C sub run.rb']) {
+    const evidence = await commandEvidence(command, root);
+    assert.equal(evidence.files.length, 0);
+    assert.ok(evidence.notes.length > 0);
+  }
+});
+
+test('remote stdin is not mistaken for local executable code', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'tower-evidence-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'run.py'), 'remote stdin');
+  const evidence = await commandEvidence('ssh host sh < run.py', root);
+  assert.equal(evidence.files.length, 0);
+  assert.ok(evidence.notes.length > 0);
+});
