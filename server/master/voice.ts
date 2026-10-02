@@ -9,9 +9,14 @@ import type { ElevenLabs, VoiceInfo } from './elevenlabs.js';
 import type { FirstReplyMaker } from './first-reply.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
-import { isNoise, READ_CHARS, speakable, streamTone, VOICE_REST, VOICE_SAMPLE, voiced, voicedChunk, voicedParts } from './voice-text.js';
+import { isNoise, READ_CHARS, speakable, streamTone, VOICE_REST, VOICE_SAMPLE, VOICE_TONES, voiced, voicedChunk, voicedParts } from './voice-text.js';
 import { CHUNK_PAUSE_MS, TextFollower } from './voice-stream.js';
 import { playbackRecord, VoiceTimings, progressRecord, elapsed, attemptNumber, transportStage, type VoiceTtsRecord, type VoiceTransportStage } from './voice-timings.js';
+
+const plainPart = (speech: string): string => {
+  for (const tag of Object.values(VOICE_TONES)) if (speech.startsWith(`${tag} `)) return speech.slice(tag.length).trim();
+  return speech;
+};
 
 /** Estimated prices: ElevenLabs realtime speech-to-text per second, text-to-speech per character by model. */
 const STT_DOLLARS_PER_SECOND = 0.39 / 3600;
@@ -141,6 +146,8 @@ interface Live {
   timing?: string;
   /** First part waited in the segment queue from this time; later parts share that segment origin. */
   queuedAt?: number;
+  session?: Session;
+  partIndex?: number;
 }
 
 /** Input for reading a turn while the master writes it. */
@@ -162,8 +169,9 @@ interface Segment {
   reply: string;
   follower: TextFollower;
   /** What is sent to speech, and how many of those parts went into its audio. */
-  parts: string[];
+  parts: Array<{ speech: string; text: string }>;
   fed: number;
+  wake?: () => void;
   /** What the page shows while it plays. */
   text: string;
   done: boolean;
@@ -499,7 +507,8 @@ export class MasterVoice {
     // Judged against the limit as it is now (an answer may have spent meanwhile), and charged in the same step.
     if (this.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) return undefined;
     const live = this.synthesize(sent);
-    if (!await this.firstChunk(live) || this.session !== session) { this.abandon(live); return undefined; }
+    live.session = session;
+    if (!await this.complete(live, signal) || signal.aborted || this.session !== session || !this.alive(session) || this.answering(request)) { this.abandon(live); return undefined; }
     return { id: randomUUID(), session: session.digest, kind: 'ack', text: reply.text, audio: `/api/master/voice/audio/${live.id}`, expiresAt: Date.now() + 60_000, request };
   }
 
@@ -625,15 +634,28 @@ export class MasterVoice {
     const request = entry.data.kind === 'master' ? entry.data.request : undefined;
     const key = speak.timing ?? request;
     this.timings.mark(key, 'text', Date.now(), { mode: 'turn-end' });
-    const live = this.synthesize(parts, undefined, key);
-    if (!await this.firstChunk(live) || this.session !== session) { this.abandon(live); this.setSpeak(entry, unspoken(speak, this.session !== session ? this.gone(session) : 'audio')); return; }
-    this.setSpeak(entry, { ...speak, state: 'playing' });
-    const { result, started } = await this.play(session, { kind: speak.session ? 'answer' : 'report', text, audio: live.id, ...(request ? { request } : {}), ...(key ? { timing: key } : {}) }, this.timing.playMs + chars * MS_PER_CHAR);
-    // Not heard to the end (skipped, voice ended, or given up on): the parts not made yet are not asked for.
-    if (result !== 'played') this.abandon(live);
-    const later = speakOf(this.options.room.get(entry.id)?.data) ?? speak;
-    // Played on the page, but its audio failed partway: the page heard it end where the sound stopped.
-    this.setSpeak(entry, result !== 'played' ? unspoken(later, reasonOf(result), started) : live.failed ? unspoken(later, 'audio', true) : played(later));
+    let heard = false;
+    for (let index = 0; index < parts.length; index++) {
+      const part = parts[index];
+      const refuse = this.session !== session || !this.alive(session) ? this.gone(session) : this.limited(Date.now(), part.length * ttsDollarsPerChar(model)) ? 'limit' : undefined;
+      if (refuse) { this.setSpeak(entry, unspoken(speakOf(this.options.room.get(entry.id)?.data) ?? speak, refuse, heard)); return; }
+      const live = this.synthesize(part, undefined, key);
+      live.session = session; live.held = true; live.partIndex = index;
+      try {
+        if (!await this.complete(live) || this.session !== session) {
+          this.abandon(live);
+          this.setSpeak(entry, unspoken(speakOf(this.options.room.get(entry.id)?.data) ?? speak, this.session !== session ? this.gone(session) : 'audio', heard)); return;
+        }
+        this.setSpeak(entry, { ...speak, state: 'playing' });
+        const { result, started } = await this.play(session, { kind: speak.session ? 'answer' : 'report', text: plainPart(part), audio: live.id, streaming: true,
+          ...(request ? { request } : {}), ...(key ? { timing: key } : {}) }, this.timing.playMs + part.length * MS_PER_CHAR);
+        heard ||= started || result === 'played';
+        if (result !== 'played') {
+          this.setSpeak(entry, unspoken(speakOf(this.options.room.get(entry.id)?.data) ?? speak, reasonOf(result), heard)); return;
+        }
+      } finally { live.held = false; }
+    }
+    this.setSpeak(entry, played(speakOf(this.options.room.get(entry.id)?.data) ?? speak));
   }
 
   // ─── reading while the master writes ─────────────────────────────────────────────────────────────────────────
@@ -753,7 +775,7 @@ export class MasterVoice {
     const model = this.options.settings.current().voice.model;
     stream.tag = streamTone(plain, model, stream.kind, stream.tag);
     this.timings.mark(stream.key, 'sentence');
-    segment.parts.push(...voicedChunk(plain, model, stream.tag));
+    segment.parts.push(...voicedChunk(plain, model, stream.tag).map(speech => ({ speech, text: plainPart(speech) })));
     segment.text = `${segment.text} ${plain}`.trim();
     stream.read += plain.length;
     stream.lastChunkAt = Date.now();
@@ -765,62 +787,68 @@ export class MasterVoice {
     return hide(speakable(hide(raw)));
   }
 
-  /** Feeds a segment's new parts into its audio (and seals it when done), or queues its turn to play. */
+  /** Wakes a reply already owning the line, or queues its one playback task. */
   private pump(stream: Stream, segment: Segment): void {
-    if (stream.state !== 'streaming') return;
-    const live = segment.live;
-    if (segment.say && segment.say.text !== segment.text && stream.state === 'streaming') {
-      segment.say = { ...segment.say, text: segment.text };
-      this.options.room.broadcast({ type: 'say', seq: 0, say: segment.say });
-    }
-    if (live) {
-      while (segment.fed < segment.parts.length) {
-        if (!this.feed(live, segment.parts[segment.fed])) {
-          // Refused while still open: the daily limit (not the end of its audio).
-          if (!live.sealed && !live.done) stream.limitHit = true;
-          this.seal(live); stream.full = true; segment.fed = segment.parts.length; break;
-        }
-        segment.fed++;
-      }
-      if (segment.done && segment.fed >= segment.parts.length) this.seal(live);
-      return;
-    }
-    if (segment.queued || !segment.parts.length) return;
+    segment.wake?.();
+    if (stream.state !== 'streaming' || segment.queued || !segment.parts.length) return;
     segment.queued = true;
     segment.queuedAt = Date.now();
     void this.onLine(() => this.playSegment(stream, segment));
   }
 
-  /** A segment's turn to play: its audio is made now, played, and the turn stops being read if it was not heard. */
+  /** A reply retains the line while its finite parts are completed, played and acknowledged in order. */
   private async playSegment(stream: Stream, segment: Segment): Promise<void> {
     const session = stream.session;
-    if (stream.state !== 'streaming') return;
-    if (this.session !== session || !this.alive(session)) { this.stopStream(stream, this.gone(session)); return; }
-    const live = this.openLive(undefined, stream.key);
-    live.held = true;
-    live.queuedAt = segment.queuedAt;
-    segment.live = live;
-    this.pump(stream, segment);
-    // Nothing could be paid for: the turn is not read further.
-    if (!live.parts.length) { this.seal(live); live.held = false; this.stopStream(stream, 'limit'); return; }
-    try {
-      if (!await this.firstChunk(live) || this.session !== session || stream.state !== 'streaming') { this.abandon(live); this.stopStream(stream, this.session !== session ? this.gone(session) : 'audio'); return; }
-      const { result, started } = await this.play(session, { kind: stream.kind, text: segment.text, audio: live.id, streaming: true, timing: stream.key, ...(stream.request ? { request: stream.request } : {}) },
-        this.timing.playMs + READ_CHARS * MS_PER_CHAR, undefined, say => { segment.say = say; });
-      if (started) segment.started = true;
-      // Not heard to its end: nothing more of the turn is read, and why is kept for its entry.
-      if (result !== 'played' || live.failed) { this.abandon(live); this.stopStream(stream, result !== 'played' ? reasonOf(result) : 'audio'); return; }
-      live.held = false;
-      segment.played = true;
-      stream.played++;
-      this.settle(stream);
-    } finally { live.held = false; }
+    while (stream.state === 'streaming') {
+      if (this.session !== session || !this.alive(session)) { this.stopStream(stream, this.gone(session)); return; }
+      if (segment.fed >= segment.parts.length) {
+        if (segment.done) break;
+        if (!await this.nextPart(stream, segment)) segment.done = true;
+        continue;
+      }
+      const part = segment.parts[segment.fed];
+      const model = this.options.settings.current().voice.model;
+      if (this.limited(Date.now(), part.speech.length * ttsDollarsPerChar(model))) { this.stopStream(stream, 'limit'); return; }
+      const live = this.synthesize(part.speech, undefined, stream.key);
+      live.held = true; live.session = session; live.queuedAt = segment.queuedAt; live.partIndex = segment.fed;
+      segment.live = live;
+      try {
+        if (!await this.complete(live) || this.session !== session || stream.state !== 'streaming') {
+          this.abandon(live);
+          if (stream.state === 'streaming') this.stopStream(stream, this.session !== session ? this.gone(session) : 'audio');
+          return;
+        }
+        const { result, started } = await this.play(session, { kind: stream.kind, text: part.text, audio: live.id, streaming: true, timing: stream.key,
+          ...(stream.request ? { request: stream.request } : {}) }, this.timing.playMs + part.speech.length * MS_PER_CHAR, undefined, say => { segment.say = say; });
+        if (started) segment.started = true;
+        if (result !== 'played' || stream.state !== 'streaming') {
+          if (stream.state === 'streaming') this.stopStream(stream, reasonOf(result));
+          return;
+        }
+        segment.fed++;
+        stream.played++;
+      } finally { live.held = false; segment.live = undefined; segment.say = undefined; }
+    }
+    segment.played = segment.done && segment.fed >= segment.parts.length ? true : undefined;
+    this.settle(stream);
+  }
+
+  /** No future text is awaited by a browser audio response; one bounded waiter owns the segment's pause. */
+  private nextPart(stream: Stream, segment: Segment): Promise<boolean> {
+    const ready = () => stream.state !== 'streaming' || segment.done || segment.fed < segment.parts.length;
+    if (ready()) return Promise.resolve(true);
+    return new Promise(resolve => {
+      const finish = (available: boolean) => { clearTimeout(timer); segment.wake = undefined; resolve(available); };
+      const timer = setTimeout(() => finish(false), LIVE_WAIT_MS);
+      segment.wake = () => { if (ready()) finish(true); };
+      segment.wake();
+    });
   }
 
   /** Once a finished turn's segments were all played, its entry is added (played) and its reading ends. */
   private settle(stream: Stream): void {
     if (stream.state !== 'streaming' || !stream.finishing) return;
-    if (stream.segments.some(segment => segment.parts.length && !segment.played)) return;
+    if (stream.segments.some(segment => !segment.done || segment.fed < segment.parts.length || segment.live || segment.say)) return;
     stream.state = 'finished';
     this.streams.delete(stream.turn);
     const entry = stream.finishing.data;
@@ -837,6 +865,7 @@ export class MasterVoice {
     stream.state = 'stopped';
     this.streams.delete(stream.turn);
     for (const segment of stream.segments) {
+      segment.wake?.();
       if (segment.say && !segment.played) {
         const done = this.results.get(segment.say.id);
         if (done) done('stopped');
@@ -927,10 +956,7 @@ export class MasterVoice {
     return live;
   }
 
-  /**
-   * Audio that parts are added to (`feed`) until it is sealed (`seal`), made part after part into one stream while the
-   * page plays it. Waiting for a part has no time limit other than `LIVE_WAIT_MS`; each request for sound has its own.
-   */
+  /** Creates the retained byte stream; synthesize seals its known input before making proceeds. */
   private openLive(voice?: { voiceId: string; model: string }, timing?: string): Live {
     const settings = voice ?? this.options.settings.current().voice;
     const live: Live = { id: randomUUID(), chunks: [], bytes: 0, done: false, failed: false, createdAt: Date.now(), waiters: new Set(), readers: new Set(),
@@ -939,25 +965,6 @@ export class MasterVoice {
     this.evict();
     void this.make(live);
     return live;
-  }
-
-  /** Adds a part to audio being made, paid for now: false (and nothing added) when sealed, stopped or over the limit. */
-  private feed(live: Live, part: string): boolean {
-    if (live.sealed || live.done || this.limited(Date.now(), part.length * ttsDollarsPerChar(live.model))) return false;
-    this.add(Date.now(), { ttsChars: part.length, model: live.model });
-    live.charged += part.length;
-    live.parts.push(part);
-    wake(live);
-    void this.save();
-    this.broadcast();
-    return true;
-  }
-
-  /** No more parts: the audio ends after those it has. */
-  private seal(live: Live): void {
-    if (live.sealed) return;
-    live.sealed = true;
-    wake(live);
   }
 
   private async make(live: Live): Promise<void> {
@@ -984,7 +991,7 @@ export class MasterVoice {
           const idle = () => { clearTimeout(deadline); deadline = setTimeout(() => controller.abort(new Error('시간 초과')), this.timing.synthMs); };
           idle();
           let got = false;
-          const piece: VoiceTtsRecord = { live: live.id, part: index, attempt, ...(live.queuedAt !== undefined ? { queuedAt: live.queuedAt } : {}), start: Date.now(), bytes: 0 };
+          const piece: VoiceTtsRecord = { live: live.id, part: live.partIndex ?? index, attempt, ...(live.queuedAt !== undefined ? { queuedAt: live.queuedAt } : {}), start: Date.now(), bytes: 0 };
           this.timings.piece(live.timing, piece);
           this.timings.mark(live.timing, 'tts');
           try {
@@ -1043,9 +1050,22 @@ export class MasterVoice {
     wake(live);
   }
 
-  private firstChunk(live: Live): Promise<boolean> {
-    return this.until(live, () => live.chunks.length > 0 || live.done, this.timing.firstChunkMs).then(() => live.chunks.length > 0 && !live.failed);
+  /** A finite part is published only once its complete successful byte count is known. */
+  private async complete(live: Live, signal?: AbortSignal): Promise<boolean> {
+    const abort = () => this.abandon(live);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    try {
+      const deadline = Date.now() + 2 * this.timing.synthMs;
+      await this.until(live, () => live.bytes > 0 || live.done || live.failed, Math.min(this.timing.firstChunkMs, 2 * this.timing.synthMs));
+      if (!live.bytes) { this.abandon(live); return false; }
+      await this.until(live, () => live.done || live.failed, Math.max(0, deadline - Date.now()));
+      const complete = live.done && !live.failed && live.bytes > 0 && !signal?.aborted;
+      if (!complete) this.abandon(live);
+      return complete;
+    } finally { signal?.removeEventListener('abort', abort); }
   }
+
   private finished(live: Live): Promise<void> { return this.until(live, () => live.done, this.timing.synthMs); }
   private until(live: Live, ready: () => boolean, ms: number): Promise<void> {
     if (ready()) return Promise.resolve();
@@ -1085,10 +1105,19 @@ export class MasterVoice {
     res.once('finish', () => { stage.end = Date.now(); stage.normal = true; record(); });
     res.once('close', () => { stage.close = Date.now(); stage.normal ??= false; record(); });
     const write = (chunk: Buffer) => { const sent = res.write(chunk); stage.bytes += chunk.length; if (stage.firstWrite === undefined) { stage.firstWrite = Date.now(); record(); } return sent; };
-    res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store' });
+    if (live.failed) { res.writeHead(502).end(); return; }
+    const finite = live.done;
+    const made = finite ? Buffer.concat(live.chunks) : undefined;
+    const from = made && at > 0 ? frameAt(made, id3Size(made) + Math.floor(at * MP3_BYTES_PER_SECOND)) : 0;
+    res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', ...(made ? { 'Content-Length': Math.max(0, made.length - from) } : {}) });
     live.readers.add(res);
     let index = 0;
     try {
+      if (made) {
+        if (from < made.length && !write(made.subarray(from)) && !await this.wait(res, live, true)) { res.destroy(); return; }
+        if (!res.destroyed) res.end();
+        return;
+      }
       // Played again from `at` seconds (the page lost its connection partway): from the first whole frame there.
       if (at > 0 && live.chunks.length) {
         const made = Buffer.concat(live.chunks);
@@ -1360,6 +1389,7 @@ export class MasterVoice {
     this.options.firstReply?.close();
     // The page's word first, so what each said ended with is recorded before its reading's outcome.
     for (const done of [...this.results.values()]) done(reason);
+    for (const live of this.lives.values()) if (live.session === session) this.abandon(live);
     for (const stream of [...this.streams.values()]) if (stream.session === session) this.stopStream(stream, reason);
   }
 

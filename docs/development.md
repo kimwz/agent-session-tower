@@ -42,19 +42,22 @@ If a check has already created personal history, use **Close session** in Tower 
 
 Speech starts from a readable sentence while the master turn is running; completing the turn flushes only its remaining text. The host persists bounded measurements in `<state-dir>/master/voice-timings.json`: run/turn IDs, reply observation times, first sentence flush, per-part TTS start/first byte/completion, say transmission, and page progress. `firstAt` and `completedAt` are native events observed by the worker. `nativeEnd` is the run's completion time; `end` is the voice follower's completion time. Aggregate `delta`/`completed` retain the first values observed in a snapshot; reply records preserve each message's times.
 
+Each bounded TTS part completes before its independent say is sent, so the MP3 response has an exact `Content-Length`. This waits for that part, not the reply or native turn's completion. Parts retain reply order and each requires its own terminal playback ACK. A resumed response advertises the remaining body length. This avoids the unknown-length MP3 startup stall reproduced with WebKit; the page also requires meaningful media-clock progress before reporting playback as started or completed. The normal watchdog and bounded recovery remain in place.
+
 The page reports receipt/queue gate, each source and play attempt, play promise results, media-clock progress, waits, resumes, retries and ended events separately from the terminal playback ACK. Promise resolution or a tiny positive clock value is not evidence of sustained or audible output. A progress report never completes or retries a say. Progress `at` is the host's receipt time and `elapsedMs` uses the page's monotonic clock since receipt of that say. `attempt` distinguishes a replaced source; a late old promise has no snapshot of the new source. A bounded history retains the first 16 events and latest 48, with a drop count, so later progress no longer overwrites the only retry/wait evidence. Terminal ACK receipt and its page elapsed time are recorded during settlement, independently of progress HTTP arrival order. Legacy `play` is an estimate (`say` plus that page delay) and excludes transmission time.
 
 Each generated audio request ID links its live MP3 to host and web relay request/first-write/bytes/end/close measurements, including a resume offset. These are server writes, not browser delivery or decoding times. Normal EOF and a subsequent close are distinguished from a cut stream. Records are bounded and omit speech text, audio, credentials, arbitrary URLs, headers and exception messages. Missing events or dropped history are not evidence of success. The original browser's network/media state and the owner's output device remain necessary to establish audible playback.
 
-For a real media regression without native providers, personal microphones or new TTS calls, supply an existing nonpersonal valid MP3 and an installed Playwright module with Chromium:
+For a real media regression without native providers, personal microphones or new TTS calls, supply an existing nonpersonal valid MP3 and an installed Playwright module with WebKit (or select `chromium` or `chrome`):
 
 ```sh
 VOICE_BROWSER_MP3=/absolute/path/to/fixture.mp3 \
 VOICE_BROWSER_PLAYWRIGHT=/absolute/path/to/playwright/index.mjs \
+VOICE_BROWSER_ENGINE=webkit VOICE_BROWSER_PCM=1 \
 node --import tsx scripts/test-master-voice-stream-browser.ts
 ```
 
-The isolated browser uses synthetic microphone input and fixture Tower/TTS responses, but real HTMLAudio decoding and Web Audio PCM. It holds a run open until playback has progressed, then checks residual flush, deduplication and cancellation. Results are written to `tmp/voice-latency/browser-stream-result.json`.
+The isolated browser uses synthetic microphone input and fixture Tower/TTS responses, but real HTMLAudio decoding and optional Web Audio PCM (`VOICE_BROWSER_PCM=0` keeps the raw media path). It verifies finite headers, progress and the first part's ACK while holding the run open, then checks residual flush, deduplication, cancellation and replay. Results are written to `tmp/voice-recovery/finite-browser-<engine>-<raw|pcm>.json`.
 
 ## Package
 

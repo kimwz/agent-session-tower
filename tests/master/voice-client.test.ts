@@ -1064,8 +1064,66 @@ test('a pending or stalled stream does not claim to be speaking and does not hol
     assert.equal(page.view().playing, undefined, 'onplaying at zero is not progress');
     mock.timers.tick(31_000);
     await flush();
+    assert.deepEqual(page.results(), [], 'an initial stall gets a bounded refetch');
+    assert.equal(page.view().playing, undefined);
+    mock.timers.tick(1_000);
+    await flush();
+    mock.timers.tick(31_000);
+    await flush();
     assert.deepEqual(page.results(), ['stalled:failed']);
+    assert.equal(posts.filter(p => p.body.event === 'retry').length, 1, 'permanent stalls cannot retain the queue indefinitely');
     assert.equal(posts.find(p => p.path.endsWith('/played'))?.body.detail, 'no-progress');
+  } finally { page.end(); }
+});
+
+test('a one-microsecond decoder clock does not establish audible playback', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as FakeAudio & { onplaying?: () => void; ontimeupdate?: () => void };
+    page.voice.say({ ...page.say('decoder-clock', 'answer'), streaming: true });
+    await flush();
+    // Recorded in both actual delayed sources: play resolves but the clock remains 1us.
+    // This reproduces the application's interpretation, not the original browser's decoder fault.
+    audio.currentTime = 0.000001;
+    audio.onplaying?.(); audio.ontimeupdate?.();
+    await flush();
+    assert.equal(page.view().playing, undefined, 'a decoder sentinel is not actual sound progress');
+    assert.equal(posts.some(p => p.body.id === 'decoder-clock' && p.body.event === 'started'), false);
+  } finally { page.end(); }
+});
+
+test('ended at a decoder sentinel cannot acknowledge an answer as played', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as FakeAudio & { ontimeupdate?: () => void };
+    page.voice.say(page.say('sentinel-ended', 'answer'));
+    await flush();
+    audio.currentTime = 0.000001; audio.ontimeupdate?.(); audio.onended?.();
+    await flush();
+    assert.deepEqual(page.results(), ['sentinel-ended:failed']);
+    assert.equal(posts.find(p => p.path.endsWith('/played'))?.body.detail, 'ended-without-progress');
+  } finally { page.end(); }
+});
+
+test('an initially stalled answer can refetch without claiming that its first source was heard', async () => {
+  const page = await harness();
+  try {
+    const audio = page.audio as FakeAudio & { ontimeupdate?: () => void };
+    page.voice.say({ ...page.say('initial-stall', 'answer'), streaming: true });
+    await flush();
+    audio.currentTime = 0;
+    mock.timers.tick(30_000); await flush();
+    assert.equal(posts.find(p => p.body.event === 'retry')?.body.reason, 'no-progress');
+    assert.equal(posts.some(p => p.body.event === 'started'), false);
+    mock.timers.tick(1_000); await flush();
+    assert.deepEqual(posts.filter(p => p.body.event === 'play-attempt').map(p => p.body.attempt), [0, 1]);
+    assert.equal(page.view().playing, undefined);
+    audio.currentTime = 0.000001; audio.ontimeupdate?.();
+    assert.equal(posts.some(p => p.body.event === 'started'), false);
+    audio.currentTime = 0.25; audio.ontimeupdate?.();
+    assert.equal(posts.filter(p => p.body.event === 'started').length, 1);
+    audio.finish(); await flush();
+    assert.deepEqual(page.results(), ['initial-stall:played']);
   } finally { page.end(); }
 });
 
@@ -1211,7 +1269,7 @@ test('each play attempt and watchdog retry is diagnosable before the terminal AC
     await flush();
     assert.deepEqual(posts.filter(p => p.body.event === 'play-attempt').map(p => p.body.attempt), [0]);
     assert.deepEqual(posts.filter(p => p.body.event === 'play-resolved').map(p => p.body.attempt), [0]);
-    audio.currentTime = 0.000001; audio.ontimeupdate?.();
+    audio.currentTime = 0.5; audio.ontimeupdate?.();
     mock.timers.tick(30_000); mock.timers.tick(1_000); await flush();
     assert.equal(posts.find(p => p.body.event === 'retry')?.body.reason, 'no-progress');
     assert.deepEqual(posts.filter(p => p.body.event === 'source').map(p => p.body.attempt), [0, 1]);
