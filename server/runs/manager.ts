@@ -352,11 +352,11 @@ export class RunManager extends EventEmitter {
   private readonly toolNotices = new Map<string, string>();
   private readonly toolNoticeSending = new Set<string>();
 
-  /** Trusted worker invalidation, not a user request: never creates or resumes a provider turn. */
-  notifyToolChange(instructions: string, sessionId?: string): void {
-    if (this.stopping || this.updating) return;
+  /** An explicit owner connection targets one session; never creates or resumes a provider turn. */
+  notifyToolChange(instructions: string, sessionId: string): void {
+    if (!sessionId || this.stopping || this.updating) return;
     for (const run of this.runs.values()) {
-      if (run.status !== 'running' || run.steering || (sessionId && run.sessionId !== sessionId)) continue;
+      if (run.status !== 'running' || run.steering || run.sessionId !== sessionId) continue;
       if (this.secretNoticeEligible(run)) this.toolNotices.set(run.id, instructions);
     }
     // Coalesce changes committed in the same tick before touching the native transport.
@@ -396,7 +396,7 @@ export class RunManager extends EventEmitter {
           if (!this.toolNotices.has(id)) this.toolNotices.set(id, text);
         } else {
           // An uncertain message may already be in the turn: do not resend it or log provider text.
-          console.warn('Tower could not confirm a private secret-change notice; the next owner turn will refresh its secret list.');
+          console.warn('Tower could not confirm a private secret-connection notice; credentials remain discoverable when needed.');
         }
       }).finally(() => {
         this.toolNoticeSending.delete(id);

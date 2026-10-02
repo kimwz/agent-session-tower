@@ -42,7 +42,7 @@ test('quick dotenv detection is overridable and optional saving keeps manual tas
   assert.equal(quickSecretKind(raw, 'auto'), 'env'); assert.equal(quickSecretKind(raw, 'scalar'), 'scalar');
   assert.equal(quickSecretKind('fake-password', 'auto'), 'scalar');
   const temporary = quickSecretPayload(overview, raw, 'auto', '', 'task');
-  assert.equal(temporary.scope, 'task'); assert.equal(temporary.connect, true); assert.equal(temporary.activation, 'manual'); assert.equal(temporary.name, 'TOKEN');
+  assert.equal(temporary.notifySession, true); assert.equal(temporary.scope, 'task'); assert.equal(temporary.connect, true); assert.equal(temporary.activation, 'manual'); assert.equal(temporary.name, 'TOKEN');
   assert.equal(temporary.allProjects, undefined); assert.equal(temporary.value, raw);
   const project = quickSecretPayload(overview, raw, 'auto', 'Env bundle', 'project');
   assert.equal(project.scope, 'project'); assert.equal(project.currentProject, true); assert.equal(project.projectId, undefined);
@@ -70,7 +70,7 @@ test('joined-session requests address the source vault and pass only canonical s
 test('registration puts transient values only in the owner request, preserving scope, activation and selected operations', () => {
   const raw = 'canary-value-that-never-enters-a-draft';
   const input = registrationPayload(form, raw, `@${node}/session`);
-  assert.equal(input.value, raw); assert.equal(input.scope, 'task'); assert.equal(input.activation, 'manual'); assert.deepEqual(input.operations, ['discover', 'env']);
+  assert.equal('notifySession' in input, false); assert.equal(input.value, raw); assert.equal(input.scope, 'task'); assert.equal(input.activation, 'manual'); assert.deepEqual(input.operations, ['discover', 'env']);
   assert.equal(input.sessionId, 'session'); assert.equal(input.nodeId, node); assert.equal(input.connect, true);
   assert.equal(input.target, undefined); assert.equal(input.projectId, undefined); assert.doesNotMatch(JSON.stringify(form), new RegExp(raw));
   const auto = registrationPayload({ ...form, scope: 'project', projectId: 'project', activation: 'auto', kind: 'env', connect: false }, 'A=value\nB=', 'session');
