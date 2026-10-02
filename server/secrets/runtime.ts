@@ -13,7 +13,7 @@ import { parseSecretCli } from './cli.js';
 import { parseDotenv } from './dotenv.js';
 import { RemoteSecretBroker, type RemoteSecretRequest, type RemoteSecretResponse } from './remote.js';
 import { SecretService } from './service.js';
-import { SECRET_USE_INSTRUCTIONS } from './notices.js';
+import { SECRET_LOCKED_LIST, SECRET_LOCKED_USE, SECRET_USE_INSTRUCTIONS } from './notices.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 const fail = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
@@ -112,11 +112,14 @@ export class SecretRuntime {
   }
   async peekTarget(sessionId: string): Promise<SecretTarget | undefined> { const session = await this.session(sessionId); return this.options.service.currentTask(session.id, session.cwd); }
   async remoteTarget(sessionId: string, create = true): Promise<SecretTarget | undefined> { return create ? this.target(sessionId) : this.peekTarget(sessionId); }
-  async context(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<SecretContext> {
+  private async ownerRun(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<{ run: Run; session: Session & { cwd: string } }> {
     if (this.blocked) throw fail('보관함 잠금 해제를 완료하지 못했습니다.', 503);
     const run = this.options.runs.list().find(item => item.id === capability.runId);
     if (!run || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || run.towerTools !== 'attached') throw fail('이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.', 403);
-    const session = await this.session(run.sessionId);
+    return { run, session: await this.session(run.sessionId) };
+  }
+  async context(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<SecretContext> {
+    const { run, session } = await this.ownerRun(capability);
     let target = this.runTasks.get(run.id);
     if (!target) { target = await this.options.service.bindRun(session.id, session.cwd, run.startedAt ?? run.createdAt); this.runTasks.set(run.id, target); }
     if (target.root !== session.cwd) throw fail('실행의 프로젝트 경로가 변경되었습니다.', 403);
@@ -130,6 +133,7 @@ export class SecretRuntime {
     const input = schemas[name as keyof typeof schemas];
     if (!input) throw fail('알 수 없는 시크릿 도구입니다.', 404);
     if (!input.safeParse(args).success) throw fail('시크릿 도구 입력이 올바르지 않습니다.');
+    if (this.options.service.status().locked) return this.lockedTool(capability, name, args);
     const context = await this.context(capability);
     if (name === 'secrets_list') return { secrets: await this.broker.list(context), unavailableSources: this.broker.unavailableSources(context), usage: descriptions.secrets_cli };
     if (name === 'secrets_run') return this.broker.run(context, runInput.parse(args));
@@ -147,6 +151,16 @@ export class SecretRuntime {
     if (cli.kind === 'run') return this.broker.run(context, { ...cli.input, ...(parsed.operationId ? { operationId: parsed.operationId } : {}) });
     if (cli.kind === 'compare') return this.broker.compare(context, cli.left, cli.right);
     return this.broker.fingerprint(context, cli.reference, cli.domain);
+  }
+  /** Names stay listable while locked; using one asks the agent to get the owner's unlock. */
+  private async lockedTool(capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>): Promise<unknown> {
+    const { run, session } = await this.ownerRun(capability);
+    const listing = name === 'secrets_list' || (name === 'secrets_cli' && parseSecretCli(schemas.secrets_cli.parse(args).argv).kind === 'list');
+    if (!listing) throw fail(SECRET_LOCKED_USE, 423);
+    if (!this.options.service.status().initialized) return { secrets: [], unavailableSources: [], usage: descriptions.secrets_cli };
+    const bound = this.runTasks.get(run.id);
+    if (bound && bound.root !== session.cwd) throw fail('실행의 프로젝트 경로가 변경되었습니다.', 403);
+    return { locked: true, notice: SECRET_LOCKED_LIST, secrets: this.options.service.lockedList(session.id, session.cwd, run.startedAt ?? run.createdAt, bound), unavailableSources: [], usage: descriptions.secrets_cli };
   }
   async endSession(sessionId: string): Promise<void> {
     const id = this.options.runs.getSession(sessionId)?.id;

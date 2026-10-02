@@ -67,7 +67,7 @@ npm start
 
 대화의 시크릿 화면에서 **현재 작업에 연결**합니다. 이 보안 작업은 턴 종료·대화 요약·웹 재접속으로 끝나지 않습니다. 직접 **작업 종료**를 누르거나 세션을 아카이브하거나 기한이 만료되면 이후 사용 권한을 회수합니다. 이미 프로그램에 전달한 평문은 회수할 수 없습니다. 이전 실행에 연결된 작업이 종료되어도 그 실행이 새 작업으로 옮겨 붙지 않습니다.
 
-에이전트는 Tower의 `secrets_list`, `secrets_run`, `secrets_compare`, `secrets_fingerprint`, `secrets_cli` 도구를 사용합니다. 목록에는 이름·참조만 있고 값은 없습니다. 프로그램에는 환경변수·stdin·비공개 파일로 전달하며, stdout/stderr는 마스킹한 뒤 에이전트에 반환합니다. dotenv 묶음은 허용한 field만 환경변수로 사용할 수 있지만, 전체 파일 전달에는 모든 field 권한이 필요합니다. 내부 비교와 domain별 HMAC 지문도 각각의 동작 권한이 있어야 합니다.
+에이전트는 Tower의 `secrets_list`, `secrets_run`, `secrets_compare`, `secrets_fingerprint`, `secrets_cli` 도구를 사용합니다. 목록에는 이름·참조만 있고 값은 없으며, 보관함이 잠겨 있어도 볼 수 있습니다. 잠긴 상태에서 시크릿을 쓰려 하면 에이전트가 소유자에게 잠금 해제를 요청합니다. 프로그램에는 환경변수·stdin·비공개 파일로 전달하며, stdout/stderr는 마스킹한 뒤 에이전트에 반환합니다. dotenv 묶음은 허용한 field만 환경변수로 사용할 수 있지만, 전체 파일 전달에는 모든 field 권한이 필요합니다. 내부 비교와 domain별 HMAC 지문도 각각의 동작 권한이 있어야 합니다.
 
 직접 `agent-session-tower secrets` CLI를 실행하려면 현재 실행에 발급된 `TOWER_SECRET_CAPABILITY`와 `TOWER_SECRET_STATE_DIR`가 필요합니다. 일반 셸이나 입력한 세션·프로젝트 ID로 권한을 만들지 않습니다. `run`과 `pipe`에는 `--operation-id ID`가 필수이며 같은 요청을 재시도할 때도 같은 ID를 유지합니다. 실행 여부가 불확실하다는 응답을 받으면 새 ID로 자동 재실행하지 마세요. 값을 출력하는 `read`·`export` 명령은 없습니다. [CLI 예시와 보호 범위](docs/development.md#encrypted-secrets)를 참고하세요.
 
