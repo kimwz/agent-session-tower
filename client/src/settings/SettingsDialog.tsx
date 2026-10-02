@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { ArchiveRestore, Bell, BrainCircuit, ChevronRight, Cpu, Network, ShieldCheck, SlidersHorizontal, Sparkles, UserRoundCog, X, Zap, type LucideIcon } from 'lucide-react';
+import { ArchiveRestore, Bell, KeyRound, BrainCircuit, ChevronRight, Cpu, Network, ShieldCheck, SlidersHorizontal, Sparkles, UserRoundCog, X, Zap, type LucideIcon } from 'lucide-react';
 import type { ProviderHealth } from '../../../shared/types';
 import type { TriggerOverview } from '../../../shared/triggers';
 import { useI18n } from '../i18n/i18n';
@@ -17,6 +17,7 @@ import { NotificationPanel } from '../notifications/NotificationPanel';
 import { AccountSection } from '../auth/AccountPanel';
 import { GeneralSettings } from './GeneralSettings';
 import { BackupPanel } from '../backup/BackupPanel';
+import { SecretsPanel } from '../secrets/SecretsPanel';
 import { ModelsPanel } from '../models/ModelsPanel';
 import { SettingsFrameContext, type SettingsFrame, type SettingsGuard } from './SettingsPane';
 import { markText, sectionMark, type SettingsAttention, type SettingsSection } from './settings-sections';
@@ -38,17 +39,17 @@ export interface SettingsContext {
 
 export interface SettingsPlace { section: SettingsSection; cwd?: string; remoteTab?: RemoteTab; list?: boolean }
 
-const ICONS: Record<SettingsSection, LucideIcon> = { general: SlidersHorizontal, models: Cpu, triggers: Zap, skills: Sparkles, permissions: ShieldCheck, decisions: BrainCircuit, remote: Network, notifications: Bell, backup: ArchiveRestore, account: UserRoundCog };
+const ICONS: Record<SettingsSection, LucideIcon> = { general: SlidersHorizontal, models: Cpu, triggers: Zap, skills: Sparkles, permissions: ShieldCheck, decisions: BrainCircuit, remote: Network, notifications: Bell, backup: ArchiveRestore, secrets: KeyRound, account: UserRoundCog };
 const GROUPS: { caption?: string; sections: SettingsSection[] }[] = [
   { sections: ['general', 'models'] },
   { caption: '자동화', sections: ['triggers', 'skills', 'permissions', 'decisions'] },
   { caption: '연결', sections: ['remote', 'notifications'] },
-  { caption: '데이터', sections: ['backup'] },
+  { caption: '데이터', sections: ['secrets', 'backup'] },
   { sections: ['account'] },
 ];
 
 export function sectionLabel(section: SettingsSection, t: (key: string) => string): string {
-  const labels: Record<SettingsSection, string> = { general: '일반', models: '모델', triggers: '트리거', skills: '스킬', permissions: '권한', decisions: '빠른 판단', remote: '원격 컴퓨터', notifications: '알림', backup: '백업', account: '계정' };
+  const labels: Record<SettingsSection, string> = { general: '일반', models: '모델', triggers: '트리거', skills: '스킬', permissions: '권한', decisions: '빠른 판단', remote: '원격 컴퓨터', notifications: '알림', backup: '백업', secrets: '시크릿', account: '계정' };
   return t(labels[section]);
 }
 
@@ -114,6 +115,7 @@ export function SettingsDialog({ place, sections, attention, context, onPlace, o
       case 'decisions': return <DecisionPanel token={context.token} />;
       case 'remote': return <RemotePanel token={context.token} projects={context.projects} controlledBy={context.controlledBy} initialTab={place.remoteTab} />;
       case 'notifications': return <NotificationPanel token={context.token} />;
+      case 'secrets': return <SecretsPanel token={context.token} />;
       case 'backup': return <BackupPanel token={context.token} />;
       case 'account': return <AccountSection />;
     }

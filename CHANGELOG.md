@@ -4,6 +4,16 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.101.0] - 2026-10-02
+
+### Added
+- **Password-encrypted secrets for agent tasks.** Settings → Secrets and the conversation's key button register individual values, dotenv bundles, and files for global, project, or current-task storage. Sharing rules select a computer, project, keys, dotenv fields, and allowed operations. Automatic project connections are discoverable on every eligible owner turn; manual connections last for the security task until revoked, expired, or explicitly ended.
+- **Use secrets by reference.** Run-scoped agent tools and the `agent-session-tower secrets` CLI deliver permitted values through environment variables, stdin, or private temporary files; compare values and return scoped HMAC fingerprints without printing them. Consumer output is masked before returning to the agent, and a stable operation ID prevents uncertain requests from executing again.
+- **Share with sessions on joined computers.** Separately approved secret-device fingerprints, exact project bindings, signed requests, and encrypted responses allow remote use without copying the source vault. Both source and recipient enforce task closure and revocation; unavailable or locked sources deny new use.
+- **Encrypted migration and backup.** Initializing the vault migrates existing trigger secrets while preserving their IDs and grants. Backups include permanent encrypted secrets and exclude current-task values. Restoring waits for explicit password-protected import before applying dependent triggers.
+
+The vault starts locked with a new execution worker. Encryption protects stored data; programs given secrets and code running as the same OS user remain trusted consumers.
+
 ## [1.100.2] - 2026-10-02
 
 ### Fixed

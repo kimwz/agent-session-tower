@@ -1,3 +1,4 @@
+import { collectEncryptedVault } from './secrets.js';
 import { parseModelSettings } from '../../shared/models.js';
 import { join } from 'node:path';
 import type { BackupPart } from '../../shared/backup.js';
@@ -48,6 +49,7 @@ export interface WorkerRestore {
   /** Parts a worker already applied (files and triggers), so a later worker only does what is left. */
   done?: { parts: BackupPart[]; errors: string[] };
   files: Partial<Record<WorkerFile, unknown>>;
+  encryptedVault?: string;
   triggers?: TriggerBackup;
   skills?: SkillBackup;
 }
@@ -82,7 +84,9 @@ function settingsOf(name: WorkerFile, value: unknown): unknown {
 /** Reads the worker's settings from its files as they are saved now. */
 export async function collectWorkerFiles(stateDir: string): Promise<WorkerRestore['files']> {
   const files: WorkerRestore['files'] = {};
+  const encryptedVault = await collectEncryptedVault(stateDir);
   for (const name of Object.keys(WORKER_FILES) as WorkerFile[]) {
+    if (encryptedVault && name === 'trigger-secrets.json') continue;
     const kept = settingsOf(name, await readOptional(join(stateDir, name)));
     if (kept !== undefined) files[name] = kept;
   }
@@ -129,6 +133,7 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
   }
   for (const name of Object.keys(WORKER_FILES) as WorkerFile[]) {
     const incoming = files[name];
+    if (name === 'trigger-secrets.json' && incoming !== undefined && await collectEncryptedVault(stateDir)) { errors.push('trigger-secrets.json: Vault가 초기화되어 평문 시크릿 복원은 거부했습니다. 암호화 가져오기를 사용하세요.'); continue; }
     if (incoming === undefined || (slackBlocked && (name === 'slack-connection.json' || name === 'slack-tone.json'))) continue;
     try {
       const existing = await current(name);
@@ -206,6 +211,7 @@ async function signOutChangedVisitors(stateDir: string, current: { id: string; s
 /** Which parts a payload holds, in the order the page lists them. */
 export function payloadParts(payload: BackupPayload): BackupPart[] {
   const parts = new Set<BackupPart>();
+  if (payload.worker.encryptedVault) parts.add('secretVault');
   if (payload.worker.triggers) parts.add('triggers');
   for (const name of Object.keys(payload.worker.files) as WorkerFile[]) parts.add(WORKER_FILES[name]);
   if (payload.worker.skills) parts.add('skills');
@@ -216,20 +222,22 @@ export function payloadParts(payload: BackupPayload): BackupPart[] {
   if (payload.web.backup !== undefined) parts.add('backup');
   return ORDER.filter(part => parts.has(part));
 }
-const ORDER: BackupPart[] = ['triggers', 'triggerSecrets', 'permissions', 'models', 'slack', 'github', 'publicAgents', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'master', 'backup'];
+const ORDER: BackupPart[] = ['triggers', 'triggerSecrets', 'secretVault', 'permissions', 'models', 'slack', 'github', 'publicAgents', 'skills', 'decisions', 'projectGroups', 'remoteExclusions', 'master', 'backup'];
 
 /** A decrypted payload, checked for its shape; the parts themselves are checked when each is restored. */
 export function parsePayload(value: unknown): BackupPayload {
   if (!record(value) || value.version !== 1 || !record(value.worker) || !record(value.web) || !record(value.worker.files)) throw new Error('백업의 내용이 올바르지 않습니다.');
   const files: WorkerRestore['files'] = {};
   for (const name of Object.keys(WORKER_FILES) as WorkerFile[]) if (value.worker.files[name] !== undefined) files[name] = value.worker.files[name];
+  const encryptedVault = value.worker.encryptedVault;
+  if (encryptedVault !== undefined && (typeof encryptedVault !== 'string' || encryptedVault.length > 24 * 1024 * 1024 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encryptedVault) || Buffer.from(encryptedVault, 'base64').toString('base64') !== encryptedVault)) throw new Error('백업의 암호화 Vault가 올바르지 않습니다.');
   const triggers = value.worker.triggers, skills = value.worker.skills;
   if (triggers !== undefined && !(record(triggers) && Array.isArray(triggers.triggers) && Array.isArray(triggers.trustedFolders) && record(triggers.secretGrants) && record(triggers.fired) && record(triggers.github))) throw new Error('백업의 트리거가 올바르지 않습니다.');
   if (skills !== undefined && !(record(skills) && record(skills.bundle) && Array.isArray(skills.bundle.skills) && typeof skills.guidance === 'string' && record(skills.settings))) throw new Error('백업의 스킬이 올바르지 않습니다.');
   const master = value.master;
   if (master !== undefined && !(record(master) && (master.settings === undefined || record(master.settings)) && (master.voiceKey === undefined || typeof master.voiceKey === 'string'))) throw new Error('백업의 마스터 설정이 올바르지 않습니다.');
   const web = value.web;
-  return { version: 1, ...(typeof value.machine === 'string' ? { machine: value.machine } : {}), worker: { files, ...(triggers ? { triggers: triggers as unknown as TriggerBackup } : {}), ...(skills ? { skills: skills as unknown as SkillBackup } : {}) },
+  return { version: 1, ...(typeof value.machine === 'string' ? { machine: value.machine } : {}), worker: { files, ...(encryptedVault ? { encryptedVault } : {}), ...(triggers ? { triggers: triggers as unknown as TriggerBackup } : {}), ...(skills ? { skills: skills as unknown as SkillBackup } : {}) },
     web: { ...(web.projectGroups !== undefined ? { projectGroups: web.projectGroups } : {}), ...(web.remoteExclusions !== undefined ? { remoteExclusions: web.remoteExclusions } : {}),
       ...(web.decisions !== undefined ? { decisions: web.decisions } : {}), ...(web.backup !== undefined ? { backup: web.backup } : {}) },
     ...(master ? { master: master as BackupPayload['master'] } : {}) };

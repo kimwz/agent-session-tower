@@ -251,6 +251,10 @@ export class DurableRunManager extends EventEmitter {
     return this.call('api', [operation, input, { origin: internal.origin, ...(internal.requestId ? { requestId: internal.requestId } : {}) }]);
   }
   async slackOverview(): Promise<SlackPublicStatus> { return this.call('slackOverview', []) as Promise<SlackPublicStatus>; }
+  async secretCall(operation: string, args: unknown[] = []): Promise<unknown> {
+    if (!this.supports('secrets')) throw Object.assign(new Error('실행 워커가 아직 새 버전으로 바뀌지 않았습니다. 진행 중인 작업이 끝나면 시크릿을 사용할 수 있습니다.'), { statusCode: 503 });
+    return this.call('secretCall', [operation, ...args]);
+  }
   async slackMutate(action: string, body: Record<string, unknown>): Promise<SlackPublicStatus> { return this.call('slackMutate', [action, body]) as Promise<SlackPublicStatus>; }
   /** Public agents run in the worker; an older worker has none yet. */
   private requirePublicAgents(): void {
