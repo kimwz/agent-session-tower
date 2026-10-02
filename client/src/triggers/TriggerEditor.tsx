@@ -65,7 +65,7 @@ export function TriggerEditor({ trigger, kind, token, providers, projects, sessi
         onAccount={(login, auth) => setInput(previous => previous.source.kind === 'github' && JSON.stringify(previous.source.auth) === JSON.stringify(auth) ? { ...previous, source: { ...previous.source, account: login } } : previous)} />}
     </Section>
     {polled && <Section step={2} title={t('얼마나 자주 확인할까요')} hint={source.kind === 'github' ? t('확인하지 못한 사이에 생긴 이슈도 다음 확인에서 찾습니다.') : t('잠자기나 종료로 확인을 놓쳤다면 다시 켜진 뒤 한 번만 확인합니다.')}>
-      <ScheduleFields polled token={token} schedule={source.schedule} onChange={schedule => setSource({ ...source, schedule })} />
+      <ScheduleFields polled token={token} schedule={source.schedule} onChange={schedule => { if (schedule.type !== 'once') setSource({ ...source, schedule }); }} />
     </Section>}
     <Section step={polled ? 3 : 2} title={t('무엇을 할까요')}>
       {source.kind === 'github' && !machine.node && <Choice label={t('처리 방식')} value={coordinator ? 'coordinator' : 'task'} onChange={setMode}
@@ -88,9 +88,11 @@ function ScheduleFields({ token, schedule, onChange, polled = false }: { token: 
     catch (cause) { setPreview(cause instanceof Error ? cause.message : String(cause)); }
   };
   return <>
-    <Choice label={t('방식')} value={schedule.type} onChange={type => { setPreview(''); onChange(type === 'interval' ? { type: 'interval', everySeconds: polled ? 300 : 3600 } : { type: 'cron', expression: polled ? '*/15 9-18 * * 1-5' : '0 9 * * 1-5', timezone: browserZone() }); }}
-      options={polled ? [['interval', t('일정 간격')], ['cron', t('정한 시각 (크론)')]] : [['cron', t('정한 시각 (크론)')], ['interval', t('일정 간격')]]} />
-    {schedule.type === 'cron' ? <div className="trigger-grid">
+    <Choice label={t('방식')} value={schedule.type} onChange={type => { setPreview(''); onChange(type === 'once' ? { type: 'once', at: new Date(Date.now() + 3600000).toISOString() } : type === 'interval' ? { type: 'interval', everySeconds: polled ? 300 : 3600 } : { type: 'cron', expression: polled ? '*/15 9-18 * * 1-5' : '0 9 * * 1-5', timezone: browserZone() }); }}
+      options={polled ? [['interval', t('일정 간격')], ['cron', t('정한 시각 (크론)')]] : [['once', t('한 번만')], ['cron', t('정한 시각 (크론)')], ['interval', t('일정 간격')]]} />
+    {schedule.type === 'once' ? <label>{t('예약 시각')}<input type="datetime-local" required value={schedule.at ? new Date(Date.parse(schedule.at) - new Date(schedule.at).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''}
+      onChange={event => { setPreview(''); onChange({ type: 'once', at: event.target.value ? new Date(event.target.value).toISOString() : '' }); }} />
+      <small>{t('이 브라우저의 시간대: {0}', { 0: browserZone() })}</small><small>{t('예약은 한 번 소비되고 보관됩니다. 실패해도 자동으로 다시 예약하지 않습니다.')}</small></label> : schedule.type === 'cron' ? <div className="trigger-grid">
       <label>{t('크론 표현식')}<input required value={schedule.expression} onChange={event => { setPreview(''); onChange({ ...schedule, expression: event.target.value }); }} /><small>{t('분 시 일 월 요일 (예: 0 9 * * 1-5 = 평일 9시)')}</small></label>
       <label>{t('시간대')}<input required value={schedule.timezone} onChange={event => { setPreview(''); onChange({ ...schedule, timezone: event.target.value }); }} /></label>
     </div> : <label className="trigger-inline">{t('간격')}<span><input type="number" required min={1} max={44640} value={Math.round(schedule.everySeconds / 60)} onChange={event => { setPreview(''); onChange({ type: 'interval', everySeconds: Math.max(1, Number(event.target.value) || 1) * 60 }); }} />{t('분마다')}</span></label>}
@@ -363,7 +365,7 @@ function AdvancedSettings({ input, onChange }: { input: TriggerInput; onChange: 
       <label>{t('시간당 최대 실행')}<input type="number" min={1} max={60} value={input.policy.maxEventsPerHour} onChange={event => onChange({ ...input, policy: { ...input.policy, maxEventsPerHour: Math.min(60, Math.max(1, Number(event.target.value) || 1)) } })} />
         <small>{issues ? t('넘으면 다음 시간까지 기다립니다.') : t('넘으면 자동으로 일시 정지합니다.')}</small></label>
       {source.kind === 'schedule' && <label className="wide">{t('놓친 실행')}<select value={source.catchUp} onChange={event => onChange({ ...input, source: { ...source, catchUp: event.target.value as 'latest' | 'skip' } })}>
-        <option value="latest">{t('하루 안에 놓친 가장 최근 시간을 한 번 실행')}</option><option value="skip">{t('건너뛰기')}</option></select>
+        <option value="latest">{source.schedule.type === 'once' ? t('늦어도 예약을 한 번 실행') : t('하루 안에 놓친 가장 최근 시간을 한 번 실행')}</option><option value="skip">{t('건너뛰기')}</option></select>
         <small>{t('컴퓨터가 잠자기 상태였거나 Tower가 꺼져 있던 동안의 실행')}</small></label>}
       {source.kind === 'http' && <label>{t('제한 시간 (초)')}<input type="number" min={1} max={45} value={source.request.timeoutSeconds} onChange={event => onChange({ ...input, source: { ...source, request: { ...source.request, timeoutSeconds: Math.min(45, Math.max(1, Number(event.target.value) || 1)) } } })} /></label>}
       {/* Keyed by the kind of watch, so what the fields show always matches what is saved. */}

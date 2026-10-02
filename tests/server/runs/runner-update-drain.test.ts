@@ -16,7 +16,7 @@ const nativeId = '10000000-0000-4000-8000-000000000001';
 const owner = { kind: 'owner' as const };
 
 /** One Claude conversation with a turn running in a fake provider. */
-async function fixture() {
+async function fixture(origin: Run['origin'] = owner) {
   const directory = await mkdtemp(join(tmpdir(), 'tower-update-drain-'));
   const session: Session = { id: `claude:${nativeId}`, nativeId, provider: 'claude', title: 'Fixture', cwd: directory,
     project: 'fixture', status: 'completed', statusReason: 'Done', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
@@ -38,7 +38,7 @@ async function fixture() {
     refreshSessions: async () => {}, findExecutable: async () => '/fixture/claude', pollMs: 10,
     spawnProcess: () => { launches++; if (launches > 1) throw new Error('fixture: one provider process only'); return child; } });
   await manager.start();
-  const first = await manager.enqueue(session.id, 'original work', {}, { origin: owner });
+  const first = await manager.enqueue(session.id, 'original work', {}, { origin });
   await until(() => received.some(frame => frame.type === 'user' && !frame.uuid));
   const run = (id: string) => manager.list().find(item => item.id === id);
   const continuation = () => manager.list().find(item => item.scheduled?.resume === 'update');
@@ -361,4 +361,20 @@ test('a second forced update after a give-up sends its own stop, and a confirmed
   finish({ status: 'cancelled' });
   await until(() => f.run(f.first.id)?.status === 'cancelled');
   assert.equal(f.continuation()?.scheduled?.afterRunId, f.first.id);
+});
+
+
+test('an update continuation retains the trigger event identity used by launch admission', async t => {
+  const origin = { kind: 'trigger' as const, triggerId: 'once-reservation', eventId: 'consumed-event' };
+  const f = await fixture(origin); t.after(f.cleanup);
+  f.manager.beginUpdateDrain(Date.now() + 60_000, () => false);
+  f.manager.driveUpdateDrain();
+  await until(() => f.received.some(frame => frame.uuid && /about to restart/.test(JSON.stringify(frame))));
+  const wrapUp = f.received.find(frame => frame.uuid && /about to restart/.test(JSON.stringify(frame)))!;
+  f.emit({ ...wrapUp, isReplay: true });
+  await until(() => f.run(wrapUp.uuid)?.steering?.state === 'delivered');
+  f.emit({ type: 'result', session_id: nativeId, is_error: false });
+  await until(() => f.continuation());
+  assert.deepEqual(f.continuation()!.origin, origin);
+  assert.equal(f.continuation()!.scheduled!.afterRunId, f.first.id);
 });

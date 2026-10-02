@@ -1,5 +1,20 @@
 /** Korean source messages and their English equivalents. Native session content is never translated. */
 export const english: Record<string, string> = {
+  "한 번만": "Once only",
+  "예약 시각": "Reservation time",
+  "이 브라우저의 시간대: {0}": "This browser’s time zone: {0}",
+  "늦어도 예약을 한 번 실행": "Run the reservation once even if late",
+  "예약은 한 번 소비되고 보관됩니다. 실패해도 자동으로 다시 예약하지 않습니다.": "The reservation is consumed once and archived. Failure does not schedule another attempt.",
+  "보관": "Archived",
+  "보관 해제": "Unarchive",
+  "예약 소비": "Reservation consumed",
+  "대기 실행 취소": "Cancel pending run",
+  "보관 해제 (꺼진 상태)": "Unarchive (turned off)",
+  "보관 (기록 유지)": "Archive (keep history)",
+  "보관된 정의와 실행 기록을 유지합니다. 실행 종료가 실제 목표 완료를 뜻하지는 않습니다.": "Archived definitions and run history are retained. A run ending does not establish that its real goal was achieved.",
+  "보관된 트리거가 없습니다.": "No archived triggers.",
+  "일회성 예약 기록 {0}/{1} · 소비 기록은 삭제해도 유지됩니다.": "Once reservation records {0}/{1} · Consumption records remain after deletion.",
+
   "시크릿 붙여넣기": "Paste a secret",
   "비밀번호, API 키 또는 .env 내용을 붙여넣으세요.": "Paste a password, API key or .env contents.",
   ".env로 연결합니다": "Connect as .env",

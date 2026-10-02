@@ -235,7 +235,7 @@ export class TowerApi {
         const found = new Map([...overview.triggers.flatMap(summary => summary.lastEvent ? [summary.lastEvent.id] : []), ...overview.recent.map(event => event.id), ...(overview.updated ?? []).map(event => event.id)]
           .map(id => [id, find(id)]));
         const view = await this.view(held, pathsOf([...found.values()]));
-        return { triggers: held.kept.triggers.filter(item => view.handler(item.handler)).map(item => view.trigger(item)), overview: view.overview(overview, id => found.get(id)) };
+        return { triggers: held.kept.triggers.filter(item => (value.includeArchived || !item.archivedAt) && view.handler(item.handler)).map(item => view.trigger(item)), overview: view.overview(overview, id => found.get(id)) };
       }
       case 'triggers.get': {
         const found = triggers.get(value.id);
@@ -277,7 +277,7 @@ export class TowerApi {
         const view = await this.view(held);
         return { secrets: secrets.map(secret => view.secret(secret)) };
       }
-      case 'triggers.create': case 'triggers.update': case 'triggers.setEnabled': case 'triggers.restore': case 'triggers.revert': {
+      case 'triggers.create': case 'triggers.update': case 'triggers.setEnabled': case 'triggers.setArchived': case 'triggers.restore': case 'triggers.revert': {
         const view = await this.view(held);
         const shown = trigger(view, (answer as { trigger?: { id?: string } }).trigger?.id);
         return shown ? { trigger: shown } : SUCCEEDED;
@@ -358,7 +358,7 @@ export class TowerApi {
         if (!job) throw failure('Auto Prompt request not found.', 404);
         return { job };
       }
-      case 'triggers.list': return { triggers: triggers.list(), overview: triggers.overview() };
+      case 'triggers.list': return { triggers: triggers.list(value), overview: triggers.overview() };
       case 'triggers.get': return triggers.get(value.id);
       case 'triggers.events': return { events: triggers.events(value) };
       case 'triggers.event': return { event: triggers.event(value.id) };
@@ -368,6 +368,7 @@ export class TowerApi {
       case 'triggers.create': return { trigger: await triggers.create(value.trigger, actor, scope) };
       case 'triggers.update': return { trigger: await triggers.update(value.id, value.trigger, value.expectedRevision, actor, scope) };
       case 'triggers.setEnabled': return { trigger: await triggers.setEnabled(value.id, value.enabled, value.expectedRevision, actor, scope) };
+      case 'triggers.setArchived': return { trigger: await triggers.setArchived(value.id, value.archived, value.expectedRevision, actor, scope) };
       case 'triggers.delete': { const removed = await triggers.remove(value.id, value.expectedRevision, actor, scope); return { deleted: true, trigger: { id: removed.id, name: removed.name } }; }
       case 'triggers.restore': return { trigger: await triggers.restore(value.id, actor, scope) };
       case 'triggers.revert': return { trigger: await triggers.revert(value.id, value.revision, value.expectedRevision, actor, scope) };

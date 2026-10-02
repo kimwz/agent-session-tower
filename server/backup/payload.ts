@@ -11,6 +11,7 @@ import { parsePublicAgents } from '../public-agents/service.js';
 
 /** Trigger settings as a backup keeps them; the trigger service merges them with what it holds (`TriggerService.start`). */
 export interface TriggerBackup {
+  onceConsumed?: Record<string, import('../../shared/triggers.js').OnceConsumption>;
   triggers: unknown[];
   settings: unknown;
   trustedFolders: string[];
@@ -100,6 +101,7 @@ export async function collectTriggers(stateDir: string): Promise<TriggerBackup |
   const github: Record<string, GitHubCursor> = {};
   if (record(saved.cursors)) for (const [id, cursor] of Object.entries(saved.cursors)) if (record(cursor) && record(cursor.github)) github[id] = cursor.github as GitHubCursor;
   return {
+    onceConsumed: record(saved.onceConsumed) ? saved.onceConsumed as TriggerBackup['onceConsumed'] : {},
     triggers: Array.isArray(saved.triggers) ? saved.triggers : [],
     settings: saved.settings ?? {},
     trustedFolders: Array.isArray(saved.trustedFolders) ? saved.trustedFolders.filter((item): item is string => typeof item === 'string') : [],

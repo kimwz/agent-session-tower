@@ -8,7 +8,7 @@ export const CATCH_UP_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /** Five-field cron or the common @-shortcuts, never seconds: the finest schedule is once a minute. */
 export function validateSchedule(schedule: Schedule): void {
-  if (schedule.type === 'interval') return;
+  if (schedule.type === 'interval' || schedule.type === 'once') return;
   const fields = schedule.expression.trim().split(/\s+/);
   if (!(fields.length === 5 || (fields.length === 1 && /^@(yearly|annually|monthly|weekly|daily|hourly)$/.test(fields[0])))) {
     throw invalid('Use a five-field cron expression (minute hour day month weekday) or @hourly, @daily, @weekly, @monthly.');
@@ -29,6 +29,7 @@ function cron(schedule: Extract<Schedule, { type: 'cron' }>): Cron {
  * time that happens twice runs once.
  */
 export function nextSlot(schedule: Schedule, after: number, anchor: number): number | undefined {
+  if (schedule.type === 'once') return Date.parse(schedule.at) > after ? Date.parse(schedule.at) : undefined;
   if (schedule.type === 'interval') {
     const every = schedule.everySeconds * 1000;
     return anchor + (Math.floor(Math.max(0, after - anchor) / every) + 1) * every;

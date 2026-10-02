@@ -702,3 +702,17 @@ test('a queued master request keeps its admission snapshot through settings chan
     assert.equal(f.dispatches.length, 1);
   } finally { await restored.close(); }
 });
+
+
+test('Auto Prompt keeps a consumed trigger event identity through both routing decisions', async t => {
+  const f = await fixture(t);
+  const origin = { kind: 'trigger' as const, triggerId: 'once-reservation', eventId: 'consumed-event' };
+  for (const decision of [resume(f.session.id), create()]) {
+    f.respond(async () => decision);
+    const accepted = await f.manager.submit(request(f.cwd), { origin });
+    const job = await f.finished(accepted.id);
+    assert.equal(job.status, 'completed');
+    assert.deepEqual(job.origin, origin);
+    assert.deepEqual(f.dispatches.at(-1)!.internal!.origin, origin);
+  }
+});

@@ -354,3 +354,17 @@ test('a controlling computer reads and changes this computer\'s model settings, 
   assert.equal((await f.call<{ model: string }>('models.get', { role: 'review.codex' }, { kind: 'agent', via: 'mcp', controllerId: CONTROLLER })).model, 'gpt-6.1-sol');
   await assert.rejects(f.call('models.update', { settings: { ...settings, custom: [{ id: 'bad' }] } }, owner), { statusCode: 400 });
 });
+
+test('archived definitions and archive changes keep the remote resource scope, while disabled recurring triggers remain visible', async t => {
+  const f = await fixture(t);
+  const visible = (await f.call<{ trigger: { id: string; revision: number } }>('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.open }, 'Visible repeating once-name') }, owner)).trigger;
+  const hidden = (await f.call<{ trigger: { id: string; revision: number } }>('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.secret }, 'Hidden') }, owner)).trigger;
+  const off = (await f.call<{ trigger: { id: string; revision: number } }>('triggers.setEnabled', { id: visible.id, expectedRevision: visible.revision, enabled: false }, owner)).trigger;
+  assert.ok((await f.call<{ triggers: Array<{ id: string }> }>('triggers.list', {})).triggers.some(item => item.id === visible.id));
+  await assert.rejects(f.call('triggers.setArchived', { id: hidden.id, expectedRevision: hidden.revision, archived: true }), { statusCode: 404 });
+  const archived = (await f.call<{ trigger: { id: string; revision: number } }>('triggers.setArchived', { id: off.id, expectedRevision: off.revision, archived: true })).trigger;
+  assert.equal((await f.call<{ triggers: Array<{ id: string }> }>('triggers.list', {})).triggers.length, 0);
+  assert.deepEqual((await f.call<{ triggers: Array<{ id: string }> }>('triggers.list', { includeArchived: true })).triggers.map(item => item.id), [visible.id]);
+  await assert.rejects(f.call('triggers.get', { id: hidden.id }), { statusCode: 404 });
+  assert.equal((await f.call<any>('triggers.setArchived', { id: archived.id, expectedRevision: archived.revision, archived: false })).trigger.enabled, false);
+});

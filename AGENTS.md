@@ -1,8 +1,8 @@
 # Verification
 
 - Keep test conversations out of the user's native session history. A temporary working directory alone does not isolate Codex or Claude Code sessions.
-- Before running a live native check, use a dedicated provider configuration home outside every home scanned by the regular Tower instance. Fail before spawning the provider if isolation is not configured or session storage points into a personal home. Do not copy personal credentials into test homes.
-- Prefer fixture-based checks. For live checks, verify that child agents use isolated storage too; do not assume an ephemeral parent guarantees this.
+- Reviews, helper agents and live native checks use the existing Claude/Codex CLI login on this computer by default. Do not require a separately authenticated profile, a new login or Vault access, and do not inspect or copy authentication values. Separate temporary cwd, fixture data and Tower state from authentication. Use supported nonpersistent execution options when possible.
+- Prefer fixture-based checks. Use read-only reviews and disable unnecessary tools, MCP servers and child agents. Verify child record handling independently; do not assume an ephemeral parent makes children nonpersistent. A native check that must persist tracks its exact test session IDs for the close-session procedure below.
 - If an earlier check leaked a session, hide only the proven test session IDs using Tower's existing close-session API. Preserve native records and unrelated sessions. Do not add broad filters for temporary paths.
 - See [docs/development.md](docs/development.md) for the live-check workflow.
 - When UI verification is part of authorized delivery, an already permitted isolated Playwright test browser with fixture data does not need a second approval merely because no personal browser is connected. Honor an explicitly selected browser and actual access denials; do not bypass them.
@@ -12,7 +12,7 @@
 - Tower is a monitoring and task-submission interface. Stopping or restarting its web server must not cancel agent turns, kill Claude/Codex processes, or close active terminal shells.
 - Provider transports, approvals, and Auto Prompt routing belong to the independent execution worker; terminal shells belong to the separate terminal host. Web shutdown only disconnects its client; a new web process reattaches to the same worker, and a worker from an older build hands off to the new one only when nothing is running.
 - Send cancellation or termination only for an explicit user stop/close action. Never infer cancellation from lost UI connections.
-- Verify lifecycle changes with isolated fake-provider processes, including web-process termination and reconnect. Do not create native test conversations in personal homes.
+- Verify lifecycle changes with isolated fake-provider processes, including web-process termination and reconnect. Prefer nonpersistent native checks; track and close only proven test session IDs if a persistent check is necessary.
 
 # Release and deployment
 
