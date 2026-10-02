@@ -723,3 +723,16 @@ test('a full consumption ledger admits restoration of its own consumed ID and ke
   assert.equal(service.events({ triggerId: repeat.id })[0].status, 'running');
   assert.equal(service.overview().onceReservations!.used, 2000);
 });
+
+test('retained archived definitions cannot exhaust admission for existing recurring execution', async t => {
+  const f = await fixture(t); let service = await f.open();
+  const repeat = await service.create(hourly(f.project), OWNER);
+  service.close(); await service.settle();
+  const path = join(f.directory, 'trigger-engine.json'); const state = JSON.parse(await readFile(path, 'utf8'));
+  for (let i = 1; i < 200; i++) state.triggers.push({ ...state.triggers[0], id: randomUUID(), name: `Archived ${i}`, enabled: false, archivedAt: new Date(f.clock.now).toISOString() });
+  await writeFile(path, JSON.stringify(state)); service = await f.open();
+  assert.equal(service.list().length, 1); assert.equal(service.list({ includeArchived: true }).length, 200);
+  await assert.rejects(service.create(hourly(f.project), OWNER), /definitions can be retained/);
+  const event = await service.run(repeat.id, OWNER); await service.tick();
+  assert.equal(service.event(event.id).status, 'running');
+});
