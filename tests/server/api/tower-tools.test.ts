@@ -15,23 +15,24 @@ import type { AutoPromptJob, Run, Session } from '../../../shared/types.js';
 const session = (id: string): Session => ({ id, nativeId: id.split(':')[1], provider: 'codex', title: 'Mine', cwd: '/project', project: 'project', status: 'idle', statusReason: '',
   createdAt: '', updatedAt: '', lastMessage: '', messageCount: 1, isSubagent: false, resumable: true });
 
-async function fixture(t: TestContext, preparing?: (internal: { validate?: () => void }) => Promise<void>) {
+async function fixture(t: TestContext, preparing?: (internal: { validate?: () => void }) => Promise<void>, withSessions = false) {
   const stateDir = await mkdtemp(join(tmpdir(), 'tower-tools-'));
   const project = join(stateDir, 'project');
   await mkdir(project);
   const runs: Run[] = [];
+  const sessions: Session[] = [];
   const submitted: unknown[] = [];
   const triggers = new TriggerService({ stateDir, tickMs: 60_000, executor: { submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
     create: async () => { throw new Error('unused'); }, enqueue: async () => { throw new Error('unused'); }, runs: () => runs, session: () => undefined } });
   await triggers.start();
-  const api = new TowerApi({ stateDir, triggers, runs: { list: () => runs },
+  const api = new TowerApi({ stateDir, triggers, runs: { list: () => runs }, ...(withSessions ? { sessions: { list: () => sessions, read: async () => undefined } } : {}),
     autoPrompts: { submit: async (request, internal) => { await preparing?.(internal); submitted.push({ request, internal }); return { id: request.requestId, provider: request.provider, prompt: request.prompt, routerModel: 'r', status: 'queued', createdAt: '', updatedAt: '' } as AutoPromptJob; }, get: () => undefined } });
   const capabilities = new CapabilityRegistry();
   const context: McpContext = { api, capabilities, run: runId => runs.find(run => run.id === runId) };
   t.after(async () => { triggers.close(); await rm(stateDir, { recursive: true, force: true }); });
   const ownerTurn = (sessionId: string, towerTools: Run['towerTools'] = 'attached') => { const run: Run = { id: randomUUID(), sessionId, prompt: '', status: 'running', createdAt: '', output: '', origin: { kind: 'owner' }, towerTools }; runs.push(run); return run; };
   const token = (run: Run) => capabilities.issue({ kind: 'owner-run', runId: run.id, sessionId: run.sessionId });
-  return { stateDir, project, runs, submitted, triggers, api, capabilities, context, ownerTurn, token };
+  return { stateDir, project, runs, sessions, submitted, triggers, api, capabilities, context, ownerTurn, token };
 }
 const schedule = (project: string) => ({ name: 'Morning digest', source: { kind: 'schedule', schedule: { type: 'cron', expression: '0 8 * * *', timezone: 'Asia/Seoul' } },
   handler: { kind: 'task', instructions: 'Summarize new issues', provider: 'codex', target: { mode: 'folder', cwd: project } } });
@@ -314,4 +315,19 @@ test('MCP rechecks parent authority after async preparation and before new job a
       assert.equal(f.submitted.length, 0, 'no new durable job was admitted');
     });
   }
+});
+
+
+test('a master run-scoped MCP Auto Prompt gets its role in code without changing agent authority', async t => {
+  const f = await fixture(t, undefined, true);
+  const master = { ...session('codex:master'), cwd: join(f.stateDir, 'master-session') };
+  f.sessions.push(master);
+  const run = f.ownerTurn(master.id);
+  const input = { requestId: randomUUID(), prompt: 'delegate without model instructions', cwd: f.project };
+  await handleMcpRequest(f.context, f.token(run), { method: 'tools/call', name: 'autoPrompt_submit', arguments: input });
+  const saved = f.submitted[0] as { request: { modelRole?: string; provider?: string }; internal: { origin: { kind: string } } };
+  assert.equal(saved.request.modelRole, 'master.worker'); assert.equal(saved.request.provider, undefined);
+  assert.equal(saved.internal.origin.kind, 'agent');
+  const regular = f.ownerTurn('codex:ordinary');
+  await assert.rejects(handleMcpRequest(f.context, f.token(regular), { method: 'tools/call', name: 'autoPrompt_submit', arguments: { ...input, requestId: randomUUID() } }), /provider/);
 });

@@ -44,6 +44,7 @@ function sourceRoutes(text: string): string[] {
   for (const [, rest] of text.matchAll(/nodeRoute\[2\] === '([^']+)'/g)) routes.add(`/api/nodes/{}/${rest}`);
   for (const [, pattern] of text.matchAll(/\/\^(\\\/api\\\/.*?)\$\//g)) {
     const route = pattern!
+      .replace('([a-z][a-zA-Z]*\\.[a-zA-Z]+)', '{}')
       .replace(/\\\//g, '/')
       .replace(/\((?:\?:)?nodes\/\[a-f0-9\]\{32\}\/\)\?/g, '')
       .replace(/\(\(\?:.*\)$/, '{}')
@@ -89,4 +90,10 @@ test('a route left out of the catalog is noticed, whether matched by literal, pa
   assert.deepEqual(await missingFrom(without(catalog, /\/api\/remote\/exclusions/)), ['/api/remote/exclusions', '/api/nodes/{}/view']);
   assert.ok((await missingFrom(without(catalog, /\/api\/skills\/pin/))).includes('/api/skills/pin'));
   assert.ok((await missingFrom(without(catalog, /\/api\/backup\/\(run/))).includes('/api/backup/run'));
+});
+
+
+test('the catalog scanner recognizes the camelCase operation matcher', () => {
+  assert.deepEqual(sourceRoutes(String.raw`const operation = path.match(/^\/api\/v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/);`), ['/api/v1/{}']);
+  assert.ok(catalogRoutes(apiCatalog()).has('/api/v1/autoPrompt.submit'));
 });

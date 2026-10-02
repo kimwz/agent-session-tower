@@ -12,14 +12,14 @@ State
 - GET /api/attachments/{id} · GET /api/chat-images/{id} — a file attached to a message, an image shown in a conversation.
 
 Sessions and work
-- POST /api/sessions {provider:"claude"|"codex", cwd, prompt, title?, model?, effort?} — start a new session with a first request.
+- POST /api/sessions {provider:"claude"|"codex", cwd, prompt, title?, model?, effort?, modelRole?:"master.worker"} — start a new session with a first request. With modelRole, provider may be omitted and missing model fields use that role; explicit fields win.
 - POST /api/sessions/{id}/messages {prompt, model?, effort?} — send a message to a session (queued if it is working).
 - POST /api/sessions/{id}/title {title} · POST /api/sessions/{id}/(close|reopen) {} · POST /api/sessions/{id}/acknowledge {} (mark a finished turn seen)
 - POST /api/runs/{runId}/cancel {} — stop a running request. Only when the owner asked to stop it.
 - POST /api/runs/{runId}/steer {} — insert a queued message into the running turn now.
 - POST /api/runs/{runId}/dismiss {} — hide a failed run.
 - POST /api/runs/{runId}/approvals/{approvalId} {decision:"allow"|"deny"} or {answers:{[question]:{answers:[...]}}} or {action:"accept"|"decline"|"cancel", content} — the approval id as the run gives it, URL-encoded.
-- POST /api/auto-prompts {requestId(uuid), provider, prompt, cwd?, sessionMode?:"new", targetSessionId?, model?, effort?} — let Tower route a task to the right project/session. GET /api/auto-prompts/{id} · POST /api/auto-prompts/{id}/cancel {}
+- POST /api/auto-prompts {requestId(uuid), provider, prompt, cwd?, sessionMode?:"new", targetSessionId?, model?, effort?, modelRole?:"master.worker"} — with modelRole, provider may be omitted; role model defaults apply only to new sessions. Let Tower route a task to the right project/session. GET /api/auto-prompts/{id} · POST /api/auto-prompts/{id}/cancel {}
 - Register an issue in a project's repository: POST /api/sessions in that folder with a short title ("이슈 등록: …") and the prompt ${JSON.stringify(issueRequest('<the issue as the owner described it>'))}; the session analyses it and files it.
 
 Folders, git, files, terminals

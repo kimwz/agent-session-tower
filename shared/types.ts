@@ -298,6 +298,8 @@ export interface CreateSessionRequest {
   attachments?: AttachmentInput[];
 }
 export interface AutoPromptRequest {
+  /** Defaults for a newly created session only; never changes authority or a resumed session's model. */
+  modelRole?: 'master.worker';
   sessionMode?: 'new';
   /** Continue this conversation in `cwd` without asking the router (the owner accepted a suggestion). */
   targetSessionId?: string;
@@ -312,6 +314,9 @@ export interface AutoPromptRequest {
   codexApprovalsReviewer?: CodexApprovalsReviewer;
   attachments?: AttachmentInput[];
 }
+/** Only a request naming a model role may omit its provider; admission resolves it before creating a job. */
+export type AutoPromptInput = Omit<AutoPromptRequest, 'provider'> & { provider?: Provider };
+export type NewSessionInput = Omit<CreateSessionRequest, 'provider'> & { provider?: Provider; modelRole?: 'master.worker' };
 export interface AutoPromptDecision {
   action: 'resume' | 'create';
   cwd: string;
@@ -319,6 +324,8 @@ export interface AutoPromptDecision {
   reason: string;
 }
 export interface AutoPromptJob {
+  /** Role defaults captured on admission, used only when routing creates a new session. */
+  newSessionModel?: { model?: string; effort?: string };
   /** Set only in a controller's page, for an item of a joined computer: that computer's id. Servers never send it. */
   node?: string;
   origin?: RunOrigin;

@@ -53,7 +53,7 @@ export function apiTarget(method: string, path: string, node?: string | null, re
   const scoped = NODE_PREFIX.exec(route);
   const local = scoped ? `/api${scoped[2]}` : route;
   if (refused.some(pattern => pattern.test(local)) || (scoped && /^\/api\/nodes\//.test(local))) throw refusal('이 경로는 도구로 부를 수 없습니다.');
-  const operation = /^\/api\/v1\/([a-z]+\.[a-zA-Z]+)$/.exec(local)?.[1];
+  const operation = /^\/api\/v1\/([a-z][a-zA-Z]*\.[a-zA-Z]+)$/.exec(local)?.[1];
   const readOperation = operation !== undefined && isOperationName(operation) && !OPERATIONS[operation].write;
   const write = method === 'POST' && !readOperation && local !== '/api/auto-prompt-suggestions';
   return { method, path: sent, route, ...(scoped ? { node: scoped[1] } : {}), local, write };

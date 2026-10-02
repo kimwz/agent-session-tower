@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { MASTER_PANELS, type MasterDirectiveResult, type MasterFilter, type MasterPanel, type MasterScreenCommand, type MasterStreamEvent } from '../../shared/master.js';
 import { NODE_ID, TOWER_TOOLS, TowerTools, truncate, type TowerToolsOptions } from '../tower-tools/tools.js';
+import { apiTarget } from '../tower-tools/api-target.js';
+import { masterWorkerModel, parseModelSettings } from '../../shared/models.js';
 
 /** How long a screen command waits for the page to say it was done. */
 const ACK_MS = 5_000;
@@ -48,6 +50,26 @@ export class MasterTools extends TowerTools {
   constructor(private readonly master: MasterToolsOptions) { super(master); }
 
   override async call(name: string, args: Record<string, unknown>): Promise<unknown> {
+    if (name === 'tower_api' && args.method === 'POST') {
+      try {
+        const target = apiTarget(String(args.method), String(args.path), typeof args.node === 'string' ? args.node : undefined);
+        if (['/api/sessions', '/api/auto-prompts', '/api/v1/autoPrompt.submit'].includes(target.local)) {
+          const body = args.body && typeof args.body === 'object' && !Array.isArray(args.body) ? args.body as Record<string, unknown> : {};
+          let input: Record<string, unknown> = { ...body, modelRole: 'master.worker' };
+          // Old remote create endpoints ignored unknown fields. Read the receiving worker's actual registry before
+          // sending a concrete, backwards-compatible request; never infer support from client-side defaults.
+          if (target.node && target.local === '/api/sessions') {
+            const reply = await this.master.tower.call('POST', `/api/nodes/${target.node}/v1/models.settings`, {}, { write: false, signal: AbortSignal.timeout(30_000) });
+            const settings = (reply.body as { result?: { settings?: { roles?: Record<string, unknown> } } } | undefined)?.result?.settings;
+            if (reply.state !== 'succeeded' || !settings?.roles?.['master.worker']) return { error: '연결된 컴퓨터가 master.worker를 지원하지 않습니다. 업데이트 후 다시 보내세요. 아직 작업을 보내지 않았습니다.' };
+            const resolved = masterWorkerModel(parseModelSettings(settings, true), body);
+            const { modelRole: _role, ...explicit } = body;
+            input = { ...explicit, ...resolved };
+          }
+          args = { ...args, body: input };
+        }
+      } catch (error) { return { error: (error as Error).message }; }
+    }
     if (name !== 'ui') return super.call(name, args);
     if (!this.master.tower.hasCredentials()) return { error: 'Tower 웹에 아직 연결되지 않았습니다. 잠시 뒤 다시 하세요.' };
     return this.ui(args);

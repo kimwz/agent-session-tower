@@ -1,8 +1,9 @@
+import { subscriptionOnly } from '../runs/subscription.js';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { OPERATIONS, REMOTE_PAGE_OPERATIONS, isOperationName, type OperationName } from '../../shared/api/operations.js';
 import type { TriggerActor, TriggerEvent, TriggerInput } from '../../shared/triggers.js';
-import type { AutoPromptJob, AutoPromptRequest, ChatMessage, Run, RunOrigin, Session, SessionDetail } from '../../shared/types.js';
+import type { AutoPromptJob, AutoPromptInput, ChatMessage, Run, RunOrigin, Session, SessionDetail } from '../../shared/types.js';
 import type { SlackWorkflow } from '../../shared/slack.js';
 import type { RunAdmission } from '../runs/manager.js';
 import type { PermissionService } from '../permissions/service.js';
@@ -38,7 +39,7 @@ export interface TowerServices {
   };
   runs?: { list(): Run[] };
   projects?: () => Array<{ cwd: string; title: string; sessions: number; pinned: boolean }>;
-  autoPrompts?: { submit(request: AutoPromptRequest, internal: Pick<RunAdmission, 'origin' | 'delegation' | 'validate'>): Promise<AutoPromptJob>; get(id: string): AutoPromptJob | undefined };
+  autoPrompts?: { submit(request: AutoPromptInput, internal: Pick<RunAdmission, 'origin' | 'delegation' | 'validate'>): Promise<AutoPromptJob>; get(id: string): AutoPromptJob | undefined };
   github?: { workflow(sessionId: string): SlackWorkflow | undefined; approveReply(workflowId: string, requestKey: string, text: string): Promise<unknown> };
   permissions?: PermissionService;
   /** What this computer keeps from controlling computers, with these folders' real locations resolved again now. */
@@ -79,6 +80,10 @@ export class TowerApi {
     if ('ownerOnly' in operation && operation.ownerOnly && actor.kind !== 'owner') throw failure('Only the owner can do this in Tower.', 403);
     if (actor.controllerId && !REMOTE_OPERATIONS.has(name)) throw failure('This is done in Tower on that computer itself.', 403);
     if (actor.kind === 'agent' && !('agent' in operation && operation.agent)) throw failure('Agents cannot use this Tower operation.', 403);
+    // The authenticated master also has run-scoped Tower MCP tools, outside its page-tool adapter.
+    if (name === 'autoPrompt.submit' && actor.kind === 'agent' && !actor.controllerId && actor.runId && actor.sessionId
+      && this.services.sessions?.list().some(session => session.id === actor.sessionId && subscriptionOnly(this.services.stateDir, session.cwd))
+      && input && typeof input === 'object' && !Array.isArray(input)) input = { ...input, modelRole: 'master.worker' };
     const parsed = operation.input.safeParse(input ?? {});
     if (!parsed.success) throw failure(`Invalid request: ${parsed.error.issues.map(issue => `${issue.path.join('.') || 'input'}: ${issue.message}`).join('; ')}`, 400);
     // Changes from agents, and from controlling computers, are made once per request.
@@ -327,7 +332,9 @@ export class TowerApi {
         const from = actor.controllerId ? { controllerId: actor.controllerId } : {};
         const origin: RunOrigin = actor.kind === 'agent' ? { kind: 'agent', ...(actor.runId ? { runId: actor.runId } : {}), ...from } : { kind: 'owner', ...from };
         return { job: await autoPrompts.submit({ requestId: value.requestId, provider: value.provider, prompt: value.prompt, ...(value.cwd ? { cwd: value.cwd } : {}),
-          ...(value.model ? { model: value.model } : {}), ...(value.effort ? { effort: value.effort } : {}) }, { origin, ...context }) };
+          ...(value.model !== undefined ? { model: value.model } : {}), ...(value.effort !== undefined ? { effort: value.effort } : {}),
+          ...(value.modelRole ? { modelRole: value.modelRole } : {}), ...(value.sessionMode ? { sessionMode: value.sessionMode } : {}),
+          ...(value.targetSessionId !== undefined ? { targetSessionId: value.targetSessionId } : {}) }, { origin, ...context }) };
       }
       case 'permissions.request': return this.permissions().request(value as Parameters<PermissionService['request']>[0], actor);
       case 'permissions.run': return this.permissions().requestRun(value as Parameters<PermissionService['requestRun']>[0], actor);

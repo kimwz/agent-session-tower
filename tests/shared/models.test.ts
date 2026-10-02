@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { BUILTIN_ROLES, customRoleLines, initialModelSettings, modelArgs, parseModelSettings, resolveRole, type ModelSettings } from '../../shared/models.js';
+import { BUILTIN_ROLES, masterWorkerModel, customRoleLines, initialModelSettings, modelArgs, parseModelSettings, resolveRole, type ModelSettings } from '../../shared/models.js';
 
 test('every role starts with what its call used before the roles existed', () => {
   const settings = initialModelSettings();
@@ -20,7 +20,7 @@ test('every role starts with what its call used before the roles existed', () =>
   // Forms and starts that passed no model keep the CLI's default, on the provider each form preselected.
   for (const id of ['master.session', 'issues.register', 'chat.new', 'autoPrompt.new', 'publicAgents.new']) assert.deepEqual(table()[id], { provider: 'claude' }, id);
   for (const id of ['triggers.new', 'slack.newRule', 'github.newRule']) assert.deepEqual(table()[id], { provider: 'codex' }, id);
-  assert.equal(BUILTIN_ROLES.length, follow.length + 12, 'a new role gets a line here');
+  assert.equal(BUILTIN_ROLES.length, follow.length + 13, 'a new role gets a line here');
 });
 
 test('saved settings are read leniently, submitted ones strictly', () => {
@@ -64,4 +64,31 @@ test('a save keeps roles it does not name and ignores roles this version does no
   const saved = parseModelSettings({ version: 1, roles: { ...others, 'future.role': { provider: 'claude', claude: {}, codex: {} } }, custom: [] }, true, current);
   assert.deepEqual(saved.roles['slack.match'], current.roles['slack.match']);
   assert.equal((saved.roles as Record<string, unknown>)['future.role'], undefined);
+});
+
+
+test('master.worker selects defaults per explicit provider and preserves each explicit field', () => {
+  const settings = initialModelSettings();
+  assert.deepEqual(resolveRole(settings, 'master.worker'), { provider: 'codex', model: 'gpt-6.1-sol' });
+  settings.roles['master.worker'] = { provider: 'claude', claude: { model: 'sonnet', effort: 'high' }, codex: { model: 'gpt-6.1-sol', effort: 'low' } };
+  assert.deepEqual(masterWorkerModel(settings), { provider: 'claude', model: 'sonnet', effort: 'high' });
+  assert.deepEqual(masterWorkerModel(settings, { provider: 'codex' }), { provider: 'codex', model: 'gpt-6.1-sol', effort: 'low' });
+  assert.deepEqual(masterWorkerModel(settings, { provider: 'codex', model: 'chosen', effort: 'xhigh' }), { provider: 'codex', model: 'chosen', effort: 'xhigh' });
+  assert.deepEqual(masterWorkerModel(settings, { model: 'chosen' }), { provider: 'claude', model: 'chosen', effort: 'high' });
+  assert.deepEqual(masterWorkerModel(settings, { effort: 'medium' }), { provider: 'claude', model: 'sonnet', effort: 'medium' });
+});
+
+test('legacy master.worker custom settings migrate once and old pages cannot overwrite the built-in role', () => {
+  const custom = { id: 'master.worker', provider: 'codex' as const, claude: {}, codex: { model: 'legacy-worker', effort: 'high' } };
+  const reviewer = { id: 'reviewer.codex', provider: 'codex' as const, claude: {}, codex: { model: 'review-model' } };
+  const legacy = { version: 1, roles: {}, custom: [custom, reviewer] };
+  const migrated = parseModelSettings(legacy);
+  assert.deepEqual(resolveRole(migrated, 'master.worker'), { provider: 'codex', model: 'legacy-worker', effort: 'high' });
+  assert.deepEqual(migrated.custom, [reviewer]);
+  migrated.roles['master.worker'].codex = { model: 'new-choice' };
+  const oldPageSave = parseModelSettings(legacy, true, migrated);
+  assert.deepEqual(resolveRole(oldPageSave, 'master.worker'), { provider: 'codex', model: 'new-choice' });
+  assert.deepEqual(oldPageSave.custom, [reviewer]);
+  const both = parseModelSettings({ ...legacy, roles: migrated.roles });
+  assert.equal(resolveRole(both, 'master.worker').model, 'new-choice');
 });
