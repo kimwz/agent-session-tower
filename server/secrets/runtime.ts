@@ -13,7 +13,7 @@ import { parseSecretCli } from './cli.js';
 import { parseDotenv } from './dotenv.js';
 import { RemoteSecretBroker, type RemoteSecretRequest, type RemoteSecretResponse } from './remote.js';
 import { SecretService } from './service.js';
-import { SECRET_USE_INSTRUCTIONS } from './notices.js';
+import { SECRET_LOCKED_LIST, SECRET_LOCKED_UNINDEXED, SECRET_LOCKED_USE, SECRET_NO_VAULT, SECRET_USE_INSTRUCTIONS } from './notices.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 const fail = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
@@ -37,6 +37,7 @@ export const SECRET_TOOLS = Object.entries(schemas).map(([name, input]) => {
   const { $schema: _schema, ...inputSchema } = z.toJSONSchema(input, { io: 'input' });
   return { name, description: descriptions[name as keyof typeof schemas], inputSchema };
 });
+const closureId = (sessionId: string) => createHash('sha256').update('tower-secret-session-close-v1:' + sessionId).digest('hex');
 interface Runs { list(): Run[]; getSession(id: string): Session | undefined; sessionOrigin(id: string): SessionOrigin | undefined }
 
 /** Owns the security task independently of conversation summaries and binds it once per run. */
@@ -112,11 +113,14 @@ export class SecretRuntime {
   }
   async peekTarget(sessionId: string): Promise<SecretTarget | undefined> { const session = await this.session(sessionId); return this.options.service.currentTask(session.id, session.cwd); }
   async remoteTarget(sessionId: string, create = true): Promise<SecretTarget | undefined> { return create ? this.target(sessionId) : this.peekTarget(sessionId); }
-  async context(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<SecretContext> {
+  private async ownerRun(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<{ run: Run; session: Session & { cwd: string } }> {
     if (this.blocked) throw fail('보관함 잠금 해제를 완료하지 못했습니다.', 503);
     const run = this.options.runs.list().find(item => item.id === capability.runId);
     if (!run || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || run.towerTools !== 'attached') throw fail('이 시크릿 도구는 발급받은 실행 중에만 사용할 수 있습니다.', 403);
-    const session = await this.session(run.sessionId);
+    return { run, session: await this.session(run.sessionId) };
+  }
+  async context(capability: Extract<Capability, { kind: 'secret-run' }>): Promise<SecretContext> {
+    const { run, session } = await this.ownerRun(capability);
     let target = this.runTasks.get(run.id);
     if (!target) { target = await this.options.service.bindRun(session.id, session.cwd, run.startedAt ?? run.createdAt); this.runTasks.set(run.id, target); }
     if (target.root !== session.cwd) throw fail('실행의 프로젝트 경로가 변경되었습니다.', 403);
@@ -130,6 +134,15 @@ export class SecretRuntime {
     const input = schemas[name as keyof typeof schemas];
     if (!input) throw fail('알 수 없는 시크릿 도구입니다.', 404);
     if (!input.safeParse(args).success) throw fail('시크릿 도구 입력이 올바르지 않습니다.');
+    if (this.options.service.status().locked) return this.lockedTool(capability, name, args);
+    try { return await this.unlockedTool(capability, name, args); }
+    catch (error) {
+      // Locked by the owner or a failed save during this call: answer as the locked path would.
+      if (this.options.service.status().locked && !(error as { statusCode?: number }).statusCode) return this.lockedTool(capability, name, args);
+      throw error;
+    }
+  }
+  private async unlockedTool(capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>): Promise<unknown> {
     const context = await this.context(capability);
     if (name === 'secrets_list') return { secrets: await this.broker.list(context), unavailableSources: this.broker.unavailableSources(context), usage: descriptions.secrets_cli };
     if (name === 'secrets_run') return this.broker.run(context, runInput.parse(args));
@@ -147,6 +160,21 @@ export class SecretRuntime {
     if (cli.kind === 'run') return this.broker.run(context, { ...cli.input, ...(parsed.operationId ? { operationId: parsed.operationId } : {}) });
     if (cli.kind === 'compare') return this.broker.compare(context, cli.left, cli.right);
     return this.broker.fingerprint(context, cli.reference, cli.domain);
+  }
+  /** Names stay listable while locked; using one asks the agent to get the owner's unlock. */
+  private async lockedTool(capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>): Promise<unknown> {
+    const { run, session } = await this.ownerRun(capability);
+    const argv = name === 'secrets_cli' ? schemas.secrets_cli.parse(args).argv : [];
+    const listing = name === 'secrets_list' || (argv[0] === 'list' && parseSecretCli(argv).kind === 'list');
+    if (!this.options.service.status().initialized) { if (listing) return { secrets: [], unavailableSources: [], usage: descriptions.secrets_cli }; throw fail(SECRET_NO_VAULT, 404); }
+    if (!listing) throw fail(SECRET_LOCKED_USE, 423);
+    // Archived while locked: the unlock closes this session's tasks, so their grants are not listed meanwhile.
+    if ((await this.readClosures()).includes(closureId(session.id))) throw fail('이 세션의 시크릿 작업은 종료되었습니다.', 403);
+    const bound = this.runTasks.get(run.id);
+    if (bound && bound.root !== session.cwd) throw fail('실행의 프로젝트 경로가 변경되었습니다.', 403);
+    const listed = this.options.service.lockedList(session.id, session.cwd, run.startedAt ?? run.createdAt, bound);
+    if (!listed) return { locked: true, notice: SECRET_LOCKED_UNINDEXED, secrets: [], unavailableSources: [], usage: descriptions.secrets_cli };
+    return { locked: true, notice: SECRET_LOCKED_LIST, secrets: listed.secrets, unavailableSources: listed.sources.map(sourceHostId => ({ sourceHostId, code: 'SECRET_SOURCE_UNAVAILABLE' })), usage: descriptions.secrets_cli };
   }
   async endSession(sessionId: string): Promise<void> {
     const id = this.options.runs.getSession(sessionId)?.id;
@@ -168,7 +196,7 @@ export class SecretRuntime {
   private async recordClosure(sessionId: string): Promise<void> {
     const next = this.closures.then(async () => {
       const ids = await this.readClosures();
-      const id = createHash('sha256').update('tower-secret-session-close-v1:' + sessionId).digest('hex');
+      const id = closureId(sessionId);
       const unique = [...new Set([...ids, id])];
       if (unique.length > 10000) throw fail('보관함을 잠금 해제하여 작업 종료 기록을 정리하세요.', 503);
       await writePrivateJson(this.closurePath(), JSON.stringify(unique));

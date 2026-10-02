@@ -355,7 +355,10 @@ test('owner password and secret control bypass generic ledger; restart is locked
     assert.equal(restarted.status().locked, true);
     await assert.rejects(restarted.unlock(password)); await restarted.unlock('changed-fixture-password-1234');
     assert.deepEqual(f.ledger, []);
-    await f.runtime.control('lock', {}); await assert.rejects(f.list(token));
+    await f.runtime.control('lock', {});
+    const locked = await f.list(token) as { secrets: SecretMetadata[]; locked?: boolean };
+    assert.equal(locked.locked, true); assert.deepEqual(locked.secrets.map(item => item.reference), [reference]);
+    await assert.rejects(f.call(token, 'secrets_run', { ...command, operationId: 'fixture-child-locked' }), /locked/);
   } finally { await f.cleanup(); }
 });
 
