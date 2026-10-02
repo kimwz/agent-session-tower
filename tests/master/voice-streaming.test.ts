@@ -800,6 +800,7 @@ test('actual host socket and web relay correlate writes, EOF and late transport 
   h.finish(run);
   let bytes = initial.value!.length;
   for (;;) { const next = await reader.read(); if (next.done) break; bytes += next.value.length; }
+  assert.equal(response.headers.get('content-length'), String(bytes), 'the actual web relay preserves the finite host length');
   assert.equal(h.voice.voicePlayed({ session: h.current(), id: say.id, result: 'played', elapsedMs: 1000, attempt: 0 }), true);
   const ended = await until(() => recordOf(h, key)?.audioRequests?.find(item => item.requestId === request.requestId && item.web?.close && item.host?.close));
   assert.equal(ended.host!.normal, true);
@@ -823,15 +824,29 @@ test('two socket readers stay distinct and a truncated relay never settles playb
   const live = say.audio.split('/').at(-1)!;
   const serve = MasterVoice.prototype.serveAudio;
   const transport = MasterVoice.prototype.voiceTransport;
-  // Keep real writes and sockets, but hold drain acknowledgement until the fixture releases it.
-  // This makes close-before-end deterministic without exceeding the production audio size cap.
+  // Gate bytes on the wire, not merely drain: parsers finish a fixed-length body before res.end().
+  // A prefix reaches each real socket; cancellation discards the rest, while the other reader gets it on release.
   let releaseDrain = false;
-  const gated: Parameters<typeof serve>[1][] = [];
+  const gated: Array<() => void> = [];
   t.mock.method(MasterVoice.prototype, 'serveAudio', (...args: Parameters<typeof serve>) => {
     const response = args[1];
-    gated.push(response);
     const emit = response.emit;
+    const write = response.write;
+    const held: Buffer[] = [];
+    response.once('close', () => { held.length = 0; });
     t.mock.method(response, 'emit', (...event: Parameters<typeof emit>) => event[0] === 'drain' && !releaseDrain ? false : emit.apply(response, event));
+    t.mock.method(response, 'write', (chunk: Buffer) => {
+      assert.ok(Buffer.isBuffer(chunk));
+      if (releaseDrain) return write.call(response, chunk, 'utf8');
+      write.call(response, chunk.subarray(0, 4096), 'utf8');
+      held.push(chunk.subarray(4096));
+      return false;
+    });
+    gated.push(() => {
+      if (response.destroyed) { held.length = 0; return; }
+      for (const chunk of held.splice(0)) write.call(response, chunk, 'utf8');
+      response.emit('drain');
+    });
     return serve.call(h.voice, ...args);
   });
   t.mock.method(MasterVoice.prototype, 'voiceTransport', (...args: Parameters<typeof transport>) => transport.call(h.voice, ...args));
@@ -859,16 +874,20 @@ test('two socket readers stay distinct and a truncated relay never settles playb
   assert.equal(cut.host!.end, undefined);
   assert.equal(cut.web!.end, undefined);
   assert.ok(cut.host!.bytes > 0 && cut.web!.bytes > 0);
+  assert.ok(cut.web!.bytes < 2_000_000, 'the first real socket closes before the declared body is delivered');
   assert.equal(recordOf(h, key)!.outcome, undefined);
   assert.equal(recordOf(h, key)!.says!.find(item => item.id === say.id)!.result, undefined);
   assert.equal(h.voice.voiceTransport({ live, requestId: cut.requestId, web: { ...cut.web!, close: Date.now() } }), true);
   assert.equal(recordOf(h, key)!.outcome, undefined, 'late transport remains diagnostic');
   assert.equal(recordOf(h, key)!.audioRequests!.find(item => item.requestId === secondRequest.requestId)!.host!.close, undefined);
   releaseDrain = true;
-  for (const response of gated) if (!response.destroyed) response.emit('drain');
+  for (const release of gated) release();
   h.write(run, 'm1:0', '', true);
   h.finish(run);
-  while (!(await secondReader.read()).done) { /* Drain the remaining finite fixture audio. */ }
+  let bytes = secondChunk.value!.length;
+  for (;;) { const next = await secondReader.read(); if (next.done) break; bytes += next.value.length; }
+  assert.equal(bytes, 2_000_000);
+  assert.equal(second.headers.get('content-length'), String(bytes));
   const complete = await until(() => recordOf(h, key)?.audioRequests?.find(item => item.requestId === secondRequest.requestId && item.host?.end && item.web?.end));
   assert.equal(complete.host!.normal, true);
   assert.equal(complete.web!.normal, true);
@@ -915,6 +934,9 @@ test('finite audio is complete before say, has exact length and plays a part bef
   assert.equal(sliced.data.length, whole.data.length - 1251);
   assert.equal(Number(sliced.length), sliced.data.length);
   assert.deepEqual(sliced.data.subarray(0, 4), frame.subarray(0, 4));
+  const pastEnd = await finiteGet(port, id, 10_000);
+  assert.equal(pastEnd.length, '0', 'a resume beyond the file has exact zero length');
+  assert.equal(pastEnd.data.length, 0);
   assert.equal(h.voice.voicePlayed({ session: h.current(), id: say.id, result: 'played' }), true);
   const key = answer.ack!.request!;
   await until(() => recordOf(h, key)?.says?.some(item => item.id === say.id && item.result === 'played') || undefined);
@@ -1125,4 +1147,228 @@ test('paired voice parts keep original brackets, existing speech partitions and 
       assert.equal(part.speech, tag ? `${tag} ${expected}` : expected);
     }
   }
+});
+
+
+test('finite replay rechecks the daily limit after an acknowledged part without further synthesis or charge', async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const text = `${'가'.repeat(186)}. ${'나'.repeat(400)}. ${'다'.repeat(400)}.`;
+  const entry = h.room.add({ kind: 'master', text, turnId: 'replay-limit', final: true, speak: { state: 'played', session: h.current() } });
+  assert.equal(h.voice.voiceMissed({ session: h.current(), entry: entry.id, action: 'replay' }), true);
+  const first = await until(() => h.says().find(item => item.kind === 'answer'));
+  const paid = h.voice.status().today;
+  assert.equal(h.labs.speeches.length, 1);
+  assert.ok(Math.abs(paid.dollars - 0.01) < 1e-9, 'first part consumes exactly one cent');
+  await h.settings.update({ voice: { dailyDollars: paid.dollars } });
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: first.id, result: 'played' }), true);
+  await until(() => h.speakOf(entry)?.state === 'unspoken' || undefined);
+  assert.deepEqual({ reason: h.speakOf(entry)?.reason, heard: h.speakOf(entry)?.heard }, { reason: 'limit', heard: true });
+  await sleep(50);
+  assert.equal(h.labs.speeches.length, 1, 'no later part is synthesized');
+  assert.equal(h.voice.status().today.ttsChars, paid.ttsChars);
+  assert.equal(h.voice.status().today.dollars, paid.dollars);
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: first.id, result: 'played' }), false);
+});
+
+for (const phase of ['synthesis', 'ack'] as const) for (const action of ['voice-off', 'replacement'] as const) test(`finite replay ${phase} stops on ${action}, preserving earlier heard parts`, async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const oldSession = h.current();
+  const entry = h.room.add({ kind: 'master', text: '첫 부분 뒤 남은 문장을 차례대로 읽습니다. '.repeat(50).trim(), turnId: `replay-${phase}-${action}`, final: true, speak: { state: 'played', session: oldSession } });
+  assert.equal(h.voice.voiceMissed({ session: oldSession, entry: entry.id, action: 'replay' }), true);
+  const first = await until(() => h.says().find(item => item.kind === 'answer'));
+  h.labs.gapMs = phase === 'synthesis' ? 300 : 10;
+  assert.equal(h.voice.voicePlayed({ session: oldSession, id: first.id, result: 'played' }), true);
+  await until(() => h.labs.speeches.length === 2 || undefined);
+  const second = phase === 'ack' ? await until(() => h.says().find(item => item.kind === 'answer' && item.id !== first.id)) : undefined;
+  if (phase === 'synthesis') assert.equal(h.says().filter(item => item.kind === 'answer').length, 1, 'unfinished second part is unpublished');
+  const paid = h.voice.status().today;
+  if (action === 'voice-off') assert.equal(h.voice.voiceOff({ session: oldSession }), true);
+  else h.on();
+  await until(() => h.speakOf(entry)?.state === 'unspoken' || undefined, 500);
+  assert.deepEqual({ reason: h.speakOf(entry)?.reason, heard: h.speakOf(entry)?.heard }, { reason: action === 'voice-off' ? 'stopped' : 'away', heard: true });
+  assert.equal(h.voice.voicePlayed({ session: oldSession, id: first.id, result: 'played' }), false);
+  if (second) assert.equal(h.voice.voicePlayed({ session: oldSession, id: second.id, result: 'played' }), false);
+  await sleep(350);
+  assert.equal(h.labs.speeches.length, 2, 'no pending replay part starts after session termination');
+  assert.equal(h.voice.status().today.ttsChars, paid.ttsChars);
+  if (phase === 'synthesis') assert.equal(h.says().filter(item => item.kind === 'answer').length, 1);
+  h.labs.gapMs = 10;
+  if (action === 'voice-off') h.on();
+  h.room.add({ kind: 'event', text: '교체된 음성에서 새 보고를 읽습니다.', speak: { state: 'pending' } });
+  const report = await until(() => h.says().find(item => item.kind === 'report'), 1_000);
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: report.id, result: 'played' }), true, 'the old reading released the line');
+});
+
+for (const action of ['voice-off', 'replacement'] as const) test(`stream synthesis stops on ${action} before its unfinished file is published`, async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const oldSession = h.current();
+  const { run } = await h.ask('합성 중 음성 세션 변경');
+  h.labs.gapMs = 300;
+  h.write(run, 'm1:0', '합성 중인 첫 파일은 새 음성 세션으로 넘어가지 않습니다. ');
+  await until(() => h.spoken().length === 1 || undefined);
+  assert.equal(h.says().filter(item => item.kind === 'answer').length, 0);
+  if (action === 'voice-off') assert.equal(h.voice.voiceOff({ session: oldSession }), true);
+  else h.on();
+  await until(() => !h.voice.streaming(run.id) || undefined, 500);
+  h.write(run, 'm1:0', '종료 뒤 다음 부분은 합성하지 않습니다.', true);
+  h.finish(run);
+  await sleep(350);
+  assert.equal(h.says().filter(item => item.kind === 'answer').length, 0, 'unfinished audio never becomes a say');
+  assert.equal(h.spoken().filter(text => text.includes('합성 중인 첫 파일')).length, 1);
+  assert.ok(!h.labs.speeches.some(text => text.includes('종료 뒤 다음')));
+  h.labs.gapMs = 10;
+  if (action === 'voice-off') h.on();
+  h.room.add({ kind: 'event', text: '새 세션의 보고가 끊김 없이 시작됩니다.', speak: { state: 'pending' } });
+  const report = await until(() => h.says().find(item => item.kind === 'report'), 1_000);
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: report.id, result: 'played' }), true);
+});
+
+test('failed synthesized audio is rejected with 502 through the actual host and web relay', async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const { answer, run } = await h.ask('실패한 파일의 HTTP 경계');
+  const key = answer.ack!.request!;
+  h.labs.chunks = [Buffer.from('partial'), Buffer.alloc(2 * 1024 * 1024)];
+  h.write(run, 'm1:0', '상한을 넘겨 실패한 합성 파일은 발행하지 않습니다. ', true);
+  h.finish(run);
+  const failed = await until(() => recordOf(h, key)?.pieces?.find(piece => piece.result === 'failed'));
+  assert.equal(h.says().filter(item => item.kind === 'answer').length, 0);
+  const serve = MasterVoice.prototype.serveAudio;
+  const transport = MasterVoice.prototype.voiceTransport;
+  t.mock.method(MasterVoice.prototype, 'serveAudio', (...args: Parameters<typeof serve>) => serve.call(h.voice, ...args));
+  t.mock.method(MasterVoice.prototype, 'voiceTransport', (...args: Parameters<typeof transport>) => transport.call(h.voice, ...args));
+  const dir = await mkdtemp(join(tmpdir(), 'voice-failed-http-'));
+  const host = await startMasterHost({ stateDir: dir, idleMs: 60_000 });
+  const client = new MasterClient({ stateDir: dir, credentials: () => undefined });
+  const relay = createServer((_req, res) => { void client.pipeAudio(res, failed.live); });
+  const port = await listen(relay);
+  t.after(async () => { await stop(relay); client.dispose(); await host.close(); await rm(dir, { recursive: true, force: true }); });
+  const response = await fetch(`http://127.0.0.1:${port}/`);
+  assert.equal(response.status, 502);
+  assert.equal((await response.arrayBuffer()).byteLength, 0);
+  const request = await until(() => recordOf(h, key)?.audioRequests?.find(item => item.live === failed.live && item.host?.close && item.web?.close));
+  assert.equal(request.host!.bytes, 0);
+  assert.equal(request.web!.bytes, 0);
+  assert.equal(request.host!.firstWrite, undefined);
+  assert.equal(request.web!.firstWrite, undefined);
+  assert.equal(h.voice.listeners(failed.live), 0);
+  assert.equal(recordOf(h, key)!.outcome!.state, 'unspoken');
+  assert.equal(recordOf(h, key)!.outcome!.reason, 'audio');
+  assert.equal(recordOf(h, key)!.says?.length ?? 0, 0, 'an error HTTP response never becomes a playback ACK');
+});
+
+test('native cancellation after accepted playback progress preserves heard and never reads the cancellation error', async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const { run } = await h.ask('진행한 첫 부분의 취소 계약');
+  h.write(run, 'm1:0', '첫 부분은 진행을 보고했지만 아직 끝나지 않았습니다. '.repeat(24), true);
+  const first = await until(() => h.says().find(item => item.kind === 'answer'));
+  assert.equal(h.voice.voiceProgress({ session: h.current(), id: first.id, event: 'started', elapsedMs: 50, playback: { position: 0.05 } }), true);
+  const made = h.labs.speeches.length;
+  await sleep(50);
+  assert.equal(h.labs.speeches.length, made, 'start means heard, not a played ACK: the next part is not synthesized');
+  assert.equal(h.says().filter(item => item.kind === 'answer').length, 1);
+  assert.equal(h.voice.streaming(run.id), true, 'start does not settle the native reading');
+  assert.ok(!h.room.recent(200).some(item => item.data.kind === 'master' && item.data.speak?.state === 'played'));
+  h.finish(run, 'cancelled');
+  await until(() => !h.voice.streaming(run.id) || undefined);
+  const entry = await until(() => h.room.recent(200).find(item => item.data.kind === 'error' && item.data.text === '요청이 멈췄습니다.'));
+  await sleep(100);
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: first.id, result: 'played' }), false, 'late first-part ACK is rejected after native cancellation');
+  const settled = structuredClone(h.speakOf(entry));
+  assert.equal(h.voice.voiceProgress({ session: h.current(), id: first.id, event: 'started', elapsedMs: 100, playback: { position: 0.1 } }), false, 'late progress cannot revive the cancelled say');
+  await sleep(20);
+  assert.deepEqual(h.speakOf(entry), settled, 'late progress leaves the cancellation entry unchanged');
+  assert.equal(h.spoken().filter(text => text === first.text).length, 1, 'the original text is never replayed');
+  assert.deepEqual({ state: h.speakOf(entry)?.state, reason: h.speakOf(entry)?.reason, heard: h.speakOf(entry)?.heard }, { state: 'unspoken', reason: 'stopped', heard: true }, 'the cancellation entry preserves the already observed playback');
+  assert.equal(h.says().filter(item => item.kind === 'answer').length, 1, 'no extra cancellation error is voiced after part of the turn was heard');
+  assert.ok(!h.spoken().some(text => text.includes('요청이 멈췄습니다')), 'the cancellation error is not synthesized');
+});
+
+for (const action of ['voice-off', 'replacement'] as const) test(`accepted playback progress survives ${action} before the first terminal ACK`, async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const oldSession = h.current();
+  const { run } = await h.ask('진행 중 음성 종료의 heard 계약');
+  h.write(run, 'm1:0', '이미 진행한 첫 부분의 들음 상태를 유지합니다. ', true);
+  const first = await until(() => h.says().find(item => item.kind === 'answer'));
+  assert.equal(h.voice.voiceProgress({ session: oldSession, id: first.id, event: 'started', elapsedMs: 50, playback: { position: 0.05 } }), true);
+  const made = h.labs.speeches.length;
+  if (action === 'voice-off') assert.equal(h.voice.voiceOff({ session: oldSession }), true);
+  else h.on();
+  await until(() => !h.voice.streaming(run.id) || undefined);
+  h.finish(run);
+  const entry = await h.entry(/이미 진행한 첫 부분/);
+  await sleep(100);
+  assert.equal(h.voice.voicePlayed({ session: oldSession, id: first.id, result: 'played' }), false);
+  assert.equal(h.voice.voiceProgress({ session: oldSession, id: first.id, event: 'progress', elapsedMs: 100, playback: { position: 0.1 } }), false);
+  if (action === 'replacement') {
+    assert.equal(h.voice.voicePlayed({ session: h.current(), id: first.id, result: 'played' }), false, 'a new page cannot settle the old say');
+    assert.equal(h.voice.voiceProgress({ session: h.current(), id: first.id, event: 'progress', elapsedMs: 100, playback: { position: 0.1 } }), false);
+  }
+  assert.equal(h.labs.speeches.length, made, 'no extra synthesis follows voice termination');
+  assert.equal(h.says().filter(item => item.kind === 'answer').length, 1);
+  assert.deepEqual({ state: h.speakOf(entry)?.state, reason: h.speakOf(entry)?.reason, heard: h.speakOf(entry)?.heard }, { state: 'unspoken', reason: action === 'voice-off' ? 'stopped' : 'away', heard: true });
+});
+
+
+for (const control of ['no-progress', 'non-start-event', 'wrong-session', 'unknown-id'] as const) test(`unheard native cancellation still reads its error after ${control}`, async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const { run } = await h.ask('들리지 않은 취소 대조군');
+  h.write(run, 'm1:0', '첫 파일이 준비됐지만 재생 시작은 수락되지 않았습니다. ', true);
+  const first = await until(() => h.says().find(item => item.kind === 'answer'));
+  if (control === 'non-start-event') assert.equal(h.voice.voiceProgress({ session: h.current(), id: first.id, event: 'progress', elapsedMs: 50, playback: { position: 0.05 } }), true);
+  if (control === 'wrong-session') assert.equal(h.voice.voiceProgress({ session: 'stale-session', id: first.id, event: 'started', elapsedMs: 50, playback: { position: 0.05 } }), false);
+  if (control === 'unknown-id') assert.equal(h.voice.voiceProgress({ session: h.current(), id: randomUUID(), event: 'started', elapsedMs: 50, playback: { position: 0.05 } }), false);
+  h.finish(run, 'cancelled');
+  const errorSay = await until(() => h.says().find(item => item.kind === 'answer' && item.id !== first.id));
+  assert.ok(errorSay.text.includes('요청이 멈췄습니다'), 'an unheard native cancellation retains the existing error reading');
+  const entry = await until(() => h.room.recent(200).find(item => item.data.kind === 'error' && item.data.text === '요청이 멈췄습니다.'));
+  assert.equal(h.speakOf(entry)?.state, 'playing');
+  assert.equal(h.speakOf(entry)?.heard, undefined, 'untrusted or non-start reports do not mark the cancelled turn heard');
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: first.id, result: 'played' }), false);
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: errorSay.id, result: 'played' }), true);
+  await until(() => h.speakOf(entry)?.state === 'played' || undefined);
+});
+
+for (const invalid of [{ name: 'negative', value: -1 }, { name: 'NaN', value: NaN }, { name: 'upper-bound', value: 3_600_000 }, { name: 'string', value: '50' }]) test(`invalid ${invalid.name} startedMs never marks an owner-stopped turn heard`, async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const { run } = await h.ask('잘못된 시작 시각 대조군');
+  h.write(run, 'm1:0', '시작 시각은 검증을 통과한 경우에만 들음으로 남습니다. ', true);
+  const first = await until(() => h.says().find(item => item.kind === 'answer'));
+  // A terminal owner stop ends playback, independently of whether its optional start time was valid.
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: first.id, result: 'stopped', startedMs: invalid.value }), true);
+  await until(() => !h.voice.streaming(run.id) || undefined);
+  h.finish(run, 'cancelled');
+  const entry = await until(() => h.room.recent(200).find(item => item.data.kind === 'error' && item.data.text === '요청이 멈췄습니다.'));
+  assert.deepEqual({ state: h.speakOf(entry)?.state, reason: h.speakOf(entry)?.reason, heard: h.speakOf(entry)?.heard }, { state: 'unspoken', reason: 'stopped', heard: undefined });
+  assert.equal(h.says().filter(item => item.kind === 'answer').length, 1, 'owner stop does not start a new error reading');
+});
+
+test('a valid terminal start survives same-tick voice off before playback resumes asynchronously', async t => {
+  const h = await harness(t, { page: { answer: () => undefined } });
+  h.on();
+  const session = h.current();
+  const { run } = await h.ask('종료 보고와 같은 틱의 음성 끄기');
+  h.write(run, 'm1:0', '첫 부분의 시작은 종료 보고에서도 즉시 보존합니다. '.repeat(24), true);
+  const first = await until(() => h.says().find(item => item.kind === 'answer'));
+  const made = h.labs.speeches.length;
+  assert.equal(h.voice.voicePlayed({ session, id: first.id, result: 'failed', startedMs: 50 }), true);
+  assert.equal(h.voice.voiceOff({ session }), true); // No await: the terminal play promise has not resumed yet.
+  await until(() => !h.voice.streaming(run.id) || undefined);
+  h.finish(run);
+  const entry = await h.entry(/첫 부분의 시작은 종료 보고/);
+  await sleep(50);
+  assert.deepEqual({ state: h.speakOf(entry)?.state, reason: h.speakOf(entry)?.reason, heard: h.speakOf(entry)?.heard }, { state: 'unspoken', reason: 'stopped', heard: true });
+  assert.equal(h.voice.voicePlayed({ session, id: first.id, result: 'played' }), false);
+  assert.equal(h.labs.speeches.length, made, 'no next part or error is synthesized after same-tick off');
+  assert.equal(h.says().filter(item => item.kind === 'answer' || item.kind === 'report').length, 1);
+  h.on();
+  assert.equal(h.voice.voicePlayed({ session: h.current(), id: first.id, result: 'played' }), false, 'the next voice session cannot revive the terminal say');
+  assert.deepEqual({ state: h.speakOf(entry)?.state, reason: h.speakOf(entry)?.reason, heard: h.speakOf(entry)?.heard }, { state: 'unspoken', reason: 'stopped', heard: true });
 });

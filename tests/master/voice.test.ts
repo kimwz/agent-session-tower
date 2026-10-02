@@ -508,6 +508,7 @@ test('a long answer to a spoken request is read whole: parts of whole sentences,
   await request(h, session, '길게 알려줘');
   const entry = await masterEntry(h, /하나씩 말씀드릴게요/);
   const played = await playFiniteAnswer(h, session, entry.id, fetchAudio);
+  assert.equal(h.speakOf(entry.id)?.state, 'played', 'all finite parts settle the successful answer');
   assert.ok(played.length > 2, 'made and played in finite parts');
   assert.equal(played.map(item => item.text).join(' '), speakable(answer), 'plain parts cover the full answer once');
   for (const item of played) assert.ok(!item.text.includes('[cheerfully]'));
@@ -532,6 +533,7 @@ test('a later part that fails before any sound is asked for once more; one that 
   await request(h, session, '하나');
   const entry = await masterEntry(h, /설명입니다/);
   await playFiniteAnswer(h, session, entry.id, fetchAudio);
+  assert.equal(h.speakOf(entry.id)?.state, 'played', 'retry success settles the whole answer');
   const texts = readings(h).map(text => text.replace(/^\[cheerfully\] /, ''));
   const duplicate = texts.findIndex((text, index) => index > 0 && text === texts[index - 1]);
   assert.ok(duplicate > 0, 'the failed part is asked for again');
@@ -545,6 +547,7 @@ test('a later part that fails before any sound is asked for once more; one that 
   assert.ok(earlier.length > 0);
   assert.equal(h.speakOf(failed.id)?.state, 'unspoken');
   assert.equal(h.speakOf(failed.id)?.reason, 'audio');
+  assert.equal(h.speakOf(failed.id)?.heard, true, 'prior acknowledged parts remain heard after later failure');
   assert.ok(!earlier.some(item => item.text.includes('5번째')), 'failed synthesis never becomes a say');
   // What is counted is what was asked for: the parts after the one that failed were never sent, nor paid for.
   assert.ok(!readings(h).some(text => text.includes('30번째 문장은 조금 길게 이어지는 이야기')));
@@ -602,6 +605,7 @@ test('a later part that comes back without sound is asked for again, never skipp
   await request(h, session, '하나');
   const entry = await masterEntry(h, /12번째/);
   await playFiniteAnswer(h, session, entry.id, fetchAudio);
+  assert.equal(h.speakOf(entry.id)?.state, 'played', 'retry success settles the whole answer');
   const texts = readings(h).map(text => text.replace(/^\[cheerfully\] /, ''));
   const duplicate = texts.findIndex((text, index) => index > 0 && text === texts[index - 1]);
   assert.ok(duplicate > 0, 'the silent part is asked for again');

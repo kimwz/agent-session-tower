@@ -296,8 +296,8 @@ export class MasterVoice {
   private readonly recording = new Map<string, Promise<string>>();
   /** Turns read while they are written, by turn. */
   private readonly streams = new Map<string, Stream>();
-  /** For the timing records: a say's request and when it went to the page. */
-  private readonly says = new Map<string, { key: string; at: number; started?: boolean }>();
+  /** A say's timing and accepted start, retained synchronously by its owning streamed segment. */
+  private readonly says = new Map<string, { key: string; at: number; started?: boolean; onStarted?: () => void }>();
   /** Turns whose reading stopped, and why, for when their end comes (`finishStream`). */
   private readonly stoppedTurns = new Map<string, { reason: MasterUnspoken; heard: boolean }>();
   /** The latest answer or report not read aloud that the owner is told of (see `MasterVoiceStatus.missed`). */
@@ -543,7 +543,7 @@ export class MasterVoice {
     const said = this.says.get(input.id);
     const started = said && typeof input.startedMs === 'number' && Number.isFinite(input.startedMs) && input.startedMs >= 0 && input.startedMs < 3_600_000 ? said.at + input.startedMs : undefined;
     if (said && started !== undefined) this.timings.mark(said.key, 'play', started);
-    if (said && started !== undefined) said.started = true;
+    if (said && started !== undefined) { said.started = true; said.onStarted?.(); }
     if (said) this.timings.terminal(said.key, input.id, { event: 'terminal', at: Date.now(), result, ...(elapsed(input.elapsedMs) !== undefined ? { elapsedMs: elapsed(input.elapsedMs) } : {}), ...(attemptNumber(input.attempt) !== undefined ? { attempt: attemptNumber(input.attempt) } : {}), ...(playbackRecord(input.playback) ? { playback: playbackRecord(input.playback) } : {}) });
     if (said) this.timings.heard(said.key, input.id, { ...(started !== undefined ? { play: started } : {}), result, ...(typeof input.detail === 'string' && input.detail ? { detail: input.detail.slice(0, 80) } : {}), playback: playbackRecord(input.playback) });
     done(result);
@@ -556,7 +556,7 @@ export class MasterVoice {
     const said = this.says.get(input.id);
     const progress = progressRecord(input);
     if (!said || !progress) return false;
-    if (progress.event === 'started') said.started = true;
+    if (progress.event === 'started') { said.started = true; said.onStarted?.(); }
     this.timings.progress(said.key, input.id, progress);
     return true;
   }
@@ -813,7 +813,7 @@ export class MasterVoice {
           return;
         }
         const { result, started } = await this.play(session, { kind: stream.kind, text: part.text, audio: live.id, streaming: true, timing: stream.key,
-          ...(stream.request ? { request: stream.request } : {}) }, this.timing.playMs + part.speech.length * MS_PER_CHAR, undefined, say => { segment.say = say; });
+          ...(stream.request ? { request: stream.request } : {}) }, this.timing.playMs + part.speech.length * MS_PER_CHAR, undefined, say => { segment.say = say; }, () => { segment.started = true; });
         if (started) segment.started = true;
         if (result !== 'played' || stream.state !== 'streaming') {
           if (stream.state === 'streaming') this.stopStream(stream, reasonOf(result));
@@ -896,7 +896,7 @@ export class MasterVoice {
    * Sends one thing to the session's page to play, and waits for its word (or gives up): how it went, and whether its
    * sound started. Each one, and the word on it, goes into the timing record.
    */
-  private play(session: Session, what: { kind: MasterSay['kind']; text: string; audio: string; request?: string; streaming?: true; timing?: string }, waitMs: number, signal?: AbortSignal, onSay?: (say: MasterSay) => void): Promise<{ result: string; started: boolean }> {
+  private play(session: Session, what: { kind: MasterSay['kind']; text: string; audio: string; request?: string; streaming?: true; timing?: string }, waitMs: number, signal?: AbortSignal, onSay?: (say: MasterSay) => void, onStarted?: () => void): Promise<{ result: string; started: boolean }> {
     const id = randomUUID();
     const key = what.timing ?? what.request;
     const say: MasterSay = { id, session: session.digest, kind: what.kind, text: what.text, audio: `/api/master/voice/audio/${what.audio}`, expiresAt: Date.now() + 60_000,
@@ -915,7 +915,7 @@ export class MasterVoice {
       this.results.set(id, finish);
       signal?.addEventListener('abort', stopped, { once: true });
       if (signal?.aborted || this.session !== session) { finish('stopped'); return; }
-      if (key) { this.says.set(id, { key, at: Date.now() }); this.timings.mark(key, 'say'); this.timings.said(key, id, Date.now(), what.text.length, what.audio); }
+      if (key) { this.says.set(id, { key, at: Date.now(), ...(onStarted ? { onStarted } : {}) }); this.timings.mark(key, 'say'); this.timings.said(key, id, Date.now(), what.text.length, what.audio); }
       onSay?.(say);
       this.options.room.broadcast({ type: 'say', seq: 0, say });
     });

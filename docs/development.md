@@ -57,7 +57,7 @@ VOICE_BROWSER_ENGINE=webkit VOICE_BROWSER_PCM=1 \
 node --import tsx scripts/test-master-voice-stream-browser.ts
 ```
 
-The isolated browser uses synthetic microphone input and fixture Tower/TTS responses, but real HTMLAudio decoding and optional Web Audio PCM (`VOICE_BROWSER_PCM=0` keeps the raw media path). It verifies finite headers, progress and the first part's ACK while holding the run open, then checks residual flush, deduplication, cancellation and replay. Results are written to `tmp/voice-recovery/finite-browser-<engine>-<raw|pcm>.json`.
+The isolated browser uses synthetic microphone input and fixture Tower/TTS responses, but real HTMLAudio decoding and optional Web Audio PCM (`VOICE_BROWSER_PCM=0` keeps the raw media path). It verifies finite headers, progress and the first part's ACK while holding the run open, then checks residual flush, deduplication, cancellation and replay. Results are written to `tmp/voice-recovery/finite-browser-<engine>-<raw|pcm>.json`. Optional `VOICE_BROWSER_TTS_DELAY_MS=3000` (integer 0–5000, default 0) sends the second fixture part's first bytes immediately and delays its remaining body and EOF. It measures the synthesis gap, calls public `VoiceSession.listen()` with silent synthetic media during that gap, and verifies that the microphone gate closes for the next audio. Delayed results use a `-delay<ms>` suffix; default checks are unchanged.
 
 ## Package
 
