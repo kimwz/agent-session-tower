@@ -735,6 +735,7 @@ export class VoiceSession {
     this.audio.onwaiting = this.audio.onstalled = () => { if (this.current === current) { current.advancing = false; this.show({}); } };
     this.audio.onended = () => {
       if (this.current !== current) return;
+      if (this.audio.muted || this.audio.volume === 0) { this.playbackFailed(current, 'output-muted'); return; }
       if (!(this.audio.currentTime > 0 || current.sourcePlayed)) { this.playbackFailed(current, 'ended-without-progress'); return; }
       say.kind === 'notice' ? this.noticeEnded(current) : this.finishPlay(current, 'played');
     };

@@ -1154,3 +1154,18 @@ test('a notice that ends without progress or is muted during playback never auth
     assert.deepEqual(page.results(), ['empty-notice:failed', 'muted-notice:failed']);
   } finally { page.end(); }
 });
+
+test('output muted immediately before ended is not reported played between watchdog ticks', async () => {
+  const page = await harness();
+  try {
+    page.voice.say(page.say('end-race', 'answer'));
+    page.audio.currentTime = 0.5;
+    page.audio.volume = 0;
+    page.audio.onended?.();
+    await flush();
+    assert.deepEqual(page.results(), ['end-race:failed']);
+    const report = posts.find(p => p.path.endsWith('/played'))!;
+    assert.equal(report.body.detail, 'output-muted');
+    assert.equal((report.body.playback as { volume: number }).volume, 0);
+  } finally { page.end(); }
+});
