@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
-import type { Writable } from 'node:stream';
+import { rm } from 'node:fs/promises';
 import type { StreamSink } from '../streams/sink.js';
 import { join } from 'node:path';
 import type { MasterEntry, MasterEntryData, MasterMissed, MasterSay, MasterSpeak, MasterStreamEvent, MasterUnspoken, MasterViewContext, MasterVoiceStatus } from '../../shared/master.js';
@@ -9,32 +8,24 @@ import type { ElevenLabs, VoiceInfo } from './elevenlabs.js';
 import type { FirstReplyMaker } from './first-reply.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
-import { isNoise, READ_CHARS, speakable, streamTone, VOICE_REST, VOICE_SAMPLE, voiced, voicedChunkPairs, voicedPartPairs } from './voice-text.js';
+import { isNoise, READ_CHARS, speakable, streamTone, VOICE_REST, voiced, voicedChunkPairs, voicedPartPairs } from './voice-text.js';
 import { CHUNK_PAUSE_MS, TextFollower } from './voice-stream.js';
-import { playbackRecord, VoiceTimings, progressRecord, elapsed, attemptNumber, transportStage, type VoiceTtsRecord, type VoiceTransportStage } from './voice-timings.js';
+import { playbackRecord, VoiceTimings, progressRecord, elapsed, attemptNumber, transportStage } from './voice-timings.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
-import { frameAt, id3Size, MP3_BYTES_PER_SECOND, withoutTag } from './mp3.js';
+import { LIVE_WAIT_MS, VoiceAudio } from './voice-audio.js';
+import { VoiceClips } from './voice-clips.js';
+import type { AudioHandle, VoiceTiming } from './voice-types.js';
 import { FIRST_REPLY_DOLLARS, localDay, ttsDollarsPerChar, VoiceUsage } from './voice-usage.js';
 
 export { frameAt, id3Size } from './mp3.js';
+export type { VoiceTiming } from './voice-types.js';
 export { migrate, type VoiceFile } from './voice-usage.js';
 
 /** A first reply not ready this long after the request came is not said: the answer is near by then. */
 const FIRST_REPLY_MS = 2_500;
 const SAY_QUEUE = 20;
-const CLIP_BYTES = 5 * 1024 * 1024;
-/** Voice samples kept for the settings: about one per voice an account lists. */
-const PREVIEWS = 60;
-const LIVE_COUNT = 40;
-/** Audio is kept longer than the longest answer read takes (`READ_CHARS` at `MS_PER_CHAR`). */
-const LIVE_MS = 20 * 60_000;
-/** Audio kept for one thing said: at least this, and more for a long answer (128 kbps is about 3 KB a character). */
-const LIVE_BYTES = 2 * 1024 * 1024;
-const LIVE_BYTES_PER_CHAR = 4 * 1024;
 /** How long reading aloud may take a character, at most: the page gives up on a player later than this too. */
 const MS_PER_CHAR = 200;
-/** Audio being read while it is written is sealed when no words came for it this long (a turn that hangs). */
-const LIVE_WAIT_MS = 5 * 60_000;
 /** News older than this is not read aloud any more: it is on the screen. */
 const STALE_MS = 60 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -48,9 +39,6 @@ const reasonOf = (result: string): MasterUnspoken => REASONS[result] ?? 'failed'
 /** What the owner is told of beside the voice: everything but their own stop and a restart. */
 const QUIET = new Set<MasterUnspoken>(['stopped', 'restart']);
 
-export interface VoiceTiming {
-  firstChunkMs: number; synthMs: number; playMs: number; resyncMs: number; waitMs: number; presenceMs: number; tickMs: number;
-}
 const TIMING: VoiceTiming = { firstChunkMs: 10_000, synthMs: 30_000, playMs: 60_000, resyncMs: 15_000, waitMs: 30_000, presenceMs: 15_000, tickMs: 5_000 };
 
 /** What the voice needs from the master: its hiding, its inbox, and when a new web arrived. */
@@ -92,36 +80,6 @@ interface Session {
   ended?: 'stopped' | 'away' | 'restart';
 }
 
-/** Audio being made (or made) for the page, kept a short while. */
-interface Live {
-  id: string;
-  chunks: Buffer[];
-  bytes: number;
-  done: boolean;
-  failed: boolean;
-  createdAt: number;
-  waiters: Set<() => void>;
-  readers: Set<StreamSink>;
-  /** Stops the request for sound under way. */
-  stop?: () => void;
-  /** What is to be read, in order: more may be added (`feed`) until it is sealed. */
-  parts: string[];
-  sealed: boolean;
-  /** Parts asked for so far (the rest were never paid for if it fails). */
-  sent: number;
-  charged: number;
-  voiceId: string;
-  model: string;
-  /** Held by a turn being read: never pushed out while it is. */
-  held: boolean;
-  /** The spoken request (or report) it answers, for the timing records. */
-  timing?: string;
-  /** First part waited in the segment queue from this time; later parts share that segment origin. */
-  queuedAt?: number;
-  session?: Session;
-  partIndex?: number;
-}
-
 /** Input for reading a turn while the master writes it. */
 export interface StreamInput {
   /** The turn's run (the one steered messages joined). */
@@ -153,7 +111,7 @@ interface Segment {
   played?: true;
   /** Its sound started on the page. */
   started?: true;
-  live?: Live;
+  live?: AudioHandle;
   say?: MasterSay;
 }
 
@@ -183,7 +141,6 @@ interface Stream {
 const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32);
 const fail = (message: string, kind: ErrorKind) => new TowerError(kind, message);
 const speakOf = (data: MasterEntryData | undefined): MasterSpeak | undefined => data && (data.kind === 'master' || data.kind === 'error' || data.kind === 'event') ? data.speak : undefined;
-const wake = (live: Live) => { for (const waiter of [...live.waiters]) waiter(); };
 /** How an answer's reading stands, without how an earlier reading of it ended. */
 const bare = ({ reason: _reason, heard: _heard, ...rest }: MasterSpeak): MasterSpeak => rest;
 /** An answer's reading ended without it being heard to its end, and why. */
@@ -202,7 +159,10 @@ export class MasterVoice {
   /** The voice's own records: money spent, tokens held and news not yet read (voice.json). */
   private readonly usage: VoiceUsage;
   private session?: Session;
-  private readonly lives = new Map<string, Live>();
+  /** Audio being made and kept for the page. */
+  private readonly audio: VoiceAudio;
+  /** Fixed sentences recorded once (voice samples). */
+  private readonly clips: VoiceClips;
   private readonly results = new Map<string, (result: string) => void>();
   private line: Promise<unknown> = Promise.resolve();
   private delivering = false;
@@ -212,9 +172,6 @@ export class MasterVoice {
   private unsubscribe?: () => void;
   private closed = false;
   private readonly timing: VoiceTiming;
-  private readonly previews: string;
-  /** Recordings being made, by digest. */
-  private readonly recording = new Map<string, Promise<string>>();
   /** Turns read while they are written, by turn. */
   private readonly streams = new Map<string, Stream>();
   /** A say's timing and accepted start, retained synchronously by its owning streamed segment. */
@@ -231,8 +188,9 @@ export class MasterVoice {
   constructor(private readonly options: MasterVoiceOptions) {
     this.timing = { ...TIMING, ...options.timing };
     this.usage = new VoiceUsage(join(options.dataDir, 'voice.json'), () => this.options.settings.current().voice.dailyDollars);
-    this.previews = join(options.dataDir, 'voice-previews');
     this.timings = new VoiceTimings(join(options.dataDir, 'voice-timings.json'));
+    this.audio = new VoiceAudio(this.usage, this.timings, options.elevenLabs, () => this.options.settings.current().voice, this.timing, () => this.broadcast());
+    this.clips = new VoiceClips(join(options.dataDir, 'voice-previews'), this.audio, this.usage, options.settings, options.elevenLabs);
   }
 
   async start(): Promise<void> {
@@ -259,7 +217,7 @@ export class MasterVoice {
     if (this.pauseTimer) clearInterval(this.pauseTimer);
     this.endSession(this.session, 'restart');
     this.options.firstReply?.close();
-    for (const live of [...this.lives.values()]) this.drop(live);
+    this.audio.dropAll();
     await this.usage.flush();
     await this.timings.flush();
   }
@@ -411,9 +369,9 @@ export class MasterVoice {
     const sent = voiced(reply.text, model, 'ack');
     // Judged against the limit as it is now (an answer may have spent meanwhile), and charged in the same step.
     if (this.usage.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) return undefined;
-    const live = this.synthesize(sent);
-    live.session = session;
-    if (!await this.complete(live, signal) || signal.aborted || this.session !== session || !this.alive(session) || this.answering(request)) { this.abandon(live); return undefined; }
+    const live = this.audio.synthesize(sent);
+    this.audio.configure(live, { session });
+    if (!await this.audio.complete(live, signal) || signal.aborted || this.session !== session || !this.alive(session) || this.answering(request)) { this.audio.abandon(live); return undefined; }
     return { id: randomUUID(), session: session.digest, kind: 'ack', text: reply.text, audio: `/api/master/voice/audio/${live.id}`, expiresAt: Date.now() + 60_000, request };
   }
 
@@ -543,11 +501,11 @@ export class MasterVoice {
       const part = parts[index];
       const refuse = this.session !== session || !this.alive(session) ? this.gone(session) : this.usage.limited(Date.now(), part.speech.length * ttsDollarsPerChar(model)) ? 'limit' : undefined;
       if (refuse) { this.setSpeak(entry, unspoken(speakOf(this.options.room.get(entry.id)?.data) ?? speak, refuse, heard)); return; }
-      const live = this.synthesize(part.speech, undefined, key);
-      live.session = session; live.held = true; live.partIndex = index;
+      const live = this.audio.synthesize(part.speech, undefined, key);
+      this.audio.configure(live, { session, held: true, partIndex: index });
       try {
-        if (!await this.complete(live) || this.session !== session) {
-          this.abandon(live);
+        if (!await this.audio.complete(live) || this.session !== session) {
+          this.audio.abandon(live);
           this.setSpeak(entry, unspoken(speakOf(this.options.room.get(entry.id)?.data) ?? speak, this.session !== session ? this.gone(session) : 'audio', heard)); return;
         }
         this.setSpeak(entry, { ...speak, state: 'playing' });
@@ -557,7 +515,7 @@ export class MasterVoice {
         if (result !== 'played') {
           this.setSpeak(entry, unspoken(speakOf(this.options.room.get(entry.id)?.data) ?? speak, reasonOf(result), heard)); return;
         }
-      } finally { live.held = false; }
+      } finally { this.audio.configure(live, { held: false }); }
     }
     this.setSpeak(entry, played(speakOf(this.options.room.get(entry.id)?.data) ?? speak));
   }
@@ -636,7 +594,7 @@ export class MasterVoice {
   }
 
   /** Whether reading aloud is under way: a turn being read, audio being made, or the page's word awaited. */
-  busy(): boolean { return this.streams.size > 0 || this.results.size > 0 || [...this.lives.values()].some(live => !live.done); }
+  busy(): boolean { return this.streams.size > 0 || this.results.size > 0 || this.audio.busy(); }
 
   /** Takes the words that are whole from each reply into its segment, in order. `done`: the turn ended, take all. */
   private take(stream: Stream, replies: readonly RunReply[], done: boolean): void {
@@ -713,12 +671,12 @@ export class MasterVoice {
       const part = segment.parts[segment.fed];
       const model = this.options.settings.current().voice.model;
       if (this.usage.limited(Date.now(), part.speech.length * ttsDollarsPerChar(model))) { this.stopStream(stream, 'limit'); return; }
-      const live = this.synthesize(part.speech, undefined, stream.key);
-      live.held = true; live.session = session; live.queuedAt = segment.queuedAt; live.partIndex = segment.fed;
+      const live = this.audio.synthesize(part.speech, undefined, stream.key);
+      this.audio.configure(live, { held: true, session, queuedAt: segment.queuedAt, partIndex: segment.fed });
       segment.live = live;
       try {
-        if (!await this.complete(live) || this.session !== session || stream.state !== 'streaming') {
-          this.abandon(live);
+        if (!await this.audio.complete(live) || this.session !== session || stream.state !== 'streaming') {
+          this.audio.abandon(live);
           if (stream.state === 'streaming') this.stopStream(stream, this.session !== session ? this.gone(session) : 'audio');
           return;
         }
@@ -731,7 +689,7 @@ export class MasterVoice {
         }
         segment.fed++;
         stream.played++;
-      } finally { live.held = false; segment.live = undefined; segment.say = undefined; }
+      } finally { this.audio.configure(live, { held: false }); segment.live = undefined; segment.say = undefined; }
     }
     segment.played = segment.done && segment.fed >= segment.parts.length ? true : undefined;
     this.settle(stream);
@@ -775,7 +733,7 @@ export class MasterVoice {
         if (done) done('stopped');
         else this.options.room.broadcast({ type: 'say', seq: 0, say: { ...segment.say, cancelled: true } });
       }
-      if (segment.live) { this.abandon(segment.live); segment.live.held = false; }
+      if (segment.live) { this.audio.abandon(segment.live); this.audio.configure(segment.live, { held: false }); }
     }
     const heard = this.heardOf(stream);
     const finishing = stream.finishing?.data;
@@ -841,308 +799,26 @@ export class MasterVoice {
   // ─── audio ───────────────────────────────────────────────────────────────────────────────────────────────────
 
   /**
-   * Starts making audio for text, given whole or in parts made one after another into one stream; the page can play
-   * it while it is still being made. The caller has checked the limit in the same step: the characters are counted
-   * here, before anything is awaited.
-   */
-  private synthesize(text: string | string[], voice?: { voiceId: string; model: string }, timing?: string): Live {
-    const live = this.openLive(voice, timing);
-    const parts = typeof text === 'string' ? [text] : text;
-    const chars = parts.reduce((sum, part) => sum + part.length, 0);
-    // Characters sent are paid for, whether or not the audio comes back whole.
-    this.usage.add(live.createdAt, { ttsChars: chars, model: live.model });
-    live.charged = chars;
-    live.parts.push(...parts);
-    live.sealed = true;
-    wake(live);
-    void this.usage.save();
-    this.broadcast();
-    return live;
-  }
-
-  /** Creates the retained byte stream; synthesize seals its known input before making proceeds. */
-  private openLive(voice?: { voiceId: string; model: string }, timing?: string): Live {
-    const settings = voice ?? this.options.settings.current().voice;
-    const live: Live = { id: randomUUID(), chunks: [], bytes: 0, done: false, failed: false, createdAt: Date.now(), waiters: new Set(), readers: new Set(),
-      parts: [], sealed: false, sent: 0, charged: 0, voiceId: settings.voiceId, model: settings.model, held: false, ...(timing ? { timing } : {}) };
-    this.lives.set(live.id, live);
-    this.evict();
-    void this.make(live);
-    return live;
-  }
-
-  private async make(live: Live): Promise<void> {
-    let deadline: ReturnType<typeof setTimeout> | undefined;
-    try {
-      for (let index = 0; ; index++) {
-        while (index >= live.parts.length) {
-          if (live.failed) throw new Error('stopped');
-          if (live.sealed) { live.done = true; return; }
-          await this.until(live, () => live.failed || live.sealed || index < live.parts.length, LIVE_WAIT_MS);
-          // No words came for it for a long while: it ends with what it has.
-          if (!live.failed && !live.sealed && index >= live.parts.length) live.sealed = true;
-        }
-        if (live.failed) throw new Error('stopped');
-        const part = live.parts[index];
-        live.sent = index + 1;
-        const most = Math.max(LIVE_BYTES, live.charged * LIVE_BYTES_PER_CHAR);
-        // Each part has its own time; a part that failed before any of its sound came is asked for once more, if
-        // the daily limit allows paying for it again. A part that comes back without sound has failed.
-        for (let attempt = 0; ; attempt++) {
-          const controller = new AbortController();
-          live.stop = () => controller.abort(new Error('stopped'));
-          // Timed from the last sound that came: a long part is given its time as long as sound keeps coming.
-          const idle = () => { clearTimeout(deadline); deadline = setTimeout(() => controller.abort(new Error('시간 초과')), this.timing.synthMs); };
-          idle();
-          let got = false;
-          const piece: VoiceTtsRecord = { live: live.id, part: live.partIndex ?? index, attempt, ...(live.queuedAt !== undefined ? { queuedAt: live.queuedAt } : {}), start: Date.now(), bytes: 0 };
-          this.timings.piece(live.timing, piece);
-          this.timings.mark(live.timing, 'tts');
-          try {
-            const stream = this.options.elevenLabs.speak(part, live.voiceId, live.model, controller.signal);
-            for await (const chunk of index ? withoutTag(stream) : stream) {
-              if (live.failed) throw new Error('stopped');
-              if (live.bytes + chunk.length > most) throw new Error('too large');
-              idle();
-              piece.bytes += chunk.length;
-              if (!got) { this.timings.mark(live.timing, 'audio'); piece.firstByte = Date.now(); this.timings.piece(live.timing, piece); }
-              got = true;
-              live.chunks.push(chunk);
-              live.bytes += chunk.length;
-              wake(live);
-            }
-            if (!got) throw new Error('no sound');
-            piece.result = 'done';
-            break;
-          } catch (error) {
-            piece.result = 'failed';
-            if (got || attempt > 0 || live.failed || (error as Error).message === 'too large' || this.usage.limited(Date.now(), part.length * ttsDollarsPerChar(live.model))) throw error;
-            this.usage.add(Date.now(), { ttsChars: part.length, model: live.model });
-            void this.usage.save();
-          } finally { clearTimeout(deadline); piece.done = Date.now(); this.timings.piece(live.timing, piece); }
-        }
-      }
-    } catch {
-      live.failed = true;
-      live.done = true;
-      live.sealed = true;
-      // Parts never asked for are not paid for.
-      const unsent = live.parts.slice(live.sent).reduce((sum, part) => sum + part.length, 0);
-      if (unsent) { this.usage.add(live.createdAt, { ttsChars: -unsent, model: live.model }); void this.usage.save(); this.broadcast(); }
-    } finally {
-      clearTimeout(deadline);
-      // A reader of audio that failed sees its connection cut, never a clean end.
-      if (live.failed) for (const reader of live.readers) this.cutOff(reader);
-      wake(live);
-    }
-  }
-
-  /** At most `LIVE_COUNT` pieces of audio are kept: the oldest go first, never one a turn being read holds. */
-  private evict(): void {
-    while (this.lives.size > LIVE_COUNT) {
-      const oldest = [...this.lives.values()].find(live => !live.held);
-      if (!oldest) break;
-      this.drop(oldest);
-    }
-  }
-
-  /** Audio nobody will hear any more: the request under way stops, and no further part is asked for. */
-  private abandon(live: Live): void {
-    if (live.done) return;
-    live.failed = true;
-    live.stop?.();
-    wake(live);
-  }
-
-  /** A finite part is published only once its complete successful byte count is known. */
-  private async complete(live: Live, signal?: AbortSignal): Promise<boolean> {
-    const abort = () => this.abandon(live);
-    signal?.addEventListener('abort', abort, { once: true });
-    if (signal?.aborted) abort();
-    try {
-      const deadline = Date.now() + 2 * this.timing.synthMs;
-      await this.until(live, () => live.bytes > 0 || live.done || live.failed, Math.min(this.timing.firstChunkMs, 2 * this.timing.synthMs));
-      if (!live.bytes) { this.abandon(live); return false; }
-      await this.until(live, () => live.done || live.failed, Math.max(0, deadline - Date.now()));
-      const complete = live.done && !live.failed && live.bytes > 0 && !signal?.aborted;
-      if (!complete) this.abandon(live);
-      return complete;
-    } finally { signal?.removeEventListener('abort', abort); }
-  }
-
-  private finished(live: Live): Promise<void> { return this.until(live, () => live.done, this.timing.synthMs); }
-  private until(live: Live, ready: () => boolean, ms: number): Promise<void> {
-    if (ready()) return Promise.resolve();
-    return new Promise(resolve => {
-      const check = () => { if (ready()) finish(); };
-      const finish = () => { clearTimeout(timer); live.waiters.delete(check); resolve(); };
-      const timer = setTimeout(finish, ms);
-      live.waiters.add(check);
-    });
-  }
-
-  /** Ends audio kept too long (or pushed out): readers still waiting are cut off, and it is gone. */
-  private drop(live: Live): void {
-    if (!live.done) { live.failed = true; live.done = true; }
-    for (const reader of live.readers) if (live.failed) this.cutOff(reader);
-    wake(live);
-    this.lives.delete(live.id);
-  }
-
-  /**
-   * Streams audio to the page (through the web): what is made so far, then the rest as it comes. A slow page is
-   * waited for, but never past its connection closing or a while; nothing waiting is left behind either way.
+   * Audio for the page (through the web): a voice sample kept on disk, or audio being made or kept for a while. A
+   * missing one is a bodiless 404; see `VoiceClips.serve` and `VoiceAudio.serve`.
    */
   async serveAudio(id: string, sink: StreamSink, at = 0, requestId: string = randomUUID()): Promise<void> {
-    const res = sink.body;
     const preview = /^preview-([a-f0-9]{64})$/.exec(id);
-    if (preview) {
-      const data = await readFile(join(this.previews, `${preview[1]}.mp3`)).catch(() => undefined);
-      if (!data) { sink.refuse('not-found'); return; }
-      sink.open({ length: data.length });
-      res.end(data);
-      return;
-    }
-    const live = this.lives.get(id);
-    if (!live) { sink.refuse('not-found'); return; }
-    const stage: VoiceTransportStage = { request: Date.now(), bytes: 0 };
-    const record = () => this.timings.audioRequest(live.timing, id, requestId, at, stage);
-    record();
-    res.once('finish', () => { stage.end = Date.now(); stage.normal = true; record(); });
-    res.once('close', () => { stage.close = Date.now(); stage.normal ??= false; record(); });
-    const write = (chunk: Buffer) => { const sent = res.write(chunk); stage.bytes += chunk.length; if (stage.firstWrite === undefined) { stage.firstWrite = Date.now(); record(); } return sent; };
-    if (live.failed) { sink.refuse('upstream'); return; }
-    const finite = live.done;
-    const made = finite ? Buffer.concat(live.chunks) : undefined;
-    const from = made && at > 0 ? frameAt(made, id3Size(made) + Math.floor(at * MP3_BYTES_PER_SECOND)) : 0;
-    sink.open(made ? { length: Math.max(0, made.length - from) } : {});
-    live.readers.add(sink);
-    let index = 0;
-    try {
-      if (made) {
-        if (from < made.length && !write(made.subarray(from)) && !await this.wait(res, live, true)) { res.destroy(); return; }
-        if (!res.destroyed) res.end();
-        return;
-      }
-      // Played again from `at` seconds (the page lost its connection partway): from the first whole frame there.
-      if (at > 0 && live.chunks.length) {
-        const made = Buffer.concat(live.chunks);
-        index = live.chunks.length;
-        const from = frameAt(made, id3Size(made) + Math.floor(at * MP3_BYTES_PER_SECOND));
-        if (from < made.length && !write(made.subarray(from)) && !await this.wait(res, live, true)) { res.destroy(); return; }
-      }
-      while (!res.destroyed && !res.writableEnded) {
-        while (index < live.chunks.length && !res.destroyed) {
-          // A page that does not take what it was sent in a while is cut off.
-          if (!write(live.chunks[index++]) && !await this.wait(res, live, true)) { res.destroy(); return; }
-        }
-        if (res.destroyed) return;
-        if (live.failed) { this.cutOff(sink); return; }
-        if (live.done && index >= live.chunks.length) { res.end(); return; }
-        await this.wait(res, live, false);
-      }
-    } finally { live.readers.delete(sink); }
-  }
-
-  /**
-   * Cuts a page off failed audio, never with a clean end, once what it was sent has left: cut at once, audio written
-   * just before would be thrown away, and a page that came late would get nothing of what was made.
-   */
-  private cutOff(reader: StreamSink): void { reader.cutOff(this.timing.waitMs); }
-
-  /**
-   * Waits for the page to drain what it was sent (`drain`), or for more audio (otherwise); either way also for its
-   * connection ending or a while passing, which is the only false answer. Leaves nothing registered.
-   */
-  private wait(res: Writable, live: Live, drain: boolean): Promise<boolean> {
-    return new Promise(resolve => {
-      const done = (value: boolean) => {
-        clearTimeout(timer);
-        res.off('drain', drained); res.off('close', ended); res.off('error', ended);
-        live.waiters.delete(more);
-        resolve(value);
-      };
-      const drained = () => done(true);
-      const ended = () => done(true);
-      const more = () => { if (!drain || live.failed) done(true); };
-      // A player takes a long answer as it plays, so it may not read for a while; it is waited for while its
-      // connection is open and the audio is kept. More audio is waited for a while, then looked at again.
-      const timer = setTimeout(() => done(false), drain ? Math.max(this.timing.waitMs, live.createdAt + LIVE_MS - Date.now()) : this.timing.waitMs);
-      if (drain) res.once('drain', drained);
-      res.once('close', ended);
-      res.once('error', ended);
-      live.waiters.add(more);
-    });
+    if (preview) return this.clips.serve(preview[1], sink);
+    return this.audio.serve(id, sink, at, requestId);
   }
 
   /** How many readers and waiters audio still has, for tests: none once its readers are gone. */
-  listeners(id: string): number {
-    const live = this.lives.get(id);
-    return live ? live.waiters.size + live.readers.size : 0;
-  }
-
-  /**
-   * Audio of a fixed sentence in a voice and model, kept in `dir` under its digest and made only when it is not there;
-   * the same recording asked for twice at once is made once. Made with exactly the voice and model it is kept under.
-   */
-  private record(dir: string, sent: string, voiceId: string, model: string, keep: number): Promise<string> {
-    const key = createHash('sha256').update(JSON.stringify([voiceId, model, sent])).digest('hex');
-    const known = this.recording.get(key);
-    if (known) return known;
-    const work = (async () => {
-      const path = join(dir, `${key}.mp3`);
-      if (await stat(path).then(() => true, () => false)) return key;
-      if (this.usage.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) throw new Error('limited');
-      const live = this.synthesize(sent, { voiceId, model });
-      await this.finished(live);
-      // Not done in time: nothing more is asked for, and what came is not kept.
-      if (live.failed || !live.done) { this.abandon(live); this.drop(live); throw new Error('clip failed'); }
-      await mkdir(dir, { recursive: true, mode: 0o700 });
-      await writeFile(path, Buffer.concat(live.chunks), { mode: 0o600 });
-      this.drop(live);
-      await this.prune(dir, key, keep);
-      return key;
-    })();
-    this.recording.set(key, work);
-    void work.catch(() => {}).finally(() => this.recording.delete(key));
-    return work;
-  }
-
-  /** At most `keep` recordings and `CLIP_BYTES` in all, the newest kept (and the one just made, always). */
-  private async prune(dir: string, keep: string, most: number): Promise<void> {
-    const names = (await readdir(dir).catch(() => [] as string[])).filter(name => /^[a-f0-9]{64}\.mp3$/.test(name));
-    const files = await Promise.all(names.map(async name => ({ name, info: await stat(join(dir, name)).catch(() => undefined) })));
-    const known = files.filter((file): file is { name: string; info: NonNullable<typeof file.info> } => Boolean(file.info))
-      .sort((a, b) => (b.name === `${keep}.mp3` ? 1 : 0) - (a.name === `${keep}.mp3` ? 1 : 0) || b.info.mtimeMs - a.info.mtimeMs);
-    let bytes = 0;
-    for (const [index, file] of known.entries()) {
-      bytes += file.info.size;
-      if (index > 0 && (index >= most || bytes > CLIP_BYTES)) await unlink(join(dir, file.name)).catch(() => {});
-    }
-  }
+  listeners(id: string): number { return this.audio.listeners(id); }
 
   /**
    * A short sample in a voice, for the owner choosing one in the settings: read with the model and bright tone set
    * now, made once per voice and model, and paid for like anything else read aloud. Needs only the key.
    */
-  async voicePreview(input: { voiceId: unknown }): Promise<{ audio: string }> {
-    if (!this.options.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 'conflict');
-    if (typeof input.voiceId !== 'string' || !/^[A-Za-z0-9]{10,64}$/.test(input.voiceId)) throw fail('목소리가 올바르지 않습니다.', 'invalid');
-    const { model } = this.options.settings.current().voice;
-    try {
-      const key = await this.record(this.previews, voiced(VOICE_SAMPLE, model, 'answer'), input.voiceId, model, PREVIEWS);
-      return { audio: `/api/master/voice/audio/preview-${key}` };
-    } catch (error) {
-      if ((error as Error).message === 'limited') throw fail('오늘 음성 한도에 닿았습니다.', 'conflict');
-      throw fail('미리 듣기를 만들지 못했습니다. 이 계정에서 쓸 수 있는 목소리인지 확인해 주세요.', 'upstream');
-    }
-  }
+  async voicePreview(input: { voiceId: unknown }): Promise<{ audio: string }> { return this.clips.preview(input); }
 
   /** Voices the account can use; needs only the key, so a voice can be chosen before the master session starts. */
-  async voiceVoices(): Promise<VoiceInfo[]> {
-    if (!this.options.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 'conflict');
-    return this.options.elevenLabs.voices();
-  }
+  async voiceVoices(): Promise<VoiceInfo[]> { return this.clips.voices(); }
 
   // ─── cost ────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -1257,7 +933,7 @@ export class MasterVoice {
     this.options.firstReply?.close();
     // The page's word first, so what each said ended with is recorded before its reading's outcome.
     for (const done of [...this.results.values()]) done(reason);
-    for (const live of this.lives.values()) if (live.session === session) this.abandon(live);
+    this.audio.abandonSession(session);
     for (const stream of [...this.streams.values()]) if (stream.session === session) this.stopStream(stream, reason);
   }
 
@@ -1274,7 +950,7 @@ export class MasterVoice {
     this.sweep();
     // Nothing waits to write a first reply for a page that is gone.
     if (!this.session || !this.alive(this.session)) this.options.firstReply?.close();
-    for (const live of [...this.lives.values()]) if (now - live.createdAt > LIVE_MS && !live.held) this.drop(live);
+    this.audio.expire(now);
     this.usage.pruneDays(now);
     const day = localDay(now);
     if (day !== this.shownDay) { this.shownDay = day; this.broadcast(); }

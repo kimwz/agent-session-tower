@@ -53,8 +53,8 @@ async function audio(t: test.TestContext, speeches: Speech[]) {
     told: () => events.filter(event => event.type === 'voice').length };
 }
 
-/** Test-only access to the private start of audio making (the facade's own synthesize). */
-const synthesize = (voice: MasterVoice, text: string | string[]) => (voice as unknown as { synthesize(text: string | string[]): { id: string } }).synthesize(text);
+/** Test-only access to the private start of audio making (C8: the private audio owner's synthesize; before, the facade's own). */
+const synthesize = (voice: MasterVoice, text: string | string[]) => (voice as unknown as { audio: { synthesize(text: string | string[]): { id: string } } }).audio.synthesize(text);
 
 test('audio being made is charged and told once at its start; a part asked for again is charged but not told; parts never asked for are given back and told', async t => {
   // A part that fails before any sound is asked for once more: charged again, told nothing more.

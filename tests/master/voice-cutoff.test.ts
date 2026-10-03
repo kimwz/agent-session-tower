@@ -38,7 +38,8 @@ test('audio that fails after its first bytes went out is cut off: a truncated re
   await voice.start();
   const stages: Array<Record<string, unknown>> = [];
   t.mock.method((voice as unknown as { timings: { audioRequest: (...args: unknown[]) => void } }).timings, 'audioRequest', (...args: unknown[]) => { stages.push({ ...(args[4] as Record<string, unknown>) }); });
-  const live = (voice as unknown as { synthesize(text: string): { id: string } }).synthesize('끝까지 만들어지지 않을 문장입니다.');
+  // Test-only access to the private audio owner (C8): the same start of audio making, with no session or hold added.
+  const live = (voice as unknown as { audio: { synthesize(text: string): { id: string } } }).audio.synthesize('끝까지 만들어지지 않을 문장입니다.');
   const served = voice;
   const server = createServer((_req, res) => { void served.serveAudio(live.id, audioSink(res)); });
   servers.push(server);
