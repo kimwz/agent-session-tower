@@ -69,24 +69,68 @@ const STATUS_API = new Set(['STATUS', 'statusOf', 'fromStatus']);
 /** shared/errors.ts defines the status table and reads foreign statuses: only those two clauses do not apply to it. */
 const DEFINITION = 'shared/errors.ts';
 
-/** How a file speaks HTTP, if it does: node:http imports, HTTP type names, `statusCode`, the status table, server/http imports. */
+/**
+ * How a file speaks HTTP, if it does: node:http imports, HTTP type names, `statusCode`, the status table, server/http
+ * imports. Imports count in every static form with a literal path: declarations, `import()`, `import x = require()`.
+ * The status table counts by name, through a namespace bound directly to shared/errors (`import * as`,
+ * `import x = require()`, `const x = await import()`; declarations are hoisted, so all are found first) or straight
+ * off an `import()`, read by property or destructured. Paths built at run time, other aliases, and re-exports through
+ * other modules are not followed.
+ */
 export function httpUse(path: string, text: string): string[] {
   const found = new Set<string>();
+  const resolve = (specifier: string) => posix.normalize(posix.join(posix.dirname(path), specifier)).replace(/\.(js|ts)$/, '');
+  const isErrors = (specifier: string) => specifier.startsWith('.') && resolve(specifier) === 'shared/errors';
+  const imported = (specifier: string) => {
+    if (/^(node:)?http2?$/.test(specifier)) found.add(`imports ${specifier}`);
+    if (specifier.startsWith('.') && resolve(specifier).startsWith('server/http/') && !path.startsWith('server/http/')) found.add('imports server/http');
+  };
+  const literalImport = (node: ts.Node): string | undefined => {
+    while (ts.isParenthesizedExpression(node) || ts.isAwaitExpression(node)) node = node.expression;
+    return ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments[0] && ts.isStringLiteralLike(node.arguments[0]) ? node.arguments[0].text : undefined;
+  };
+  /** Names bound directly to the whole of shared/errors, found before any use (import declarations are hoisted). */
+  const namespaces = new Set<string>();
+  const bind = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier) && isErrors(node.moduleSpecifier.text) && node.importClause?.namedBindings && ts.isNamespaceImport(node.importClause.namedBindings)) namespaces.add(node.importClause.namedBindings.name.text);
+    if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) && ts.isStringLiteral(node.moduleReference.expression) && isErrors(node.moduleReference.expression.text)) namespaces.add(node.name.text);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer) { const from = literalImport(node.initializer); if (from !== undefined && isErrors(from)) namespaces.add(node.name.text); }
+    ts.forEachChild(node, bind);
+  };
+  const source = parse(path, text);
+  bind(source);
+  const statusApi = (name: string) => { if (STATUS_API.has(name)) found.add(`imports ${name}`); };
   const visit = (node: ts.Node): void => {
     if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
       const specifier = node.moduleSpecifier.text;
-      if (/^(node:)?http2?$/.test(specifier)) found.add(`imports ${specifier}`);
-      const target = posix.normalize(posix.join(posix.dirname(path), specifier)).replace(/\.(js|ts)$/, '');
-      if (target === 'shared/errors' && ts.isImportDeclaration(node) && node.importClause?.namedBindings && ts.isNamedImports(node.importClause.namedBindings)) {
-        for (const element of node.importClause.namedBindings.elements) if (STATUS_API.has((element.propertyName ?? element.name).text)) found.add(`imports ${(element.propertyName ?? element.name).text}`);
+      imported(specifier);
+      if (isErrors(specifier) && ts.isImportDeclaration(node) && node.importClause?.namedBindings) {
+        const bindings = node.importClause.namedBindings;
+        if (ts.isNamedImports(bindings)) for (const element of bindings.elements) statusApi((element.propertyName ?? element.name).text);
       }
-      if (specifier.startsWith('.') && target.startsWith('server/http/') && !path.startsWith('server/http/')) found.add('imports server/http');
+    }
+    if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference) && ts.isStringLiteral(node.moduleReference.expression)) {
+      imported(node.moduleReference.expression.text);
+    }
+    const dynamic = literalImport(node);
+    if (dynamic !== undefined && ts.isCallExpression(node)) imported(dynamic);
+    // The table read through a namespace, or straight off an import() of shared/errors.
+    if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
+      const name = ts.isPropertyAccessExpression(node) ? node.name.text : ts.isStringLiteralLike(node.argumentExpression) ? node.argumentExpression.text : undefined;
+      const from = literalImport(node.expression);
+      if (name && ((ts.isIdentifier(node.expression) && namespaces.has(node.expression.text)) || (from !== undefined && isErrors(from)))) statusApi(name);
+    }
+    // Destructured straight off an import() of shared/errors, or off a namespace bound to it.
+    if (ts.isVariableDeclaration(node) && node.initializer && ts.isObjectBindingPattern(node.name)) {
+      const from = literalImport(node.initializer);
+      const initializer = ts.isParenthesizedExpression(node.initializer) ? node.initializer.expression : node.initializer;
+      if ((from !== undefined && isErrors(from)) || (ts.isIdentifier(initializer) && namespaces.has(initializer.text))) for (const element of node.name.elements) statusApi((element.propertyName ?? element.name).getText());
     }
     if (ts.isIdentifier(node) && HTTP_NAMES.has(node.text)) found.add(`names ${node.text}`);
     if (ts.isIdentifier(node) && node.text === 'statusCode') found.add('statusCode');
     ts.forEachChild(node, visit);
   };
-  visit(parse(path, text));
+  visit(source);
   if (path === DEFINITION) { found.delete('statusCode'); for (const name of STATUS_API) found.delete(`imports ${name}`); }
   return [...found].sort();
 }
@@ -186,6 +230,25 @@ test('R5 cases: what makes a file speak HTTP, the definition exemptions, and sta
   assert.deepEqual(uses('shared/errors.ts', "import { request } from 'node:http';"), ['imports node:http'], 'but does not speak HTTP');
   assert.deepEqual(uses('shared/models.ts', "const failure = { statusCode: 400 };"), ['statusCode']);
   assert.deepEqual(uses('client/src/app.ts', "import { request } from 'node:http';"), [], 'the page has its own ApiError');
+  // Static forms other than a declaration, with a literal path.
+  assert.deepEqual(uses('server/master/session.ts', "const http = await import('node:http');"), ['imports node:http']);
+  assert.deepEqual(uses('server/master/session.ts', "import http2 = require('node:http2');"), ['imports node:http2']);
+  assert.deepEqual(uses('server/master/session.ts', "const requests = await import('../http/requests.js');"), ['imports server/http']);
+  assert.deepEqual(uses('server/master/session.ts', "import requests = require('../http/requests.js');"), ['imports server/http']);
+  assert.deepEqual(uses('server/master/session.ts', "const fs = await import('node:fs'); import path = require('node:path');"), [], 'other modules');
+  // The status table through a namespace or an import().
+  assert.deepEqual(uses('server/master/session.ts', "import * as errors from '../../shared/errors.js'; errors.statusOf(e); errors['STATUS'];"), ['imports STATUS', 'imports statusOf']);
+  assert.deepEqual(uses('server/master/session.ts', "import errors = require('../../shared/errors.js'); errors.fromStatus(500, 'x');"), ['imports fromStatus']);
+  assert.deepEqual(uses('server/master/session.ts', "const status = (await import('../../shared/errors.js')).statusOf(e);"), ['imports statusOf']);
+  assert.deepEqual(uses('server/master/session.ts', "const { fromStatus, isKind } = await import('../../shared/errors.js');"), ['imports fromStatus']);
+  assert.deepEqual(uses('server/master/session.ts', "import * as errors from '../../shared/errors.js'; errors.isKind(e, 'conflict'); new errors.TowerError('invalid', 'x');"), [], 'the domain part of the module');
+  assert.deepEqual(uses('server/master/session.ts', "import * as other from './other.js'; other.statusOf(e);"), [], 'another module of the same name');
+  assert.deepEqual(uses('server/master/session.ts', "const name = 'node:http'; await import(name);"), [], 'a path built at run time is not followed (named limit)');
+  assert.deepEqual(uses('server/master/session.ts', "const errors = await import('../../shared/errors.js'); errors.statusOf(e);"), ['imports statusOf'], 'a namespace bound to an import()');
+  assert.deepEqual(uses('server/master/session.ts', "import * as errors from '../../shared/errors.js'; const { statusOf, kindOf } = errors;"), ['imports statusOf'], 'destructured off a namespace');
+  assert.deepEqual(uses('server/master/session.ts', "errors.fromStatus(500, 'x'); import * as errors from '../../shared/errors.js';"), ['imports fromStatus'], 'used before its hoisted import');
+  assert.deepEqual(uses('server/master/session.ts', "const errors = await import('./other.js'); errors.statusOf(e); const { STATUS } = errors;"), [], 'a namespace of another module');
+  assert.deepEqual(uses('server/master/session.ts', "const errors = await import('../../shared/errors.js'); const { kindOf } = errors; errors.isKind(e, 'conflict');"), [], 'the domain part through such a namespace');
   const files = new Map([['server/a.ts', "import { request } from 'node:http';"], ['server/b.ts', 'export const b = 1;']]);
   assert.deepEqual(staleEdges(files, new Map([['server/a.ts', ''], ['server/b.ts', ''], ['server/gone.ts', '']])), ['server/b.ts', 'server/gone.ts']);
 });
