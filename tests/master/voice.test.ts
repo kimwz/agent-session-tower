@@ -797,3 +797,20 @@ test('finite first response retains the original deadline while TTS is incomplet
   assert.deepEqual(await request(h, session, '느린 첫 음성'), {});
   assert.ok(Date.now() - started < 2_900, 'the existing 2.5 second first-response deadline also covers synthesis');
 });
+
+test('missing preview and live audio are bodiless 404s, and a preview is a finite file with its length', async t => {
+  const h = await harness(t, { steps: [] });
+  const { port } = await audioServer(t, h.voice);
+  const fetchHead = (id: string) => new Promise<{ status: number; body: string; headers: Record<string, string | undefined> }>((resolve, reject) => {
+    httpRequest({ host: '127.0.0.1', port, path: `/${id}` }, res => {
+      const chunks: Buffer[] = [];
+      res.on('data', chunk => chunks.push(chunk as Buffer));
+      res.on('end', () => resolve({ status: res.statusCode!, body: Buffer.concat(chunks).toString(), headers: { type: res.headers['content-type'], cache: res.headers['cache-control'], length: res.headers['content-length'], encoding: res.headers['transfer-encoding'] } }));
+    }).on('error', reject).end();
+  });
+  const bodiless = { body: '', headers: { type: undefined, cache: undefined, length: undefined, encoding: 'chunked' } };
+  assert.deepEqual(await fetchHead(`preview-${'0'.repeat(64)}`), { status: 404, ...bodiless });
+  assert.deepEqual(await fetchHead(randomUUID()), { status: 404, ...bodiless });
+  const preview = await h.voice.voicePreview({ voiceId: 'bv62BmVlrpG0pQegOpuN' });
+  assert.deepEqual(await fetchHead(preview.audio.split('/').at(-1)!), { status: 200, body: 'ID3-first-second-part', headers: { type: 'audio/mpeg', cache: 'no-store', length: String('ID3-first-second-part'.length), encoding: undefined } });
+});

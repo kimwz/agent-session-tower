@@ -526,3 +526,32 @@ test('rotated versions and broadened rules require explicit owner reapproval wit
     await assert.rejects(f.service.resolve(context, updated.reference, 'env'), /Grant denied/);
   } finally { await f.cleanup(); }
 });
+
+test('a tool that fails because the Vault locked meanwhile is answered as locked only when the failure has no status', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-secret-runtime-status-'));
+  const state = { locked: false };
+  const runtime = new SecretRuntime({ stateDir: directory, service: { status: () => ({ locked: state.locked }) } as unknown as SecretService, runs: { list: () => [], getSession: () => undefined, sessionOrigin: () => undefined } });
+  try {
+    let thrown: unknown;
+    const inner = runtime as unknown as { unlockedTool: () => Promise<unknown>; lockedTool: () => Promise<unknown> };
+    inner.unlockedTool = async () => { state.locked = true; throw thrown; };
+    inner.lockedTool = async () => 'answered as locked';
+    const outcome = async (value: unknown) => {
+      state.locked = false; thrown = value;
+      return runtime.tool({ kind: 'secret-run' } as never, 'secrets_list', {}).then(result => result, (error: unknown) => error === value ? 'thrown' : error);
+    };
+    const plain = (statusCode: unknown) => Object.assign(new Error('x'), { statusCode });
+    assert.equal(await outcome(new Error('untyped')), 'answered as locked');
+    assert.equal(await outcome(plain(403)), 'thrown', 'a mapped status is a typed failure');
+    assert.equal(await outcome(plain(599)), 'thrown', 'an unmapped numeric status is a typed failure');
+    assert.equal(await outcome(plain(0)), 'answered as locked', 'zero counts as no status');
+    assert.equal(await outcome(plain(Number.NaN)), 'answered as locked', 'NaN counts as no status');
+    assert.equal(await outcome(plain(undefined)), 'answered as locked');
+    assert.equal(await outcome(plain('0')), 'thrown', 'a non-empty string counts as a status');
+    assert.equal(await outcome({ statusCode: 409 }), 'thrown', 'any object with a status');
+    assert.equal(await outcome('text'), 'answered as locked');
+    // Not locked after the failure: always the failure.
+    inner.unlockedTool = async () => { throw thrown; };
+    assert.equal(await outcome(new Error('untyped')), 'thrown');
+  } finally { runtime.close(); await rm(directory, { recursive: true, force: true }); }
+});

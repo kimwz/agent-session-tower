@@ -1605,3 +1605,34 @@ test('a handoff asked for while a trigger run is being claimed waits until the c
   assert.equal(h.enqueues(), 1, 'submitted exactly once');
   assert.equal(f.cancels(), 0);
 });
+
+test('worker error replies keep their status, message and disposition across the runner wire', async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const client = await f.connect();
+  const { errorDisposition, errorStatus } = await import('../../../server/http/requests.js');
+  const { RunError } = await import('../../../server/runs/run-records.js');
+  const { SteeringError } = await import('../../../server/runs/steering.js');
+  const plain = (message: string, fields: Record<string, unknown>) => Object.assign(new Error(message), fields);
+  const cases: Array<[name: string, thrown: unknown, expected: { status: number; message: string; disposition?: string; edge?: string }]> = [
+    ['mapped status', plain('a', { statusCode: 404 }), { status: 404, message: 'a' }],
+    ['unmapped status', plain('b', { statusCode: 599 }), { status: 599, message: 'b' }],
+    ['zero', plain('c', { statusCode: 0 }), { status: 0, message: 'c' }],
+    ['NaN travels as null and reads as 0', plain('d', { statusCode: Number.NaN }), { status: 0, message: 'd' }],
+    ['numeric string', plain('e', { statusCode: '404' }), { status: 404, message: 'e' }],
+    ['no status is 500', new Error('f'), { status: 500, message: 'f' }],
+    ['not an Error', 'boom', { status: 500, message: 'Runner operation failed.' }],
+    ['rejected is carried but not shown', plain('g', { statusCode: 409, disposition: 'rejected' }), { status: 409, message: 'g', disposition: 'rejected' }],
+    ['uncertain', plain('h', { statusCode: 503, disposition: 'uncertain' }), { status: 503, message: 'h', disposition: 'uncertain', edge: 'uncertain' }],
+    ['handoff', plain('i', { statusCode: 503, disposition: 'handoff' }), { status: 503, message: 'i', disposition: 'handoff', edge: 'not-admitted' }],
+    ['a disposition without a status', plain('j', { disposition: 'not-admitted' }), { status: 500, message: 'j', disposition: 'not-admitted', edge: 'not-admitted' }],
+    ['RunError', new RunError('k', 404), { status: 404, message: 'k' }],
+    ['SteeringError', new SteeringError('l', 'rejected'), { status: 409, message: 'l', disposition: 'rejected' }],
+  ];
+  for (const [name, thrown, expected] of cases) {
+    f.runs.create = async () => { throw thrown; };
+    const error = await client.create({ provider: 'codex', cwd: f.directory, prompt: 'x' }).then(() => undefined, (caught: unknown) => caught);
+    assert.ok(error instanceof Error, name);
+    assert.deepEqual({ status: errorStatus(error), message: error.message, disposition: (error as { disposition?: string }).disposition, edge: errorDisposition(error) },
+      { status: expected.status, message: expected.message, disposition: expected.disposition, edge: expected.edge }, name);
+  }
+});

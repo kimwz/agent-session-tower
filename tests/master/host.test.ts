@@ -217,3 +217,40 @@ test('a settings file this build cannot read is left as it is, not replaced by d
   cleanup.push(() => host.close());
   assert.equal(await readFile(join(paths.data, 'settings.json'), 'utf8'), newer);
 });
+
+test('master host error replies keep their status and message across the host wire, and the route clamps what it answers', async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-master-error-wire-'));
+  const host = await startMasterHost({ stateDir, idleMs: 60_000 });
+  const client = new MasterClient({ stateDir, credentials: () => undefined });
+  t.after(async () => { client.dispose(); await host.close(); await rm(stateDir, { recursive: true, force: true }); });
+  const { errorStatus } = await import('../../server/http/requests.js');
+  const { masterRoutes } = await import('../../server/master/routes.js');
+  const plain = (message: string, fields: Record<string, unknown>) => Object.assign(new Error(message), fields);
+  const cases: Array<[name: string, thrown: unknown, status: number, message: string]> = [
+    ['mapped', plain('a', { statusCode: 404 }), 404, 'a'],
+    ['unmapped', plain('b', { statusCode: 599 }), 599, 'b'],
+    ['zero', plain('c', { statusCode: 0 }), 0, 'c'],
+    ['no status', new Error('d'), 500, 'd'],
+    ['not an Error', 'boom', 500, 'Master operation failed.'],
+  ];
+  let thrown: unknown;
+  t.mock.method(MasterVoice.prototype, 'voicePlayed', () => { throw thrown; });
+  for (const [name, value, status, message] of cases) {
+    thrown = value;
+    const error = await client.call('voicePlayed', { session: 's', id: 'i', result: 'played' }).then(() => undefined, (caught: unknown) => caught);
+    assert.ok(error instanceof Error, name);
+    assert.deepEqual({ status: errorStatus(error), message: error.message, hostAbsent: (error as { hostAbsent?: boolean }).hostAbsent }, { status, message, hostAbsent: undefined }, name);
+  }
+  // The page route answers 400–599 as it is and anything else as 503, with the message or its own.
+  const answered = async (failure: unknown) => {
+    const handle = masterRoutes({ call: async () => { throw failure; } } as never);
+    let status: unknown; let body = '';
+    await handle({ method: 'GET' } as never, { writeHead: (value: unknown) => { status = value; }, end: (text: string) => { body = text; } } as never, '/api/master', new URL('http://x/api/master'), { local: true });
+    return { status, body: JSON.parse(body) as { error: string } };
+  };
+  assert.deepEqual(await answered(plain('e', { statusCode: 404 })), { status: 404, body: { error: 'e' } });
+  assert.deepEqual(await answered(plain('f', { statusCode: 599 })), { status: 599, body: { error: 'f' } });
+  for (const statusCode of [600, 399, 0, Number.NaN, undefined]) assert.deepEqual(await answered(plain('g', { statusCode })), { status: 503, body: { error: 'g' } }, String(statusCode));
+  assert.deepEqual(await answered(new Error('h')), { status: 503, body: { error: 'h' } });
+  assert.deepEqual(await answered({}), { status: 503, body: { error: '마스터를 사용할 수 없습니다.' } });
+});

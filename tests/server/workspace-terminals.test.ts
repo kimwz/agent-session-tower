@@ -167,3 +167,23 @@ test('windows on this computer and on several controllers can watch one shell to
   assert.throws(() => terminals.attach(id, new Response().asHttp()), /너무 많습니다/);
   terminals.dispose();
 });
+
+test('SSE head and replay order, and a seventh window on one shell is refused with 429', async t => {
+  const { errorStatus } = await import('../../server/http/requests.js');
+  const { terminals, ptys } = setup(); t.after(() => terminals.dispose());
+  const { id } = await terminals.create('/fixture', 80, 24);
+  ptys[0].output('one'); ptys[0].output('two');
+  class Headed extends Response { head: unknown[] = []; writeHead(...args: unknown[]) { this.head = args; return this; } }
+  const first = new Headed(); terminals.attach(id, first.asHttp());
+  assert.deepEqual(first.head, [200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' }]);
+  assert.deepEqual(first.frames, [': connected\n\n', 'id: 1\nevent: output\ndata: {"data":"one"}\n\n', 'id: 2\nevent: output\ndata: {"data":"two"}\n\n']);
+  for (let i = 0; i < 5; i++) terminals.attach(id, new Headed().asHttp());
+  const seventh = new Headed();
+  let refused: unknown;
+  try { terminals.attach(id, seventh.asHttp()); } catch (error) { refused = error; }
+  assert.deepEqual({ status: errorStatus(refused), message: (refused as Error).message }, { status: 429, message: '터미널에 연결된 창이 너무 많습니다.' });
+  assert.deepEqual(seventh.head, [], 'nothing is written to a refused window');
+  let bad: unknown;
+  try { terminals.attach(id, new Headed().asHttp(), 'x'); } catch (error) { bad = error; }
+  assert.equal(errorStatus(bad), 400);
+});

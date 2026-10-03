@@ -158,3 +158,24 @@ test('a refusal that came before anything ran tells the controller it is safe to
   await assert.rejects(ledger.once(CONTROLLER, 'enqueue', requestId(Date.now()), {}, async () => { throw new RunError('Install the codex CLI and ensure it is in PATH before sending instructions.', 503); }, record, () => undefined),
     (error: Error & { disposition?: string }) => error.disposition === 'not-admitted');
 });
+
+test('whether a failed request may be sent again with its ID follows its status, its disposition and RunError', async t => {
+  const f = await fixture(t);
+  const ledger = await f.open();
+  const plain = (fields: Record<string, unknown>) => Object.assign(new Error('failed'), fields);
+  const again = async (thrown: unknown) => {
+    const id = requestId(Date.now(), `8abc-${Math.random().toString(16).slice(2, 14).padEnd(12, '0')}`);
+    await assert.rejects(ledger.once(CONTROLLER, 'enqueue', id, {}, async () => { throw thrown; }, record, () => undefined));
+    return ledger.once(CONTROLLER, 'enqueue', id, {}, async () => ({ runId: 'ran' }), record, () => undefined).then(() => true, () => false);
+  };
+  assert.equal(await again(plain({ statusCode: 404 })), true, 'a client error');
+  assert.equal(await again(plain({ statusCode: 0 })), true, 'zero is below 500');
+  assert.equal(await again(plain({ statusCode: null })), true, 'null compares below 500');
+  assert.equal(await again(plain({ statusCode: 599 })), false);
+  assert.equal(await again(plain({ statusCode: 503 })), false);
+  assert.equal(await again(new Error('no status')), false);
+  assert.equal(await again(plain({ statusCode: 503, disposition: 'not-admitted' })), true);
+  assert.equal(await again(plain({ statusCode: 404, disposition: 'uncertain' })), false, 'uncertain always wins');
+  assert.equal(await again(new RunError('own refusal', 503)), true);
+  assert.equal(await again(Object.assign(new RunError('own but uncertain', 400), { disposition: 'uncertain' })), false);
+});

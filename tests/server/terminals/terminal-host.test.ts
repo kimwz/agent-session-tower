@@ -156,3 +156,58 @@ test('the version shown on the page asks a terminal host once, so looking never 
   assert.equal(await f.client.displayVersion(), null, 'a host that left shows as not running, without asking');
   assert.deepEqual(asked, ['ping']);
 });
+
+test('the terminal client reads host failures as before: absent host, old host, unknown shell, refusals and replies', async t => {
+  const { errorStatus } = await import('../../../server/http/requests.js');
+  const { RUNNER_PROTOCOL } = await import('../../../server/runs/runner-protocol.js');
+  const { chmod } = await import('node:fs/promises');
+  const stateDir = await mkdtemp(join(tmpdir(), 'tower-terminal-client-'));
+  const paths = await terminalHostPaths(stateDir);
+  const legacyCalls: string[] = [];
+  const legacy = { attach: async (id: string, res: { writeHead(status: number): void; end(): void }) => { legacyCalls.push(`attach ${id}`); res.writeHead(299); res.end(); }, input: async (id: string) => { legacyCalls.push(`input ${id}`); }, dispose: () => {} } as unknown as WorkspaceTerminalBackend;
+  const plain = new TerminalHostClient({ stateDir, hostEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 200 });
+  const withLegacy = new TerminalHostClient({ stateDir, legacy, hostEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 200 });
+  let answer: { status: number; body?: unknown } = { status: 200 };
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      if (answer.status !== 200) { res.writeHead(answer.status); res.end(); return; }
+      res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ protocol: RUNNER_PROTOCOL, stateDir: paths.stateDir, instance: 'i', version: '1', ...answer.body as object }));
+    });
+  });
+  t.after(async () => { server.closeAllConnections(); server.close(); plain.dispose(); withLegacy.dispose(); await rm(stateDir, { recursive: true, force: true }); await rm((await runnerPaths(stateDir)).directory, { recursive: true, force: true }); });
+  const failed = async (work: Promise<unknown>) => { const error = await work.then(() => undefined, (caught: unknown) => caught) as Error & { hostAbsent?: boolean }; return { status: errorStatus(error), message: error.message, hostAbsent: error.hostAbsent }; };
+  const response = () => { const seen: { status?: number; headersSent: boolean } = { headersSent: false }; return { seen, res: { headersSent: false, destroyed: false, writableEnded: false, writeHead: (status: number) => { seen.status = status; }, end: () => {}, once: () => {} } as never }; };
+
+  // No host: absent, so list is empty and shells belong to the older worker.
+  assert.deepEqual(await plain.list(), []);
+  assert.deepEqual(await failed(plain.input('a', 'x')), { status: 503, message: 'The terminal host is not running.', hostAbsent: true });
+  await withLegacy.input('a', 'x');
+  assert.deepEqual(await failed(plain.attach('a', response().res)), { status: 404, message: '터미널을 찾을 수 없습니다. 새 터미널을 여세요.', hostAbsent: undefined });
+  const viaLegacy = response();
+  await withLegacy.attach('b', viaLegacy.res);
+  assert.equal(viaLegacy.seen.status, 299);
+  assert.equal(await plain.hostVersion(), null);
+  assert.equal(await plain.displayVersion(), null);
+  assert.deepEqual(legacyCalls, ['input a', 'attach b']);
+
+  // A host that answers.
+  await writeFile(paths.token, 'a'.repeat(64), { mode: 0o600 }); await chmod(paths.token, 0o600);
+  await new Promise<void>(resolve => server.listen(paths.socket, resolve));
+  answer = { status: 200, body: { error: { message: 'Unknown method.', statusCode: 400 } } };
+  assert.equal(await plain.list(), undefined, 'a host too old to list answers 400');
+  answer = { status: 200, body: { error: { message: 'Unknown terminal.', statusCode: 404 } } };
+  await withLegacy.input('c', 'x');
+  assert.deepEqual(legacyCalls.at(-1), 'input c', 'an unknown shell belongs to the older worker');
+  assert.deepEqual(await failed(plain.input('c', 'x')), { status: 404, message: 'Unknown terminal.', hostAbsent: undefined });
+  for (const statusCode of [409, 599, 0]) {
+    answer = { status: 200, body: { error: { message: `m${statusCode}`, statusCode } } };
+    assert.deepEqual(await failed(withLegacy.input('d', 'x')), { status: statusCode, message: `m${statusCode}`, hostAbsent: undefined }, String(statusCode));
+  }
+  answer = { status: 403 };
+  assert.deepEqual(await failed(plain.input('e', 'x')), { status: 503, message: 'The terminal host refused the request.', hostAbsent: undefined });
+  answer = { status: 500 };
+  assert.deepEqual(await failed(plain.input('e', 'x')), { status: 500, message: 'The terminal host refused the request.', hostAbsent: undefined });
+  answer = { status: 200, body: { result: 'ok' } };
+  assert.equal(await plain.hostVersion(), '1');
+});

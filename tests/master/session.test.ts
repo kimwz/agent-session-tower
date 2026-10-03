@@ -519,3 +519,33 @@ test('a master report cancelled by worker recovery does not stop later goal repo
   assert.equal(h.reports().length, 2, 'one recovered record and one newly delivered report');
   assert.match(h.reports()[1].body.prompt, /Deployment verified/);
 });
+
+test('start and send failures keep the remote status: uncertain is 503, none is 502 to start and 503 to send', async t => {
+  const { errorStatus } = await import('../../server/http/requests.js');
+  const answers: Array<{ state: string; status: number; body?: unknown }> = [];
+  const failed = async (work: Promise<unknown>) => { const error = await work.then(() => undefined, (caught: unknown) => caught) as Error; return { status: errorStatus(error), message: error.message }; };
+  const fresh = await harness(t);
+  // A stand-in for Tower's answers, so every state and status can be given.
+  (fresh.session as unknown as { options: { tower: { call: () => Promise<unknown> } } }).options.tower = { call: async () => answers.shift() };
+  answers.push({ state: 'uncertain', status: 0 });
+  assert.deepEqual(await failed(fresh.session.begin({ provider: 'claude', text: 'a' })), { status: 503, message: '마스터 세션을 만들었는지 알 수 없습니다. 세션 목록에서 "마스터" 세션을 확인해 주세요.' });
+  answers.push({ state: 'uncertain', status: 500 });
+  assert.equal((await failed(fresh.session.begin({ provider: 'claude', text: 'a' }))).status, 503, 'uncertain wins over a status');
+  answers.push({ state: 'failed', status: 0 });
+  assert.deepEqual(await failed(fresh.session.begin({ provider: 'claude', text: 'a' })), { status: 502, message: '마스터 세션을 시작하지 못했습니다.' });
+  answers.push({ state: 'failed', status: 418, body: { error: 'x' } });
+  assert.deepEqual(await failed(fresh.session.begin({ provider: 'claude', text: 'a' })), { status: 418, message: '마스터 세션을 시작하지 못했습니다: x' });
+  answers.push({ state: 'failed', status: 599, body: {} });
+  assert.equal((await failed(fresh.session.begin({ provider: 'claude', text: 'a' }))).status, 599);
+
+  const bound = await harness(t, { bound: true });
+  (bound.session as unknown as { options: { tower: { call: () => Promise<unknown> } } }).options.tower = { call: async () => answers.shift() };
+  answers.push({ state: 'failed', status: 0, body: {} });
+  assert.deepEqual(await failed(bound.session.spoken({ text: 'b', voiceSession: 'v', key: 'k1' })), { status: 503, message: '마스터 세션에 보내지 못했습니다.' });
+  answers.push({ state: 'failed', status: 409, body: { error: 'busy' } });
+  assert.deepEqual(await failed(bound.session.spoken({ text: 'b', voiceSession: 'v', key: 'k2' })), { status: 409, message: 'busy' });
+  answers.push({ state: 'uncertain', status: 0 });
+  assert.deepEqual(await failed(bound.session.spoken({ text: 'b', voiceSession: 'v', key: 'k3' })), { status: 503, message: '마스터 세션에 보내지 못했습니다.' });
+  answers.push({ state: 'failed', status: 599, body: { error: 'odd' } });
+  assert.deepEqual(await failed(bound.session.spoken({ text: 'b', voiceSession: 'v', key: 'k4' })), { status: 599, message: 'odd' });
+});
