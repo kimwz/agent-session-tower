@@ -140,3 +140,10 @@ test('the conversation leaves out exactly Tower’s own instruction blocks', () 
   // An assistant quoting one is shown as written.
   assert.match(parseMessages('claude', { type: 'assistant', uuid: 'a', timestamp: now, message: { role: 'assistant', content: [{ type: 'text', text: block }] } })[0]!.text, /Coordinator policy/);
 });
+
+test('notes that would exceed the limit are left out; the turn’s own instructions stay', async t => {
+  const f = await fixture(t, async () => 'x'.repeat(48_000));
+  const { run } = await f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Task' }, { origin: { kind: 'owner' }, instructions: { text: 'Policy', required: true } });
+  await f.settled(run.id);
+  assert.equal(f.codex[0].instructions, 'Policy');
+});

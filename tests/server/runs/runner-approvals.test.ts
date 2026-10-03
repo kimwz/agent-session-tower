@@ -155,3 +155,23 @@ test('runner roundtrips Claude question answers through the owned provider trans
   assert.doesNotMatch(saved, /private-fixture-answer|Get game code/);
   assert.equal(JSON.parse(saved)[0].approvals, undefined);
 });
+
+test('the owner’s answers are kept per conversation with the question; allow and deny are not kept', async t => {
+  const plain = await fixture(t);
+  await until(() => plain.manager.list().find(run => run.id === plain.accepted.id && run.approvals?.length));
+  await plain.manager.respondToApproval(plain.accepted.id, 'permission-1', 'allow');
+  await until(() => plain.manager.list().find(run => run.id === plain.accepted.id && run.status === 'completed'));
+  assert.deepEqual(plain.manager.ownerAnswers(plain.session.id), []);
+  const f = await fixture(t, 'questions');
+  const pending = await until(() => f.manager.list().find(run => run.id === f.accepted.id && run.approvals?.length));
+  const interaction = pending.approvals![0].interaction;
+  if (interaction?.type !== 'questions') throw new Error('Expected question interaction');
+  const answer = { answers: { [interaction.questions[0].id]: { answers: ['Clone'] } } };
+  await f.manager.respondToApproval(f.accepted.id, 'permission-1', answer);
+  const kept = f.manager.ownerAnswers(f.session.id);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].question, JSON.stringify(interaction.questions));
+  assert.equal(kept[0].answer, JSON.stringify(answer));
+  assert.ok(Date.parse(kept[0].at));
+  assert.deepEqual(f.manager.ownerAnswers('claude:other'), []);
+});

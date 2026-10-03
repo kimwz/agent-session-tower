@@ -1032,3 +1032,43 @@ test('optional desktop forwarding attaches neither caller environment nor CLI to
   assert.doesNotMatch(JSON.stringify(bridge), /stale-caller|cccccccc|dddddddd/, 'bridge receives neither reporting nor MCP credentials');
   await assert.rejects(stat(join(f.directory, 'received.json.env')), { code: 'ENOENT' });
 });
+
+test('a private notice is not sent to a Codex app (bridged) turn', async t => {
+  const steered: unknown[] = [];
+  let bridge!: CodexBridgeOptions;
+  const f = await fixture({
+    resolveRunTools: () => ({ required: false, towerTools: 'attached', servers: { tower_secrets: { command: '/fixture/secret-tool', args: [] } } }),
+    openCodexBridge: async options => { bridge = options; return { done: new Promise<void>(() => {}), start: async () => { options.onStarted('turn'); },
+      canSteer: () => true, steer: async input => { steered.push(input); }, cancel: async () => { options.onFinished({ status: 'cancelled' }); }, close: () => {} }; },
+  });
+  t.after(f.cleanup);
+  f.sessions.set(f.session.id, { ...f.session, status: 'idle', activeProcess: true });
+  const run = await f.manager.enqueue(f.session.id, 'Work in the desktop app', {}, { origin: { kind: 'owner' } });
+  await until(() => f.manager.list().find(item => item.id === run.id)?.status === 'running');
+  f.manager.notifyToolChange('A private notice', f.session.id);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(steered, []);
+  assert.equal(f.manager.busy(), true, 'the bridged turn itself is live');
+  bridge.onFinished({ status: 'completed' });
+});
+
+test('the private MCP config is removed when the provider cannot be spawned', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-mcp-spawn-failure-'));
+  const privateTmp = join(directory, 'tmp'); await mkdir(privateTmp);
+  const previous = process.env.TMPDIR; process.env.TMPDIR = privateTmp;
+  t.after(async () => { if (previous === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = previous; await rm(directory, { recursive: true, force: true }); });
+  const session = makeSession(directory, { provider: 'claude', id: `claude:${ID}` });
+  let configPath: string | undefined;
+  const manager = new RunManager({ stateDir: join(directory, 'state'), getSession: id => id === session.id ? session : undefined, refreshSessions: async () => {}, pollMs: 20,
+    findExecutable: async provider => `/fixture/${provider}`,
+    resolveRunTools: () => ({ required: false, servers: { tower: { command: '/fixture/node', args: [], env: { TOWER_MCP_CAPABILITY: 'e'.repeat(64) } } } }),
+    spawnProcess: ((_file: string, args: string[]) => { configPath = args[args.indexOf('--mcp-config') + 1]; throw new Error('spawn refused by the fixture'); }) as never });
+  await manager.start();
+  t.after(() => manager.close());
+  const run = await manager.enqueue(session.id, 'Use the tools');
+  const result = await finished(manager, run.id);
+  assert.equal(result.status, 'error');
+  assert.match(result.error!, /spawn refused by the fixture/);
+  assert.ok(configPath?.startsWith(privateTmp), 'the config was written to its own private folder');
+  await until(() => readdir(privateTmp).then(names => names.length === 0));
+});
