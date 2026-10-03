@@ -853,7 +853,8 @@ test('backup restore rechecks reservation capacity after concurrent local consum
   await writeFile(path, JSON.stringify(state)); service = await f.open();
   const backup = (await collectTriggers(f.directory))!;
   const newId = randomUUID(); backup.triggers = [{ ...service.get(trigger.id).trigger, id: newId, name: 'Incoming reservation' }];
-  const engine = service as any; const validate = engine.validate.bind(engine);
+  // A restore checks each incoming definition through the definitions' validate.
+  const engine = (service as any).definitions; const validate = engine.validate.bind(engine);
   let entered!: () => void; let release!: () => void;
   const waiting = new Promise<void>(resolve => { entered = resolve; }); const gate = new Promise<void>(resolve => { release = resolve; });
   engine.validate = async (...args: any[]) => { entered(); await gate; return validate(...args); };
