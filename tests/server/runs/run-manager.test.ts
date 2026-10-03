@@ -1142,3 +1142,22 @@ test('master replies stream block by block and complete messages add nothing aft
   f.exit();
   await finished(f.manager, f.run.id);
 });
+
+test('a Claude master reply records firstAt on its first text and completedAt when done', async t => {
+  const f = await fakeClaude(t, { master: true });
+  f.send({ type: 'system', subtype: 'init', session_id: ID, permissionMode: 'auto' });
+  const before = Date.now();
+  f.send({ type: 'stream_event', event: { type: 'message_start', message: { id: 'm1' } } });
+  f.send({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hi' } } });
+  await until(() => f.read().replies?.[0]?.text === 'Hi');
+  const first = f.read().replies![0];
+  assert.ok(first.firstAt !== undefined && first.firstAt >= before, 'first text is timed');
+  assert.equal(first.completedAt, undefined);
+  f.send({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  await until(() => f.read().replies?.[0]?.done);
+  const done = f.read().replies![0];
+  assert.ok(done.completedAt !== undefined && done.completedAt >= first.firstAt!, 'completion is timed');
+  f.send({ type: 'result', is_error: false, result: 'done' });
+  f.exit();
+  await finished(f.manager, f.run.id);
+});

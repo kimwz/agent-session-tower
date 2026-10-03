@@ -178,10 +178,12 @@ const turn = [
 
 test('the master\'s turn keeps its words block by block, as they stream, without tool notes, subagents or repeats', async t => {
   const run = await fixture(t, stateDir => join(stateDir, 'master-session'), turn);
-  assert.deepEqual(run.replies, [
+  assert.deepEqual(run.replies?.map(({ firstAt: _first, completedAt: _completed, ...reply }) => reply), [
     { id: 'msg_1:1', text: '세션 목록을 볼게요.', done: true },
     { id: 'msg_2:a0', text: '두 개가 돌고 있어요.', done: true },
   ]);
+  // Claude's master replies carry the host's timings, as Codex's do (owner decision 11).
+  assert.ok(run.replies?.every(reply => typeof reply.firstAt === 'number' && typeof reply.completedAt === 'number' && reply.completedAt >= reply.firstAt));
   assert.equal(run.repliesTrimmed, undefined);
   assert.match(run.output, /\[tower_query\]|세션 목록을/, 'the output shows as before');
 });

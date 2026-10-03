@@ -114,7 +114,7 @@ function claudeProcess(host: TurnHost, run: Run, session: Session, creating: boo
   let shown = false;
   const show = (text: string) => { shown = true; host.append(run, text); };
   // The master's words, block by block, so they can be read aloud as they are written.
-  const replies = host.masterSession(session) ? new ReplyLog(run) : undefined;
+  const replies = host.masterSession(session) ? new ReplyLog(run, Date.now) : undefined;
   let replyMessage = '';
   /** Messages whose words came as partial text: their complete form adds nothing. */
   const streamedMessages = new Set<string>();
