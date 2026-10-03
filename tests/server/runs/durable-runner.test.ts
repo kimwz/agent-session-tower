@@ -24,6 +24,7 @@ import { runtimePaths } from '../../../server/link/service.js';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { acquireStateLock, MonitorAlreadyRunning } from '../../../server/instance/state-lock.js';
+import { TriggerService, type TriggerExecutor } from '../../../server/triggers/service.js';
 
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), 'tower-durable-fixture-'));
@@ -1176,4 +1177,90 @@ test('the receiving worker resolves master.worker for direct creation before Run
   assert.deepEqual(received[0], { provider: 'codex', model: 'gpt-6.1-sol', cwd: f.directory, prompt: 'new work' });
   await client.create({ provider: 'codex', cwd: f.directory, prompt: 'ordinary' });
   assert.deepEqual(received[1], { provider: 'codex', cwd: f.directory, prompt: 'ordinary' });
+});
+
+/**
+ * A trigger engine on the fixture's runs, handed over the way the production worker does it (hold, wait for nothing in
+ * flight, pause and flush, close; the successor starts its own engine on the same state). `enqueues` counts submissions;
+ * `gate` holds the next one.
+ */
+async function triggerHandoff(f: Awaited<ReturnType<typeof fixture>>, t: test.TestContext) {
+  await f.host.close();
+  const events: string[] = [];
+  let enqueues = 0;
+  let gate: Promise<void> | undefined;
+  const executor: TriggerExecutor = {
+    submitAutoPrompt: async () => { throw new Error('unused'); }, getAutoPrompt: () => undefined,
+    create: async () => { throw new Error('unused'); },
+    enqueue: async (sessionId, prompt, request, internal) => { enqueues++; await gate; return f.runs.enqueue(sessionId, prompt, request, internal); },
+    runs: () => f.runs.list(), session: id => f.runs.getSession(id),
+  };
+  const engine = () => new TriggerService({ stateDir: f.stateDir, executor, tickMs: 3_600_000 });
+  const a = engine();
+  await a.start();
+  let b: TriggerService | undefined;
+  let successor: Awaited<ReturnType<typeof startRunnerHost>> | undefined;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, triggers: a,
+    inFlight: () => a.inFlight(), transient: () => a.inFlight(),
+    quiesce: async () => { events.push('quiesce'); a.pause(); await a.flush(); },
+    resume: () => { events.push('resume'); a.resume(); },
+    onHandedOff: () => { events.push('onHandedOff'); a.close(); },
+    startSuccessor: (_command, nonce) => {
+      events.push('startSuccessor');
+      b = engine();
+      void b.start().then(() => startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, triggers: b, handoffNonce: nonce })).then(next => { successor = next; });
+    } });
+  t.after(async () => {
+    const count = (name: string) => events.filter(event => event === name).length;
+    await until(() => count('quiesce') === count('onHandedOff') + count('resume'));
+    await host.close(); await successor?.close();
+    for (const engine of [a, b]) { engine?.close(); await engine?.settle(); }
+  });
+  const trigger = await a.create({ name: 'Session follow-up', enabled: true, source: { kind: 'schedule', schedule: { type: 'cron', expression: '0 * * * *', timezone: 'UTC' }, catchUp: 'latest' },
+    handler: { kind: 'task', instructions: 'Continue the work', provider: 'codex', approvals: 'auto', target: { node: 'local', mode: 'session', sessionId: f.session.id } },
+    policy: { overlap: 'skip', maxEventsPerHour: 20 } }, { kind: 'owner', via: 'ui' });
+  return { a, b: () => b, successor: () => successor, events, trigger, enqueues: () => enqueues, hold: (barrier: Promise<void> | undefined) => { gate = barrier; } };
+}
+
+test('a trigger run in flight survives a worker handoff and is not submitted again', { timeout: 20_000 }, async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const h = await triggerHandoff(f, t);
+  const fired = await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
+  await until(() => f.starts() === 1 && h.a.event(fired.id).status === 'running');
+  const runId = h.a.event(fired.id).dispatch?.runId;
+  const client = await f.connect();
+  assert.equal(await client.requestHandoff(true), true);
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.deepEqual(h.events, [], 'a running turn keeps the old worker and its engine in service');
+  f.finish();
+  await until(() => h.events.includes('onHandedOff') && h.successor());
+  assert.equal((h.a as unknown as { timer?: unknown }).timer, undefined, "the old engine's timer is stopped");
+  const b = h.b()!;
+  for (let i = 0; i < 200 && b.event(fired.id).status !== 'completed'; i++) { await b.tick(); await new Promise(resolve => setTimeout(resolve, 10)); }
+  assert.equal(b.event(fired.id).status, 'completed');
+  assert.equal(b.event(fired.id).dispatch?.runId, runId, 'the successor follows the same run');
+  assert.equal(h.enqueues(), 1, 'submitted exactly once');
+  assert.equal(f.cancels(), 0, 'nothing is cancelled');
+});
+
+test('a handoff asked for while a trigger run is being claimed waits until the claim is recorded', { timeout: 20_000 }, async t => {
+  const f = await fixture(); t.after(f.cleanup);
+  const h = await triggerHandoff(f, t);
+  let release!: () => void;
+  h.hold(new Promise<void>(resolve => { release = resolve; }));
+  const fired = await h.a.run(h.trigger.id, { kind: 'owner', via: 'ui' });
+  await until(() => h.enqueues() === 1 && h.a.event(fired.id).status === 'claimed');
+  const client = await f.connect();
+  assert.equal(await client.requestHandoff(true), true);
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  assert.deepEqual(h.events, [], 'the claim keeps the old worker in service');
+  release(); h.hold(undefined);
+  await until(() => h.a.event(fired.id).status === 'running' && f.starts() === 1);
+  f.finish();
+  await until(() => h.events.includes('onHandedOff') && h.successor());
+  const b = h.b()!;
+  for (let i = 0; i < 200 && b.event(fired.id).status !== 'completed'; i++) { await b.tick(); await new Promise(resolve => setTimeout(resolve, 10)); }
+  assert.equal(b.event(fired.id).status, 'completed');
+  assert.equal(h.enqueues(), 1, 'submitted exactly once');
+  assert.equal(f.cancels(), 0);
 });
