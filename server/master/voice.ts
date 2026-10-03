@@ -5,7 +5,6 @@ import type { StreamSink } from '../streams/sink.js';
 import { join } from 'node:path';
 import type { MasterEntry, MasterEntryData, MasterMissed, MasterSay, MasterSpeak, MasterStreamEvent, MasterUnspoken, MasterViewContext, MasterVoiceStatus } from '../../shared/master.js';
 import type { RunReply } from '../../shared/types.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { ElevenLabs, VoiceInfo } from './elevenlabs.js';
 import type { FirstReplyMaker } from './first-reply.js';
 import type { MasterRoom } from './room.js';
@@ -14,27 +13,15 @@ import { isNoise, READ_CHARS, speakable, streamTone, VOICE_REST, VOICE_SAMPLE, v
 import { CHUNK_PAUSE_MS, TextFollower } from './voice-stream.js';
 import { playbackRecord, VoiceTimings, progressRecord, elapsed, attemptNumber, transportStage, type VoiceTtsRecord, type VoiceTransportStage } from './voice-timings.js';
 import { TowerError, type ErrorKind } from '../../shared/errors.js';
+import { frameAt, id3Size, MP3_BYTES_PER_SECOND, withoutTag } from './mp3.js';
+import { FIRST_REPLY_DOLLARS, localDay, ttsDollarsPerChar, VoiceUsage } from './voice-usage.js';
 
-/** Estimated prices: ElevenLabs realtime speech-to-text per second, text-to-speech per character by model. */
-const STT_DOLLARS_PER_SECOND = 0.39 / 3600;
-const ttsDollarsPerChar = (model: string) => (model === 'eleven_v3' ? 0.1 : 0.05) / 1000;
-/** GPT-Live's price, for voice time kept from 1.52–1.55. */
-const LIVE_DOLLARS_PER_SECOND = 0.05 / 60;
-/**
- * A first reply's model call, as counted against the daily limit: paid by the Claude subscription, estimated at Haiku's
- * list price for about 1,000 tokens read and 40 written, rounded up.
- */
-const FIRST_REPLY_DOLLARS = 0.002;
+export { frameAt, id3Size } from './mp3.js';
+export { migrate, type VoiceFile } from './voice-usage.js';
+
 /** A first reply not ready this long after the request came is not said: the answer is near by then. */
 const FIRST_REPLY_MS = 2_500;
-/** One thing said is at most this long (the page stops sending there); each token reserves it until settled. */
-const UTTERANCE_SECONDS = 180;
-const TOKEN_LIFE_MS = 16 * 60_000;
-const TOKENS_PER_SESSION = 2;
-const TOKENS_PER_MINUTE = 20;
 const SAY_QUEUE = 20;
-const KEEP_DAYS = 40;
-const KEEP_SPEAKING = 500;
 const CLIP_BYTES = 5 * 1024 * 1024;
 /** Voice samples kept for the settings: about one per voice an account lists. */
 const PREVIEWS = 60;
@@ -48,8 +35,6 @@ const LIVE_BYTES_PER_CHAR = 4 * 1024;
 const MS_PER_CHAR = 200;
 /** Audio being read while it is written is sealed when no words came for it this long (a turn that hangs). */
 const LIVE_WAIT_MS = 5 * 60_000;
-/** mp3 at 128 kbps: bytes of audio a second, for starting again partway (see `serveAudio`). */
-const MP3_BYTES_PER_SECOND = 16_000;
 /** News older than this is not read aloud any more: it is on the screen. */
 const STALE_MS = 60 * 60_000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -92,16 +77,6 @@ export interface MasterVoiceOptions {
   /** Writes the first thing said after a spoken request; without it nothing is said before the answer. */
   firstReply?: Pick<FirstReplyMaker, 'prepare' | 'make' | 'close'>;
   timing?: Partial<VoiceTiming>;
-}
-
-interface Day { sttSeconds: number; ttsChars: number; dollars: number; firstReplies?: number }
-export interface VoiceFile {
-  version: 6;
-  days: Record<string, Day>;
-  /** Tokens given to a page and not yet settled: each holds a whole utterance's cost. */
-  tokens: Array<{ id: string; session: string; issuedAt: number }>;
-  /** Conversation entries with news not yet read aloud or given up on. */
-  speaking: Array<{ id: string; order: number }>;
 }
 
 /** The tab where voice is on. Its id lives in memory only; pages know it by its digest. */
@@ -207,7 +182,6 @@ interface Stream {
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32);
 const fail = (message: string, kind: ErrorKind) => new TowerError(kind, message);
-const localDay = (time: number) => { const date = new Date(time); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; };
 const speakOf = (data: MasterEntryData | undefined): MasterSpeak | undefined => data && (data.kind === 'master' || data.kind === 'error' || data.kind === 'event') ? data.speak : undefined;
 const wake = (live: Live) => { for (const waiter of [...live.waiters]) waiter(); };
 /** How an answer's reading stands, without how an earlier reading of it ended. */
@@ -219,80 +193,25 @@ const unspoken = (speak: MasterSpeak | undefined, reason: MasterUnspoken, heard 
 const played = (speak: MasterSpeak | undefined): MasterSpeak => ({ ...(speak ? bare(speak) : {}), state: 'played' });
 const withSpeak = (data: MasterEntryData, speak: MasterSpeak): MasterEntryData => ({ ...data, speak } as MasterEntryData);
 /**
- * An mp3 stream without the ID3 tag it starts with. The parts of a long answer are made one after another into one
- * stream, and only the first part's tag may stand at its start.
- */
-async function* withoutTag(stream: AsyncIterable<Buffer>): AsyncGenerator<Buffer> {
-  let head = Buffer.alloc(0);
-  let skip = -1;
-  for await (const chunk of stream) {
-    if (skip < 0) {
-      head = Buffer.concat([head, chunk]);
-      if (head.length < 10) continue;
-      // An ID3v2 header: "ID3", version, flags (0x10: a footer follows), then the tag's size in 7-bit bytes.
-      skip = head.subarray(0, 3).toString('latin1') === 'ID3'
-        ? 10 + (((head[6] & 0x7f) << 21) | ((head[7] & 0x7f) << 14) | ((head[8] & 0x7f) << 7) | (head[9] & 0x7f)) + (head[5] & 0x10 ? 10 : 0)
-        : 0;
-      const rest = head.subarray(Math.min(skip, head.length));
-      skip = Math.max(0, skip - head.length);
-      if (rest.length) yield rest;
-      continue;
-    }
-    if (skip >= chunk.length) { skip -= chunk.length; continue; }
-    const rest = skip ? chunk.subarray(skip) : chunk;
-    skip = 0;
-    yield rest;
-  }
-  if (skip < 0 && head.length) yield head;
-}
-
-/** How many bytes the ID3v2 tag an mp3 starts with takes (0 without one). */
-export function id3Size(data: Buffer): number {
-  if (data.length < 10 || data.subarray(0, 3).toString('latin1') !== 'ID3') return 0;
-  return 10 + (((data[6] & 0x7f) << 21) | ((data[7] & 0x7f) << 14) | ((data[8] & 0x7f) << 7) | (data[9] & 0x7f)) + (data[5] & 0x10 ? 10 : 0);
-}
-
-/** The first MPEG-1 layer III frame at or after `from` (its header, and the next frame's when it is there), or the end. */
-export function frameAt(data: Buffer, from: number): number {
-  const BITRATES = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
-  const RATES = [44_100, 48_000, 32_000];
-  const length = (at: number) => {
-    if (at + 4 > data.length || data[at] !== 0xff || (data[at + 1] & 0xfe) !== 0xfa) return 0;
-    const bitrate = BITRATES[data[at + 2] >> 4];
-    const rate = RATES[(data[at + 2] >> 2) & 3];
-    if (!bitrate || !rate) return 0;
-    return Math.floor(144_000 * bitrate / rate) + ((data[at + 2] >> 1) & 1);
-  };
-  for (let at = Math.max(0, from); at + 4 <= data.length; at++) {
-    const size = length(at);
-    if (!size) continue;
-    if (at + size + 4 > data.length || length(at + size)) return at;
-  }
-  return data.length;
-}
-
-/**
  * The master's voice. The owner's page listens and writes down what is said with ElevenLabs directly, using a
  * single-use token from here; what is said becomes a request like a typed one. Answers, news of finished work, and
  * the sentence before an irreversible change are read aloud: made here with the owner's key and played by the page
  * where voice is on. Turning voice off never stops anything the master does.
  */
 export class MasterVoice {
-  private file: VoiceFile = { version: 6, days: {}, tokens: [], speaking: [] };
+  /** The voice's own records: money spent, tokens held and news not yet read (voice.json). */
+  private readonly usage: VoiceUsage;
   private session?: Session;
   private readonly lives = new Map<string, Live>();
   private readonly results = new Map<string, (result: string) => void>();
   private line: Promise<unknown> = Promise.resolve();
-  private writes: Promise<void> = Promise.resolve();
   private delivering = false;
   private deliverAgain = false;
-  private recentTokens: number[] = [];
   private shownDay = localDay(Date.now());
   private timer?: ReturnType<typeof setInterval>;
   private unsubscribe?: () => void;
   private closed = false;
   private readonly timing: VoiceTiming;
-  private readonly path: string;
   private readonly previews: string;
   /** Recordings being made, by digest. */
   private readonly recording = new Map<string, Promise<string>>();
@@ -311,25 +230,24 @@ export class MasterVoice {
 
   constructor(private readonly options: MasterVoiceOptions) {
     this.timing = { ...TIMING, ...options.timing };
-    this.path = join(options.dataDir, 'voice.json');
+    this.usage = new VoiceUsage(join(options.dataDir, 'voice.json'), () => this.options.settings.current().voice.dailyDollars);
     this.previews = join(options.dataDir, 'voice-previews');
     this.timings = new VoiceTimings(join(options.dataDir, 'voice-timings.json'));
   }
 
   async start(): Promise<void> {
-    const saved = await readPrivateJson(this.path).catch(() => undefined) as Record<string, unknown> | undefined;
-    this.file = migrate(saved, Date.now());
+    const rebuild = await this.usage.load();
     await this.timings.start();
     // Short replies recorded before 1.73 are not said any more.
     await rm(join(this.options.dataDir, 'voice-clips'), { recursive: true, force: true }).catch(() => {});
     // News waiting to be read may sit in an older part of the conversation; nothing being read survives a restart.
-    for (const item of this.file.speaking) await this.options.room.load(item.order).catch(() => {});
-    this.file.speaking = this.file.speaking.filter(item => speakOf(this.options.room.get(item.id)?.data));
-    if (saved && !Array.isArray(saved.speaking)) await this.rebuildSpeaking();
+    for (const item of this.usage.speakingItems()) await this.options.room.load(item.order).catch(() => {});
+    this.usage.keepSpeaking(id => Boolean(speakOf(this.options.room.get(id)?.data)));
+    if (rebuild) await this.rebuildSpeaking();
     this.unsubscribe = this.options.room.subscribe(event => this.follow(event));
     for (const { entry, speak } of this.speakEntries()) if (speak.state !== 'played' && speak.state !== 'unspoken') this.setSpeak(entry, unspoken(speak, 'restart'));
-    this.settleExpired(Date.now());
-    await this.save();
+    this.usage.settleExpired(Date.now());
+    await this.usage.save();
     this.timer = setInterval(() => this.tick(), this.timing.tickMs);
     this.timer.unref();
   }
@@ -342,19 +260,19 @@ export class MasterVoice {
     this.endSession(this.session, 'restart');
     this.options.firstReply?.close();
     for (const live of [...this.lives.values()]) this.drop(live);
-    await this.writes;
+    await this.usage.flush();
     await this.timings.flush();
   }
 
   status(): MasterVoiceStatus {
     const now = Date.now();
-    const today = this.file.days[localDay(now)] ?? { sttSeconds: 0, ttsChars: 0, dollars: 0 };
+    const today = this.usage.day(now);
     return {
       ...(this.session ? { session: this.session.digest } : {}),
       listening: Boolean(this.session?.listening && this.alive(this.session)),
-      today: { sttSeconds: Math.round(today.sttSeconds), ttsChars: today.ttsChars, dollars: Math.round(this.spent(now) * 100) / 100 },
+      today: { sttSeconds: Math.round(today.sttSeconds), ttsChars: today.ttsChars, dollars: Math.round(this.usage.spent(now) * 100) / 100 },
       limitDollars: this.options.settings.current().voice.dailyDollars,
-      limited: this.limited(now, 0),
+      limited: this.usage.limited(now, 0),
       ...(this.missed && now - this.missed.at < STALE_MS ? { missed: { entry: this.missed.entry, reason: this.missed.reason, ...(this.missed.heard ? { heard: true as const } : {}), text: this.missed.text } } : {}),
     };
   }
@@ -419,22 +337,16 @@ export class MasterVoice {
     if (!session) throw fail('음성 세션이 바뀌었습니다.', 'conflict');
     this.ready();
     const now = Date.now();
-    this.settleExpired(now);
-    if (this.file.tokens.filter(token => token.session === session.digest).length >= TOKENS_PER_SESSION) throw fail('받아쓰기 준비가 이미 되어 있습니다.', 'conflict');
-    this.recentTokens = this.recentTokens.filter(at => now - at < 60_000);
-    if (this.recentTokens.length >= TOKENS_PER_MINUTE) throw fail('받아쓰기 요청이 너무 많습니다.', 'rate-limited');
-    if (this.limited(now, UTTERANCE_SECONDS * STT_DOLLARS_PER_SECOND)) throw fail('오늘 음성 한도에 닿았습니다.', 'conflict');
+    this.usage.settleExpired(now);
     // Held before the token is asked for, so two requests at once cannot both pass the limit.
-    const id = randomUUID();
-    this.file.tokens.push({ id, session: session.digest, issuedAt: now });
-    this.recentTokens.push(now);
+    const id = this.usage.reserveToken(session.digest, now);
     let token: string;
     try { token = await this.options.elevenLabs.sttToken(); }
     catch (error) {
-      this.file.tokens = this.file.tokens.filter(item => item.id !== id);
+      this.usage.releaseToken(id);
       throw error;
     }
-    await this.save();
+    await this.usage.save();
     this.broadcast();
     return { tokenId: id, url: this.options.elevenLabs.sttUrl(token), expiresAt: now + 14 * 60_000 };
   }
@@ -442,12 +354,8 @@ export class MasterVoice {
   /** How long one utterance ran, from any page that got its token (voice may have moved since). Counted once, today. */
   async voiceUsage(input: { tokenId: unknown; seconds: unknown }): Promise<boolean> {
     if (typeof input.tokenId !== 'string') return false;
-    const index = this.file.tokens.findIndex(token => token.id === input.tokenId);
-    if (index < 0) return false;
-    this.file.tokens.splice(index, 1);
-    const seconds = typeof input.seconds === 'number' && Number.isFinite(input.seconds) ? Math.min(Math.max(input.seconds, 0), UTTERANCE_SECONDS) : UTTERANCE_SECONDS;
-    this.add(Date.now(), { sttSeconds: seconds });
-    await this.save();
+    if (!this.usage.settleToken(input.tokenId, input.seconds)) return false;
+    await this.usage.save();
     this.broadcast();
     return true;
   }
@@ -491,9 +399,9 @@ export class MasterVoice {
     const maker = this.options.firstReply;
     if (!maker) return undefined;
     // The call is counted when it is made, like characters read.
-    if (this.limited(Date.now(), FIRST_REPLY_DOLLARS)) return undefined;
-    this.add(Date.now(), { firstReply: true });
-    void this.save();
+    if (this.usage.limited(Date.now(), FIRST_REPLY_DOLLARS)) return undefined;
+    this.usage.add(Date.now(), { firstReply: true });
+    void this.usage.save();
     const signal = AbortSignal.any([cancel, AbortSignal.timeout(FIRST_REPLY_MS)]);
     const reply = await maker.make(text, signal);
     if (!reply.text || signal.aborted || this.session !== session || !this.alive(session) || this.answering(request)) return undefined;
@@ -502,7 +410,7 @@ export class MasterVoice {
     const model = this.options.settings.current().voice.model;
     const sent = voiced(reply.text, model, 'ack');
     // Judged against the limit as it is now (an answer may have spent meanwhile), and charged in the same step.
-    if (this.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) return undefined;
+    if (this.usage.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) return undefined;
     const live = this.synthesize(sent);
     live.session = session;
     if (!await this.complete(live, signal) || signal.aborted || this.session !== session || !this.alive(session) || this.answering(request)) { this.abandon(live); return undefined; }
@@ -625,7 +533,7 @@ export class MasterVoice {
     if (speak.cut && parts.length && !parts.at(-1)!.text.endsWith(VOICE_REST)) parts.push({ text: VOICE_REST, speech: voiced(VOICE_REST, model, kind) });
     const chars = parts.reduce((sum, part) => sum + part.speech.length, 0);
     // Judged and recorded together: nothing else can start making audio in between.
-    const refused: MasterUnspoken | undefined = !parts.length ? 'empty' : this.session !== session || !this.alive(session) ? this.gone(session) : this.limited(Date.now(), chars * ttsDollarsPerChar(model)) ? 'limit' : undefined;
+    const refused: MasterUnspoken | undefined = !parts.length ? 'empty' : this.session !== session || !this.alive(session) ? this.gone(session) : this.usage.limited(Date.now(), chars * ttsDollarsPerChar(model)) ? 'limit' : undefined;
     if (refused) { this.setSpeak(entry, unspoken(speak, refused)); return; }
     const request = entry.data.kind === 'master' ? entry.data.request : undefined;
     const key = speak.timing ?? request;
@@ -633,7 +541,7 @@ export class MasterVoice {
     let heard = false;
     for (let index = 0; index < parts.length; index++) {
       const part = parts[index];
-      const refuse = this.session !== session || !this.alive(session) ? this.gone(session) : this.limited(Date.now(), part.speech.length * ttsDollarsPerChar(model)) ? 'limit' : undefined;
+      const refuse = this.session !== session || !this.alive(session) ? this.gone(session) : this.usage.limited(Date.now(), part.speech.length * ttsDollarsPerChar(model)) ? 'limit' : undefined;
       if (refuse) { this.setSpeak(entry, unspoken(speakOf(this.options.room.get(entry.id)?.data) ?? speak, refuse, heard)); return; }
       const live = this.synthesize(part.speech, undefined, key);
       live.session = session; live.held = true; live.partIndex = index;
@@ -804,7 +712,7 @@ export class MasterVoice {
       }
       const part = segment.parts[segment.fed];
       const model = this.options.settings.current().voice.model;
-      if (this.limited(Date.now(), part.speech.length * ttsDollarsPerChar(model))) { this.stopStream(stream, 'limit'); return; }
+      if (this.usage.limited(Date.now(), part.speech.length * ttsDollarsPerChar(model))) { this.stopStream(stream, 'limit'); return; }
       const live = this.synthesize(part.speech, undefined, stream.key);
       live.held = true; live.session = session; live.queuedAt = segment.queuedAt; live.partIndex = segment.fed;
       segment.live = live;
@@ -942,12 +850,12 @@ export class MasterVoice {
     const parts = typeof text === 'string' ? [text] : text;
     const chars = parts.reduce((sum, part) => sum + part.length, 0);
     // Characters sent are paid for, whether or not the audio comes back whole.
-    this.add(live.createdAt, { ttsChars: chars, model: live.model });
+    this.usage.add(live.createdAt, { ttsChars: chars, model: live.model });
     live.charged = chars;
     live.parts.push(...parts);
     live.sealed = true;
     wake(live);
-    void this.save();
+    void this.usage.save();
     this.broadcast();
     return live;
   }
@@ -1008,9 +916,9 @@ export class MasterVoice {
             break;
           } catch (error) {
             piece.result = 'failed';
-            if (got || attempt > 0 || live.failed || (error as Error).message === 'too large' || this.limited(Date.now(), part.length * ttsDollarsPerChar(live.model))) throw error;
-            this.add(Date.now(), { ttsChars: part.length, model: live.model });
-            void this.save();
+            if (got || attempt > 0 || live.failed || (error as Error).message === 'too large' || this.usage.limited(Date.now(), part.length * ttsDollarsPerChar(live.model))) throw error;
+            this.usage.add(Date.now(), { ttsChars: part.length, model: live.model });
+            void this.usage.save();
           } finally { clearTimeout(deadline); piece.done = Date.now(); this.timings.piece(live.timing, piece); }
         }
       }
@@ -1020,7 +928,7 @@ export class MasterVoice {
       live.sealed = true;
       // Parts never asked for are not paid for.
       const unsent = live.parts.slice(live.sent).reduce((sum, part) => sum + part.length, 0);
-      if (unsent) { this.add(live.createdAt, { ttsChars: -unsent, model: live.model }); void this.save(); this.broadcast(); }
+      if (unsent) { this.usage.add(live.createdAt, { ttsChars: -unsent, model: live.model }); void this.usage.save(); this.broadcast(); }
     } finally {
       clearTimeout(deadline);
       // A reader of audio that failed sees its connection cut, never a clean end.
@@ -1184,7 +1092,7 @@ export class MasterVoice {
     const work = (async () => {
       const path = join(dir, `${key}.mp3`);
       if (await stat(path).then(() => true, () => false)) return key;
-      if (this.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) throw new Error('limited');
+      if (this.usage.limited(Date.now(), sent.length * ttsDollarsPerChar(model))) throw new Error('limited');
       const live = this.synthesize(sent, { voiceId, model });
       await this.finished(live);
       // Not done in time: nothing more is asked for, and what came is not kept.
@@ -1238,39 +1146,8 @@ export class MasterVoice {
 
   // ─── cost ────────────────────────────────────────────────────────────────────────────────────────────────────
 
-  private add(at: number, used: { sttSeconds?: number; ttsChars?: number; model?: string; firstReply?: true }): void {
-    const day = (this.file.days[localDay(at)] ??= { sttSeconds: 0, ttsChars: 0, dollars: 0 });
-    if (used.firstReply) { day.firstReplies = (day.firstReplies ?? 0) + 1; day.dollars += FIRST_REPLY_DOLLARS; }
-    if (used.sttSeconds) { day.sttSeconds += used.sttSeconds; day.dollars += used.sttSeconds * STT_DOLLARS_PER_SECOND; }
-    if (used.ttsChars) { day.ttsChars += used.ttsChars; day.dollars += used.ttsChars * ttsDollarsPerChar(used.model ?? ''); }
-  }
-
-  /** Today's dollars, with every unsettled token (whenever it was given) held as a whole utterance. */
-  private spent(now: number): number {
-    const reserved = this.file.tokens.length * UTTERANCE_SECONDS * STT_DOLLARS_PER_SECOND;
-    return (this.file.days[localDay(now)]?.dollars ?? 0) + reserved;
-  }
-
   /** Whether today's limit is already reached, so nothing more would be read aloud. */
-  spentOut(): boolean {
-    const limit = this.options.settings.current().voice.dailyDollars;
-    return limit > 0 && this.spent(Date.now()) >= limit - 1e-9;
-  }
-
-  /** Whether spending `more` now would pass the daily limit (when there is one). */
-  private limited(now: number, more: number): boolean {
-    const limit = this.options.settings.current().voice.dailyDollars;
-    return limit > 0 && this.spent(now) + more > limit + 1e-9;
-  }
-
-  /** Tokens never settled count as a whole utterance, on the day they run out. */
-  private settleExpired(now: number): void {
-    const expired = this.file.tokens.filter(token => now - token.issuedAt > TOKEN_LIFE_MS);
-    if (!expired.length) return;
-    this.file.tokens = this.file.tokens.filter(token => now - token.issuedAt <= TOKEN_LIFE_MS);
-    for (let index = 0; index < expired.length; index++) this.add(now, { sttSeconds: UTTERANCE_SECONDS });
-    void this.save();
-  }
+  spentOut(): boolean { return this.usage.spentOut(); }
 
   // ─── news to read ────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -1281,24 +1158,24 @@ export class MasterVoice {
   private follow(event: MasterStreamEvent, history = false): void {
     if (event.type !== 'entry') return;
     const speak = speakOf(event.entry.data);
-    const known = this.file.speaking.findIndex(item => item.id === event.entry.id);
+    const known = this.usage.isSpeaking(event.entry.id);
     const open = speak?.state === 'pending' || speak?.state === 'playing';
     // Its reading ended now: added ended, or waiting until now.
-    if (speak && !open && !history && (known >= 0 || event.entry.revision === 1)) this.ended(event.entry, speak);
-    if (open && known < 0) {
-      this.file.speaking.push({ id: event.entry.id, order: event.entry.order });
-      while (this.file.speaking.length > KEEP_SPEAKING) {
-        const oldest = this.file.speaking[0];
+    if (speak && !open && !history && (known || event.entry.revision === 1)) this.ended(event.entry, speak);
+    if (open && !known) {
+      this.usage.addSpeaking(event.entry.id, event.entry.order);
+      for (let oldest; (oldest = this.usage.overflowing());) {
         const entry = this.options.room.get(oldest.id);
         const stale = speakOf(entry?.data);
-        // Given up on while still in the list, so its end is recorded and told of like any other.
+        // Given up on while still in the list, so its end is recorded and told of like any other (the room's change
+        // may remove that listing itself).
         if (entry && stale && (stale.state === 'pending' || stale.state === 'playing')) this.setSpeak(entry, unspoken(stale, 'queue'));
-        if (this.file.speaking[0] === oldest) this.file.speaking.shift();
+        this.usage.removeFirstIfSame(oldest.token);
       }
       if (speak?.state === 'pending') this.deliver();
-    } else if (!open && known >= 0) this.file.speaking.splice(known, 1);
+    } else if (!open && known) this.usage.removeSpeaking(event.entry.id);
     else return;
-    void this.save();
+    void this.usage.save();
   }
 
   /** A reading ended: kept in its timing record, and told of beside the voice when the owner should know. */
@@ -1330,7 +1207,7 @@ export class MasterVoice {
   }
 
   private speakEntries(): Array<{ entry: MasterEntry; speak: MasterSpeak }> {
-    return this.file.speaking.flatMap(item => {
+    return this.usage.speakingList().flatMap(item => {
       const entry = this.options.room.get(item.id);
       const speak = speakOf(entry?.data);
       return entry && speak ? [{ entry, speak }] : [];
@@ -1393,13 +1270,12 @@ export class MasterVoice {
 
   private tick(): void {
     const now = Date.now();
-    this.settleExpired(now);
+    this.usage.settleExpired(now);
     this.sweep();
     // Nothing waits to write a first reply for a page that is gone.
     if (!this.session || !this.alive(this.session)) this.options.firstReply?.close();
     for (const live of [...this.lives.values()]) if (now - live.createdAt > LIVE_MS && !live.held) this.drop(live);
-    const oldest = localDay(now - KEEP_DAYS * 86_400_000);
-    for (const day of Object.keys(this.file.days)) if (day < oldest) delete this.file.days[day];
+    this.usage.pruneDays(now);
     const day = localDay(now);
     if (day !== this.shownDay) { this.shownDay = day; this.broadcast(); }
     // Too old to be told of any more: pages stop showing it.
@@ -1413,66 +1289,4 @@ export class MasterVoice {
    * session, so the tab it left sees it moved (not voice gone from the host).
    */
   private broadcastSoon(): void { queueMicrotask(() => { if (!this.closed) this.broadcast(); }); }
-
-  private save(): Promise<void> {
-    const write = () => writePrivateJson(this.path, JSON.stringify(this.file));
-    const next = this.writes.then(write, write);
-    this.writes = next.catch(error => { console.error(`Master voice records were not saved: ${(error as NodeJS.ErrnoException)?.code ?? 'error'}`); });
-    return next;
-  }
-}
-
-/**
- * Voice records as kept before (GPT-Live, 1.52–1.55) become today's form in one step: their time, counted and not
- * yet counted, is added to the days as dollars; the calls themselves are dropped. Records in today's form pass as
- * they are, so reading them again adds nothing.
- */
-export function migrate(saved: Record<string, unknown> | undefined, now: number): VoiceFile {
-  const file: VoiceFile = { version: 6, days: {}, tokens: [], speaking: [] };
-  if (!saved || typeof saved !== 'object') return file;
-  if (Array.isArray(saved.speaking)) file.speaking = saved.speaking.filter((item): item is { id: string; order: number } => typeof item?.id === 'string' && Number.isInteger(item?.order));
-  if (saved.version === 6) {
-    if (saved.days && typeof saved.days === 'object') {
-      for (const [day, value] of Object.entries(saved.days as Record<string, Partial<Day>>)) {
-        if (/^\d{4}-\d{2}-\d{2}$/.test(day) && value && typeof value === 'object') file.days[day] = { sttSeconds: Number(value.sttSeconds) || 0, ttsChars: Number(value.ttsChars) || 0, dollars: Number(value.dollars) || 0, ...(Number(value.firstReplies) > 0 ? { firstReplies: Number(value.firstReplies) } : {}) };
-      }
-    }
-    if (Array.isArray(saved.tokens)) file.tokens = saved.tokens.filter((token): token is VoiceFile['tokens'][number] => typeof token?.id === 'string' && typeof token?.session === 'string' && Number.isFinite(token?.issuedAt));
-    return file;
-  }
-  const liveDollars = (day: string, seconds: number) => {
-    const entry = (file.days[day] ??= { sttSeconds: 0, ttsChars: 0, dollars: 0 });
-    entry.dollars += seconds * LIVE_DOLLARS_PER_SECOND;
-  };
-  if (saved.days && typeof saved.days === 'object') {
-    for (const [day, seconds] of Object.entries(saved.days as Record<string, unknown>)) if (/^\d{4}-\d{2}-\d{2}$/.test(day) && typeof seconds === 'number' && seconds > 0) liveDollars(day, seconds);
-  }
-  interface OldAttempt { folded?: boolean; unbilled?: boolean; answered?: boolean; readyAt?: number; createdAt?: number; closedAt?: number; expiresAt?: number; usage?: { seconds?: number; observedAt?: number; final?: boolean; byDay?: Record<string, unknown> } }
-  for (const attempt of Array.isArray(saved.attempts) ? saved.attempts as OldAttempt[] : []) {
-    if (!attempt || typeof attempt !== 'object' || attempt.folded || attempt.unbilled || !Number.isFinite(attempt.createdAt)) continue;
-    // Not yet in the days: what it reported, on the days it reported it; for a call whose answer reached the page,
-    // the time since its last report until it ended (or now), on the days that time fell; and at least the 15
-    // seconds every call is billed, on the day it was made.
-    const days: Record<string, number> = {};
-    let seconds = 0;
-    for (const [day, value] of Object.entries(attempt.usage?.byDay ?? {})) if (/^\d{4}-\d{2}-\d{2}$/.test(day) && typeof value === 'number' && value > 0) { days[day] = (days[day] ?? 0) + value; seconds += value; }
-    // Reported without its days (or only partly): the rest goes on the day the call was made.
-    const reported = Number(attempt.usage?.seconds) || 0;
-    if (reported > seconds) { days[localDay(attempt.createdAt!)] = (days[localDay(attempt.createdAt!)] ?? 0) + reported - seconds; seconds = reported; }
-    const reachedPage = attempt.answered ?? attempt.readyAt !== undefined;
-    if (!attempt.usage?.final && reachedPage) {
-      const from = attempt.usage?.observedAt ?? attempt.readyAt ?? attempt.createdAt!;
-      const to = Math.min(attempt.closedAt ?? now, attempt.expiresAt ?? Number.MAX_SAFE_INTEGER, now);
-      for (let at = from; at < to;) {
-        const midnight = new Date(at); midnight.setHours(24, 0, 0, 0);
-        const end = Math.min(to, midnight.getTime());
-        days[localDay(at)] = (days[localDay(at)] ?? 0) + (end - at) / 1000;
-        seconds += (end - at) / 1000;
-        at = end;
-      }
-    }
-    if (seconds < 15) days[localDay(attempt.createdAt!)] = (days[localDay(attempt.createdAt!)] ?? 0) + 15 - seconds;
-    for (const [day, value] of Object.entries(days)) liveDollars(day, value);
-  }
-  return file;
 }

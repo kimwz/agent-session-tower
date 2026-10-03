@@ -239,9 +239,11 @@ test('voice needs an ElevenLabs key; tokens come from it, each reserving an utte
   assert.equal(h.voice.status().today.sttSeconds, 6);
   await h.voice.voiceToken({ session: other });
   // A token never settled counts as a whole utterance once it can no longer be used, on the day it runs out.
-  const file = (h.voice as unknown as { file: { tokens: Array<{ issuedAt: number }> } }).file;
+  // Test-only access to the private records owner (C8): the same file object and the owner's own expiry sweep.
+  const usage = (h.voice as unknown as { usage: { file: { tokens: Array<{ issuedAt: number }> }; settleExpired(now: number): void } }).usage;
+  const file = usage.file;
   for (const token of file.tokens) token.issuedAt -= 17 * 60_000;
-  (h.voice as unknown as { settleExpired(now: number): void }).settleExpired(Date.now());
+  usage.settleExpired(Date.now());
   assert.equal(h.voice.status().today.sttSeconds, 6 + 180 * 2);
   assert.equal(file.tokens.length, 0);
 });
@@ -288,7 +290,8 @@ test('what the owner said is a request like a typed one, answered first with a r
   await masterEntry(h, /두 개입니다/);
   assert.ok(!h.room.recent(50).some(entry => JSON.stringify(entry.data).includes(FIRST)), 'the first reply is not part of the conversation');
   assert.deepEqual(await readdir(join(h.dir, 'voice-clips')).catch(() => []), [], 'nothing recorded');
-  await (h.voice as unknown as { writes: Promise<void> }).writes;
+  // Test-only access to the private records owner (C8): the same caught write tail the facade's `writes` was.
+  await (h.voice as unknown as { usage: { flush(): Promise<void> } }).usage.flush();
   const days = (JSON.parse(await readFile(join(h.dir, 'voice.json'), 'utf8')) as { days: Record<string, { firstReplies?: number }> }).days;
   assert.ok(Object.values(days).some(day => day.firstReplies === 1), 'the model call is counted');
   assert.equal(isNoise('네 알겠어요'), false);
