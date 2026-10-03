@@ -158,6 +158,8 @@ export class TriggerService extends EventEmitter {
   private writes: Promise<unknown> = Promise.resolve();
   private pendingCommits = 0;
   private storageError?: string;
+  /** Set when unreadable state could not be moved aside: nothing is saved over it until Tower restarts. */
+  private locked?: string;
   private timer?: ReturnType<typeof setInterval>;
   private ticking?: Promise<void>;
   private started = false;
@@ -401,7 +403,11 @@ export class TriggerService extends EventEmitter {
   hasActive(): boolean { return this.state.triggers.some(trigger => trigger.enabled) || this.state.events.some(event => UNFINISHED.has(event.status)); }
   /** Work a handoff must wait for: a tick, a save, or a claim whose submission is not yet recorded. */
   inFlight(): boolean { return Boolean(this.ticking) || Boolean(this.closingIssues) || this.pendingCommits > 0 || this.polling.size > 0 || this.state.events.some(event => event.status === 'claimed'); }
-  async flush(): Promise<void> { await this.commit(() => undefined, 'settle'); }
+  async flush(): Promise<void> {
+    // A locked engine never saves, and a handoff must not wait on it.
+    if (this.locked) { await this.writes.catch(() => {}); return; }
+    await this.commit(() => undefined, 'settle');
+  }
 
   // ---- Reading ----------------------------------------------------------------------------------
 
@@ -466,7 +472,7 @@ export class TriggerService extends EventEmitter {
     }
     const recent = latest.reverse().map(brief);
     const full = this.stateBytes > this.acceptBytes ? 'Trigger history is full; scheduled times pass without running until old history expires or triggers are deleted.' : undefined;
-    const problem = this.storageError ?? full ?? this.capacityError;
+    const problem = this.storageError ?? this.secrets.problem ?? full ?? this.capacityError;
     return structuredClone({ onceReservations: { used: this.onceCount(this.state), limit: MAX_ONCE_RESERVATIONS }, triggers: summaries, recent, ...(updated.length ? { updated } : {}), ...(problem ? { storageError: problem } : {}) });
   }
 
@@ -1697,6 +1703,7 @@ export class TriggerService extends EventEmitter {
         if (kind === 'settle') { this.storageError = 'Trigger state is full even after trimming finished history. New runs are not accepted.'; this.emit('change'); }
         throw failure('Trigger history is full. Delete old triggers or wait for finished runs to expire.', 507);
       }
+      if (this.locked) { this.storageError = this.locked; this.emit('change'); throw failure(this.storageError, 503); }
       try { await writePrivateJson(this.path, data); }
       catch (error) { this.storageError = `Cannot save triggers: ${error instanceof Error ? error.message : String(error)}`; this.emit('change'); throw failure(this.storageError, 503); }
       this.storageError = undefined;
@@ -1781,10 +1788,18 @@ export class TriggerService extends EventEmitter {
     return state;
   }
 
-  /** Unreadable state is kept aside for inspection; triggers start empty rather than guess. */
+  /**
+   * Unreadable state is kept aside for inspection; triggers start empty rather than guess. When it cannot be moved,
+   * the engine locks before anything can fire or save, so the file is never written over.
+   */
   private async quarantine(error: unknown): Promise<void> {
     console.error('Trigger state could not be read and was moved aside:', error);
-    await quarantineFile(this.path).catch(() => {});
+    try { await quarantineFile(this.path); }
+    catch (moveError) {
+      this.locked = 'Trigger state could not be read or moved aside; nothing is saved until Tower restarts.';
+      this.storageError = this.locked;
+      console.error(this.locked, moveError);
+    }
   }
 }
 

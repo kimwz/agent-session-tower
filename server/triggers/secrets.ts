@@ -12,11 +12,23 @@ const valid = (item: unknown): item is StoredSecret => !!item && typeof item ===
   && ['id', 'name', 'origin', 'value', 'createdAt'].every(key => typeof (item as Record<string, unknown>)[key] === 'string');
 
 /**
+ * The saved file's shape: every record valid, no id twice. No count limit: a restore merge may keep more than
+ * `MAX_SECRETS`, and those load as before.
+ */
+function parseLegacyFile(records: unknown): StoredSecret[] | undefined {
+  if (!Array.isArray(records) || !records.every(valid) || new Set(records.map(record => record.id)).size !== records.length) return undefined;
+  return records;
+}
+
+/**
  * Header values for HTTP triggers, in an owner-only file apart from trigger definitions. Values are
  * read only to send a request; no operation returns them.
  */
 export class SecretStore {
   private secrets = new Map<string, StoredSecret>();
+  /** Why saved secrets are missing, for the triggers page: kept aside, or locked because they could not be. */
+  problem?: string;
+  private locked?: string;
   private writes: Promise<unknown> = Promise.resolve();
   constructor(private readonly stateDir: string, private readonly options: { vault?: SecretService } = {}) {}
   private get encrypted() { return this.options.vault?.status().initialized === true; }
@@ -29,12 +41,23 @@ export class SecretStore {
     try { saved = await readPrivateJson(this.path); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      // Kept aside rather than overwritten, so an unreadable file never silently loses the owner's values.
-      console.error('Trigger secrets could not be read and were moved aside:', error);
-      await quarantineFile(this.path).catch(() => {});
-      return;
+      return this.setAside(error);
     }
-    for (const item of Array.isArray(saved) ? saved : []) if (valid(item)) this.secrets.set(item.id, item);
+    const records = parseLegacyFile(saved);
+    if (!records) return this.setAside(new Error('Saved trigger secrets are invalid.'));
+    for (const item of records) this.secrets.set(item.id, item);
+  }
+
+  /** Kept aside rather than overwritten, so an unreadable file never loses the owner's values; if it cannot be, nothing is saved. */
+  private async setAside(error: unknown): Promise<void> {
+    console.error('Trigger secrets could not be read and were moved aside:', error);
+    try {
+      const aside = await quarantineFile(this.path);
+      this.problem = `Trigger secrets could not be read and were kept as ${aside}; triggers that use them fail until they are entered again.`;
+    } catch (moveError) {
+      this.locked = this.problem = 'Trigger secrets could not be read or moved aside; nothing is saved until Tower restarts.';
+      console.error(this.locked, moveError);
+    }
   }
 
   get(id: string): StoredSecret | undefined { return this.encrypted ? this.requireVault().legacyGet(id) : structuredClone(this.secrets.get(id)); }
@@ -77,15 +100,17 @@ export class SecretStore {
     const vault = this.requireVault();
     let records: unknown;
     try { records = await readPrivateJson(this.path); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
-    if (!Array.isArray(records) || !records.every(valid) || records.length > MAX_SECRETS || new Set(records.map(record => record.id)).size !== records.length) throw new Error('Invalid legacy trigger secrets; original file preserved.');
-    await vault.importLegacy(records);
-    for (const record of records) if (JSON.stringify(vault.legacyGet(record.id)) !== JSON.stringify(record)) throw new Error('Encrypted migration verification failed; original file preserved.');
+    const parsed = parseLegacyFile(records);
+    if (!parsed || parsed.length > MAX_SECRETS) throw new Error('Invalid legacy trigger secrets; original file preserved.');
+    await vault.importLegacy(parsed);
+    for (const record of parsed) if (JSON.stringify(vault.legacyGet(record.id)) !== JSON.stringify(record)) throw new Error('Encrypted migration verification failed; original file preserved.');
     await unlink(this.path); const directory = await open(this.stateDir, 'r'); try { await directory.sync(); } finally { await directory.close(); } this.secrets.clear();
   }
 
   /** Changes apply one at a time to a copy; only a saved copy becomes current. */
   private update<T>(change: (next: Map<string, StoredSecret>) => T): Promise<T> {
     const write = this.writes.catch(() => {}).then(async () => {
+      if (this.locked) throw Object.assign(new Error(this.locked), { statusCode: 503 });
       const next = new Map(this.secrets);
       const result = change(next);
       await writePrivateJson(this.path, JSON.stringify([...next.values()]));
