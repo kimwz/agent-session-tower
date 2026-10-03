@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { createServer, request } from 'node:http';
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,6 +23,31 @@ class Pty implements WorkspacePty {
   kill() { this.killed++; }
   onData(listener: (data: string) => void) { this.data.add(listener); return { dispose: () => { this.data.delete(listener); } }; }
   onExit() { return { dispose: () => {} }; }
+  output(data: string) { for (const listener of this.data) listener(data); }
+}
+
+/**
+ * Streams one shell through the terminal host client the way the web server does, and resolves with the stream once
+ * `expected` arrives; it fails when the stream ends, errors or stays silent instead.
+ */
+async function streamUntil(client: TerminalHostClient, id: string, expected: string, emit: () => void): Promise<string> {
+  const server = createServer((_req, res) => { void client.attach(id, res).catch(error => { res.writeHead(error.statusCode || 500); res.end(); }); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    return await new Promise<string>((resolve, reject) => {
+      const timer = setTimeout(() => { req.destroy(); reject(new Error(`No "${expected}" from shell ${id}`)); }, 5000);
+      const req = request({ host: '127.0.0.1', port: (server.address() as { port: number }).port }, res => {
+        if (res.statusCode !== 200) { clearTimeout(timer); reject(new Error(`Attaching shell ${id} answered ${res.statusCode}`)); return; }
+        let text = '';
+        // Sent once the stream is open, so it reaches the page live rather than only from the replay.
+        setTimeout(emit, 50);
+        res.on('data', chunk => { text += chunk; if (text.includes(expected)) { clearTimeout(timer); req.destroy(); resolve(text); } });
+        res.on('end', () => { clearTimeout(timer); reject(new Error(`The stream of shell ${id} ended before "${expected}"`)); });
+      });
+      req.on('error', error => { clearTimeout(timer); reject(error); });
+      req.end();
+    });
+  } finally { server.closeAllConnections(); server.close(); }
 }
 
 const lines = (path: string) => existsSync(path) ? readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : [];
@@ -89,6 +115,7 @@ test('locked state does not stop a handoff and is never written over; the turn e
   const run = await web.enqueue(session, 'locked-state turn');
   await until(() => web.list().find(item => item.id === run.id)?.approvals?.length, 15_000);
   await shellClient.input(shell, 'echo before\r');
+  assert.match(await streamUntil(shellClient, shell, 'out-during-turn', () => ptys[0].output('out-during-turn\r\n')), /out-during-turn/);
 
   // The web restarts while the turn waits: the turn and the shell go on.
   await web.close(); shellClient.dispose();
@@ -99,6 +126,8 @@ test('locked state does not stop a handoff and is never written over; the turn e
   shells.push(shellClient);
   assert.equal(web.list().find(item => item.id === run.id)?.status, 'running');
   await shellClient.input(shell, 'echo after-web\r');
+  const reattached = await streamUntil(shellClient, shell, 'out-after-web', () => ptys[0].output('out-after-web\r\n'));
+  assert.match(reattached, /out-during-turn[\s\S]*out-after-web/, 'the new page gets what the shell wrote before, then what it writes now');
   await unchanged();
 
   // A web of a newer build asks for a handoff; the running turn keeps the first worker in service.
@@ -132,6 +161,7 @@ test('locked state does not stop a handoff and is never written over; the turn e
 
   // The same shell answers after the handoff; nothing was cancelled or killed.
   await shellClient.input(shell, 'echo after-handoff\r');
+  assert.match(await streamUntil(shellClient, shell, 'out-after-handoff', () => ptys[0].output('out-after-handoff\r\n')), /out-after-handoff/);
   assert.deepEqual(ptys[0].written, ['echo before\r', 'echo after-web\r', 'echo after-handoff\r']);
   assert.equal(ptys.length, 1);
   assert.equal(ptys[0].killed, 0);
