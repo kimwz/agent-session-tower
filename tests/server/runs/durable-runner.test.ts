@@ -523,7 +523,9 @@ test('a hold that cannot be checked keeps the worker until the check works again
   const f = await fixture(); t.after(f.cleanup);
   await f.host.close();
   let handoffs = 0;
-  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {} });
+  let handedOff = false;
+  // Quiesce runs before the handoff record is written; only onHandedOff says the worker has stopped writing here.
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => {}, onHandedOff: () => { handedOff = true; } });
   let unreadable = true;
   const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => { if (unreadable) throw new Error('ELOOP: too many symbolic links'); return false; } });
   try {
@@ -532,7 +534,8 @@ test('a hold that cannot be checked keeps the worker until the check works again
     await new Promise(resolve => setTimeout(resolve, 1500));
     assert.equal(handoffs, 0, 'whether an update is still tried cannot be told, so the previous worker stays');
     unreadable = false;
-    await until(() => handoffs === 1);
+    await until(() => handedOff);
+    assert.equal(handoffs, 1);
   } finally { await client.close(); await host.close(); }
 });
 
@@ -545,7 +548,8 @@ test('with a live helper and a hold unreadable past 15 minutes, automatic handof
   let successors = 0;
   const run = await f.runs.enqueue(f.session.id, 'Keeps running while the hold cannot be read');
   await until(() => f.starts() === 1);
-  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => { successors++; } });
+  let handedOff = false;
+  const host = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, quiesce: async () => { handoffs++; }, startSuccessor: () => { successors++; }, onHandedOff: () => { handedOff = true; } });
   const { hold, lock } = updatePaths(f.stateDir);
   await mkdir(runtimePaths(f.stateDir).root, { recursive: true });
   await symlink(hold, hold);
@@ -569,7 +573,8 @@ test('with a live helper and a hold unreadable past 15 minutes, automatic handof
     await rm(hold);
     await rm(lock);
     f.finish();
-    await until(() => handoffs === 1);
+    await until(() => handedOff);
+    assert.equal(handoffs, 1);
   } finally { await client.close(); await host.close(); }
 });
 
