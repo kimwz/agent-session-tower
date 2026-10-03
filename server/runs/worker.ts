@@ -431,7 +431,10 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     }
     // Socket and credential are removed while this worker still holds the lock, so a successor's are never touched.
     await close();
-    (options.startSuccessor ?? spawnSuccessor)(successor, nonce, options.handoffCarry?.());
+    let carry: Buffer | undefined;
+    // State the successor may do without never stands in the way of starting it.
+    try { carry = options.handoffCarry?.(); } catch { console.error('The open vault could not be handed to the successor; it starts locked.'); }
+    (options.startSuccessor ?? spawnSuccessor)(successor, nonce, carry);
     options.onHandedOff?.();
   };
   const close = async (idle = false) => {

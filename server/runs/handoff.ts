@@ -50,12 +50,18 @@ const MAX_CARRY = 4096;
  * must not touch disk, argv or the environment (the open vault key): only the successor can read its stdin pipe.
  */
 export function spawnSuccessor(command: SuccessorCommand, nonce: string, carry?: Buffer): void {
-  const child = spawn(command.execPath, command.args, { detached: true, stdio: ['pipe', 'ignore', 'ignore'], env: { ...process.env, TOWER_HANDOFF: nonce } });
-  child.on('error', error => { console.error('Could not start the successor execution worker:', error); });
-  child.stdin?.on('error', () => { console.error('The successor execution worker did not take the handed-over state; it starts without it.'); });
-  if (carry?.length && carry.length <= MAX_CARRY) child.stdin?.end(carry, () => { carry.fill(0); });
-  else { carry?.fill(0); child.stdin?.end(); }
-  child.unref();
+  let sent = false;
+  try {
+    const child = spawn(command.execPath, command.args, { detached: true, stdio: ['pipe', 'ignore', 'ignore'], env: { ...process.env, TOWER_HANDOFF: nonce } });
+    child.on('error', error => { console.error('Could not start the successor execution worker:', error); });
+    child.unref();
+    // No stdin when the process could not be created (too many open files): nothing is sent.
+    if (!child.stdin) return;
+    child.stdin.on('error', () => { console.error('The successor execution worker did not take the handed-over state; it starts without it.'); });
+    // Cleared once written, or once the pipe closes unwritten (the process failed to start).
+    if (carry?.length && carry.length <= MAX_CARRY) { sent = true; child.stdin.once('close', () => carry.fill(0)); child.stdin.end(carry, () => { carry.fill(0); }); }
+    else child.stdin.end();
+  } finally { if (!sent) carry?.fill(0); }
 }
 
 /** What the predecessor handed over on stdin; undefined when it sent nothing (an older build) or did not finish in time. */

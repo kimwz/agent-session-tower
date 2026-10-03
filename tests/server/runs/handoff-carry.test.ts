@@ -60,3 +60,11 @@ test('a predecessor that never finishes sending is not waited on forever', async
   const got = await s.result();
   assert.equal(got.carry, null);
 });
+
+test('a successor that cannot be started leaves no handed-over state behind', async () => {
+  const carry = Buffer.from('open vault');
+  spawnSuccessor({ execPath: '/nonexistent/tower-successor', args: [] }, 'e'.repeat(32), carry);
+  const deadline = Date.now() + 5000;
+  while (!carry.every(byte => byte === 0) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.ok(carry.every(byte => byte === 0));
+});
