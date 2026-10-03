@@ -4,7 +4,7 @@ import { mkdir, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import type { CreateSessionRequest, MessageAttachments, Provider, Run, RunApprovalResponse, RunInstructions, RunOrigin, Session, SteerBlock } from '../../shared/types.js';
 import { attachmentPrompt, AttachmentStore, claudeImageBlocks, imagePaths } from '../stores/attachments.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
@@ -17,12 +17,12 @@ import { claudeInputTokens, contextCapacity, modelContextWindow, withNativeConte
 import { defaultStateDir } from '../state-dir.js';
 import { findExecutable, PROVIDERS } from '../providers/discovery.js';
 import { towerInstructionsBlock } from '../sessions/parser.js';
-import { isCreatedSession, UUID, type CreatedSession } from './saved-state.js';
+import { UUID, type CreatedSession } from './saved-state.js';
 import { buildCreateArgs, buildResumeArgs } from './claude-args.js';
 import { ReplyLog } from './replies.js';
 import { checkClaudeSubscription, markMaster, MASTER_TOOL_TIMEOUT_SECONDS, subscriptionOnly } from './subscription.js';
 import { awaitToolServers, NO_RUN_TOOLS, privateMcpConfig, type RunTools } from './session-mcp.js';
-import { automatedOrigin, ownerOrigin, restoredSessionOrigin, sameOrigin, sessionOriginOf, type SessionOrigin } from './origin.js';
+import { automatedOrigin, ownerOrigin, sameOrigin, type SessionOrigin } from './origin.js';
 import { WakeupTracker, type Wakeup } from './wakeup.js';
 import { TOWER_NOTICE } from '../../shared/task-notification.js';
 import { BackgroundTaskTracker, messageText, type FinishedTask } from './background-tasks.js';
@@ -35,6 +35,7 @@ import { errorMessage, FINISHED, finishedTime, MAX_OUTPUT, MAX_PROMPT, notAdmitt
 import { MAX_RUNS, RunHistory, SCHEDULED_OUTPUT, UPDATE_RESUME_WAIT } from './run-history.js';
 import { PermissionContinuations, retainedReceipts } from './permission-continuation.js';
 import { inheritedRunFields } from './continuations.js';
+import { CreatedSessionRegistry } from './session-registry.js';
 
 type SpawnProcess = (file: string, args: string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 interface RunnerOptions {
@@ -159,7 +160,7 @@ export class RunManager extends EventEmitter {
   private readonly options: RunnerOptions;
   private readonly history: RunHistory;
   private readonly attachments: AttachmentStore;
-  private readonly createdSessions = new Map<string, CreatedSession>();
+  private readonly registry = new CreatedSessionRegistry({ native: id => this.options.getSession(id), persist: () => this.persist() });
   private readonly runs = new Map<string, Run>();
   private readonly answers = new OwnerAnswers();
   private readonly owned = new Map<string, OwnedProcess>();
@@ -280,35 +281,12 @@ export class RunManager extends EventEmitter {
    */
   sessionOrigin(id: string): SessionOrigin | undefined {
     id = this.monitorSessionId(id);
-    const created = this.createdSessions.get(id);
-    const linked = this.options.isExternallyLinked?.([id, this.nativeSessionId(id)]) === true;
-    if (!created) return linked ? { kind: 'unknown', untrustedInput: true } : undefined;
-    if (linked && !created.origin?.untrustedInput) {
-      // The mark is permanent: record it so a later ledger cleanup cannot clear it.
-      created.origin = { ...(created.origin ?? { kind: 'unknown' as const }), untrustedInput: true };
-      this.persist();
-    }
-    return { ...(created.origin ?? { kind: 'unknown' as const, untrustedInput: true }) };
+    return this.registry.origin(id, this.options.isExternallyLinked?.([id, this.nativeSessionId(id)]) === true);
   }
 
-  /**
-   * Fills provenance for sessions created before it was recorded. Only evidence that survives in the
-   * run registry or in external ledgers is used; anything undecidable stays unknown and untrusted.
-   */
+  /** Fills provenance for sessions created before it was recorded (see CreatedSessionRegistry.backfill). */
   backfillSessionOrigins(links: { sessionIds: ReadonlySet<string>; requestIds: ReadonlySet<string> }): number {
-    let changed = 0;
-    for (const [id, created] of this.createdSessions) {
-      if (created.origin) continue;
-      const initial = this.runs.get(created.runId);
-      const aliases = [id, this.nativeSessionId(id)];
-      if (aliases.some(alias => links.sessionIds.has(alias)) || (initial?.autoPromptId && links.requestIds.has(initial.autoPromptId))) {
-        created.origin = { kind: 'slack', untrustedInput: true };
-      } else if (initial) created.origin = { kind: 'owner', untrustedInput: false };
-      else created.origin = { kind: 'unknown', untrustedInput: true };
-      changed++;
-    }
-    if (changed) this.persist();
-    return changed;
+    return this.registry.backfill(links, id => this.runs.get(id));
   }
 
   async start(): Promise<void> {
@@ -316,15 +294,7 @@ export class RunManager extends EventEmitter {
     await mkdir(this.options.stateDir ?? defaultStateDir(), { recursive: true, mode: 0o700 });
     await this.attachments.start();
     const saved = await this.history.readCreated();
-    if (saved !== undefined) {
-      if (!Array.isArray(saved) || saved.some(value => !isCreatedSession(value))) throw new Error('Saved created sessions are invalid.');
-      for (const value of saved) {
-        const origin = restoredSessionOrigin((value as { origin?: unknown }).origin);
-        if (origin) value.origin = origin; else delete value.origin;
-        this.createdSessions.set(value.session.id, value);
-      }
-      this.history.noteCreated(JSON.stringify([...this.createdSessions.values()]));
-    }
+    if (saved !== undefined) this.history.noteCreated(this.registry.load(saved));
     for (const run of await this.history.restore()) this.runs.set(run.id, run);
     this.started = true;
     // Without a worker to load the automations later, the retained runs are whatever they report from now on.
@@ -365,57 +335,23 @@ export class RunManager extends EventEmitter {
   }
 
   /** Stable monitor IDs keep layout, titles and closure attached after native discovery. */
-  nativeSessionId(id: string): string {
-    id = this.monitorSessionId(id);
-    const created = this.createdSessions.get(id);
-    return created?.confirmed ? `${created.session.provider}:${created.session.nativeId}` : id;
-  }
+  nativeSessionId(id: string): string { return this.registry.nativeId(id); }
 
   getSession(id: string): Session | undefined {
     id = this.monitorSessionId(id);
-    const created = this.createdSessions.get(id);
-    if (!created) {
-      const native = this.options.getSession(id);
-      if (!native) return undefined;
-      return this.sessionWithContext(native.parentId ? { ...native, parentId: this.monitorSessionId(native.parentId) } : native);
-    }
-    const native = created.confirmed ? this.options.getSession(this.nativeSessionId(id)) : undefined;
-    if (native && !created.seenNative) { created.seenNative = true; this.persist(); }
-    const initialRun = this.runs.get(created.runId);
-    const launchedBy = created.origin?.kind === 'trigger' && created.origin.triggerId ? { launchedBy: { kind: 'trigger' as const, triggerId: created.origin.triggerId } } : {};
-    // The folder explicitly chosen at creation remains the project's identity.
-    // Native discovery may observe a later working directory or incomplete metadata.
-    if (native) return this.sessionWithContext({ ...native, id, cwd: created.session.cwd, project: created.session.project, ...(native.parentId ? { parentId: this.monitorSessionId(native.parentId) } : {}), ...(created.title ? { customTitle: created.title } : {}), ...launchedBy });
-    if (created.seenNative && (!initialRun || FINISHED.has(initialRun.status))) return undefined;
-    const live = initialRun?.status === 'queued' || initialRun?.status === 'running';
-    return {
-      ...created.session,
-      ...launchedBy,
-      resumable: created.confirmed,
-      creationPending: !created.confirmed && live,
-      status: initialRun?.status === 'running' ? 'working' : initialRun?.status === 'queued' ? 'idle' : initialRun?.status === 'completed' ? 'completed' : 'error',
-      statusReason: live ? '새 세션을 생성하고 있습니다.' : initialRun?.error || (initialRun?.status === 'completed' ? '첫 작업을 완료했습니다.' : '세션 생성이 완료되지 않았습니다. 새 세션으로 다시 시작할 수 있습니다.'),
-      updatedAt: initialRun?.finishedAt || initialRun?.startedAt || created.session.updatedAt,
-    };
+    if (this.registry.has(id)) return this.registry.view(id, runId => this.runs.get(runId), session => this.sessionWithContext(session));
+    const native = this.options.getSession(id);
+    if (!native) return undefined;
+    return this.sessionWithContext(native.parentId ? { ...native, parentId: this.monitorSessionId(native.parentId) } : native);
   }
 
-  private monitorSessionId(id: string): string {
-    if (this.createdSessions.has(id)) return id;
-    for (const [monitorId, created] of this.createdSessions) {
-      if (created.confirmed && `${created.session.provider}:${created.session.nativeId}` === id) return monitorId;
-    }
-    return id;
-  }
+  private monitorSessionId(id: string): string { return this.registry.monitorId(id); }
+
+  /** The records of created conversations, for tests that reach them directly; only the registry changes them. */
+  private get createdSessions(): Map<string, CreatedSession> { return this.registry.records; }
 
   sessionList(nativeSessions: readonly Session[]): Session[] {
-    const aliases = new Map([...this.createdSessions.keys()].map(id => [this.nativeSessionId(id), id]));
-    const sessions = new Map(nativeSessions.filter(session => !aliases.has(session.id)).map(session => [session.id, session]));
-    for (const id of this.createdSessions.keys()) {
-      const session = this.getSession(id);
-      if (session) sessions.set(id, session);
-    }
-    const listed = markMaster([...sessions.values()].map(session => this.sessionWithContext(session.parentId && aliases.has(session.parentId)
-      ? { ...session, parentId: aliases.get(session.parentId) } : session)), this.options.stateDir ?? defaultStateDir());
+    const listed = markMaster(this.registry.list(nativeSessions, id => this.getSession(id)).map(session => this.sessionWithContext(session)), this.options.stateDir ?? defaultStateDir());
     const overlay = this.options.sessionOverlay;
     return overlay ? listed.map(overlay) : listed;
   }
@@ -449,19 +385,13 @@ export class RunManager extends EventEmitter {
       internal.validate?.();
     } catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
     const createdAt = new Date().toISOString();
-    const session: Session = {
-      id, nativeId: input.provider === 'claude' ? uuid : '', provider: input.provider,
-      title: input.prompt.trim().replace(/\s+/g, ' ').slice(0, 120) || '첨부 파일 확인', ...(title ? { customTitle: title } : {}), cwd: input.cwd, project: basename(input.cwd) || input.cwd,
-      status: 'idle', statusReason: '새 세션을 생성하고 있습니다.', createdAt, updatedAt: createdAt,
-      lastRequestAt: createdAt, lastMessage: input.prompt.trim().slice(0, 512), messageCount: 0, isSubagent: false, resumable: false, creationPending: true,
-    };
     const origin = internal.origin ?? { kind: 'unknown' as const };
     const run: Run = { id: randomUUID(), sessionId: id, origin, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), prompt: input.prompt, status: 'queued', createdAt, output: 'Queued — preparing to create this conversation.', ...(model ? { model } : {}), ...(effort ? { effort } : {}),
       ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
       ...(approvalsReviewer ? { codexApprovalsReviewer: approvalsReviewer } : {}),
       ...(prepared.attachments.length ? { attachments: prepared.attachments } : {}), ...(internal.autoPromptId ? { autoPromptId: internal.autoPromptId } : {}) };
     // Provenance commits with the session identity, before any provider starts.
-    this.createdSessions.set(id, { session, runId: run.id, confirmed: false, ...(title ? { title } : {}), origin: sessionOriginOf(origin, internal.untrustedInput === true) });
+    this.registry.add(input, id, input.provider === 'claude' ? uuid : '', run, title, origin, internal.untrustedInput === true);
     this.runs.set(run.id, run);
     this.admissions.add(run.id);
     this.prune();
@@ -493,7 +423,7 @@ export class RunManager extends EventEmitter {
 
   /** External content only enters conversations Tower created and can keep marked. */
   private admitUntrusted(sessionId: string): void {
-    if (!this.createdSessions.has(sessionId)) throw new RunError('External trigger content can only continue a conversation Tower created for it.', 409);
+    if (!this.registry.has(sessionId)) throw new RunError('External trigger content can only continue a conversation Tower created for it.', 409);
   }
 
   private validateCorrelation(id: string | undefined): void {
@@ -519,8 +449,7 @@ export class RunManager extends EventEmitter {
     catch (error) { await this.attachments.rollback(prepared.createdIds); throw error; }
     if (internal.untrustedInput) {
       // Recorded before the run exists: once external content is queued, the session stays marked.
-      const created = this.createdSessions.get(sessionId)!;
-      if (!created.origin?.untrustedInput) created.origin = { ...(created.origin ?? { kind: 'unknown' as const }), untrustedInput: true };
+      this.registry.markUntrusted(sessionId);
     }
     const run: Run = { id: randomUUID(), sessionId, origin: internal.origin ?? { kind: 'unknown' }, ...(internal.delegation ? { delegation: { ...internal.delegation } } : {}), prompt, status: 'queued', createdAt: new Date().toISOString(), output: this.waitReason(session),
       ...(internal.unattended ? { unattended: true } : {}), ...(internal.instructions ? { instructions: checkedInstructions(internal.instructions) } : {}),
@@ -772,7 +701,7 @@ export class RunManager extends EventEmitter {
           continue;
         }
         const session = this.getSession(run.sessionId);
-        const creating = this.createdSessions.get(run.sessionId)?.runId === run.id;
+        const creating = this.registry.creationRun(run.sessionId) === run.id;
         try {
           if (!session) throw new RunError('Session no longer exists.', 404);
           if (!creating) this.validateSession(session);
@@ -941,9 +870,8 @@ export class RunManager extends EventEmitter {
         if (!UUID.test(id) || (!creating && id !== session.nativeId)) throw new Error('Codex returned a different or invalid conversation ID. No message was submitted.');
         if (run.status !== 'running' || this.stopping) throw new Error('The task stopped before a message was submitted.');
         if (creating) {
-          const created = this.createdSessions.get(session.id);
-          if (!created || (created.confirmed && created.session.nativeId !== id)) throw new Error('The new conversation identity changed. No message was submitted.');
-          created.confirmed = true; created.session.nativeId = id; created.session.creationPending = false; session.nativeId = id;
+          if (!this.registry.confirm(session.id, id)) throw new Error('The new conversation identity changed. No message was submitted.');
+          session.nativeId = id;
           this.changed();
           try { await this.flush(); }
           catch (error) { throw new Error(`Cannot save the new conversation identity: ${errorMessage(error)}`); }
@@ -1184,12 +1112,9 @@ export class RunManager extends EventEmitter {
         return;
       }
       const actualId = event.type === 'system' && event.subtype === 'init' ? event.session_id : undefined;
-      const created = creating ? this.createdSessions.get(session.id) : undefined;
-      if (actualId && created && !created.confirmed && typeof actualId === 'string' && UUID.test(actualId)
+      if (actualId && creating && this.registry.unconfirmed(session.id) && typeof actualId === 'string' && UUID.test(actualId)
         && actualId === session.nativeId) {
-        created.confirmed = true;
-        created.session.nativeId = actualId;
-        created.session.creationPending = false;
+        this.registry.confirm(session.id, actualId);
         session.nativeId = actualId;
         this.changed();
         identitySaved = this.flush().catch(error => {
@@ -1589,7 +1514,7 @@ export class RunManager extends EventEmitter {
     this.cancelOutputPersist();
     // A wrap-up request is never carried: after a restart it would start as a turn of its own.
     if (this.updating) for (const run of this.runs.values()) if (run.status === 'queued' && !run.scheduled && !this.drain!.wrapUps.has(run.id)) this.history.carried.add(run.id);
-    this.history.save(this.runs, this.list(), JSON.stringify([...this.createdSessions.values()]), retained);
+    this.history.save(this.runs, this.list(), this.registry.serialize(), retained);
   }
 
   /** Waits for every accepted change to reach disk, without stopping or cancelling anything. */
@@ -1604,7 +1529,7 @@ export class RunManager extends EventEmitter {
    * waited.
    */
   holdProvider(provider: Provider): (() => void) | undefined {
-    const of = (sessionId: string) => (this.getSession(sessionId) ?? this.createdSessions.get(sessionId)?.session)?.provider ?? sessionId.split(':')[0];
+    const of = (sessionId: string) => (this.getSession(sessionId) ?? this.registry.created(sessionId))?.provider ?? sessionId.split(':')[0];
     const inFlight = [...this.reservedSessions].some(id => of(id) === provider)
       || [...this.runs.values()].some(run => run.status === 'running' && of(run.sessionId) === provider);
     if (inFlight || this.heldProviders.has(provider)) return undefined;
