@@ -5,12 +5,11 @@ import { mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunOrigin, Session } from '../../shared/types.js';
 import {
-  OnceConsumptionSchema, type OnceConsumption, GITHUB_API, TriggerInputSchema, upgradeWatch, type CoordinatorRule, TriggerSettingsSchema, carriesOutsideContent, type GitHubAuth, type GitHubCheck, type HttpCondition, type HttpRequest, type HttpTestResult, type SecretInput, type Trigger, type TriggerActor,
+  OnceConsumptionSchema, type OnceConsumption, GITHUB_API, TriggerInputSchema, type CoordinatorRule, TriggerSettingsSchema, carriesOutsideContent, type GitHubAuth, type GitHubCheck, type HttpCondition, type HttpRequest, type HttpTestResult, type SecretInput, type Trigger, type TriggerActor,
   type TriggerAuditEntry, type TriggerEvent, type TriggerHandler, type TriggerInput, type TriggerOverview, type TriggerSecret, type TriggerSettings, type TriggerSummary, type TriggerTarget, type TriggerPolicy, type IssuePreview, type IssuePreviewItem, type TriggerSource, type Schedule,
 } from '../../shared/triggers.js';
 import { requestedEffort, requestedModel } from '../providers/models.js';
 import type { RunAdmission } from '../runs/manager.js';
-import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { CATCH_UP_WINDOW_MS, LATE_AFTER_MS, latestSlot, nextSlot, previewSlots, validateSchedule } from './schedule.js';
 import { evaluate, performHttp, type ConditionState, type HttpOutcome } from './http.js';
 import { SecretStore, type StoredSecret } from './secrets.js';
@@ -18,7 +17,14 @@ import type { TriggerBackup } from './backup.js';
 import { checkGitHub, GitHubError, keyOf, noted, passed, readIssues, refused, type GitHubCursor, type GitHubFetch, type GitHubIssue, type GitHubResponse } from './github.js';
 import { findExecutable } from '../providers/discovery.js';
 import { execFile } from 'node:child_process';
-import { decodeOnceTrigger, encodeOnceTrigger } from './once-storage.js';
+import { decodeOnceTrigger } from './once-storage.js';
+import { MAX_AUDIT, MAX_ONCE_RESERVATIONS, MAX_RETAINED_TRIGGERS, MAX_REVISIONS, MAX_TOMBSTONES } from './limits.js';
+import { failure } from './errors.js';
+import { appendAudit, changedFields, describeTrigger, logTrigger } from './audit.js';
+import { admitCapacity, assertFuture, assertOnceRoom, assertRoom, consumeOnce, mergeConsumed, normalizeOnce, onceCount } from './once.js';
+import { ACTIVE, empty, UNFINISHED, upgradeState, type Cursor, type EngineState } from './state.js';
+import { keptGitHub, mergeGitHub } from './github-cursor.js';
+import { TriggerStore } from './store.js';
 
 /** How a trigger reaches project agents on this machine. A future remote node implements the same calls. */
 export interface TriggerExecutor {
@@ -40,59 +46,12 @@ export interface TriggerExecutor {
 /** A read-only view of the Slack connection so it appears among triggers without moving its data. */
 export interface SlackProjection { id: string; name: string; enabled: boolean; updatedAt: string; error?: string }
 
-interface Cursor {
-  anchorAt: number; nextAt?: number; lastSlot?: number; paused?: { reason: string; at: string }; turnedOffAt?: number;
-  /** HTTP: what the last response looked like, for `changed` and `match`. */
-  observed?: ConditionState;
-  /** HTTP: a request claimed for this time; if Tower stops before it answers, it is not sent again. */
-  polling?: { slot: number; revision: number; method: 'GET' | 'POST' };
-  failures?: number;
-  lastError?: string;
-  /** GitHub: what the last complete check saw. */
-  github?: GitHubCursor;
-  /** GitHub's rate limit allows no request before this time, manual checks included. */
-  blockedUntil?: number;
-}
-interface EngineState {
-  version: 1;
-  /** Durable consumption is independent of definition deletion and history retention. */
-  onceConsumed: Record<string, OnceConsumption>;
-  triggers: Trigger[];
-  /** Earlier revisions per trigger, oldest first. */
-  revisions: Record<string, Trigger[]>;
-  tombstones: Trigger[];
-  cursors: Record<string, Cursor>;
-  events: TriggerEvent[];
-  /** `${triggerId} ${dedupKey}` → when it fired. Kept apart from event history so pruning history never refires. */
-  fired: Record<string, string>;
-  audit: TriggerAuditEntry[];
-  settings: TriggerSettings;
-  /** Folders the owner chose for a trigger; only these receive the native folder trust prompt answer. */
-  trustedFolders: string[];
-  /** Every firing in the last hour, kept apart from event history so trimming history never lifts a limit. */
-  recentFires: Array<{ at: number; triggerId: string }>;
-  /** Secret id → triggers the owner gave it to. Saved with the definitions, so a change and its grant commit together. */
-  secretGrants: Record<string, string[]>;
-}
-
-export const MAX_REVISIONS = 20;
-const MAX_TOMBSTONES = 20;
-export const MAX_RETAINED_TRIGGERS = 200;
-export const MAX_ONCE_RESERVATIONS = 2000;
-const MAX_AUDIT = 1000;
-const MAX_EVENTS = 500;
-const FIRED_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-const MAX_STATE_BYTES = 10_000_000;
-/** New runs stop being accepted here, so runs already accepted can still record how they end. */
-const ACCEPT_STATE_BYTES = 8_000_000;
+export { MAX_ONCE_RESERVATIONS, MAX_RETAINED_TRIGGERS, MAX_REVISIONS } from './limits.js';
 const MAX_FIRED_PER_TRIGGER = 20_000;
 const MAX_WAITING_PER_TRIGGER = 5;
-const KEEP_FULL_INPUT = 100;
 const MAX_PREVIEW = 100;
 const MAX_PAYLOAD_BODY = 16_000;
 const MAX_REQUESTS_PER_MINUTE = 60;
-const UNFINISHED = new Set<TriggerEvent['status']>(['queued', 'claimed', 'running']);
-const ACTIVE = new Set<TriggerEvent['status']>(['claimed', 'running']);
 /** The line an open-issues run ends its report with to keep its issue open. */
 export const KEEP_OPEN = 'TOWER_KEEP_ISSUE_OPEN';
 const CLOSE_TRIES = 5;
@@ -106,10 +65,7 @@ function issueRef(event: TriggerEvent): { repository: string; number: number } |
   const { repository, number } = event.input.issue ?? {};
   return typeof repository === 'string' && /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/.test(repository) && Number.isInteger(number) ? { repository, number: number! } : undefined;
 }
-const failure = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
 export const REMOTE_FOLDER_REFUSED = 'This trigger was set up from another computer, and its folder is one this computer keeps out of sharing; it did not run.';
-const empty = (): EngineState => ({ version: 1, onceConsumed: {}, triggers: [], revisions: {}, tombstones: [], cursors: {}, events: [], fired: {}, audit: [], secretGrants: {},
-  settings: TriggerSettingsSchema.parse({}), trustedFolders: [], recentFires: [] });
 
 /** JSON for a prompt, cut to `max` characters with a visible mark. */
 function excerpt(value: unknown, max: number): string {
@@ -154,12 +110,8 @@ const unmarked = <T extends Trigger>({ remoteEdited: _, ...trigger }: T): Omit<T
  * every change is computed on a copy, saved, and only then made current.
  */
 export class TriggerService extends EventEmitter {
-  private state: EngineState = empty();
-  private writes: Promise<unknown> = Promise.resolve();
-  private pendingCommits = 0;
-  private storageError?: string;
-  /** Set when unreadable state could not be moved aside: nothing is saved over it until Tower restarts. */
-  private locked?: string;
+  private readonly store: TriggerStore;
+  private get state(): EngineState { return this.store.state; }
   private timer?: ReturnType<typeof setInterval>;
   private ticking?: Promise<void>;
   private started = false;
@@ -178,12 +130,7 @@ export class TriggerService extends EventEmitter {
   /** Per credential: GitHub's rate limit allows no request before this time. */
   private readonly githubBlocked = new Map<string, number>();
   private readonly secrets: SecretStore;
-  private stateBytes = 0;
-  private capacityError?: string;
-  private get acceptBytes() { return this.options.limits?.acceptBytes ?? ACCEPT_STATE_BYTES; }
-  private get maxBytes() { return this.options.limits?.maxBytes ?? MAX_STATE_BYTES; }
   private get requestLimit() { return this.options.limits?.requestsPerMinute ?? MAX_REQUESTS_PER_MINUTE; }
-  private readonly path: string;
   private readonly now: () => number;
 
   constructor(private readonly options: { stateDir: string; executor: TriggerExecutor; now?: () => number; slack?: () => SlackProjection | undefined; tickMs?: number;
@@ -204,9 +151,9 @@ export class TriggerService extends EventEmitter {
     githubTransport?: (authorization: string) => GitHubFetch;
     resolve?: Parameters<typeof performHttp>[2] }) {
     super();
-    this.path = join(options.stateDir, 'trigger-engine.json');
     this.secrets = options.secretStore ?? new SecretStore(options.stateDir);
     this.now = options.now ?? Date.now;
+    this.store = new TriggerStore({ stateDir: options.stateDir, now: this.now, limits: () => this.options.limits, changed: () => this.emit('change') });
   }
 
   /**
@@ -215,16 +162,7 @@ export class TriggerService extends EventEmitter {
    */
   async start(options: { restore?: TriggerBackup } = {}): Promise<{ errors: string[] }> {
     await mkdir(this.options.stateDir, { recursive: true, mode: 0o700 });
-    let saved: unknown;
-    try { saved = await readPrivateJson(this.path); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') { await this.quarantine(error); saved = undefined; } }
-    if (saved !== undefined) {
-      const restored = this.parseState(saved);
-      if (!restored) await this.quarantine(new Error('Saved trigger state is invalid.'));
-      else this.state = restored;
-    }
-    this.recoverClaims();
-    this.recoverPolls();
+    await this.store.load(loaded => { this.recoverClaims(loaded); this.recoverPolls(loaded); });
     await this.secrets.load();
     const errors = options.restore ? await this.restoreFrom(options.restore).catch(error => [`트리거를 복원하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`]) : [];
     await this.commit(() => undefined, 'settle').catch(() => {});
@@ -303,8 +241,8 @@ export class TriggerService extends EventEmitter {
     const same = (a: Trigger, b: Trigger) => (['name', 'enabled', 'source', 'handler', 'policy', 'archivedAt', 'consumed'] as const).every(key => JSON.stringify(a[key]) === JSON.stringify(b[key]));
     await this.commit(state => {
       const now = new Date(this.now()).toISOString();
-      state.onceConsumed = { ...consumed, ...state.onceConsumed };
-      this.normalizeOnce(state);
+      mergeConsumed(state, consumed);
+      normalizeOnce(state, this.now);
       if (settings.success) state.settings = settings.data;
       const localGrants = structuredClone(state.secretGrants), localTrusted = [...state.trustedFolders];
       // Grants of secrets that exist here; the restored triggers below add any they need.
@@ -320,7 +258,7 @@ export class TriggerService extends EventEmitter {
         state.tombstones = [...state.tombstones, current].slice(-MAX_TOMBSTONES);
         this.cancelQueued(state, current.id, 'The trigger was removed by a restore before this ran.');
         state.cursors[current.id] = { anchorAt: this.now(), turnedOffAt: this.now() };
-        this.log(state, actor, 'delete', current, current.revision, undefined, `Removed by restoring a backup: ${this.describe(current)}`);
+        this.log(state, actor, 'delete', current, current.revision, undefined, `Removed by restoring a backup: ${describeTrigger(current)}`);
       }
       for (const id of named) if (!incoming.some(item => item.id === id)) keptHere.add(id);
       for (const saved of incoming) {
@@ -345,7 +283,7 @@ export class TriggerService extends EventEmitter {
             // A restored definition counts from now: times missed before the restore never run with it.
             // What its source observed (GitHub history, an HTTP condition's state) stays: only the timing starts over.
             if (next.enabled) { const { failures: _failures, lastError: _error, ...previous } = draft.cursors[next.id] ?? { anchorAt: this.now() }; this.schedule(draft, next); draft.cursors[next.id] = { ...previous, ...draft.cursors[next.id]! }; }
-            this.log(draft, actor, 'restore', next, current.revision, next.revision, `Restored from a backup: ${this.changes(current, next)}`);
+            this.log(draft, actor, 'restore', next, current.revision, next.revision, `Restored from a backup: ${changedFields(current, next)}`);
           } else {
             const earlier = [...draft.tombstones, ...(draft.revisions[trigger.id] ?? [])].filter(item => item.id === trigger.id).reduce((max, item) => Math.max(max, item.revision), 0);
             const next: Trigger = { ...unmarked(trigger), revision: Math.max(trigger.revision, earlier) + 1, createdAt: typeof trigger.createdAt === 'string' ? trigger.createdAt : now, updatedAt: now,
@@ -356,7 +294,7 @@ export class TriggerService extends EventEmitter {
             this.schedule(draft, next);
             if (!next.enabled) delete draft.cursors[next.id].nextAt;
             this.trust(draft, next, actor);
-            this.log(draft, actor, 'restore', next, undefined, next.revision, `Restored from a backup: ${this.describe(next)}`);
+            this.log(draft, actor, 'restore', next, undefined, next.revision, `Restored from a backup: ${describeTrigger(next)}`);
           }
           Object.assign(state, draft);
         } catch (error) {
@@ -378,9 +316,9 @@ export class TriggerService extends EventEmitter {
         if (github) cursor.github = github;
       }
       state.fired = { ...(record(backup.fired) ? backup.fired : {}), ...state.fired };
-      this.normalizeOnce(state);
+      normalizeOnce(state, this.now);
       // Preflight validation yields; the final serialized state is the admission authority.
-      if (state.triggers.length > MAX_RETAINED_TRIGGERS || this.activeCount(state) > state.settings.maxTriggers || this.onceCount(state) > MAX_ONCE_RESERVATIONS) throw failure('The restored trigger state exceeds the supported capacity. Existing records were preserved.', 409);
+      admitCapacity(state);
       // Restoring trusts exactly the folders the backup trusted (and those of triggers kept here), nothing its triggers add.
       state.trustedFolders = trusted;
     }, 'settle');
@@ -402,12 +340,11 @@ export class TriggerService extends EventEmitter {
 
   hasActive(): boolean { return this.state.triggers.some(trigger => trigger.enabled) || this.state.events.some(event => UNFINISHED.has(event.status)); }
   /** Work a handoff must wait for: a tick, a save, or a claim whose submission is not yet recorded. */
-  inFlight(): boolean { return Boolean(this.ticking) || Boolean(this.closingIssues) || this.pendingCommits > 0 || this.polling.size > 0 || this.state.events.some(event => event.status === 'claimed'); }
-  async flush(): Promise<void> {
-    // A locked engine never saves, and a handoff must not wait on it.
-    if (this.locked) { await this.writes.catch(() => {}); return; }
-    await this.commit(() => undefined, 'settle');
-  }
+  inFlight(): boolean { return Boolean(this.ticking) || Boolean(this.closingIssues) || this.store.pending() > 0 || this.polling.size > 0 || this.state.events.some(event => event.status === 'claimed'); }
+  /** Saves again; a locked engine never saves, and a handoff must not wait on it. */
+  flush(): Promise<void> { return this.store.flush(); }
+  /** Every change goes through the store's one commit path (see TriggerStore.commit). */
+  private commit<T>(change: (state: EngineState) => T, kind: 'grow' | 'settle' = 'grow'): Promise<T> { return this.store.commit(change, kind); }
 
   // ---- Reading ----------------------------------------------------------------------------------
 
@@ -471,9 +408,8 @@ export class TriggerService extends EventEmitter {
       if (!shown.has(event.id)) { shown.add(event.id); updated.push(brief(event)); }
     }
     const recent = latest.reverse().map(brief);
-    const full = this.stateBytes > this.acceptBytes ? 'Trigger history is full; scheduled times pass without running until old history expires or triggers are deleted.' : undefined;
-    const problem = this.storageError ?? this.secrets.problem ?? full ?? this.capacityError;
-    return structuredClone({ onceReservations: { used: this.onceCount(this.state), limit: MAX_ONCE_RESERVATIONS }, triggers: summaries, recent, ...(updated.length ? { updated } : {}), ...(problem ? { storageError: problem } : {}) });
+    const problem = this.store.overviewProblem(this.secrets.problem);
+    return structuredClone({ onceReservations: { used: onceCount(this.state), limit: MAX_ONCE_RESERVATIONS }, triggers: summaries, recent, ...(updated.length ? { updated } : {}), ...(problem ? { storageError: problem } : {}) });
   }
 
   /**
@@ -529,9 +465,9 @@ export class TriggerService extends EventEmitter {
     const input = await this.validate(value, scope);
     hereOnly(input, scope);
     return this.commit(state => {
-      this.room(state);
-      this.futureOnce(input);
-      this.onceRoom(state, input);
+      assertRoom(state);
+      assertFuture(input, this.now);
+      assertOnceRoom(state, input);
       const now = new Date(this.now()).toISOString();
       const trigger: Trigger = { ...input, id: randomUUID(), revision: 1, createdAt: now, updatedAt: now, createdBy: actor, updatedBy: actor, ...remoteMark(actor) };
       this.guardAutoReply(trigger, undefined, actor, 'refuse');
@@ -539,7 +475,7 @@ export class TriggerService extends EventEmitter {
       state.triggers.push(trigger);
       this.schedule(state, trigger);
       this.trust(state, trigger, actor);
-      this.log(state, actor, 'create', trigger, undefined, 1, `Created ${this.describe(trigger)}`);
+      this.log(state, actor, 'create', trigger, undefined, 1, `Created ${describeTrigger(trigger)}`);
       return structuredClone(trigger);
     });
   }
@@ -551,7 +487,7 @@ export class TriggerService extends EventEmitter {
       hereOnly(current, scope); hereOnly(input, scope);
       this.guardAutoReply({ ...current, ...structuredClone(input) }, current, actor, 'refuse');
       const next = this.replace(state, current, { ...input }, actor);
-      this.log(state, actor, 'update', next, current.revision, next.revision, `Changed ${this.changes(current, next)}`);
+      this.log(state, actor, 'update', next, current.revision, next.revision, `Changed ${changedFields(current, next)}`);
       return structuredClone(next);
     });
   }
@@ -564,7 +500,7 @@ export class TriggerService extends EventEmitter {
         hereOnly(current, scope);
         if (state.onceConsumed[id]) throw failure('This once reservation was consumed. Create a new reservation to retry.', 409);
         if (current.archivedAt) throw failure('Unarchive this trigger before enabling it.', 409);
-        this.futureOnce(current);
+        assertFuture(current, this.now);
       }
       // A toggle keeps no copy of the definition in history, so it never runs out of space; the audit records it.
       // Turning it on or off is a change too: from a controlling computer it marks the trigger, from here it clears it.
@@ -584,7 +520,7 @@ export class TriggerService extends EventEmitter {
       const current = this.revisionOf(state, id, expectedRevision, scope);
       if (Boolean(current.archivedAt) === archived) return structuredClone(current);
       if (state.events.some(event => event.triggerId === id && UNFINISHED.has(event.status))) throw failure('This trigger has unfinished work; wait for it to finish before archiving or unarchiving.', 409);
-      if (!archived) { hereOnly(current, scope); this.room(state, true); }
+      if (!archived) { hereOnly(current, scope); assertRoom(state, true); }
       const next: Trigger = { ...unmarked(current), enabled: false, revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor, ...remoteMark(actor) };
       if (archived) next.archivedAt = next.updatedAt; else delete next.archivedAt;
       state.triggers = state.triggers.map(item => item.id === id ? next : item);
@@ -604,7 +540,7 @@ export class TriggerService extends EventEmitter {
       // The cursor keeps the moment of deletion, so a restored trigger never starts runs fired before it.
       this.cancelQueued(state, id, 'The trigger was deleted before this ran.');
       state.cursors[id] = { anchorAt: this.now(), turnedOffAt: this.now() };
-      this.log(state, actor, 'delete', current, current.revision, undefined, `Deleted ${this.describe(current)}`);
+      this.log(state, actor, 'delete', current, current.revision, undefined, `Deleted ${describeTrigger(current)}`);
       return structuredClone(current);
     }, 'settle');
   }
@@ -631,15 +567,15 @@ export class TriggerService extends EventEmitter {
       if (!deleted || !seen(deleted, scope)) throw failure('This deleted trigger is no longer kept.', 404);
       hereOnly(deleted, scope);
       if (state.triggers.some(item => item.id === id)) throw failure('This trigger already exists.', 409);
-      this.room(state, false, Boolean(deleted.archivedAt));
+      assertRoom(state, false, Boolean(deleted.archivedAt));
       const now = new Date(this.now()).toISOString();
       // Restored from a controlling computer, it is that computer's to run; restored here, it is this computer's again.
       const trigger: Trigger = { ...unmarked(structuredClone(deleted)), revision: deleted.revision + 1, updatedAt: now, updatedBy: actor, enabled: false, ...remoteMark(actor) };
       const note = this.guardAutoReply(trigger, undefined, actor, 'strip') ?? '';
-      this.onceRoom(state, trigger, trigger.id);
+      assertOnceRoom(state, trigger, trigger.id);
       this.grantSecrets(state, trigger, actor);
       state.triggers.push(trigger);
-      this.normalizeOnce(state);
+      normalizeOnce(state, this.now);
       state.tombstones = state.tombstones.filter(item => item !== deleted);
       this.schedule(state, trigger);
       this.log(state, actor, 'restore', trigger, deleted.revision, trigger.revision, `Restored after deletion, turned off${note}`);
@@ -652,7 +588,7 @@ export class TriggerService extends EventEmitter {
     const settings = TriggerSettingsSchema.parse(value);
     const saved = await this.commit(state => {
       state.settings = settings;
-      state.audit = [...state.audit, { id: randomUUID(), at: new Date(this.now()).toISOString(), actor, action: 'settings' as const, triggerId: '', triggerName: '', summary: `Limits: ${JSON.stringify(settings)}` }].slice(-MAX_AUDIT);
+      appendAudit(state, this.now, { actor, action: 'settings', triggerId: '', triggerName: '', summary: `Limits: ${JSON.stringify(settings)}` });
       return structuredClone(settings);
     });
     this.emit('settings', saved);
@@ -662,7 +598,7 @@ export class TriggerService extends EventEmitter {
   /** Slack keeps its own files; its changes still appear in the shared audit log. */
   async recordSlack(actor: TriggerActor, slackId: string, summary: string): Promise<void> {
     await this.commit(state => {
-      state.audit = [...state.audit, { id: randomUUID(), at: new Date(this.now()).toISOString(), actor, action: 'slack' as const, triggerId: slackId, triggerName: 'Slack', summary }].slice(-MAX_AUDIT);
+      appendAudit(state, this.now, { actor, action: 'slack', triggerId: slackId, triggerName: 'Slack', summary });
     }).catch(() => {});
   }
 
@@ -676,7 +612,7 @@ export class TriggerService extends EventEmitter {
     hereOnly(trigger, scope);
     if (this.state.onceConsumed[id]) throw failure('This once reservation was consumed. Create a new reservation to retry.', 409);
     if (trigger.archivedAt) throw failure('Unarchive this trigger before running it.', 409);
-    if (this.stateBytes > this.acceptBytes) throw failure('Trigger history is full. Delete old triggers or wait for finished runs to expire.', 507);
+    if (this.store.full()) throw failure('Trigger history is full. Delete old triggers or wait for finished runs to expire.', 507);
     if (trigger.source.kind === 'github') {
       if (!trigger.enabled) throw failure('Turn the trigger on before checking it.', 409);
       const blocked = this.state.cursors[id]?.blockedUntil;
@@ -730,9 +666,9 @@ export class TriggerService extends EventEmitter {
     // A turned-off trigger's run would never start, so its request is not sent either.
     if (!trigger.enabled) throw failure('Turn the trigger on before running it.', 409);
     // A run that limits would skip is refused before anything is sent. Tried on a copy, so nothing is recorded.
-    const warning = this.capacityError;
+    const warning = this.store.capacity;
     const probe = this.fire(structuredClone(this.state), trigger, `manual:${randomUUID()}`, this.now(), 'manual', actor);
-    this.capacityError = warning;
+    this.store.noteCapacity(warning);
     if (!probe || probe.status === 'skipped') throw failure(`Nothing was sent: ${probe?.reason ?? 'this trigger cannot record more runs right now.'}`, 409);
     const unlock = this.lock(id);
     if (!unlock) throw failure('This trigger is sending its request right now. Try again in a moment.', 409);
@@ -788,7 +724,7 @@ export class TriggerService extends EventEmitter {
   /** Waits for requests in flight and their saves, so the state lock is released only after the last write. */
   async settle(): Promise<void> {
     await Promise.allSettled([...this.polling.values(), this.closingIssues]);
-    await this.writes.catch(() => {});
+    await this.store.idle();
   }
 
   // ---- Firing and dispatch ------------------------------------------------------------------------
@@ -800,13 +736,13 @@ export class TriggerService extends EventEmitter {
 
   private async step(): Promise<void> {
     // After a failed save, try saving again before anything new is accepted.
-    if (this.storageError) await this.commit(() => undefined, 'settle').catch(() => {});
+    if (this.store.problem) await this.commit(() => undefined, 'settle').catch(() => {});
     // A claim whose outcome could not be saved is matched to what was admitted, never submitted again.
     if (this.state.events.some(event => event.status === 'claimed' && !this.submitting.has(event.id))) {
       await this.commit(state => { this.reconcile(state, event => !this.submitting.has(event.id)); }, 'settle').catch(() => {});
     }
     const now = this.now();
-    if (!this.held && !this.storageError) {
+    if (!this.held && !this.store.problem) {
       for (const trigger of this.state.triggers) {
         if (!trigger.enabled) continue;
         const cursor = this.state.cursors[trigger.id];
@@ -818,7 +754,7 @@ export class TriggerService extends EventEmitter {
         // Taken before the claim is saved, so a manual run cannot start a second request in between.
         const unlock = polled ? this.lock(trigger.id) : undefined;
         if (polled && !unlock) continue;
-        const full = this.stateBytes > this.acceptBytes;
+        const full = this.store.full();
         if (full && trigger.source.schedule.type === 'once') continue;
         let poll: { slot: number; revision: number } | undefined;
         await this.commit(state => {
@@ -857,11 +793,11 @@ export class TriggerService extends EventEmitter {
           if ((error as { statusCode?: number }).statusCode !== 507) return;
           // A once reservation keeps its due time without repeated settle writes until history has room.
           if (trigger.source.schedule.type === 'once') {
-            this.capacityError = `"${trigger.name}" is waiting because trigger history is full.`;
+            this.store.noteCapacity(`"${trigger.name}" is waiting because trigger history is full.`);
             return;
           }
           // Repeating schedules move on, with a visible warning.
-          this.capacityError = `"${trigger.name}" skipped a scheduled run because trigger history is full.`;
+          this.store.noteCapacity(`"${trigger.name}" skipped a scheduled run because trigger history is full.`);
           await this.commit(state => {
             const position = state.cursors[trigger.id];
             const current = state.triggers.find(item => item.id === trigger.id);
@@ -872,7 +808,7 @@ export class TriggerService extends EventEmitter {
     }
     await this.track();
     // Closing issues talks to GitHub; it goes on beside the tick so a slow answer never holds up other triggers.
-    if (!this.closingIssues && !this.held && !this.storageError) this.closingIssues = this.closeIssues().catch(() => {}).finally(() => { this.closingIssues = undefined; });
+    if (!this.closingIssues && !this.held && !this.store.problem) this.closingIssues = this.closeIssues().catch(() => {}).finally(() => { this.closingIssues = undefined; });
     await this.dispatch();
   }
 
@@ -1177,14 +1113,14 @@ export class TriggerService extends EventEmitter {
     const key = `${trigger.id} ${dedupKey}`;
     if (trigger.source.schedule.type === 'once' && state.onceConsumed[trigger.id]) return undefined;
     if (state.fired[key]) {
-      if (trigger.source.schedule.type === 'once') this.consumeOnce(state, trigger, state.events.find(event => event.triggerId === trigger.id && event.dedupKey === dedupKey)?.id);
+      if (trigger.source.schedule.type === 'once') consumeOnce(state, trigger, state.events.find(event => event.triggerId === trigger.id && event.dedupKey === dedupKey)?.id, this.now);
       return undefined;
     }
     const now = this.now();
     const iso = new Date(now).toISOString();
     // Checked before anything is stored: a trigger at its record limit adds nothing more.
     if (Object.keys(state.fired).filter(item => item.startsWith(`${trigger.id} `)).length >= MAX_FIRED_PER_TRIGGER) {
-      this.capacityError = `"${trigger.name}" has ${MAX_FIRED_PER_TRIGGER} runs recorded in the last 30 days; new runs are not accepted until older ones expire.`;
+      this.store.noteCapacity(`"${trigger.name}" has ${MAX_FIRED_PER_TRIGGER} runs recorded in the last 30 days; new runs are not accepted until older ones expire.`);
       return undefined;
     }
     state.fired[key] = iso;
@@ -1229,7 +1165,7 @@ export class TriggerService extends EventEmitter {
     state.events.push(event);
     if (trigger.source.schedule.type === 'once') {
       if (event.status === 'skipped') event.reason = `${event.reason ?? 'Skipped.'} This once reservation is consumed; create a new reservation to retry.`;
-      this.consumeOnce(state, trigger, event.id);
+      consumeOnce(state, trigger, event.id, this.now);
     }
     return event;
   }
@@ -1318,7 +1254,7 @@ export class TriggerService extends EventEmitter {
     const due = this.state.events.filter(event => event.status === 'completed' && event.input.issue?.close
       && !event.issueActions?.closedAt && !event.issueActions?.closeError && !event.issueActions?.keptOpen && (this.closeRetries.get(event.id)?.at ?? 0) <= this.now());
     for (const event of due) {
-      if (this.held || this.storageError) return;
+      if (this.held || this.store.problem) return;
       const runs = this.options.executor.runs();
       // A turn that scheduled its own continuation goes on in that run: its last run's report decides.
       let run = runs.find(item => item.id === event.dispatch?.runId);
@@ -1455,10 +1391,10 @@ export class TriggerService extends EventEmitter {
   }
 
   /** A claim saved before a crash is matched to what the executor admitted, or left uncertain. */
-  private recoverClaims(): void { this.reconcile(this.state, () => true); }
+  private recoverClaims(state: EngineState): void { this.reconcile(state, () => true); }
   /** A request cut off by a stop is not sent again for its time; a POST is reported, since it may have arrived. */
-  private recoverPolls(): void {
-    for (const position of Object.values(this.state.cursors)) {
+  private recoverPolls(state: EngineState): void {
+    for (const position of Object.values(state.cursors)) {
       if (!position.polling) continue;
       if (position.polling.method === 'POST') position.lastError = 'Tower stopped while a POST was being sent. It may have reached the server and was not sent again.';
       delete position.polling;
@@ -1523,7 +1459,7 @@ export class TriggerService extends EventEmitter {
     if (!granted.includes(trigger.id)) state.secretGrants[secret.id] = [...granted, trigger.id];
   }
   private note(state: EngineState, actor: TriggerActor, action: 'secret', summary: string): void {
-    state.audit = [...state.audit, { id: randomUUID(), at: new Date(this.now()).toISOString(), actor, action, triggerId: '', triggerName: '', summary: summary.slice(0, 500) }].slice(-MAX_AUDIT);
+    appendAudit(state, this.now, { actor, action, triggerId: '', triggerName: '', summary: summary.slice(0, 500) });
   }
   private reconcile(state: EngineState, include: (event: TriggerEvent) => boolean): void {
     const runs = this.options.executor.runs();
@@ -1577,58 +1513,14 @@ export class TriggerService extends EventEmitter {
     if (!Number.isInteger(expected) || current.revision !== expected) throw failure(`The trigger changed (now revision ${current.revision}). Reload it and try again.`, 409);
     return current;
   }
-  private activeCount(state: EngineState): number { return state.triggers.filter(trigger => !trigger.archivedAt).length; }
-  private onceCount(state: EngineState): number {
-    return new Set([...Object.keys(state.onceConsumed), ...state.triggers.filter(trigger => trigger.source.schedule.type === 'once').map(trigger => trigger.id)]).size;
-  }
-  private room(state: EngineState, unarchive = false, archived = false): void {
-    if (!archived && this.activeCount(state) >= state.settings.maxTriggers) throw failure(`At most ${state.settings.maxTriggers} active trigger definitions can exist. Archive one first.`, 409);
-    if (!unarchive && state.triggers.length >= MAX_RETAINED_TRIGGERS) throw failure(`At most ${MAX_RETAINED_TRIGGERS} definitions can be retained. Delete an archived definition; its run history is kept.`, 409);
-  }
-  private onceRoom(state: EngineState, input: TriggerInput, id?: string): void {
-    if (input.source.schedule.type === 'once' && (!id || !state.triggers.some(item => item.id === id && item.source.schedule.type === 'once'))
-      && !state.onceConsumed[id ?? ''] && this.onceCount(state) >= MAX_ONCE_RESERVATIONS) throw failure(`Once reservation records are full (${this.onceCount(state)}/${MAX_ONCE_RESERVATIONS}). Consumption records are retained and cannot be reset by deletion.`, 409);
-  }
-  private futureOnce(input: TriggerInput): void {
-    if (input.source.schedule.type === 'once' && Date.parse(input.source.schedule.at) <= this.now()) throw failure('Choose a future instant for a new or re-enabled once reservation.', 400);
-  }
-  private consumeOnce(state: EngineState, trigger: Trigger, eventId?: string): void {
-    const at = new Date(this.now()).toISOString();
-    state.onceConsumed[trigger.id] ??= { at, ...(eventId ? { eventId } : {}) };
-    const next: Trigger = { ...trigger, consumed: state.onceConsumed[trigger.id], enabled: false, archivedAt: at, revision: trigger.revision + 1,
-      updatedAt: at, updatedBy: { kind: 'system', via: 'migration' } };
-    state.revisions[trigger.id] = [...(state.revisions[trigger.id] ?? []), trigger].slice(-MAX_REVISIONS);
-    state.triggers = state.triggers.map(item => item.id === trigger.id ? next : item);
-    if (state.cursors[trigger.id]) delete state.cursors[trigger.id].nextAt;
-    this.log(state, next.updatedBy, 'consume', next, trigger.revision, next.revision, 'Once reservation consumed and archived; run outcome is separate from task completion');
-  }
-  private normalizeOnce(state: EngineState): void {
-    for (const trigger of [...state.triggers, ...state.tombstones, ...Object.values(state.revisions).flat()]) {
-      const parsed = OnceConsumptionSchema.safeParse(trigger.consumed);
-      if (parsed.success) state.onceConsumed[trigger.id] ??= parsed.data;
-    }
-    for (const trigger of state.triggers) {
-      const cursor = state.cursors[trigger.id];
-      if (state.onceConsumed[trigger.id]) {
-        trigger.consumed = state.onceConsumed[trigger.id]; trigger.enabled = false;
-        if (cursor) delete cursor.nextAt;
-      } else if (trigger.archivedAt && trigger.enabled) delete trigger.archivedAt;
-      if (trigger.source.schedule.type === 'once' && !trigger.enabled && cursor) delete cursor.nextAt;
-      if (trigger.source.schedule.type === 'once' && trigger.enabled && cursor?.nextAt === undefined && Date.parse(trigger.source.schedule.at) <= this.now()) {
-        trigger.enabled = false;
-        this.log(state, { kind: 'system', via: 'migration' }, 'disable', trigger, trigger.revision, trigger.revision, 'A past once reservation without a pending slot was loaded turned off.');
-      }
-    }
-  }
-
   private inputOf(trigger: Trigger): TriggerInput {
     return { name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy };
   }
   private replace(state: EngineState, current: Trigger, input: TriggerInput, actor: TriggerActor): Trigger {
     if (state.onceConsumed[current.id] && (input.enabled || JSON.stringify(current.source) !== JSON.stringify(input.source))) throw failure('This once reservation was consumed. Create a new reservation to retry or change its schedule.', 409);
     if (current.archivedAt && input.enabled) throw failure('Unarchive this trigger before enabling it.', 409);
-    if (JSON.stringify(current.source.schedule) !== JSON.stringify(input.source.schedule) || (!current.enabled && input.enabled)) this.futureOnce(input);
-    if (JSON.stringify(current.source) !== JSON.stringify(input.source)) this.onceRoom(state, input, current.id);
+    if (JSON.stringify(current.source.schedule) !== JSON.stringify(input.source.schedule) || (!current.enabled && input.enabled)) assertFuture(input, this.now);
+    if (JSON.stringify(current.source) !== JSON.stringify(input.source)) assertOnceRoom(state, input, current.id);
     const next: Trigger = { ...unmarked(current), ...structuredClone(input), revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor, ...remoteMark(actor) };
     this.grantSecrets(state, next, actor);
     state.revisions[current.id] = [...(state.revisions[current.id] ?? []), current].slice(-MAX_REVISIONS);
@@ -1667,190 +1559,8 @@ export class TriggerService extends EventEmitter {
     for (const event of state.events) if (event.triggerId === id && event.status === 'queued') Object.assign(event, { status: 'cancelled', reason, updatedAt: new Date(this.now()).toISOString() });
   }
   private log(state: EngineState, actor: TriggerActor, action: TriggerAuditEntry['action'], trigger: Trigger, fromRevision: number | undefined, toRevision: number | undefined, summary: string): void {
-    state.audit = [...state.audit, { id: randomUUID(), at: new Date(this.now()).toISOString(), actor, action, triggerId: trigger.id, triggerName: trigger.name,
-      ...(fromRevision !== undefined ? { fromRevision } : {}), ...(toRevision !== undefined ? { toRevision } : {}), summary: summary.slice(0, 500) }].slice(-MAX_AUDIT);
+    logTrigger(state, this.now, actor, action, trigger, fromRevision, toRevision, summary);
   }
-  private describe(trigger: Trigger): string {
-    const schedule = trigger.source.schedule;
-    const when = schedule.type === 'once' ? `once at ${schedule.at}` : schedule.type === 'cron' ? `${schedule.expression} ${schedule.timezone}` : `every ${schedule.everySeconds}s`;
-    const request = trigger.source.kind === 'http' ? `${trigger.source.request.method} ${new URL(trigger.source.request.url).origin}, `
-      : trigger.source.kind === 'github' ? `GitHub ${trigger.source.watch.type}${trigger.source.watch.repos?.length ? ` ${trigger.source.watch.repos.join(' ')}` : ''} as ${trigger.source.account}, ` : '';
-    return `"${trigger.name}" (${request}${when})`;
-  }
-  private changes(before: Trigger, after: Trigger): string {
-    const fields = (['name', 'enabled', 'source', 'handler', 'policy'] as const).filter(key => JSON.stringify(before[key]) !== JSON.stringify(after[key]));
-    return fields.length ? fields.join(', ') : 'nothing';
-  }
-
-  /** Saves a changed copy first; only a saved state becomes current. Commits run one at a time. */
-  /**
-   * `settle` commits record what already-accepted work did (claims, outcomes, cancellations) and may use the
-   * reserved space up to the hard limit; everything else stops at the acceptance limit.
-   */
-  private commit<T>(change: (state: EngineState) => T, kind: 'grow' | 'settle' = 'grow'): Promise<T> {
-    this.pendingCommits++;
-    const work = this.writes.catch(() => {}).then(async () => {
-      const draft = structuredClone(this.state);
-      // A new attempt to add something starts without the last capacity warning; the change may set it again.
-      if (kind === 'grow') this.capacityError = undefined;
-      const result = change(draft);
-      this.prune(draft);
-      const encode = (trigger: Trigger) => encodeOnceTrigger({ ...trigger, ...(draft.onceConsumed[trigger.id] ? { consumed: draft.onceConsumed[trigger.id] } : {}) });
-      const data = JSON.stringify({ ...draft, triggers: draft.triggers.map(encode), tombstones: draft.tombstones.map(encode),
-        revisions: Object.fromEntries(Object.entries(draft.revisions).map(([id, list]) => [id, list.map(encode)])) });
-      const bytes = Buffer.byteLength(data);
-      if (bytes > (kind === 'settle' ? this.maxBytes : this.acceptBytes) && bytes > this.stateBytes) {
-        if (kind === 'settle') { this.storageError = 'Trigger state is full even after trimming finished history. New runs are not accepted.'; this.emit('change'); }
-        throw failure('Trigger history is full. Delete old triggers or wait for finished runs to expire.', 507);
-      }
-      if (this.locked) { this.storageError = this.locked; this.emit('change'); throw failure(this.storageError, 503); }
-      try { await writePrivateJson(this.path, data); }
-      catch (error) { this.storageError = `Cannot save triggers: ${error instanceof Error ? error.message : String(error)}`; this.emit('change'); throw failure(this.storageError, 503); }
-      this.storageError = undefined;
-      this.stateBytes = bytes;
-      this.state = draft;
-      this.emit('change');
-      return result;
-    }).finally(() => { this.pendingCommits--; });
-    this.writes = work;
-    return work;
-  }
-  private prune(state: EngineState): void {
-    state.recentFires = state.recentFires.filter(item => item.at > this.now() - 60 * 60 * 1000);
-    const known = new Set([...state.triggers, ...state.tombstones].map(trigger => trigger.id));
-    for (const id of Object.keys(state.cursors)) if (!known.has(id)) delete state.cursors[id];
-    const cutoff = this.now() - FIRED_RETENTION_MS;
-    for (const [key, at] of Object.entries(state.fired)) if (Date.parse(at) < cutoff) delete state.fired[key];
-    const finished = state.events.filter(event => !UNFINISHED.has(event.status));
-    if (finished.length > MAX_EVENTS) {
-      const drop = new Set(finished.slice(0, finished.length - MAX_EVENTS).map(event => event.id));
-      state.events = state.events.filter(event => !drop.has(event.id));
-    }
-    // Once a run was handed over (or never will be), only a short trace of the response it saw is kept.
-    for (const event of state.events) {
-      if (event.payload === undefined || event.status === 'queued' || event.status === 'claimed') continue;
-      const { status, url, selected } = event.payload as { status?: unknown; url?: unknown; selected?: unknown };
-      const trace = selected === undefined ? undefined : typeof selected === 'string' ? selected : JSON.stringify(selected) ?? '';
-      event.payload = { status, url, ...(trace !== undefined ? { selected: trace.slice(0, 300) } : {}), trimmed: true };
-      if (JSON.stringify(event.payload).length > 1000) event.payload = { status, trimmed: true };
-    }
-    for (const [secretId, triggerIds] of Object.entries(state.secretGrants)) {
-      const kept = triggerIds.filter(id => known.has(id));
-      if (kept.length) state.secretGrants[secretId] = kept; else delete state.secretGrants[secretId];
-    }
-    // Older finished runs keep their outcome but not the full instructions they were given.
-    for (const event of finished.slice(0, Math.max(0, finished.length - KEEP_FULL_INPUT))) if (event.input.instructions.length > 200) event.input.instructions = `${event.input.instructions.slice(0, 200)}…`;
-  }
-
-  private parseState(value: unknown): EngineState | undefined {
-    if (!value || typeof value !== 'object' || (value as EngineState).version !== 1) return undefined;
-    const saved = upgradeState(value as EngineState, this.now());
-    const state = empty();
-    const record = (item: unknown): item is Record<string, any> => !!item && typeof item === 'object' && !Array.isArray(item);
-    try {
-      state.settings = TriggerSettingsSchema.parse(saved.settings ?? {});
-      if (saved.onceConsumed !== undefined) {
-        if (!record(saved.onceConsumed)) return undefined;
-        for (const [id, value] of Object.entries(saved.onceConsumed)) state.onceConsumed[id] = OnceConsumptionSchema.parse(value);
-      }
-      for (const trigger of Array.isArray(saved.triggers) ? saved.triggers : []) {
-        const input = TriggerInputSchema.parse({ name: trigger.name, enabled: trigger.enabled, source: trigger.source, handler: trigger.handler, policy: trigger.policy });
-        if (typeof trigger.id !== 'string' || !Number.isInteger(trigger.revision)) return undefined;
-        state.triggers.push({ ...trigger, ...input });
-      }
-      const definition = (value: unknown) => record(value) && typeof value.id === 'string' && Number.isInteger(value.revision)
-        && TriggerInputSchema.safeParse({ name: value.name, enabled: value.enabled, source: value.source, handler: value.handler, policy: value.policy }).success;
-      // Kept as parsed, so a definition moved to a newer shape compares equal to the same one saved again.
-      const parsed = (value: Trigger): Trigger => ({ ...value, ...TriggerInputSchema.parse({ name: value.name, enabled: value.enabled, source: value.source, handler: value.handler, policy: value.policy }) });
-      if (!record(saved.revisions) || Object.values(saved.revisions).some(list => !Array.isArray(list) || !list.every(definition))) return undefined;
-      if (!Array.isArray(saved.tombstones) || !saved.tombstones.every(definition)) return undefined;
-      state.revisions = Object.fromEntries(Object.entries(saved.revisions as Record<string, Trigger[]>).map(([id, list]) => [id, list.map(parsed)]));
-      state.tombstones = (saved.tombstones as Trigger[]).map(parsed);
-      state.recentFires = Array.isArray(saved.recentFires) ? saved.recentFires.filter(item => record(item) && typeof item.at === 'number' && typeof item.triggerId === 'string') : [];
-      if (!record(saved.cursors) || Object.values(saved.cursors).some(cursor => !record(cursor) || typeof cursor.anchorAt !== 'number')) return undefined;
-      state.cursors = saved.cursors as Record<string, Cursor>;
-      if (!Array.isArray(saved.events) || saved.events.some(event => !record(event) || typeof event.id !== 'string' || typeof event.triggerId !== 'string' || typeof event.status !== 'string'
-        || typeof event.requestId !== 'string' || !record(event.input) || !record(event.input.target))) return undefined;
-      state.events = saved.events.map(event => ({ ...event, input: { ...event.input, overlap: event.input.overlap ?? 'skip' } }));
-      state.fired = saved.fired && typeof saved.fired === 'object' ? saved.fired : {};
-      state.audit = Array.isArray(saved.audit) ? saved.audit : [];
-      state.trustedFolders = Array.isArray(saved.trustedFolders) ? saved.trustedFolders.filter(item => typeof item === 'string') : [];
-      if (record(saved.secretGrants)) for (const [secretId, triggerIds] of Object.entries(saved.secretGrants)) {
-        if (Array.isArray(triggerIds)) state.secretGrants[secretId] = triggerIds.filter(item => typeof item === 'string');
-      }
-    } catch { return undefined; }
-    if (saved.onceConsumed === undefined) {
-      const projection = [...state.triggers, ...state.tombstones, ...Object.values(state.revisions).flat()].find(trigger => OnceConsumptionSchema.safeParse(trigger.consumed).success);
-      if (projection) this.log(state, { kind: 'system', via: 'migration' }, 'consume', projection, projection.revision, projection.revision,
-        'The once consumption ledger was absent after a downgrade; retained snapshots were recovered. Deleted IDs beyond legacy retention cannot be recovered.');
-    }
-    this.normalizeOnce(state);
-    return state;
-  }
-
-  /**
-   * Unreadable state is kept aside for inspection; triggers start empty rather than guess. When it cannot be moved,
-   * the engine locks before anything can fire or save, so the file is never written over.
-   */
-  private async quarantine(error: unknown): Promise<void> {
-    console.error('Trigger state could not be read and was moved aside:', error);
-    try { await quarantineFile(this.path); }
-    catch (moveError) {
-      this.locked = 'Trigger state could not be read or moved aside; nothing is saved until Tower restarts.';
-      this.storageError = this.locked;
-      console.error(this.locked, moveError);
-    }
-  }
-}
-
-/**
- * Saved state from before issues had one kind of watch, moved to it: each old issue watch becomes the issue watch
- * that does the same (`upgradeWatch`), in triggers, their revisions and deleted ones, and what it had seen goes
- * with it, so no issue it had already seen starts a run.
- */
-function upgradeState(saved: EngineState, now: number): EngineState {
-  const record = (item: unknown): item is Record<string, any> => !!item && typeof item === 'object' && !Array.isArray(item);
-  const audit = Array.isArray(saved.audit) ? [...saved.audit] : [];
-  const upgrade = (value: unknown) => {
-    const decoded = decodeOnceTrigger(value);
-    const trigger = decoded.trigger;
-    if (decoded.changed && record(trigger)) audit.push({ id: randomUUID(), at: new Date(now).toISOString(), actor: { kind: 'system', via: 'migration' }, action: 'disable',
-      triggerId: trigger.id, triggerName: trigger.name, summary: trigger.enabled ? 'An obsolete once marker was removed after a source change by an older engine; inspect the definition.' : 'A reservation changed by an older engine was loaded turned off or its obsolete marker removed; inspect it before rescheduling.' });
-    return record(trigger) && record(trigger.source) && trigger.source.kind === 'github'
-      ? { ...trigger, source: { ...trigger.source, watch: upgradeWatch(trigger.source.watch, record(trigger.policy) ? trigger.policy.overlap : undefined) } } : trigger;
-  };
-  const cursors = record(saved.cursors) ? Object.fromEntries(Object.entries(saved.cursors).map(([id, cursor]) => {
-    if (!record(cursor) || !record(cursor.github)) return [id, cursor];
-    const old = cursor.github as Record<string, any>;
-    // The new-issue watch knew the highest number seen per repository; the issues up to it are noted, not run.
-    if (record(old.repos)) {
-      const watermarks = Object.fromEntries(Object.entries(old.repos).flatMap(([repo, seen]) => record(seen) && Number.isInteger(seen.watermark) ? [[repo.toLowerCase(), seen.watermark as number]] : []));
-      return [id, { ...cursor, github: { handled: [], checkedAt: now, baseline: { watermarks } } }];
-    }
-    if (Array.isArray(old.assigned)) return [id, { ...cursor, github: { handled: old.assigned.filter((key: unknown) => typeof key === 'string'), checkedAt: now } }];
-    if (Array.isArray(old.handled) && old.checkedAt === undefined) return [id, { ...cursor, github: { ...old, checkedAt: now } }];
-    return [id, cursor];
-  })) : saved.cursors;
-  return { ...saved, triggers: Array.isArray(saved.triggers) ? saved.triggers.map(upgrade) as Trigger[] : saved.triggers,
-    revisions: record(saved.revisions) ? Object.fromEntries(Object.entries(saved.revisions).map(([id, list]) => [id, Array.isArray(list) ? list.map(upgrade) : list])) as EngineState['revisions'] : saved.revisions,
-    tombstones: Array.isArray(saved.tombstones) ? saved.tombstones.map(upgrade) as Trigger[] : saved.tombstones, cursors: cursors as EngineState['cursors'], audit: audit.slice(-MAX_AUDIT) };
-}
-
-/** Two records of one GitHub watch: what either took or noted stays taken; the rest is the current one's. */
-function mergeGitHub(current: GitHubCursor | undefined, value: GitHubCursor): GitHubCursor | undefined {
-  // A backup's record is taken whole or not at all: a partial one (a list lost, a check time kept) would take old issues as new.
-  const strings = (list: unknown) => list === undefined || (Array.isArray(list) && list.every(item => typeof item === 'string'));
-  const baseline = value.baseline as unknown as Record<string, unknown> | undefined;
-  const validBaseline = baseline === undefined || (!!baseline && typeof baseline === 'object' && (baseline.before === undefined || typeof baseline.before === 'string')
-    && (baseline.watermarks === undefined || (!!baseline.watermarks && typeof baseline.watermarks === 'object' && Object.values(baseline.watermarks).every(item => Number.isInteger(item)))));
-  const number = (item: unknown) => item === undefined || (typeof item === 'number' && Number.isFinite(item));
-  if (!strings(value.handled) || !strings(value.skipped) || !strings(value.reviews) || !strings(value.matched) || !validBaseline || !number(value.checkedAt) || !number(value.verifiedAt)) return current;
-  const saved: GitHubCursor = structuredClone(value);
-  if (!current) return saved;
-  const union = (a?: string[], b?: string[]) => a || b ? [...new Set([...(a ?? []), ...(b ?? [])])] : undefined;
-  const handled = union(current.handled, saved.handled), skipped = union(current.skipped, saved.skipped), reviews = union(current.reviews, saved.reviews);
-  const checkedAt = Math.max(current.checkedAt ?? -Infinity, saved.checkedAt ?? -Infinity);
-  return { ...current, ...(handled ? { handled } : {}), ...(skipped ? { skipped } : {}), ...(reviews ? { reviews } : {}), ...(Number.isFinite(checkedAt) ? { checkedAt } : {}) };
 }
 
 /** The GitHub CLI's token for github.com. Nothing is cached on disk by Tower. */
@@ -1863,29 +1573,3 @@ async function readGhToken(): Promise<string> {
     else resolve(token);
   }));
 }
-
-/**
- * What a GitHub trigger keeps when its definition changes while on, with the same connection and kind of watch. An
- * issue watch keeps the issues it took; when what it watches changed and it starts from now, the issues that newly
- * match but were opened before the last check are noted instead of taken, while issues opened meanwhile, or waiting
- * for a place, still run.
- */
-function keptGitHub(before: Trigger, after: Trigger, cursor: Cursor | undefined): GitHubCursor | undefined {
-  if (before.source.kind !== 'github' || after.source.kind !== 'github' || !cursor?.github) return undefined;
-  const [a, b] = [before.source, after.source];
-  if (JSON.stringify(a.auth) !== JSON.stringify(b.auth) || a.account.toLowerCase() !== b.account.toLowerCase() || a.watch.type !== b.watch.type) return undefined;
-  if (a.watch.type === 'issues' && b.watch.type === 'issues') {
-    const scope = ({ repos, assignee, labels, excludeLabels, authors, authorAssociation, includePullRequests, start }: typeof a.watch) =>
-      JSON.stringify([repos, assignee, labels, excludeLabels, authors, authorAssociation, includePullRequests, start]);
-    const kept = cursor.github;
-    // A baseline not yet taken (after moving from an earlier kind, or an earlier edit) stays: it is already the earlier one.
-    if (scope(a.watch) === scope(b.watch) || b.watch.start !== 'new' || kept.checkedAt === undefined || kept.baseline) return kept;
-    // Switched to start from now: the backlog it was working through is left alone too.
-    if (a.watch.start !== 'new') return { ...kept, baseline: {} };
-    return { ...kept, baseline: { before: new Date(kept.checkedAt).toISOString() } };
-  }
-  // What a review may decide does not change which requests are seen.
-  if (a.watch.type === 'review-requested' && b.watch.type === 'review-requested') return JSON.stringify([a.watch.repos, a.watch.includeTeams]) === JSON.stringify([b.watch.repos, b.watch.includeTeams]) ? cursor.github : undefined;
-  return undefined;
-}
-
