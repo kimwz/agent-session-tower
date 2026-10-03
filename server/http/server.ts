@@ -36,6 +36,7 @@ import type { BackupOverview, BackupPreview, RemoteBackup, RestoreReport } from 
 import { MAX_BACKUP_FILE_BYTES } from '../../shared/backup.js';
 import type { AutoPromptSuggestionRequest, AutoPromptSuggestionResponse, DecisionOverview } from '../../shared/decisions.js';
 import { TowerError, statusOf } from '../../shared/errors.js';
+import { sseSink } from './sinks.js';
 
 export interface Backend {
   /** Dedicated owner input channel; never included in agent operations or their request ledger. */
@@ -562,7 +563,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
       if (terminalMatch && req.method === 'GET' && terminalMatch[2] === 'events') {
         const cursor = req.headers['last-event-id'];
         if (Array.isArray(cursor)) return json(res, 400, { error: '터미널 출력 위치가 올바르지 않습니다.' });
-        await workspaceTerminals.attach(terminalMatch[1], res, cursor);
+        await workspaceTerminals.attach(terminalMatch[1], sseSink(res), cursor);
         if (!identity.local) {
           if (!auth?.session(sessionId, identity.ip)) res.end();
           else trackStream(sessionId, res, () => { res.end(); });

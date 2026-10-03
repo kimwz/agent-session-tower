@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises';
-import type { ServerResponse } from 'node:http';
+import type { Writable } from 'node:stream';
+import type { StreamSink } from '../streams/sink.js';
 import { join } from 'node:path';
 import type { MasterEntry, MasterEntryData, MasterMissed, MasterSay, MasterSpeak, MasterStreamEvent, MasterUnspoken, MasterViewContext, MasterVoiceStatus } from '../../shared/master.js';
 import type { RunReply } from '../../shared/types.js';
@@ -125,7 +126,7 @@ interface Live {
   failed: boolean;
   createdAt: number;
   waiters: Set<() => void>;
-  readers: Set<ServerResponse>;
+  readers: Set<StreamSink>;
   /** Stops the request for sound under way. */
   stop?: () => void;
   /** What is to be read, in order: more may be added (`feed`) until it is sealed. */
@@ -1084,28 +1085,30 @@ export class MasterVoice {
    * Streams audio to the page (through the web): what is made so far, then the rest as it comes. A slow page is
    * waited for, but never past its connection closing or a while; nothing waiting is left behind either way.
    */
-  async serveAudio(id: string, res: ServerResponse, at = 0, requestId: string = randomUUID()): Promise<void> {
+  async serveAudio(id: string, sink: StreamSink, at = 0, requestId: string = randomUUID()): Promise<void> {
+    const res = sink.body;
     const preview = /^preview-([a-f0-9]{64})$/.exec(id);
     if (preview) {
       const data = await readFile(join(this.previews, `${preview[1]}.mp3`)).catch(() => undefined);
-      if (!data) { res.writeHead(404).end(); return; }
-      res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', 'Content-Length': data.length }).end(data);
+      if (!data) { sink.refuse('not-found'); return; }
+      sink.open({ length: data.length });
+      res.end(data);
       return;
     }
     const live = this.lives.get(id);
-    if (!live) { res.writeHead(404).end(); return; }
+    if (!live) { sink.refuse('not-found'); return; }
     const stage: VoiceTransportStage = { request: Date.now(), bytes: 0 };
     const record = () => this.timings.audioRequest(live.timing, id, requestId, at, stage);
     record();
     res.once('finish', () => { stage.end = Date.now(); stage.normal = true; record(); });
     res.once('close', () => { stage.close = Date.now(); stage.normal ??= false; record(); });
     const write = (chunk: Buffer) => { const sent = res.write(chunk); stage.bytes += chunk.length; if (stage.firstWrite === undefined) { stage.firstWrite = Date.now(); record(); } return sent; };
-    if (live.failed) { res.writeHead(502).end(); return; }
+    if (live.failed) { sink.refuse('upstream'); return; }
     const finite = live.done;
     const made = finite ? Buffer.concat(live.chunks) : undefined;
     const from = made && at > 0 ? frameAt(made, id3Size(made) + Math.floor(at * MP3_BYTES_PER_SECOND)) : 0;
-    res.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', ...(made ? { 'Content-Length': Math.max(0, made.length - from) } : {}) });
-    live.readers.add(res);
+    sink.open(made ? { length: Math.max(0, made.length - from) } : {});
+    live.readers.add(sink);
     let index = 0;
     try {
       if (made) {
@@ -1126,31 +1129,24 @@ export class MasterVoice {
           if (!write(live.chunks[index++]) && !await this.wait(res, live, true)) { res.destroy(); return; }
         }
         if (res.destroyed) return;
-        if (live.failed) { this.cutOff(res); return; }
+        if (live.failed) { this.cutOff(sink); return; }
         if (live.done && index >= live.chunks.length) { res.end(); return; }
         await this.wait(res, live, false);
       }
-    } finally { live.readers.delete(res); }
+    } finally { live.readers.delete(sink); }
   }
 
   /**
    * Cuts a page off failed audio, never with a clean end, once what it was sent has left: cut at once, audio written
    * just before would be thrown away, and a page that came late would get nothing of what was made.
    */
-  private cutOff(res: ServerResponse): void {
-    const socket = res.socket;
-    if (!socket || socket.destroyed) { res.destroy(); return; }
-    // Ending the connection (not the response) sends what is queued first; the page sees a response cut short.
-    const timer = setTimeout(() => res.destroy(), this.timing.waitMs);
-    socket.once('close', () => clearTimeout(timer));
-    socket.end();
-  }
+  private cutOff(reader: StreamSink): void { reader.cutOff(this.timing.waitMs); }
 
   /**
    * Waits for the page to drain what it was sent (`drain`), or for more audio (otherwise); either way also for its
    * connection ending or a while passing, which is the only false answer. Leaves nothing registered.
    */
-  private wait(res: ServerResponse, live: Live, drain: boolean): Promise<boolean> {
+  private wait(res: Writable, live: Live, drain: boolean): Promise<boolean> {
     return new Promise(resolve => {
       const done = (value: boolean) => {
         clearTimeout(timer);

@@ -11,6 +11,7 @@ import { runnerPaths } from '../../../server/runs/runner-protocol.js';
 import { WorkspaceTerminals, type WorkspacePty, type WorkspaceTerminalBackend } from '../../../server/workspace-terminals.js';
 import { until } from '../../helpers/until.ts';
 import { statusOf } from '../../../shared/errors.js';
+import { sseSink } from '../../../server/http/sinks.js';
 
 class Pty implements WorkspacePty {
   written: string[] = [];
@@ -38,7 +39,7 @@ async function fixture(t: TestContext, options: { idleMs?: number; legacy?: Work
 
 /** Streams one terminal through the client the way the web server does. */
 async function stream(client: TerminalHostClient, id: string, until: RegExp): Promise<string> {
-  const server = createServer((_req, res) => { void client.attach(id, res).catch(error => { res.writeHead(statusOf(error) || 500); res.end(); }); });
+  const server = createServer((_req, res) => { void client.attach(id, sseSink(res)).catch(error => { res.writeHead(statusOf(error) || 500); res.end(); }); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     return await new Promise<string>((resolve, reject) => {

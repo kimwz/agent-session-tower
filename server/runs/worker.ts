@@ -64,6 +64,7 @@ import { modelRoleNotes } from '../models/notes.js';
 import { keepEndpoint } from './endpoint-keeper.js';
 import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
 import { TowerError, statusOf } from '../../shared/errors.js';
+import { sseSink } from '../http/sinks.js';
 
 const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup', 'secretCall']);
 
@@ -340,7 +341,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       const cursor = req.headers['last-event-id'];
       try {
         if (Array.isArray(cursor)) throw new TowerError('invalid', 'Invalid terminal cursor.');
-        options.terminals.attach(terminalMatch[1], res, cursor);
+        options.terminals.attach(terminalMatch[1], sseSink(res), cursor);
       } catch (error) { res.writeHead(statusOf(error) || 500); res.end(); }
       return;
     }

@@ -14,6 +14,7 @@ import { TerminalHostClient } from '../../../server/terminals/client.js';
 import { WorkspaceTerminals, type WorkspacePty } from '../../../server/workspace-terminals.js';
 import { until } from '../../helpers/until.ts';
 import { statusOf } from '../../../shared/errors.js';
+import { sseSink } from '../../../server/http/sinks.js';
 
 class Pty implements WorkspacePty {
   written: string[] = [];
@@ -32,7 +33,7 @@ class Pty implements WorkspacePty {
  * `expected` arrives; it fails when the stream ends, errors or stays silent instead.
  */
 async function streamUntil(client: TerminalHostClient, id: string, expected: string, emit: () => void): Promise<string> {
-  const server = createServer((_req, res) => { void client.attach(id, res).catch(error => { res.writeHead(statusOf(error) || 500); res.end(); }); });
+  const server = createServer((_req, res) => { void client.attach(id, sseSink(res)).catch(error => { res.writeHead(statusOf(error) || 500); res.end(); }); });
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
     return await new Promise<string>((resolve, reject) => {

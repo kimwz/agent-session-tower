@@ -8,6 +8,7 @@ import { keepEndpoint } from '../runs/endpoint-keeper.js';
 import { MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths } from '../runs/runner-protocol.js';
 import { WorkspaceTerminals, type TerminalOwner } from '../workspace-terminals.js';
 import { TowerError, statusOf } from '../../shared/errors.js';
+import { sseSink } from '../http/sinks.js';
 
 /** The terminal host shares the worker's owner-only socket directory but has its own lock, socket and credential. */
 export async function terminalHostPaths(stateDir: string) {
@@ -67,7 +68,7 @@ export async function startTerminalHost(options: TerminalHostOptions) {
       const cursor = req.headers['last-event-id'];
       try {
         if (Array.isArray(cursor)) throw new TowerError('invalid', 'Invalid terminal cursor.');
-        options.terminals.attach(events[1], res, cursor);
+        options.terminals.attach(events[1], sseSink(res), cursor);
       } catch (error) { res.writeHead(statusOf(error) || 500); res.end(); }
       return;
     }

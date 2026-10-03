@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import type { ServerResponse } from 'node:http';
+import type { Writable } from 'node:stream';
+import type { StreamSink } from './streams/sink.js';
 import { loadWorkspacePty } from './workspace-pty-runtime.js';
 import { TowerError, isTyped, type ErrorKind } from '../shared/errors.js';
 
@@ -34,14 +35,15 @@ export interface WorkspaceTerminalBackend {
   create(cwd: string, cols: unknown, rows: unknown, owner?: TerminalOwner): Promise<{ id: string }>;
   /** Shells with a known folder and opener; undefined when the shells' owner is too old to say. */
   list?(): Promise<TerminalSummary[] | undefined> | TerminalSummary[] | undefined;
-  attach(id: string, response: ServerResponse, lastEventId?: string): void | Promise<void>;
+  /** Streams a shell's events into `sink`: its head, then what the shell wrote after `lastEventId`, then as it writes. */
+  attach(id: string, sink: StreamSink, lastEventId?: string): void | Promise<void>;
   input(id: string, data: unknown): void | Promise<void>;
   resize(id: string, cols: unknown, rows: unknown): void | Promise<void>;
   close(id: string): void | Promise<void>;
   dispose(): void;
 }
 interface Output { id: number; data: string }
-interface Stream { response: ServerResponse; blocked: boolean; queue: string[]; bytes: number }
+interface Stream { body: Writable; blocked: boolean; queue: string[]; bytes: number }
 interface Terminal {
   cwd: string; opener: string; openedAt: string; request?: string;
   pty: WorkspacePty; output: Output[]; bytes: number; sequence: number; exitCode?: number;
@@ -137,13 +139,14 @@ export class WorkspaceTerminals {
     terminal.pty.resize(size.cols, size.rows);
   }
 
-  attach(id: string, response: ServerResponse, lastEventId?: string): void {
+  attach(id: string, sink: StreamSink, lastEventId?: string): void {
     const terminal = this.get(id);
     if (lastEventId !== undefined && (!/^\d{1,12}$/.test(lastEventId) || Number(lastEventId) > terminal.sequence)) throw failure('터미널 출력 위치가 올바르지 않습니다.');
     if (terminal.streams.size >= MAX_STREAMS) throw failure('터미널에 연결된 창이 너무 많습니다.', 'rate-limited');
     if (terminal.expiry) clearTimeout(terminal.expiry);
-    response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    const stream: Stream = { response, blocked: false, queue: [], bytes: 0 };
+    sink.open();
+    const response = sink.body;
+    const stream: Stream = { body: response, blocked: false, queue: [], bytes: 0 };
     terminal.streams.add(stream);
     const close = () => {
       response.off('drain', drain);
@@ -185,7 +188,7 @@ export class WorkspaceTerminals {
     if (terminal.exitCode === undefined) { try { terminal.pty.kill(); } catch { /* Already gone. */ } }
     for (const stream of terminal.streams) {
       this.send(stream, frame('exit', { exitCode: terminal.exitCode ?? 0 }));
-      stream.response.end();
+      stream.body.end();
     }
     terminal.streams.clear();
   }
@@ -241,10 +244,10 @@ export class WorkspaceTerminals {
     }
   }
   private send(stream: Stream, data: string): void {
-    if (stream.response.destroyed || stream.response.writableEnded) return;
-    if (!stream.blocked) { stream.blocked = !stream.response.write(data); return; }
+    if (stream.body.destroyed || stream.body.writableEnded) return;
+    if (!stream.blocked) { stream.blocked = !stream.body.write(data); return; }
     stream.bytes += Buffer.byteLength(data);
-    if (stream.bytes > BUFFER_LIMIT * 2) { stream.response.destroy(); return; }
+    if (stream.bytes > BUFFER_LIMIT * 2) { stream.body.destroy(); return; }
     stream.queue.push(data);
   }
 }

@@ -17,6 +17,7 @@ import type { FirstReply } from '../../server/master/first-reply.js';
 import type { MasterEntry, MasterSpeak, MasterStreamEvent } from '../../shared/master.js';
 import type { ChatMessage, Run, Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
+import { audioSink } from '../../server/http/sinks.js';
 
 const TOKEN = 'a'.repeat(64);
 const SECRET = 'b'.repeat(64);
@@ -184,7 +185,7 @@ const autoPlay = (h: Harness, session: string) => h.room.subscribe(event => {
 
 /** Reads a GET as the page would, through an HTTP server that hands the request to the voice. */
 async function audioServer(t: test.TestContext, voice: MasterVoice) {
-  const server = createServer((req, res) => { void voice.serveAudio(req.url!.slice(1), res); });
+  const server = createServer((req, res) => { void voice.serveAudio(req.url!.slice(1), audioSink(res)); });
   const port = await listen(server);
   t.after(() => stop(server));
   const fetchAudio = (id: string) => new Promise<{ status: number; body: Buffer; complete: boolean; length?: string }>(resolve => {

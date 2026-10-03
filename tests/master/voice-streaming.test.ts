@@ -25,6 +25,7 @@ import { SayOrder } from '../../shared/master/voice-order.js';
 import type { MasterEntry, MasterSay, MasterStreamEvent } from '../../shared/master.js';
 import type { Run, RunReply, Snapshot } from '../../shared/types.js';
 import { until } from '../helpers/until.js';
+import { audioSink } from '../../server/http/sinks.js';
 
 const TOKEN = 'a'.repeat(64);
 const SECRET = 'b'.repeat(64);
@@ -443,7 +444,7 @@ test('audio asked for again partway starts at a whole frame near that place', as
   h.write(run, 'm1:0', '이어 듣기를 확인하는 답입니다.', true);
   const say = await until(() => h.says().find(item => item.kind === 'answer'));
   const id = say.audio.split('/').at(-1)!;
-  const server = createServer((req, res) => { const url = new URL(req.url!, 'http://x'); void h.voice.serveAudio(url.pathname.slice(1), res, Number(url.searchParams.get('at') ?? 0)); });
+  const server = createServer((req, res) => { const url = new URL(req.url!, 'http://x'); void h.voice.serveAudio(url.pathname.slice(1), audioSink(res), Number(url.searchParams.get('at') ?? 0)); });
   const port = await listen(server);
   t.after(() => stop(server));
   const get = (path: string) => new Promise<Buffer>(resolve => {
@@ -829,7 +830,7 @@ test('two socket readers stay distinct and a truncated relay never settles playb
   let releaseDrain = false;
   const gated: Array<() => void> = [];
   t.mock.method(MasterVoice.prototype, 'serveAudio', (...args: Parameters<typeof serve>) => {
-    const response = args[1];
+    const response = args[1].body;
     const emit = response.emit;
     const write = response.write;
     const held: Buffer[] = [];
@@ -924,7 +925,7 @@ test('finite audio is complete before say, has exact length and plays a part bef
   assert.ok(h.labs.completed.some(item => item.speech === 2), 'one TTS part must finish before its say is emitted');
   assert.equal(run.status, 'running');
   const id = say.audio.split('/').at(-1)!;
-  const relay = createServer((req, res) => { const url = new URL(req.url!, 'http://fixture'); void h.voice.serveAudio(url.pathname.slice(1), res, Number(url.searchParams.get('at') ?? 0)); });
+  const relay = createServer((req, res) => { const url = new URL(req.url!, 'http://fixture'); void h.voice.serveAudio(url.pathname.slice(1), audioSink(res), Number(url.searchParams.get('at') ?? 0)); });
   const port = await listen(relay);
   t.after(() => stop(relay));
   const whole = await finiteGet(port, id);
@@ -1005,7 +1006,7 @@ test('finite replay uses complete parts and settles the entry only after their A
   const entry = h.room.add({ kind: 'master', text, turnId: 'replay-fixture', final: true, speak: { state: 'played', session: h.voice.status().session! } });
   assert.equal(h.voice.voiceMissed({ session: h.current(), entry: entry.id, action: 'replay' }), true);
   const first = await until(() => h.says().find(item => item.kind === 'answer'));
-  const relay = createServer((req, res) => { void h.voice.serveAudio(req.url!.slice(1), res); });
+  const relay = createServer((req, res) => { void h.voice.serveAudio(req.url!.slice(1), audioSink(res)); });
   const port = await listen(relay);
   t.after(() => stop(relay));
   const acked = new Set<string>();

@@ -20,6 +20,7 @@ import type { RepositoryAction } from '../../shared/repositories.js';
 import { isOperationName, OPERATIONS, REMOTE_PAGE_OPERATIONS } from '../../shared/api/operations.js';
 import type { RemoteAction, RemoteChange } from '../../shared/link.js';
 import { TowerError } from '../../shared/errors.js';
+import { sseSink } from '../http/sinks.js';
 
 type Request = IncomingMessage | Http2ServerRequest;
 // The HTTP/2 compatibility response offers the same calls as an HTTP/1 response.
@@ -295,7 +296,7 @@ export function createRemoteRouter({ backend, exclusions, terminals, mutationsPe
       shellStreams.add(res);
       res.once('close', () => shellStreams.delete(res));
       await shell(terminal[1]);
-      await terminals.attach(terminal[1], res, cursor);
+      await terminals.attach(terminal[1], sseSink(res), cursor);
       return;
     }
     const autoPrompt = path.match(/^\/api\/auto-prompts\/([a-f\d-]+)(\/cancel)?$/i);

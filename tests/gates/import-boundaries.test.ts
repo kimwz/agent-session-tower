@@ -48,6 +48,7 @@ const ALLOWED: ReadonlyArray<readonly [edge: string, reason: string]> = [
   ['server/remote/router -> server/http/server', 'remote HTTP router'],
   ['server/remote/router -> server/http/snapshot-stream', 'remote HTTP router'],
   ['server/remote/router -> server/http/sse-client', 'remote HTTP router'],
+  ['server/remote/router -> server/http/sinks', 'remote HTTP router (terminal event stream)'],
   // Route modules mounted by server/index.ts read request bodies with readJson.
   ['server/link/routes -> server/http/requests', 'route module'],
   ['server/master/routes -> server/http/requests', 'route module'],
@@ -55,6 +56,11 @@ const ALLOWED: ReadonlyArray<readonly [edge: string, reason: string]> = [
   // The link proxy shares the attachment body limit; a node's own listener reads its request bodies.
   ['server/link/proxy -> server/http/requests', 'proxy edge (ATTACHMENT_BODY_BYTES)'],
   ['server/link/node -> server/http/requests', "node's own listener (readJson)"],
+  // Listeners of the worker, terminal host and master host give the domain a stream sink around their responses.
+  ['server/runs/worker -> server/http/sinks', 'worker socket listener (terminal events)'],
+  ['server/terminals/host -> server/http/sinks', 'terminal host listener (terminal events)'],
+  ['server/master/host -> server/http/sinks', 'master host listener (voice audio)'],
+  ['server/master/client -> server/http/sinks', 'web relay of master audio (same audio head)'],
 ];
 
 test('the import boundaries hold, apart from the listed exceptions', async () => {

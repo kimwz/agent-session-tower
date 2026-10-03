@@ -13,6 +13,7 @@ import type { VoiceTransportStage } from './voice-timings.js';
 import { masterPaths, type MasterPaths } from './paths.js';
 import type { WebCredentials } from '../tower-tools/tower-client.js';
 import { TowerError, fromStatus, statusOf, type ErrorKind } from '../../shared/errors.js';
+import { audioSink } from '../http/sinks.js';
 
 const MAX_REPLY = 16 * 1024 * 1024;
 const failure = (message: string, kind: ErrorKind, hostAbsent = false) => hostAbsent ? Object.assign(new TowerError(kind, message), { hostAbsent }) : new TowerError(kind, message);
@@ -115,14 +116,15 @@ export class MasterClient {
     const paths = await this.hostPaths();
     const requestId = randomUUID();
     const stage: VoiceTransportStage = { request: Date.now(), bytes: 0 };
+    const sink = audioSink(response);
     const report = () => { void this.exchange('voiceTransport', { live: id, requestId, web: { ...stage } }).catch(() => { /* Diagnostics never delay or retry audio. */ }); };
     response.once('finish', () => { stage.end = Date.now(); stage.normal = true; report(); });
     response.once('close', () => { stage.close = Date.now(); stage.normal ??= false; report(); });
     await new Promise<void>((resolve, reject) => {
       const req = request({ socketPath: paths.socket, path: `/audio/${encodeURIComponent(id)}${at > 0 ? `?at=${at}` : ''}`, headers: { authorization: `Bearer ${token}`, 'x-tower-audio-request-id': requestId } }, upstream => {
         if (response.destroyed || response.writableEnded) { upstream.destroy(); resolve(); return; }
-        if (upstream.statusCode !== 200) { upstream.resume(); response.writeHead(upstream.statusCode === 404 ? 404 : 502).end(); resolve(); return; }
-        response.writeHead(200, { 'Content-Type': 'audio/mpeg', 'Cache-Control': 'no-store', ...(upstream.headers['content-length'] ? { 'Content-Length': upstream.headers['content-length'] } : {}) });
+        if (upstream.statusCode !== 200) { upstream.resume(); sink.refuse(upstream.statusCode === 404 ? 'not-found' : 'upstream'); resolve(); return; }
+        sink.open(upstream.headers['content-length'] ? { length: upstream.headers['content-length'] } : {});
         upstream.on('error', () => response.destroy());
         upstream.on('aborted', () => response.destroy());
         upstream.on('close', () => { if (!upstream.complete) response.destroy(); });

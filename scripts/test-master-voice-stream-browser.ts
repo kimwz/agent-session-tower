@@ -27,6 +27,7 @@ import { MasterVoice } from '../server/master/voice.js';
 import { TowerClient } from '../server/tower-tools/tower-client.js';
 import type { LiveState } from '../server/tower-tools/live-state.js';
 import type { Run, Snapshot } from '../shared/types.js';
+import { audioSink } from '../server/http/sinks.js';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 async function until<T>(get: () => T, timeout = 15_000): Promise<NonNullable<T>> {
@@ -132,7 +133,7 @@ try {
       if (!audio) { res.writeHead(404).end(); return; }
       const requestId = req.headers['x-tower-audio-request-id'];
       assert.equal(typeof requestId, 'string');
-      await voice.serveAudio(audio[1], res, Number(url.searchParams.get('at') ?? 0), requestId as string);
+      await voice.serveAudio(audio[1], audioSink(res), Number(url.searchParams.get('at') ?? 0), requestId as string);
     } catch (error) { if (!res.headersSent) res.writeHead(500).end(String(error)); else res.destroy(); }
   });
   cleanups.push(() => stop(socketHost));

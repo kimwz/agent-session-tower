@@ -18,6 +18,7 @@ import { APP_VERSION } from '../../shared/app-identity.js';
 import { newerVersion } from '../link/service.js';
 import type { SkillBackup } from '../skills/backup.js';
 import { TowerError, fromStatus, statusOf, type Disposition } from '../../shared/errors.js';
+import type { StreamSink } from '../streams/sink.js';
 
 interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number; version?: string;
   /** How long a handed-off worker's successor may stay silent before this web starts a worker itself. */
@@ -343,7 +344,8 @@ export class DurableRunManager extends EventEmitter {
     return token;
   }
 
-  private async attachTerminal(id: string, response: ServerResponse, cursor?: string): Promise<void> {
+  private async attachTerminal(id: string, sink: StreamSink, cursor?: string): Promise<void> {
+    const response = sink.body;
     const token = await this.credential();
     if (response.destroyed || response.writableEnded) return;
     await new Promise<void>((resolve, reject) => {
@@ -354,7 +356,7 @@ export class DurableRunManager extends EventEmitter {
           upstream.resume(); reject(fromStatus(upstream.statusCode || 502, '터미널에 연결하지 못했습니다.')); return;
         }
         if (response.destroyed || response.writableEnded) { upstream.destroy(); resolve(); return; }
-        response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+        sink.open();
         upstream.on('error', () => response.destroy());
         upstream.pipe(response);
         resolve();
@@ -362,7 +364,7 @@ export class DurableRunManager extends EventEmitter {
       this.terminalStreams.add(req);
       req.once('close', () => this.terminalStreams.delete(req));
       response.once('close', () => req.destroy());
-      req.once('error', error => { if (!response.headersSent) reject(error); else response.destroy(); });
+      req.once('error', error => { if (!sink.opened) reject(error); else response.destroy(); });
       req.end();
     });
   }

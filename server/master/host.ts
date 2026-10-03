@@ -19,6 +19,7 @@ import { FirstReplyMaker } from './first-reply.js';
 import { MasterVoice, type MasterVoiceOptions, type VoiceTiming } from './voice.js';
 import { keepEndpoint } from '../runs/endpoint-keeper.js';
 import { TowerError, statusOf, type ErrorKind } from '../../shared/errors.js';
+import { audioSink } from '../http/sinks.js';
 
 export const MASTER_PROTOCOL = 1;
 const MAX_REQUEST = 256 * 1024;
@@ -162,7 +163,7 @@ export async function startMasterHost(options: MasterHostOptions) {
       lastRequest = Date.now();
       const at = Number(url.searchParams.get('at') ?? '0');
       const requestId = req.headers['x-tower-audio-request-id'];
-      void voice!.serveAudio(audio[1], res, Number.isFinite(at) && at > 0 && at <= 1_200 ? at : 0, typeof requestId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId) ? requestId : undefined).catch(() => { if (!res.headersSent) res.writeHead(500); res.destroy(); });
+      void voice!.serveAudio(audio[1], audioSink(res), Number.isFinite(at) && at > 0 && at <= 1_200 ? at : 0, typeof requestId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId) ? requestId : undefined).catch(() => { if (!res.headersSent) res.writeHead(500); res.destroy(); });
       return;
     }
     if (req.method !== 'POST' || url.pathname !== '/rpc') { res.writeHead(404); res.end(); return; }

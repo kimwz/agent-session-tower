@@ -2,13 +2,14 @@ import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { connect } from 'node:net';
-import { request, type ClientRequest, type ServerResponse } from 'node:http';
+import { request, type ClientRequest } from 'node:http';
 import { isSea } from 'node:sea';
 import { fileURLToPath } from 'node:url';
 import { MAX_RPC_BYTES, RUNNER_PROTOCOL } from '../runs/runner-protocol.js';
 import type { TerminalOwner, TerminalSummary, WorkspaceTerminalBackend } from '../workspace-terminals.js';
 import { terminalHostPaths, type TerminalHostReply } from './host.js';
 import { TowerError, fromStatus, statusOf, type ErrorKind } from '../../shared/errors.js';
+import type { StreamSink } from '../streams/sink.js';
 
 interface Options {
   stateDir: string;
@@ -49,11 +50,11 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
   async input(id: string, data: unknown): Promise<void> { await this.route(id, () => this.call('input', [id, data]), legacy => legacy.input(id, data)); }
   async resize(id: string, cols: unknown, rows: unknown): Promise<void> { await this.route(id, () => this.call('resize', [id, cols, rows]), legacy => legacy.resize(id, cols, rows)); }
   async close(id: string): Promise<void> { await this.route(id, () => this.call('close', [id]), legacy => legacy.close(id)); }
-  async attach(id: string, response: ServerResponse, cursor?: string): Promise<void> {
-    try { await this.pipe(id, response, cursor); }
+  async attach(id: string, sink: StreamSink, cursor?: string): Promise<void> {
+    try { await this.pipe(id, sink, cursor); }
     catch (error) {
-      if (!this.options.legacy || statusOf(error) !== 404 || response.headersSent) throw error;
-      await this.options.legacy.attach(id, response, cursor);
+      if (!this.options.legacy || statusOf(error) !== 404 || sink.opened) throw error;
+      await this.options.legacy.attach(id, sink, cursor);
     }
   }
   dispose(): void {
@@ -179,7 +180,8 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
     return reply;
   }
 
-  private async pipe(id: string, response: ServerResponse, cursor?: string): Promise<void> {
+  private async pipe(id: string, sink: StreamSink, cursor?: string): Promise<void> {
+    const response = sink.body;
     const token = await this.credential().catch(error => { throw statusOf(error) === 503 ? failure('터미널을 찾을 수 없습니다. 새 터미널을 여세요.', 'not-found') : error; });
     const paths = await this.hostPaths();
     if (response.destroyed || response.writableEnded) return;
@@ -187,7 +189,7 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
       const req = request({ socketPath: paths.socket, path: `/terminals/${encodeURIComponent(id)}/events`, headers: { authorization: `Bearer ${token}`, ...(cursor ? { 'last-event-id': cursor } : {}) } }, upstream => {
         if (upstream.statusCode !== 200) { upstream.resume(); reject(relayed('터미널에 연결하지 못했습니다.', upstream.statusCode || 502)); return; }
         if (response.destroyed || response.writableEnded) { upstream.destroy(); resolve(); return; }
-        response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+        sink.open();
         upstream.on('error', () => response.destroy());
         upstream.pipe(response);
         resolve();
@@ -196,7 +198,7 @@ export class TerminalHostClient implements WorkspaceTerminalBackend {
       req.once('close', () => this.streams.delete(req));
       response.once('close', () => req.destroy());
       // A host that is not running cannot own this terminal.
-      req.once('error', error => { if (!response.headersSent) reject((error as NodeJS.ErrnoException).code === 'ECONNREFUSED' || (error as NodeJS.ErrnoException).code === 'ENOENT' ? failure('터미널을 찾을 수 없습니다. 새 터미널을 여세요.', 'not-found') : error); else response.destroy(); });
+      req.once('error', error => { if (!sink.opened) reject((error as NodeJS.ErrnoException).code === 'ECONNREFUSED' || (error as NodeJS.ErrnoException).code === 'ENOENT' ? failure('터미널을 찾을 수 없습니다. 새 터미널을 여세요.', 'not-found') : error); else response.destroy(); });
       req.end();
     });
   }
