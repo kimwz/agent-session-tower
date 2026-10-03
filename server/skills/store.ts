@@ -5,7 +5,7 @@ import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep 
 import { promisify } from 'node:util';
 import type { SkillBundle, SkillBundleFile } from '../../shared/skills.js';
 import { MAX_SKILL_BUNDLE_BYTES, MAX_SKILL_TARGETS, SKILL_BUNDLE_FORMAT, SKILL_NAME } from '../../shared/skills.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 /**
  * Tower's own skill folder, `<state>/skills`: `global/<name>` and `projects/<folder>-<hash>/<name>` with the project's
@@ -33,7 +33,7 @@ export async function readMoves(path: string): Promise<SkillMove[]> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
     // A record that cannot be parsed is kept aside for the owner, not guessed at; moves start over from an empty one.
     if (error instanceof SyntaxError || (error as Error).name === 'SyntaxError') {
-      await rename(path, `${path}.unreadable-${Date.now()}`).catch(() => {});
+      await quarantineFile(path).catch(() => {});
       console.error('The skill move record could not be read and was set aside.');
       return [];
     }

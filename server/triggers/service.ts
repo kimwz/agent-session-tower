@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { continuedRun, continuedRunById } from '../runs/continuations.js';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, rename, stat } from 'node:fs/promises';
+import { mkdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { AutoPromptJob, AutoPromptRequest, CreateSessionRequest, MessageAttachments, Run, RunOrigin, Session } from '../../shared/types.js';
 import {
@@ -10,7 +10,7 @@ import {
 } from '../../shared/triggers.js';
 import { requestedEffort, requestedModel } from '../providers/models.js';
 import type { RunAdmission } from '../runs/manager.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { CATCH_UP_WINDOW_MS, LATE_AFTER_MS, latestSlot, nextSlot, previewSlots, validateSchedule } from './schedule.js';
 import { evaluate, performHttp, type ConditionState, type HttpOutcome } from './http.js';
 import { SecretStore, type StoredSecret } from './secrets.js';
@@ -1784,7 +1784,7 @@ export class TriggerService extends EventEmitter {
   /** Unreadable state is kept aside for inspection; triggers start empty rather than guess. */
   private async quarantine(error: unknown): Promise<void> {
     console.error('Trigger state could not be read and was moved aside:', error);
-    await rename(this.path, `${this.path}.unreadable-${Date.now()}`).catch(() => {});
+    await quarantineFile(this.path).catch(() => {});
   }
 }
 

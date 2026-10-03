@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { readPrivateJson } from '../../../server/stores/private-json.js';
+import { quarantineFile, readPrivateBytes, readPrivateJson } from '../../../server/stores/private-json.js';
 
 test('readPrivateJson keeps its errors and limits', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'tower-private-json-'));
@@ -31,4 +31,31 @@ test('readPrivateJson keeps its errors and limits', async t => {
 
   await writeFile(path, '{ not json');
   await assert.rejects(readPrivateJson(path), SyntaxError);
+});
+
+test('readPrivateBytes answers the bytes as they are, with the same checks', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-private-json-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'state.json');
+  const bytes = Buffer.from([0x7b, 0xff, 0x7d]);
+  await writeFile(path, bytes, { mode: 0o644 });
+  await chmod(path, 0o644);
+  assert.deepEqual(await readPrivateBytes(path), bytes);
+  assert.equal((await stat(path)).mode & 0o777, 0o600);
+  await assert.rejects(readPrivateBytes(path, 2), { message: `Saved state in ${path} is invalid or too large.` });
+  await assert.rejects(readPrivateBytes(join(dir, 'missing.json')), { code: 'ENOENT' });
+});
+
+test('quarantineFile moves the file aside and answers where; a missing file throws', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'tower-private-json-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, 'state.json');
+  await writeFile(path, '{ not json', { mode: 0o600 });
+  t.mock.method(Date, 'now', () => 1234);
+  const aside = await quarantineFile(path);
+  assert.equal(aside, `${path}.unreadable-1234`);
+  assert.deepEqual(await readdir(dir), ['state.json.unreadable-1234']);
+  assert.equal(await readFile(aside, 'utf8'), '{ not json');
+  assert.equal((await stat(aside)).mode & 0o777, 0o600);
+  await assert.rejects(quarantineFile(path), { code: 'ENOENT' });
 });

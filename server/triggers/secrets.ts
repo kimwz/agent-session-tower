@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { rename, unlink, open } from 'node:fs/promises';
+import { unlink, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SecretService } from '../secrets/service.js';
 import type { SecretInput } from '../../shared/triggers.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 export interface StoredSecret { id: string; name: string; origin: string; value: string; createdAt: string }
 const MAX_SECRETS = 50;
@@ -31,7 +31,7 @@ export class SecretStore {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
       // Kept aside rather than overwritten, so an unreadable file never silently loses the owner's values.
       console.error('Trigger secrets could not be read and were moved aside:', error);
-      await rename(this.path, `${this.path}.unreadable-${Date.now()}`).catch(() => {});
+      await quarantineFile(this.path).catch(() => {});
       return;
     }
     for (const item of Array.isArray(saved) ? saved : []) if (valid(item)) this.secrets.set(item.id, item);

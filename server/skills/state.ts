@@ -1,7 +1,7 @@
-import { mkdir, rename } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SkillAdvisorSettings, SkillNote, SkillProposal } from '../../shared/skills.js';
-import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 
 /** What Tower keeps about skills beside the skill folders themselves, in `<state>/skills.json`. */
 export interface SkillState {
@@ -54,7 +54,7 @@ export class SkillStateStore {
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') { await this.save(); return; }
       // A file this build cannot read is kept aside, never overwritten, and skills start over; the worker still starts.
-      await rename(this.path, `${this.path}.unreadable-${Date.now()}`).catch(() => {});
+      await quarantineFile(this.path).catch(() => {});
       console.error(`Skill state was set aside: ${error instanceof Error ? error.message : String(error)}`);
       await this.save();
       return;
