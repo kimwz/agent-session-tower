@@ -143,3 +143,8 @@ test('a message that keeps the chat model and effort choice is still judged when
   const same = harness({ now: 0.9, runs: [{ ...running, model: 'model-a', effort: 'high' }, queued({ canSteer: true, model: 'model-a', effort: 'high' })] });
   assert.equal(await insertIfItBelongs(same.dependencies, queued({ model: 'model-a', effort: 'high' })), 'inserted');
 });
+
+test('an exception from record escapes insertIfItBelongs', async () => {
+  const { dependencies } = harness({ now: 0.97 });
+  await assert.rejects(insertIfItBelongs({ ...dependencies, record: () => { throw new Error('the decision log is full'); } }, queued()), /decision log is full/);
+});
