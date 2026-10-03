@@ -177,6 +177,15 @@ export class SecretRuntime {
     if (!listed) return { locked: true, notice: SECRET_LOCKED_UNINDEXED, secrets: [], unavailableSources: [], usage: descriptions.secrets_cli };
     return { locked: true, notice: SECRET_LOCKED_LIST, secrets: listed.secrets, unavailableSources: listed.sources.map(sourceHostId => ({ sourceHostId, code: 'SECRET_SOURCE_UNAVAILABLE' })), usage: descriptions.secrets_cli };
   }
+  /** The open vault for the successor worker, unless an unlock is still being completed. */
+  handoff(): Buffer | undefined { return this.blocked ? undefined : this.options.service.handoff(); }
+  /** Opens the vault with the previous worker's handoff, completing it as a password unlock would. */
+  async adopt(carry: Buffer): Promise<void> { await this.open(() => this.options.service.adopt(carry)); }
+  private async open(unlock: () => Promise<void>): Promise<void> {
+    this.blocked = true;
+    try { await unlock(); await this.options.migrate?.(); await this.applyClosures(); this.blocked = false; }
+    catch (error) { await this.options.service.lock(); this.blocked = false; throw error; }
+  }
   async endSession(sessionId: string): Promise<void> {
     const id = this.options.runs.getSession(sessionId)?.id;
     if (!id) throw fail('종료할 세션을 찾을 수 없습니다.', 'not-found');
@@ -253,13 +262,8 @@ export class SecretRuntime {
     const explicitConnection = notifySession === true && ((action === 'create' && input.connect === true) || action === 'connect' || action === 'attach');
     if (receiptOnly && (!explicitConnection || !remoteTarget || typeof input.nodeId !== 'string' || typeof input.sessionId !== 'string')) throw fail('원격 채팅 연결의 완료 기록만 요청할 수 있습니다.');
     const password = (field: string) => { if (typeof input[field] !== 'string') throw fail('보관함 비밀번호가 필요합니다.'); return input[field] as string; };
-    if (action === 'initialize' || action === 'unlock') {
-      this.blocked = true;
-      try {
-        if (action === 'initialize') await service.initialize(password('password')); else await service.unlock(password('password'));
-        await this.options.migrate?.(); await this.applyClosures(); this.blocked = false;
-      } catch (error) { await service.lock(); this.blocked = false; throw error; }
-    }
+    if (action === 'initialize') await this.open(() => service.initialize(password('password')));
+    else if (action === 'unlock') await this.open(() => service.unlock(password('password')));
     else if (action === 'lock') await service.lock();
     else if (action === 'password') await service.changePassword(password('currentPassword'), password('newPassword'));
     else if (action === 'import') { if (!this.options.importPending || typeof input.id !== 'string') throw fail('가져올 암호화 기록이 필요합니다.'); await this.options.importPending(input.id, password('password')); }

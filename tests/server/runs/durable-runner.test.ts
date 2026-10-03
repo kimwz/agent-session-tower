@@ -435,10 +435,12 @@ test('an outdated worker hands off only when nothing is running, and the web fol
   let successor: Awaited<ReturnType<typeof startRunnerHost>> | undefined;
   let handoffs = 0;
   let credentialAtSpawn: boolean | undefined;
+  let carried: string | undefined;
   const first = await startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs,
     quiesce: async () => { handoffs++; },
-    startSuccessor: (command, nonce) => {
-      successors.push(command);
+    handoffCarry: () => Buffer.from('open vault'),
+    startSuccessor: (command, nonce, carry) => {
+      successors.push(command); carried = carry?.toString();
       credentialAtSpawn = existsSync(f.paths.token);
       void startRunnerHost({ stateDir: f.stateDir, sessions: f.sessions, runs: f.runs, handoffNonce: nonce }).then(host => { successor = host; });
     } });
@@ -455,6 +457,7 @@ test('an outdated worker hands off only when nothing is running, and the web fol
   assert.equal(handoffs, 1);
   assert.equal(credentialAtSpawn, false, 'the old worker removed its own credential before the successor could write one');
   assert.deepEqual(successors[0].args.slice(-2), ['--runner-worker', f.paths.stateDir]);
+  assert.equal(carried, 'open vault', 'the successor is started with the state only it may receive');
   await until(() => client.list().some(item => item.id === run.id) && client.supports('handoff') && (client as unknown as { snapshot: { instance: string } }).snapshot.instance === successor!.instance);
   const after = await client.enqueue(f.session.id, 'Sent after the handoff');
   assert.equal(after.origin?.kind, 'owner');

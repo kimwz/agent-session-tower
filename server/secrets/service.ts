@@ -33,10 +33,27 @@ export class SecretService {
     const data: Permanent = { device: { id: String(randomUUID()), name: 'This computer', signingKey, encryptionKey, fingerprint: createHash('sha256').update(signingKey + ':' + encryptionKey).digest('hex') }, keys: { signingPrivateKey: signing.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(), encryptionPrivateKey: encryption.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString() }, hmac: randomBytes(32).toString('base64'), peers: [], projects: [], groups: [], secrets: [], rules: [], legacy: [] };
     await this.vault.initialize(password, data, data.device.id); this.permanent = data; this.journal = emptyJournal(); await this.vault.save(data, this.journal, this.lockedIndex());
   }); }
-  async unlock(password: string) { return this.serialize(async () => { const data = await this.vault.unlock(password) as Permanent; try { this.permanent = data; this.journal = { ...emptyJournal(), ...((await this.vault.journal() as Journal | undefined) ?? {}) }; this.data(); } catch (error) { this.vault.lock(); this.permanent = undefined; throw error; }
+  async unlock(password: string) { return this.serialize(async () => this.opened(await this.vault.unlock(password) as Permanent)); }
+  /** What the successor worker needs to open this vault without the password; undefined while locked. */
+  handoff(): Buffer | undefined {
+    const key = this.vault.exportKey(); if (!key) return;
+    try { return Buffer.from(JSON.stringify({ format: 1, vaultId: this.vault.vaultId, key: key.toString('base64') })); } finally { key.fill(0); }
+  }
+  /** Opens with a previous worker's handoff; anything that does not open this very vault leaves it locked. */
+  async adopt(carry: Buffer) { return this.serialize(async () => {
+    let key: Buffer | undefined;
+    try {
+      const value = JSON.parse(carry.toString()) as { format?: unknown; vaultId?: unknown; key?: unknown };
+      if (value.format !== 1 || typeof value.key !== 'string' || !this.vault.initialized || value.vaultId !== this.vault.vaultId) throw new Error('Handoff is not for this vault');
+      key = Buffer.from(value.key, 'base64');
+      return this.opened(this.vault.unlockWithKey(key) as Permanent);
+    } finally { key?.fill(0); }
+  }); }
+  private async opened(data: Permanent) {
+    try { this.permanent = data; this.journal = { ...emptyJournal(), ...((await this.vault.journal() as Journal | undefined) ?? {}) }; this.data(); } catch (error) { this.vault.lock(); this.permanent = undefined; throw error; }
     // Vaults saved by older builds have no index yet; listing while locked works from the next lock on.
     await this.vault.writeIndex(this.lockedIndex()).catch(() => console.warn('Tower could not refresh the secret name index; names stay unlisted while locked until the next save.'));
-  }); }
+  }
   async lock() { return this.serialize(async () => { this.vault.lock(); this.permanent = undefined; this.journal = emptyJournal(); }); }
   async changePassword(current: string, next: string) { return this.mutate(() => this.vault.changePassword(current, next)); }
   async flush() { return this.mutate(() => undefined); }

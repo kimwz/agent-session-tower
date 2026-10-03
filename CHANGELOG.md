@@ -4,6 +4,11 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.107.0] - 2026-10-03
+
+### Changed
+- **The secret vault stays open through Tower updates.** Once unlocked, the vault no longer locks again each time Tower updates, is deployed, switches with **지금 업데이트** or applies a restore: the previous execution worker hands the open vault to the next one directly, over a private pipe, so it is never written to disk or placed in a command line or environment. The vault still locks when you lock it, after a restart of the computer, and when Tower's execution worker stopped without handing over, which happens when Tower's web server has been gone for a while with no work running. Restarting only the web server while the worker keeps running leaves it open. A handed-over key that does not open the vault on disk (for example after restoring another vault) is ignored and the vault stays locked. Secrets connected to a conversation on this computer stay connected until it is archived, as before; connections for conversations on other computers still end after 8 hours.
+
 ## [1.106.2] - 2026-10-03
 
 ### Fixed
