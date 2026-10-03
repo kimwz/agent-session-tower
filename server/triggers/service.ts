@@ -14,7 +14,7 @@ import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/pri
 import { CATCH_UP_WINDOW_MS, LATE_AFTER_MS, latestSlot, nextSlot, previewSlots, validateSchedule } from './schedule.js';
 import { evaluate, performHttp, type ConditionState, type HttpOutcome } from './http.js';
 import { SecretStore, type StoredSecret } from './secrets.js';
-import type { TriggerBackup } from '../backup/payload.js';
+import type { TriggerBackup } from './backup.js';
 import { checkGitHub, GitHubError, keyOf, noted, passed, readIssues, refused, type GitHubCursor, type GitHubFetch, type GitHubIssue, type GitHubResponse } from './github.js';
 import { findExecutable } from '../providers/discovery.js';
 import { execFile } from 'node:child_process';

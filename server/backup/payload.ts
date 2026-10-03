@@ -2,33 +2,15 @@ import { collectEncryptedVault } from './secrets.js';
 import { parseModelSettings } from '../../shared/models.js';
 import { join } from 'node:path';
 import type { BackupPart } from '../../shared/backup.js';
-import type { SkillBundle, SkillAdvisorSettings } from '../../shared/skills.js';
 import type { GitHubCursor } from '../triggers/github.js';
+import type { TriggerBackup } from '../triggers/backup.js';
+import type { SkillBackup } from '../skills/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { validateSlackRules } from '../slack/automation.js';
 import { validSlackConnection } from '../slack/service.js';
 import { parsePublicAgents } from '../public-agents/service.js';
 
-/** Trigger settings as a backup keeps them; the trigger service merges them with what it holds (`TriggerService.start`). */
-export interface TriggerBackup {
-  onceConsumed?: Record<string, import('../../shared/triggers.js').OnceConsumption>;
-  triggers: unknown[];
-  settings: unknown;
-  trustedFolders: string[];
-  secretGrants: Record<string, string[]>;
-  /** `${triggerId} ${dedupKey}` → when it fired. */
-  fired: Record<string, string>;
-  /** Per trigger, what its GitHub watch has already taken or noted. */
-  github: Record<string, GitHubCursor>;
-}
-
-/** Tower's own skills as a backup keeps them; `SkillService.restore` writes them back exactly. */
-export interface SkillBackup {
-  bundle: SkillBundle;
-  /** The owner's guidance, empty included. */
-  guidance: string;
-  settings: SkillAdvisorSettings;
-}
+export type { TriggerBackup, SkillBackup };
 
 /** Files the execution worker reads once when it starts, by the part of the settings they hold. */
 export const WORKER_FILES = {

@@ -16,7 +16,7 @@ import { readHandoff } from './handoff.js';
 import type { TriggerOverview } from '../../shared/triggers.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { newerVersion } from '../link/service.js';
-import type { SkillBackup } from '../backup/payload.js';
+import type { SkillBackup } from '../skills/backup.js';
 
 interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number; version?: string;
   /** How long a handed-off worker's successor may stay silent before this web starts a worker itself. */

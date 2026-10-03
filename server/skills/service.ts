@@ -16,7 +16,7 @@ import { DEFAULT_SKILLS } from './defaults.js';
 import { SkillError, SkillFiles, type SkillHomes } from './files.js';
 import { SkillStateStore, type SkillTargetRecord } from './state.js';
 import { ClosedSessionStore } from '../stores/closed-sessions.js';
-import type { SkillBackup } from '../backup/payload.js';
+import type { SkillBackup } from './backup.js';
 
 export interface SkillServiceOptions {
   stateDir: string;

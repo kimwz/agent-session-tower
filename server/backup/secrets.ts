@@ -6,7 +6,7 @@ import { SecretVault } from '../secrets/vault.js';
 import type { SecretService } from '../secrets/service.js';
 import { decode } from '../secrets/crypto.js';
 import { encryptBackup, decryptBackup } from './crypto.js';
-import type { TriggerBackup } from './payload.js';
+import type { TriggerBackup } from '../triggers/backup.js';
 import type { StoredSecret } from '../triggers/secrets.js';
 const PREFIX = 'pending-import-';
 const validId = (id: string) => /^[a-f0-9-]{36}$/.test(id);

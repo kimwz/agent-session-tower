@@ -6,7 +6,8 @@ import { BACKUP_EXTENSION, DEFAULT_BACKUP_SETTINGS, MAX_BACKUP_FILE_BYTES, type 
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { BackupError, checkPassphrase, decryptBackup, encryptBackup, readBackupHeader, type BackupHeader } from './crypto.js';
 import { collectEncryptedVault, stageVaultImport, stageLegacyImport } from './secrets.js';
-import { collectTriggers, collectWorkerFiles, parsePayload, payloadParts, WORKER_FILES, type BackupPayload, type SkillBackup } from './payload.js';
+import { collectTriggers, collectWorkerFiles, parsePayload, payloadParts, WORKER_FILES, type BackupPayload } from './payload.js';
+import type { SkillBackup } from '../skills/backup.js';
 import { keepBefore, readReport, removePendingWorker, writePendingWorker, writeReport } from './restore-files.js';
 import { S3Client, endpointUrl, unsafeKey } from './s3.js';
 import { newerVersion } from '../link/service.js';
