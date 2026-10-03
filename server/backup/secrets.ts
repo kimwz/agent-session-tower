@@ -7,7 +7,7 @@ import type { SecretService } from '../secrets/service.js';
 import { decode } from '../secrets/crypto.js';
 import { encryptBackup, decryptBackup } from './crypto.js';
 import type { TriggerBackup } from '../triggers/backup.js';
-import type { StoredSecret } from '../triggers/secrets.js';
+import { validStoredSecret } from '../triggers/secrets.js';
 const PREFIX = 'pending-import-';
 const validId = (id: string) => /^[a-f0-9-]{36}$/.test(id);
 const root = (stateDir: string) => join(stateDir, 'secrets');
@@ -28,7 +28,7 @@ export async function stageVaultImport(stateDir: string, content: string, restor
   return stage(stateDir, { version: 1, kind: 'vault', content, restoreId });
 }
 export async function stageLegacyImport(stateDir: string, records: unknown, passphrase: string, restoreId?: string, triggers?: TriggerBackup): Promise<string> {
-  if (!Array.isArray(records) || !records.every(validLegacy)) throw new Error('Invalid legacy import');
+  if (!Array.isArray(records) || !records.every(validStoredSecret)) throw new Error('Invalid legacy import');
   const content = await encryptBackup({ version: 1, records, ...(triggers ? { triggers } : {}) }, passphrase, { towerVersion: 'secret-legacy-import', from: 'encrypted-backup' });
   return stage(stateDir, { version: 1, kind: 'legacy', content, restoreId });
 }
@@ -45,8 +45,6 @@ export async function listPendingSecretImports(stateDir: string): Promise<string
   if (!await directory(stateDir)) return [];
   return (await readdir(root(stateDir))).filter(name => /^pending-import-[a-f0-9-]{36}\.json$/.test(name)).map(name => name.slice(PREFIX.length, -5)).sort();
 }
-const validLegacy = (record: unknown): record is StoredSecret => !!record && typeof record === 'object'
-  && ['id', 'name', 'origin', 'value', 'createdAt'].every(key => typeof (record as Record<string, unknown>)[key] === 'string');
 /** Source password belongs only to this owner request; the pending file stays encrypted until commit succeeds. */
 export async function importPendingSecret(stateDir: string, id: string, password: string, target: SecretService, options: { restoreTriggers?: (backup: TriggerBackup) => Promise<void> } = {}): Promise<void> {
   if (!validId(id)) throw new Error('Invalid secret import ID');
@@ -57,7 +55,7 @@ export async function importPendingSecret(stateDir: string, id: string, password
   if (pending.kind === 'vault') await target.importEncryptedVault(decode(pending.content), password);
   else if (pending.kind === 'legacy') {
     const { payload } = await decryptBackup(pending.content, password); const value = payload as { version?: unknown; records?: unknown; triggers?: TriggerBackup };
-    if (value?.version !== 1 || !Array.isArray(value.records) || !value.records.every(validLegacy)) throw new Error('Invalid pending legacy records');
+    if (value?.version !== 1 || !Array.isArray(value.records) || !value.records.every(validStoredSecret)) throw new Error('Invalid pending legacy records');
     if (value.triggers && !options.restoreTriggers) throw new Error('The trigger engine must be ready before restoring its encrypted snapshot');
     await target.importLegacy(value.records);
     if (value.triggers) await options.restoreTriggers!(value.triggers);

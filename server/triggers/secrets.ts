@@ -8,7 +8,8 @@ import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/pri
 export interface StoredSecret { id: string; name: string; origin: string; value: string; createdAt: string }
 const MAX_SECRETS = 50;
 
-const valid = (item: unknown): item is StoredSecret => !!item && typeof item === 'object'
+/** A saved trigger secret: all five fields are strings. The one check of that shape (load, migrate, backup, imports). */
+export const validStoredSecret = (item: unknown): item is StoredSecret => !!item && typeof item === 'object'
   && ['id', 'name', 'origin', 'value', 'createdAt'].every(key => typeof (item as Record<string, unknown>)[key] === 'string');
 
 /**
@@ -16,7 +17,7 @@ const valid = (item: unknown): item is StoredSecret => !!item && typeof item ===
  * `MAX_SECRETS`, and those load as before.
  */
 function parseLegacyFile(records: unknown): StoredSecret[] | undefined {
-  if (!Array.isArray(records) || !records.every(valid) || new Set(records.map(record => record.id)).size !== records.length) return undefined;
+  if (!Array.isArray(records) || !records.every(validStoredSecret) || new Set(records.map(record => record.id)).size !== records.length) return undefined;
   return records;
 }
 

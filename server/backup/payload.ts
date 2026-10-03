@@ -2,8 +2,7 @@ import { collectEncryptedVault } from './secrets.js';
 import { parseModelSettings } from '../../shared/models.js';
 import { join } from 'node:path';
 import type { BackupPart } from '../../shared/backup.js';
-import type { GitHubCursor } from '../triggers/github.js';
-import type { TriggerBackup } from '../triggers/backup.js';
+import { mergeTriggerSecrets, secretsBackupOf, triggerBackupOf, type TriggerBackup } from '../triggers/backup.js';
 import type { SkillBackup } from '../skills/backup.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { automationBackupOf, hasUnfinishedSlackWork, mergeAutomation, restoreSlackConnection, slackAccountKey } from '../slack/backup.js';
@@ -55,7 +54,8 @@ async function readOptional(path: string): Promise<unknown> {
 
 /** The settings part of each worker file: what a backup keeps of it. Runtime records stay on their computer. */
 function settingsOf(name: WorkerFile, value: unknown): unknown {
-  if (!record(value)) return name === 'trigger-secrets.json' && Array.isArray(value) ? value : undefined;
+  if (name === 'trigger-secrets.json') return secretsBackupOf(value);
+  if (!record(value)) return undefined;
   switch (name) {
     case 'permissions.json': return permissionsBackupOf(value);
     case 'slack-automation.json':
@@ -78,19 +78,7 @@ export async function collectWorkerFiles(stateDir: string): Promise<WorkerRestor
 
 /** The trigger engine's settings, from its saved state. */
 export async function collectTriggers(stateDir: string): Promise<TriggerBackup | undefined> {
-  const saved = await readOptional(join(stateDir, 'trigger-engine.json'));
-  if (!record(saved)) return undefined;
-  const github: Record<string, GitHubCursor> = {};
-  if (record(saved.cursors)) for (const [id, cursor] of Object.entries(saved.cursors)) if (record(cursor) && record(cursor.github)) github[id] = cursor.github as GitHubCursor;
-  return {
-    onceConsumed: record(saved.onceConsumed) ? saved.onceConsumed as TriggerBackup['onceConsumed'] : {},
-    triggers: Array.isArray(saved.triggers) ? saved.triggers : [],
-    settings: saved.settings ?? {},
-    trustedFolders: Array.isArray(saved.trustedFolders) ? saved.trustedFolders.filter((item): item is string => typeof item === 'string') : [],
-    secretGrants: record(saved.secretGrants) ? saved.secretGrants as Record<string, string[]> : {},
-    fired: record(saved.fired) ? saved.fired as Record<string, string> : {},
-    github,
-  };
+  return triggerBackupOf(await readOptional(join(stateDir, 'trigger-engine.json')));
 }
 
 /**
@@ -122,14 +110,7 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
         case 'permissions.json': next = mergePermissions(incoming, existing); if (next === undefined) throw new Error('invalid'); break;
         case 'slack-automation.json':
         case 'github-automation.json': next = mergeAutomation(incoming, existing); if (next === undefined) throw new Error('invalid'); break;
-        case 'trigger-secrets.json': {
-          // The backup's secrets come in (its value wins for the same one); secrets only this computer has stay, so a
-          // trigger kept here never loses the one it uses.
-          if (!Array.isArray(incoming) || !incoming.every(item => record(item) && ['id', 'name', 'origin', 'value', 'createdAt'].every(key => typeof item[key] === 'string'))) throw new Error('invalid');
-          const ids = new Set(incoming.map(item => (item as { id: string }).id));
-          next = [...incoming, ...(Array.isArray(existing) ? existing.filter(item => record(item) && !ids.has(String(item.id))) : [])];
-          break;
-        }
+        case 'trigger-secrets.json': next = mergeTriggerSecrets(incoming, existing); if (next === undefined) throw new Error('invalid'); break;
         // Read again by every call, so it applies as soon as it is written. Read like a saved file: roles this version does not know are dropped.
         case 'models.json': if (!record(incoming)) throw new Error('invalid'); next = parseModelSettings(incoming); break;
         // What the worker's services refuse at start is never written: one would keep the worker from starting.
