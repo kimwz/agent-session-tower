@@ -9,6 +9,7 @@ import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { validateSlackRules } from '../slack/automation.js';
 import { validSlackConnection } from '../slack/service.js';
 import { parsePublicAgents } from '../public-agents/service.js';
+import { mergePermissions, permissionsBackupOf } from '../permissions/backup.js';
 
 export type { TriggerBackup, SkillBackup };
 
@@ -57,7 +58,7 @@ async function readOptional(path: string): Promise<unknown> {
 function settingsOf(name: WorkerFile, value: unknown): unknown {
   if (!record(value)) return name === 'trigger-secrets.json' && Array.isArray(value) ? value : undefined;
   switch (name) {
-    case 'permissions.json': return { rules: Array.isArray(value.rules) ? value.rules : [], ...(record(value.autoReview) ? { autoReview: value.autoReview } : {}) };
+    case 'permissions.json': return permissionsBackupOf(value);
     case 'slack-automation.json':
     case 'github-automation.json': return { rules: value.rules ?? [] };
     default: return value;
@@ -124,13 +125,7 @@ export async function applyWorkerFiles(stateDir: string, files: WorkerRestore['f
       if (unreadable.has(name)) throw new Error('이 컴퓨터의 파일을 읽지 못해 건너뛰었습니다.');
       let next: unknown;
       switch (name) {
-        case 'permissions.json': {
-          if (!record(incoming) || !Array.isArray(incoming.rules)) throw new Error('invalid');
-          const kept = record(existing) ? existing : {};
-          next = { version: 1, requests: Array.isArray(kept.requests) ? kept.requests : [], codex: Array.isArray(kept.codex) ? kept.codex : [], ...(typeof kept.lost === 'string' ? { lost: kept.lost } : {}),
-            rules: incoming.rules, ...(record(incoming.autoReview) ? { autoReview: incoming.autoReview } : {}) };
-          break;
-        }
+        case 'permissions.json': next = mergePermissions(incoming, existing); if (next === undefined) throw new Error('invalid'); break;
         case 'slack-automation.json':
         case 'github-automation.json': {
           if (!record(incoming) || !Array.isArray(incoming.rules)) throw new Error('invalid');
