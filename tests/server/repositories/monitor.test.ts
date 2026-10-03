@@ -9,6 +9,7 @@ import { RepositoryMonitor, watchedRepositoryPaths } from '../../../server/repos
 import { gitRunner, parseStatus } from '../../../server/repositories/git.js';
 import type { RepositoryStatus } from '../../../shared/repositories.js';
 import type { ProjectGroup, Session } from '../../../shared/types.js';
+import { statusOf } from '../../../shared/errors.js';
 
 const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
   GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid' };
@@ -71,7 +72,7 @@ test('nothing moves when the branch has its own commits, uncommitted edits, or a
     const [status] = monitored.list();
     assert.equal(status.behind, 1, setup);
     assert.equal(status.lastAction, undefined, setup);
-    await assert.rejects(monitored.act(work, 'pull'), (error: Error & { statusCode?: number }) => error.statusCode === 409, setup);
+    await assert.rejects(monitored.act(work, 'pull'), (error: Error) => statusOf(error) === 409, setup);
   }
 });
 
@@ -87,7 +88,7 @@ test('the owner pushes local commits to the tracked branch without forcing, and 
   await commit(work, 'more.txt', 'more');
   git(other, 'pull', '-q'); await commit(other, 'theirs.txt', 'theirs'); git(other, 'push', '-q');
   await monitored.act(work, 'refresh');
-  await assert.rejects(monitored.act(work, 'push'), (error: Error & { statusCode?: number }) => error.statusCode === 409);
+  await assert.rejects(monitored.act(work, 'push'), (error: Error) => statusOf(error) === 409);
 });
 
 test('folders outside git and folders Tower does not track are left alone', async t => {
@@ -98,7 +99,7 @@ test('folders outside git and folders Tower does not track are left alone', asyn
   await monitored.prepareRun(plain);
   await monitored.tick();
   assert.deepEqual(monitored.list(), []);
-  await assert.rejects(monitored.act(join(dir, 'unknown'), 'refresh'), (error: Error & { statusCode?: number }) => error.statusCode === 404);
+  await assert.rejects(monitored.act(join(dir, 'unknown'), 'refresh'), (error: Error) => statusOf(error) === 404);
 });
 
 test('pinned folders and folders with a session from the last week are watched, but not hidden, temporary or agent-launched ones', () => {

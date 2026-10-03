@@ -12,6 +12,7 @@ import type { MasterSettingsStore } from './settings.js';
 import { isNoise, READ_CHARS, speakable, streamTone, VOICE_REST, VOICE_SAMPLE, voiced, voicedChunkPairs, voicedPartPairs } from './voice-text.js';
 import { CHUNK_PAUSE_MS, TextFollower } from './voice-stream.js';
 import { playbackRecord, VoiceTimings, progressRecord, elapsed, attemptNumber, transportStage, type VoiceTtsRecord, type VoiceTransportStage } from './voice-timings.js';
+import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
 /** Estimated prices: ElevenLabs realtime speech-to-text per second, text-to-speech per character by model. */
 const STT_DOLLARS_PER_SECOND = 0.39 / 3600;
@@ -204,7 +205,7 @@ interface Stream {
 }
 
 const hash = (value: string) => createHash('sha256').update(value).digest('hex').slice(0, 32);
-const fail = (message: string, statusCode: number) => Object.assign(new Error(message), { statusCode });
+const fail = (message: string, kind: ErrorKind) => new TowerError(kind, message);
 const localDay = (time: number) => { const date = new Date(time); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; };
 const speakOf = (data: MasterEntryData | undefined): MasterSpeak | undefined => data && (data.kind === 'master' || data.kind === 'error' || data.kind === 'event') ? data.speak : undefined;
 const wake = (live: Live) => { for (const waiter of [...live.waiters]) waiter(); };
@@ -361,7 +362,7 @@ export class MasterVoice {
 
   /** The owner turned voice on in a tab: a new session, which ends any before it. */
   voiceOn(input: { tabId: unknown; local: boolean }): { session: string } {
-    if (typeof input.tabId !== 'string' || !UUID.test(input.tabId)) throw fail('음성 켜기 요청이 올바르지 않습니다.', 400);
+    if (typeof input.tabId !== 'string' || !UUID.test(input.tabId)) throw fail('음성 켜기 요청이 올바르지 않습니다.', 'invalid');
     this.ready();
     this.endSession(this.session, 'away');
     const id = randomUUID();
@@ -414,14 +415,14 @@ export class MasterVoice {
    */
   async voiceToken(input: { session: unknown }): Promise<{ tokenId: string; url: string; expiresAt: number }> {
     const session = this.current(input.session);
-    if (!session) throw fail('음성 세션이 바뀌었습니다.', 409);
+    if (!session) throw fail('음성 세션이 바뀌었습니다.', 'conflict');
     this.ready();
     const now = Date.now();
     this.settleExpired(now);
-    if (this.file.tokens.filter(token => token.session === session.digest).length >= TOKENS_PER_SESSION) throw fail('받아쓰기 준비가 이미 되어 있습니다.', 409);
+    if (this.file.tokens.filter(token => token.session === session.digest).length >= TOKENS_PER_SESSION) throw fail('받아쓰기 준비가 이미 되어 있습니다.', 'conflict');
     this.recentTokens = this.recentTokens.filter(at => now - at < 60_000);
-    if (this.recentTokens.length >= TOKENS_PER_MINUTE) throw fail('받아쓰기 요청이 너무 많습니다.', 429);
-    if (this.limited(now, UTTERANCE_SECONDS * STT_DOLLARS_PER_SECOND)) throw fail('오늘 음성 한도에 닿았습니다.', 409);
+    if (this.recentTokens.length >= TOKENS_PER_MINUTE) throw fail('받아쓰기 요청이 너무 많습니다.', 'rate-limited');
+    if (this.limited(now, UTTERANCE_SECONDS * STT_DOLLARS_PER_SECOND)) throw fail('오늘 음성 한도에 닿았습니다.', 'conflict');
     // Held before the token is asked for, so two requests at once cannot both pass the limit.
     const id = randomUUID();
     this.file.tokens.push({ id, session: session.digest, issuedAt: now });
@@ -457,8 +458,8 @@ export class MasterVoice {
   async voiceRequest(input: { session: unknown; clientMessageId: unknown; text: unknown; viewContext?: MasterViewContext; local: boolean }): Promise<{ ignored?: true; stale?: true; ack?: MasterSay }> {
     const session = this.current(input.session);
     if (!session) return { stale: true };
-    if (typeof input.clientMessageId !== 'string' || !/^[a-zA-Z0-9-]{8,64}$/.test(input.clientMessageId)) throw fail('요청 ID가 올바르지 않습니다.', 400);
-    if (typeof input.text !== 'string' || input.text.length > 4_000) throw fail('받아쓴 글이 올바르지 않습니다.', 400);
+    if (typeof input.clientMessageId !== 'string' || !/^[a-zA-Z0-9-]{8,64}$/.test(input.clientMessageId)) throw fail('요청 ID가 올바르지 않습니다.', 'invalid');
+    if (typeof input.text !== 'string' || input.text.length > 4_000) throw fail('받아쓴 글이 올바르지 않습니다.', 'invalid');
     session.seenAt = Date.now();
     if (isNoise(input.text)) return { ignored: true };
     const key = hash(input.clientMessageId);
@@ -1221,21 +1222,21 @@ export class MasterVoice {
    * now, made once per voice and model, and paid for like anything else read aloud. Needs only the key.
    */
   async voicePreview(input: { voiceId: unknown }): Promise<{ audio: string }> {
-    if (!this.options.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 409);
-    if (typeof input.voiceId !== 'string' || !/^[A-Za-z0-9]{10,64}$/.test(input.voiceId)) throw fail('목소리가 올바르지 않습니다.', 400);
+    if (!this.options.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 'conflict');
+    if (typeof input.voiceId !== 'string' || !/^[A-Za-z0-9]{10,64}$/.test(input.voiceId)) throw fail('목소리가 올바르지 않습니다.', 'invalid');
     const { model } = this.options.settings.current().voice;
     try {
       const key = await this.record(this.previews, voiced(VOICE_SAMPLE, model, 'answer'), input.voiceId, model, PREVIEWS);
       return { audio: `/api/master/voice/audio/preview-${key}` };
     } catch (error) {
-      if ((error as Error).message === 'limited') throw fail('오늘 음성 한도에 닿았습니다.', 409);
-      throw fail('미리 듣기를 만들지 못했습니다. 이 계정에서 쓸 수 있는 목소리인지 확인해 주세요.', 502);
+      if ((error as Error).message === 'limited') throw fail('오늘 음성 한도에 닿았습니다.', 'conflict');
+      throw fail('미리 듣기를 만들지 못했습니다. 이 계정에서 쓸 수 있는 목소리인지 확인해 주세요.', 'upstream');
     }
   }
 
   /** Voices the account can use; needs only the key, so a voice can be chosen before the master session starts. */
   async voiceVoices(): Promise<VoiceInfo[]> {
-    if (!this.options.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 409);
+    if (!this.options.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 'conflict');
     return this.options.elevenLabs.voices();
   }
 
@@ -1354,8 +1355,8 @@ export class MasterVoice {
 
   private ready(): void {
     const settings = this.options.settings.current();
-    if (!settings.session) throw fail('마스터 세션이 아직 없습니다. 먼저 글로 한 번 말을 걸어 주세요.', 409);
-    if (!this.options.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 409);
+    if (!settings.session) throw fail('마스터 세션이 아직 없습니다. 먼저 글로 한 번 말을 걸어 주세요.', 'conflict');
+    if (!this.options.settings.voiceKey()) throw fail('ElevenLabs API 키가 없습니다. 마스터 설정에서 넣어 주세요.', 'conflict');
   }
 
   private current(session: unknown): Session | undefined {

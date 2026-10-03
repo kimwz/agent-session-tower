@@ -50,7 +50,7 @@ export async function handEvent(event: TriggerEvent, context: HandoverContext): 
   // more as the run is admitted.
   const withheld = async (cwd: string) => Boolean(input.remote) && (await context.sharing?.check(cwd) ?? true);
   const refused = { status: 'error' as const, error: REMOTE_FOLDER_REFUSED };
-  const admitted = (cwd: () => string | undefined) => input.remote ? { validate: () => { const path = cwd(); if (path === undefined || (context.sharing?.now(path) ?? true)) throw failure(REMOTE_FOLDER_REFUSED, 409); } } : {};
+  const admitted = (cwd: () => string | undefined) => input.remote ? { validate: () => { const path = cwd(); if (path === undefined || (context.sharing?.now(path) ?? true)) throw failure(REMOTE_FOLDER_REFUSED, 'conflict'); } } : {};
   const unattended = input.approvals === 'auto';
   const prompt = triggerPrompt(event);
   const common = { ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}) };

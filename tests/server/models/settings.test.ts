@@ -52,7 +52,7 @@ test('a saved change reaches the next call; one bad entry never breaks the other
   await saveModelSettings(directory, codexIntent);
   assert.deepEqual(await resolveModel(directory, 'slack.replyIntent', { provider: 'claude', override: { provider: 'claude', model: 'opus' } }), { provider: 'codex', model: 'gpt-6.1-sol' });
   await saveModelSettings(directory, next);
-  await assert.rejects(saveModelSettings(directory, { ...next, custom: [{ id: 'x', provider: 'codex', claude: {}, codex: {} }] }), { statusCode: 400 });
+  await assert.rejects(saveModelSettings(directory, { ...next, custom: [{ id: 'x', provider: 'codex', claude: {}, codex: {} }] }), { kind: 'invalid' });
   // Written by hand or by another process: read again, and an invalid role falls back to its initial value.
   const saved = JSON.parse(await readFile(join(directory, 'models.json'), 'utf8'));
   saved.roles['autoPrompt.router'] = { provider: 'gemini', claude: {}, codex: {} };

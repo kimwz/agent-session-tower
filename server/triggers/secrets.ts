@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import type { SecretService } from '../secrets/service.js';
 import type { SecretInput } from '../../shared/triggers.js';
 import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { TowerError } from '../../shared/errors.js';
 
 export interface StoredSecret { id: string; name: string; origin: string; value: string; createdAt: string }
 const MAX_SECRETS = 50;
@@ -33,7 +34,7 @@ export class SecretStore {
   private writes: Promise<unknown> = Promise.resolve();
   constructor(private readonly stateDir: string, private readonly options: { vault?: SecretService } = {}) {}
   private get encrypted() { return this.options.vault?.status().initialized === true; }
-  private requireVault() { const vault = this.options.vault; if (!vault || vault.status().locked) throw Object.assign(new Error('Secret Vault is locked. Unlock it before using trigger secrets.'), { statusCode: 423 }); this.secrets.clear(); return vault; }
+  private requireVault() { const vault = this.options.vault; if (!vault || vault.status().locked) throw new TowerError('locked', 'Secret Vault is locked. Unlock it before using trigger secrets.'); this.secrets.clear(); return vault; }
   private get path() { return join(this.stateDir, 'trigger-secrets.json'); }
 
   async load(): Promise<void> {
@@ -67,10 +68,10 @@ export class SecretStore {
   }
 
   async create(input: SecretInput, now: number): Promise<Omit<StoredSecret, 'value'>> {
-    if (this.encrypted) return this.encryptedUpdate(async () => { const vault = this.requireVault(); if (vault.legacyList().length >= MAX_SECRETS) throw Object.assign(new Error(`At most ${MAX_SECRETS} secrets can be saved. Delete one first.`), { statusCode: 409 }); const { value: _value, ...shown } = await vault.legacyCreate(input, now); return shown; });
+    if (this.encrypted) return this.encryptedUpdate(async () => { const vault = this.requireVault(); if (vault.legacyList().length >= MAX_SECRETS) throw new TowerError('conflict', `At most ${MAX_SECRETS} secrets can be saved. Delete one first.`); const { value: _value, ...shown } = await vault.legacyCreate(input, now); return shown; });
     const secret: StoredSecret = { id: randomUUID(), name: input.name, origin: input.origin, value: input.value, createdAt: new Date(now).toISOString() };
     await this.update(next => {
-      if (next.size >= MAX_SECRETS) throw Object.assign(new Error(`At most ${MAX_SECRETS} secrets can be saved. Delete one first.`), { statusCode: 409 });
+      if (next.size >= MAX_SECRETS) throw new TowerError('conflict', `At most ${MAX_SECRETS} secrets can be saved. Delete one first.`);
       next.set(secret.id, secret);
     });
     const { value: _value, ...shown } = secret;
@@ -78,10 +79,10 @@ export class SecretStore {
   }
 
   async remove(id: string): Promise<Omit<StoredSecret, 'value'>> {
-    if (this.encrypted) return this.encryptedUpdate(async () => { const vault = this.requireVault(); const found = vault.legacyGet(id); if (!found) throw Object.assign(new Error('Secret not found.'), { statusCode: 404 }); await vault.legacyRemove(id); const { value: _value, ...shown } = found; return shown; });
+    if (this.encrypted) return this.encryptedUpdate(async () => { const vault = this.requireVault(); const found = vault.legacyGet(id); if (!found) throw new TowerError('not-found', 'Secret not found.'); await vault.legacyRemove(id); const { value: _value, ...shown } = found; return shown; });
     const secret = await this.update(next => {
       const found = next.get(id);
-      if (!found) throw Object.assign(new Error('Secret not found.'), { statusCode: 404 });
+      if (!found) throw new TowerError('not-found', 'Secret not found.');
       next.delete(id);
       return found;
     });
@@ -111,7 +112,7 @@ export class SecretStore {
   /** Changes apply one at a time to a copy; only a saved copy becomes current. */
   private update<T>(change: (next: Map<string, StoredSecret>) => T): Promise<T> {
     const write = this.writes.catch(() => {}).then(async () => {
-      if (this.locked) throw Object.assign(new Error(this.locked), { statusCode: 503 });
+      if (this.locked) throw new TowerError('unavailable', this.locked);
       const next = new Map(this.secrets);
       const result = change(next);
       await writePrivateJson(this.path, JSON.stringify([...next.values()]));

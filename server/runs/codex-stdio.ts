@@ -9,6 +9,7 @@ import { SteeringError, type SteeringInput } from './steering.js';
 import { APP_NAME, APP_TITLE, APP_VERSION } from '../../shared/app-identity.js';
 import type { SessionMcpServers } from './session-mcp.js';
 import { checkCodexAccount, checkCodexProvider, CODEX_SUBSCRIPTION_CONFIG } from './subscription.js';
+import { TowerError } from '../../shared/errors.js';
 
 // v2 wire shapes verified with Codex CLI 0.153.4 app-server generate-ts --experimental.
 type RequestId = string | number;
@@ -66,7 +67,7 @@ const requestId = (value: unknown): value is RequestId => typeof value === 'stri
 const timestamp = (seconds: unknown): string | undefined => typeof seconds === 'number' && Number.isFinite(seconds) && Math.abs(seconds) < 8_640_000_000_000 ? new Date(seconds * 1000).toISOString() : undefined;
 /** How Codex names the setting when it refuses a reviewer it does not know. */
 const REVIEWER_REFUSAL = /approvals_?reviewer|auto_review/i;
-const approvalError = () => Object.assign(new Error('This approval is no longer pending. Refresh the conversation.'), { statusCode: 409 });
+const approvalError = () => new TowerError('conflict', 'This approval is no longer pending. Refresh the conversation.');
 
 /** A dedicated stdio process owns only this run. Never connect it to the desktop daemon. */
 export async function openCodexStdioRun(options: CodexStdioOptions): Promise<CodexStdioRun> {

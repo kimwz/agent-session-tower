@@ -121,7 +121,7 @@ export class GitHubAccess {
 
   /** Shows the owner which account a connection acts as. Nothing is recorded. */
   async check(auth: GitHubAuth, actor: TriggerActor): Promise<GitHubCheck> {
-    if (actor.kind !== 'owner') throw failure('Only the owner can check GitHub connections.', 403);
+    if (actor.kind !== 'owner') throw failure('Only the owner can check GitHub connections.', 'forbidden');
     try {
       if (auth.type === 'gh') this.ghToken = undefined;
       const { fetch, identity } = await this.fetchFor(auth);

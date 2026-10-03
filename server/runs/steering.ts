@@ -1,7 +1,8 @@
+import { TowerError } from '../../shared/errors.js';
 /** A rejected input is safe to leave queued; an uncertain input must never be resent automatically. */
-export class SteeringError extends Error {
-  readonly statusCode = 409;
-  constructor(message: string, readonly disposition: 'rejected' | 'uncertain') { super(message); }
+export class SteeringError extends TowerError {
+  declare readonly disposition: 'rejected' | 'uncertain';
+  constructor(message: string, disposition: 'rejected' | 'uncertain') { super('conflict', message, { disposition }); }
 }
 
 export interface SteeringInput {

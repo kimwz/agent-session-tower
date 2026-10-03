@@ -53,5 +53,5 @@ test('collection is asynchronous, keeps worker alive, and never enables or sends
   }
   assert.equal(saved?.includes('private fixture'), false);
   await service.mutate('tone/save', { guide: 'Be brief', enabled: true }); assert.equal(service.overview().tone.enabled, true);
-  await assert.rejects(service.mutate('tone/save', { guide: 'x'.repeat(4001), enabled: true }), { statusCode: 400 });
+  await assert.rejects(service.mutate('tone/save', { guide: 'x'.repeat(4001), enabled: true }), { kind: 'invalid' });
 });

@@ -35,12 +35,12 @@ test('a pending permission waits for an explicit response and retains the exact 
   f.ask();
   assert.equal(f.written.length, 2); assert.equal(f.approvals.length, 1);
   f.approvals[0].input.command = 'browser must not replace the command';
-  await assert.rejects(f.control.respond('permission-1', 'invalid' as 'allow'), { statusCode: 400 });
+  await assert.rejects(f.control.respond('permission-1', 'invalid' as 'allow'), { kind: 'invalid' });
   await f.control.respond('permission-1', 'allow');
   assert.deepEqual(f.written[2], { type: 'control_response', response: { subtype: 'success', request_id: 'permission-1',
     response: { behavior: 'allow', updatedInput: { command: 'gh --version' }, toolUseID: 'tool-1' } } });
   assert.deepEqual(f.cancelled, ['permission-1']);
-  await assert.rejects(f.control.respond('permission-1', 'allow'), { statusCode: 409 });
+  await assert.rejects(f.control.respond('permission-1', 'allow'), { kind: 'conflict' });
   assert.equal(f.written.length, 3);
 });
 
@@ -50,15 +50,15 @@ test('denial is one-shot and does not change persisted permission rules', async 
   const response = f.written.at(-1)!.response.response;
   assert.equal(response.behavior, 'deny'); assert.match(response.message, /user denied/);
   assert.equal(response.updatedPermissions, undefined); assert.equal(response.interrupt, undefined);
-  await assert.rejects(f.control.respond('unknown', 'deny'), { statusCode: 409 });
+  await assert.rejects(f.control.respond('unknown', 'deny'), { kind: 'conflict' });
 });
 
 test('native cancellation and process closure retire pending requests without answering them', async () => {
   const f = fixture(); f.initialize(); f.ask();
   f.control.handle({ type: 'control_cancel_request', request_id: 'permission-1' });
-  await assert.rejects(f.control.respond('permission-1', 'allow'), { statusCode: 409 });
+  await assert.rejects(f.control.respond('permission-1', 'allow'), { kind: 'conflict' });
   f.ask('permission-2'); f.control.close();
-  await assert.rejects(f.control.respond('permission-2', 'allow'), { statusCode: 409 });
+  await assert.rejects(f.control.respond('permission-2', 'allow'), { kind: 'conflict' });
   assert.deepEqual(f.cancelled, ['permission-1', 'permission-2']); assert.equal(f.written.length, 2);
 });
 
@@ -90,7 +90,7 @@ test('a failed initialization never submits an instruction and unknown controls 
 test('a lost approval response is not retried or silently reported as sent', async t => {
   const f = fixture(); t.after(() => f.control.close()); f.initialize(); f.ask(); f.failWrites();
   await assert.rejects(f.control.respond('permission-1', 'allow'), /not sent again/);
-  await assert.rejects(f.control.respond('permission-1', 'allow'), { statusCode: 409 });
+  await assert.rejects(f.control.respond('permission-1', 'allow'), { kind: 'conflict' });
   assert.equal(f.errors.length, 1); assert.equal(f.written.length, 2);
 });
 
@@ -196,14 +196,14 @@ test('Claude questions require complete answers and return native question-text 
   const f = fixture(); t.after(() => f.control.close()); f.initialize(); askQuestions(f);
   assert.equal(f.approvals[0].interaction?.type, 'questions');
   for (const answer of ['allow', { answers: {} }, { answers: { '0': { answers: ['Clone', 'Bundle'] }, '1': { answers: ['Source'] } } }]) {
-    await assert.rejects(f.control.respond('questions', answer as any), { statusCode: 400 });
+    await assert.rejects(f.control.respond('questions', answer as any), { kind: 'invalid' });
   }
   assert.equal(f.written.length, 2);
   await f.control.respond('questions', { answers: { '0': { answers: ['Get it from admin'] }, '1': { answers: ['Source', 'Build'] } } });
   assert.deepEqual(f.written.at(-1)!.response.response, { behavior: 'allow', toolUseID: 'question-tool', updatedInput: {
     ...questionInput, answers: { 'How should we get the code?': 'Get it from admin', 'Which checks?': 'Source, Build' },
   } });
-  await assert.rejects(f.control.respond('questions', 'deny'), { statusCode: 409 });
+  await assert.rejects(f.control.respond('questions', 'deny'), { kind: 'conflict' });
 });
 test('question cancellation denies without inventing an answer', async t => {
   const f = fixture(); t.after(() => f.control.close()); f.initialize(); askQuestions(f);

@@ -280,7 +280,7 @@ test('agent data that cannot be moved aside is never written over and the agent 
   await service.start();
   blocked.release();
   assert.equal(service.overview().storageError, `공개 에이전트 ${published.name}의 저장된 대화를 읽지도 옮기지도 못했습니다. 파일은 그대로 두고 Tower를 다시 시작할 때까지 이 에이전트를 닫습니다.`);
-  await assert.rejects(service.visit('state', published.slug, { ip: '203.0.113.5' }), { statusCode: 404, message: 'not_found' });
+  await assert.rejects(service.visit('state', published.slug, { ip: '203.0.113.5' }), { kind: 'not-found', message: 'not_found' });
   assert.equal(service.launchAllowed(published.id), false);
   await service.mutate('update', { id: published.id, agent: { ...f.agent, name: 'Renamed desk' } });
   await service.flush();

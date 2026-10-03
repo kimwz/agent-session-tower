@@ -44,8 +44,8 @@ test('a new skill is kept in Tower’s own folder and linked into both agents’
   assert.deepEqual(second.providers, ['claude', 'codex']);
   assert.match(await readFile(join(linkedHome, '.claude', 'skills', 'second', 'SKILL.md'), 'utf8'), /name: "second"/);
   assert.match(await readFile(join(skill.dir, 'SKILL.md'), 'utf8'), /^---\nname: "cross-review"\ndescription: "Use for new work."\n---\n\n1\. Design/);
-  await assert.rejects(f.files.save({ scope: 'global', name: 'cross-review', description: 'x', body: '' }), { statusCode: 409 });
-  await assert.rejects(f.files.save({ scope: 'global', name: 'Bad Name', description: 'x', body: '' }), { statusCode: 400 });
+  await assert.rejects(f.files.save({ scope: 'global', name: 'cross-review', description: 'x', body: '' }), { kind: 'conflict' });
+  await assert.rejects(f.files.save({ scope: 'global', name: 'Bad Name', description: 'x', body: '' }), { kind: 'invalid' });
 });
 
 test('a skill only Claude Code has can be linked for Codex as well, and one edited elsewhere is not overwritten', async t => {
@@ -57,7 +57,7 @@ test('a skill only Claude Code has can be linked for Codex as well, and one edit
   const linked = await f.files.link(listed.dir);
   assert.deepEqual(linked.providers, ['claude', 'codex']);
   assert.equal((await lstat(join(f.agentsHome, 'skills', 'mine'))).isSymbolicLink(), true);
-  await assert.rejects(f.files.save({ dir: listed.dir, revision: 'stale', scope: 'global', name: 'mine', description: 'new', body: 'b' }), { statusCode: 409 });
+  await assert.rejects(f.files.save({ dir: listed.dir, revision: 'stale', scope: 'global', name: 'mine', description: 'new', body: 'b' }), { kind: 'conflict' });
   const saved = await f.files.save({ dir: listed.dir, revision: listed.revision, scope: 'global', name: 'mine', description: 'new', body: 'b' });
   assert.match(await readFile(join(saved.dir, 'SKILL.md'), 'utf8'), /allowed-tools: Bash/);
   assert.equal(saved.description, 'new');
@@ -68,9 +68,9 @@ test('only a listed skill can be read, changed or deleted, whatever path a reque
   const outside = join(f.home, 'elsewhere');
   await mkdir(outside, { recursive: true });
   await writeFile(join(outside, 'SKILL.md'), '---\nname: x\ndescription: y\n---\n');
-  await assert.rejects(f.files.detail(outside), { statusCode: 404 });
-  await assert.rejects(f.files.remove(outside), { statusCode: 404 });
-  await assert.rejects(f.files.save({ dir: outside, revision: '', scope: 'global', name: 'x', description: 'y', body: '' }), { statusCode: 404 });
+  await assert.rejects(f.files.detail(outside), { kind: 'not-found' });
+  await assert.rejects(f.files.remove(outside), { kind: 'not-found' });
+  await assert.rejects(f.files.save({ dir: outside, revision: '', scope: 'global', name: 'x', description: 'y', body: '' }), { kind: 'not-found' });
 });
 
 test('deleting a skill moves its folder to Tower’s trash and removes the links to it', async t => {
@@ -131,7 +131,7 @@ test('a new skill is never written through a linked skills folder that leads out
   const project = join(f.home, 'work', 'app'), elsewhere = join(f.home, 'elsewhere');
   await mkdir(project, { recursive: true }); await mkdir(elsewhere, { recursive: true });
   await symlink(elsewhere, join(project, '.agents'));
-  await assert.rejects(f.files.save({ scope: 'project', cwd: project, name: 'x', description: 'd', body: '' }), { statusCode: 409 });
+  await assert.rejects(f.files.save({ scope: 'project', cwd: project, name: 'x', description: 'd', body: '' }), { kind: 'conflict' });
   assert.deepEqual(await readdir(elsewhere), [], 'nothing was created on the other side of the link');
 });
 
@@ -209,7 +209,7 @@ test('copies whose contents differ stay separate, and deleting the skill removes
   await copy(f.claudeHome, 'tmux', 'Talk to other Claude instances');
   const [listed] = await f.files.list();
   assert.equal(listed.copiesDiffer, true);
-  await assert.rejects(f.files.merge(listed.dir), { statusCode: 409 });
+  await assert.rejects(f.files.merge(listed.dir), { kind: 'conflict' });
   assert.equal((await f.files.detail(join(f.claudeHome, 'skills', 'tmux'))).dir, listed.dir, 'either copy finds the skill');
   await f.files.remove(listed.dir);
   assert.deepEqual(await f.files.list(), []);
@@ -262,7 +262,7 @@ test('skill state that cannot be moved aside is never written over, and flush on
   blocked.release();
   assert.equal(store.locked, 'Skill state could not be read or moved aside; skills are not changed until Tower restarts.');
   let changed = false;
-  await assert.rejects(store.update(() => { changed = true; }), { statusCode: 503 });
+  await assert.rejects(store.update(() => { changed = true; }), { kind: 'unavailable' });
   assert.equal(changed, false, 'the change is never applied, even in memory');
   await store.flush();
   assert.equal(await readFile(path, 'utf8'), '{not json');

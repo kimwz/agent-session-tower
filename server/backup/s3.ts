@@ -70,11 +70,11 @@ export class S3Client {
     const { host: _host, ...sent } = signed;
     let response: Response;
     try { response = await this.fetcher(url, { method, headers: sent, ...(body ? { body: new Uint8Array(body) } : {}), signal: this.signal ? AbortSignal.any([this.signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs), redirect: 'error' }); }
-    catch (error) { throw new BackupError(`저장소에 연결하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`, 502); }
+    catch (error) { throw new BackupError(`저장소에 연결하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`, 'upstream'); }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
       const code = tag(text, 'Code'), message = tag(text, 'Message');
-      throw new BackupError(`저장소가 요청을 거절했습니다 (${response.status}${code ? ` ${code}` : ''}${message ? `: ${message.slice(0, 200)}` : ''}).`, 502);
+      throw new BackupError(`저장소가 요청을 거절했습니다 (${response.status}${code ? ` ${code}` : ''}${message ? `: ${message.slice(0, 200)}` : ''}).`, 'upstream');
     }
     return response;
   }
@@ -86,16 +86,16 @@ export class S3Client {
   async get(key: string, maxBytes: number): Promise<Buffer> {
     const response = await this.request('GET', this.url(key), undefined, {}, 120_000);
     const length = Number(response.headers.get('content-length'));
-    if (Number.isFinite(length) && length > maxBytes) { await response.body?.cancel(); throw new BackupError('백업 파일이 너무 큽니다.', 413); }
+    if (Number.isFinite(length) && length > maxBytes) { await response.body?.cancel(); throw new BackupError('백업 파일이 너무 큽니다.', 'too-large'); }
     // Read piece by piece, so a body larger than it says is stopped as soon as it passes the limit.
     const parts: Buffer[] = [];
     let size = 0;
     const reader = response.body?.getReader();
     for (;;) {
-      const next = await reader?.read().catch(error => { throw new BackupError(`저장소에서 받는 중 끊겼습니다: ${error instanceof Error ? error.message : String(error)}`, 502); });
+      const next = await reader?.read().catch(error => { throw new BackupError(`저장소에서 받는 중 끊겼습니다: ${error instanceof Error ? error.message : String(error)}`, 'upstream'); });
       if (!next || next.done) break;
       size += next.value.length;
-      if (size > maxBytes) { await reader!.cancel().catch(() => {}); throw new BackupError('백업 파일이 너무 큽니다.', 413); }
+      if (size > maxBytes) { await reader!.cancel().catch(() => {}); throw new BackupError('백업 파일이 너무 큽니다.', 'too-large'); }
       parts.push(Buffer.from(next.value));
     }
     return Buffer.concat(parts);

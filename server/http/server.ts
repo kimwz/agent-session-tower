@@ -35,6 +35,7 @@ import type { NotificationOverview } from '../../shared/notifications.js';
 import type { BackupOverview, BackupPreview, RemoteBackup, RestoreReport } from '../../shared/backup.js';
 import { MAX_BACKUP_FILE_BYTES } from '../../shared/backup.js';
 import type { AutoPromptSuggestionRequest, AutoPromptSuggestionResponse, DecisionOverview } from '../../shared/decisions.js';
+import { TowerError, statusOf } from '../../shared/errors.js';
 
 export interface Backend {
   /** Dedicated owner input channel; never included in agent operations or their request ledger. */
@@ -297,7 +298,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         let body: Record<string, unknown>;
         try { body = await readJson(req, 1_000_000); }
         catch (error) {
-          if ((error as { statusCode?: number }).statusCode !== 400) throw error;
+          if (statusOf(error) !== 400) throw error;
           return json(res, 400, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Invalid JSON (one message per request)' } });
         }
         const reply = await localMcp.answer(body);
@@ -313,7 +314,7 @@ export function createMonitorServer({ port, clientDir, backend, remote, auth, wo
         const capability = req.headers[CALLER_CAPABILITY_HEADER.toLowerCase()];
         if (capability === undefined) return undefined;
         if (!identity.local || typeof capability !== 'string' || !/^[a-f\d]{64}$/.test(capability)) {
-          throw Object.assign(new Error('A calling turn must use its local reporting credential.'), { statusCode: 403 });
+          throw new TowerError('forbidden', 'A calling turn must use its local reporting credential.');
         }
         return { callerCapability: capability };
       };

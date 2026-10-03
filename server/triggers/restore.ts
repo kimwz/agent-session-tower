@@ -23,7 +23,7 @@ export interface RestoreContext { store: TriggerStore; secrets: SecretStore; def
  */
 export async function restoreOwnerBackup(backup: TriggerBackup, context: RestoreContext & { started: boolean }): Promise<void> {
   const { store, secrets, definitions } = context;
-  if (!context.started) throw failure('The trigger engine is not ready for an owner restore.', 503);
+  if (!context.started) throw failure('The trigger engine is not ready for an owner restore.', 'unavailable');
   if (!backup || !Array.isArray(backup.triggers) || !backup.secretGrants || typeof backup.secretGrants !== 'object') throw failure('Invalid trigger backup.');
   // A deferred restore must not remove current definitions until every referenced encrypted secret is ready.
   for (const id of Object.keys(backup.secretGrants)) if (!secrets.get(id)) throw failure('Import the original secret Vault before restoring its trigger grants.');
@@ -51,7 +51,7 @@ export async function restoreFrom(backup: TriggerBackup, context: RestoreContext
     for (const [id, value] of Object.entries(backup.onceConsumed)) consumed[id] ??= OnceConsumptionSchema.parse(value);
   }
   for (const trigger of upgraded) if (record(trigger) && trigger.consumed !== undefined) consumed[trigger.id] ??= OnceConsumptionSchema.parse(trigger.consumed);
-  if (Object.keys(consumed).length > MAX_ONCE_RESERVATIONS) throw failure('The restored once consumption records exceed the supported capacity. Existing records were preserved.', 409);
+  if (Object.keys(consumed).length > MAX_ONCE_RESERVATIONS) throw failure('The restored once consumption records exceed the supported capacity. Existing records were preserved.', 'conflict');
   const incoming: Trigger[] = [];
   // Every id the backup names: one it names but cannot restore keeps its definition here rather than being removed.
   const named = new Set<string>();
@@ -83,7 +83,7 @@ export async function restoreFrom(backup: TriggerBackup, context: RestoreContext
     if (problem && trigger.enabled) { trigger.enabled = false; errors.push(`트리거 "${name}": 꺼서 복원했습니다. ${problem}`); }
     incoming.push(trigger);
   }
-  if (incoming.length > MAX_RETAINED_TRIGGERS || new Set([...Object.keys(consumed), ...incoming.filter(item => item.source.schedule.type === 'once').map(item => item.id)]).size > MAX_ONCE_RESERVATIONS) throw failure('The restored reservation definitions exceed the supported capacity. Existing records were preserved.', 409);
+  if (incoming.length > MAX_RETAINED_TRIGGERS || new Set([...Object.keys(consumed), ...incoming.filter(item => item.source.schedule.type === 'once').map(item => item.id)]).size > MAX_ONCE_RESERVATIONS) throw failure('The restored reservation definitions exceed the supported capacity. Existing records were preserved.', 'conflict');
   const same = (a: Trigger, b: Trigger) => (['name', 'enabled', 'source', 'handler', 'policy', 'archivedAt', 'consumed'] as const).every(key => JSON.stringify(a[key]) === JSON.stringify(b[key]));
   await store.commit(state => {
     const now = new Date(clock()).toISOString();

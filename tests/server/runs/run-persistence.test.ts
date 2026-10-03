@@ -196,7 +196,7 @@ test('when instructions cannot be saved, runs.json is still saved and flushState
   const id = '50000000-0000-4000-8000-000000000010';
   f.internals.runs.set(id, { id, sessionId: `codex:${ID}`, origin: { kind: 'owner' }, prompt: 'Needs policy', status: 'queued', createdAt: new Date().toISOString(), output: '', instructions: { text: 'Policy', required: true } });
   await mkdir(join(f.stateDir, 'run-instructions.json'));
-  await assert.rejects(f.manager.flushState(), { statusCode: 503, message: /Cannot save instructions of turns still to run/ });
+  await assert.rejects(f.manager.flushState(), { kind: 'unavailable', message: /Cannot save instructions of turns still to run/ });
   const saved = await f.saved();
   assert.equal((saved.find(run => run.id === id) as unknown as Record<string, unknown>).needsInstructions, true);
 });

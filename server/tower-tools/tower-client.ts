@@ -1,5 +1,6 @@
 import { request, type IncomingMessage } from 'node:http';
 import { REQUEST_TOKEN_HEADER } from '../../shared/app-identity.js';
+import { fromStatus, TowerError } from '../../shared/errors.js';
 
 /** What the web hands the master host so it can call Tower's API like the owner's own page. */
 export interface WebCredentials { port: number; token: string; callerSecret: string }
@@ -13,6 +14,11 @@ const masterCaller: CallerHeaders = credentials => ({ [MASTER_CALLER_HEADER]: cr
 /** Whether a call ran: `uncertain` may have, `not-admitted` surely did not. */
 export type CallState = 'succeeded' | 'failed' | 'uncertain' | 'not-admitted';
 export interface TowerResponse { status: number; body: unknown; state: CallState }
+
+/** A failure Tower answered: its status when it gave one, otherwise `fallback`. For callers that do not read statuses. */
+export function replyError(message: string, response: Pick<TowerResponse, 'status'>, fallback: 'upstream' | 'unavailable'): TowerError {
+  return response.status ? fromStatus(response.status, message) : new TowerError(fallback, message);
+}
 
 const MAX_RESPONSE = 8 * 1024 * 1024;
 const WAIT_FOR_WEB_MS = 60_000;

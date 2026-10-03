@@ -169,7 +169,7 @@ test('a new session created by Auto Prompt carries a reviewer only for triggers 
   const plain = await f.manager.submit(request(f.cwd));
   assert.equal((await f.finished(plain.id)).status, 'completed');
   assert.equal((f.dispatches[3].input as CreateSessionRequest).codexApprovalsReviewer, undefined);
-  await assert.rejects(f.manager.submit(request(f.cwd, { codexApprovalsReviewer: 'always' as 'user' })), { statusCode: 400 });
+  await assert.rejects(f.manager.submit(request(f.cwd, { codexApprovalsReviewer: 'always' as 'user' })), { kind: 'invalid' });
 });
 
 test('hidden-only folders without sessions remain available to Auto and explicit folder routing without being pinned', async t => {
@@ -269,7 +269,7 @@ test('identical concurrent request IDs share admission and a different payload i
   const input = request(f.cwd);
   const [first, second] = await Promise.all([f.manager.submit(input), f.manager.submit(structuredClone(input))]);
   assert.equal(first.id, second.id);
-  await assert.rejects(f.manager.submit({ ...input, prompt: 'Different request' }), { statusCode: 409 });
+  await assert.rejects(f.manager.submit({ ...input, prompt: 'Different request' }), { kind: 'conflict' });
   release(); await f.finished(first.id);
   const repeated = await f.manager.submit(input);
   assert.equal(repeated.runId, f.managed[0].id);
@@ -370,7 +370,7 @@ test('dispatch claims cancellation before an asynchronous run admission can star
   const accepted = await f.manager.submit(request(f.cwd));
   await until(() => preparing ? true : undefined);
   assert.equal(f.manager.get(accepted.id)?.status, 'dispatching');
-  await assert.rejects(f.manager.cancel(accepted.id), { statusCode: 409 });
+  await assert.rejects(f.manager.cancel(accepted.id), { kind: 'conflict' });
   release(); assert.equal((await f.finished(accepted.id)).status, 'completed');
   assert.equal(f.dispatches.length, 1);
 });
@@ -391,12 +391,12 @@ test('unavailable provider or an explicitly unavailable routing model rejects be
   const f = await fixture(t);
   f.current.providers[0].available = false;
   const unavailable = request(f.cwd);
-  await assert.rejects(f.manager.submit(unavailable), { statusCode: 422 });
+  await assert.rejects(f.manager.submit(unavailable), { kind: 'unprocessable' });
   assert.equal(f.manager.get(unavailable.requestId), undefined, 'the rejection must allow editing an unaccepted draft');
   f.current.providers[0].available = true;
   f.current.providers[0].models = [{ id: 'other-model', label: 'Other' }];
   const unsupported = request(f.cwd);
-  await assert.rejects(f.manager.submit(unsupported), { statusCode: 422, message: '선택한 Codex 계정에서 라우팅 모델 gpt-5.6-sol을 사용할 수 없습니다. 설정 › 모델에서 라우팅 모델을 바꾸세요.' });
+  await assert.rejects(f.manager.submit(unsupported), { kind: 'unprocessable', message: '선택한 Codex 계정에서 라우팅 모델 gpt-5.6-sol을 사용할 수 없습니다. 설정 › 모델에서 라우팅 모델을 바꾸세요.' });
   assert.equal(f.manager.get(unsupported.requestId), undefined);
   assert.equal(f.calls.length, 0);
   f.respond(async () => create());
@@ -564,7 +564,7 @@ test('a named conversation needs its folder, excludes a new-session request, and
   await assert.rejects(f.manager.submit(request(f.cwd, { targetSessionId: 'bad\nid' })), /함께 지정/);
   const first = request(f.cwd, { targetSessionId: f.session.id });
   await f.manager.submit(first);
-  await assert.rejects(f.manager.submit({ ...first, targetSessionId: 'codex:other' }), { statusCode: 409 });
+  await assert.rejects(f.manager.submit({ ...first, targetSessionId: 'codex:other' }), { kind: 'conflict' });
 });
 
 test('external content can never name a conversation to continue', async t => {
@@ -576,7 +576,7 @@ test('external content can never name a conversation to continue', async t => {
 test('work that names its place does not need the routing model, but asking the router still does', async t => {
   const f = await fixture(t);
   f.current.providers[0].models = [{ id: 'other-model', label: 'Other' }];
-  await assert.rejects(f.manager.submit(request(f.cwd)), { statusCode: 422 });
+  await assert.rejects(f.manager.submit(request(f.cwd)), { kind: 'unprocessable' });
   const created = await f.finished((await f.manager.submit(request(f.cwd, { sessionMode: 'new' }))).id);
   assert.equal(created.decision?.action, 'create');
   const continued = await f.finished((await f.manager.submit(request(f.cwd, { targetSessionId: f.session.id }))).id);
@@ -602,7 +602,7 @@ test('a saved request that names its conversation survives a restart and a corru
 test('a new conversation whose folder is still to be chosen asks the router and needs its model', async t => {
   const f = await fixture(t);
   f.current.providers[0].models = [{ id: 'other-model', label: 'Other' }];
-  await assert.rejects(f.manager.submit(request(undefined, { sessionMode: 'new' })), { statusCode: 422 });
+  await assert.rejects(f.manager.submit(request(undefined, { sessionMode: 'new' })), { kind: 'unprocessable' });
 });
 
 test('delegation survives routing and restart without changing authority or admitting a different caller retry', async t => {
@@ -615,8 +615,8 @@ test('delegation survives routing and restart without changing authority or admi
   assert.deepEqual(job.delegation, delegation);
   assert.deepEqual(f.dispatches[0].internal?.delegation, delegation);
   assert.deepEqual(f.dispatches[0].internal?.origin, origin);
-  await assert.rejects(f.manager.submit(input, { origin, delegation: { ...delegation, parentRunId: randomUUID() } }), { statusCode: 409 });
-  await assert.rejects(f.manager.submit(input, { origin }), { statusCode: 409 });
+  await assert.rejects(f.manager.submit(input, { origin, delegation: { ...delegation, parentRunId: randomUUID() } }), { kind: 'conflict' });
+  await assert.rejects(f.manager.submit(input, { origin }), { kind: 'conflict' });
   await f.manager.close();
   const restored = new AutoPromptManager(f.options);
   try {

@@ -10,6 +10,7 @@ import { displayFingerprint, linkDirectory, linkId, type LinkIdentity } from './
 import { decodeJoinCode } from './join-code.js';
 import { LINK_PROTOCOL, MAX_FRAME_BYTES, REMOVED_CLOSE_CODE, openNodeEnd, pairingProof } from './transport.js';
 import type { ControllerStatus, ControllerSummary, NodeReport } from '../../shared/link.js';
+import { TowerError } from '../../shared/errors.js';
 
 const CLAIM_GRACE_MS = 10 * 60_000;
 const RETRY_MIN_MS = 1000;
@@ -107,8 +108,8 @@ export class NodeLinks extends EventEmitter {
   /** Starts connecting to the controller that made this code. */
   async join(text: unknown): Promise<ControllerSummary> {
     const code = decodeJoinCode(text);
-    if (code.expiresAt <= this.now()) throw Object.assign(new Error('연결 코드가 만료되었습니다. 다른 컴퓨터에서 새로 만드세요.'), { statusCode: 410 });
-    if (code.pin === this.options.identity.pin) throw Object.assign(new Error('이 컴퓨터에서 만든 코드입니다. 연결할 다른 컴퓨터에서 사용하세요.'), { statusCode: 400 });
+    if (code.expiresAt <= this.now()) throw new TowerError('gone', '연결 코드가 만료되었습니다. 다른 컴퓨터에서 새로 만드세요.');
+    if (code.pin === this.options.identity.pin) throw new TowerError('invalid', '이 컴퓨터에서 만든 코드입니다. 연결할 다른 컴퓨터에서 사용하세요.');
     const id = linkId(code.pin);
     const existing = this.records.find(record => record.id === id);
     if (existing?.state === 'paired') {
@@ -301,7 +302,7 @@ export class NodeLinks extends EventEmitter {
   }
 
   private save(records: ControllerRecord[]): Promise<void> {
-    if (this.broken) return Promise.reject(Object.assign(new Error(this.broken), { statusCode: 503 }));
+    if (this.broken) return Promise.reject(new TowerError('unavailable', this.broken));
     this.records = records;
     const data = JSON.stringify(records);
     const write = this.writes.then(() => writePrivateJson(this.path, data));

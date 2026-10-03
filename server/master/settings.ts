@@ -2,8 +2,9 @@ import { mkdir, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DEFAULT_MASTER_SETTINGS, DEFAULT_MASTER_VOICE, MASTER_PLAYBACK_RATES, MASTER_TTS_MODELS, type MasterBinding, type MasterSettings, type MasterTtsModel, type MasterVoiceSettings } from '../../shared/master.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { TowerError } from '../../shared/errors.js';
 
-const invalid = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
+const invalid = (message: string) => new TowerError('invalid', message);
 const validKey = (value: unknown): value is string => typeof value === 'string' && value.length >= 8 && value.length <= 512 && !/[\s\x00-\x1f\x7f]/.test(value);
 /** Settings of the master that answered through a model API (1.44–1.64): read and dropped. */
 const LEGACY_KEYS = new Set(['enabled', 'model', 'effort', 'showResults', 'guards']);

@@ -2,12 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { validateApprovalResponse } from '../../shared/approval-interactions.js';
 import type { RunApproval, RunApprovalResponse } from '../../shared/types.js';
 import { SteeringError } from './steering.js';
+import { TowerError } from '../../shared/errors.js';
 
 type Message = Record<string, unknown>;
 type Pending = { requestId: string; approval: RunApproval; serializedInput: string; toolUseId?: string };
 const record = (value: unknown): value is Message => !!value && typeof value === 'object' && !Array.isArray(value);
 const validId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 200 && !/[\x00-\x1f]/.test(value);
-const failed = (message: string) => Object.assign(new Error(message), { statusCode: 409 });
+const failed = (message: string) => new TowerError('conflict', message);
 
 /** Claude keys its returned answers by question text; Tower uses stable per-request IDs. */
 function questionInteraction(input: Message): RunApproval['interaction'] {

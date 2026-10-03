@@ -1,10 +1,11 @@
 import type { RunApproval, RunApprovalResponse } from './types.js';
+import { TowerError } from './errors.js';
 
 type ObjectValue = Record<string, any>;
 const object = (value: unknown): value is ObjectValue => !!value && typeof value === 'object' && !Array.isArray(value);
 const only = (value: ObjectValue, keys: string[]) => Object.keys(value).every(key => keys.includes(key));
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string');
-const invalid = (detail: string): never => { throw Object.assign(new Error(detail), { statusCode: 400 }); };
+const invalid = (detail: string): never => { throw new TowerError('invalid', detail); };
 const bound = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 const unique = (values: unknown[]) => new Set(values).size === values.length;
 const enumOptions = (value: unknown): value is Array<{ const: string; title: string }> => Array.isArray(value) && value.length > 0 && value.every(option => object(option) && only(option, ['const', 'title']) && typeof option.const === 'string' && typeof option.title === 'string') && unique(value.map(option => option.const));

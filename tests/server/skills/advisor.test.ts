@@ -118,7 +118,7 @@ test('project proposals stay with their project: the same name in two projects i
   assert.ok(all.every(proposalReady), 'a rule the owner stated outright is proposed at once');
   const shop = await f.service.overview({ cwd: f.project });
   assert.deepEqual(shop.proposals.map(item => item.cwd), [f.project], 'a project panel shows only its own project proposals');
-  await assert.rejects(f.service.overview({ cwd: join(f.project, 'unknown') }), { statusCode: 404 });
+  await assert.rejects(f.service.overview({ cwd: join(f.project, 'unknown') }), { kind: 'not-found' });
 });
 
 test('accepting a proposal writes the skill, pins it, and every turn in scope is told to check it', async t => {

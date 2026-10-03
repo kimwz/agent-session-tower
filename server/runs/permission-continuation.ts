@@ -78,11 +78,11 @@ export class PermissionContinuations {
     const revision = `${request.status}:${request.decidedAt ?? request.createdAt}`;
     const reopenedDecision = existing?.error && existing.permissionDecisionRevisions?.[request.id]?.startsWith('withdrawn:')
       && request.status !== 'withdrawn' && request.status !== 'pending' && existing.permissionDecisionRevisions[request.id] !== revision;
-    if (existing && !reopenedDecision) { await this.host.flush(); if (!existing.scheduled && existing.error) throw new RunError(existing.error, 409); return this.host.shown(existing); }
+    if (existing && !reopenedDecision) { await this.host.flush(); if (!existing.scheduled && existing.error) throw new RunError(existing.error, 'conflict'); return this.host.shown(existing); }
     let target = request.runId ? this.host.runs.get(request.runId) : undefined;
     const visited = new Set<string>();
     while (target?.steering && !visited.has(target.id)) { visited.add(target.id); target = this.host.runs.get(target.steering.targetRunId); }
-    if (!target || target.sessionId !== request.sessionId) throw new RunError('The requesting turn can no longer be reached.', 409);
+    if (!target || target.sessionId !== request.sessionId) throw new RunError('The requesting turn can no longer be reached.', 'conflict');
     const now = new Date().toISOString();
     const approved = request.status === 'approved' && request.rule.kind !== 'run';
     const updateResume = [...this.host.runs.values()].find(run => run.status === 'queued' && run.sessionId === target!.sessionId && run.scheduled?.afterRunId === target!.id && run.scheduled.resume === 'update');
@@ -129,7 +129,7 @@ export class PermissionContinuations {
       }
       catch { if (notice.status === 'queued') { notice.status = 'cancelled'; notice.finishedAt = new Date().toISOString(); this.host.changed(); await this.host.flush(); } }
     }
-    if (!approved && continuation.error) throw new RunError(continuation.error, 409);
+    if (!approved && continuation.error) throw new RunError(continuation.error, 'conflict');
     this.host.pump();
     return this.host.shown(continuation);
   }

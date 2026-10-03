@@ -6,12 +6,13 @@ import { requestedEffort, requestedModel } from '../providers/models.js';
 import { requestedApprovalsReviewer } from '../providers/approvals.js';
 import { normalizeSessionTitle } from '../stores/session-titles.js';
 import { AUTO_PROMPT_SUGGESTION_MIN_CHARS, type AutoPromptSuggestionRequest } from '../../shared/decisions.js';
+import { fromStatus, statusOf, TowerError } from '../../shared/errors.js';
 
 /** Request bodies that carry attachments may hold the base64 form of the largest allowed upload. */
 export const ATTACHMENT_BODY_BYTES = Math.ceil(MAX_TOTAL_ATTACHMENT_BYTES / 3) * 4 + 256 * 1024;
 export const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 
-export const httpError = (statusCode: number, message: string) => Object.assign(new Error(message), { statusCode });
+export const httpError = (status: number, message: string) => fromStatus(status, message);
 /** A Tower session id as requests name it: `provider:nativeId`, or a scoped form; never control characters. */
 export const validTargetSessionId = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\x00-\x1f\x7f]/.test(value);
 
@@ -123,6 +124,7 @@ export function parseAutoPromptSuggestion(body: Record<string, unknown>): AutoPr
 
 /** The status a failure answers with: its own when it carries one, otherwise judged from the message. */
 export function errorStatus(error: unknown): number {
+  if (error instanceof TowerError) return Number(statusOf(error));
   const message = error instanceof Error ? error.message : '';
   return typeof error === 'object' && error && 'statusCode' in error ? Number((error as { statusCode: unknown }).statusCode)
     : /not found|unknown session|찾을 수 없/i.test(message) ? 404 : /busy|already|resum|subagent|queue|재개|대기열|CLI|executable/i.test(message) ? 409 : 500;

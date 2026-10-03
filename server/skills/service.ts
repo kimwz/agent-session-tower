@@ -105,7 +105,7 @@ export class SkillService {
         try { await this.create({ name: skill.name, description: skill.description, body: skill.body }, { all: true, projects: [] }); }
         catch (error) {
           // Something of that name already sits where the skill would be linked: that stays, and Tower does not ask again.
-          if (!(error instanceof SkillError && error.statusCode === 409)) throw error;
+          if (!(error instanceof SkillError && error.kind === 'conflict')) throw error;
           made = false;
         }
       }
@@ -149,7 +149,7 @@ export class SkillService {
     const folder = resolve(cwd);
     // Only a folder Tower knows as a project on this computer; a request cannot point the listing anywhere else.
     if (!(this.options.sessions().some(session => !session.node && session.cwd === folder) || this.options.projects?.().includes(folder)) || !(await stat(folder).catch(() => undefined))?.isDirectory()) {
-      throw new SkillError('Tower가 아는 프로젝트 폴더가 아닙니다.', 404);
+      throw new SkillError('Tower가 아는 프로젝트 폴더가 아닙니다.', 'not-found');
     }
     return folder;
   }
@@ -287,7 +287,7 @@ export class SkillService {
   private checkRevision(dir: string, body: Record<string, unknown>): void {
     if (typeof body.targetsRevision !== 'string') return;
     const current = this.record(dir);
-    if (body.targetsRevision !== targetsRevision(current && { all: current.all, projects: current.projects })) throw new SkillError('다른 곳에서 적용 프로젝트가 바뀌었습니다. 다시 열어 최신 상태로 고치세요.', 409);
+    if (body.targetsRevision !== targetsRevision(current && { all: current.all, projects: current.projects })) throw new SkillError('다른 곳에서 적용 프로젝트가 바뀌었습니다. 다시 열어 최신 상태로 고치세요.', 'conflict');
   }
 
   /** A new skill kept in Tower: its record is written before its folder exists, so a crash never leaves it applying everywhere. */
@@ -295,7 +295,7 @@ export class SkillService {
     const name = text(body.name).trim();
     if (!SKILL_NAME.test(name)) throw new SkillError('스킬 이름은 영어 소문자, 숫자, 하이픈으로 64자 이내로 쓰세요.');
     const dir = await this.files.towerDir(name);
-    if (await stat(dir).catch(() => undefined)) throw new SkillError('타워에 같은 이름의 스킬이 이미 있습니다.', 409);
+    if (await stat(dir).catch(() => undefined)) throw new SkillError('타워에 같은 이름의 스킬이 이미 있습니다.', 'conflict');
     await this.files.checkTargets(dir, targets);
     await this.writeRecord({ dir, all: targets.all, projects: targets.projects, linked: targets.projects, globalLinked: targets.all });
     let skill: Skill;
@@ -359,7 +359,7 @@ export class SkillService {
   private exclusive<T>(change: () => Promise<T>): Promise<T> {
     // Every change that touches links, folders, default skills or the move record comes here: none runs while locked.
     const next = this.queue.catch(() => {}).then(() => {
-      if (this.state.locked) throw new SkillError(this.state.locked, 503);
+      if (this.state.locked) throw new SkillError(this.state.locked, 'unavailable');
       return change();
     });
     this.queue = next;
@@ -384,7 +384,7 @@ export class SkillService {
         else {
           if (editing && targets) {
             const current = await this.files.lookup(editing, cwd);
-            if (!current.managed) throw new SkillError('타워에 있는 스킬만 적용 프로젝트를 정할 수 있습니다.', 409);
+            if (!current.managed) throw new SkillError('타워에 있는 스킬만 적용 프로젝트를 정할 수 있습니다.', 'conflict');
             this.checkRevision(current.dir, body);
             await this.files.checkTargets(current.dir, targets);
           }
@@ -415,7 +415,7 @@ export class SkillService {
       }
       case 'assign': {
         const skill = await this.files.lookup(text(body.dir), cwd);
-        if (!skill.managed) throw new SkillError('타워에 있는 스킬만 적용 프로젝트를 정할 수 있습니다.', 409);
+        if (!skill.managed) throw new SkillError('타워에 있는 스킬만 적용 프로젝트를 정할 수 있습니다.', 'conflict');
         const targets = await this.targetsFrom(body.targets, skill.dir);
         if (!targets) throw new SkillError('적용 프로젝트를 고르세요.');
         this.checkRevision(skill.dir, body);
@@ -448,9 +448,9 @@ export class SkillService {
       }
       case 'guidance': {
         const owner = text(body.owner).replace(/\r\n/g, '\n');
-        if (Buffer.byteLength(owner) > 256 * 1024) throw new SkillError('지침이 너무 깁니다.', 413);
+        if (Buffer.byteLength(owner) > 256 * 1024) throw new SkillError('지침이 너무 깁니다.', 'too-large');
         await this.guidanceChange(async current => {
-          if (text(body.revision) !== current.revision) throw new SkillError('다른 곳에서 지침이 바뀌었습니다. 다시 열어 최신 내용으로 고치세요.', 409);
+          if (text(body.revision) !== current.revision) throw new SkillError('다른 곳에서 지침이 바뀌었습니다. 다시 열어 최신 내용으로 고치세요.', 'conflict');
           return owner;
         });
         break;
@@ -475,7 +475,7 @@ export class SkillService {
         const id = text(body.id);
         await this.state.update(state => {
           const proposal = state.proposals.find(item => item.id === id && item.status === 'open');
-          if (!proposal) throw new SkillError('추천을 찾을 수 없습니다.', 404);
+          if (!proposal) throw new SkillError('추천을 찾을 수 없습니다.', 'not-found');
           proposal.status = 'dismissed'; proposal.updatedAt = new Date().toISOString();
         });
         break;
@@ -493,7 +493,7 @@ export class SkillService {
         void this.advisor.backfill(days).catch(() => {});
         break;
       }
-      default: throw new SkillError('알 수 없는 스킬 작업입니다.', 404);
+      default: throw new SkillError('알 수 없는 스킬 작업입니다.', 'not-found');
     }
   }
 
@@ -558,7 +558,7 @@ export class SkillService {
     }));
     const owner = input.guidance === true ? (await this.guidance()).owner : undefined;
     const bundle: SkillBundle = { format: SKILL_BUNDLE_FORMAT, version: 1, exportedAt: new Date().toISOString(), from: hostname(), ...(owner ? { guidance: owner } : {}), skills };
-    if (Buffer.byteLength(JSON.stringify(bundle)) > MAX_SKILL_BUNDLE_BYTES) throw new SkillError('백업이 20MB를 넘습니다. 스킬을 나눠서 내보내세요.', 413);
+    if (Buffer.byteLength(JSON.stringify(bundle)) > MAX_SKILL_BUNDLE_BYTES) throw new SkillError('백업이 20MB를 넘습니다. 스킬을 나눠서 내보내세요.', 'too-large');
     return bundle;
   }
 
@@ -571,7 +571,7 @@ export class SkillService {
       // Missing is no guidance; one that cannot be read fails the backup rather than record it as empty (a restore would clear it).
       const guidance = await readFile(this.guidanceFile(), 'utf8').catch(error => {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '';
-        throw new SkillError(`지침 파일을 읽지 못해 백업하지 않았습니다: ${error instanceof Error ? error.message : String(error)}`, 500);
+        throw new SkillError(`지침 파일을 읽지 못해 백업하지 않았습니다: ${error instanceof Error ? error.message : String(error)}`, 'internal');
       });
       return { bundle, guidance, settings: { ...this.state.get().settings } };
     });
@@ -688,7 +688,7 @@ export class SkillService {
       } catch (error) { failures.push(`${item.name}: ${error instanceof Error ? error.message : String(error)}`); }
     }
     // The guidance is taken only when every chosen skill came in, so trying again never adds it twice.
-    if (failures.length) throw new SkillError(`가져오지 못한 스킬이 있습니다. 지침은 가져오지 않았습니다. ${failures.join(' / ')}`, 409);
+    if (failures.length) throw new SkillError(`가져오지 못한 스킬이 있습니다. 지침은 가져오지 않았습니다. ${failures.join(' / ')}`, 'conflict');
     const guidance = bundle.guidance?.trim();
     if (guidance && (body.guidance === 'replace' || body.guidance === 'append')) {
       await this.guidanceChange(async current => body.guidance === 'append' && current.owner.trim() ? `${current.owner.trim()}\n\n${guidance}` : guidance);

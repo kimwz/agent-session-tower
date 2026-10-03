@@ -49,8 +49,8 @@ test('Slack connection stays private, admits only personal mentions, and pauses 
   await service.mutate('disconnect', {});
   assert.equal((await readFile(join(stateDir, 'slack-connection.json'), 'utf8')).includes('xoxp'), false);
   assert.equal(service.overview().connected, false);
-  await assert.rejects(service.mutate('rules', { rules: [{}] }), { statusCode: 400 });
-  await assert.rejects(service.mutate('settings', { enabled: true, extra: true }), { statusCode: 400 });
+  await assert.rejects(service.mutate('rules', { rules: [{}] }), { kind: 'invalid' });
+  await assert.rejects(service.mutate('settings', { enabled: true, extra: true }), { kind: 'invalid' });
 });
 
 test('self-mention testing is opt-in, persists, and keeps bot, edit, and escaped reply filters', async t => {
@@ -73,7 +73,7 @@ test('self-mention testing is opt-in, persists, and keeps bot, edit, and escaped
   await send('default-off');
   assert.equal(service.overview().events.length, 0);
   for (const body of [{}, { allowSelfMentions: 'true' }, { enabled: null }, { allowSelfMentions: true, unexpected: true }]) {
-    await assert.rejects(service.mutate('settings', body), { statusCode: 400 });
+    await assert.rejects(service.mutate('settings', body), { kind: 'invalid' });
   }
   await service.mutate('settings', { allowSelfMentions: true });
   assert.equal(service.overview().enabled, true, 'partial settings preserve monitoring');
@@ -307,7 +307,7 @@ test('the working reaction is a saved setting that marks new mentions at once on
   await service.start();
   await service.mutate('connect', { appToken: 'xapp-test-1234567890', userToken: 'xoxp-test-1234567890' });
   assert.equal(service.overview().workingReaction, undefined, 'off by default');
-  for (const workingReaction of ['bad name', 7, ':'.repeat(3)]) await assert.rejects(service.mutate('settings', { workingReaction }), { statusCode: 400 });
+  for (const workingReaction of ['bad name', 7, ':'.repeat(3)]) await assert.rejects(service.mutate('settings', { workingReaction }), { kind: 'invalid' });
   await service.mutate('settings', { enabled: true, workingReaction: ':loading:' });
   assert.equal(service.overview().workingReaction, 'loading');
   await socket!.onEvent({ team_id: 'T1', event_id: 'E1', event: { type: 'message', channel: 'C1', user: 'U2', ts: '100.001', text: '<@U1> deploy dev please' } });

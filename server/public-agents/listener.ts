@@ -5,6 +5,7 @@ import { PUBLIC_SLUG, PublicListenerSettingsSchema, type PublicListenerSettings,
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { canonicalIp } from '../auth/store.js';
 import { PAGE_CSS, PAGE_HTML, PAGE_JS } from './page.js';
+import { TowerError, statusOf } from '../../shared/errors.js';
 
 export interface PublicVisitBackend {
   publicVisit(action: string, slug: string, input: { token?: string; ip: string; password?: unknown; text?: unknown }): Promise<{ state: PublicVisitorState; token?: string }>;
@@ -48,8 +49,8 @@ export class PublicListener {
 
   async configure(value: unknown): Promise<PublicListenerStatus> {
     const parsed = PublicListenerSettingsSchema.safeParse(value);
-    if (!parsed.success) throw Object.assign(new Error(`공개 페이지 설정이 올바르지 않습니다: ${parsed.error.issues.map(issue => issue.message).join('; ')}`), { statusCode: 400 });
-    if (parsed.data.port && this.options.reservedPorts?.().includes(parsed.data.port)) throw Object.assign(new Error('Tower가 이미 쓰는 포트입니다. 다른 포트를 고르세요.'), { statusCode: 400 });
+    if (!parsed.success) throw new TowerError('invalid', `공개 페이지 설정이 올바르지 않습니다: ${parsed.error.issues.map(issue => issue.message).join('; ')}`);
+    if (parsed.data.port && this.options.reservedPorts?.().includes(parsed.data.port)) throw new TowerError('invalid', 'Tower가 이미 쓰는 포트입니다. 다른 포트를 고르세요.');
     await writePrivateJson(this.file, JSON.stringify(parsed.data));
     this.settings = parsed.data;
     await this.bind();
@@ -145,7 +146,7 @@ export class PublicListener {
     } catch (error) {
       // Only the service's own codes reach visitors; anything else is a plain "unavailable".
       const message = error instanceof Error ? error.message : '';
-      const status = (error as { statusCode?: number }).statusCode;
+      const status = statusOf(error);
       return json(CODE.test(message) && status && status >= 400 && status < 500 ? status : 503, { error: CODE.test(message) && status && status < 500 ? message : 'unavailable' });
     }
   }

@@ -76,7 +76,7 @@ test('more than 50 valid trigger secrets from a restore are all kept', async t =
   assert.equal(store.get('backup-7')?.value, 'Bearer backup-7');
   assert.equal(store.problem, undefined);
   assert.deepEqual(await asideNames(path), []);
-  await assert.rejects(store.create({ name: 'One more', origin: 'https://status.example.com', value: 'Bearer more' }, Date.now()), { statusCode: 409 });
+  await assert.rejects(store.create({ name: 'One more', origin: 'https://status.example.com', value: 'Bearer more' }, Date.now()), { kind: 'conflict' });
 
   const before = await readFile(path, 'utf8');
   const vault = new SecretService({ stateDir: dir });
@@ -96,8 +96,8 @@ test('trigger secrets that cannot be moved aside are never written over', async 
   await store.load();
   blocked.release();
   const locked = 'Trigger secrets could not be read or moved aside; nothing is saved until Tower restarts.';
-  await assert.rejects(store.create({ name: 'New', origin: 'https://status.example.com', value: 'Bearer new' }, Date.now()), { statusCode: 503, message: locked });
-  await assert.rejects(store.remove('a'), { statusCode: 503, message: locked });
+  await assert.rejects(store.create({ name: 'New', origin: 'https://status.example.com', value: 'Bearer new' }, Date.now()), { kind: 'unavailable', message: locked });
+  await assert.rejects(store.remove('a'), { kind: 'unavailable', message: locked });
   assert.equal(store.get('a'), undefined);
   assert.equal(store.problem, locked);
   assert.equal(await readFile(path, 'utf8'), '{}');

@@ -19,19 +19,19 @@ export function onceCount(state: EngineState): number {
 
 /** Room for one more definition: active ones within the owner's limit (unless it comes archived), all of them within 200 (unless unarchiving). */
 export function assertRoom(state: EngineState, unarchive = false, archived = false): void {
-  if (!archived && activeCount(state) >= state.settings.maxTriggers) throw failure(`At most ${state.settings.maxTriggers} active trigger definitions can exist. Archive one first.`, 409);
-  if (!unarchive && state.triggers.length >= MAX_RETAINED_TRIGGERS) throw failure(`At most ${MAX_RETAINED_TRIGGERS} definitions can be retained. Delete an archived definition; its run history is kept.`, 409);
+  if (!archived && activeCount(state) >= state.settings.maxTriggers) throw failure(`At most ${state.settings.maxTriggers} active trigger definitions can exist. Archive one first.`, 'conflict');
+  if (!unarchive && state.triggers.length >= MAX_RETAINED_TRIGGERS) throw failure(`At most ${MAX_RETAINED_TRIGGERS} definitions can be retained. Delete an archived definition; its run history is kept.`, 'conflict');
 }
 
 /** Room for one more once reservation; a definition that already is one (`id`), or one consumed, takes no new record. */
 export function assertOnceRoom(state: EngineState, input: TriggerInput, id?: string): void {
   if (input.source.schedule.type === 'once' && (!id || !state.triggers.some(item => item.id === id && item.source.schedule.type === 'once'))
-    && !state.onceConsumed[id ?? ''] && onceCount(state) >= MAX_ONCE_RESERVATIONS) throw failure(`Once reservation records are full (${onceCount(state)}/${MAX_ONCE_RESERVATIONS}). Consumption records are retained and cannot be reset by deletion.`, 409);
+    && !state.onceConsumed[id ?? ''] && onceCount(state) >= MAX_ONCE_RESERVATIONS) throw failure(`Once reservation records are full (${onceCount(state)}/${MAX_ONCE_RESERVATIONS}). Consumption records are retained and cannot be reset by deletion.`, 'conflict');
 }
 
 /** A new or re-enabled once reservation is for a future instant. */
 export function assertFuture(input: TriggerInput, now: () => number): void {
-  if (input.source.schedule.type === 'once' && Date.parse(input.source.schedule.at) <= now()) throw failure('Choose a future instant for a new or re-enabled once reservation.', 400);
+  if (input.source.schedule.type === 'once' && Date.parse(input.source.schedule.at) <= now()) throw failure('Choose a future instant for a new or re-enabled once reservation.', 'invalid');
 }
 
 /** Records a reservation as consumed (once, with the event that consumed it) and archives its definition. */
@@ -85,5 +85,5 @@ export function mergeConsumed(state: EngineState, incoming: Record<string, OnceC
 
 /** The final say on a restored state, checked on the state about to be saved. */
 export function admitCapacity(state: EngineState): void {
-  if (state.triggers.length > MAX_RETAINED_TRIGGERS || activeCount(state) > state.settings.maxTriggers || onceCount(state) > MAX_ONCE_RESERVATIONS) throw failure('The restored trigger state exceeds the supported capacity. Existing records were preserved.', 409);
+  if (state.triggers.length > MAX_RETAINED_TRIGGERS || activeCount(state) > state.settings.maxTriggers || onceCount(state) > MAX_ONCE_RESERVATIONS) throw failure('The restored trigger state exceeds the supported capacity. Existing records were preserved.', 'conflict');
 }

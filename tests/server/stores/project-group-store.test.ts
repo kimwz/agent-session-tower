@@ -8,6 +8,7 @@ import { normalizeProjectGroupPatch, ProjectGroupStore } from '../../../server/s
 import { blockRename, temporaryFiles } from '../../helpers/private-writes.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import type { Session } from '../../../shared/types.js';
+import { statusOf } from '../../../shared/errors.js';
 
 test('project labels and pins survive restart privately without changing cwd identity or native history', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'monitor-groups-'));
@@ -105,7 +106,7 @@ test('a failed group save preserves memory and disk and does not poison later pa
   const store = new ProjectGroupStore(stateDir); await store.start();
   await store.set({ cwd: '/project', title: 'Committed' });
   await rename(stateDir, savedDir); await writeFile(stateDir, 'Prevent writes');
-  await assert.rejects(store.set({ cwd: '/project', pinned: true }), { statusCode: 503 });
+  await assert.rejects(store.set({ cwd: '/project', pinned: true }), { kind: 'unavailable' });
   await store.flush();
   assert.deepEqual(store.list(), [{ cwd: '/project', title: 'Committed', pinned: false }]);
   assert.deepEqual(JSON.parse(await readFile(join(savedDir, 'project-groups.json'), 'utf8')), store.list());
@@ -126,7 +127,7 @@ test('group patches validate exact booleans and title limits while preserving ab
     ...[undefined, null, 0, 1, 'true', [], {}].map(pinned => ({ cwd: '/valid', pinned })),
     ...[undefined, null, 0, 1, 'true', [], {}].map(hidden => ({ cwd: '/valid', hidden })),
     ...[undefined, null, 42, [], {}, 'x'.repeat(121), '😀'.repeat(61)].map(title => ({ cwd: '/valid', title })),
-  ]) assert.throws(() => normalizeProjectGroupPatch(invalid), { statusCode: 400 });
+  ]) assert.throws(() => normalizeProjectGroupPatch(invalid), { kind: 'invalid' });
 });
 
 test('group startup rejects symlink metadata and invalid saved documents', async t => {
@@ -222,9 +223,9 @@ test('writes exact bytes and failure message', async t => {
   assert.equal(await readFile(path, 'utf8'), `${JSON.stringify(restored)}\n`);
   assert.deepEqual(await temporaryFiles(dir), []);
   const restore = await blockRename(path);
-  const error = await store.set({ cwd: '/project', pinned: true }).then(() => undefined, (caught: unknown) => caught as Error & { statusCode?: number });
+  const error = await store.set({ cwd: '/project', pinned: true }).then(() => undefined, (caught: unknown) => caught as Error);
   assert.match(String(error?.message), /^폴더 그룹을 저장하지 못했습니다: /);
-  assert.equal(error?.statusCode, 503);
+  assert.equal(statusOf(error), 503);
   assert.deepEqual(await temporaryFiles(dir), []);
   await restore();
   assert.equal(await readFile(path, 'utf8'), `${JSON.stringify(restored)}\n`);

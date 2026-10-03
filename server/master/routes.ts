@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readJson } from '../http/requests.js';
 import type { MasterClient } from './client.js';
 import type { VoiceTurnEnd } from './voice-turn-end.js';
+import { statusOf } from '../../shared/errors.js';
 
 const json = (res: ServerResponse, status: number, body: unknown) => {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -18,8 +19,8 @@ export function masterRoutes(client: MasterClient, options: { turnEnd?: VoiceTur
     const call = async (method: string, args: Record<string, unknown> = {}) => {
       try { return json(res, 200, await client.call(method, args)); }
       catch (error) {
-        const value = error as { message?: string; statusCode?: number };
-        return json(res, value.statusCode && value.statusCode >= 400 && value.statusCode < 600 ? value.statusCode : 503, { error: value.message ?? '마스터를 사용할 수 없습니다.' });
+        const status = statusOf(error);
+        return json(res, status && status >= 400 && status < 600 ? status : 503, { error: (error as { message?: string }).message ?? '마스터를 사용할 수 없습니다.' });
       }
     };
     if (req.method === 'GET' && path === '/api/master') { await call('overview'); return true; }

@@ -17,6 +17,7 @@ import type { TriggerOverview } from '../../shared/triggers.js';
 import { APP_VERSION } from '../../shared/app-identity.js';
 import { newerVersion } from '../link/service.js';
 import type { SkillBackup } from '../skills/backup.js';
+import { TowerError, fromStatus, statusOf, type Disposition } from '../../shared/errors.js';
 
 interface Options { stateDir: string; workerEntry?: string; startupTimeoutMs?: number; pollMs?: number; version?: string;
   /** How long a handed-off worker's successor may stay silent before this web starts a worker itself. */
@@ -140,8 +141,8 @@ export class DurableRunManager extends EventEmitter {
   async forceUpdate(deadlineMs = FORCE_UPDATE_DEADLINE_MS): Promise<{ deadline: string }> {
     const own = this.options.version ?? APP_VERSION;
     const worker = this.snapshot?.version;
-    if (!this.snapshot || !worker || worker === own || newerVersion(worker, own)) throw Object.assign(new Error('The execution worker already runs this version.'), { statusCode: 409 });
-    if (!this.supports('forceUpdate')) throw Object.assign(new Error('This execution worker predates updating on request; it switches at its next quiet moment.'), { statusCode: 409 });
+    if (!this.snapshot || !worker || worker === own || newerVersion(worker, own)) throw new TowerError('conflict', 'The execution worker already runs this version.');
+    if (!this.supports('forceUpdate')) throw new TowerError('conflict', 'This execution worker predates updating on request; it switches at its next quiet moment.');
     // While a service update is still being verified, the web may yet go back to the version the worker runs.
     await this.refuseWhileHeld('Tower is still verifying this update. Try again in a few minutes.');
     return await this.call('forceHandoff', [this.workerCommand(), { deadlineMs }]) as { deadline: string };
@@ -153,7 +154,7 @@ export class DurableRunManager extends EventEmitter {
   private async poll(): Promise<void> {
     try { await this.call('snapshot'); this.unreachableSince = undefined; this.recovery = undefined; await this.releaseHandoff(); return; }
     catch (error) {
-      if ((error as { incompatible?: boolean }).incompatible || (error as { statusCode?: number }).statusCode !== 503) return;
+      if ((error as { incompatible?: boolean }).incompatible || statusOf(error) !== 503) return;
     }
     if (!this.recovery) {
       // A worker that handed off started its successor. If that successor never answers, start one here.
@@ -184,8 +185,8 @@ export class DurableRunManager extends EventEmitter {
   private async refuseWhileHeld(message: string): Promise<void> {
     const { held, error } = await this.holdState();
     if (!held) return;
-    throw Object.assign(new Error(error === undefined ? message
-      : `Tower could not check whether an update is being verified (${error}). The worker is not handed over until it can be checked; try again later.`), { statusCode: 409 });
+    throw new TowerError('conflict', error === undefined ? message
+      : `Tower could not check whether an update is being verified (${error}). The worker is not handed over until it can be checked; try again later.`);
   }
 
   private async handoffFrom(instance: string) {
@@ -213,14 +214,14 @@ export class DurableRunManager extends EventEmitter {
    */
   private requireOrigins(internal: Pick<RunAdmission, 'origin' | 'callerCapability'>): void {
     if (internal.callerCapability && !this.supports('delegation')) {
-      throw Object.assign(new Error('The execution worker cannot yet track the calling turn. Nothing was submitted; retry after its safe handoff.'), { statusCode: 503, disposition: 'not-admitted' });
+      throw new TowerError('unavailable', 'The execution worker cannot yet track the calling turn. Nothing was submitted; retry after its safe handoff.', { disposition: 'not-admitted' });
     }
     if (internal.origin && internal.origin.kind !== 'owner' && !this.supports('origins')) {
-      throw Object.assign(new Error('The execution worker is outdated and cannot keep who started this work. It was not submitted; retry after the worker updates.'), { statusCode: 409 });
+      throw new TowerError('conflict', 'The execution worker is outdated and cannot keep who started this work. It was not submitted; retry after the worker updates.');
     }
     // An older worker would drop the controller and treat remote work as local work, folders excluded from sharing included.
     if (internal.origin?.controllerId && !this.supports('remoteOrigins')) {
-      throw Object.assign(new Error('The execution worker on this computer has not updated yet, so it cannot accept remote work. Nothing was submitted.'), { statusCode: 503, disposition: 'not-admitted' });
+      throw new TowerError('unavailable', 'The execution worker on this computer has not updated yet, so it cannot accept remote work. Nothing was submitted.', { disposition: 'not-admitted' });
     }
   }
   /** Coordinator conversations the worker reports; undefined while the attached worker cannot say. */
@@ -230,12 +231,12 @@ export class DurableRunManager extends EventEmitter {
   /** An older worker would run the master on whatever sign-in its CLI has, an API key included, so it is never given the master. */
   private requireSubscription(cwd: string | undefined): void {
     if (cwd && !this.supports('subscriptionOnly') && subscriptionOnly(this.paths?.stateDir ?? this.options.stateDir, cwd)) {
-      throw Object.assign(new Error('실행 워커가 아직 새 버전으로 바뀌지 않아 마스터에게 보내지 않았습니다. 진행 중인 작업이 끝나면 바뀝니다.'), { statusCode: 503, disposition: 'not-admitted' });
+      throw new TowerError('unavailable', '실행 워커가 아직 새 버전으로 바뀌지 않아 마스터에게 보내지 않았습니다. 진행 중인 작업이 끝나면 바뀝니다.', { disposition: 'not-admitted' });
     }
   }
   private requireModelRole(input: unknown): void {
     if (input && typeof input === 'object' && 'modelRole' in input && !this.supports('masterWorker')) {
-      throw Object.assign(new Error('The execution worker has not updated to support master.worker. Nothing was submitted.'), { statusCode: 503, disposition: 'not-admitted' });
+      throw new TowerError('unavailable', 'The execution worker has not updated to support master.worker. Nothing was submitted.', { disposition: 'not-admitted' });
     }
   }
   async create(input: NewSessionInput, internal: RunAdmission = {}): Promise<{ session: Session; run: Run }> {
@@ -254,7 +255,7 @@ export class DurableRunManager extends EventEmitter {
   /** An older worker would ignore `targetRunId` and insert into whatever turn runs, so it is never sent one. */
   async steer(id: string, options: { targetRunId?: string } = {}): Promise<Run> {
     if (options.targetRunId === undefined) return this.call('steer', [id]) as Promise<Run>;
-    if (!this.supports('steerTargets')) throw Object.assign(new Error('The execution worker has not updated yet, so it cannot insert into a chosen turn.'), { statusCode: 503, disposition: 'not-admitted' });
+    if (!this.supports('steerTargets')) throw new TowerError('unavailable', 'The execution worker has not updated yet, so it cannot insert into a chosen turn.', { disposition: 'not-admitted' });
     return this.call('steer', [id, { targetRunId: options.targetRunId }]) as Promise<Run>;
   }
   async cancel(id: string): Promise<void> { await this.call('cancel', [id]); }
@@ -266,39 +267,39 @@ export class DurableRunManager extends EventEmitter {
   /** Tower operations run in the worker; an outdated worker is told apart from a real error. */
   async api(operation: string, input: unknown, internal?: Pick<RunAdmission, 'origin' | 'requestId' | 'callerCapability'>): Promise<unknown> {
     if (operation === 'autoPrompt.submit') this.requireModelRole(input);
-    if (!this.supports('triggers')) throw Object.assign(new Error('The execution worker has not updated yet. Triggers become available once it hands over to the new version.'), { statusCode: 503 });
-    if (operation.startsWith('models.') && !this.supports('models')) throw Object.assign(new Error('The execution worker has not updated yet. Model settings become available once it hands over to the new version.'), { statusCode: 503, disposition: 'not-admitted' });
+    if (!this.supports('triggers')) throw new TowerError('unavailable', 'The execution worker has not updated yet. Triggers become available once it hands over to the new version.');
+    if (operation.startsWith('models.') && !this.supports('models')) throw new TowerError('unavailable', 'The execution worker has not updated yet. Model settings become available once it hands over to the new version.', { disposition: 'not-admitted' });
     this.requireOrigins(internal ?? {});
     if (!internal?.origin?.controllerId) return this.call('api', [operation, input, ...(internal?.callerCapability ? [{ callerCapability: internal.callerCapability }] : [])]);
     // An older worker would answer a controlling computer as the owner here, folders kept from sharing included.
-    if (!this.supports('remoteTriggers')) throw Object.assign(new Error('The execution worker on this computer has not updated yet, so it cannot take remote requests for this. Nothing was done.'), { statusCode: 503, disposition: 'not-admitted' });
+    if (!this.supports('remoteTriggers')) throw new TowerError('unavailable', 'The execution worker on this computer has not updated yet, so it cannot take remote requests for this. Nothing was done.', { disposition: 'not-admitted' });
     return this.call('api', [operation, input, { origin: internal.origin, ...(internal.requestId ? { requestId: internal.requestId } : {}), ...(internal.callerCapability ? { callerCapability: internal.callerCapability } : {}) }]);
   }
   async slackOverview(): Promise<SlackPublicStatus> { return this.call('slackOverview', []) as Promise<SlackPublicStatus>; }
   async secretCall(operation: string, args: unknown[] = []): Promise<unknown> {
-    if (!this.supports('secrets')) throw Object.assign(new Error('실행 워커가 아직 새 버전으로 바뀌지 않았습니다. 진행 중인 작업이 끝나면 시크릿을 사용할 수 있습니다.'), { statusCode: 503 });
+    if (!this.supports('secrets')) throw new TowerError('unavailable', '실행 워커가 아직 새 버전으로 바뀌지 않았습니다. 진행 중인 작업이 끝나면 시크릿을 사용할 수 있습니다.');
     return this.call('secretCall', [operation, ...args]);
   }
   async slackMutate(action: string, body: Record<string, unknown>): Promise<SlackPublicStatus> { return this.call('slackMutate', [action, body]) as Promise<SlackPublicStatus>; }
   /** Public agents run in the worker; an older worker has none yet. */
   private requirePublicAgents(): void {
-    if (!this.supports('publicAgents')) throw Object.assign(new Error('The execution worker has not updated yet. Public agents become available once it hands over to the new version.'), { statusCode: 503 });
+    if (!this.supports('publicAgents')) throw new TowerError('unavailable', 'The execution worker has not updated yet. Public agents become available once it hands over to the new version.');
   }
   async publicAgentsOverview(): Promise<Omit<PublicAgentOverview, 'listener'>> { this.requirePublicAgents(); return this.call('publicAgentsOverview', []) as Promise<Omit<PublicAgentOverview, 'listener'>>; }
   async publicAgentsConversation(agentId: string, conversationId: string): Promise<PublicConversationView> { this.requirePublicAgents(); return this.call('publicAgentsConversation', [agentId, conversationId]) as Promise<PublicConversationView>; }
   async publicAgentsMutate(action: string, body: Record<string, unknown>): Promise<Omit<PublicAgentOverview, 'listener'>> { this.requirePublicAgents(); return this.call('publicAgentsMutate', [action, body]) as Promise<Omit<PublicAgentOverview, 'listener'>>; }
   /** Skills live in the worker; an older worker has none yet. */
   async skills(operation: 'skillsOverview' | 'skillsDetail' | 'skillsSummary' | 'skillsMutate' | 'skillsExport' | 'skillsImportPlan', args: unknown[]): Promise<unknown> {
-    if (!this.supports(skillsCapability(operation, args))) throw Object.assign(new Error('실행 워커가 아직 새 버전으로 바뀌지 않았습니다. 진행 중인 작업이 끝나 워커가 바뀌면 스킬을 쓸 수 있습니다.'), { statusCode: 503 });
+    if (!this.supports(skillsCapability(operation, args))) throw new TowerError('unavailable', '실행 워커가 아직 새 버전으로 바뀌지 않았습니다. 진행 중인 작업이 끝나 워커가 바뀌면 스킬을 쓸 수 있습니다.');
     return this.call(operation, args);
   }
   /** A full backup's share of the worker: every skill kept in Tower with the owner's guidance. */
   async skillsBackup(): Promise<SkillBackup> {
-    if (!this.supports('backup')) throw Object.assign(new Error('실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 다시 시도하세요.'), { statusCode: 503 });
+    if (!this.supports('backup')) throw new TowerError('unavailable', '실행 워커가 아직 새 버전으로 바뀌지 않아 백업을 만들 수 없습니다. 진행 중인 작업이 끝나 워커가 바뀌면 다시 시도하세요.');
     return this.call('skillsBackup', []) as Promise<SkillBackup>;
   }
   async publicVisit(action: string, slug: string, input: { token?: string; ip: string; password?: unknown; text?: unknown }): Promise<{ state: PublicVisitorState; token?: string }> {
-    if (!this.supports('publicAgents')) throw Object.assign(new Error('not_found'), { statusCode: 404 });
+    if (!this.supports('publicAgents')) throw new TowerError('not-found', 'not_found');
     return this.call('publicVisit', [action, slug, input]) as Promise<{ state: PublicVisitorState; token?: string }>;
   }
   getAutoPrompt(id: string): AutoPromptJob | undefined { return this.autoPromptList().find(job => job.id === id.toLowerCase()); }
@@ -307,7 +308,7 @@ export class DurableRunManager extends EventEmitter {
     this.requireOrigins(internal);
     // An older worker would ignore a target it does not know and route the request somewhere else.
     if ((input.targetSessionId !== undefined && !this.supports('autoPromptTargets')) || (input.sessionMode !== undefined && !this.supports('origins'))) {
-      throw Object.assign(new Error('실행 워커가 아직 업데이트되지 않아 추천한 곳으로 바로 보낼 수 없습니다. 추천을 끄고 보내거나, 진행 중인 작업이 끝나 워커가 교체된 뒤 다시 보내세요.'), { statusCode: 503, disposition: 'not-admitted' });
+      throw new TowerError('unavailable', '실행 워커가 아직 업데이트되지 않아 추천한 곳으로 바로 보낼 수 없습니다. 추천을 끄고 보내거나, 진행 중인 작업이 끝나 워커가 교체된 뒤 다시 보내세요.', { disposition: 'not-admitted' });
     }
     this.requireSubscription(input.cwd);
     if (input.targetSessionId) this.requireSubscription(this.getSession(input.targetSessionId)?.cwd);
@@ -326,11 +327,11 @@ export class DurableRunManager extends EventEmitter {
   }
 
   private async credential(): Promise<string> {
-    if (this.closed || !this.paths) throw Object.assign(new Error('Runner connection is closed.'), { statusCode: 503 });
+    if (this.closed || !this.paths) throw new TowerError('unavailable', 'Runner connection is closed.');
     let file;
     try { file = await open(this.paths.token, constants.O_RDONLY | constants.O_NOFOLLOW); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw Object.assign(new Error('The execution worker is not running.'), { statusCode: 503, disposition: 'not-admitted' });
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new TowerError('unavailable', 'The execution worker is not running.', { disposition: 'not-admitted' });
       throw error;
     }
     let token: string;
@@ -350,7 +351,7 @@ export class DurableRunManager extends EventEmitter {
         authorization: `Bearer ${token}`, 'x-runner-instance': this.snapshot!.instance, ...(cursor ? { 'last-event-id': cursor } : {}),
       } }, upstream => {
         if (upstream.statusCode !== 200) {
-          upstream.resume(); reject(Object.assign(new Error('터미널에 연결하지 못했습니다.'), { statusCode: upstream.statusCode || 502 })); return;
+          upstream.resume(); reject(fromStatus(upstream.statusCode || 502, '터미널에 연결하지 못했습니다.')); return;
         }
         if (response.destroyed || response.writableEnded) { upstream.destroy(); resolve(); return; }
         response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
@@ -385,7 +386,7 @@ export class DurableRunManager extends EventEmitter {
       req.on('error', error => reject(Object.assign(error, { statusCode: 503, disposition: (error as { disposition?: string }).disposition ?? (sent ? 'uncertain' : 'not-admitted') })));
       req.end(body);
     });
-    const incompatible = () => Object.assign(new Error('Runner identity changed or is incompatible. Restart Tower to reconnect; requests were not retried.'), { incompatible: true, statusCode: 503 });
+    const incompatible = () => Object.assign(new TowerError('unavailable', 'Runner identity changed or is incompatible. Restart Tower to reconnect; requests were not retried.'), { incompatible: true });
     if (reply.protocol !== RUNNER_PROTOCOL || reply.stateDir !== this.paths!.stateDir) throw incompatible();
     let adopted = false;
     if (this.snapshot && reply.instance !== this.snapshot.instance) {
@@ -400,8 +401,8 @@ export class DurableRunManager extends EventEmitter {
       this.emit('change');
     }
     // The successor refused a request addressed to its predecessor; it never ran.
-    if (adopted && reply.error?.statusCode === 409) throw Object.assign(new Error('Tower just updated its execution worker. The request was not submitted; send it again.'), { statusCode: 503, disposition: 'not-admitted' });
-    if (reply.error) throw Object.assign(new Error(reply.error.message), { statusCode: reply.error.statusCode, ...(reply.error.disposition ? { disposition: reply.error.disposition } : {}) });
+    if (adopted && reply.error?.statusCode === 409) throw new TowerError('unavailable', 'Tower just updated its execution worker. The request was not submitted; send it again.', { disposition: 'not-admitted' });
+    if (reply.error) throw fromStatus(reply.error.statusCode, reply.error.message, reply.error.disposition ? { disposition: reply.error.disposition as Disposition } : {});
     return reply.result;
   }
 }

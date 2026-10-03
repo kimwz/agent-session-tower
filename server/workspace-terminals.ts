@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import type { ServerResponse } from 'node:http';
 import { loadWorkspacePty } from './workspace-pty-runtime.js';
+import { TowerError, isTyped, type ErrorKind } from '../shared/errors.js';
 
 interface Disposable { dispose(): void }
 export interface WorkspacePty {
@@ -50,7 +51,7 @@ interface Terminal {
 const BUFFER_LIMIT = 256 * 1024;
 /** Windows on this computer and on every controller can watch one shell together. */
 const MAX_STREAMS = 6;
-function failure(message: string, statusCode = 400): Error { return Object.assign(new Error(message), { statusCode }); }
+function failure(message: string, kind: ErrorKind = 'invalid'): Error { return new TowerError(kind, message); }
 function frame(event: string, data: unknown, id?: number): string { return `${id === undefined ? '' : `id: ${id}\n`}event: ${event}\ndata: ${JSON.stringify(data)}\n\n`; }
 
 export function terminalSize(cols: unknown, rows: unknown): { cols: number; rows: number } {
@@ -80,7 +81,7 @@ export class WorkspaceTerminals {
   create(cwd: string, cols: unknown, rows: unknown, owner: TerminalOwner = { opener: 'local' }): Promise<{ id: string }> {
     if (!owner.requestId) return this.start(cwd, cols, rows, owner);
     const key = `${owner.opener}\u0000${owner.requestId}`;
-    if (this.closedRequests.has(key)) return Promise.reject(failure('이 요청으로 연 터미널은 이미 닫혔습니다. 새 터미널을 여세요.', 410));
+    if (this.closedRequests.has(key)) return Promise.reject(failure('이 요청으로 연 터미널은 이미 닫혔습니다. 새 터미널을 여세요.', 'gone'));
     const known = this.requests.get(key);
     if (known) return known;
     const started = this.start(cwd, cols, rows, owner);
@@ -95,8 +96,8 @@ export class WorkspaceTerminals {
 
   private async start(cwd: string, cols: unknown, rows: unknown, owner: TerminalOwner): Promise<{ id: string }> {
     const size = terminalSize(cols, rows);
-    if (this.disposed) throw failure('터미널 서버가 종료되었습니다.', 503);
-    if (this.terminals.size + this.pending >= (this.options.maxTerminals ?? 8)) throw failure('열려 있는 터미널이 너무 많습니다. 사용하지 않는 터미널을 닫거나, 폴더의 ‘열린 터미널’에서 남아 있는 터미널을 끝내세요.', 429);
+    if (this.disposed) throw failure('터미널 서버가 종료되었습니다.', 'unavailable');
+    if (this.terminals.size + this.pending >= (this.options.maxTerminals ?? 8)) throw failure('열려 있는 터미널이 너무 많습니다. 사용하지 않는 터미널을 닫거나, 폴더의 ‘열린 터미널’에서 남아 있는 터미널을 끝내세요.', 'rate-limited');
     this.pending++;
     try {
       const env = Object.fromEntries(Object.entries(this.options.env ?? process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
@@ -104,7 +105,7 @@ export class WorkspaceTerminals {
       const shell = windows ? 'powershell.exe' : env.SHELL && isAbsolute(env.SHELL) ? env.SHELL : '/bin/sh';
       const factory = this.options.spawnPty ?? (async (command, args, options) => (await loadWorkspacePty()).spawn(command, args, options));
       const pty = await factory(shell, windows ? [] : ['-l'], { ...size, cwd, name: 'xterm-256color', env: { ...env, TERM: 'xterm-256color' } });
-      if (this.disposed) { pty.kill(); throw failure('터미널 서버가 종료되었습니다.', 503); }
+      if (this.disposed) { pty.kill(); throw failure('터미널 서버가 종료되었습니다.', 'unavailable'); }
       const id = randomUUID();
       const terminal: Terminal = { cwd, opener: owner.opener, openedAt: new Date().toISOString(), ...(owner.requestId ? { request: `${owner.opener}\u0000${owner.requestId}` } : {}),
         pty, output: [], bytes: 0, sequence: 0, streams: new Set(), subscriptions: [], inputRate: { at: Date.now(), count: 0, bytes: 0 } };
@@ -117,8 +118,8 @@ export class WorkspaceTerminals {
       this.expire(id, terminal);
       return { id };
     } catch (error) {
-      if (error && typeof error === 'object' && 'statusCode' in error) throw error;
-      throw failure('터미널을 시작하지 못했습니다. 서버의 셸 설정을 확인하세요.', 502);
+      if (isTyped(error)) throw error;
+      throw failure('터미널을 시작하지 못했습니다. 서버의 셸 설정을 확인하세요.', 'upstream');
     } finally { this.pending--; }
   }
 
@@ -139,7 +140,7 @@ export class WorkspaceTerminals {
   attach(id: string, response: ServerResponse, lastEventId?: string): void {
     const terminal = this.get(id);
     if (lastEventId !== undefined && (!/^\d{1,12}$/.test(lastEventId) || Number(lastEventId) > terminal.sequence)) throw failure('터미널 출력 위치가 올바르지 않습니다.');
-    if (terminal.streams.size >= MAX_STREAMS) throw failure('터미널에 연결된 창이 너무 많습니다.', 429);
+    if (terminal.streams.size >= MAX_STREAMS) throw failure('터미널에 연결된 창이 너무 많습니다.', 'rate-limited');
     if (terminal.expiry) clearTimeout(terminal.expiry);
     response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     const stream: Stream = { response, blocked: false, queue: [], bytes: 0 };
@@ -206,19 +207,19 @@ export class WorkspaceTerminals {
 
   private get(id: string): Terminal {
     const terminal = this.terminals.get(id);
-    if (!terminal) throw failure('터미널을 찾을 수 없습니다. 새 터미널을 여세요.', 404);
+    if (!terminal) throw failure('터미널을 찾을 수 없습니다. 새 터미널을 여세요.', 'not-found');
     return terminal;
   }
   private active(id: string): Terminal {
     const terminal = this.get(id);
-    if (terminal.exitCode !== undefined) throw failure('종료된 터미널입니다. 새 터미널을 여세요.', 409);
+    if (terminal.exitCode !== undefined) throw failure('종료된 터미널입니다. 새 터미널을 여세요.', 'conflict');
     return terminal;
   }
   private rate(terminal: Terminal, bytes: number): void {
     const now = Date.now();
     if (now - terminal.inputRate.at >= 60_000) terminal.inputRate = { at: now, count: 0, bytes: 0 };
     terminal.inputRate.count++; terminal.inputRate.bytes += bytes;
-    if (terminal.inputRate.count > 12_000 || terminal.inputRate.bytes > 2 * 1024 * 1024) throw failure('터미널 입력이 너무 많습니다. 잠시 후 다시 시도하세요.', 429);
+    if (terminal.inputRate.count > 12_000 || terminal.inputRate.bytes > 2 * 1024 * 1024) throw failure('터미널 입력이 너무 많습니다. 잠시 후 다시 시도하세요.', 'rate-limited');
   }
   private expire(id: string, terminal: Terminal): void {
     if (terminal.expiry) clearTimeout(terminal.expiry);

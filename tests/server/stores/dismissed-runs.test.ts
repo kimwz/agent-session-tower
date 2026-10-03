@@ -11,6 +11,7 @@ import { projectSessionStates } from '../../../server/sessions/snapshot.js';
 import { RunManager } from '../../../server/runs/manager.js';
 import type { Run, Session, Snapshot } from '../../../shared/types.js';
 import { computeConversationRevision } from '../../../shared/conversation-revision.js';
+import { statusOf } from '../../../shared/errors.js';
 
 const session: Session = {
   id: 'codex:example', nativeId: 'example', provider: 'codex', title: 'Native conversation', cwd: '/tmp/project', project: 'project',
@@ -60,9 +61,9 @@ test('concurrent dismissals retain every id and rejection does not block subsequ
   const operations = runs.map(run => store.dismiss(run.id, run));
   await store.flush();
   await Promise.all(operations);
-  await assert.rejects(store.dismiss('unknown', undefined), { statusCode: 404 });
+  await assert.rejects(store.dismiss('unknown', undefined), { kind: 'not-found' });
   for (const status of ['running', 'queued', 'completed', 'cancelled'] as const) {
-    await assert.rejects(store.dismiss(status, { ...failed, id: status, status }), { statusCode: 409 });
+    await assert.rejects(store.dismiss(status, { ...failed, id: status, status }), { kind: 'conflict' });
   }
   await store.dismiss('last', { ...failed, id: 'last' });
   const reloaded = new DismissedRunStore(dir);
@@ -180,9 +181,9 @@ test('writes exact bytes and failure message', async t => {
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.deepEqual(await temporaryFiles(dir), []);
   const restore = await blockRename(path);
-  const error = await store.dismiss('other', { ...failed, id: 'other' }).then(() => undefined, (caught: unknown) => caught as Error & { statusCode?: number });
+  const error = await store.dismiss('other', { ...failed, id: 'other' }).then(() => undefined, (caught: unknown) => caught as Error);
   assert.match(String(error?.message), /^실패 기록을 지우지 못했습니다: /);
-  assert.equal(error?.statusCode, 503);
+  assert.equal(statusOf(error), 503);
   assert.deepEqual(await temporaryFiles(dir), []);
   await restore();
   assert.equal(await readFile(path, 'utf8'), `${JSON.stringify([failed.id])}\n`);

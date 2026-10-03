@@ -1,7 +1,8 @@
 import { Cron } from 'croner';
 import type { Schedule } from '../../shared/triggers.js';
+import { TowerError } from '../../shared/errors.js';
 
-const invalid = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
+const invalid = (message: string) => new TowerError('invalid', message);
 /** A slot this late is a missed run (sleep, downtime), not an on-time one. */
 export const LATE_AFTER_MS = 90_000;
 export const CATCH_UP_WINDOW_MS = 24 * 60 * 60 * 1000;

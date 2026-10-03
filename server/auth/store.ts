@@ -4,6 +4,7 @@ import { isIP } from 'node:net';
 import { join } from 'node:path';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import type { AuthOverview, BlockedIp, LoginAttempt } from '../../shared/auth.js';
+import { TowerError } from '../../shared/errors.js';
 
 const LIMIT = 5;
 const HISTORY = 1000;
@@ -86,7 +87,7 @@ export class AuthStore {
   username(): string | undefined { return this.credentials?.username; }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     if (!this.started || this.closed || this.persistenceError) return Promise.reject(new Error('Authentication store is not running.'));
-    if (this.pending >= 16) return Promise.reject(Object.assign(new Error('Too many authentication requests.'), { statusCode: 429 }));
+    if (this.pending >= 16) return Promise.reject(new TowerError('rate-limited', 'Too many authentication requests.'));
     this.pending++;
     const result = this.queue.then(() => {
       if (this.closed || this.persistenceError) throw new Error('Authentication store is not running.');
@@ -97,7 +98,7 @@ export class AuthStore {
   }
   async setCredentials(username: string, password: string): Promise<void> {
     username = username.trim();
-    if (!validUsername(username) || password.length < 12 || password.length > 256) throw Object.assign(new Error('Username must be 1–64 characters and password must be 12–256 characters.'), { statusCode: 400 });
+    if (!validUsername(username) || password.length < 12 || password.length > 256) throw new TowerError('invalid', 'Username must be 1–64 characters and password must be 12–256 characters.');
     return this.serial(async () => {
       const salt = randomBytes(32).toString('hex');
       const credentials: Credentials = { version: 1, username, algorithm: 'scrypt', salt, hash: (await derive(password, salt)).toString('hex'), N: KDF.N, r: KDF.r, p: KDF.p };

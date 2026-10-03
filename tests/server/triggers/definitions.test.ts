@@ -7,6 +7,7 @@ import test, { type TestContext } from 'node:test';
 import { TriggerService, type TriggerExecutor, type TriggerScope } from '../../../server/triggers/service.js';
 import type { Run } from '../../../shared/types.js';
 import type { TriggerActor, TriggerInput } from '../../../shared/triggers.js';
+import { statusOf } from '../../../shared/errors.js';
 
 const OWNER: TriggerActor = { kind: 'owner', via: 'ui' };
 const REMOTE: TriggerActor = { kind: 'owner', via: 'ui', controllerId: 'c'.repeat(32) };
@@ -43,7 +44,7 @@ const once = (project: string, at: string, values: Partial<TriggerInput> = {}) =
 
 /** What a refused call answers: its status and message. */
 async function refusal(call: Promise<unknown>): Promise<string> {
-  try { await call; return 'accepted'; } catch (error) { return `${(error as { statusCode?: number }).statusCode} ${(error as Error).message}`; }
+  try { await call; return 'accepted'; } catch (error) { return `${statusOf(error)} ${(error as Error).message}`; }
 }
 
 test('capacity, consumed and archived refusals answer as before', async t => {

@@ -60,7 +60,7 @@ test('a request refused before admission can be sent again with the same ID', as
   const handoff = async (): Promise<{ runId: string }> => { attempts++; throw Object.assign(new Error('Replacing the worker.'), { statusCode: 503, disposition: 'handoff' }); };
   await assert.rejects(ledger.once(CONTROLLER, 'enqueue', id, {}, handoff, record, () => undefined), /Replacing/);
   // Tower's own refusals come before anything is admitted, whatever their status: a missing CLI is fixed and sent again.
-  const missingCli = async (): Promise<{ runId: string }> => { attempts++; throw new RunError('Install the codex CLI and ensure it is in PATH before sending instructions.', 503); };
+  const missingCli = async (): Promise<{ runId: string }> => { attempts++; throw new RunError('Install the codex CLI and ensure it is in PATH before sending instructions.', 'unavailable'); };
   await assert.rejects(ledger.once(CONTROLLER, 'enqueue', id, {}, missingCli, record, () => undefined), /Install the codex CLI/);
   assert.deepEqual(await ledger.once(CONTROLLER, 'enqueue', id, {}, async () => ({ runId: 'run-1' }), record, () => undefined), { runId: 'run-1' });
   assert.equal(attempts, 3);
@@ -155,7 +155,7 @@ test('records saved before the issue time was kept still use the time inside the
 test('a refusal that came before anything ran tells the controller it is safe to send again', async t => {
   const f = await fixture(t);
   const ledger = await f.open();
-  await assert.rejects(ledger.once(CONTROLLER, 'enqueue', requestId(Date.now()), {}, async () => { throw new RunError('Install the codex CLI and ensure it is in PATH before sending instructions.', 503); }, record, () => undefined),
+  await assert.rejects(ledger.once(CONTROLLER, 'enqueue', requestId(Date.now()), {}, async () => { throw new RunError('Install the codex CLI and ensure it is in PATH before sending instructions.', 'unavailable'); }, record, () => undefined),
     (error: Error & { disposition?: string }) => error.disposition === 'not-admitted');
 });
 
@@ -176,6 +176,6 @@ test('whether a failed request may be sent again with its ID follows its status,
   assert.equal(await again(new Error('no status')), false);
   assert.equal(await again(plain({ statusCode: 503, disposition: 'not-admitted' })), true);
   assert.equal(await again(plain({ statusCode: 404, disposition: 'uncertain' })), false, 'uncertain always wins');
-  assert.equal(await again(new RunError('own refusal', 503)), true);
-  assert.equal(await again(Object.assign(new RunError('own but uncertain', 400), { disposition: 'uncertain' })), false);
+  assert.equal(await again(new RunError('own refusal', 'unavailable')), true);
+  assert.equal(await again(Object.assign(new RunError('own but uncertain', 'invalid'), { disposition: 'uncertain' })), false);
 });

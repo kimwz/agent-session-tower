@@ -344,7 +344,7 @@ test('the worker serves native conversation pages without the native file path o
   assert.equal(history.indexing, false);
   assert.deepEqual(await history.read(f.session.nativeId, 100, 50), { messages, hasMore: true, nextBefore: 42 });
   assert.deepEqual(calls, [[f.session.nativeId, 100, 50]]);
-  await assert.rejects(client.sessionHistory(''), { statusCode: 400 });
+  await assert.rejects(client.sessionHistory(''), { kind: 'invalid' });
   const token = await readFile(f.paths.token, 'utf8');
   const { instance } = JSON.parse((await rpc(f.host.socketPath, token, { protocol: RUNNER_PROTOCOL, method: 'snapshot', args: [] })).body) as { instance: string };
   const reply = JSON.parse((await rpc(f.host.socketPath, token, { protocol: RUNNER_PROTOCOL, method: 'sessionHistory', args: [f.session.nativeId, -1, 1.5], instance })).body);
@@ -379,7 +379,7 @@ test('a web process attached to a 1.12 worker reads conversations from its own i
   assert.equal(stopped, 1);
   assert.ok(!legacy.methods.includes('sessionHistory'), `sent: ${legacy.methods.join(', ')}`);
   // Why the capability check exists: the old worker rejects the operation outright.
-  await assert.rejects(client.sessionHistory(session.nativeId), { statusCode: 400, message: 'Unknown runner operation.' });
+  await assert.rejects(client.sessionHistory(session.nativeId), { kind: 'invalid', message: 'Unknown runner operation.' });
 });
 
 test('an outdated worker is only given the owner’s own requests, never work on anyone else’s behalf', async t => {
@@ -393,7 +393,7 @@ test('an outdated worker is only given the owner’s own requests, never work on
   await client.start();
   assert.equal(client.supports('origins'), false);
   const agent = { kind: 'agent' as const, runId: '12345678-1234-4234-8234-123456789abc' };
-  await assert.rejects(client.enqueue(session.id, '1번 보내주세요', {}, { origin: agent }), { statusCode: 409, message: /outdated/ });
+  await assert.rejects(client.enqueue(session.id, '1번 보내주세요', {}, { origin: agent }), { kind: 'conflict', message: /outdated/ });
   await assert.rejects(client.create({ provider: 'codex', cwd: directory, prompt: 'Agent task' }, { origin: agent }), /outdated/);
   await assert.rejects(client.submitAutoPrompt({ requestId: '12345678-1234-4234-8234-123456789abd', provider: 'codex', prompt: 'Agent task' }, { origin: agent }), /outdated/);
   const caller = { callerCapability: 'a'.repeat(64) };
@@ -496,7 +496,7 @@ test('updating on request stops the running turn at the deadline, hands off, and
 test('updating on request is refused while the worker already runs this version', async t => {
   const f = await fixture(); t.after(f.cleanup);
   const client = await f.connect();
-  await assert.rejects(client.forceUpdate(), { statusCode: 409 });
+  await assert.rejects(client.forceUpdate(), { kind: 'conflict' });
 });
 
 test('while an update of this computer is being tried, the new web does not take the worker over', async t => {
@@ -523,8 +523,8 @@ test('while an update is verified, a restore or an update on request is refused 
   const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0', handoffHeld: async () => true });
   try {
     await client.start();
-    await assert.rejects(client.restartWorker(), { statusCode: 409, message: /still verifying/ });
-    await assert.rejects(client.forceUpdate(), { statusCode: 409, message: /still verifying/ });
+    await assert.rejects(client.restartWorker(), { kind: 'conflict', message: /still verifying/ });
+    await assert.rejects(client.forceUpdate(), { kind: 'conflict', message: /still verifying/ });
   } finally { await client.close(); }
 });
 
@@ -569,8 +569,8 @@ test('with a live helper and a hold unreadable past 15 minutes, automatic handof
     await client.start();
     await new Promise(resolve => setTimeout(resolve, 1500));
     assert.equal(handoffs, 0);
-    await assert.rejects(client.restartWorker(), { statusCode: 409, message: /could not check/ });
-    await assert.rejects(client.forceUpdate(), { statusCode: 409, message: /could not check/ });
+    await assert.rejects(client.restartWorker(), { kind: 'conflict', message: /could not check/ });
+    await assert.rejects(client.forceUpdate(), { kind: 'conflict', message: /could not check/ });
     await client.close();
     client = web();
     await client.start();
@@ -624,7 +624,7 @@ test('requests that arrive while the worker hands off are refused, never half-ac
   const client = await f.connect();
   await client.requestHandoff(true);
   await until(() => entered);
-  await assert.rejects(client.enqueue(f.session.id, 'Arrives mid-handoff'), { statusCode: 503, disposition: 'handoff' });
+  await assert.rejects(client.enqueue(f.session.id, 'Arrives mid-handoff'), { kind: 'unavailable', disposition: 'handoff' });
   const token = await readFile(f.paths.token, 'utf8');
   const tool = JSON.parse((await rpc(f.paths.socket, token, { protocol: RUNNER_PROTOCOL, method: 'slackTool', args: ['workflow', 'slack_send', { text: 'hi' }] })).body);
   assert.equal(tool.error.disposition, 'handoff', 'coordinator tool calls are refused too');
@@ -1039,8 +1039,8 @@ test('trigger operations run in the worker as the owner and their state reaches 
   const { trigger } = await client.api('triggers.create', { trigger: input }) as { trigger: { id: string; createdBy: { kind: string } } };
   assert.equal(trigger.createdBy.kind, 'owner');
   await until(() => client.triggerOverview()?.triggers.some(item => item.id === trigger.id));
-  await assert.rejects(client.api('triggers.updateSettings', { settings: { maxTriggers: 0 } }), { statusCode: 400 });
-  await assert.rejects(client.api('sessions.destroyEverything', {}), { statusCode: 404 });
+  await assert.rejects(client.api('triggers.updateSettings', { settings: { maxTriggers: 0 } }), { kind: 'invalid' });
+  await assert.rejects(client.api('sessions.destroyEverything', {}), { kind: 'not-found' });
   assert.equal(client.supports('triggers'), true);
 });
 
@@ -1051,7 +1051,7 @@ test('with an outdated worker, trigger operations explain the pending update ins
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
   t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
-  await assert.rejects(client.api('triggers.list', {}), { statusCode: 503, message: /not updated yet/ });
+  await assert.rejects(client.api('triggers.list', {}), { kind: 'unavailable', message: /not updated yet/ });
   assert.equal(client.triggerOverview(), undefined);
   assert.ok(!legacy.methods.includes('api'));
 });
@@ -1065,8 +1065,8 @@ test('an outdated worker is never given a request that names its place, since it
   await client.start();
   assert.equal(client.supports('autoPromptTargets'), false);
   const base = { provider: 'codex' as const, prompt: 'Continue', cwd: directory };
-  await assert.rejects(client.submitAutoPrompt({ ...base, requestId: '12345678-1234-4234-8234-123456789abd', targetSessionId: 'codex:legacy' }), { statusCode: 503, disposition: 'not-admitted' });
-  await assert.rejects(client.submitAutoPrompt({ ...base, requestId: '12345678-1234-4234-8234-123456789abe', sessionMode: 'new' }), { statusCode: 503, disposition: 'not-admitted' });
+  await assert.rejects(client.submitAutoPrompt({ ...base, requestId: '12345678-1234-4234-8234-123456789abd', targetSessionId: 'codex:legacy' }), { kind: 'unavailable', disposition: 'not-admitted' });
+  await assert.rejects(client.submitAutoPrompt({ ...base, requestId: '12345678-1234-4234-8234-123456789abe', sessionMode: 'new' }), { kind: 'unavailable', disposition: 'not-admitted' });
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
 });
 
@@ -1084,7 +1084,7 @@ test('an outdated worker is never asked to insert into a chosen turn, since it w
   t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   assert.equal(client.supports('steerTargets'), false);
-  await assert.rejects(client.steer('queued-run', { targetRunId: 'turn' }), { statusCode: 503, disposition: 'not-admitted' });
+  await assert.rejects(client.steer('queued-run', { targetRunId: 'turn' }), { kind: 'unavailable', disposition: 'not-admitted' });
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
 });
 
@@ -1097,8 +1097,8 @@ test('an outdated worker is never given the master, which it would run on whatev
   await client.start();
   assert.equal(client.supports('subscriptionOnly'), false);
   const master = join(stateDir, 'master-session');
-  await assert.rejects(client.create({ provider: 'claude', prompt: 'hello', cwd: master }), { statusCode: 503, disposition: 'not-admitted' });
-  await assert.rejects(client.submitAutoPrompt({ provider: 'claude', prompt: 'hello', cwd: master, requestId: '12345678-1234-4234-8234-123456789abf' }), { statusCode: 503, disposition: 'not-admitted' });
+  await assert.rejects(client.create({ provider: 'claude', prompt: 'hello', cwd: master }), { kind: 'unavailable', disposition: 'not-admitted' });
+  await assert.rejects(client.submitAutoPrompt({ provider: 'claude', prompt: 'hello', cwd: master, requestId: '12345678-1234-4234-8234-123456789abf' }), { kind: 'unavailable', disposition: 'not-admitted' });
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
 });
 
@@ -1110,8 +1110,8 @@ test('while an outdated worker has a master session, it is not asked to route wo
   const client = new DurableRunManager({ stateDir, pollMs: 10, workerEntry: '/nonexistent/must-not-spawn.js', startupTimeoutMs: 1000 });
   t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
-  await assert.rejects(client.submitAutoPrompt({ provider: 'claude', prompt: 'somewhere', requestId: '12345678-1234-4234-8234-123456789ac0' }), { statusCode: 503, disposition: 'not-admitted' });
-  await assert.rejects(client.enqueue('claude:master', 'hello'), { statusCode: 503, disposition: 'not-admitted' });
+  await assert.rejects(client.submitAutoPrompt({ provider: 'claude', prompt: 'somewhere', requestId: '12345678-1234-4234-8234-123456789ac0' }), { kind: 'unavailable', disposition: 'not-admitted' });
+  await assert.rejects(client.enqueue('claude:master', 'hello'), { kind: 'unavailable', disposition: 'not-admitted' });
   assert.deepEqual(legacy.methods.filter(method => method !== 'snapshot'), []);
 });
 
@@ -1139,14 +1139,14 @@ test('worker records a verified calling turn without treating its message as own
   assert.deepEqual(child.origin, { kind: 'owner' }, 'reporting lineage never changes execution authority');
   assert.deepEqual(ownerMessages, ['Implement the goal'], 'an attributed agent message cannot consume owner approval');
   const before = f.runs.list().length;
-  await assert.rejects(client.enqueue(f.session.id, 'Forged', {}, { callerCapability: 'f'.repeat(64) }), { statusCode: 403 });
+  await assert.rejects(client.enqueue(f.session.id, 'Forged', {}, { callerCapability: 'f'.repeat(64) }), { kind: 'forbidden' });
   const mismatched = capabilities.issue({ kind: 'caller-run', runId: parent.id, sessionId: 'codex:someone-else' });
-  await assert.rejects(client.enqueue(f.session.id, 'Wrong session', {}, { callerCapability: mismatched }), { statusCode: 403 });
+  await assert.rejects(client.enqueue(f.session.id, 'Wrong session', {}, { callerCapability: mismatched }), { kind: 'forbidden' });
   assert.equal(f.runs.list().length, before);
   await f.runs.cancel(child.id);
   f.finish();
   await until(() => f.runs.list().find(run => run.id === parent.id)?.status === 'completed');
-  await assert.rejects(client.enqueue(f.session.id, 'Expired', {}, { callerCapability: token }), { statusCode: 403 });
+  await assert.rejects(client.enqueue(f.session.id, 'Expired', {}, { callerCapability: token }), { kind: 'forbidden' });
   const saved = await readFile(join(f.stateDir, 'runs.json'), 'utf8');
   assert.equal(saved.includes(token), false, 'credentials never enter persisted run history');
   assert.ok(saved.includes(parent.id));
@@ -1161,7 +1161,7 @@ test('an old worker cannot silently ignore master.worker on direct, Auto Prompt,
   t.after(async () => { await client.close(); await legacy.close(); await rm(directory, { recursive: true, force: true }); await rm(legacy.directory, { recursive: true, force: true }); });
   await client.start();
   const input = { provider: 'codex' as const, prompt: 'work', cwd: directory, modelRole: 'master.worker' as const };
-  const expected = { statusCode: 503, disposition: 'not-admitted' };
+  const expected = { kind: 'unavailable', disposition: 'not-admitted' };
   await assert.rejects(client.create(input), expected);
   await assert.rejects(client.submitAutoPrompt({ ...input, requestId: '12345678-1234-4234-8234-123456789abd' }), expected);
   await assert.rejects(client.api('autoPrompt.submit', { ...input, requestId: '12345678-1234-4234-8234-123456789abe' }), expected);
@@ -1625,7 +1625,7 @@ test('worker error replies keep their status, message and disposition across the
     ['uncertain', plain('h', { statusCode: 503, disposition: 'uncertain' }), { status: 503, message: 'h', disposition: 'uncertain', edge: 'uncertain' }],
     ['handoff', plain('i', { statusCode: 503, disposition: 'handoff' }), { status: 503, message: 'i', disposition: 'handoff', edge: 'not-admitted' }],
     ['a disposition without a status', plain('j', { disposition: 'not-admitted' }), { status: 500, message: 'j', disposition: 'not-admitted', edge: 'not-admitted' }],
-    ['RunError', new RunError('k', 404), { status: 404, message: 'k' }],
+    ['RunError', new RunError('k', 'not-found'), { status: 404, message: 'k' }],
     ['SteeringError', new SteeringError('l', 'rejected'), { status: 409, message: 'l', disposition: 'rejected' }],
   ];
   for (const [name, thrown, expected] of cases) {

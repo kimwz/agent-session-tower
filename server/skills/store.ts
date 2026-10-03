@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import type { SkillBundle, SkillBundleFile } from '../../shared/skills.js';
 import { MAX_SKILL_BUNDLE_BYTES, MAX_SKILL_TARGETS, SKILL_BUNDLE_FORMAT, SKILL_NAME } from '../../shared/skills.js';
 import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { TowerError } from '../../shared/errors.js';
 
 /**
  * Tower's own skill folder, `<state>/skills`: `global/<name>` and `projects/<folder>-<hash>/<name>` with the project's
@@ -97,12 +98,12 @@ export async function bundleFiles(dir: string): Promise<SkillBundleFile[]> {
   const walk = async (folder: string): Promise<void> => {
     for (const entry of await readdir(folder, { withFileTypes: true })) {
       const path = join(folder, entry.name);
-      if (entry.isSymbolicLink()) throw Object.assign(new Error('스킬 폴더 안에 링크가 있어 백업할 수 없습니다.'), { statusCode: 409 });
+      if (entry.isSymbolicLink()) throw new TowerError('conflict', '스킬 폴더 안에 링크가 있어 백업할 수 없습니다.');
       if (entry.isDirectory()) { await walk(path); continue; }
       if (!entry.isFile()) continue;
       const content = await readFile(path);
       bytes += content.length;
-      if (files.length >= MAX_SKILL_FILES || bytes > MAX_SKILL_BYTES) throw Object.assign(new Error('스킬 폴더가 너무 커서 백업할 수 없습니다.'), { statusCode: 413 });
+      if (files.length >= MAX_SKILL_FILES || bytes > MAX_SKILL_BYTES) throw new TowerError('too-large', '스킬 폴더가 너무 커서 백업할 수 없습니다.');
       files.push({ path: relative(dir, path).split(sep).join('/'), mode: (await lstat(path)).mode & 0o777, base64: content.toString('base64') });
     }
   };
@@ -119,14 +120,14 @@ export async function containsLink(dir: string): Promise<boolean> {
   return false;
 }
 
-const bad = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
+const bad = (message: string) => new TowerError('invalid', message);
 
 /** Checks a backup file from outside before anything of it is used: its shape, names, paths and sizes. */
 export function parseBundle(value: unknown): SkillBundle {
   if (!value || typeof value !== 'object') throw bad('백업 파일 형식이 올바르지 않습니다.');
   const input = value as Record<string, unknown>;
   if (input.format !== SKILL_BUNDLE_FORMAT || input.version !== 1 || !Array.isArray(input.skills)) throw bad('Tower 스킬 백업 파일이 아닙니다.');
-  if (Buffer.byteLength(JSON.stringify(value)) > MAX_SKILL_BUNDLE_BYTES + 1024) throw Object.assign(new Error('백업 파일이 너무 큽니다.'), { statusCode: 413 });
+  if (Buffer.byteLength(JSON.stringify(value)) > MAX_SKILL_BUNDLE_BYTES + 1024) throw new TowerError('too-large', '백업 파일이 너무 큽니다.');
   const text = (item: unknown, max: number) => typeof item === 'string' ? item.slice(0, max) : '';
   const skills = input.skills.map(raw => {
     const skill = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};

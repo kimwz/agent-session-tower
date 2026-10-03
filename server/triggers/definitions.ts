@@ -26,7 +26,7 @@ export interface TriggerScope {
 export const COORDINATOR_HERE = 'GitHub coordinator triggers are created, changed and run on that computer itself.';
 export const seen = (trigger: Pick<Trigger, 'handler'>, scope?: TriggerScope) => !scope || scope.handler(trigger.handler);
 /** From a controlling computer a coordinator trigger is only turned off or deleted. */
-export const hereOnly = (trigger: Pick<Trigger, 'handler'>, scope?: TriggerScope) => { if (scope && trigger.handler.kind === 'coordinator') throw failure(COORDINATOR_HERE, 403); };
+export const hereOnly = (trigger: Pick<Trigger, 'handler'>, scope?: TriggerScope) => { if (scope && trigger.handler.kind === 'coordinator') throw failure(COORDINATOR_HERE, 'forbidden'); };
 
 /** A change from a controlling computer marks the trigger as that computer's; a change made here clears it. */
 export const remoteMark = (actor: TriggerActor): Pick<Trigger, 'remoteEdited'> => actor.controllerId ? { remoteEdited: { controllerId: actor.controllerId } } : {};
@@ -81,8 +81,8 @@ export class TriggerDefinitions {
       const current = this.revisionOf(state, id, expectedRevision, scope);
       if (enabled) {
         hereOnly(current, scope);
-        if (state.onceConsumed[id]) throw failure('This once reservation was consumed. Create a new reservation to retry.', 409);
-        if (current.archivedAt) throw failure('Unarchive this trigger before enabling it.', 409);
+        if (state.onceConsumed[id]) throw failure('This once reservation was consumed. Create a new reservation to retry.', 'conflict');
+        if (current.archivedAt) throw failure('Unarchive this trigger before enabling it.', 'conflict');
         assertFuture(current, this.now);
       }
       // A toggle keeps no copy of the definition in history, so it never runs out of space; the audit records it.
@@ -102,7 +102,7 @@ export class TriggerDefinitions {
     return this.store.commit(state => {
       const current = this.revisionOf(state, id, expectedRevision, scope);
       if (Boolean(current.archivedAt) === archived) return structuredClone(current);
-      if (state.events.some(event => event.triggerId === id && UNFINISHED.has(event.status))) throw failure('This trigger has unfinished work; wait for it to finish before archiving or unarchiving.', 409);
+      if (state.events.some(event => event.triggerId === id && UNFINISHED.has(event.status))) throw failure('This trigger has unfinished work; wait for it to finish before archiving or unarchiving.', 'conflict');
       if (!archived) { hereOnly(current, scope); assertRoom(state, true); }
       const next: Trigger = { ...unmarked(current), enabled: false, revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor, ...remoteMark(actor) };
       if (archived) next.archivedAt = next.updatedAt; else delete next.archivedAt;
@@ -134,7 +134,7 @@ export class TriggerDefinitions {
       const current = this.revisionOf(state, id, expectedRevision, scope);
       hereOnly(current, scope);
       const earlier = (state.revisions[id] ?? []).find(item => item.revision === revision);
-      if (!earlier || !seen(earlier, scope)) throw failure(`Revision ${revision} is no longer kept. Only the last ${MAX_REVISIONS} revisions can be restored.`, 404);
+      if (!earlier || !seen(earlier, scope)) throw failure(`Revision ${revision} is no longer kept. Only the last ${MAX_REVISIONS} revisions can be restored.`, 'not-found');
       hereOnly(earlier, scope);
       const restored = structuredClone(this.inputOf(earlier));
       const note = this.guardAutoReply({ ...current, ...restored }, current, actor, 'strip') ?? '';
@@ -147,9 +147,9 @@ export class TriggerDefinitions {
   async restore(id: string, actor: TriggerActor, scope?: TriggerScope): Promise<Trigger> {
     return this.store.commit(state => {
       const deleted = [...state.tombstones].reverse().find(item => item.id === id);
-      if (!deleted || !seen(deleted, scope)) throw failure('This deleted trigger is no longer kept.', 404);
+      if (!deleted || !seen(deleted, scope)) throw failure('This deleted trigger is no longer kept.', 'not-found');
       hereOnly(deleted, scope);
-      if (state.triggers.some(item => item.id === id)) throw failure('This trigger already exists.', 409);
+      if (state.triggers.some(item => item.id === id)) throw failure('This trigger already exists.', 'conflict');
       assertRoom(state, false, Boolean(deleted.archivedAt));
       const now = new Date(this.now()).toISOString();
       // Restored from a controlling computer, it is that computer's to run; restored here, it is this computer's again.
@@ -167,7 +167,7 @@ export class TriggerDefinitions {
   }
 
   async updateSettings(value: unknown, actor: TriggerActor): Promise<TriggerSettings> {
-    if (actor.kind !== 'owner') throw failure('Only the owner can change trigger limits.', 403);
+    if (actor.kind !== 'owner') throw failure('Only the owner can change trigger limits.', 'forbidden');
     const settings = TriggerSettingsSchema.parse(value);
     const saved = await this.store.commit(state => {
       state.settings = settings;
@@ -185,14 +185,14 @@ export class TriggerDefinitions {
   }
 
   async createSecret(input: SecretInput, actor: TriggerActor): Promise<TriggerSecret> {
-    if (actor.kind !== 'owner') throw failure('Only the owner can save secrets.', 403);
+    if (actor.kind !== 'owner') throw failure('Only the owner can save secrets.', 'forbidden');
     const secret = await this.secrets.create(input, this.now());
     await this.store.commit(state => { this.note(state, actor, 'secret', `Saved secret "${secret.name}" for ${secret.origin}`); }).catch(() => {});
     return { ...secret, triggerIds: [] };
   }
 
   async deleteSecret(id: string, actor: TriggerActor): Promise<void> {
-    if (actor.kind !== 'owner') throw failure('Only the owner can delete secrets.', 403);
+    if (actor.kind !== 'owner') throw failure('Only the owner can delete secrets.', 'forbidden');
     const secret = await this.secrets.remove(id);
     await this.store.commit(state => { delete state.secretGrants[id]; this.note(state, actor, 'secret', `Deleted secret "${secret.name}"`); }, 'settle').catch(() => {});
   }
@@ -227,8 +227,8 @@ export class TriggerDefinitions {
 
   revisionOf(state: EngineState, id: string, expected: number, scope?: TriggerScope): Trigger {
     const current = state.triggers.find(item => item.id === id);
-    if (!current || !seen(current, scope)) throw failure('Trigger not found.', 404);
-    if (!Number.isInteger(expected) || current.revision !== expected) throw failure(`The trigger changed (now revision ${current.revision}). Reload it and try again.`, 409);
+    if (!current || !seen(current, scope)) throw failure('Trigger not found.', 'not-found');
+    if (!Number.isInteger(expected) || current.revision !== expected) throw failure(`The trigger changed (now revision ${current.revision}). Reload it and try again.`, 'conflict');
     return current;
   }
 
@@ -237,8 +237,8 @@ export class TriggerDefinitions {
   }
 
   replace(state: EngineState, current: Trigger, input: TriggerInput, actor: TriggerActor): Trigger {
-    if (state.onceConsumed[current.id] && (input.enabled || JSON.stringify(current.source) !== JSON.stringify(input.source))) throw failure('This once reservation was consumed. Create a new reservation to retry or change its schedule.', 409);
-    if (current.archivedAt && input.enabled) throw failure('Unarchive this trigger before enabling it.', 409);
+    if (state.onceConsumed[current.id] && (input.enabled || JSON.stringify(current.source) !== JSON.stringify(input.source))) throw failure('This once reservation was consumed. Create a new reservation to retry or change its schedule.', 'conflict');
+    if (current.archivedAt && input.enabled) throw failure('Unarchive this trigger before enabling it.', 'conflict');
     if (JSON.stringify(current.source.schedule) !== JSON.stringify(input.source.schedule) || (!current.enabled && input.enabled)) assertFuture(input, this.now);
     if (JSON.stringify(current.source) !== JSON.stringify(input.source)) assertOnceRoom(state, input, current.id);
     const next: Trigger = { ...unmarked(current), ...structuredClone(input), revision: current.revision + 1, updatedAt: new Date(this.now()).toISOString(), updatedBy: actor, ...remoteMark(actor) };
@@ -297,7 +297,7 @@ export class TriggerDefinitions {
     if (actor.kind !== 'owner' && request.headers.some(header => 'secretId' in header)) {
       const accepted = [...state.triggers, ...(state.revisions[trigger.id] ?? []), ...state.tombstones].filter(item => item.id === trigger.id)
         .some(item => item.source.kind === 'http' && JSON.stringify(item.source.request) === JSON.stringify(request));
-      if (!accepted) throw failure('Only the owner can change a request that sends saved secrets. Ask the owner to make this change in Tower.', 403);
+      if (!accepted) throw failure('Only the owner can change a request that sends saved secrets. Ask the owner to make this change in Tower.', 'forbidden');
     }
     for (const header of request.headers) {
       if (!('secretId' in header)) continue;
@@ -306,7 +306,7 @@ export class TriggerDefinitions {
       if (secret.origin !== origin) throw failure(`The secret "${secret.name}" is only sent to ${secret.origin}; this trigger calls ${origin}.`);
       const granted = state.secretGrants[secret.id] ?? [];
       if (granted.includes(trigger.id)) continue;
-      if (actor.kind !== 'owner') throw failure(`Only the owner can give the secret "${secret.name}" to a trigger. Ask the owner to choose it in Tower.`, 403);
+      if (actor.kind !== 'owner') throw failure(`Only the owner can give the secret "${secret.name}" to a trigger. Ask the owner to choose it in Tower.`, 'forbidden');
       state.secretGrants[secret.id] = [...granted, trigger.id];
     }
   }
@@ -322,7 +322,7 @@ export class TriggerDefinitions {
       && JSON.stringify({ ...item, enabled: undefined }) === JSON.stringify({ ...rule, enabled: undefined }));
     const added = next.handler.rules.filter(rule => rule.autoReply && !kept(rule));
     if (!added.length) return undefined;
-    if (mode === 'refuse') throw failure('Only the owner can turn on automatic replies for a coordinator rule, or change a rule that has them. Ask the owner to make this change in Tower.', 403);
+    if (mode === 'refuse') throw failure('Only the owner can turn on automatic replies for a coordinator rule, or change a rule that has them. Ask the owner to make this change in Tower.', 'forbidden');
     for (const rule of added) delete rule.autoReply;
     return ` (automatic replies turned off for ${added.map(rule => `"${rule.name}"`).join(', ')}: only the owner can turn them on)`;
   }
@@ -337,7 +337,7 @@ export class TriggerDefinitions {
     if (actor.kind !== 'owner') {
       const source = JSON.stringify(trigger.source);
       const accepted = [...state.triggers, ...(state.revisions[trigger.id] ?? []), ...state.tombstones].some(item => item.id === trigger.id && JSON.stringify(item.source) === source);
-      if (!accepted || !granted.includes(trigger.id)) throw failure('Only the owner can set up or change a GitHub trigger that uses a saved token. Ask the owner to make this change in Tower.', 403);
+      if (!accepted || !granted.includes(trigger.id)) throw failure('Only the owner can set up or change a GitHub trigger that uses a saved token. Ask the owner to make this change in Tower.', 'forbidden');
       return;
     }
     if (!granted.includes(trigger.id)) state.secretGrants[secret.id] = [...granted, trigger.id];

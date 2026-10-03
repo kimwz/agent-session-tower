@@ -146,7 +146,7 @@ export class TriggerService extends EventEmitter {
 
   /** Sends a request once for the owner to see; nothing is recorded, no run starts and no trigger changes. */
   async testHttp(request: HttpRequest, condition: HttpCondition | undefined, actor: TriggerActor): Promise<HttpTestResult> {
-    if (actor.kind !== 'owner') throw failure('Only the owner can test requests.', 403);
+    if (actor.kind !== 'owner') throw failure('Only the owner can test requests.', 'forbidden');
     return testResult(await this.send(request, secret => secret.origin === new URL(request.url).origin), condition);
   }
   /** Shows the owner which account a connection acts as. Nothing is recorded. */

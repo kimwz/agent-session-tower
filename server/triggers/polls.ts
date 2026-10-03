@@ -38,7 +38,7 @@ export class TriggerPolls {
 
   private trigger(id: string): Trigger {
     const trigger = this.store.state.triggers.find(item => item.id === id);
-    if (!trigger) throw failure('Trigger not found.', 404);
+    if (!trigger) throw failure('Trigger not found.', 'not-found');
     return trigger;
   }
   /** Fires inside a commit; a capacity warning it answers is noted in that same commit. */
@@ -57,17 +57,17 @@ export class TriggerPolls {
    */
   async run(id: string, actor: TriggerActor, scope?: TriggerScope): Promise<TriggerEvent> {
     const trigger = this.trigger(id);
-    if (!seen(trigger, scope)) throw failure('Trigger not found.', 404);
+    if (!seen(trigger, scope)) throw failure('Trigger not found.', 'not-found');
     hereOnly(trigger, scope);
-    if (this.store.state.onceConsumed[id]) throw failure('This once reservation was consumed. Create a new reservation to retry.', 409);
-    if (trigger.archivedAt) throw failure('Unarchive this trigger before running it.', 409);
-    if (this.store.full()) throw failure('Trigger history is full. Delete old triggers or wait for finished runs to expire.', 507);
+    if (this.store.state.onceConsumed[id]) throw failure('This once reservation was consumed. Create a new reservation to retry.', 'conflict');
+    if (trigger.archivedAt) throw failure('Unarchive this trigger before running it.', 'conflict');
+    if (this.store.full()) throw failure('Trigger history is full. Delete old triggers or wait for finished runs to expire.', 'storage-full');
     if (trigger.source.kind === 'github') {
-      if (!trigger.enabled) throw failure('Turn the trigger on before checking it.', 409);
+      if (!trigger.enabled) throw failure('Turn the trigger on before checking it.', 'conflict');
       const blocked = this.store.state.cursors[id]?.blockedUntil;
-      if (blocked && blocked > this.now()) throw failure(`GitHub's rate limit allows the next check at ${new Date(blocked).toISOString()}.`, 429);
+      if (blocked && blocked > this.now()) throw failure(`GitHub's rate limit allows the next check at ${new Date(blocked).toISOString()}.`, 'rate-limited');
       const unlock = this.lock(id);
-      if (!unlock) throw failure('This trigger is checking GitHub right now. Try again in a moment.', 409);
+      if (!unlock) throw failure('This trigger is checking GitHub right now. Try again in a moment.', 'conflict');
       let fired: TriggerEvent[];
       const first = this.store.state.cursors[id]?.github?.checkedAt === undefined;
       try {
@@ -84,22 +84,22 @@ export class TriggerPolls {
         : problem ? `GitHub could not be checked: ${problem}`
         : limited ? 'This trigger reached its runs for this hour; the next issue is taken when the hour allows.'
         : noted ? 'Checked GitHub and noted the issues already open; issues that appear from now on will run.'
-        : 'Checked GitHub: nothing new since the last check.', problem && !full ? 502 : 409);
+        : 'Checked GitHub: nothing new since the last check.', problem && !full ? 'upstream' : 'conflict');
       this.ports.requestTick();
       return structuredClone(fired[0]);
     }
     const event = trigger.source.kind === 'http' ? await this.runHttp(trigger, actor) : await this.store.commit(state => {
       const current = state.triggers.find(item => item.id === id);
-      if (!current || !seen(current, scope)) throw failure('Trigger not found.', 404);
+      if (!current || !seen(current, scope)) throw failure('Trigger not found.', 'not-found');
       hereOnly(current, scope);
-      if (state.onceConsumed[id]) throw failure('This once reservation was consumed. Create a new reservation to retry.', 409);
-      if (current.archivedAt) throw failure('Unarchive this trigger before running it.', 409);
-      if (current.source.schedule.type === 'once' && !current.enabled) throw failure('Turn the once reservation on before running it.', 409);
+      if (state.onceConsumed[id]) throw failure('This once reservation was consumed. Create a new reservation to retry.', 'conflict');
+      if (current.archivedAt) throw failure('Unarchive this trigger before running it.', 'conflict');
+      if (current.source.schedule.type === 'once' && !current.enabled) throw failure('Turn the once reservation on before running it.', 'conflict');
       const created = this.fire(state, current, `manual:${randomUUID()}`, this.now(), 'manual', actor);
       this.log(state, actor, 'run', current, current.revision, current.revision, `Ran now: ${created?.status ?? 'skipped'}`);
       return created;
     });
-    if (!event) throw failure(`${trigger.name} did not run.`, 409);
+    if (!event) throw failure(`${trigger.name} did not run.`, 'conflict');
     this.ports.requestTick();
     return structuredClone(event);
   }
@@ -113,13 +113,13 @@ export class TriggerPolls {
     const id = trigger.id;
     const method = trigger.source.request.method;
     // A turned-off trigger's run would never start, so its request is not sent either.
-    if (!trigger.enabled) throw failure('Turn the trigger on before running it.', 409);
+    if (!trigger.enabled) throw failure('Turn the trigger on before running it.', 'conflict');
     // A run that limits would skip is refused before anything is sent. Tried on a copy, so nothing is recorded.
     // The probe's capacity warning is dropped: it records nothing.
     const probe = fire(structuredClone(this.store.state), trigger, `manual:${randomUUID()}`, this.now(), 'manual', this.now, actor).event;
-    if (!probe || probe.status === 'skipped') throw failure(`Nothing was sent: ${probe?.reason ?? 'this trigger cannot record more runs right now.'}`, 409);
+    if (!probe || probe.status === 'skipped') throw failure(`Nothing was sent: ${probe?.reason ?? 'this trigger cannot record more runs right now.'}`, 'conflict');
     const unlock = this.lock(id);
-    if (!unlock) throw failure('This trigger is sending its request right now. Try again in a moment.', 409);
+    if (!unlock) throw failure('This trigger is sending its request right now. Try again in a moment.', 'conflict');
     let sent = false;
     const uncertain = (error: unknown) => Object.assign(error instanceof Error ? error : new Error(String(error)), { uncertain: true,
       message: `${error instanceof Error ? error.message : String(error)} The POST was sent, or may have been; it will not be sent again for this request.` });
@@ -133,15 +133,15 @@ export class TriggerPolls {
       const unclaim = (state: EngineState) => { const position = state.cursors[id]; if (position) delete position.polling; };
       if (!outcome.ok) {
         await this.store.commit(unclaim, 'settle').catch(() => {});
-        throw failure(`The request failed, so nothing ran: ${outcome.error}`, 502);
+        throw failure(`The request failed, so nothing ran: ${outcome.error}`, 'upstream');
       }
       return await this.store.commit(state => {
         unclaim(state);
         const current = state.triggers.find(item => item.id === id);
-        if (!current) throw failure('Trigger not found.', 404);
-        if (current.revision !== trigger.revision) throw failure('The trigger changed while its request was sent, so nothing ran.', 409);
+        if (!current) throw failure('Trigger not found.', 'not-found');
+        if (current.revision !== trigger.revision) throw failure('The trigger changed while its request was sent, so nothing ran.', 'conflict');
         const created = this.fire(state, current, `manual:${randomUUID()}`, this.now(), 'manual', actor);
-        if (!created) throw failure(`${current.name} could not record this run.`, 409);
+        if (!created) throw failure(`${current.name} could not record this run.`, 'conflict');
         created.payload = responsePayload(current, outcome); created.summary = `Run now · ${responseSummary(outcome, undefined)}`;
         this.log(state, actor, 'run', current, current.revision, current.revision, `Ran now: ${created?.status ?? 'skipped'}`);
         return created;
@@ -163,16 +163,16 @@ export class TriggerPolls {
   async previewIssues(source: Extract<TriggerSource, { kind: 'github' }>, id: string | undefined, actor: TriggerActor, scope?: TriggerScope): Promise<IssuePreview> {
     const watch = source.watch;
     if (watch.type !== 'issues') throw failure('Only issue watches have a preview.');
-    if (source.auth.type === 'token' && actor.kind !== 'owner') throw failure('Only the owner can preview with a saved token.', 403);
+    if (source.auth.type === 'token' && actor.kind !== 'owner') throw failure('Only the owner can preview with a saved token.', 'forbidden');
     const saved = id ? this.store.state.triggers.find(item => item.id === id) : undefined;
-    if (id && (!saved || !seen(saved, scope))) throw failure('Trigger not found.', 404);
+    if (id && (!saved || !seen(saved, scope))) throw failure('Trigger not found.', 'not-found');
     let read;
     try {
       const { fetch, identity } = await this.github.fetchFor(source.auth);
       const login = await this.github.login(fetch, identity);
       if (login.toLowerCase() !== source.account.toLowerCase()) throw new GitHubError(`GitHub is signed in as ${login}, not ${source.account}.`);
       read = await readIssues(watch, fetch, source.account);
-    } catch (error) { throw failure(error instanceof Error ? error.message : String(error), 502); }
+    } catch (error) { throw failure(error instanceof Error ? error.message : String(error), 'upstream'); }
     // What the saved trigger remembers counts while it is on; an edit is judged as saving it would.
     const cursor = saved?.enabled ? keptGitHub(saved, { ...saved, source }, this.store.state.cursors[saved.id]) ?? {} : {};
     const working = new Set(saved ? this.store.state.events.filter(event => event.triggerId === saved.id && UNFINISHED.has(event.status)).flatMap(event => { const ref = issueRef(event); return ref ? [keyOf(ref)] : []; }) : []);

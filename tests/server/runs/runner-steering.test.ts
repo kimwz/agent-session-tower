@@ -174,13 +174,13 @@ test('external activity and requested model changes cannot receive steering', as
   const external = await fixture(t, { external: true });
   const queued = await external.manager.enqueue(external.session.id, 'Wait for external writer');
   assert.equal(external.read(queued.id).canSteer, false);
-  await assert.rejects(external.manager.steer(queued.id), { statusCode: 409 });
+  await assert.rejects(external.manager.steer(queued.id), { kind: 'conflict' });
   assert.equal(external.controls.length, 0);
   const f = await fixture(t);
   await f.pair();
   const differentModel = await f.manager.enqueue(f.session.id, 'Different model', { model: 'model-b' });
   assert.equal(f.read(differentModel.id).canSteer, false);
-  await assert.rejects(f.manager.steer(differentModel.id), { statusCode: 409 });
+  await assert.rejects(f.manager.steer(differentModel.id), { kind: 'conflict' });
   assert.equal(f.inputs.length, 0);
 });
 
@@ -262,7 +262,7 @@ test('duplicate delivery and an active turn finishing during attachment preparat
   const sending = f.manager.steer(second.id);
   const rejected = assert.rejects(sending, { disposition: 'rejected' });
   await entered.promise;
-  await assert.rejects(f.manager.steer(second.id), { statusCode: 409 });
+  await assert.rejects(f.manager.steer(second.id), { kind: 'conflict' });
   f.controls[0].finish();
   // Keep the normal scheduler waiting on external activity after the original finishes.
   f.session.status = 'working';

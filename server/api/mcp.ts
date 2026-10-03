@@ -6,6 +6,7 @@ import { GITHUB_SESSION_TOOLS } from '../triggers/github-coordinator.js';
 import { SLACK_SESSION_TOOLS } from '../slack/mcp-bridge.js';
 import { SESSION_TOOL_OPERATIONS } from './session-tools.js';
 import type { TowerApi } from './tower-api.js';
+import { TowerError } from '../../shared/errors.js';
 
 /** What a capability lets its holder do. The holder never chooses; the worker decides when it issues one. */
 export type Capability = { kind: 'owner-run'; runId: string; sessionId: string } | { kind: 'slack-workflow'; workflowId: string } | { kind: 'github-workflow'; workflowId: string }
@@ -56,7 +57,7 @@ export function callerDelegation(registry: CapabilityRegistry, find: (id: string
   const capability = registry.resolve(token);
   const run = capability?.kind === 'caller-run' ? find(capability.runId) : undefined;
   if (!run || capability?.kind !== 'caller-run' || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.controllerId) {
-    throw Object.assign(new Error('The calling turn is no longer running here, or its reporting credential is invalid. Nothing was submitted.'), { statusCode: 403, disposition: 'not-admitted' });
+    throw new TowerError('forbidden', 'The calling turn is no longer running here, or its reporting credential is invalid. Nothing was submitted.', { disposition: 'not-admitted' });
   }
   return delegationOf(run);
 }
@@ -88,43 +89,43 @@ export interface McpContext {
 /** Handles one request from a tool server process. Only the capability decides what it may do. */
 export async function handleMcpRequest(context: McpContext, token: string, body: { method?: unknown; name?: unknown; arguments?: unknown }): Promise<unknown> {
   const capability = context.capabilities.resolve(token);
-  if (!capability) throw Object.assign(new Error('This tool credential is not valid.'), { statusCode: 403 });
-  if (capability.kind === 'caller-run') throw Object.assign(new Error('A reporting credential cannot call Tower tools.'), { statusCode: 403 });
+  if (!capability) throw new TowerError('forbidden', 'This tool credential is not valid.');
+  if (capability.kind === 'caller-run') throw new TowerError('forbidden', 'A reporting credential cannot call Tower tools.');
   if (capability.kind === 'session-reader') {
     if (body.method === 'tools/list') return { tools: towerTools(SESSION_TOOL_OPERATIONS) };
     const operation = typeof body.name === 'string' ? operationOf(body.name) : undefined;
-    if (body.method !== 'tools/call' || !operation || !SESSION_TOOL_OPERATIONS.has(operation)) throw Object.assign(new Error('Unknown session tool.'), { statusCode: 404 });
-    if (!context.api) throw Object.assign(new Error('Tower operations are unavailable.'), { statusCode: 503 });
+    if (body.method !== 'tools/call' || !operation || !SESSION_TOOL_OPERATIONS.has(operation)) throw new TowerError('not-found', 'Unknown session tool.');
+    if (!context.api) throw new TowerError('unavailable', 'Tower operations are unavailable.');
     return context.api.call(operation, body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments) ? body.arguments : {}, { kind: 'agent', via: 'mcp' });
   }
   if (capability.kind === 'slack-workflow') {
     if (body.method === 'tools/list') return { tools: SLACK_SESSION_TOOLS };
-    if (body.method !== 'tools/call' || typeof body.name !== 'string' || !SLACK_SESSION_TOOLS.some(tool => tool.name === body.name)) throw Object.assign(new Error('Unknown Slack session tool.'), { statusCode: 404 });
-    if (!context.slackTool) throw Object.assign(new Error('Slack is unavailable.'), { statusCode: 503 });
+    if (body.method !== 'tools/call' || typeof body.name !== 'string' || !SLACK_SESSION_TOOLS.some(tool => tool.name === body.name)) throw new TowerError('not-found', 'Unknown Slack session tool.');
+    if (!context.slackTool) throw new TowerError('unavailable', 'Slack is unavailable.');
     return context.slackTool(capability.workflowId, body.name, (body.arguments ?? {}) as Record<string, unknown>);
   }
   if (capability.kind === 'github-workflow') {
     if (body.method === 'tools/list') return { tools: GITHUB_SESSION_TOOLS };
-    if (body.method !== 'tools/call' || typeof body.name !== 'string' || !GITHUB_SESSION_TOOLS.some(tool => tool.name === body.name)) throw Object.assign(new Error('Unknown GitHub conversation tool.'), { statusCode: 404 });
-    if (!context.githubTool) throw Object.assign(new Error('GitHub conversations are unavailable.'), { statusCode: 503 });
+    if (body.method !== 'tools/call' || typeof body.name !== 'string' || !GITHUB_SESSION_TOOLS.some(tool => tool.name === body.name)) throw new TowerError('not-found', 'Unknown GitHub conversation tool.');
+    if (!context.githubTool) throw new TowerError('unavailable', 'GitHub conversations are unavailable.');
     return context.githubTool(capability.workflowId, body.name, (body.arguments ?? {}) as Record<string, unknown>);
   }
   // The credential works only for its own run, only while that run works, and only if Tower's tools were
   // actually attached to it (not a turn forwarded to the desktop app).
   const run = context.run(capability.runId);
   if (!run || run.sessionId !== capability.sessionId || run.status !== 'running' || run.origin?.kind !== 'owner' || run.towerTools !== 'attached') {
-    throw Object.assign(new Error('Tower tools work only during the turn you started from Tower that they were given to.'), { statusCode: 403 });
+    throw new TowerError('forbidden', 'Tower tools work only during the turn you started from Tower that they were given to.');
   }
   if (capability.kind === 'secret-run') {
-    if (!context.secretTool || !context.secretTools) throw Object.assign(new Error('시크릿 도구를 사용할 수 없습니다.'), { statusCode: 503 });
+    if (!context.secretTool || !context.secretTools) throw new TowerError('unavailable', '시크릿 도구를 사용할 수 없습니다.');
     if (body.method === 'tools/list') return { tools: context.secretTools };
-    if (body.method !== 'tools/call' || typeof body.name !== 'string') throw Object.assign(new Error('알 수 없는 시크릿 도구입니다.'), { statusCode: 404 });
+    if (body.method !== 'tools/call' || typeof body.name !== 'string') throw new TowerError('not-found', '알 수 없는 시크릿 도구입니다.');
     return context.secretTool(capability, body.name, body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments) ? body.arguments as Record<string, unknown> : {});
   }
   if (body.method === 'tools/list') return { tools: towerTools() };
   const operation = typeof body.name === 'string' ? operationOf(body.name) : undefined;
-  if (body.method !== 'tools/call' || !operation) throw Object.assign(new Error('Unknown Tower tool.'), { statusCode: 404 });
-  if (!context.api) throw Object.assign(new Error('Tower operations are unavailable.'), { statusCode: 503 });
+  if (body.method !== 'tools/call' || !operation) throw new TowerError('not-found', 'Unknown Tower tool.');
+  if (!context.api) throw new TowerError('unavailable', 'Tower operations are unavailable.');
   const { requestKey, ...input } = (body.arguments && typeof body.arguments === 'object' && !Array.isArray(body.arguments) ? body.arguments : {}) as Record<string, unknown>;
   // Admission may prepare files asynchronously. Recheck the credential at its commit point, without
   // keeping this transient gate on an already admitted durable job.
@@ -134,7 +135,7 @@ export async function handleMcpRequest(context: McpContext, token: string, body:
     if (context.capabilities.resolve(token) !== capability || !current || current.sessionId !== capability.sessionId
       || current.status !== 'running' || current.origin?.kind !== 'owner' || current.towerTools !== 'attached'
       || current.origin.controllerId !== controllerId) {
-      throw Object.assign(new Error('The calling turn lost its Tower authority before admission. Nothing was submitted.'), { statusCode: 403, disposition: 'not-admitted' });
+      throw new TowerError('forbidden', 'The calling turn lost its Tower authority before admission. Nothing was submitted.', { disposition: 'not-admitted' });
     }
   };
   // A turn started from a controlling computer keeps to what that computer may see and change.

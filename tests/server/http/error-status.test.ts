@@ -88,21 +88,21 @@ test('every domain error keeps its status, message and disposition at the edge',
     await row('models/worker role', () => newWorkerSession(base, { cwd, prompt: 'x', modelRole: 'other' } as never), 400, 'Unknown worker model role.');
     await row('triggers/schedule', () => validateSchedule({ type: 'cron', expression: 'bad', timezone: 'UTC' } as never), 400, /five-field cron/);
     await row('triggers failure default', () => { throw triggerFailure('t'); }, 400, 't');
-    await row('triggers failure 507', () => { throw triggerFailure('full', 507); }, 507, 'full');
-    await row('triggers failure 423', () => { throw triggerFailure('locked', 423); }, 423, 'locked');
+    await row('triggers failure 507', () => { throw triggerFailure('full', 'storage-full'); }, 507, 'full');
+    await row('triggers failure 423', () => { throw triggerFailure('locked', 'locked'); }, 423, 'locked');
     await row('link/join-code', () => decodeJoinCode('nope'), 400, 'Tower 연결 코드가 아닙니다. 다른 컴퓨터에서 코드 전체를 복사하세요.');
     await row('runs/handoff', () => parseSuccessor({}, base), 400, 'Invalid successor worker command.');
     await row('master/tools', () => screenCommand({}), 400, 'action은 openSession, close, openPanel, filter, setPreference 중 하나입니다.');
     await row('master/settings', () => mergeSettings({} as never, 'x'), 400, '마스터 설정이 올바르지 않습니다.');
     await row('backup/crypto passphrase', () => checkPassphrase(''), 400, /./);
-    await row('backup BackupError 500', () => { throw new BackupError('b', 500); }, 500, 'b');
+    await row('backup BackupError 500', () => { throw new BackupError('b', 'internal'); }, 500, 'b');
     await row('runs RunError default', () => { throw new RunError('r'); }, 400, 'r');
-    await row('runs RunError 404', () => { throw new RunError('r404', 404); }, 404, 'r404');
-    await row('runs RunError not admitted', () => { throw notAdmitted(new RunError('full', 503)); }, 503, 'full');
+    await row('runs RunError 404', () => { throw new RunError('r404', 'not-found'); }, 404, 'r404');
+    await row('runs RunError not admitted', () => { throw notAdmitted(new RunError('full', 'unavailable')); }, 503, 'full');
     await row('runs SteeringError rejected', () => { throw new SteeringError('s', 'rejected'); }, 409, 's');
     await row('runs SteeringError uncertain', () => { throw new SteeringError('u', 'uncertain'); }, 409, 'u', 'uncertain');
     await row('skills SkillError default', () => { throw new SkillError('k'); }, 400, 'k');
-    await row('skills SkillError 409', () => { throw new SkillError('k409', 409); }, 409, 'k409');
+    await row('skills SkillError 409', () => { throw new SkillError('k409', 'conflict'); }, 409, 'k409');
     await row('http httpError', () => { throw httpError(410, 'gone'); }, 410, 'gone');
     await row('workspace relative', () => assertWorkspace('relative', snapshot), 400, 'An absolute workspace directory is required.');
     await row('workspace unlisted', () => assertWorkspace(base, snapshot), 403, 'Only workspace directories listed in Tower can be opened.');
@@ -111,7 +111,7 @@ test('every domain error keeps its status, message and disposition at the edge',
     await row('workspace binary 415', () => readWorkspaceFile(cwd, 'binary.bin', snapshot), 415, 'Binary files cannot be opened in the text editor.');
     for (const [name, actual, expected] of rows) assert.deepEqual(actual, expected, name);
     // Kept as the classes they are: callers branch on them.
-    assert.equal((notAdmitted(new RunError('x', 503))).retryable, true);
+    assert.equal((notAdmitted(new RunError('x', 'unavailable'))).retryable, true);
     assert.ok(new SteeringError('s', 'rejected') instanceof Error);
     assert.equal(new SteeringError('s', 'rejected').disposition, 'rejected');
   } finally { await rm(base, { recursive: true, force: true }); }

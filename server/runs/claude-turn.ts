@@ -71,7 +71,7 @@ export async function prepareClaudeTurn(host: TurnHost, run: Run, session: Sessi
     return { kind: 'refused' };
   }
   if (!creating) host.validateSession(latest);
-  else if (!latest) throw new RunError('Session no longer exists.', 404);
+  else if (!latest) throw new RunError('Session no longer exists.', 'not-found');
   const master = host.masterSession(session);
   const env = turnEnv(host.options.env, master, tools, host.options.launchMarks);
   if (master) {

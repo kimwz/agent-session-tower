@@ -57,11 +57,11 @@ test('each feature can be turned off on its own and keeps its usual behaviour th
 test('settings refuse unknown fields, providers, features, and malformed keys', async t => {
   const service = new DecisionService(await directory(t));
   await service.start();
-  await assert.rejects(service.update({ token: 'x' }), { statusCode: 400 });
-  await assert.rejects(service.update({ provider: 'other' }), { statusCode: 400 });
-  await assert.rejects(service.update({ features: { everything: true } }), { statusCode: 400 });
-  await assert.rejects(service.update({ features: { autoPromptSuggestions: 'yes' } }), { statusCode: 400 });
-  for (const apiKey of ['short', 'has space inside', 'x'.repeat(513), 42]) await assert.rejects(service.update({ apiKey }), { statusCode: 400 });
+  await assert.rejects(service.update({ token: 'x' }), { kind: 'invalid' });
+  await assert.rejects(service.update({ provider: 'other' }), { kind: 'invalid' });
+  await assert.rejects(service.update({ features: { everything: true } }), { kind: 'invalid' });
+  await assert.rejects(service.update({ features: { autoPromptSuggestions: 'yes' } }), { kind: 'invalid' });
+  for (const apiKey of ['short', 'has space inside', 'x'.repeat(513), 42]) await assert.rejects(service.update({ apiKey }), { kind: 'invalid' });
   assert.equal(service.overview().configured, false);
 });
 
@@ -84,13 +84,13 @@ test('checking a key asks one made-up question and words a refusal for the owner
   const { providers } = standIn(() => answer());
   const service = new DecisionService(await directory(t), providers);
   await service.start();
-  await assert.rejects(service.test(), { statusCode: 409 });
+  await assert.rejects(service.test(), { kind: 'conflict' });
   await service.update({ apiKey: 'tsk-abcdefgh1234' });
   assert.equal((await service.test()).configured, true);
   answer = async () => { throw new DecisionError('unauthorized', 'no'); };
-  await assert.rejects(service.test(), { statusCode: 400, message: /API 키를 거부/ });
+  await assert.rejects(service.test(), { kind: 'invalid', message: /API 키를 거부/ });
   answer = async () => { throw new DecisionError('unavailable', 'no'); };
-  await assert.rejects(service.test(), { statusCode: 502 });
+  await assert.rejects(service.test(), { kind: 'upstream' });
 });
 
 test('a damaged settings file starts with suggestions off rather than failing', async t => {

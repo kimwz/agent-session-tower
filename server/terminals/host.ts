@@ -7,6 +7,7 @@ import { acquireStateLock, MonitorAlreadyRunning } from '../instance/state-lock.
 import { keepEndpoint } from '../runs/endpoint-keeper.js';
 import { MAX_RPC_BYTES, RUNNER_PROTOCOL, runnerPaths } from '../runs/runner-protocol.js';
 import { WorkspaceTerminals, type TerminalOwner } from '../workspace-terminals.js';
+import { TowerError, statusOf } from '../../shared/errors.js';
 
 /** The terminal host shares the worker's owner-only socket directory but has its own lock, socket and credential. */
 export async function terminalHostPaths(stateDir: string) {
@@ -54,7 +55,7 @@ export async function startTerminalHost(options: TerminalHostOptions) {
       case 'resize': return options.terminals.resize(args[0] as string, args[1], args[2]);
       case 'close': return options.terminals.close(args[0] as string);
     }
-    throw Object.assign(new Error('Unknown terminal operation.'), { statusCode: 400 });
+    throw new TowerError('invalid', 'Unknown terminal operation.');
   };
   const server = createServer(async (req, res) => {
     const supplied = Buffer.from(req.headers.authorization ?? '');
@@ -65,9 +66,9 @@ export async function startTerminalHost(options: TerminalHostOptions) {
     if (req.method === 'GET' && events) {
       const cursor = req.headers['last-event-id'];
       try {
-        if (Array.isArray(cursor)) throw Object.assign(new Error('Invalid terminal cursor.'), { statusCode: 400 });
+        if (Array.isArray(cursor)) throw new TowerError('invalid', 'Invalid terminal cursor.');
         options.terminals.attach(events[1], res, cursor);
-      } catch (error) { res.writeHead((error as { statusCode?: number }).statusCode || 500); res.end(); }
+      } catch (error) { res.writeHead(statusOf(error) || 500); res.end(); }
       return;
     }
     if (req.method !== 'POST' || req.url !== '/rpc') { res.writeHead(404); res.end(); return; }
@@ -77,15 +78,15 @@ export async function startTerminalHost(options: TerminalHostOptions) {
       const chunks: Buffer[] = []; let bytes = 0;
       for await (const chunk of req) {
         bytes += chunk.length;
-        if (bytes > MAX_RPC_BYTES) throw Object.assign(new Error('Terminal request too large.'), { statusCode: 413 });
+        if (bytes > MAX_RPC_BYTES) throw new TowerError('too-large', 'Terminal request too large.');
         chunks.push(chunk);
       }
       const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { protocol?: number; method?: string; args?: unknown[] };
-      if (input.protocol !== RUNNER_PROTOCOL || typeof input.method !== 'string' || !Array.isArray(input.args)) throw Object.assign(new Error('Incompatible terminal request.'), { statusCode: 409 });
+      if (input.protocol !== RUNNER_PROTOCOL || typeof input.method !== 'string' || !Array.isArray(input.args)) throw new TowerError('conflict', 'Incompatible terminal request.');
       reply.result = await dispatch(input.method, input.args) ?? null;
     } catch (error) {
-      const value = error as { message?: string; statusCode?: number };
-      reply.error = { message: value.message ?? 'Terminal operation failed.', statusCode: value.statusCode ?? 500 };
+      const value = error as { message?: string };
+      reply.error = { message: value.message ?? 'Terminal operation failed.', statusCode: statusOf(error) ?? 500 };
     } finally { pending--; lastRequest = Date.now(); }
     if (!res.destroyed) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(reply)); }
   });

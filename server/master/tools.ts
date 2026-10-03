@@ -3,6 +3,7 @@ import { MASTER_PANELS, type MasterDirectiveResult, type MasterFilter, type Mast
 import { NODE_ID, TOWER_TOOLS, TowerTools, truncate, type TowerToolsOptions } from '../tower-tools/tools.js';
 import { apiTarget } from '../tower-tools/api-target.js';
 import { masterWorkerModel, parseModelSettings } from '../../shared/models.js';
+import { TowerError } from '../../shared/errors.js';
 
 /** How long a screen command waits for the page to say it was done. */
 const ACK_MS = 5_000;
@@ -105,7 +106,7 @@ export class MasterTools extends TowerTools {
 
 /** A screen command from the model's arguments, checked field by field. */
 export function screenCommand(args: Record<string, unknown>): MasterScreenCommand {
-  const refuse = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
+  const refuse = (message: string) => new TowerError('invalid', message);
   const text = (value: unknown, max: number, name: string) => {
     if (value === undefined) return undefined;
     if (typeof value !== 'string' || value.length > max) throw refuse(`${name}이(가) 올바르지 않습니다.`);

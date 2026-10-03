@@ -188,7 +188,7 @@ test('a joined computer that cannot update itself is never asked to', async t =>
   await until(() => a.controller.list()[0]?.report, 5000);
   await new Promise(resolve => setTimeout(resolve, 200));
   assert.equal(asked, 0);
-  await assert.rejects(a.controller.update(joined.id), { statusCode: 409 });
+  await assert.rejects(a.controller.update(joined.id), { kind: 'conflict' });
 });
 
 test('a code works once: a second computer using it is not accepted', async t => {

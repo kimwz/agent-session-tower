@@ -2,13 +2,14 @@ import type { IncomingMessage } from 'node:http';
 import type { Http2ServerRequest, Http2ServerResponse } from 'node:http2';
 import { readJson, errorStatus } from '../http/requests.js';
 import type { SecretPeer, SecretTarget } from '../../shared/secrets.js';
-import { REMOTE_SECRET_MAX_RESPONSE_BYTES } from './remote.js';
-import type { RemoteNodes } from '../link/nodes.js';
-import { linkRequest } from '../link/transport.js';
+import { REMOTE_SECRET_MAX_RESPONSE_BYTES } from '../secrets/remote.js';
+import type { RemoteNodes } from './nodes.js';
+import { linkRequest } from './transport.js';
 import { z } from 'zod';
+import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
 interface Worker { secretCall(operation: string, args?: unknown[]): Promise<unknown> }
-const fail = (message: string, statusCode = 403) => Object.assign(new Error(message), { statusCode });
+const fail = (message: string, kind: ErrorKind = 'forbidden') => new TowerError(kind, message);
 
 /** Paired TLS callers can relay envelopes and ask for a verified task, never manage the Vault. */
 export async function handleSecretLink(req: Http2ServerRequest, res: Http2ServerResponse, controllerId: string, worker: Worker): Promise<boolean> {
@@ -35,14 +36,14 @@ export async function handleSecretLink(req: Http2ServerRequest, res: Http2Server
 /** Resolve the page's remote selection against the pinned link and separately approved secret device. */
 export async function ownerRemoteTarget(nodes: RemoteNodes | undefined, worker: Worker, input: Record<string, unknown>, create = false): Promise<SecretTarget | undefined> {
   if (input.nodeId === undefined) return undefined;
-  if (!nodes || typeof input.nodeId !== 'string' || typeof input.sessionId !== 'string') throw fail('원격 프로젝트 세션을 선택하세요.', 400);
+  if (!nodes || typeof input.nodeId !== 'string' || typeof input.sessionId !== 'string') throw fail('원격 프로젝트 세션을 선택하세요.', 'invalid');
   const peer = (await worker.secretCall('peers') as SecretPeer[]).find(item => item.enabled && item.direction === 'node' && item.routeId === input.nodeId);
   const link = nodes.session(input.nodeId);
-  if (!peer || !link) throw fail('원격 컴퓨터의 시크릿 승인과 연결이 필요합니다.', 503);
+  if (!peer || !link) throw fail('원격 컴퓨터의 시크릿 승인과 연결이 필요합니다.', 'unavailable');
   const response = await linkRequest(link, 'GET', `/secret-target?sessionId=${encodeURIComponent(input.sessionId)}&create=${create ? 'true' : 'false'}`, undefined, 8000, { maxBytes: 32 * 1024 });
   if (response.status === 204) return undefined;
   const target = response.json as SecretTarget;
-  if (response.status !== 200 || !target || target.hostId !== peer.device.id || typeof target.taskId !== 'string' || typeof target.root !== 'string' || typeof target.sessionId !== 'string') throw fail('원격 세션의 시크릿 작업을 확인할 수 없습니다.', 503);
+  if (response.status !== 200 || !target || target.hostId !== peer.device.id || typeof target.taskId !== 'string' || typeof target.root !== 'string' || typeof target.sessionId !== 'string') throw fail('원격 세션의 시크릿 작업을 확인할 수 없습니다.', 'unavailable');
   return target;
 }
 
@@ -55,13 +56,13 @@ export async function ownerSecretControl(nodes: RemoteNodes | undefined, worker:
   const result = await worker.secretCall('control', [action, safe, target, remoteConnection]);
   if (!remoteConnection) return result;
   const connected = (result as { connectedTarget?: SecretTarget }).connectedTarget;
-  if (!connected || connected.hostId !== target!.hostId || connected.sessionId !== target!.sessionId || connected.taskId !== target!.taskId) throw fail('연결한 원격 작업의 완료 기록을 확인할 수 없습니다.', 503);
+  if (!connected || connected.hostId !== target!.hostId || connected.sessionId !== target!.sessionId || connected.taskId !== target!.taskId) throw fail('연결한 원격 작업의 완료 기록을 확인할 수 없습니다.', 'unavailable');
   // An uncertain insert is never sent a second time, and cannot undo the committed grant.
   try {
     const link = nodes?.session(input.nodeId as string);
-    if (!link) throw fail('원격 알림 연결이 종료되었습니다.', 503);
+    if (!link) throw fail('원격 알림 연결이 종료되었습니다.', 'unavailable');
     const response = await linkRequest(link, 'POST', '/secret-connection-notice', { sessionId: connected.sessionId, taskId: connected.taskId }, 8000, { maxBytes: 4096 });
-    if (response.status !== 200) throw fail('원격 알림을 확인하지 못했습니다.', 503);
+    if (response.status !== 200) throw fail('원격 알림을 확인하지 못했습니다.', 'unavailable');
   } catch { console.warn('Tower could not confirm the remote secret-connection notice; credentials remain discoverable when needed.'); }
   return worker.secretCall('control', ['overview', { ...safe, notifySession: false }, connected]);
 }

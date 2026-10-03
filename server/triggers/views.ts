@@ -15,7 +15,7 @@ export function listTriggers(state: EngineState, query: { includeArchived?: bool
 /** One definition with its kept revisions and its last 50 runs, newest first. */
 export function getTrigger(state: EngineState, id: string) {
   const trigger = state.triggers.find(item => item.id === id);
-  if (!trigger) throw failure('Trigger not found.', 404);
+  if (!trigger) throw failure('Trigger not found.', 'not-found');
   return structuredClone({ trigger, revisions: state.revisions[id] ?? [], events: state.events.filter(event => event.triggerId === id).slice(-50).reverse() });
 }
 
@@ -35,7 +35,7 @@ export function eventsPage(state: EngineState, query: { triggerId?: string; befo
 /** One run, whether or not its trigger still exists. */
 export function oneEvent(state: EngineState, id: string): TriggerEvent {
   const event = state.events.find(item => item.id === id);
-  if (!event) throw failure('This run is no longer in trigger history.', 404);
+  if (!event) throw failure('This run is no longer in trigger history.', 'not-found');
   return structuredClone(event);
 }
 

@@ -61,6 +61,6 @@ test('creating a session makes a missing folder and trusts it before the provide
   const { session } = await manager.create({ provider: 'claude', cwd, prompt: 'hi' });
   assert.equal(session.cwd, cwd);
   assert.deepEqual(trusted, [`claude:${cwd}`]);
-  await assert.rejects(manager.create({ provider: 'claude', cwd: join(f.directory, 'state', 'runs.json', 'child'), prompt: 'hi' }), { statusCode: 400 });
+  await assert.rejects(manager.create({ provider: 'claude', cwd: join(f.directory, 'state', 'runs.json', 'child'), prompt: 'hi' }), { kind: 'invalid' });
   await manager.close();
 });

@@ -72,7 +72,7 @@ test('the quick-lookup database answers reads only: no writes, PRAGMA, ATTACH, r
   assert.equal((await db.query('WITH w AS (SELECT id FROM sessions) SELECT count(*) AS n FROM w', 'v1', tables)).rows[0].n, 3);
   for (const sql of ["INSERT INTO sessions (id) VALUES ('x')", 'DELETE FROM sessions', 'PRAGMA table_info(sessions)', "SELECT * FROM pragma_table_info('sessions')",
     "ATTACH ':memory:' AS other", 'WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c', 'SELECT 1; SELECT 2', 'SELECT 1; DELETE FROM sessions']) {
-    await assert.rejects(db.query(sql, 'v1', tables), { statusCode: 400 }, sql);
+    await assert.rejects(db.query(sql, 'v1', tables), { kind: 'invalid' }, sql);
   }
   assert.equal((await db.query('SELECT count(*) AS n FROM sessions', 'v1', tables)).rows[0].n, 3, 'nothing was changed');
 });

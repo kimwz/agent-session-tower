@@ -46,7 +46,7 @@ test('PTY starts in exact cwd, accepts raw input and resize, and is killed on cl
   terminals.input(id, 'pwd\r'); terminals.resize(id, 100, 40);
   assert.deepEqual(ptys[0].written, ['pwd\r']); assert.deepEqual(ptys[0].sizes, [[100, 40]]);
   terminals.close(id); assert.equal(ptys[0].killed, 1);
-  assert.throws(() => terminals.input(id, 'x'), { statusCode: 404 });
+  assert.throws(() => terminals.input(id, 'x'), { kind: 'not-found' });
 });
 
 test('SSE replays early output and resumes after last event without duplicating it', async t => {
@@ -62,7 +62,7 @@ test('SSE replays early output and resumes after last event without duplicating 
   assert.match(reconnect.frames.join(''), /id: 2\nevent: output/);
   ptys[0].exit(7);
   assert.match(reconnect.frames.join(''), /event: exit\ndata: \{"exitCode":7\}/);
-  assert.throws(() => terminals.input(id, 'x'), { statusCode: 409 });
+  assert.throws(() => terminals.input(id, 'x'), { kind: 'conflict' });
 });
 
 test('output replay is bounded and slow consumers are disconnected', async t => {
@@ -79,16 +79,16 @@ test('output replay is bounded and slow consumers are disconnected', async t => 
 
 test('input limits, size validation and terminal caps do not spawn extra processes', async t => {
   const { terminals, ptys } = setup({ maxTerminals: 1 }); t.after(() => terminals.dispose());
-  await assert.rejects(terminals.create('/fixture', 1000, 24), { statusCode: 400 });
+  await assert.rejects(terminals.create('/fixture', 1000, 24), { kind: 'invalid' });
   const { id } = await terminals.create('/fixture', 80, 24);
-  await assert.rejects(terminals.create('/fixture', 80, 24), { statusCode: 429 });
+  await assert.rejects(terminals.create('/fixture', 80, 24), { kind: 'rate-limited' });
   assert.equal(ptys.length, 1);
-  assert.throws(() => terminals.resize(id, 80, 0), { statusCode: 400 });
-  assert.throws(() => terminals.input(id, 'x'.repeat(16385)), { statusCode: 400 });
+  assert.throws(() => terminals.resize(id, 80, 0), { kind: 'invalid' });
+  assert.throws(() => terminals.input(id, 'x'.repeat(16385)), { kind: 'invalid' });
   for (let i = 0; i < 128; i++) terminals.input(id, 'x'.repeat(16384));
-  assert.throws(() => terminals.input(id, 'x'), { statusCode: 429 });
+  assert.throws(() => terminals.input(id, 'x'), { kind: 'rate-limited' });
   assert.equal(ptys[0].written.length, 128);
-  assert.throws(() => terminals.attach(id, new Response().asHttp(), '999'), { statusCode: 400 });
+  assert.throws(() => terminals.attach(id, new Response().asHttp(), '999'), { kind: 'invalid' });
 });
 
 test('unattached and disconnected terminals expire; attached terminals survive grace period', async t => {
@@ -109,13 +109,13 @@ test('disposal kills all PTYs, ends streams, and handles an in-flight spawn', as
   const response = new Response(); terminals.attach(id, response.asHttp());
   terminals.dispose(); terminals.dispose();
   assert.equal(ptys[0].killed, 1); assert.equal(response.writableEnded, true);
-  await assert.rejects(terminals.create('/fixture', 80, 24), { statusCode: 503 });
+  await assert.rejects(terminals.create('/fixture', 80, 24), { kind: 'unavailable' });
   let finish!: (pty: WorkspacePty) => void;
   const pending = new WorkspaceTerminals({ spawnPty: () => new Promise(resolve => { finish = resolve; }) });
   const creating = pending.create('/fixture', 80, 24);
   pending.dispose();
   const pty = new Pty(); finish(pty);
-  await assert.rejects(creating, { statusCode: 503 }); assert.equal(pty.killed, 1);
+  await assert.rejects(creating, { kind: 'unavailable' }); assert.equal(pty.killed, 1);
 });
 
 
@@ -153,7 +153,7 @@ test('each shell knows its folder and who opened it, and a controller’s repeat
   assert.deepEqual(listed.map(item => [item.id, item.cwd, item.opener, item.exited]), [[own.id, '/work/app', 'local', false], [remote.id, '/work/app', 'controller-a', false], [other.id, '/work/app', 'controller-b', false]]);
   assert.ok(listed.every(item => !Number.isNaN(Date.parse(item.openedAt))));
   terminals.close(remote.id);
-  await assert.rejects(terminals.create('/work/app', 80, 24, { opener: 'controller-a', requestId: 'r1' }), { statusCode: 410 },
+  await assert.rejects(terminals.create('/work/app', 80, 24, { opener: 'controller-a', requestId: 'r1' }), { kind: 'gone' },
     'a request whose shell was closed meanwhile (by another window, say) opens nothing when it arrives again');
   assert.equal(ptys.length, 3);
   terminals.dispose();

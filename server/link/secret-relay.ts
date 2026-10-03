@@ -1,7 +1,7 @@
 import type { ClientHttp2Session } from 'node:http2';
 import type { SecretPeer } from '../../shared/secrets.js';
-import { linkRequest } from '../link/transport.js';
-import type { RemoteSecretRequest, RemoteSecretResponse } from './remote.js';
+import { linkRequest } from './transport.js';
+import type { RemoteSecretRequest, RemoteSecretResponse } from '../secrets/remote.js';
 
 export interface SecretRelayOptions {
   nodes: { list(): { id: string; status: string }[]; session(id: string): ClientHttp2Session | undefined };

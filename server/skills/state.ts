@@ -80,7 +80,7 @@ export class SkillStateStore {
 
   /** Changes the state and writes it; writes are kept in order. */
   update(change: (state: SkillState) => void): Promise<void> {
-    if (this.locked) return Promise.reject(new SkillError(this.locked, 503));
+    if (this.locked) return Promise.reject(new SkillError(this.locked, 'unavailable'));
     change(this.state);
     trim(this.state);
     return this.save();

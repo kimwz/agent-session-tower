@@ -51,13 +51,10 @@ const ALLOWED: ReadonlyArray<readonly [edge: string, reason: string]> = [
   // Route modules mounted by server/index.ts read request bodies with readJson.
   ['server/link/routes -> server/http/requests', 'route module'],
   ['server/master/routes -> server/http/requests', 'route module'],
-  ['server/secrets/link-routes -> server/http/requests', 'route module (also errorStatus)'],
+  ['server/link/secret-routes -> server/http/requests', 'route module (also errorStatus)'],
   // The link proxy shares the attachment body limit; a node's own listener reads its request bodies.
   ['server/link/proxy -> server/http/requests', 'proxy edge (ATTACHMENT_BODY_BYTES)'],
   ['server/link/node -> server/http/requests', "node's own listener (readJson)"],
-  // Domains that throw an HTTP status with httpError; moved out by the error-kind cleanup.
-  ['server/decisions/service -> server/http/requests', 'domain throws httpError'],
-  ['server/notifications/service -> server/http/requests', 'domain throws httpError'],
 ];
 
 test('the import boundaries hold, apart from the listed exceptions', async () => {

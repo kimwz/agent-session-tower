@@ -13,6 +13,7 @@ import type { AutoPromptJob, Run, RunOrigin, Session } from '../../../shared/typ
 import type { TriggerActor, TriggerEvent } from '../../../shared/triggers.js';
 import { RemoteView } from '../../../server/api/remote-view.js';
 import { until } from '../../helpers/until.ts';
+import { statusOf } from '../../../shared/errors.js';
 
 const CONTROLLER = 'controllera1b2c3d4e5f6';
 const remote: TriggerActor = { kind: 'owner', via: 'remote', controllerId: CONTROLLER };
@@ -84,20 +85,20 @@ test('a controlling computer sees only triggers and runs that stay in shared fol
   const events = await f.call<{ events: TriggerEvent[] }>('triggers.events', {});
   assert.deepEqual([...new Set(events.events.map(event => event.triggerId))], [shared.id]);
   for (const id of [hidden.id, inPrivate.id]) {
-    await assert.rejects(f.call('triggers.get', { id }), { statusCode: 404 });
-    await assert.rejects(f.call('triggers.setEnabled', { id, enabled: false, expectedRevision: 1 }), { statusCode: 404 });
-    await assert.rejects(f.call('triggers.delete', { id, expectedRevision: 1 }), { statusCode: 404 });
+    await assert.rejects(f.call('triggers.get', { id }), { kind: 'not-found' });
+    await assert.rejects(f.call('triggers.setEnabled', { id, enabled: false, expectedRevision: 1 }), { kind: 'not-found' });
+    await assert.rejects(f.call('triggers.delete', { id, expectedRevision: 1 }), { kind: 'not-found' });
   }
   const audit = await f.call<{ audit: Array<{ triggerId: string }> }>('triggers.audit', {});
   assert.ok(audit.audit.every(entry => entry.triggerId === shared.id));
   await f.call('triggers.delete', { id: hidden.id, expectedRevision: 1 }, owner);
   assert.deepEqual((await f.call<{ triggers: unknown[] }>('triggers.deleted', {})).triggers, [], 'a deleted trigger that pointed into it stays hidden too');
-  await assert.rejects(f.call('triggers.restore', { id: hidden.id }), { statusCode: 404 });
+  await assert.rejects(f.call('triggers.restore', { id: hidden.id }), { kind: 'not-found' });
 });
 
 test('a controlling computer cannot aim a trigger at what it cannot see, and its changes mark the trigger as its own', async t => {
   const f = await fixture(t);
-  const refusal = (cwd: string) => f.call('triggers.create', { trigger: trigger({ mode: 'folder', cwd }) }).then(() => '', (error: Error & { statusCode: number }) => `${error.statusCode} ${error.message.replace(cwd, '<folder>')}`);
+  const refusal = (cwd: string) => f.call('triggers.create', { trigger: trigger({ mode: 'folder', cwd }) }).then(() => '', (error: Error) => `${statusOf(error)} ${error.message.replace(cwd, '<folder>')}`);
   const missing = await refusal(join(f.root, 'nope'));
   assert.match(missing, /^400 /);
   for (const cwd of [f.secret, join(f.secret, 'inner'), join(f.secret, 'nope')]) assert.equal(await refusal(cwd), missing, 'a folder kept from sharing reads exactly as one that is not there');
@@ -106,7 +107,7 @@ test('a controlling computer cannot aim a trigger at what it cannot see, and its
   const created = (await f.call<{ trigger: { id: string; remoteEdited?: unknown; createdBy: TriggerActor } }>('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.open }) })).trigger;
   assert.deepEqual(created.remoteEdited, { controllerId: CONTROLLER });
   assert.deepEqual(created.createdBy, remote);
-  await assert.rejects(f.call('triggers.update', { id: created.id, expectedRevision: 1, trigger: trigger({ mode: 'folder', cwd: f.secret }) }), { statusCode: 400 });
+  await assert.rejects(f.call('triggers.update', { id: created.id, expectedRevision: 1, trigger: trigger({ mode: 'folder', cwd: f.secret }) }), { kind: 'invalid' });
   const local = (await f.call<{ trigger: { remoteEdited?: unknown } }>('triggers.update', { id: created.id, expectedRevision: 1, trigger: trigger({ mode: 'auto' }) }, owner)).trigger;
   assert.equal(local.remoteEdited, undefined, 'a change made here makes it this computer’s again');
   assert.deepEqual(await f.call('triggers.delete', { id: created.id, expectedRevision: 2 }), { deleted: true, trigger: { id: created.id, name: 'Digest' } });
@@ -114,31 +115,31 @@ test('a controlling computer cannot aim a trigger at what it cannot see, and its
   assert.equal(restored.remoteEdited, undefined, 'restored here, it is this computer’s');
   const coordinator = { name: 'Issues', source: { kind: 'github', account: 'octo', auth: { type: 'gh' }, watch: { type: 'issues', assignee: 'me' }, schedule: { type: 'interval', everySeconds: 300 } },
     handler: { kind: 'coordinator', rules: [{ id: 'r', name: 'r', enabled: true, condition: 'c', instructions: 'i', replyInstructions: 'r', provider: 'codex' }] } };
-  await assert.rejects(f.call('triggers.create', { trigger: coordinator }), { statusCode: 403, message: /on that computer itself/ });
+  await assert.rejects(f.call('triggers.create', { trigger: coordinator }), { kind: 'forbidden', message: /on that computer itself/ });
   const issues = (await f.call<{ trigger: { id: string; revision: number } }>('triggers.create', { trigger: coordinator }, owner)).trigger;
-  await assert.rejects(f.call('triggers.run', { id: issues.id }), { statusCode: 403 });
+  await assert.rejects(f.call('triggers.run', { id: issues.id }), { kind: 'forbidden' });
   const off = (await f.call<{ trigger: { enabled: boolean; remoteEdited?: unknown } }>('triggers.setEnabled', { id: issues.id, enabled: false, expectedRevision: issues.revision })).trigger;
   assert.equal(off.enabled, false, 'a coordinator trigger can still be turned off from there');
   assert.deepEqual(off.remoteEdited, { controllerId: CONTROLLER }, 'turning it on or off is a change too');
-  await assert.rejects(f.call('triggers.setEnabled', { id: issues.id, enabled: true, expectedRevision: issues.revision + 1 }), { statusCode: 403, message: /on that computer itself/ }, 'it is turned on there');
+  await assert.rejects(f.call('triggers.setEnabled', { id: issues.id, enabled: true, expectedRevision: issues.revision + 1 }), { kind: 'forbidden', message: /on that computer itself/ }, 'it is turned on there');
   for (const [name, input] of [['triggers.updateSettings', { settings: { maxTriggers: 10, maxConcurrentRuns: 2, maxEventsPerHour: 10, privateHosts: [] } }], ['secrets.create', { secret: { name: 'x', origin: 'https://example.com', value: 'a-long-secret-value-here' } }]] as const) {
-    await assert.rejects(f.call(name, input), { statusCode: 403 }, `${name} stays with this computer`);
+    await assert.rejects(f.call(name, input), { kind: 'forbidden' }, `${name} stays with this computer`);
   }
 });
 
 test('a folder kept from sharing is refused at the same step, and in the same words, as one that is not there', async t => {
   const f = await fixture(t);
   const broken = (target: Record<string, unknown>) => ({ ...trigger(target), source: { kind: 'schedule', schedule: { type: 'cron', expression: '61 * * * *', timezone: 'Asia/Seoul' } } });
-  const refusal = (target: Record<string, unknown>, cwd = '') => f.call('triggers.create', { trigger: broken(target) }).then(() => '', (error: Error & { statusCode: number }) => `${error.statusCode} ${cwd ? error.message.replace(cwd, '<folder>') : error.message}`);
+  const refusal = (target: Record<string, unknown>, cwd = '') => f.call('triggers.create', { trigger: broken(target) }).then(() => '', (error: Error) => `${statusOf(error)} ${cwd ? error.message.replace(cwd, '<folder>') : error.message}`);
   const missing = await refusal({ mode: 'folder', cwd: join(f.root, 'nope') }, join(f.root, 'nope'));
   assert.equal(await refusal({ mode: 'folder', cwd: f.open }, f.open), missing, 'a bad schedule is reported first');
   assert.equal(await refusal({ mode: 'folder', cwd: f.secret }, f.secret), missing);
   assert.equal(await refusal({ mode: 'session', sessionId: 'codex:private' }), await refusal({ mode: 'session', sessionId: 'codex:nowhere' }));
   const shared = (await f.call<{ trigger: { id: string } }>('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.open }) }, owner)).trigger;
   const hidden = (await f.call<{ trigger: { id: string } }>('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.secret }) }, owner)).trigger;
-  const stale = (id: string) => f.call('triggers.update', { id, expectedRevision: 5, trigger: broken({ mode: 'auto' }) }).catch((error: Error & { statusCode: number }) => `${error.statusCode} ${error.message}`);
+  const stale = (id: string) => f.call('triggers.update', { id, expectedRevision: 5, trigger: broken({ mode: 'auto' }) }).catch((error: Error) => `${statusOf(error)} ${error.message}`);
   assert.equal(await stale(hidden.id), await stale(randomUUID()), 'a trigger it cannot see reads as one that is not there, even for a bad change');
-  const revert = (id: string) => f.call('triggers.revert', { id, revision: 1, expectedRevision: 5 }).catch((error: Error & { statusCode: number }) => error.statusCode);
+  const revert = (id: string) => f.call('triggers.revert', { id, revision: 1, expectedRevision: 5 }).catch((error: Error) => statusOf(error));
   assert.equal(await revert(shared.id), 409, 'the revision it names is looked at after the trigger’s own');
 });
 
@@ -154,7 +155,7 @@ test('a change from a controlling computer is made once per request, and its ans
     'the recorded answer names a folder no longer shared, so it says only that the change was made');
   f.excluded.delete(f.open);
   const old = `00000000-0001-7123-8abc-000000000001`;
-  await assert.rejects(f.call('triggers.create', { trigger: trigger({ mode: 'auto' }) }, remote, old), { statusCode: 409, disposition: 'not-admitted' }, 'a request older than the record kept is never run');
+  await assert.rejects(f.call('triggers.create', { trigger: trigger({ mode: 'auto' }) }, remote, old), { kind: 'conflict', disposition: 'not-admitted' }, 'a request older than the record kept is never run');
   // A result too large to keep whole is read again when it is sent again.
   const long = { ...trigger({ mode: 'auto' }, 'Long'), handler: { ...trigger({ mode: 'auto' }).handler, instructions: 'x'.repeat(8000) } };
   const longKey = requests();
@@ -308,7 +309,7 @@ test('an agent in a turn started from a controlling computer sees and starts onl
   const tool = <T>(name: string, args: Record<string, unknown>) => handleMcpRequest(context, token, { method: 'tools/call', name, arguments: args }) as Promise<T>;
   assert.deepEqual((await tool<{ sessions: Array<{ id: string }> }>('sessions_list', {})).sessions.map(item => item.id), ['codex:shared']);
   assert.deepEqual((await tool<{ projects: Array<{ cwd: string }> }>('projects_list', {})).projects.map(item => item.cwd), [f.open]);
-  await assert.rejects(tool('sessions_read', { id: 'codex:private' }), { statusCode: 404 });
+  await assert.rejects(tool('sessions_read', { id: 'codex:private' }), { kind: 'not-found' });
   assert.deepEqual((await tool<{ sessions: Array<{ id: string }> }>('sessions_search', { query: 'release' })).sessions.map(item => item.id), ['codex:shared']);
   await tool('autoPrompt_submit', { requestId: randomUUID(), provider: 'codex', prompt: 'Look into it' });
   assert.deepEqual(f.submitted.at(-1)!.origin, { kind: 'agent', runId: run.id, controllerId: CONTROLLER });
@@ -322,7 +323,7 @@ test('a search from a controlling computer answers nothing if sharing changed wh
   assert.deepEqual((await f.call<{ sessions: Array<{ id: string }> }>('sessions.search', { query: 'release' })).sessions.map(item => item.id), ['codex:shared']);
   f.looking.skip = 1;
   f.looking.during = async () => { f.excluded.add(f.open); };
-  await assert.rejects(f.call('sessions.search', { query: 'release', limit: 1 }), { statusCode: 409 });
+  await assert.rejects(f.call('sessions.search', { query: 'release', limit: 1 }), { kind: 'conflict' });
   assert.deepEqual((await f.call<{ sessions: unknown[]; nextCursor?: string }>('sessions.search', { query: 'release' })), { sessions: [], searched: 0 });
 });
 
@@ -334,7 +335,7 @@ test('work the canvas no longer shows is looked up here, never by a controlling 
   assert.deepEqual(ids(await f.api.call('sessions.search', { query: 'release' }, agent)), ['codex:finished-slack-work', 'codex:private', 'codex:shared']);
   assert.deepEqual(ids(await f.call('sessions.list', {})), ['codex:shared']);
   assert.deepEqual(ids(await f.call('sessions.search', { query: 'release' })), ['codex:shared']);
-  await assert.rejects(f.call('sessions.read', { id: 'codex:finished-slack-work' }), { statusCode: 404 });
+  await assert.rejects(f.call('sessions.read', { id: 'codex:finished-slack-work' }), { kind: 'not-found' });
 });
 
 test('a controlling computer reads and changes this computer\'s model settings, which this computer\'s calls follow; agents only look roles up', async t => {
@@ -349,10 +350,10 @@ test('a controlling computer reads and changes this computer\'s model settings, 
   assert.deepEqual(await resolveModel(f.root, 'autoPrompt.router', { provider: 'claude' }), { provider: 'codex', model: 'gpt-6.1-sol', effort: 'high' });
   const agent: TriggerActor = { kind: 'agent', via: 'mcp' };
   assert.deepEqual(await f.call('models.get', { role: 'review.codex' }, agent), { role: 'review.codex', provider: 'codex', model: 'gpt-6.1-sol', args: ['-m', 'gpt-6.1-sol'] });
-  await assert.rejects(f.call('models.update', { settings }, agent), { statusCode: 403 });
+  await assert.rejects(f.call('models.update', { settings }, agent), { kind: 'forbidden' });
   // An agent in a turn a controlling computer started looks roles up too.
   assert.equal((await f.call<{ model: string }>('models.get', { role: 'review.codex' }, { kind: 'agent', via: 'mcp', controllerId: CONTROLLER })).model, 'gpt-6.1-sol');
-  await assert.rejects(f.call('models.update', { settings: { ...settings, custom: [{ id: 'bad' }] } }, owner), { statusCode: 400 });
+  await assert.rejects(f.call('models.update', { settings: { ...settings, custom: [{ id: 'bad' }] } }, owner), { kind: 'invalid' });
 });
 
 test('archived definitions and archive changes keep the remote resource scope, while disabled recurring triggers remain visible', async t => {
@@ -361,10 +362,10 @@ test('archived definitions and archive changes keep the remote resource scope, w
   const hidden = (await f.call<{ trigger: { id: string; revision: number } }>('triggers.create', { trigger: trigger({ mode: 'folder', cwd: f.secret }, 'Hidden') }, owner)).trigger;
   const off = (await f.call<{ trigger: { id: string; revision: number } }>('triggers.setEnabled', { id: visible.id, expectedRevision: visible.revision, enabled: false }, owner)).trigger;
   assert.ok((await f.call<{ triggers: Array<{ id: string }> }>('triggers.list', {})).triggers.some(item => item.id === visible.id));
-  await assert.rejects(f.call('triggers.setArchived', { id: hidden.id, expectedRevision: hidden.revision, archived: true }), { statusCode: 404 });
+  await assert.rejects(f.call('triggers.setArchived', { id: hidden.id, expectedRevision: hidden.revision, archived: true }), { kind: 'not-found' });
   const archived = (await f.call<{ trigger: { id: string; revision: number } }>('triggers.setArchived', { id: off.id, expectedRevision: off.revision, archived: true })).trigger;
   assert.equal((await f.call<{ triggers: Array<{ id: string }> }>('triggers.list', {})).triggers.length, 0);
   assert.deepEqual((await f.call<{ triggers: Array<{ id: string }> }>('triggers.list', { includeArchived: true })).triggers.map(item => item.id), [visible.id]);
-  await assert.rejects(f.call('triggers.get', { id: hidden.id }), { statusCode: 404 });
+  await assert.rejects(f.call('triggers.get', { id: hidden.id }), { kind: 'not-found' });
   assert.equal((await f.call<any>('triggers.setArchived', { id: archived.id, expectedRevision: archived.revision, archived: false })).trigger.enabled, false);
 });

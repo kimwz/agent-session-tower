@@ -1,3 +1,4 @@
+import { TowerError } from '../../shared/errors.js';
 /**
  * The only code that knows ElevenLabs: single-use tokens for the page's own speech-to-text connection, streaming
  * text-to-speech, the account's voices, and removing what text-to-speech leaves in the account's history. The key
@@ -32,7 +33,7 @@ export class ElevenLabs {
 
   private headers(): Record<string, string> {
     const key = this.options.key();
-    if (!key) throw Object.assign(new Error('ElevenLabs API 키가 없습니다.'), { statusCode: 409 });
+    if (!key) throw new TowerError('conflict', 'ElevenLabs API 키가 없습니다.');
     return { 'xi-api-key': key };
   }
 
@@ -40,7 +41,7 @@ export class ElevenLabs {
   async sttToken(signal?: AbortSignal): Promise<string> {
     const response = await this.fetcher(`${this.apiBase}/v1/single-use-token/realtime_scribe`, { method: 'POST', headers: this.headers(), signal: signal ?? AbortSignal.timeout(10_000) });
     const body = await response.json().catch(() => undefined) as { token?: unknown; detail?: unknown } | undefined;
-    if (!response.ok || typeof body?.token !== 'string') throw Object.assign(new Error(`받아쓰기 토큰을 받지 못했습니다 (HTTP ${response.status}).`), { statusCode: response.status >= 400 && response.status < 500 ? 409 : 502 });
+    if (!response.ok || typeof body?.token !== 'string') throw new TowerError(response.status >= 400 && response.status < 500 ? 'conflict' : 'upstream', `받아쓰기 토큰을 받지 못했습니다 (HTTP ${response.status}).`);
     return body.token;
   }
 
@@ -58,7 +59,7 @@ export class ElevenLabs {
       const query = new URLSearchParams({ page_size: '100', ...(page ? { next_page_token: page } : {}) });
       const response = await this.fetcher(`${this.apiBase}/v2/voices?${query}`, { headers: this.headers(), signal: AbortSignal.timeout(10_000) });
       const body = await response.json().catch(() => undefined) as { voices?: Array<{ voice_id?: unknown; name?: unknown; category?: unknown }>; has_more?: unknown; next_page_token?: unknown } | undefined;
-      if (!response.ok || !Array.isArray(body?.voices)) throw Object.assign(new Error(`목소리 목록을 받지 못했습니다 (HTTP ${response.status}).`), { statusCode: 502 });
+      if (!response.ok || !Array.isArray(body?.voices)) throw new TowerError('upstream', `목소리 목록을 받지 못했습니다 (HTTP ${response.status}).`);
       for (const voice of body.voices) {
         if (typeof voice.voice_id === 'string' && /^[A-Za-z0-9]{10,64}$/.test(voice.voice_id) && typeof voice.name === 'string') {
           found.push({ id: voice.voice_id, name: voice.name.slice(0, 80), ...(typeof voice.category === 'string' ? { category: voice.category } : {}) });

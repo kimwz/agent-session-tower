@@ -230,7 +230,7 @@ test('a failed write, a full state and a locked state behave as before', async t
     return original(...args);
   });
   syncBuiltinESMExports();
-  await assert.rejects(service.create(hourly(f.project, { name: 'Unsaved' }), OWNER), { statusCode: 503, message: /^Cannot save triggers: EIO/ });
+  await assert.rejects(service.create(hourly(f.project, { name: 'Unsaved' }), OWNER), { kind: 'unavailable', message: /^Cannot save triggers: EIO/ });
   assert.equal(await f.file(), before, 'the file is not changed');
   assert.match(service.overview().storageError ?? '', /^Cannot save triggers: EIO/);
   assert.equal(service.list().length, 1, 'nothing unsaved becomes current');
@@ -242,6 +242,6 @@ test('a failed write, a full state and a locked state behave as before', async t
   const small = new TriggerService({ stateDir: full.directory, executor: { runs: () => [], session: () => undefined, getAutoPrompt: () => undefined } as never, now: () => full.clock.now, tickMs: 3_600_000, limits: { acceptBytes: 500, maxBytes: 100_000 } });
   await small.start();
   t.after(() => small.close());
-  await assert.rejects(small.create(hourly(full.project), OWNER), { statusCode: 507 });
+  await assert.rejects(small.create(hourly(full.project), OWNER), { kind: 'storage-full' });
   assert.deepEqual(small.list(), []);
 });

@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes, scrypt as scryptCallback, type ScryptOptions } from 'node:crypto';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { BACKUP_FORMAT, MAX_BACKUP_FILE_BYTES, MIN_BACKUP_PASSPHRASE } from '../../shared/backup.js';
+import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
 /** What a backup file says about itself; all of it is authenticated with the contents. */
 export interface BackupHeader {
@@ -20,8 +21,8 @@ const KDF_MEMORY = 256 * 1024 * 1024;
 /** The payload may be many times smaller than what it expands to; this bounds a hostile file. */
 const MAX_PLAIN_BYTES = 200 * 1024 * 1024;
 
-export class BackupError extends Error {
-  constructor(message: string, readonly statusCode = 400) { super(message); }
+export class BackupError extends TowerError {
+  constructor(message: string, kind: ErrorKind = 'invalid') { super(kind, message); }
 }
 
 export function checkPassphrase(value: unknown): string {
@@ -53,7 +54,7 @@ export async function encryptBackup(payload: unknown, passphrase: string, meta: 
   const data = Buffer.concat([cipher.update(gzipSync(Buffer.from(JSON.stringify(payload)))), cipher.final()]);
   const envelope: BackupEnvelope = { ...header, tag: cipher.getAuthTag().toString('base64'), data: data.toString('base64') };
   const text = JSON.stringify(envelope);
-  if (Buffer.byteLength(text) > MAX_BACKUP_FILE_BYTES) throw new BackupError('백업이 40MB를 넘습니다. 큰 스킬 파일을 정리한 뒤 다시 시도하세요.', 413);
+  if (Buffer.byteLength(text) > MAX_BACKUP_FILE_BYTES) throw new BackupError('백업이 40MB를 넘습니다. 큰 스킬 파일을 정리한 뒤 다시 시도하세요.', 'too-large');
   return text;
 }
 
@@ -62,7 +63,7 @@ const whole = (value: unknown, min: number, max: number) => Number.isInteger(val
 
 /** The header of a backup file, checked, without decrypting it. */
 export function readBackupHeader(text: string): BackupEnvelope {
-  if (Buffer.byteLength(text) > MAX_BACKUP_FILE_BYTES) throw new BackupError('백업 파일이 너무 큽니다.', 413);
+  if (Buffer.byteLength(text) > MAX_BACKUP_FILE_BYTES) throw new BackupError('백업 파일이 너무 큽니다.', 'too-large');
   let value: Partial<BackupEnvelope>;
   try { value = JSON.parse(text) as Partial<BackupEnvelope>; } catch { throw new BackupError('Tower 백업 파일이 아닙니다.'); }
   if (!value || typeof value !== 'object' || value.format !== BACKUP_FORMAT) throw new BackupError('Tower 백업 파일이 아닙니다.');

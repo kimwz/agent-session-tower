@@ -46,7 +46,7 @@ test('instructions reach the provider beside the request, and never leave the wo
   const claude = await f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Owner reply' }, { origin: { kind: 'owner' }, instructions: { text: 'Receipt' } });
   await f.settled(claude.run.id);
   assert.ok(!f.claude[0]!.includes('--append-system-prompt'), 'Claude keeps a conversation’s first system prompt, so instructions go in the message');
-  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'x' }, { instructions: { text: 'x'.repeat(48_001) } }), { statusCode: 413 });
+  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'x' }, { instructions: { text: 'x'.repeat(48_001) } }), { kind: 'too-large' });
 });
 
 test('a new conversation’s first turn gets its notes; a later turn does not', async t => {

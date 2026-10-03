@@ -4,10 +4,11 @@ import { writePrivateJson } from './private-json.js';
 import { join } from 'node:path';
 import type { Session } from '../../shared/types.js';
 import { defaultStateDir } from '../state-dir.js';
+import { TowerError } from '../../shared/errors.js';
 
 export function normalizeSessionTitle(value: unknown): string {
   if (typeof value !== 'string' || value.trim().length > 120) {
-    throw Object.assign(new Error('제목은 120자 이하의 문자열이어야 합니다.'), { statusCode: 400 });
+    throw new TowerError('invalid', '제목은 120자 이하의 문자열이어야 합니다.');
   }
   return value.trim();
 }
@@ -60,7 +61,7 @@ export class SessionTitleStore {
       else next.delete(session.id);
       try { await writePrivateJson(this.path, `${JSON.stringify(Object.fromEntries(next))}\n`); }
       catch (error) {
-        throw Object.assign(new Error(`제목을 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`), { statusCode: 503 });
+        throw new TowerError('unavailable', `제목을 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
       }
       this.titles = next;
       return this.apply(session);

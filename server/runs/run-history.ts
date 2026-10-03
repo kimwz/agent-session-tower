@@ -145,12 +145,12 @@ export class RunHistory {
   /** Waits for every queued save; a failed one refuses, so nothing is acknowledged that is not on disk. */
   async flush(): Promise<void> {
     await this.writes;
-    if (this.persistenceError) throw notAdmitted(new RunError(`Cannot save the instruction queue: ${this.persistenceError.message}`, 503));
+    if (this.persistenceError) throw notAdmitted(new RunError(`Cannot save the instruction queue: ${this.persistenceError.message}`, 'unavailable'));
   }
 
   /** After a flush: refuses when instructions of turns still to run are not on disk, as a handoff would lose them. */
   checkInstructionsSaved(): void {
-    if (this.instructionsError) throw new RunError(`Cannot save instructions of turns still to run: ${this.instructionsError.message}`, 503);
+    if (this.instructionsError) throw new RunError(`Cannot save instructions of turns still to run: ${this.instructionsError.message}`, 'unavailable');
   }
 }
 

@@ -1,4 +1,5 @@
 import { isOperationName, OPERATIONS } from '../../shared/api/operations.js';
+import { TowerError } from '../../shared/errors.js';
 
 export interface ApiTarget {
   method: 'GET' | 'POST';
@@ -59,4 +60,4 @@ export function apiTarget(method: string, path: string, node?: string | null, re
   return { method, path: sent, route, ...(scoped ? { node: scoped[1] } : {}), local, write };
 }
 
-function refusal(message: string) { return Object.assign(new Error(message), { statusCode: 400 }); }
+function refusal(message: string) { return new TowerError('invalid', message); }

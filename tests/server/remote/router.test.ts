@@ -74,9 +74,9 @@ async function fixture(t: TestContext, options: { coordinators?: string[] | null
       if (operation === 'triggers.get') throw Object.assign(new Error(`Cannot read properties of undefined (reading '${(input as { id: string }).id}')`), { statusCode: 500 });
       if (operation === 'triggers.run') throw Object.assign(new Error('GitHub coordinator triggers are created, changed and run on that computer itself.'), { statusCode: 403 });
       // Tower's own refusals as the domain makes them.
-      if (operation === 'triggers.delete') throw triggerFailure('Only on that computer.', 403);
-      if (operation === 'triggers.revert') throw Object.assign(triggerFailure('Maybe changed.', 503), { disposition: 'uncertain' });
-      if (operation === 'triggers.restore') throw triggerFailure('Hidden failure.', 500);
+      if (operation === 'triggers.delete') throw triggerFailure('Only on that computer.', 'forbidden');
+      if (operation === 'triggers.revert') throw Object.assign(triggerFailure('Maybe changed.', 'unavailable'), { disposition: 'uncertain' });
+      if (operation === 'triggers.restore') throw triggerFailure('Hidden failure.', 'internal');
       return { answered: operation };
     },
     ...(options.repositories ? { repositoryAction: async (cwd: string, action: string) => {

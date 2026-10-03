@@ -2,11 +2,12 @@ import { EventEmitter } from 'node:events';
 import { isAbsolute, join } from 'node:path';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { linkDirectory } from './identity.js';
+import { TowerError } from '../../shared/errors.js';
 
 export interface FolderView { pinned?: true; hidden?: true }
 type Views = Record<string, Record<string, FolderView>>;
 
-const invalid = (message: string) => Object.assign(new Error(message), { statusCode: 400 });
+const invalid = (message: string) => new TowerError('invalid', message);
 
 /**
  * How this Tower shows another computer's folders: pinned or hidden here. The other computer never learns
@@ -59,7 +60,7 @@ export class NodeViewStore extends EventEmitter {
   flush(): Promise<unknown> { return this.writes; }
 
   private save(next: Views): Promise<void> {
-    if (this.broken) return Promise.reject(Object.assign(new Error(this.broken), { statusCode: 503 }));
+    if (this.broken) return Promise.reject(new TowerError('unavailable', this.broken));
     this.views = next;
     const data = JSON.stringify(next);
     const write = this.writes.then(() => writePrivateJson(this.path, data));

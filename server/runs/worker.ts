@@ -63,6 +63,7 @@ import { runAutoPromptModel } from '../auto-prompt/native.js';
 import { modelRoleNotes } from '../models/notes.js';
 import { keepEndpoint } from './endpoint-keeper.js';
 import { FORCE_UPDATE_DEADLINE_MS, FORCE_UPDATE_GIVE_UP_MS, MAX_RPC_BYTES, RUNNER_CAPABILITIES, RUNNER_PROTOCOL, runnerPaths, type RunnerReply, type RunnerSnapshot, type SessionHistoryPage } from './runner-protocol.js';
+import { TowerError, statusOf } from '../../shared/errors.js';
 
 const SNAPSHOT_FREE_OPERATIONS = new Set(['terminalInput', 'terminalResize', 'terminalCreate', 'terminalClose', 'attachment', 'sessionHistory', 'publicVisit', 'publicAgentsOverview', 'publicAgentsConversation', 'skillsOverview', 'skillsDetail', 'skillsSummary', 'skillsExport', 'skillsImportPlan', 'skillsBackup', 'secretCall']);
 
@@ -157,8 +158,8 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     record: (value: T) => RemoteResult, replay: (result: RemoteResult) => T | undefined): Promise<T> => {
     const controllerId = admitted.origin?.controllerId;
     if (!controllerId) return execute();
-    if (sessionId && coordinator(options.runs.getSession(sessionId)?.id ?? sessionId)) throw Object.assign(new Error('Not found.'), { statusCode: 404 });
-    if (!options.ledger || !admitted.requestId) throw Object.assign(new Error('원격 요청에는 요청 ID가 필요합니다.'), { statusCode: 400 });
+    if (sessionId && coordinator(options.runs.getSession(sessionId)?.id ?? sessionId)) throw new TowerError('not-found', 'Not found.');
+    if (!options.ledger || !admitted.requestId) throw new TowerError('invalid', '원격 요청에는 요청 ID가 필요합니다.');
     return options.ledger.once(controllerId, operation, admitted.requestId, content, execute, record, replay);
   };
   const findRun = (id: string) => options.runs.list().find(run => run.id === id);
@@ -166,14 +167,14 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     const admitted = admission(value);
     const token = record(value).callerCapability;
     if (token === undefined) return admitted;
-    if (typeof token !== 'string' || admitted.origin?.controllerId) throw Object.assign(new Error('Invalid local calling-turn credential.'), { statusCode: 403 });
+    if (typeof token !== 'string' || admitted.origin?.controllerId) throw new TowerError('forbidden', 'Invalid local calling-turn credential.');
     const validate = () => { callerDelegation(capabilities, findRun, token); };
     return { ...admitted, delegation: callerDelegation(capabilities, findRun, token), validate };
   };
   // Explicit dispatch prevents access to prototype methods or lifecycle controls.
   const dispatch = async (method: string, args: unknown[]) => {
     if (draining && !READS_DURING_HANDOFF.has(method)) {
-      throw Object.assign(new Error('Tower is replacing its execution worker right now. Nothing was submitted; retry in a few seconds.'), { statusCode: 503, disposition: 'handoff' });
+      throw new TowerError('unavailable', 'Tower is replacing its execution worker right now. Nothing was submitted; retry in a few seconds.', { disposition: 'handoff' });
     }
     switch (method) {
       case 'snapshot': return undefined;
@@ -190,7 +191,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         const successor = parseSuccessor(args[0], paths.stateDir);
         const input = record(args[1]);
         const deadlineMs = input.deadlineMs === undefined ? FORCE_UPDATE_DEADLINE_MS : input.deadlineMs;
-        if (typeof deadlineMs !== 'number' || !Number.isInteger(deadlineMs) || deadlineMs < 0 || deadlineMs > 60 * 60 * 1000) throw Object.assign(new Error('Invalid wrap-up time.'), { statusCode: 400 });
+        if (typeof deadlineMs !== 'number' || !Number.isInteger(deadlineMs) || deadlineMs < 0 || deadlineMs > 60 * 60 * 1000) throw new TowerError('invalid', 'Invalid wrap-up time.');
         handoff = { successor, requestedAt: handoff?.requestedAt ?? Date.now(), held: true, retryAt: undefined };
         if (!forced) {
           forced = { deadline: Date.now() + deadlineMs };
@@ -227,7 +228,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       }
       case 'steer': {
         const target = (args[1] as { targetRunId?: unknown } | undefined)?.targetRunId;
-        if (target !== undefined && (typeof target !== 'string' || !target || target.length > 200)) throw Object.assign(new Error('Invalid target turn.'), { statusCode: 400 });
+        if (target !== undefined && (typeof target !== 'string' || !target || target.length > 200)) throw new TowerError('invalid', 'Invalid target turn.');
         return options.runs.steer(args[0] as string, target === undefined ? {} : { targetRunId: target });
       }
       case 'cancel': return options.runs.cancel(args[0] as string);
@@ -260,12 +261,12 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         if (operation === 'deliver') { secrets.deliver(String(args[1]), args[2] as RemoteSecretResponse); return { delivered: true }; }
         if (operation === 'target' || operation === 'connection-notice') {
           const session = options.runs.getSession(String(args[1]));
-          if (!session || coordinator(session.id)) throw Object.assign(new Error('Not found.'), { statusCode: 404 });
+          if (!session || coordinator(session.id)) throw new TowerError('not-found', 'Not found.');
           await options.exclusions?.reload();
-          if (options.exclusions && await options.exclusions.excludesNow(session.cwd)) throw Object.assign(new Error('Not found.'), { statusCode: 404 });
+          if (options.exclusions && await options.exclusions.excludesNow(session.cwd)) throw new TowerError('not-found', 'Not found.');
           if (operation === 'connection-notice') {
             const target = await secrets.peekTarget(session.id);
-            if (!target || target.taskId !== args[2]) throw Object.assign(new Error('Secret task no longer matches.'), { statusCode: 403 });
+            if (!target || target.taskId !== args[2]) throw new TowerError('forbidden', 'Secret task no longer matches.');
             secrets.notifyConnection(target);
             return { notified: true };
           }
@@ -308,7 +309,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
         return options.publicAgents.visit(action, String(args[1]), { ip: typeof input.ip === 'string' ? input.ip : 'unknown', token: typeof input.token === 'string' ? input.token : undefined, password: input.password, text: input.text });
       } break;
     }
-    throw Object.assign(new Error('Unknown runner operation.'), { statusCode: 400 });
+    throw new TowerError('invalid', 'Unknown runner operation.');
   };
   const mcp = { api: options.api, capabilities, secretTools: options.secrets ? SECRET_TOOLS : undefined, secretTool: options.secrets ? (capability: Extract<Capability, { kind: 'secret-run' }>, name: string, args: Record<string, unknown>) => options.secrets!.tool(capability, name, args) : undefined, slackTool: options.slack ? (workflowId: string, name: string, args: Record<string, unknown>) => options.slack!.tool(workflowId, name, args) : undefined,
     githubTool: options.github ? (workflowId: string, name: string, args: Record<string, unknown>) => options.github!.tool(workflowId, name, args) : undefined,
@@ -338,9 +339,9 @@ export async function startRunnerHost(options: RunnerHostOptions) {
     if (req.method === 'GET' && terminalMatch && options.terminals && req.headers['x-runner-instance'] === instance) {
       const cursor = req.headers['last-event-id'];
       try {
-        if (Array.isArray(cursor)) throw Object.assign(new Error('Invalid terminal cursor.'), { statusCode: 400 });
+        if (Array.isArray(cursor)) throw new TowerError('invalid', 'Invalid terminal cursor.');
         options.terminals.attach(terminalMatch[1], res, cursor);
-      } catch (error) { res.writeHead((error as { statusCode?: number }).statusCode || 500); res.end(); }
+      } catch (error) { res.writeHead(statusOf(error) || 500); res.end(); }
       return;
     }
     if (req.method !== 'POST' || req.url !== '/rpc') { res.writeHead(404); res.end(); return; }
@@ -350,20 +351,20 @@ export async function startRunnerHost(options: RunnerHostOptions) {
       const chunks: Buffer[] = []; let bytes = 0;
       for await (const chunk of req) {
         bytes += chunk.length;
-        if (bytes > MAX_RPC_BYTES) throw Object.assign(new Error('Runner request too large.'), { statusCode: 413 });
+        if (bytes > MAX_RPC_BYTES) throw new TowerError('too-large', 'Runner request too large.');
         chunks.push(chunk);
       }
       const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { protocol?: number; method?: string; args?: unknown[]; instance?: string; revision?: number };
       if (input.protocol !== RUNNER_PROTOCOL || typeof input.method !== 'string' || !Array.isArray(input.args) || (input.instance && input.instance !== instance)) {
-        throw Object.assign(new Error('Incompatible runner request.'), { statusCode: 409 });
+        throw new TowerError('conflict', 'Incompatible runner request.');
       }
       reply.result = await dispatch(input.method, input.args);
       // Keystrokes, resizes and attachment downloads do not change run state.
       // Keep their replies small; the regular snapshot poll publishes engine changes.
       if (input.method !== 'slackTool' && (input.instance !== instance || (input.method === 'snapshot' ? input.revision !== revision : !SNAPSHOT_FREE_OPERATIONS.has(input.method)))) reply.snapshot = snapshot();
     } catch (error) {
-      const value = error as { message?: string; statusCode?: number; disposition?: string };
-      reply.error = { message: value.message ?? 'Runner operation failed.', statusCode: value.statusCode ?? 500, ...(value.disposition ? { disposition: value.disposition } : {}) };
+      const value = error as { message?: string; disposition?: string };
+      reply.error = { message: value.message ?? 'Runner operation failed.', statusCode: statusOf(error) ?? 500, ...(value.disposition ? { disposition: value.disposition } : {}) };
       reply.snapshot = snapshot();
     } finally { pending--; }
     if (!res.destroyed) { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(reply)); }
@@ -476,7 +477,7 @@ export async function startRunnerHost(options: RunnerHostOptions) {
 
 /** Only the page fields leave the worker; the native file path stays private. */
 async function sessionHistory(sessions: SessionService, [nativeId, before, limit]: unknown[]): Promise<SessionHistoryPage | undefined> {
-  if (typeof nativeId !== 'string' || !nativeId || nativeId.length > 512) throw Object.assign(new Error('Invalid session history request.'), { statusCode: 400 });
+  if (typeof nativeId !== 'string' || !nativeId || nativeId.length > 512) throw new TowerError('invalid', 'Invalid session history request.');
   const page = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
   const history = await sessions.detail(nativeId, page(before), page(limit));
   if (!history) return undefined;
@@ -490,8 +491,8 @@ async function sessionHistory(sessions: SessionService, [nativeId, before, limit
 function admission(value: unknown): RunAdmission {
   const input = value && typeof value === 'object' ? value as { autoPromptId?: string; origin?: unknown; requestId?: unknown } : {};
   const origin = input.origin === undefined ? { kind: 'owner' as const } : parseRunOrigin(input.origin);
-  if (!origin || (origin.kind !== 'owner' && origin.kind !== 'agent')) throw Object.assign(new Error('The web connection can only admit owner or agent work.'), { statusCode: 400 });
-  if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-f\d-]{36}$/i.test(input.requestId))) throw Object.assign(new Error('Invalid request ID.'), { statusCode: 400 });
+  if (!origin || (origin.kind !== 'owner' && origin.kind !== 'agent')) throw new TowerError('invalid', 'The web connection can only admit owner or agent work.');
+  if (input.requestId !== undefined && (typeof input.requestId !== 'string' || !/^[a-f\d-]{36}$/i.test(input.requestId))) throw new TowerError('invalid', 'Invalid request ID.');
   return { ...(input.autoPromptId !== undefined ? { autoPromptId: input.autoPromptId } : {}), origin,
     ...(typeof input.requestId === 'string' ? { requestId: input.requestId.toLowerCase() } : {}) };
 }

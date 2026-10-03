@@ -41,7 +41,7 @@ test('saved settings are read leniently, submitted ones strictly', () => {
     { ...fine, custom: [{ ...fine.custom[0], provider: 'codex', codex: { effort: 'off' } }] },
     { ...fine, roles: { ...fine.roles, 'chat.new': { provider: 'claude', claude: { effort: 'off' }, codex: {} } } },
     { ...fine, custom: [{ ...fine.custom[0], claude: { effort: 'off' } }] },
-  ]) assert.throws(() => parseModelSettings(bad, true), { statusCode: 400 }, JSON.stringify(bad.custom));
+  ]) assert.throws(() => parseModelSettings(bad, true), { kind: 'invalid' }, JSON.stringify(bad.custom));
 });
 
 test('a role gives the same model as flags, as JSON and in the turn table', () => {
@@ -54,7 +54,7 @@ test('a role gives the same model as flags, as JSON and in the turn table', () =
   assert.deepEqual(modelArgs({ provider: 'claude', model: 'opus', effort: 'max' }), ['--model', 'opus', '--effort', 'max']);
   assert.deepEqual(modelArgs({ provider: 'claude', model: 'haiku', effort: 'off' }), ['--model', 'haiku']);
   assert.deepEqual(customRoleLines(settings), ['- review.codex = codex / gpt-6.1-sol / high', '- review.claude = claude / fable / default — validity check']);
-  assert.throws(() => resolveRole(settings, 'review.gemini'), { statusCode: 404 });
+  assert.throws(() => resolveRole(settings, 'review.gemini'), { kind: 'not-found' });
 });
 
 test('a save keeps roles it does not name and ignores roles this version does not know', () => {

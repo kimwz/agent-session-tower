@@ -347,7 +347,7 @@ for (const decision of ['allow', 'deny'] as const) test(`owned Codex exposes a l
   await (f.manager as unknown as { flush(): Promise<void> }).flush();
   assert.equal(JSON.parse(await readFile(join(f.stateDir, 'runs.json'), 'utf8'))[0].approvals, undefined);
   await f.manager.respondToApproval(accepted.id, approval.id, decision);
-  await assert.rejects(f.manager.respondToApproval(accepted.id, approval.id, decision), { statusCode: 409 });
+  await assert.rejects(f.manager.respondToApproval(accepted.id, approval.id, decision), { kind: 'conflict' });
   const result = await finished(f.manager, accepted.id);
   assert.equal(result.status, 'completed', result.error);
   assert.equal(result.approvals, undefined);
@@ -420,7 +420,7 @@ test('retries retain attachments after restart, enforce session ownership, and n
     assert.deepEqual(retry.attachments, run.attachments);
     const other = makeSession(f.directory, { id: `codex:${ID2}`, nativeId: ID2 });
     f.sessions.set(other.id, other);
-    await assert.rejects(reopened.enqueue(other.id, 'other session', { attachmentIds: [run.attachments![0].id] }), { statusCode: 404 });
+    await assert.rejects(reopened.enqueue(other.id, 'other session', { attachmentIds: [run.attachments![0].id] }), { kind: 'not-found' });
     assert.equal(f.launches.length, 0);
   } finally { await reopened?.close(); await f.cleanup(); }
 });

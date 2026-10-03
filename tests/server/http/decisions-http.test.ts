@@ -21,13 +21,13 @@ test('an Auto Prompt may name a new conversation or one to continue, always with
     { sessionMode: 'new' }, { sessionMode: 'old', cwd: '/work' }, { targetSessionId: 'claude:abc' },
     { targetSessionId: 'claude:abc', cwd: '/work', sessionMode: 'new' }, { targetSessionId: '', cwd: '/work' }, { targetSessionId: 'a\u0000b', cwd: '/work' },
     { routingContext: 'set by Tower only', cwd: '/work' },
-  ]) assert.throws(() => parseAutoPrompt({ requestId, provider: 'claude', prompt, ...body }), { statusCode: 400 }, JSON.stringify(body));
+  ]) assert.throws(() => parseAutoPrompt({ requestId, provider: 'claude', prompt, ...body }), { kind: 'invalid' }, JSON.stringify(body));
 });
 
 test('a suggestion needs a draft of 30 characters and names nothing but the draft, tool, folder and computer', () => {
   assert.deepEqual(parseAutoPromptSuggestion({ prompt, provider: 'codex', cwd: '/work', node: 'a'.repeat(32) }), { prompt, provider: 'codex', cwd: '/work', node: 'a'.repeat(32) });
   for (const body of [{ prompt: `  ${'x'.repeat(29)}  `, provider: 'claude' }, { prompt, provider: 'other' }, { prompt, provider: 'claude', cwd: 'relative' },
-    { prompt, provider: 'claude', node: 'short' }, { prompt, provider: 'claude', sessionId: 'x' }]) assert.throws(() => parseAutoPromptSuggestion(body), { statusCode: 400 }, JSON.stringify(body));
+    { prompt, provider: 'claude', node: 'short' }, { prompt, provider: 'claude', sessionId: 'x' }]) assert.throws(() => parseAutoPromptSuggestion(body), { kind: 'invalid' }, JSON.stringify(body));
 });
 
 async function serve(t: test.TestContext, options: Partial<HttpOptions> = {}) {

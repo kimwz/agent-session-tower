@@ -99,7 +99,7 @@ test('the first message starts the master session in its own folder, with its gu
   assert.deepEqual(h.posted[0], { path: '/api/sessions', body: { provider: 'claude', cwd: join(h.dir, 'master-session'), prompt: '안녕', title: '마스터', model: 'opus' } });
   assert.match(await readFile(join(h.dir, 'master-session', 'AGENTS.md'), 'utf8'), /master agent of Agent Session Tower/);
   assert.equal(h.settings.current().session?.sessionId, MASTER);
-  await assert.rejects(h.session.begin({ provider: 'codex', text: '또' }), { statusCode: 409 });
+  await assert.rejects(h.session.begin({ provider: 'codex', text: '또' }), { kind: 'conflict' });
   await h.session.begin({ provider: 'codex', text: '새로', replace: true });
   assert.equal(h.settings.current().session?.provider, 'codex');
   await h.session.release();

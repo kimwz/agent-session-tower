@@ -1,13 +1,14 @@
 import type { Run } from '../../shared/types.js';
+import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
 /**
  * What a run record is and how it ends, shared by the run manager and the modules that own a part of its runs.
  * `RunError` is part of the manager's API and is exported from there as well.
  */
-export class RunError extends Error {
+export class RunError extends TowerError {
   /** Nothing was accepted and the same request may succeed a little later (a full queue, a save that failed). */
   retryable?: boolean;
-  constructor(message: string, public readonly statusCode = 400) { super(message); }
+  constructor(message: string, kind: ErrorKind = 'invalid') { super(kind, message); }
 }
 export function notAdmitted(error: RunError): RunError { error.retryable = true; return error; }
 

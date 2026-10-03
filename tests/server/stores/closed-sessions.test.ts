@@ -8,6 +8,7 @@ import { ClosedSessionStore } from '../../../server/stores/closed-sessions.js';
 import { blockRename, temporaryFiles } from '../../helpers/private-writes.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import type { CreateSessionRequest, Run, Session, Snapshot } from '../../../shared/types.js';
+import { statusOf } from '../../../shared/errors.js';
 
 const session: Session = { id: 'claude:fixture', nativeId: 'fixture', provider: 'claude', title: 'Native task', cwd: '/tmp', project: 'tmp', status: 'working',
   statusReason: 'Active in original application', createdAt: '2026-09-15T00:00:00Z', updatedAt: '2026-09-15T00:00:00Z', lastMessage: 'hello',
@@ -46,7 +47,7 @@ test('concurrent closure writes retain every session and failed storage never co
   assert.ok(all.every(session => store.apply(session).closed));
   await rename(stateDir, join(dir, 'saved'));
   await writeFile(stateDir, 'Blocked');
-  await assert.rejects(store.set(session, true), { statusCode: 503 });
+  await assert.rejects(store.set(session, true), { kind: 'unavailable' });
   assert.equal(store.apply(session).closed, undefined);
   await rm(stateDir);
   await rename(join(dir, 'saved'), stateDir);
@@ -128,9 +129,9 @@ test('writes exact bytes and leaves no temp files after success or failure', asy
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.deepEqual(await temporaryFiles(dir), []);
   const restore = await blockRename(path);
-  const error = await store.set({ ...session, id: 'claude:other' }, true).then(() => undefined, (caught: unknown) => caught as Error & { statusCode?: number });
+  const error = await store.set({ ...session, id: 'claude:other' }, true).then(() => undefined, (caught: unknown) => caught as Error);
   assert.match(String(error?.message), /^세션 표시 상태를 저장하지 못했습니다: /);
-  assert.equal(error?.statusCode, 503);
+  assert.equal(statusOf(error), 503);
   assert.deepEqual(await temporaryFiles(dir), []);
   await restore();
   assert.equal(await readFile(path, 'utf8'), `${JSON.stringify([session.id])}\n`);

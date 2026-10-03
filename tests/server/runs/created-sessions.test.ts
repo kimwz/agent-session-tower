@@ -102,7 +102,7 @@ test("Tower's own Codex turns hand approvals to the automatic reviewer, new or r
   assert.equal((await threadParams()).approvalsReviewer, undefined);
   const claude = await f.manager.create({ provider: 'claude', cwd: f.directory, prompt: 'Claude ignores it', codexApprovalsReviewer: 'auto_review' });
   assert.equal(claude.run.codexApprovalsReviewer, undefined);
-  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Invalid reviewer', codexApprovalsReviewer: 'always' as 'user' }), { statusCode: 400 });
+  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'Invalid reviewer', codexApprovalsReviewer: 'always' as 'user' }), { kind: 'invalid' });
 });
 
 test('a trigger keeps the reviewer it chose for a new Codex conversation, and never sends one on resume', async t => {
@@ -337,10 +337,10 @@ test('invalid input and a partially committed admission cannot launch a provider
     { provider: 'bad', cwd: f.directory, prompt: 'hi' },
     { provider: 'codex', cwd: join(f.stateDir, 'runs.json', 'child'), prompt: 'hi' },
     { provider: 'codex', cwd: f.directory, prompt: 'hi', title: 't'.repeat(121) },
-  ]) await assert.rejects(f.manager.create(input as Parameters<RunManager['create']>[0]), { statusCode: 400 });
+  ]) await assert.rejects(f.manager.create(input as Parameters<RunManager['create']>[0]), { kind: 'invalid' });
   await rm(join(f.stateDir, 'runs.json'));
   await mkdir(join(f.stateDir, 'runs.json'));
-  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'must not run later' }), { statusCode: 503 });
+  await assert.rejects(f.manager.create({ provider: 'codex', cwd: f.directory, prompt: 'must not run later' }), { kind: 'unavailable' });
   assert.ok(f.manager.list().every(run => run.status === 'error'));
   assert.ok(f.manager.sessionList([]).every(session => session.status === 'error' && !session.creationPending));
   assert.equal(f.launches.length, 0);

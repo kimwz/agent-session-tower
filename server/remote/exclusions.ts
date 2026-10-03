@@ -3,6 +3,7 @@ import { realpath } from 'node:fs';
 import { promisify } from 'node:util';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
+import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
 /** A folder this machine never shares with a remote controller, including everything below it. */
 export interface ExcludedFolder { path: string; canonical: string }
@@ -16,7 +17,7 @@ export interface ExclusionMatcher {
 const MAX_FOLDERS = 200;
 // The native call reports the real letter case on case-insensitive file systems.
 const realpathNative = promisify(realpath.native);
-const invalid = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
+const invalid = (message: string, kind: ErrorKind = 'invalid') => new TowerError(kind, message);
 // The default macOS and Windows file systems ignore case, so "Secret" and "secret" are one folder.
 const foldCase = process.platform === 'darwin' || process.platform === 'win32';
 const key = (path: string) => foldCase ? path.toLowerCase() : path;
@@ -289,7 +290,7 @@ export class RemoteExclusionStore extends EventEmitter {
     const write = this.writes.then(async () => {
       const next = await change(this.folders);
       if (!next) return this.list();
-      if (this.unreadable) throw invalid(this.unreadable, 503);
+      if (this.unreadable) throw invalid(this.unreadable, 'unavailable');
       // Time-based, so a list rebuilt after the file was lost still reads as newer to every reader.
       const revision = Math.max(this.currentRevision + 1, Date.now());
       const roots = await rootsOf(next);

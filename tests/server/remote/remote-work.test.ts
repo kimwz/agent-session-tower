@@ -16,6 +16,7 @@ import { runToolResolver } from '../../../server/api/run-tools.js';
 import { CapabilityRegistry } from '../../../server/api/mcp.js';
 import type { SlackService } from '../../../server/slack/service.js';
 import type { Session } from '../../../shared/types.js';
+import { statusOf } from '../../../shared/errors.js';
 
 const CONTROLLER = 'controllera1b2c3d4e5f6';
 const remote = { kind: 'owner' as const, controllerId: CONTROLLER };
@@ -103,7 +104,7 @@ test('the worker runs a retried remote message once and answers the retry with t
 
 test('the worker refuses remote work in a coordinator conversation', async t => {
   const f = await worker(t, ['codex:10000000-0000-4000-8000-000000000001']);
-  await assert.rejects(f.client.enqueue(f.session.id, 'hello', {}, { origin: remote, requestId: v7('000000000002') }), (error: { statusCode?: number }) => error.statusCode === 404);
+  await assert.rejects(f.client.enqueue(f.session.id, 'hello', {}, { origin: remote, requestId: v7('000000000002') }), (error: { disposition?: string }) => statusOf(error) === 404);
   assert.deepEqual([...f.client.coordinators() ?? []], [f.session.id]);
   assert.equal(f.runs.list().length, 0);
 });
@@ -111,7 +112,7 @@ test('the worker refuses remote work in a coordinator conversation', async t => 
 test('remote work is not sent to a worker that cannot tell it apart from local work', async () => {
   const client = new DurableRunManager({ stateDir: '/nonexistent-tower-state' });
   await assert.rejects(client.enqueue('codex:x', 'hello', {}, { origin: remote, requestId: v7('000000000003') }),
-    (error: { statusCode?: number; disposition?: string }) => error.statusCode === 503 && error.disposition === 'not-admitted');
+    (error: { disposition?: string }) => statusOf(error) === 503 && error.disposition === 'not-admitted');
   assert.equal(client.coordinators(), undefined, 'an unknown worker cannot keep coordinator conversations private');
 });
 

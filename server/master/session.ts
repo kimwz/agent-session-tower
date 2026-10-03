@@ -8,11 +8,13 @@ import { quarantineFile, readPrivateJson, writePrivateJson } from '../stores/pri
 import type { ApiTarget } from '../tower-tools/api-target.js';
 import { REPORT_MARK, VOICE_MARK, writeMasterGuide } from './guide.js';
 import type { LiveState } from '../tower-tools/live-state.js';
+import { replyError } from '../tower-tools/tower-client.js';
 import type { Table } from '../tower-tools/read-db.js';
 import type { MasterRoom } from './room.js';
 import type { MasterSettingsStore } from './settings.js';
 import type { TowerClient } from '../tower-tools/tower-client.js';
 import { READ_CHARS } from './voice-text.js';
+import { TowerError } from '../../shared/errors.js';
 
 const FOLLOW_MS = 5_000;
 /** Work Tower cannot find for this long is reported as unknown. */
@@ -282,18 +284,18 @@ export class MasterSession {
    * ordinary session. A start whose answer was lost is not tried again: the owner sees it in the session list.
    */
   begin(input: { provider: Provider; text: string; model?: string; effort?: string; replace?: boolean }): Promise<MasterBinding> {
-    if (this.starting) throw Object.assign(new Error('마스터 세션을 시작하는 중입니다.'), { statusCode: 409 });
+    if (this.starting) throw new TowerError('conflict', '마스터 세션을 시작하는 중입니다.');
     const run = async (): Promise<MasterBinding> => {
-      if (this.binding() && !input.replace) throw Object.assign(new Error('마스터 세션이 이미 있습니다.'), { statusCode: 409 });
+      if (this.binding() && !input.replace) throw new TowerError('conflict', '마스터 세션이 이미 있습니다.');
       await writeMasterGuide(this.folder);
       const response = await this.options.tower.call('POST', '/api/sessions', { provider: input.provider, cwd: this.folder, prompt: input.text, title: '마스터',
         ...(input.model ? { model: input.model } : {}), ...(input.effort ? { effort: input.effort } : {}) }, { write: true });
       const created = response.body as { session?: { id?: string }; run?: Run } | undefined;
       if (response.state !== 'succeeded' || !created?.session?.id) {
         const message = (response.body as { error?: string } | undefined)?.error;
-        throw Object.assign(new Error(response.state === 'uncertain'
-          ? '마스터 세션을 만들었는지 알 수 없습니다. 세션 목록에서 "마스터" 세션을 확인해 주세요.'
-          : `마스터 세션을 시작하지 못했습니다${message ? `: ${message}` : '.'}`), { statusCode: response.state === 'uncertain' ? 503 : response.status || 502 });
+        throw response.state === 'uncertain'
+          ? new TowerError('unavailable', '마스터 세션을 만들었는지 알 수 없습니다. 세션 목록에서 "마스터" 세션을 확인해 주세요.')
+          : replyError(`마스터 세션을 시작하지 못했습니다${message ? `: ${message}` : '.'}`, response, 'upstream');
       }
       const binding: MasterBinding = { sessionId: created.session.id, provider: input.provider, startedAt: new Date().toISOString() };
       await this.options.settings.bind(binding);
@@ -314,7 +316,7 @@ export class MasterSession {
   /** A request the owner said aloud: sent to the master session, and its answer read aloud when it comes. */
   async spoken(input: { text: string; voiceSession: string; key: string }): Promise<void> {
     const binding = this.binding();
-    if (!binding) throw Object.assign(new Error('마스터 세션이 아직 없습니다. 먼저 글로 한 번 말을 걸어 주세요.'), { statusCode: 409 });
+    if (!binding) throw new TowerError('conflict', '마스터 세션이 아직 없습니다. 먼저 글로 한 번 말을 걸어 주세요.');
     // The same request (its page sent it again) goes once.
     if (this.sending.has(input.key) || this.file.followed.some(item => item.key === input.key)) return;
     this.sending.add(input.key);
@@ -341,7 +343,7 @@ export class MasterSession {
     // Refused, it can be said again; whether an uncertain one arrived is not known, so it is not sent again by its key.
     if (response.state !== 'uncertain') { this.file.followed = this.file.followed.filter(entry => entry !== item); await this.save(); }
     else { item.state = 'unknown'; await this.save(); }
-    throw Object.assign(new Error((response.body as { error?: string } | undefined)?.error ?? '마스터 세션에 보내지 못했습니다.'), { statusCode: response.status || 503 });
+    throw replyError((response.body as { error?: string } | undefined)?.error ?? '마스터 세션에 보내지 못했습니다.', response, 'unavailable');
   }
 
   /** Work a tower_api call started (a new session, a message, an Auto Prompt), followed so its end is reported. */

@@ -11,6 +11,7 @@ import type { SecretContext, SecretMetadata } from '../../../shared/secrets.js';
 import type { Run, Session } from '../../../shared/types.js';
 import type { Capability } from '../../../server/api/mcp.js';
 import type { SessionOrigin } from '../../../server/runs/origin.js';
+import { statusOf } from '../../../shared/errors.js';
 
 const PASSWORD = 'fixture-locked-list-password';
 const CANARY = 'LOCKED_LIST_VALUE_CANARY_5531';
@@ -147,15 +148,15 @@ test('locked tools list names and turn any use into an unlock request; ineligibl
 
   const reference = locked.secrets.find(item => item.name === 'GLOBAL_AUTO')!.reference;
   await assert.rejects(runtime.tool(capability, 'secrets_run', { operationId: 'locked-use', command: process.execPath, args: ['-e', ''], env: { KEY: reference } }),
-    (error: Error & { statusCode?: number }) => error.statusCode === 423 && error.message === SECRET_LOCKED_USE);
-  await assert.rejects(runtime.tool(capability, 'secrets_cli', { argv: ['fingerprint', reference] }), (error: Error & { statusCode?: number }) => error.statusCode === 423);
-  await assert.rejects(runtime.tool(capability, 'secrets_cli', { operationId: 'locked-cli', argv: ['run', '--env', `KEY=${reference}`, '--', process.execPath, '-e', ''] }), (error: Error & { statusCode?: number }) => error.statusCode === 423);
+    (error: Error) => statusOf(error) === 423 && error.message === SECRET_LOCKED_USE);
+  await assert.rejects(runtime.tool(capability, 'secrets_cli', { argv: ['fingerprint', reference] }), (error: Error) => statusOf(error) === 423);
+  await assert.rejects(runtime.tool(capability, 'secrets_cli', { operationId: 'locked-cli', argv: ['run', '--env', `KEY=${reference}`, '--', process.execPath, '-e', ''] }), (error: Error) => statusOf(error) === 423);
 
   // Archiving while locked records a closure that the unlock applies; the locked list honours it already.
   await runtime.endSession(capability.sessionId);
-  await assert.rejects(runtime.tool(capability, 'secrets_list', {}), (error: Error & { statusCode?: number }) => error.statusCode === 403);
+  await assert.rejects(runtime.tool(capability, 'secrets_list', {}), (error: Error) => statusOf(error) === 403);
   runs.running.find(run => run.id === capability.runId)!.status = 'completed';
-  await assert.rejects(runtime.tool(capability, 'secrets_list', {}), (error: Error & { statusCode?: number }) => error.statusCode === 403);
+  await assert.rejects(runtime.tool(capability, 'secrets_list', {}), (error: Error) => statusOf(error) === 403);
 });
 
 test('without an index the locked list says names are unknown, and a vault-less Tower never asks for an unlock', async t => {
@@ -178,7 +179,7 @@ test('without an index the locked list says names are unknown, and a vault-less 
   const empty = new SecretService({ stateDir: emptyState }); await empty.start();
   const emptyRuntime = new SecretRuntime({ stateDir: emptyState, service: empty, runs }); t.after(() => emptyRuntime.close());
   assert.deepEqual((await emptyRuntime.tool(capability, 'secrets_list', {}) as { secrets: unknown[] }).secrets, []);
-  await assert.rejects(emptyRuntime.tool(capability, 'secrets_run', { operationId: 'no-vault', command: process.execPath, env: { KEY: 'NAME' } }), (error: Error & { statusCode?: number }) => error.statusCode === 404 && error.message === SECRET_NO_VAULT);
+  await assert.rejects(emptyRuntime.tool(capability, 'secrets_run', { operationId: 'no-vault', command: process.execPath, env: { KEY: 'NAME' } }), (error: Error) => statusOf(error) === 404 && error.message === SECRET_NO_VAULT);
 });
 
 test('a lock that lands during an unlocked call still answers as the locked path', async t => {
@@ -190,5 +191,5 @@ test('a lock that lands during an unlocked call still answers as the locked path
   const listed = await runtime.tool(capability, 'secrets_list', {}) as { locked: boolean; secrets: SecretMetadata[] };
   assert.equal(listed.locked, true); assert.ok(names(listed.secrets).includes('GLOBAL_AUTO'));
   await f.service.unlock(PASSWORD);
-  await assert.rejects(runtime.tool(capability, 'secrets_fingerprint', { reference: listed.secrets[0].reference }), (error: Error & { statusCode?: number }) => error.statusCode === 423 && error.message === SECRET_LOCKED_USE);
+  await assert.rejects(runtime.tool(capability, 'secrets_fingerprint', { reference: listed.secrets[0].reference }), (error: Error) => statusOf(error) === 423 && error.message === SECRET_LOCKED_USE);
 });

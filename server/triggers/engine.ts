@@ -6,6 +6,7 @@ import type { TriggerPolls } from './polls.js';
 import { CATCH_UP_WINDOW_MS, LATE_AFTER_MS, latestSlot, nextSlot } from './schedule.js';
 import type { EngineState } from './state.js';
 import type { TriggerStore } from './store.js';
+import { isKind } from '../../shared/errors.js';
 
 /**
  * The engine's clock: a tick every so often fires what is due, starts polls, follows runs and hands queued ones over.
@@ -105,7 +106,7 @@ export class TriggerEngine {
           poll = { slot, revision: current.revision };
         }, full ? 'settle' : 'grow').then(() => { if (poll && unlock) this.polls.startPoll(trigger.id, poll.slot, poll.revision, unlock); else unlock?.(); }).catch(async error => {
           unlock?.();
-          if ((error as { statusCode?: number }).statusCode !== 507) return;
+          if (!isKind(error, 'storage-full')) return;
           // A once reservation keeps its due time without repeated settle writes until history has room.
           if (trigger.source.schedule.type === 'once') {
             this.store.noteCapacity(`"${trigger.name}" is waiting because trigger history is full.`);

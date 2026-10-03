@@ -218,7 +218,7 @@ test('every change is audited, earlier revisions can be restored, and a stale re
   const service = await f.open();
   const created = await service.create(hourly(f.project), AGENT);
   const updated = await service.update(created.id, hourly(f.project, { name: 'Renamed' }), created.revision, OWNER);
-  await assert.rejects(service.update(created.id, hourly(f.project, { name: 'Stale' }), created.revision, OWNER), { statusCode: 409 });
+  await assert.rejects(service.update(created.id, hourly(f.project, { name: 'Stale' }), created.revision, OWNER), { kind: 'conflict' });
   const reverted = await service.revert(created.id, 1, updated.revision, OWNER);
   assert.equal(reverted.name, 'Hourly report');
   assert.equal(reverted.revision, 3);
@@ -251,7 +251,7 @@ test('a state file that cannot be saved stops new runs and says why', async t =>
   await service.tick();
   assert.equal(f.calls.length, 0);
   assert.match(service.overview().storageError ?? '', /Cannot save triggers/);
-  await assert.rejects(service.run(trigger.id, OWNER), { statusCode: 503 });
+  await assert.rejects(service.run(trigger.id, OWNER), { kind: 'unavailable' });
   await rm(path, { recursive: true });
   await service.tick();
   assert.equal(service.overview().storageError, undefined);
@@ -333,9 +333,9 @@ test('trigger state that cannot be moved aside is never written over', async t =
   assert.match(service.overview().storageError ?? '', locked);
   f.clock.now += 2 * HOUR;
   await service.tick();
-  await assert.rejects(service.create(hourly(f.project), OWNER), { statusCode: 503, message: locked });
+  await assert.rejects(service.create(hourly(f.project), OWNER), { kind: 'unavailable', message: locked });
   const backup = { triggers: [{ ...hourly(f.project), id: randomUUID(), revision: 1, createdAt: '', updatedAt: '', updatedBy: OWNER }], settings: service.settings(), trustedFolders: [f.project], secretGrants: {}, fired: {}, github: {} };
-  await assert.rejects(service.restoreBackup(backup as any), { statusCode: 503 });
+  await assert.rejects(service.restoreBackup(backup as any), { kind: 'unavailable' });
   await service.flush();
   assert.equal(service.inFlight(), false);
   await service.settle();
@@ -349,7 +349,7 @@ test('schedules refuse second-level cron and unknown time zones', async t => {
   const f = await fixture(t);
   const service = await f.open();
   for (const schedule of [{ type: 'cron', expression: '* * * * * *', timezone: 'UTC' }, { type: 'cron', expression: '0 9 * * *', timezone: 'Mars/Base' }] as const) {
-    await assert.rejects(service.create(hourly(f.project, { source: { kind: 'schedule', schedule, catchUp: 'latest' } }), OWNER), { statusCode: 400 });
+    await assert.rejects(service.create(hourly(f.project, { source: { kind: 'schedule', schedule, catchUp: 'latest' } }), OWNER), { kind: 'invalid' });
   }
   assert.deepEqual(service.preview({ type: 'cron', expression: '30 1 * * *', timezone: 'America/New_York' }).slice(0, 1), ['2026-09-24T05:30:00.000Z']);
 });
@@ -415,8 +415,8 @@ test('when trigger history is full, new runs and definitions stop but accepted r
   service.close();
   const size = (await readFile(join(f.directory, 'trigger-engine.json'))).byteLength;
   service = await f.open({ acceptBytes: size - 1, maxBytes: size + 5000 });
-  await assert.rejects(service.create(hourly(f.project, { name: 'One more' }), OWNER), { statusCode: 507 });
-  await assert.rejects(service.run(trigger.id, OWNER), { statusCode: 507 });
+  await assert.rejects(service.create(hourly(f.project, { name: 'One more' }), OWNER), { kind: 'storage-full' });
+  await assert.rejects(service.run(trigger.id, OWNER), { kind: 'storage-full' });
   assert.match(service.overview().storageError ?? '', /history is full/);
   for (const run of f.runs) Object.assign(run, { status: 'error', error: 'The provider failed: '.padEnd(1400, '.') });
   await service.tick();
@@ -449,7 +449,7 @@ test('a trigger at its record limit adds nothing more and says so', async t => {
   for (let index = 0; index < 20_000; index++) state.fired[`${trigger.id} old:${index}`] = new Date(start - 1000).toISOString();
   await writeFile(path, JSON.stringify(state));
   service = await f.open();
-  await assert.rejects(service.run(trigger.id, OWNER), { statusCode: 409 });
+  await assert.rejects(service.run(trigger.id, OWNER), { kind: 'conflict' });
   assert.match(service.overview().storageError ?? '', /20000 runs recorded/);
   assert.equal(Object.keys(JSON.parse(await readFile(path, 'utf8')).fired).length, 20_000);
 });
@@ -697,7 +697,7 @@ test('once parsing keeps past state readable; timing admission requires a future
   const service = await f.open();
   const source = (at: string): TriggerInput['source'] => ({ kind: 'schedule', schedule: { type: 'once', at }, catchUp: 'latest' });
   for (const at of ['2026-09-24T01:00:00', 'not-a-date', '2026-09-23T01:00:00Z']) {
-    await assert.rejects(service.create(hourly(f.project, { source: source(at) } as any), OWNER), { statusCode: 400 });
+    await assert.rejects(service.create(hourly(f.project, { source: source(at) } as any), OWNER), { kind: 'invalid' });
   }
   const trigger = await service.create(hourly(f.project, { source: source('2026-09-24T01:00:00Z') }), OWNER);
   f.clock.now += 24 * HOUR;
@@ -740,7 +740,7 @@ test('a disabled once cannot be consumed manually and a consumed source cannot b
   const service = await f.open();
   const input = hourly(f.project, { enabled: false, source: { kind: 'schedule', schedule: { type: 'once', at: '2026-09-24T01:00:00Z' }, catchUp: 'latest' } });
   let trigger = await service.create(input, OWNER);
-  await assert.rejects(service.run(trigger.id, OWNER), { statusCode: 409 });
+  await assert.rejects(service.run(trigger.id, OWNER), { kind: 'conflict' });
   assert.equal(service.events().length, 0);
   trigger = await service.setEnabled(trigger.id, true, trigger.revision, OWNER);
   f.clock.now++;

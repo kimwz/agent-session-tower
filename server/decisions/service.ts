@@ -1,7 +1,7 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DECISION_PROVIDER_IDS, DECISION_RECORDS_KEPT, DEFAULT_DECISION_FEATURES, type DecisionFeatures, type DecisionOverview, type DecisionProviderId, type DecisionRecord } from '../../shared/decisions.js';
-import { httpError } from '../http/requests.js';
+import { TowerError } from '../../shared/errors.js';
 import { readPrivateJson, writePrivateJson } from '../stores/private-json.js';
 import { DecisionError, type DecisionEngine } from './engine.js';
 import { DECISION_PROVIDERS, type DecisionProvider } from './providers.js';
@@ -16,7 +16,7 @@ function parseFeatures(value: unknown, fallback: DecisionFeatures): DecisionFeat
   if (value === undefined) return fallback;
   const features = value as Record<string, unknown>;
   if (!features || typeof features !== 'object' || Array.isArray(features) || Object.entries(features).some(([key, item]) => !(key in DEFAULT_DECISION_FEATURES) || typeof item !== 'boolean')) {
-    throw httpError(400, '빠른 판단 기능 설정이 올바르지 않습니다.');
+    throw new TowerError('invalid', '빠른 판단 기능 설정이 올바르지 않습니다.');
   }
   return { ...fallback, ...features as Partial<DecisionFeatures> };
 }
@@ -79,13 +79,13 @@ export class DecisionService {
   }
 
   private async apply(body: Record<string, unknown>): Promise<DecisionOverview> {
-    if (!body || typeof body !== 'object' || Object.keys(body).some(key => !['provider', 'apiKey', 'features'].includes(key))) throw httpError(400, '빠른 판단 설정 요청 형식이 올바르지 않습니다.');
-    if (body.provider !== undefined && !provider(body.provider)) throw httpError(400, '지원하지 않는 판단 서비스입니다.');
+    if (!body || typeof body !== 'object' || Object.keys(body).some(key => !['provider', 'apiKey', 'features'].includes(key))) throw new TowerError('invalid', '빠른 판단 설정 요청 형식이 올바르지 않습니다.');
+    if (body.provider !== undefined && !provider(body.provider)) throw new TowerError('invalid', '지원하지 않는 판단 서비스입니다.');
     let apiKey = this.saved.apiKey;
     if (body.apiKey === null) apiKey = undefined;
     else if (body.apiKey !== undefined) {
       const key = typeof body.apiKey === 'string' ? body.apiKey.trim() : body.apiKey;
-      if (!validKey(key)) throw httpError(400, 'API 키는 공백 없는 8~512자여야 합니다.');
+      if (!validKey(key)) throw new TowerError('invalid', 'API 키는 공백 없는 8~512자여야 합니다.');
       apiKey = key;
     }
     const features = parseFeatures(body.features, this.saved.features);
@@ -98,15 +98,15 @@ export class DecisionService {
   /** Asks the service one question about made-up content, so no conversation leaves this computer. */
   async test(): Promise<DecisionOverview> {
     const { provider: id, apiKey } = this.saved;
-    if (!apiKey) throw httpError(409, '먼저 API 키를 저장하세요.');
+    if (!apiKey) throw new TowerError('conflict', '먼저 API 키를 저장하세요.');
     const engine = this.providers[id].create(apiKey, this.fetcher);
     try {
       await engine.decide({ state: { message: 'The build finished and every test passed.' }, questions: { finished: { type: 'yesNo', instructions: 'Does the message say that the work finished?' } } });
     } catch (error) {
       const kind = error instanceof DecisionError ? error.kind : 'unavailable';
-      if (kind === 'unauthorized') throw httpError(400, `${engine.label}가 API 키를 거부했습니다. 키를 확인하세요.`);
-      if (kind === 'rate-limited') throw httpError(429, `${engine.label} 요청 한도에 걸렸습니다. 잠시 후 다시 확인하세요.`);
-      throw httpError(502, `${engine.label}에 연결하지 못했습니다. 잠시 후 다시 확인하세요.`);
+      if (kind === 'unauthorized') throw new TowerError('invalid', `${engine.label}가 API 키를 거부했습니다. 키를 확인하세요.`);
+      if (kind === 'rate-limited') throw new TowerError('rate-limited', `${engine.label} 요청 한도에 걸렸습니다. 잠시 후 다시 확인하세요.`);
+      throw new TowerError('upstream', `${engine.label}에 연결하지 못했습니다. 잠시 후 다시 확인하세요.`);
     }
     return this.overview();
   }
@@ -118,7 +118,7 @@ export class DecisionService {
   restore(value: unknown): Promise<DecisionOverview> {
     const change = this.changes.then(async () => {
       const input = value as Partial<Saved> | undefined;
-      if (!input || typeof input !== 'object' || !provider(input.provider) || (input.apiKey !== undefined && !validKey(input.apiKey))) throw httpError(400, '백업의 빠른 판단 설정이 올바르지 않습니다.');
+      if (!input || typeof input !== 'object' || !provider(input.provider) || (input.apiKey !== undefined && !validKey(input.apiKey))) throw new TowerError('invalid', '백업의 빠른 판단 설정이 올바르지 않습니다.');
       const next: Saved = { provider: input.provider, features: parseFeatures(input.features ?? {}, DEFAULT_DECISION_FEATURES), ...(input.apiKey ? { apiKey: input.apiKey } : {}) };
       await this.save(next);
       this.saved = next;

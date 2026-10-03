@@ -3,6 +3,7 @@ import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { writePrivateJson } from '../stores/private-json.js';
+import { TowerError } from '../../shared/errors.js';
 
 /** How to start the next execution worker. The web process names its own, newer build. */
 export interface SuccessorCommand { execPath: string; args: string[] }
@@ -19,7 +20,7 @@ export function parseSuccessor(value: unknown, stateDir: string): SuccessorComma
   if (typeof input.execPath !== 'string' || !isAbsolute(input.execPath) || input.execPath.includes('\0')
     || args.length > 64 || args.some(arg => typeof arg !== 'string' || arg.length > 4096 || arg.includes('\0'))
     || worker === -1 || args[worker + 1] !== stateDir || worker + 2 !== args.length) {
-    throw Object.assign(new Error('Invalid successor worker command.'), { statusCode: 400 });
+    throw new TowerError('invalid', 'Invalid successor worker command.');
   }
   return { execPath: input.execPath, args: [...args] };
 }

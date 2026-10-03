@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { TowerError } from '../../shared/errors.js';
 
 /** A join code: what a computer needs to connect to a controller once. Made by the controller, used once, within ten minutes. */
 export interface JoinCode {
@@ -52,7 +53,7 @@ export function decodeJoinCode(text: unknown): JoinCode {
   return parsed.data;
 }
 
-function invalidCode() { return Object.assign(new Error('Tower 연결 코드가 아닙니다. 다른 컴퓨터에서 코드 전체를 복사하세요.'), { statusCode: 400 }); }
+function invalidCode() { return new TowerError('invalid', 'Tower 연결 코드가 아닙니다. 다른 컴퓨터에서 코드 전체를 복사하세요.'); }
 
 /** A released version's package as its release publishes it: built, so installing it needs no Git and no compiler. */
 export const releasePackage = (version: string) => `https://github.com/kimwz/agent-session-tower/releases/download/v${version}/agent-session-tower-${version}.tgz`;

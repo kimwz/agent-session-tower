@@ -9,6 +9,7 @@ import { blockRename, temporaryFiles } from '../../helpers/private-writes.js';
 import { createMonitorServer } from '../../../server/http/server.js';
 import type { Session } from '../../../shared/types.js';
 import { computeConversationRevision } from '../../../shared/conversation-revision.js';
+import { statusOf } from '../../../shared/errors.js';
 
 const native: Session = {
   id: 'codex:example', nativeId: 'example', provider: 'codex', title: 'First conversation', cwd: '/tmp/project', project: 'project',
@@ -64,7 +65,7 @@ test('failed persistence leaves the committed title intact and later saves can r
   await store.set(native, 'Committed title');
   await rename(stateDir, savedDir);
   await writeFile(stateDir, 'This file prevents new writes.');
-  await assert.rejects(store.set(native, 'Unsaved title'), { statusCode: 503 });
+  await assert.rejects(store.set(native, 'Unsaved title'), { kind: 'unavailable' });
   assert.equal(store.apply(native).customTitle, 'Committed title');
   assert.equal(JSON.parse(await readFile(join(savedDir, 'session-titles.json'), 'utf8'))[native.id], 'Committed title');
   await rm(stateDir);
@@ -80,7 +81,7 @@ test('title validation trims whitespace and uses the same UTF-16 length as brows
   assert.equal(normalizeSessionTitle(` ${'x'.repeat(120)} `), 'x'.repeat(120));
   assert.equal(normalizeSessionTitle('😀'.repeat(60)), '😀'.repeat(60));
   for (const value of [undefined, null, 12, {}, [], 'x'.repeat(121), '😀'.repeat(61)]) {
-    assert.throws(() => normalizeSessionTitle(value), { statusCode: 400 });
+    assert.throws(() => normalizeSessionTitle(value), { kind: 'invalid' });
   }
 });
 
@@ -186,9 +187,9 @@ test('writes exact bytes and failure message', async t => {
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.deepEqual(await temporaryFiles(dir), []);
   const restore = await blockRename(path);
-  const error = await store.set(native, 'Unsaved').then(() => undefined, (caught: unknown) => caught as Error & { statusCode?: number });
+  const error = await store.set(native, 'Unsaved').then(() => undefined, (caught: unknown) => caught as Error);
   assert.match(String(error?.message), /^제목을 저장하지 못했습니다: /);
-  assert.equal(error?.statusCode, 503);
+  assert.equal(statusOf(error), 503);
   assert.deepEqual(await temporaryFiles(dir), []);
   await restore();
   assert.equal(await readFile(path, 'utf8'), `${JSON.stringify({ [native.id]: 'Saved title' })}\n`);

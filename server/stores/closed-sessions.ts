@@ -3,6 +3,7 @@ import { mkdir, open } from 'node:fs/promises';
 import { writePrivateJson } from './private-json.js';
 import { join } from 'node:path';
 import type { Session } from '../../shared/types.js';
+import { TowerError } from '../../shared/errors.js';
 
 /** Which conversations the owner closed. Native processes and conversation files are untouched; the worktrees a closed conversation made are removed by the worker. */
 export class ClosedSessionStore {
@@ -41,7 +42,7 @@ export class ClosedSessionStore {
       if (closed) next.add(session.id); else next.delete(session.id);
       try { await writePrivateJson(this.path, `${JSON.stringify([...next])}\n`); }
       catch (error) {
-        throw Object.assign(new Error(`세션 표시 상태를 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`), { statusCode: 503 });
+        throw new TowerError('unavailable', `세션 표시 상태를 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
       }
       this.ids = next;
       return this.apply(session);

@@ -353,9 +353,9 @@ export class RunManager extends EventEmitter {
     if (!isAbsolute(cwd)) throw new RunError('작업 폴더의 절대 경로를 입력하세요.');
     input = { ...input, cwd };
     const title = input.title === undefined ? '' : normalizeSessionTitle(input.title);
-    if (!(await this.executable(input.provider))) throw new RunError(`Install the ${input.provider} CLI and ensure it is in PATH before creating a session.`, 503);
+    if (!(await this.executable(input.provider))) throw new RunError(`Install the ${input.provider} CLI and ensure it is in PATH before creating a session.`, 'unavailable');
     if (internal.createFolder === false) {
-      if (!(await stat(cwd).then(info => info.isDirectory(), () => false))) throw new RunError('The working folder does not exist. It was not created.', 404);
+      if (!(await stat(cwd).then(info => info.isDirectory(), () => false))) throw new RunError('The working folder does not exist. It was not created.', 'not-found');
     } else {
       // A folder that does not exist yet is created, like `mkdir -p` before starting the CLI there.
       try { await mkdir(cwd, { recursive: true }); if (!(await stat(cwd)).isDirectory()) throw new Error(); }
@@ -400,21 +400,21 @@ export class RunManager extends EventEmitter {
   }
 
   private validateAdmission(prompt: string, hasAttachments = false): void {
-    if (!this.started || this.stopping) throw notAdmitted(new RunError('The task runner is not accepting instructions.', 503));
+    if (!this.started || this.stopping) throw notAdmitted(new RunError('The task runner is not accepting instructions.', 'unavailable'));
     if (typeof prompt !== 'string' || (!prompt.trim() && !hasAttachments)) throw new RunError('Enter an instruction or attach a file first.');
-    if (prompt.length > MAX_PROMPT) throw new RunError(`Instructions must be at most ${MAX_PROMPT.toLocaleString()} characters.`, 413);
-    if ([...this.runs.values()].filter((run) => run.status === 'queued' && !run.scheduled).length >= MAX_QUEUED) throw notAdmitted(new RunError('The task queue is full. Wait for a task to finish.', 429));
+    if (prompt.length > MAX_PROMPT) throw new RunError(`Instructions must be at most ${MAX_PROMPT.toLocaleString()} characters.`, 'too-large');
+    if ([...this.runs.values()].filter((run) => run.status === 'queued' && !run.scheduled).length >= MAX_QUEUED) throw notAdmitted(new RunError('The task queue is full. Wait for a task to finish.', 'rate-limited'));
   }
 
   /** External content only enters conversations Tower created and can keep marked. */
   private admitUntrusted(sessionId: string): void {
-    if (!this.registry.has(sessionId)) throw new RunError('External trigger content can only continue a conversation Tower created for it.', 409);
+    if (!this.registry.has(sessionId)) throw new RunError('External trigger content can only continue a conversation Tower created for it.', 'conflict');
   }
 
   private validateCorrelation(id: string | undefined): void {
     if (id === undefined) return;
     if (!UUID.test(id)) throw new RunError('Invalid Auto Prompt request ID.');
-    if ([...this.runs.values()].some(run => run.autoPromptId === id)) throw new RunError('This Auto Prompt already has an execution task.', 409);
+    if ([...this.runs.values()].some(run => run.autoPromptId === id)) throw new RunError('This Auto Prompt already has an execution task.', 'conflict');
   }
 
   async enqueue(sessionId: string, prompt: string, request: MessageAttachments = {}, internal: RunAdmission = {}): Promise<Run> {
@@ -427,7 +427,7 @@ export class RunManager extends EventEmitter {
     if (internal.untrustedInput) this.admitUntrusted(sessionId);
     const model = requestedModel(request.model);
     const effort = requestedEffort(request.effort, session.provider);
-    if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 503);
+    if (!(await this.executable(session.provider))) throw new RunError(`Install the ${session.provider} CLI and ensure it is in PATH before sending instructions.`, 'unavailable');
     const prepared = await this.attachments.prepare(sessionId, request);
     // File writes yield; recheck admission immediately before inserting the run.
     try { this.validateAdmission(prompt, prepared.attachments.length > 0); this.validateSession(this.getSession(sessionId)); this.validateCorrelation(internal.autoPromptId); internal.validate?.(); }
@@ -483,10 +483,10 @@ export class RunManager extends EventEmitter {
   /** `targetRunId` inserts only into that turn: a decision made about one turn never lands in the next. */
   async steer(runId: string, options: { whileWaiting?: boolean; targetRunId?: string } = {}): Promise<Run> {
     const run = this.runs.get(runId);
-    if (!run) throw new RunError('Task not found.', 404);
+    if (!run) throw new RunError('Task not found.', 'not-found');
     if (run.steering) return this.list().find(item => item.id === runId)!;
     const selected = this.steeringTarget(run);
-    if (!selected) throw new RunError('This queued instruction cannot be inserted into an active Tower turn.', 409);
+    if (!selected) throw new RunError('This queued instruction cannot be inserted into an active Tower turn.', 'conflict');
     if (options.targetRunId !== undefined && selected.target.id !== options.targetRunId) throw new SteeringError('The active turn changed before delivery.', 'rejected');
     // Reserve synchronously before attachment reads so duplicate clicks cannot submit twice.
     this.admissions.add(run.id);
@@ -545,9 +545,9 @@ export class RunManager extends EventEmitter {
   /** `reason` is recorded on the cancelled run (a forced update says why it stopped). */
   async cancel(runId: string, reason?: string): Promise<void> {
     const run = this.runs.get(runId);
-    if (!run) throw new RunError('Task not found.', 404);
+    if (!run) throw new RunError('Task not found.', 'not-found');
     if (FINISHED.has(run.status)) return;
-    if (run.steering) throw new RunError('An inserted instruction belongs to the active turn. Stop the active turn instead.', 409);
+    if (run.steering) throw new RunError('An inserted instruction belongs to the active turn. Stop the active turn instead.', 'conflict');
     const noted = () => { if (reason && run.status === 'cancelled' && run.error !== reason) { run.error = reason; this.changed(); } };
     // Stopped by the owner, not by the update's deadline: the update does not bring the work back.
     if (!reason) { this.ownerStopped.add(runId); run.ownerStopped = true; this.changed(); }
@@ -576,11 +576,11 @@ export class RunManager extends EventEmitter {
 
   async respondToApproval(runId: string, approvalId: string, decision: RunApprovalResponse): Promise<Run> {
     const run = this.runs.get(runId);
-    if (!run) throw new RunError('Task not found.', 404);
+    if (!run) throw new RunError('Task not found.', 'not-found');
     const owned = this.owned.get(runId);
     const stdio = this.stdio.get(runId);
     if (this.stopping || run.status !== 'running' || (!owned?.claude && !stdio) || !run.approvals?.some(approval => approval.id === approvalId)) {
-      throw new RunError('This permission request is no longer pending. Refresh the conversation.', 409);
+      throw new RunError('This permission request is no longer pending. Refresh the conversation.', 'conflict');
     }
     // The owner's own words to the agent, kept whole with what was asked, before they go (see ownerAnswers).
     this.answers.record(run.sessionId, run.approvals!.find(approval => approval.id === approvalId)!, decision);
@@ -627,7 +627,7 @@ export class RunManager extends EventEmitter {
   }
 
   private validateSession(session: Session | undefined): asserts session is Session {
-    if (!session) throw new RunError('Session no longer exists. Refresh and select another session.', 404);
+    if (!session) throw new RunError('Session no longer exists. Refresh and select another session.', 'not-found');
     if (!session.resumable) throw new RunError('This session cannot be resumed by its provider.');
     if (!/^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(session.nativeId)) throw new RunError('The native session ID is invalid.');
     if (!isAbsolute(session.cwd)) throw new RunError('The session has no valid working directory.');
@@ -688,7 +688,7 @@ export class RunManager extends EventEmitter {
         const session = this.getSession(run.sessionId);
         const creating = this.registry.creationRun(run.sessionId) === run.id;
         try {
-          if (!session) throw new RunError('Session no longer exists.', 404);
+          if (!session) throw new RunError('Session no longer exists.', 'not-found');
           if (!creating) this.validateSession(session);
           if (this.isWorking(session) || this.reservedSessions.has(session.id)) {
             const reason = this.waitReason(session);
@@ -802,7 +802,7 @@ export class RunManager extends EventEmitter {
       refused = run.status !== 'queued' || this.stopping || Boolean(latest && (this.isWorking(latest) || (latest.provider === 'codex' && latest.activeProcess))) || this.refusedAtLaunch(run, session);
       if (!refused) {
         if (!creating) this.validateSession(latest);
-        else if (!latest) throw new RunError('Session no longer exists.', 404);
+        else if (!latest) throw new RunError('Session no longer exists.', 'not-found');
       }
     } catch (error) { prepared.dispose(); throw error; }
     if (refused) { prepared.dispose(); this.reservedSessions.delete(session.id); return; }

@@ -7,6 +7,7 @@ import { SKILL_NAME } from '../../shared/skills.js';
 import { isTaskNotification } from '../../shared/task-notification.js';
 import type { AutoPromptModelRequest } from '../auto-prompt/native.js';
 import type { SkillStateStore } from './state.js';
+import { TowerError } from '../../shared/errors.js';
 
 export interface SkillAdvisorDependencies {
   stateDir: string;
@@ -258,7 +259,7 @@ export class SkillAdvisor {
 
   /** Reads the owner's requests of the last days at once and proposes the ways of working that repeat across them. */
   async backfill(days = 7): Promise<number> {
-    if (this.backfilling || this.paused) throw Object.assign(new Error('이미 분석하고 있습니다.'), { statusCode: 409 });
+    if (this.backfilling || this.paused) throw new TowerError('conflict', '이미 분석하고 있습니다.');
     this.backfilling = true; this.backfillStatus = undefined; this.deps.onChange();
     try {
       const since = new Date(this.now() - days * 24 * 60 * 60_000).toISOString();

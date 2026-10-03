@@ -7,6 +7,7 @@ import type { Skill, SkillBundleSkill, SkillDetail, SkillProvider, SkillScope, S
 import { MAX_SKILL_BODY, MAX_SKILL_DESCRIPTION, SKILL_NAME } from '../../shared/skills.js';
 import { formatSkillFile, parseSkillFile } from './skill-file.js';
 import { asideOf, bundleFiles, containsLink, excludeLinks, projectKey, readMoves, trackedByGit, writeBundleFiles, writeMoves, type SkillMove } from './store.js';
+import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
 export interface SkillHomes {
   /** The account's home folder: project skills are never looked for at or above it. */
@@ -48,8 +49,8 @@ export function skillHomes(stateDir: string, env: NodeJS.ProcessEnv = process.en
     codexHome: env.CODEX_HOME || join(home, '.codex'), trash: join(stateDir, 'skills-trash'),
     store: join(stateDir, 'skills'), journal: join(stateDir, 'skills-moves.json') };
 }
-export class SkillError extends Error {
-  constructor(message: string, readonly statusCode = 400) { super(message); }
+export class SkillError extends TowerError {
+  constructor(message: string, kind: ErrorKind = 'invalid') { super(kind, message); }
 }
 
 /**
@@ -179,7 +180,7 @@ export class SkillFiles {
     const skill = await this.find(dir, cwd);
     // Everything shown comes from the read whose revision a save or a confirmation sends back.
     const read = await readSkillSnapshot(skill.dir);
-    if (!read) throw new SkillError('스킬 파일을 읽을 수 없습니다.', 404);
+    if (!read) throw new SkillError('스킬 파일을 읽을 수 없습니다.', 'not-found');
     return { ...skill, name: read.name, description: read.description, revision: read.revision, body: read.body };
   }
 
@@ -203,7 +204,7 @@ export class SkillFiles {
   private async mergeNow(dir: string, cwd?: string): Promise<Skill> {
     const skill = await this.find(dir, cwd);
     if (!skill.copies) return skill;
-    if (skill.copiesDiffer) throw new SkillError('복사본의 내용이 달라 합칠 수 없습니다.', 409);
+    if (skill.copiesDiffer) throw new SkillError('복사본의 내용이 달라 합칠 수 없습니다.', 'conflict');
     const roots = await this.realRoots(skill.cwd);
     for (const copy of skill.copies) {
       if (copy.dir === skill.dir || !roots.has(dirname(copy.dir))) continue;
@@ -238,21 +239,21 @@ export class SkillFiles {
   private async adoptNow(dir: string, cwd?: string): Promise<{ skill: Skill; from: string[] }> {
     const skill = await this.find(dir, cwd);
     if (skill.managed) return { skill, from: [] };
-    if (skill.copiesDiffer) throw new SkillError('에이전트별 복사본의 내용이 달라 옮길 수 없습니다. 먼저 하나로 정리하세요.', 409);
+    if (skill.copiesDiffer) throw new SkillError('에이전트별 복사본의 내용이 달라 옮길 수 없습니다. 먼저 하나로 정리하세요.', 'conflict');
     const roots = await this.realRoots(skill.cwd);
     const places = [skill.dir, ...(skill.copies ?? []).map(copy => copy.dir).filter(place => place !== skill.dir)];
-    if (places.some(place => !roots.has(dirname(place)))) throw new SkillError('스킬 폴더 밖에 있는 스킬은 옮길 수 없습니다.', 409);
-    if (await containsLink(skill.dir)) throw new SkillError('스킬 폴더 안에 링크가 있어 옮길 수 없습니다. 링크가 가리키는 파일이 따라오지 않습니다.', 409);
+    if (places.some(place => !roots.has(dirname(place)))) throw new SkillError('스킬 폴더 밖에 있는 스킬은 옮길 수 없습니다.', 'conflict');
+    if (await containsLink(skill.dir)) throw new SkillError('스킬 폴더 안에 링크가 있어 옮길 수 없습니다. 링크가 가리키는 파일이 따라오지 않습니다.', 'conflict');
     // A folder git tracks (a project's shared skill, or a dotfiles repository) would show as deleted, and a commit would
     // remove it for everyone; git would also turn the link back into a folder on the next checkout.
-    for (const place of places) if (await trackedByGit(place)) throw new SkillError('git이 관리하는 스킬 폴더라 옮기지 않습니다. 저장소에서 함께 쓰는 스킬은 그대로 두세요.', 409);
+    for (const place of places) if (await trackedByGit(place)) throw new SkillError('git이 관리하는 스킬 폴더라 옮기지 않습니다. 저장소에서 함께 쓰는 스킬은 그대로 두세요.', 'conflict');
     for (const place of places) {
       try { await access(dirname(place), constants.W_OK); }
-      catch { throw new SkillError('스킬이 있는 폴더에 쓸 수 없어 옮길 수 없습니다.', 409); }
+      catch { throw new SkillError('스킬이 있는 폴더에 쓸 수 없어 옮길 수 없습니다.', 'conflict'); }
     }
     const root = await this.storeRoot(skill.scope, skill.cwd);
     const to = join(root, basename(skill.dir));
-    if (await lstat(to).catch(() => undefined)) throw new SkillError('타워에 같은 이름의 스킬이 이미 있습니다.', 409);
+    if (await lstat(to).catch(() => undefined)) throw new SkillError('타워에 같은 이름의 스킬이 이미 있습니다.', 'conflict');
     const id = randomUUID().replace(/-/g, '').slice(0, 8);
     const move: SkillMove = { id, to, incoming: join(root, `.incoming-${id}`), places };
     await this.journal(moves => [...moves, move]);
@@ -382,7 +383,7 @@ export class SkillFiles {
   async bundle(dirs: string[]): Promise<Omit<SkillBundleSkill, 'pinned'>[]> {
     const stored = await this.managed();
     const chosen = dirs.map(dir => stored.find(skill => skill.dir === dir));
-    if (chosen.some(skill => !skill)) throw new SkillError('타워가 관리하는 스킬만 백업할 수 있습니다.', 404);
+    if (chosen.some(skill => !skill)) throw new SkillError('타워가 관리하는 스킬만 백업할 수 있습니다.', 'not-found');
     // Where it is kept in Tower, whatever projects it applies to now.
     const global = join(await this.storeReal(), 'global');
     return Promise.all(chosen.map(async skill => {
@@ -410,7 +411,7 @@ export class SkillFiles {
   install(item: SkillBundleSkill, cwd: string | undefined, replace: boolean, link = true): Promise<Skill> {
     return this.serial(async () => {
       const conflict = await this.conflict(item.name, item.scope, cwd);
-      if (conflict === 'external' || conflict === 'managed' && !replace) throw new SkillError('같은 이름의 스킬이 이미 있습니다.', 409);
+      if (conflict === 'external' || conflict === 'managed' && !replace) throw new SkillError('같은 이름의 스킬이 이미 있습니다.', 'conflict');
       const root = await this.storeRoot(item.scope, cwd);
       const target = join(root, item.name), id = randomUUID().replace(/-/g, '').slice(0, 8);
       const incoming = join(root, `.incoming-${id}`), aside = asideOf(target, id);
@@ -446,10 +447,10 @@ export class SkillFiles {
     // A Tower skill made without links is checked where it will be linked, when its projects are applied.
     const roots = this.roots(cwd).filter(root => root.scope === input.scope && (root.scope === 'global' || root.cwd === cwd || !root.provider) && (input.link !== false || !root.provider));
     for (const root of roots) {
-      if (await lstat(join(root.dir, name)).catch(() => undefined)) throw new SkillError('같은 이름의 스킬이 이미 있습니다.', 409);
+      if (await lstat(join(root.dir, name)).catch(() => undefined)) throw new SkillError('같은 이름의 스킬이 이미 있습니다.', 'conflict');
     }
     // Two Tower skills of one name could never both be linked into the same project.
-    if ((await this.managed()).some(skill => basename(skill.dir) === name)) throw new SkillError('타워에 같은 이름의 스킬이 이미 있습니다.', 409);
+    if ((await this.managed()).some(skill => basename(skill.dir) === name)) throw new SkillError('타워에 같은 이름의 스킬이 이미 있습니다.', 'conflict');
     // A skill made in Tower lives in Tower's store; the agents reach it through links.
     const dir = join(await this.storeRoot(input.scope, cwd), name);
     await mkdir(dir);
@@ -469,7 +470,7 @@ export class SkillFiles {
       const root = roots.find(item => item.provider === provider);
       if (!root) continue;
       const path = join(root.dir, basename(skill.dir));
-      if (await lstat(path).catch(() => undefined)) throw new SkillError('연결할 스킬 폴더에 같은 이름이 이미 있습니다.', 409);
+      if (await lstat(path).catch(() => undefined)) throw new SkillError('연결할 스킬 폴더에 같은 이름이 이미 있습니다.', 'conflict');
       await ensureRoot(root);
       // A stored skill is linked by its absolute path; others relative to the folder's real place, so the link holds
       // when part of the path is itself a link (/tmp on macOS).
@@ -512,8 +513,8 @@ export class SkillFiles {
     const skill = await this.find(dir, cwd);
     const file = join(skill.dir, 'SKILL.md');
     const text = await readSkillText(file);
-    if (text === undefined) throw new SkillError('스킬 파일을 읽을 수 없습니다.', 404);
-    if (revision !== revisionOf(text)) throw new SkillError('다른 곳에서 이 스킬이 바뀌었습니다. 다시 열어 최신 내용으로 고치세요.', 409);
+    if (text === undefined) throw new SkillError('스킬 파일을 읽을 수 없습니다.', 'not-found');
+    if (revision !== revisionOf(text)) throw new SkillError('다른 곳에서 이 스킬이 바뀌었습니다. 다시 열어 최신 내용으로 고치세요.', 'conflict');
     const parsed = parseSkillFile(text);
     const temporary = join(skill.dir, `.SKILL.md.${process.pid}.${randomUUID()}.tmp`);
     const mode = (await stat(file)).mode & 0o777;
@@ -534,7 +535,7 @@ export class SkillFiles {
     const real = await realpath(dir).catch(() => undefined);
     const match = (item: Skill) => item.dir === real || item.copies?.some(copy => copy.dir === real);
     const skill = real && ((await this.list(cwd)).find(match) ?? (real.startsWith(await this.storeReal() + sep) ? (await this.managed()).find(match) : undefined));
-    if (!skill) throw new SkillError('스킬을 찾을 수 없습니다.', 404);
+    if (!skill) throw new SkillError('스킬을 찾을 수 없습니다.', 'not-found');
     return skill;
   }
   lookup(dir: string, cwd?: string): Promise<Skill> { return this.find(dir, cwd); }
@@ -569,10 +570,10 @@ export class SkillFiles {
     const wanted = [...(targets.all ? this.globalRoots().link : []), ...targets.projects.flatMap(cwd => this.projectRoots(cwd))];
     for (const root of wanted) {
       const where = root.cwd ? basename(root.cwd) : root.dir;
-      if (!await rootIsSafe(root)) throw new SkillError(`${where}의 스킬 폴더가 다른 곳을 가리키는 링크라 쓸 수 없습니다.`, 409);
+      if (!await rootIsSafe(root)) throw new SkillError(`${where}의 스킬 폴더가 다른 곳을 가리키는 링크라 쓸 수 없습니다.`, 'conflict');
       const path = join(root.dir, name);
       if (!await lstat(path).catch(() => undefined)) continue;
-      if (await realpath(path).catch(() => '') !== dir) throw new SkillError(`${where}에 같은 이름의 다른 스킬이 이미 있습니다.`, 409);
+      if (await realpath(path).catch(() => '') !== dir) throw new SkillError(`${where}에 같은 이름의 다른 스킬이 이미 있습니다.`, 'conflict');
     }
   }
 
@@ -583,7 +584,7 @@ export class SkillFiles {
   reconcile(dir: string, targets: SkillTargets, tracked: { projects: string[]; global: boolean }): Promise<void> {
     return this.serial(async () => {
       const name = basename(dir);
-      if (!(await stat(dir).catch(() => undefined))?.isDirectory()) throw new SkillError('스킬을 찾을 수 없습니다.', 404);
+      if (!(await stat(dir).catch(() => undefined))?.isDirectory()) throw new SkillError('스킬을 찾을 수 없습니다.', 'not-found');
       // A project folder that is gone is never made again by linking into it.
       const present: string[] = [];
       for (const cwd of targets.projects) if ((await stat(cwd).catch(() => undefined))?.isDirectory()) present.push(cwd);
@@ -623,7 +624,7 @@ export class SkillFiles {
         if ((await lstat(path).catch(() => undefined))?.isSymbolicLink() && await realpath(path).catch(() => '') === dir) doomed.set(join(folder, name), path);
       }
       for (const path of doomed.values()) await unlink(path).catch(error => { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failures.push(error instanceof Error ? error.message : String(error)); });
-      if (failures.length) throw new SkillError(failures.join(' / '), 409);
+      if (failures.length) throw new SkillError(failures.join(' / '), 'conflict');
     });
   }
 
@@ -664,7 +665,7 @@ async function ensureRoot(root: Root): Promise<void> {
   for (const part of parts) {
     path = join(path, part);
     const info = await lstat(path).catch(() => undefined);
-    if (info?.isSymbolicLink() || info && !info.isDirectory()) throw new SkillError('스킬 폴더가 다른 곳을 가리키는 링크라 쓸 수 없습니다.', 409);
+    if (info?.isSymbolicLink() || info && !info.isDirectory()) throw new SkillError('스킬 폴더가 다른 곳을 가리키는 링크라 쓸 수 없습니다.', 'conflict');
     if (!info) await mkdir(path);
   }
 }

@@ -201,7 +201,7 @@ async function audioServer(t: test.TestContext, voice: MasterVoice) {
 
 test('voice is one session at a time: a new one ends the one before, whose page is refused from then on and cannot take it back', async t => {
   const h = await harness(t);
-  assert.throws(() => h.voice.voiceOn({ tabId: 'not-a-uuid', local: true }), { statusCode: 400 });
+  assert.throws(() => h.voice.voiceOn({ tabId: 'not-a-uuid', local: true }), { kind: 'invalid' });
   const first = on(h);
   assert.equal(h.voice.status().session, digestOf(first));
   assert.equal(h.voice.voicePresence({ session: first, listening: true }), true);
@@ -209,7 +209,7 @@ test('voice is one session at a time: a new one ends the one before, whose page 
   assert.equal(h.voice.status().session, digestOf(second));
   assert.equal(h.voice.voicePresence({ session: first, listening: true }), false, 'presence never takes voice back');
   assert.deepEqual(await request(h, first, '지금 뭐 돌아가?'), { stale: true });
-  await assert.rejects(h.voice.voiceToken({ session: first }), { statusCode: 409 });
+  await assert.rejects(h.voice.voiceToken({ session: first }), { kind: 'conflict' });
   assert.equal(h.voice.voiceActivity({ session: first, speaking: true }), false);
   assert.equal(h.voice.voiceOff({ session: first }), false);
   assert.equal(h.voice.voiceOff({ session: second }), true);
@@ -220,7 +220,7 @@ test('voice is one session at a time: a new one ends the one before, whose page 
 
 test('voice needs an ElevenLabs key; tokens come from it, each reserving an utterance until settled once, from any session', async t => {
   const h = await harness(t, { voiceKey: false });
-  assert.throws(() => on(h), { statusCode: 409 });
+  assert.throws(() => on(h), { kind: 'conflict' });
   await h.settings.update({ voiceKey: VOICE_KEY });
   const session = on(h);
   const first = await h.voice.voiceToken({ session });
@@ -230,7 +230,7 @@ test('voice needs an ElevenLabs key; tokens come from it, each reserving an utte
   const reserved = h.voice.status().today.dollars;
   assert.ok(reserved > 0, 'a token holds a whole utterance');
   await h.voice.voiceToken({ session });
-  await assert.rejects(h.voice.voiceToken({ session }), { statusCode: 409 }, 'at most two unsettled a session');
+  await assert.rejects(h.voice.voiceToken({ session }), { kind: 'conflict' }, 'at most two unsettled a session');
   // Voice moves to another tab: the first page's utterance is still settled.
   const other = on(h, randomUUID());
   assert.equal(await h.voice.voiceUsage({ tokenId: first.tokenId, seconds: 6 }), true);
@@ -251,7 +251,7 @@ test('a daily limit holds every unsettled token and every reading before it star
   const session = on(h);
   const token = await h.voice.voiceToken({ session });
   // Three minutes held (about $0.0195): a second would pass the limit.
-  await assert.rejects(h.voice.voiceToken({ session }), { statusCode: 409 });
+  await assert.rejects(h.voice.voiceToken({ session }), { kind: 'conflict' });
   await h.voice.voiceUsage({ tokenId: token.tokenId, seconds: 2 });
   await h.voice.voiceToken({ session });
   assert.equal(h.voice.status().limited, false);
@@ -336,7 +336,7 @@ test('a voice is heard before it is chosen: a Korean sample read brightly in tha
   const h = await harness(t, { steps: [] });
   const { fetchAudio } = await audioServer(t, h.voice);
   const OTHER = 'bv62BmVlrpG0pQegOpuN';
-  await assert.rejects(h.voice.voicePreview({ voiceId: 'bad id' }), { statusCode: 400 });
+  await assert.rejects(h.voice.voicePreview({ voiceId: 'bad id' }), { kind: 'invalid' });
   const first = await h.voice.voicePreview({ voiceId: OTHER });
   assert.match(first.audio, /^\/api\/master\/voice\/audio\/preview-[a-f0-9]{64}$/);
   assert.equal(h.labs.speeches.length, 1);
@@ -362,14 +362,14 @@ test('a voice is heard before it is chosen: a Korean sample read brightly in tha
   assert.deepEqual(await readdir(join(h.dir, 'voice-clips')).catch(() => []), []);
   assert.equal((await readdir(join(h.dir, 'voice-previews'))).length, 2);
   h.labs.mode = 'error';
-  await assert.rejects(h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' }), { statusCode: 502 });
+  await assert.rejects(h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' }), { kind: 'upstream' });
   assert.equal((await fetchAudio(`preview-${'0'.repeat(64)}`)).status, 404);
 });
 
 test('voices are listed and heard with only a key, before the master session starts; without a key neither is', async t => {
   const h = await harness(t, { steps: [], voiceKey: false });
-  await assert.rejects(h.voice.voiceVoices(), { statusCode: 409 });
-  await assert.rejects(h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' }), { statusCode: 409 });
+  await assert.rejects(h.voice.voiceVoices(), { kind: 'conflict' });
+  await assert.rejects(h.voice.voicePreview({ voiceId: 'cgSgspJ2msm6clMCkdW9' }), { kind: 'conflict' });
   await h.settings.update({ voiceKey: VOICE_KEY });
   await h.settings.bind(undefined);
   assert.deepEqual(await h.voice.voiceVoices(), [{ id: 'cgSgspJ2msm6clMCkdW9', name: 'Jessica', category: 'premade' }]);

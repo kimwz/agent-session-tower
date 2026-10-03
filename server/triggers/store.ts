@@ -78,11 +78,11 @@ export class TriggerStore {
       const bytes = Buffer.byteLength(data);
       if (bytes > (kind === 'settle' ? this.maxBytes : this.acceptBytes) && bytes > this.stateBytes) {
         if (kind === 'settle') { this.storageError = 'Trigger state is full even after trimming finished history. New runs are not accepted.'; this.options.changed(); }
-        throw failure('Trigger history is full. Delete old triggers or wait for finished runs to expire.', 507);
+        throw failure('Trigger history is full. Delete old triggers or wait for finished runs to expire.', 'storage-full');
       }
-      if (this.locked) { this.storageError = this.locked; this.options.changed(); throw failure(this.storageError, 503); }
+      if (this.locked) { this.storageError = this.locked; this.options.changed(); throw failure(this.storageError, 'unavailable'); }
       try { await writePrivateJson(this.path, data); }
-      catch (error) { this.storageError = `Cannot save triggers: ${error instanceof Error ? error.message : String(error)}`; this.options.changed(); throw failure(this.storageError, 503); }
+      catch (error) { this.storageError = `Cannot save triggers: ${error instanceof Error ? error.message : String(error)}`; this.options.changed(); throw failure(this.storageError, 'unavailable'); }
       this.storageError = undefined;
       this.stateBytes = bytes;
       this.current = draft;

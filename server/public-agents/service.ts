@@ -17,6 +17,7 @@ import type { SlackProjection } from '../triggers/service.js';
 import {
   COMPACT_SCHEMA, INTAKE_SCHEMA, RESULT_SCHEMA, REVIEW_SCHEMA, SUMMARY_MARK, compactSystemPrompt, intakeSystemPrompt, resultSystemPrompt, reviewSystemPrompt, workPrompt,
 } from './prompts.js';
+import { TowerError, type ErrorKind } from '../../shared/errors.js';
 
 /** Trigger IDs of public agents' runs; the launch gate and the trigger list tell them apart by this prefix. */
 export const PUBLIC_TRIGGER_PREFIX = 'public:';
@@ -92,8 +93,8 @@ export interface VisitInput { token?: string; ip: string; password?: unknown; te
 export interface VisitResult { state: PublicVisitorState; token?: string }
 
 /** Errors a visitor's page reads by code; nothing about this Tower is in them. */
-const refuse = (code: string, statusCode: number) => Object.assign(new Error(code), { statusCode });
-const invalid = (message: string, statusCode = 400) => Object.assign(new Error(message), { statusCode });
+const refuse = (code: string, kind: ErrorKind) => new TowerError(kind, code);
+const invalid = (message: string, kind: ErrorKind = 'invalid') => new TowerError(kind, message);
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 const tokens = (text: string) => Math.ceil(Buffer.byteLength(text) / 3);
 const newSlug = () => randomBytes(16).toString('base64url').slice(0, 22);
@@ -243,7 +244,7 @@ export class PublicAgentService extends EventEmitter {
   conversation(agentId: string, conversationId: string): PublicConversationView {
     const data = this.data.get(agentId);
     const conversation = data?.conversations.find(item => item.id === conversationId);
-    if (!data || !conversation) throw invalid('대화를 찾을 수 없습니다.', 404);
+    if (!data || !conversation) throw invalid('대화를 찾을 수 없습니다.', 'not-found');
     return this.view(data, conversation, MAX_STORED_MESSAGES);
   }
 
@@ -251,7 +252,7 @@ export class PublicAgentService extends EventEmitter {
     if (!record(body)) throw invalid('요청 형식이 올바르지 않습니다.');
     const agentOf = () => {
       const agent = typeof body.id === 'string' ? this.agents.get(body.id) : undefined;
-      if (!agent) throw invalid('공개 에이전트를 찾을 수 없습니다.', 404);
+      if (!agent) throw invalid('공개 에이전트를 찾을 수 없습니다.', 'not-found');
       return agent;
     };
     if (action === 'create' || action === 'update') {
@@ -301,7 +302,7 @@ export class PublicAgentService extends EventEmitter {
       const agent = agentOf();
       const data = this.data.get(agent.id)!;
       const conversation = data.conversations.find(item => item.id === body.conversationId);
-      if (!conversation) throw invalid('대화를 찾을 수 없습니다.', 404);
+      if (!conversation) throw invalid('대화를 찾을 수 없습니다.', 'not-found');
       data.conversations = data.conversations.filter(item => item !== conversation);
       for (const visitor of data.visitors) if (visitor.conversationId === conversation.id) delete visitor.conversationId;
       await this.saveData(agent.id);
@@ -324,14 +325,14 @@ export class PublicAgentService extends EventEmitter {
    */
   async visit(action: 'state' | 'login' | 'message' | 'reset', slug: string, input: VisitInput): Promise<VisitResult> {
     const agent = PUBLIC_SLUG.test(slug) ? [...this.agents.values()].find(item => item.slug === slug) : undefined;
-    if (!agent || !agent.enabled || this.frozen.has(agent.id)) throw refuse('not_found', 404);
+    if (!agent || !agent.enabled || this.frozen.has(agent.id)) throw refuse('not_found', 'not-found');
     const data = this.data.get(agent.id)!;
     const now = this.now();
     let token: string | undefined;
     let visitor = typeof input.token === 'string' && /^[a-f\d]{64}$/.test(input.token) ? data.visitors.find(item => item.hash === sha(input.token!)) : undefined;
     if (visitor && now - Date.parse(visitor.seenAt) > VISITOR_IDLE_MS) { data.visitors = data.visitors.filter(item => item !== visitor); visitor = undefined; }
     if (!visitor) {
-      if (!this.allow(`new ${input.ip}`, MAX_NEW_VISITORS_PER_HOUR, HOUR)) throw refuse('rate_limited', 429);
+      if (!this.allow(`new ${input.ip}`, MAX_NEW_VISITORS_PER_HOUR, HOUR)) throw refuse('rate_limited', 'rate-limited');
       token = randomBytes(32).toString('hex');
       visitor = { hash: sha(token), authorized: false, tag: sha(`${agent.id} ${token}`).slice(0, 4).toUpperCase(), createdAt: this.iso(), seenAt: this.iso() };
       data.visitors.push(visitor);
@@ -341,14 +342,14 @@ export class PublicAgentService extends EventEmitter {
     const open = () => !agent.password || visitor!.authorized;
     if (action === 'login') {
       if (!agent.password) return { state: this.stateFor(agent, data, visitor), ...(token ? { token } : {}) };
-      if (this.count(`fail ${agent.id} ${input.ip}`, LOGIN_WINDOW) >= LOGIN_FAILURES || this.count(`fail ${agent.id}`, HOUR) >= AGENT_LOGIN_FAILURES) throw refuse('login_blocked', 429);
+      if (this.count(`fail ${agent.id} ${input.ip}`, LOGIN_WINDOW) >= LOGIN_FAILURES || this.count(`fail ${agent.id}`, HOUR) >= AGENT_LOGIN_FAILURES) throw refuse('login_blocked', 'rate-limited');
       const supplied = typeof input.password === 'string' && input.password.length <= 256 ? input.password : '';
       const expected = Buffer.from(agent.password.hash, 'hex');
       const actual = await derive(supplied, agent.password.salt);
       if (!supplied || !timingSafeEqual(actual, expected)) {
         this.allow(`fail ${agent.id} ${input.ip}`, Infinity, LOGIN_WINDOW); this.allow(`fail ${agent.id}`, Infinity, HOUR);
         await this.saveData(agent.id);
-        throw refuse('wrong_password', 401);
+        throw refuse('wrong_password', 'unauthorized');
       }
       // A fresh token after signing in, so a token handed out before cannot ride on this sign-in.
       token = randomBytes(32).toString('hex');
@@ -356,10 +357,10 @@ export class PublicAgentService extends EventEmitter {
       visitor = { ...visitor, hash: sha(token), authorized: true };
       data.visitors.push(visitor);
     } else if (action === 'message') {
-      if (!open()) throw refuse('password_required', 401);
+      if (!open()) throw refuse('password_required', 'unauthorized');
       const text = typeof input.text === 'string' ? input.text.trim() : '';
-      if (!text || text.length > PUBLIC_MESSAGE_MAX) throw refuse('invalid_message', 400);
-      if (this.count(`message ${visitor.hash}`, HOUR) >= MAX_VISITOR_MESSAGES_PER_HOUR || this.count(`message ${agent.id}`, HOUR) >= MAX_AGENT_MESSAGES_PER_HOUR) throw refuse('rate_limited', 429);
+      if (!text || text.length > PUBLIC_MESSAGE_MAX) throw refuse('invalid_message', 'invalid');
+      if (this.count(`message ${visitor.hash}`, HOUR) >= MAX_VISITOR_MESSAGES_PER_HOUR || this.count(`message ${agent.id}`, HOUR) >= MAX_AGENT_MESSAGES_PER_HOUR) throw refuse('rate_limited', 'rate-limited');
       this.allow(`message ${visitor.hash}`, Infinity, HOUR); this.allow(`message ${agent.id}`, Infinity, HOUR);
       const conversation = this.conversationFor(agent, data, visitor, true)!;
       conversation.messages.push({ id: randomUUID(), role: 'visitor', text, at: this.iso(), ...(agent.conversation === 'shared' ? { visitor: visitor.tag } : {}) });
@@ -369,8 +370,8 @@ export class PublicAgentService extends EventEmitter {
       this.trim(conversation);
       void this.tick().catch(() => {});
     } else if (action === 'reset') {
-      if (!open()) throw refuse('password_required', 401);
-      if (agent.conversation !== 'visitor') throw refuse('reset_unavailable', 403);
+      if (!open()) throw refuse('password_required', 'unauthorized');
+      if (agent.conversation !== 'visitor') throw refuse('reset_unavailable', 'forbidden');
       const current = data.conversations.find(item => item.id === visitor!.conversationId);
       if (current) data.conversations = data.conversations.filter(item => item !== current);
       delete visitor.conversationId;

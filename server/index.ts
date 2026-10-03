@@ -43,8 +43,8 @@ import type { SkillBundle, SkillDetail, SkillImportPlan, SkillOverview, SkillSum
 import { startSessionsMcp } from './api/session-tools.js';
 import { startSecretsMcp } from './secrets/runtime.js';
 import { runSecretsCommand } from './secrets/cli.js';
-import { SecretRelay } from './secrets/relay.js';
-import { handleSecretLink, ownerSecretControl } from './secrets/link-routes.js';
+import { SecretRelay } from './link/secret-relay.js';
+import { handleSecretLink, ownerSecretControl } from './link/secret-routes.js';
 import type { SecretPeer } from '../shared/secrets.js';
 import type { RemoteSecretResponse } from './secrets/remote.js';
 import { overlapsRepository } from '../shared/repositories.js';
@@ -79,6 +79,7 @@ import { SessionOutcomes } from './sessions/outcomes.js';
 import { autoPromptSuggestionResponse } from './auto-prompt/suggestion.js';
 import { insertInBackground } from './runs/steer-timing.js';
 import { APP_TITLE, APP_VERSION, STATE_DIR_NAME } from '../shared/app-identity.js';
+import { TowerError, statusOf } from '../shared/errors.js';
 
 /** Every request this web server admits comes from the owner's browser session. */
 const OWNER = { kind: 'owner' } as const;
@@ -428,7 +429,7 @@ async function main() {
     getAutoPrompt: id => runs.getAutoPrompt(id),
     cancelAutoPrompt: id => runs.cancelAutoPrompt(id),
     secrets: async (action, input) => {
-      if (action === 'trust' && (typeof input.direction !== 'string' || typeof input.routeId !== 'string' || !secretRouteKnown(input.direction, input.routeId))) throw Object.assign(new Error('연결 설정에서 먼저 승인한 컴퓨터를 선택하세요.'), { statusCode: 400 });
+      if (action === 'trust' && (typeof input.direction !== 'string' || typeof input.routeId !== 'string' || !secretRouteKnown(input.direction, input.routeId))) throw new TowerError('invalid', '연결 설정에서 먼저 승인한 컴퓨터를 선택하세요.');
       return ownerSecretControl(remoteNodes, runs, action, input);
     },
     slackOverview: () => runs.slackOverview(),
@@ -599,7 +600,7 @@ async function main() {
     },
     forceRunnerUpdate: async () => {
       try { const answer = await runs.forceUpdate(); changed(); return { status: 202, body: answer }; }
-      catch (error) { return { status: (error as { statusCode?: number }).statusCode ?? 500, body: { error: error instanceof Error ? error.message : 'The update could not start.' } }; }
+      catch (error) { return { status: statusOf(error) ?? 500, body: { error: error instanceof Error ? error.message : 'The update could not start.' } }; }
     },
     towerUpdate: async version => {
       if (!updates.managed) return { status: 409, body: { code: 'not-service', error: 'This Tower does not run as the background service, so it cannot replace itself.' } };
