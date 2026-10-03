@@ -4,6 +4,14 @@ Every release has a section here; it is published as that version's GitHub relea
 Versions follow [Semantic Versioning](https://semver.org): the CLI options, the state directory
 format, and saved browser preferences are the compatibility surface.
 
+## [1.108.0] - 2026-10-03
+
+### Added
+- **File paths in a conversation open in the workspace editor.** When an agent names a file by its absolute path, as a Markdown link (`[script](/Users/me/video/script.md)`), in inline code or in plain text, clicking it opens the file in the browser workspace editor on the same page, with the file selected in the tree, instead of opening a broken address in a new tab. Agents keep writing plain paths; only the page reads them. A path opens when it lies in a folder Tower lists on the conversation's own computer, and a joined computer's conversation opens only that computer's folders; other paths stay as written, and a link to one explains why it does not open. Names with spaces and Hangul work in links and inline code. The editor's limits are unchanged: a file that cannot be opened, such as a binary file, one over 2 MiB or one that no longer exists, is named with the reason, and **다시 시도** opens it again. Clicking the file that is already open reloads it unless it has unsaved edits, and opening another file still asks before discarding edits.
+
+### Fixed
+- Opening a folder as a file in the workspace editor says that only regular text files can be opened, instead of reporting that the file changed while opening it.
+
 ## [1.107.0] - 2026-10-03
 
 ### Changed
