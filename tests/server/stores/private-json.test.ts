@@ -3,6 +3,8 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import fsPromises from 'node:fs/promises';
+import { syncBuiltinESMExports } from 'node:module';
 import { quarantineFile, readPrivateBytes, readPrivateJson, writePrivateJson } from '../../../server/stores/private-json.js';
 
 test('readPrivateJson keeps its errors and limits', async t => {
@@ -69,4 +71,43 @@ test('writePrivateJson writes bytes as given, and with syncDirectory still leave
   assert.deepEqual(new Uint8Array(await readFile(path)), bytes);
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.deepEqual(await readdir(directory), ['vault.json']);
+});
+
+test('writePrivateJson always closes what it opened, and a close failure never hides the first error', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'tower-private-close-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'state.json');
+  const fail = (code: string) => Object.assign(new Error(code), { code });
+  // Test-only, limited to this folder: chosen handle calls fail after the real handle is used and closed.
+  let plan: { file?: { sync?: string; close?: string }; folder?: { sync?: string; close?: string } } = {};
+  const calls: string[] = [];
+  const original = fsPromises.open;
+  t.mock.method(fsPromises, 'open', async (...args: Parameters<typeof original>) => {
+    const handle = await original(...args);
+    const target = String(args[0]);
+    const kind = target === directory ? 'folder' : target.startsWith(`${path}.`) ? 'file' : undefined;
+    if (!kind) return handle;
+    calls.push(`${kind}:open`);
+    const { sync, close } = { sync: handle.sync.bind(handle), close: handle.close.bind(handle) };
+    handle.sync = async () => { calls.push(`${kind}:sync`); await sync(); const code = plan[kind]?.sync; if (code) throw fail(code); };
+    handle.close = async () => { calls.push(`${kind}:close`); await close(); const code = plan[kind]?.close; if (code) throw fail(code); };
+    return handle;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  const attempt = async (next: typeof plan, syncDirectory: boolean) => {
+    plan = next; calls.length = 0;
+    return writePrivateJson(path, 'x', { syncDirectory }).then(() => undefined, (error: NodeJS.ErrnoException) => error.code);
+  };
+
+  assert.equal(await attempt({}, true), undefined);
+  assert.deepEqual(calls, ['file:open', 'file:sync', 'file:close', 'folder:open', 'folder:sync', 'folder:close']);
+  assert.equal(await attempt({}, false), undefined);
+  assert.deepEqual(calls, ['file:open', 'file:sync', 'file:close'], 'no folder sync unless asked');
+  assert.equal(await attempt({ file: { sync: 'EIO', close: 'EBADF' } }, false), 'EIO', 'a failed file sync is the error, not the close after it');
+  assert.equal(await attempt({ file: { close: 'EBADF' } }, false), 'EBADF', 'a close that alone fails is the error');
+  assert.equal(await attempt({ folder: { sync: 'EIO', close: 'EBADF' } }, true), 'EIO', 'a failed folder sync is the error, not the close after it');
+  assert.equal(await attempt({ folder: { close: 'EBADF' } }, true), 'EBADF');
+  assert.ok(calls.includes('folder:close'), 'the folder is closed even when its sync fails');
+  assert.deepEqual((await readdir(directory)).filter(name => name.endsWith('.tmp')), []);
 });

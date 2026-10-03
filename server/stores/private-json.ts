@@ -1,5 +1,5 @@
 import { constants } from 'node:fs';
-import { open, rename, unlink } from 'node:fs/promises';
+import { open, rename, unlink, type FileHandle } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname } from 'node:path';
 
@@ -39,14 +39,19 @@ export async function writePrivateJson(path: string, data: string | Uint8Array, 
   const temporary = `${path}.${process.pid}.${createHash('sha256').update(randomUUID()).digest('hex').slice(0, 12)}.tmp`;
   try {
     const file = await open(temporary, 'wx', 0o600);
-    try { await file.writeFile(data); await file.sync(); }
-    finally { await file.close(); }
+    await closing(file, async () => { await file.writeFile(data); await file.sync(); });
     await rename(temporary, path);
     if (options.syncDirectory) {
       const directory = await open(dirname(path), constants.O_RDONLY);
-      try { await directory.sync(); } finally { await directory.close(); }
+      await closing(directory, () => directory.sync());
     }
   } catch (error) { await unlink(temporary).catch(() => {}); throw error; }
+}
+
+/** Runs `work`, then always closes `handle`; a failed close is the error only when `work` itself succeeded. */
+async function closing(handle: FileHandle, work: () => Promise<void>): Promise<void> {
+  try { await work(); } catch (error) { await handle.close().catch(() => {}); throw error; }
+  await handle.close();
 }
 
 /** Any owner-only text file in the state directory, written the same safe way. */
