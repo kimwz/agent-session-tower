@@ -809,13 +809,16 @@ async function idleWorker(f: Awaited<ReturnType<typeof fixture>>, options: Parti
   // A newer web asks for the handoff and goes away (a web replaced during an update), so nothing keeps the worker busy.
   const ask = async () => { const client = new DurableRunManager({ stateDir: f.stateDir, pollMs: 10, version: '99.0.0' }); await client.start(); await client.close(); };
   /**
-   * Ends this worker before the fixture folder goes, whatever point a test stopped at: test gates opened, a handoff
-   * under way finished or resumed, then the worker closed (a no-op when a handoff or idle shutdown already closes it)
-   * and its lock released. host.close() alone does not wait for a close already under way, so the release is awaited.
+   * Ends this worker before the fixture folder goes, whatever point a test stopped at: test gates opened, every handoff
+   * attempt that paused finished or resumed (an earlier attempt's resume does not end a later one), then the worker
+   * closed (a no-op when a handoff or idle shutdown already closes it) and its lock released. host.close() alone does
+   * not wait for a close already under way, so the release is awaited.
    */
   const settle = async (...gates: Array<() => void>) => {
     for (const open of gates) open();
-    if (events.includes('quiesce')) await until(() => events.includes('onHandedOff') || events.includes('resume'));
+    // Each handoff attempt that paused ends with either a handoff or a resume; wait until every one has ended.
+    const count = (name: string) => events.filter(event => event === name).length;
+    await until(() => count('quiesce') === count('onHandedOff') + count('resume'));
     // Synchronous with the check above: a handoff not yet started finds the worker closing and never starts.
     await host.close();
     await until(() => events.includes('release'));
